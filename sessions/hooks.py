@@ -1,0 +1,714 @@
+"""Pernix — Post-task hooks: auto-title, memory distillation, reflect, evaluation."""
+
+from __future__ import annotations
+
+import logging
+import re
+
+from config import settings
+from db import models as db
+
+logger = logging.getLogger("pernix.sessions.hooks")
+
+
+def _strip_thinking(text: str) -> str:
+    """Strip LLM thinking/reasoning blocks from response content.
+
+    Handles <think>...</think> tags and 'Thinking Process:' style prefixes
+    that thinking models emit before the actual answer.
+    """
+    # Remove <think>...</think> blocks (greedy, handles multiline)
+    text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL)
+    # If a TITLE: line exists, strip everything before it
+    m = re.search(r"^(TITLE:.*)", text, flags=re.MULTILINE)
+    if m:
+        text = text[m.start() :]
+    return text.strip()
+
+
+async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> None:
+    """Run all post-task hooks for a completed session turn.
+
+    Args:
+        emit: Optional callback(event_dict) to emit SSE events.
+        session_obj: Optional AgentSession for Reflect state tracking.
+    """
+    session = db.get_session(session_id)
+    if not session:
+        return
+
+    # Auto-title if still default
+    if session["title"] == "New session":
+        await _auto_title(session_id, emit=emit)
+
+    # Clean up any stale questions (answered inline or moot after turn completed)
+    await _cleanup_stale_questions(session_id, session_obj=session_obj)
+
+    # Memory distillation
+    await _maybe_distill(session_id, session)
+
+    # Reflect: post-execution verification
+    if settings.reflect_enabled and session_obj:
+        await _maybe_reflect(session_id, session, emit=emit, session_obj=session_obj)
+
+    # Evaluation: feature QA against acceptance criteria
+    if settings.eval_auto and session_obj:
+        await _maybe_evaluate(session_id, session, emit=emit, session_obj=session_obj)
+
+
+async def _cleanup_stale_questions(session_id: str, session_obj=None) -> None:
+    """Delete questions that the user answered inline (bypassing the modal).
+
+    A question is stale if a user message was sent AFTER the question was created,
+    meaning the conversation continued without using the question answer flow.
+    Questions from the current turn are NOT deleted — the user hasn't seen them yet.
+    """
+    questions = db.get_questions(session_id)
+    if not questions:
+        return
+
+    messages = db.get_messages(session_id)
+    user_timestamps = [m["created_at"] for m in messages if m["role"] == "user" and m.get("created_at")]
+    if not user_timestamps:
+        return
+
+    last_user_ts = max(user_timestamps)
+    cleaned = 0
+    for q in questions:
+        if q.get("created_at", "") < last_user_ts:
+            db.delete_question(q["id"])
+            cleaned += 1
+
+    if cleaned:
+        # If every stale question was cleaned and the session is still parked
+        # in AWAITING_USER, transition it out via question-dismissed so the
+        # state machine agrees with the DB (no outstanding question rows).
+        remaining = db.get_questions(session_id)
+        if not remaining and session_obj:
+            from sessions import state_v2 as sv2
+
+            if sv2._current_state(session_obj) is sv2.SessionStateV2.AWAITING_USER:
+                try:
+                    sv2.transition(
+                        session_obj,
+                        sv2.SessionStateV2.IDLE_READY,
+                        "question-dismissed",
+                    )
+                    db.set_session_state(session_id, session_obj.state.value)
+                except Exception as e:
+                    logger.error("stale-question cleanup transition failed: %s", e)
+        logger.info("Cleaned up %d stale question(s) for session %s", cleaned, session_id)
+
+
+async def _auto_title(session_id: str, emit=None) -> None:
+    """Generate a session title and subtitle from the first user+assistant exchange."""
+    messages = db.get_messages(session_id)
+    user_msgs = [m for m in messages if m["role"] == "user"]
+    if not user_msgs:
+        return
+
+    # Build context from first exchange — assistant response reveals actual topic
+    asst_msgs = [m for m in messages if m["role"] == "assistant"]
+    context_parts = [f"User: {user_msgs[0]['content'][:300]}"]
+    if asst_msgs:
+        context_parts.append(f"Assistant: {asst_msgs[0]['content'][:300]}")
+    context = "\n".join(context_parts)
+
+    try:
+        from core.llm.client import get_llm_client
+
+        client = get_llm_client()
+        model = settings.background_model or settings.llm_model
+
+        system_prompt = (
+            "Generate two things for this conversation:\n"
+            "1. TITLE: A concise title (3-6 words) capturing the specific intent. "
+            "Use an action verb for requests (e.g. 'Fix nginx proxy timeout'). "
+            "For questions, lead with the topic (e.g. 'Redis caching strategies').\n"
+            "2. SUBTITLE: A brief phrase (3-5 words) describing the task area or domain "
+            "(e.g. 'backend api debugging', 'weather data lookup', 'ui component styling').\n\n"
+            "Reply in exactly this format, nothing else:\n"
+            "TITLE: <title>\n"
+            "SUBTITLE: <subtitle>"
+        )
+
+        response = await client.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context},
+            ],
+            model=model,
+            max_tokens=300,
+        )
+        raw = _strip_thinking(response.content)
+        title = ""
+        subtitle = ""
+        for line in raw.split("\n"):
+            line = line.strip()
+            if line.upper().startswith("TITLE:"):
+                title = line[6:].strip().strip("\"'")[:60]
+            elif line.upper().startswith("SUBTITLE:"):
+                subtitle = line[9:].strip().strip("\"'")[:40]
+
+        # Fallback: if model didn't follow format, use whole response
+        # BUT reject thinking/reasoning garbage
+        if not title:
+            candidate = raw.strip().strip("\"'")[:60]
+            if not re.match(r"^(Thinking|Thought|<think|Step \d|1\.|I need to)", candidate, re.IGNORECASE):
+                title = candidate
+
+        if title:
+            updates = {"title": title}
+            if subtitle:
+                updates["subtitle"] = subtitle
+            db.update_session(session_id, **updates)
+            logger.debug("Auto-titled session %s: %s [%s]", session_id, title, subtitle)
+            if emit:
+                emit({"type": "session.title", "title": title, "subtitle": subtitle})
+    except Exception as e:
+        logger.warning("Auto-title failed for %s: %s", session_id, e)
+
+
+async def _maybe_distill(session_id: str, session: dict) -> None:
+    """Trigger memory distillation if session qualifies."""
+    if not settings.memory_recall:
+        return
+
+    messages = db.get_messages(session_id)
+    substantive = [m for m in messages if m["role"] in ("user", "assistant")]
+
+    # Quality gate: need enough substance to distill
+    if len(substantive) < 4:
+        return
+    total_chars = sum(len(m.get("content", "")) for m in substantive)
+    if total_chars < 500:
+        return
+
+    try:
+        from core.memory.distill import distill_session
+
+        await distill_session(
+            session_id=session_id,
+            title=session.get("title", ""),
+            messages=messages,
+            session_type=session.get("session_type", "normal"),
+        )
+    except Exception as e:
+        logger.warning("Distillation failed for %s: %s", session_id, e)
+
+
+def _broadcast_reflect_notification(
+    session_id: str,
+    session: dict,
+    title: str,
+    body: str,
+) -> None:
+    """Broadcast a dialog.notification for reflect events so push/webhook fire."""
+    from core.events import get_event_bus
+    from sessions.manager import get_manager
+
+    session_title = session.get("title", "")
+    label = f"{session_title}: {title}" if session_title else title
+
+    notification = {
+        "type": "dialog.notification",
+        "title": label,
+        "body": body,
+        "urgency": "high",
+        "source_session_id": session_id,
+    }
+
+    # Persist so the bell panel can display it
+    nid = db.add_notification(
+        session_id=session_id,
+        title=label,
+        body=body,
+        urgency="high",
+    )
+    notification["notification_id"] = nid
+
+    get_manager().broadcast(notification)
+    get_event_bus().emit({**notification, "session_id": session_id})
+
+
+async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=None) -> None:
+    """Run Reflect verification if session qualifies."""
+    if not session_obj:
+        return
+
+    # Skip if the agent suspended waiting for user input. Running reflect here
+    # produces false negatives: the "final assistant message" is always the
+    # procedural ask_user acknowledgment ("I've asked you a question…"), not
+    # the real completion report, and any tool errors from earlier in the turn
+    # are still visible in the summary. The turn is either complete (agent asked
+    # a courtesy confirmation) or genuinely blocked on user input — either way
+    # reflect can't make a useful determination, and retrying would be wrong.
+    from sessions import state_v2 as sv2
+
+    if sv2._current_state(session_obj) is sv2.SessionStateV2.AWAITING_USER:
+        logger.debug("Skipping reflect for %s: session is AWAITING_USER", session_id)
+        return
+
+    # Skip if session errored (incomplete evidence, unreliable verdict)
+    if session_obj.error:
+        return
+
+    # Workers retry more conservatively than main sessions — fan-out cost
+    # (scout + agent + reflect per worker per retry) adds up quickly.
+    max_retries = (
+        settings.reflect_max_retries_worker if session.get("session_type") == "worker" else settings.reflect_max_retries
+    )
+
+    # Skip if already at max retries
+    if session_obj.reflect_count >= max_retries:
+        if emit:
+            # Notify user that reflect retries are exhausted
+            last_reflect = None
+            try:
+                messages = db.get_messages(session_id)
+                for msg in reversed(messages):
+                    if msg["role"] == "reflect":
+                        last_reflect = msg.get("content", "")
+                        break
+            except Exception:
+                pass
+            emit(
+                {
+                    "type": "reflect.exhausted",
+                    "attempts": session_obj.reflect_count,
+                    "max": max_retries,
+                    "last_result": last_reflect or "",
+                }
+            )
+        # Broadcast notification so the user gets a push alert
+        _broadcast_reflect_notification(
+            session_id,
+            session,
+            title="Retries exhausted",
+            body=f"Reflect gave up after {session_obj.reflect_count} attempt(s).",
+        )
+        return
+
+    # Quality gate: need enough substance to verify
+    messages = db.get_messages(session_id)
+    substantive = [m for m in messages if m["role"] in ("user", "assistant", "tool")]
+    if len(substantive) < settings.reflect_min_messages:
+        # Surface the skip so the UI can render a small marker — without
+        # this, a short turn finalizes silently and looks like reflect is
+        # missing/broken when it actually skipped on purpose.
+        logger.info(
+            "Reflect skipped for %s: too few messages (%d/%d)",
+            session_id,
+            len(substantive),
+            settings.reflect_min_messages,
+        )
+        # Persist a transcript-visible marker so the skip is durable across
+        # page reloads (the live SSE event below only updates an open tab).
+        # "notice" role is filtered from LLM context by the compiler.
+        try:
+            db.add_message(
+                session_id,
+                "notice",
+                f"[reflect skipped — {len(substantive)}/{settings.reflect_min_messages} messages, too short to verify]",
+            )
+        except Exception as _e:
+            logger.debug("Reflect-skipped notice insert skipped: %s", _e)
+        if emit:
+            emit(
+                {
+                    "type": "reflect.skipped",
+                    "reason": "too-few-messages",
+                    "count": len(substantive),
+                    "min": settings.reflect_min_messages,
+                }
+            )
+        return
+
+    # Pre-reflect enrichment: lessons recall + (when stuck) trial-hint peek at
+    # pending skill proposals. extra_evidence is appended to reflect's prompt
+    # context, never written into SKILL.md. Stuck = we've already retried at
+    # least once on this turn (reflect_count >= 1).
+    extra_evidence_parts: list[str] = []
+    injected_trial_proposals: list[str] = []
+    is_stuck = session_obj.reflect_count >= 1
+
+    try:
+        last_user_msg = next(
+            (m["content"] for m in reversed(messages) if m["role"] == "user" and m.get("content")),
+            "",
+        )
+        if last_user_msg:
+            from core.memory.store import get_memory_store
+
+            store = get_memory_store()
+            if store:
+                lessons = store.search_lessons(last_user_msg, limit=3)
+                if lessons:
+                    import time as _t
+
+                    _now_ts = int(_t.time())
+                    lines = ["## Past lessons that may apply (verify current relevance — codebase moves fast)"]
+                    for r in lessons:
+                        _age_d = max(0, (_now_ts - int(r.entry.epoch or _now_ts)) // 86400)
+                        _age_s = f"{_age_d}d ago" if _age_d > 0 else "today"
+                        lines.append(f"- [{r.entry.file_name}, {_age_s}] {r.entry.content[:400]}")
+                    extra_evidence_parts.append("\n".join(lines))
+    except Exception as e:
+        logger.debug("Reflect lesson recall failed for %s: %s", session_id, e)
+
+    if is_stuck:
+        try:
+            from core.snooze_reflect import _identify_active_skill
+
+            active_skill = _identify_active_skill(messages)
+            if active_skill:
+                pending = db.get_pending_proposals_for_skill(active_skill, limit=3)
+                if pending:
+                    lines = [
+                        f"## TRIAL HINTS (unapproved skill proposals for '{active_skill}' "
+                        f"— use with caution; report back what helped)"
+                    ]
+                    for p in pending:
+                        pid = p["id"]
+                        conf = p.get("confidence", 0.0)
+                        problem = (p.get("problem") or "").strip()
+                        change = (p.get("proposed_change") or "").strip()
+                        lines.append(
+                            f"- [proposal {pid[:8]}, confidence {conf:.2f}] "
+                            f"Problem: {problem}\n  Proposed fix: {change}"
+                        )
+                        db.record_proposal_trial_use(pid)
+                        injected_trial_proposals.append(pid)
+                    extra_evidence_parts.append("\n".join(lines))
+        except Exception as e:
+            logger.debug("Reflect stuck-mode peek failed for %s: %s", session_id, e)
+
+    extra_evidence = "\n\n".join(extra_evidence_parts)
+    # Track on session_obj so the post-verdict success bump can find them.
+    session_obj._injected_trial_proposals = injected_trial_proposals
+
+    try:
+        from core.reflect import build_lessons_context, reflect_on_session
+
+        result = await reflect_on_session(
+            session_id,
+            emit=emit,
+            attempt=session_obj.reflect_count + 1,
+            tool_summary=session_obj.last_tool_summary or None,
+            scout_report=session_obj.last_scout_report,
+            extra_evidence=extra_evidence,
+            turn_user_msg_id=session_obj.current_turn_user_msg_id,
+        )
+
+        # If trial hints were injected and reflect now reports pass, count
+        # those proposals as having helped — weak signal toward approval, never
+        # an auto-approval.
+        if result.verdict == "pass" and injected_trial_proposals:
+            for pid in injected_trial_proposals:
+                try:
+                    db.record_proposal_trial_success(pid)
+                except Exception as e:
+                    logger.debug("record_proposal_trial_success failed for %s: %s", pid, e)
+
+        # Persist reflect result as a message for visibility
+        import json
+
+        reflect_event = {
+            "verdict": result.verdict,
+            "reasoning": result.reasoning,
+            "diagnostic": result.diagnostic,
+            "what_worked": result.what_worked,
+            "what_failed": result.what_failed,
+            "strategy": result.strategy,
+            "missing": result.missing,
+            "failure_cause": result.failure_cause,
+            "confidence": result.confidence,
+            "latency_ms": result.reflect_latency_ms,
+            "reflect_model": result.reflect_model,
+        }
+        db.add_message(session_id, "reflect", json.dumps(reflect_event))
+
+        if result.verdict == "retry":
+            session_obj.reflect_count += 1
+            session_obj.reflect_lessons = build_lessons_context(
+                result,
+                session_obj.reflect_count,
+                max_retries,
+                tool_summary=session_obj.last_tool_summary or None,
+            )
+            # Budget guard: refuse a retry if the LLM session-time budget
+            # cannot accommodate at least one scout + one agent turn floor.
+            # Without this, reflect-retry would push past llm_session_timeout
+            # and cascade through scout (180s) → fallback (180s) → first agent
+            # acquire, all failing with LLMSessionTimeoutError — exactly the
+            # 15ms agent-error after a 220s scout pause we saw on session
+            # 7b97cf7ef84a. We need enough headroom for scout's primary attempt
+            # plus a minimal agent round; anything tighter is wishful thinking.
+            try:
+                from core.llm.client import session_seconds_remaining
+
+                remaining = session_seconds_remaining(session_id)
+                # Worst-case scout cost = primary attempt + one primary retry on
+                # first timeout (runner.py: attempt==1 retries) + fallback model
+                # attempt = 3× scout_timeout. Plus 30s for the first agent
+                # acquire. Anything tighter and the retry can land past the
+                # cap mid-scout and cascade to LLMSessionTimeoutError on the
+                # agent — exactly what session 4b184273f4b5 hit (remaining 420s,
+                # old guard 390s let it through, scout consumed 420s).
+                min_needed = float(settings.scout_timeout) * 3 + 30.0
+            except Exception:
+                remaining = float("inf")
+                min_needed = 0.0
+            if remaining < min_needed:
+                logger.info(
+                    "Reflect retry blocked for session %s: "
+                    "%.0fs of LLM budget remain, need ~%.0fs for retry. "
+                    "Surfacing as escalate instead.",
+                    session_id,
+                    remaining,
+                    min_needed,
+                )
+                # Convert verdict from retry → escalate-style termination so
+                # the user sees a real reason rather than a mysterious
+                # mid-scout failure.
+                if emit:
+                    emit(
+                        {
+                            "type": "reflect.budget_exhausted",
+                            "remaining_s": int(remaining),
+                            "needed_s": int(min_needed),
+                            "reasoning": result.reasoning,
+                        }
+                    )
+                _broadcast_reflect_notification(
+                    session_id,
+                    session,
+                    title="Retry skipped — budget exhausted",
+                    body=f"Reflect wanted to retry but only {int(remaining)}s " f"of LLM session time remain.",
+                )
+                # Don't request retry; let the turn end. session_obj.reflect_count
+                # has already been incremented so the next run will see it.
+                return
+
+            # Only request a retry if the outer loop's gate will honor it.
+            # The gate in manager._run_agent_safe is `reflect_count < cap`; with
+            # reflect_count just incremented, emit retry iff that check still
+            # holds. Otherwise this was the terminal verdict — emit exhausted
+            # (matching the top-of-function branch shape) and leave retry_requested
+            # False so the outer loop drops cleanly.
+            if session_obj.reflect_count < max_retries:
+                session_obj.reflect_retry_requested = True
+                if emit:
+                    emit(
+                        {
+                            "type": "reflect.retry",
+                            "attempt": session_obj.reflect_count,
+                            "max": max_retries,
+                            "reasoning": result.reasoning,
+                            "strategy": result.strategy,
+                        }
+                    )
+                logger.info(
+                    "Reflect requesting retry #%d for session %s: %s",
+                    session_obj.reflect_count,
+                    session_id,
+                    result.reasoning,
+                )
+            else:
+                if emit:
+                    emit(
+                        {
+                            "type": "reflect.exhausted",
+                            "attempts": session_obj.reflect_count,
+                            "max": max_retries,
+                            "last_result": json.dumps(reflect_event),
+                        }
+                    )
+                _broadcast_reflect_notification(
+                    session_id,
+                    session,
+                    title="Retries exhausted",
+                    body=f"Reflect gave up after {session_obj.reflect_count} attempt(s).",
+                )
+                logger.info(
+                    "Reflect retry requested but cap reached for session %s " "(count=%d, max=%d): %s",
+                    session_id,
+                    session_obj.reflect_count,
+                    max_retries,
+                    result.reasoning,
+                )
+
+        elif result.verdict == "escalate":
+            if emit:
+                emit(
+                    {
+                        "type": "reflect.escalate",
+                        "reasoning": result.reasoning,
+                        "missing": result.missing,
+                    }
+                )
+            # Broadcast notification so the user gets a push alert
+            _broadcast_reflect_notification(
+                session_id,
+                session,
+                title="Needs attention",
+                body=result.reasoning[:200],
+            )
+            logger.info("Reflect escalating session %s: %s", session_id, result.reasoning)
+
+    except Exception as e:
+        # The reflect block above is wide — anything from reflect_on_session,
+        # the LLM call inside it, db.add_message, or the verdict-handling
+        # branches can land here. Two failure modes have actually surfaced
+        # in production:
+        #   * reflect crashed mid-flight (LLM error, asyncio cancel propagated
+        #     as Exception, transient DB lock during add_message)
+        #   * the verdict handler itself raised (notification broadcast bug)
+        # Either way, leaving the worker with NO reflect row is what trips
+        # up the workflow engine — _latest_reflect() returns None, the manifest
+        # records verdict='unknown', and downstream steps short-circuit. Write
+        # a sentinel reflect row so the engine knows reflect was attempted but
+        # failed, distinct from "reflect never ran". logger.exception captures
+        # the traceback so we can actually diagnose this next time.
+        logger.exception("Reflect failed for %s: %s", session_id, e)
+        try:
+            import json as _json
+
+            sentinel = {
+                "verdict": "error",
+                "reasoning": f"reflect crashed: {type(e).__name__}: {str(e)[:200]}",
+                "diagnostic": "",
+                "what_worked": "",
+                "what_failed": "",
+                "strategy": "",
+                "missing": "",
+                "failure_cause": "env",
+                "confidence": 0.0,
+                "latency_ms": 0,
+                "_sentinel": True,
+            }
+            db.add_message(session_id, "reflect", _json.dumps(sentinel))
+        except Exception as persist_err:
+            logger.error(
+                "Could not persist reflect-failure sentinel for %s: %s",
+                session_id,
+                persist_err,
+            )
+
+
+async def _maybe_evaluate(session_id: str, session: dict, emit=None, session_obj=None) -> None:
+    """Run feature evaluation if registry exists and has pending features."""
+    if not session_obj:
+        return
+
+    # Skip workers (parent evaluates)
+    if session.get("session_type") == "worker":
+        return
+
+    # Skip if session errored
+    if session_obj.error:
+        return
+
+    # Skip if already at max retries
+    if session_obj.eval_count >= settings.eval_max_retries:
+        if emit:
+            emit(
+                {
+                    "type": "eval.exhausted",
+                    "attempts": session_obj.eval_count,
+                    "max": settings.eval_max_retries,
+                }
+            )
+        return
+
+    # Check for feature registry — no registry means nothing to evaluate
+    import json
+    from pathlib import Path
+
+    registry_path = Path("data/registry.json")
+    if not registry_path.exists():
+        return
+
+    try:
+        features = json.loads(registry_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+
+    pending = [f for f in features if not f.get("passes")]
+    if not pending:
+        return
+
+    try:
+        from core.extensions.evaluation import evaluate_single_async
+
+        if emit:
+            emit({"type": "eval.start", "features": len(pending)})
+
+        results = []
+        any_failed = False
+        feedback_parts = []
+
+        for feat in pending:
+            result = await evaluate_single_async(feat, session_id)
+            passed = result.get("passed", False)
+            results.append(
+                {
+                    "feature": feat.get("id", ""),
+                    "title": feat.get("title", ""),
+                    "passed": passed,
+                    "scores": result.get("scores", {}),
+                    "feedback": result.get("feedback", ""),
+                }
+            )
+            if not passed:
+                any_failed = True
+                if result.get("feedback"):
+                    feedback_parts.append(f"{feat.get('title', feat.get('id', '?'))}: {result['feedback']}")
+
+        # Persist as eval message
+        eval_event = {"results": results, "all_passed": not any_failed}
+        db.add_message(session_id, "eval", json.dumps(eval_event))
+
+        # Emit a typed event so the UI can render the same card live that it
+        # builds from the persisted eval row on history reload. Without this
+        # the only feedback during a turn was the unstructured eval.pass /
+        # eval.retry / eval.exhausted notices.
+        if emit:
+            emit({"type": "eval.done", **eval_event})
+
+        # Close the auto-eval loop: when the judge passes a feature, mark
+        # it passed in the registry. Without this, the feature stays
+        # "pending" and the post-hook re-evaluates it on every subsequent
+        # turn — burning eval LLM calls and eventually hitting eval_max_retries.
+        # Observed: a single passing palindrome_check feature got re-evaluated
+        # across 5 sessions before this fix.
+        if results:
+            try:
+                from core.extensions.planning import mark_feature_passed as _mark
+
+                for r in results:
+                    if r.get("passed") and r.get("feature"):
+                        _mark(r["feature"])
+            except Exception as _mark_err:
+                logger.debug("Auto-mark-passed skipped: %s", _mark_err)
+
+        if any_failed and session_obj.eval_count < settings.eval_max_retries:
+            session_obj.eval_count += 1
+            session_obj.eval_retry_requested = True
+            if emit:
+                emit(
+                    {
+                        "type": "eval.retry",
+                        "attempt": session_obj.eval_count,
+                        "max": settings.eval_max_retries,
+                        "feedback": "\n".join(feedback_parts),
+                    }
+                )
+            logger.info("Eval requesting retry #%d for session %s", session_obj.eval_count, session_id)
+        elif not any_failed:
+            if emit:
+                emit({"type": "eval.pass", "features": len(results)})
+            logger.info("All %d features passed evaluation for session %s", len(results), session_id)
+
+    except Exception as e:
+        logger.warning("Evaluation failed for %s: %s", session_id, e)

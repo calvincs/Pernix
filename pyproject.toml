@@ -1,0 +1,69 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# `-n auto` parallelizes across CPU cores via pytest-xdist. Tests use
+# tmp_path/monkeypatch-isolated state — no shared SQLite or disk
+# fixtures — so parallel execution is safe. Drops full-suite wall time
+# from ~180s to ~95s on a 32-core box. Disable with `-n 0` (or `-p
+# no:xdist` to deactivate the plugin) if debugging a flaky test that
+# needs serial ordering.
+addopts = "-v --tb=short --strict-markers -n auto"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: tests requiring multiple subsystems",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+    "tests/*",
+    ".venv/*",
+    "venv/*",
+    "data/*",
+    "static/*",
+    "docs/*",
+    # Hard-to-test without heavy external deps (Playwright, git, SSL)
+    "core/extensions/*",        # each requires external deps
+    "run.py",                   # app entrypoint (integration-level)
+    "core/certs.py",            # SSL certificate generation
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+fail_under = 60
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+exclude = '''
+/(
+    \.venv
+  | venv
+  | data
+  | static
+  | docs
+  | __pycache__
+)/
+'''
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+exclude = [".venv", "venv", "data", "static", "docs", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E501",   # line-too-long — black handles line length
+    "E402",   # module-level import not at top — intentional in some files
+    "E741",   # ambiguous-variable-name — noisy for math-style vars
+    "F401",   # unused-import — too many intentional re-exports
+    "F841",   # unused-variable — common in tests and debug scaffolding
+]

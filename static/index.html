@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+    <title>Pernix</title>
+    <link rel="icon" type="image/png" href="/static/img/favicon.png">
+    <link rel="apple-touch-icon" href="/static/img/app-icon-192.png">
+    <meta name="theme-color" content="#0e0e0e">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Pernix">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Newsreader:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+    <link rel="stylesheet" href="/static/css/tokens.css">
+    <link rel="stylesheet" href="/static/css/layout.css">
+    <link rel="stylesheet" href="/static/css/modals.css">
+    <link rel="stylesheet" href="/static/css/jobs.css">
+    <link rel="stylesheet" href="/static/css/file-panel.css">
+    <link rel="stylesheet" href="/static/css/mobile.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Sidebar -->
+        <div id="sidebar">
+            <header>
+                <h1>Pernix</h1>
+                <button id="new-session-btn">+ new</button>
+            </header>
+            <div id="session-list"></div>
+        </div>
+
+        <!-- Main -->
+        <div id="main">
+            <button id="sidebar-toggle" title="Toggle sidebar">&#9776;</button>
+            <div id="messages">
+                <div class="messages-inner" id="messages-inner"></div>
+            </div>
+            <div id="status-bar">
+                <span id="sse-health" class="sse-health disconnected" title="SSE: disconnected"></span>
+                <span class="model" id="status-model">...</span>
+                <span class="ctx" id="status-ctx"></span>
+                <span id="state-badge" class="state-badge idle_ready" title="Session state — click for timeline">idle</span>
+                <span id="browser-status"></span>
+                <span id="tool-status"></span>
+                <span class="info" id="status-info"></span>
+                <span class="status-divider" aria-hidden="true"></span>
+                <button id="notification-bell" class="status-btn" title="Notifications"><span class="bell-icon">&#9678;</span><span class="bell-badge" id="bell-badge">0</span></button>
+                <button id="copy-transcript-btn" class="status-btn" title="Copy transcript">&#9112;</button>
+                <button id="files-btn" class="status-btn" title="Explorer">&#9776;</button>
+<button id="settings-btn" class="status-btn" title="Settings">&#9881;</button>
+            </div>
+            <div id="input-wrapper">
+                <div id="file-chips"></div>
+                <div id="input-bar">
+                    <textarea id="msg-input" placeholder="Message Pernix..." rows="1"></textarea>
+                    <button id="send-btn" title="Send message">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="22" y1="2" x2="11" y2="13"></line>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- File panel -->
+        <div id="file-panel"></div>
+    </div>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(function(e) {
+                console.warn('SW registration failed:', e);
+            });
+        }
+    </script>
+    <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

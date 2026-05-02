@@ -1,0 +1,601 @@
+/* Pernix — Mobile responsive styles
+   Loaded AFTER all other stylesheets so media-query-scoped rules
+   safely override desktop defaults. No rules outside @media blocks
+   except safe-area variables. Desktop is never affected.            */
+
+/* ======================================================================
+   Safe area insets (notch phones)
+   ====================================================================== */
+:root {
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+}
+
+/* ======================================================================
+   Touch accessibility — devices without hover (size-independent)
+   ====================================================================== */
+@media (hover: none) {
+    /* Session delete — always visible on touch */
+    .session-item .session-delete {
+        opacity: 0.7;
+    }
+
+    /* File tree actions — always visible on touch */
+    .fp-tree-item .fp-tree-actions {
+        opacity: 1;
+    }
+
+    /* Code copy buttons — always visible on touch */
+    .code-block-wrap .copy-btn {
+        opacity: 1;
+    }
+
+    /* Suppress session tooltip — no hover to trigger it */
+    #session-tooltip {
+        display: none !important;
+    }
+}
+
+/* ======================================================================
+   Main mobile breakpoint — narrow viewports OR touch-primary devices
+   (keeps iPad and other tablets on the drawer UI even above 768px)
+   ====================================================================== */
+@media (max-width: 768px), (hover: none) and (pointer: coarse) {
+
+    /* ------------------------------------------------------------------
+       Font scale bump (+1px across the board)
+       ------------------------------------------------------------------ */
+    :root {
+        --text-xxs: 0.6875rem;   /* 11px, up from 10px */
+        --text-xs:  0.75rem;     /* 12px, up from 11px */
+        --text-sm:  0.8125rem;   /* 13px, up from 12px */
+        --text-base: 0.875rem;   /* 14px, up from 13px */
+        --text-md:  0.9375rem;   /* 15px, up from 14px */
+        --text-lg:  1rem;        /* 16px, up from 15px */
+        --text-xl:  1.0625rem;   /* 17px, up from 16px */
+        --chat-max-w: 100% !important;
+    }
+
+    /* ------------------------------------------------------------------
+       Viewport — prevent page-level scrolling. Only #messages scrolls.
+       ------------------------------------------------------------------ */
+    #app {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 100vh;       /* fallback */
+        height: 100dvh;      /* visible viewport, excludes browser toolbar */
+        overflow: hidden;
+        overscroll-behavior: none;
+    }
+
+    #main {
+        overflow: hidden;
+        min-height: 0;
+    }
+
+    /* ------------------------------------------------------------------
+       Scrollbar hiding (native indicators are better on mobile)
+       ------------------------------------------------------------------ */
+    ::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+    }
+
+    #messages,
+    .fp-tree,
+    .fp-viewer,
+    .fp-memory-list,
+    .modal-body,
+    #session-list {
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+    }
+
+    /* ------------------------------------------------------------------
+       Mobile header (status bar relocated to top via flexbox order)
+       ------------------------------------------------------------------ */
+    #status-bar {
+        order: -1;
+        border-top: none;
+        border-bottom: 1px solid var(--border-subtle);
+        background: var(--bg-raised);
+        padding: var(--sp-2) var(--sp-3);
+        padding-top: calc(var(--sp-2) + var(--safe-top));
+        flex-wrap: nowrap;
+        gap: var(--sp-2);
+        min-height: 44px;
+        overflow: hidden;
+    }
+    #status-bar .model {
+        flex: 1;
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    #status-bar .info {
+        display: none;
+    }
+    #status-bar .ctx {
+        display: none;
+    }
+    #browser-status {
+        display: none !important;
+    }
+
+    /* Sidebar toggle — positioned inside status bar by mobile.js */
+    #sidebar-toggle {
+        display: flex !important;
+        position: static;
+        align-items: center;
+        justify-content: center;
+        min-width: 44px;
+        min-height: 44px;
+        flex-shrink: 0;
+        z-index: auto;
+        background: none;
+        border: none;
+        margin: calc(-1 * var(--sp-2)) 0;
+        margin-left: calc(-1 * var(--sp-2));
+    }
+
+    /* Header action buttons — compact, touch-friendly */
+    .status-btn {
+        min-width: 40px;
+        min-height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        flex-shrink: 0;
+    }
+    .status-divider { display: none; }
+    #question-badge {
+        min-width: 28px;
+        min-height: 28px;
+        line-height: 28px;
+        flex-shrink: 0;
+    }
+    /* State badge is tappable (opens timeline modal) — give it a real
+       touch target instead of the 18px-tall span inherited from desktop. */
+    #state-badge {
+        min-height: 28px;
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 10px;
+        flex-shrink: 0;
+    }
+    .jobs-indicator {
+        min-height: 40px;
+        padding: var(--sp-1) var(--sp-2);
+        flex-shrink: 0;
+    }
+
+    /* ------------------------------------------------------------------
+       Sidebar — slide-in drawer (overrides layout.css 768px display:none)
+       ------------------------------------------------------------------ */
+    #sidebar {
+        display: flex !important;
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 280px !important;
+        z-index: 500;
+        transform: translateX(-100%);
+        transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: none;
+        padding-top: var(--safe-top);
+    }
+    #sidebar.collapsed {
+        width: 280px !important;
+        border-right-color: var(--border);
+        transform: translateX(-100%);
+    }
+    #sidebar.mobile-open {
+        transform: translateX(0);
+        box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
+    }
+
+    /* Scrim behind drawer */
+    .mobile-scrim {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 499;
+        touch-action: none;
+    }
+    .mobile-scrim.visible {
+        display: block;
+    }
+
+    /* Session items — touch-friendly sizing */
+    .session-item {
+        padding: var(--sp-2) var(--sp-3);
+        min-height: 40px;
+    }
+    .session-delete {
+        min-width: 44px;
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: var(--text-md);
+    }
+    #new-session-btn {
+        min-height: 36px;
+        padding: var(--sp-2) var(--sp-3);
+    }
+
+    /* ------------------------------------------------------------------
+       File panel — full-screen overlay
+       ------------------------------------------------------------------ */
+    #file-panel.open {
+        position: fixed !important;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        width: 100% !important;
+        z-index: 400;
+    }
+    .fp-resize-handle {
+        display: none;
+    }
+    .fp-header {
+        padding-top: calc(var(--sp-3) + var(--safe-top));
+    }
+    .fp-tab-btn {
+        min-height: 44px;
+        padding: 12px var(--sp-3);
+    }
+    .fp-close {
+        min-width: 44px;
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+    }
+    .fp-tree-item {
+        min-height: 44px;
+        padding: 8px var(--sp-3) 8px var(--sp-2);
+    }
+    .fp-tree-action {
+        min-width: 40px;
+        min-height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+    }
+    .fp-icon-btn {
+        min-width: 40px;
+        min-height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .fp-toolbar-back {
+        min-width: 44px;
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .fp-btn {
+        min-height: 36px;
+        padding: var(--sp-2) var(--sp-3);
+    }
+    .fp-memory-item {
+        padding: var(--sp-3);
+    }
+    .fp-search-input {
+        min-height: 44px;
+        font-size: 16px;
+    }
+    .fp-skill-item {
+        padding: var(--sp-3);
+    }
+
+    /* ------------------------------------------------------------------
+       Messages area
+       ------------------------------------------------------------------ */
+    #messages {
+        padding: var(--sp-3) 0;
+        min-height: 0;
+    }
+    .messages-inner {
+        padding: 0 var(--sp-3);
+    }
+    .message {
+        margin-bottom: var(--sp-2);
+    }
+    .message.assistant .content {
+        font-size: 1.0625rem;
+    }
+    .message.user .content {
+        font-size: var(--text-md);
+    }
+    .message.assistant .content pre {
+        -webkit-overflow-scrolling: touch;
+        padding: var(--sp-3);
+    }
+    .copy-btn {
+        min-width: 44px;
+        min-height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .tool-group-header {
+        min-height: 44px;
+        padding: var(--sp-2) var(--sp-3);
+    }
+    .tool-item-header {
+        min-height: 44px;
+        padding: var(--sp-2) var(--sp-3);
+    }
+    .tool-toggle {
+        min-height: 36px;
+        padding: var(--sp-2) 0;
+    }
+    .file-view-btn {
+        min-height: 32px;
+        padding: var(--sp-1) var(--sp-2);
+    }
+
+    /* ------------------------------------------------------------------
+       Input area (sole bottom element — compact, native-feeling)
+       ------------------------------------------------------------------ */
+    #input-wrapper {
+        padding: var(--sp-1) var(--sp-3);
+        padding-bottom: max(var(--sp-2), var(--safe-bottom));
+        background: var(--bg);
+    }
+    #input-bar {
+        border-radius: 1.25rem;
+        padding: 6px 6px 6px var(--sp-3);
+        gap: var(--sp-2);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+    }
+    #input-bar textarea {
+        font-size: 16px; /* prevents iOS auto-zoom on focus */
+        min-height: 22px;
+        padding: 5px 0;
+        line-height: 1.4;
+        max-height: 120px;
+    }
+    #send-btn {
+        width: 34px;
+        height: 34px;
+    }
+
+    /* ------------------------------------------------------------------
+       Modals — bottom-sheet pattern
+       ------------------------------------------------------------------ */
+    .modal-overlay {
+        align-items: flex-end;
+    }
+    .modal-card {
+        width: 100%;
+        max-width: 100%;
+        max-height: 92vh;
+        max-height: 92dvh;
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+        animation: slideUpMobile 0.25s ease;
+    }
+    /* Grab handle indicator for bottom sheets */
+    .modal-card::before {
+        content: '';
+        display: block;
+        width: 32px;
+        height: 4px;
+        background: var(--border);
+        border-radius: 2px;
+        margin: var(--sp-2) auto 0;
+        flex-shrink: 0;
+    }
+    .modal-card.expanded {
+        max-width: 100%;
+        width: 100%;
+        max-height: 100vh;
+        max-height: 100dvh;
+        border-radius: 0;
+    }
+    .modal-card.expanded::before {
+        display: none;
+    }
+    .modal-body {
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+    }
+    .modal-close,
+    .modal-expand {
+        min-width: 44px;
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 22px;
+    }
+    .modal-footer {
+        padding-bottom: max(var(--sp-3), var(--safe-bottom));
+    }
+
+    /* Scout Signals — bottom-sheet sizing + compact table */
+    #signals-modal {
+        max-width: 100%;
+        width: 100%;
+        max-height: 92dvh;
+    }
+    #signals-modal table {
+        font-size: var(--text-xs);
+    }
+    #signals-modal th,
+    #signals-modal td {
+        padding: 0.35rem 0.4rem;
+    }
+
+    /* Settings rows — stack vertically */
+    .setting-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--sp-2);
+    }
+    .setting-row label {
+        min-width: auto;
+    }
+    .setting-row input[type="text"],
+    .setting-row input[type="number"],
+    .setting-row input[type="password"],
+    .setting-row select {
+        width: 100%;
+        font-size: 16px;
+        min-height: 44px;
+        padding: var(--sp-2) var(--sp-3);
+    }
+    .setting-row input[type="checkbox"] {
+        width: 24px;
+        height: 24px;
+    }
+
+    /* Section help tooltip — flow-relative instead of fixed */
+    .section-help-tip {
+        position: absolute !important;
+        left: 0 !important;
+        top: 100% !important;
+        right: auto !important;
+        bottom: auto !important;
+        width: min(280px, 80vw);
+        margin-top: 4px;
+    }
+    .section-help-wrap {
+        position: relative;
+    }
+
+    /* Modal buttons — touch-friendly */
+    .btn {
+        min-height: 44px;
+        padding: var(--sp-3) var(--sp-5);
+        font-size: var(--text-md);
+    }
+    .tab-btn {
+        min-height: 44px;
+    }
+
+    /* OpenRouter model list */
+    .or-model-item {
+        padding: var(--sp-3);
+    }
+    .or-remove {
+        min-width: 44px;
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+    }
+    .or-model-input {
+        min-height: 44px;
+        font-size: 16px;
+    }
+    .ollama-refresh {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    /* Question modal */
+    .question-answer {
+        font-size: 16px;
+        min-height: 60px;
+    }
+
+    @keyframes slideUpMobile {
+        from { opacity: 0; transform: translateY(30%); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ------------------------------------------------------------------
+       Jobs UI
+       ------------------------------------------------------------------ */
+    .jobs-btn {
+        min-height: 36px;
+        padding: var(--sp-2) var(--sp-3);
+    }
+    .jobs-item {
+        padding: var(--sp-3);
+    }
+    .jobs-add-form input,
+    .jobs-add-form textarea,
+    .jobs-add-form select,
+    .jobs-edit-form input,
+    .jobs-edit-form textarea,
+    .jobs-edit-form select {
+        min-height: 44px;
+        font-size: 16px;
+    }
+    .jobs-add-row {
+        flex-direction: column;
+    }
+    .jobs-history-header {
+        flex-wrap: wrap;
+    }
+    .jobs-history-header select {
+        min-height: 44px;
+        font-size: 16px;
+    }
+
+    /* ------------------------------------------------------------------
+       Empty state
+       ------------------------------------------------------------------ */
+    .empty-state {
+        padding: var(--sp-6);
+    }
+    .empty-state-icon {
+        width: 64px;
+        height: 64px;
+    }
+}
+
+/* ======================================================================
+   Small phones (portrait)
+   ====================================================================== */
+@media (max-width: 480px) {
+    #copy-transcript-btn {
+        display: none !important;
+    }
+    .messages-inner {
+        padding: 0 var(--sp-2);
+    }
+    .message.user .content {
+        padding: var(--sp-2) var(--sp-3);
+    }
+}
+
+/* ======================================================================
+   Landscape phones
+   ====================================================================== */
+@media (max-width: 768px) and (orientation: landscape) {
+    #status-bar {
+        padding-top: max(var(--sp-1), var(--safe-top));
+        padding-bottom: var(--sp-1);
+        min-height: 36px;
+    }
+    #input-wrapper {
+        padding: var(--sp-1) var(--sp-3);
+        padding-bottom: max(var(--sp-2), var(--safe-bottom));
+    }
+    #sidebar.mobile-open {
+        width: 240px !important;
+    }
+    .modal-card {
+        max-height: 95vh;
+        max-height: 95dvh;
+    }
+}

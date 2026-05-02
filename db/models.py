@@ -1,0 +1,1589 @@
+"""Pernix — Database query helpers organized by table."""
+
+import logging
+import uuid
+from datetime import datetime, timezone
+
+from db.database import connect_sessions
+
+logger = logging.getLogger("pernix.db")
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _new_id(length: int = 12) -> str:
+    return uuid.uuid4().hex[:length]
+
+
+# ---------------------------------------------------------------------------
+# Sessions
+# ---------------------------------------------------------------------------
+
+
+def create_session(
+    title: str = "New session",
+    system_prompt: str = "",
+    session_type: str = "normal",
+    parent_session_id: str | None = None,
+) -> str:
+    """Create a new session. Returns session ID."""
+    sid = _new_id()
+    now = _now()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO sessions (id, title, system_prompt, session_type,
+               parent_session_id, state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, 'idle', ?, ?)""",
+            (sid, title, system_prompt, session_type, parent_session_id, now, now),
+        )
+    return sid
+
+
+def get_session(session_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_sessions(limit: int = 50, offset: int = 0) -> list[dict]:
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_sessions_enriched(limit: int = 50, offset: int = 0) -> list[dict]:
+    """List sessions with message_count, total_tokens, and first_message."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT
+                s.*,
+                COALESCE(mc.message_count, 0) AS message_count,
+                COALESCE(tu.total_tokens, 0) AS total_tokens,
+                fm.first_message
+            FROM sessions s
+            LEFT JOIN (
+                SELECT session_id, COUNT(*) AS message_count
+                FROM messages
+                WHERE role IN ('user', 'assistant')
+                GROUP BY session_id
+            ) mc ON mc.session_id = s.id
+            LEFT JOIN (
+                SELECT session_id, SUM(total_tokens) AS total_tokens
+                FROM token_usage
+                GROUP BY session_id
+            ) tu ON tu.session_id = s.id
+            LEFT JOIN (
+                SELECT session_id, substr(content, 1, 200) AS first_message
+                FROM (
+                    SELECT session_id, content,
+                           ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS rn
+                    FROM messages
+                    WHERE role = 'user'
+                )
+                WHERE rn = 1
+            ) fm ON fm.session_id = s.id
+            ORDER BY s.updated_at DESC
+            LIMIT ? OFFSET ?""",
+            (limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_session(session_id: str, **kwargs) -> None:
+    """Update session fields. Only known columns are set."""
+    allowed = {
+        "title",
+        "subtitle",
+        "system_prompt",
+        "session_type",
+        "parent_session_id",
+        "state",
+        "state_v2",
+        "watched_worker_ids",
+    }
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return
+    updates["updated_at"] = _now()
+    cols = ", ".join(f"{k} = ?" for k in updates)
+    vals = list(updates.values()) + [session_id]
+    with connect_sessions() as conn:
+        conn.execute(f"UPDATE sessions SET {cols} WHERE id = ?", vals)
+
+
+def set_session_state_v2(session_id: str, state_v2: str) -> None:
+    """Persist the v2 state name (one of the 10 SessionStateV2 values) so
+    restarts can restore AWAITING_WORKERS, AWAITING_USER, FINALIZING and
+    other states the legacy `state` column collapses to "idle"."""
+    update_session(session_id, state_v2=state_v2)
+
+
+def set_watched_workers(session_id: str, worker_ids: list[str]) -> None:
+    """Persist the parent's watch-set as a JSON array. Called whenever
+    `_watched_worker_ids` mutates so a restart in AWAITING_WORKERS
+    doesn't lose the list of workers being awaited."""
+    import json as _json
+
+    update_session(session_id, watched_worker_ids=_json.dumps(list(worker_ids)))
+
+
+def get_sessions_in_state_v2(state_v2: str) -> list[dict]:
+    """Return all sessions persisted with the given v2 state. Used by the
+    boot-time reconcile sweep to find parents that were suspended on
+    workers when the server stopped."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sessions WHERE state_v2 = ?",
+            (state_v2,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_session(session_id: str) -> None:
+    """Delete session and cascade (messages, artifacts, questions)."""
+    # Delete workers first (recursive), then parent — all in one transaction
+    with connect_sessions() as conn:
+        worker_ids = [
+            r["id"]
+            for r in conn.execute("SELECT id FROM sessions WHERE parent_session_id = ?", (session_id,)).fetchall()
+        ]
+    for wid in worker_ids:
+        delete_session(wid)
+    with connect_sessions() as conn:
+        # Single transaction: delete related rows then session
+        conn.execute("DELETE FROM session_messages WHERE sender_id = ? OR recipient_id = ?", (session_id, session_id))
+        conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+
+def set_session_state(session_id: str, state: str) -> None:
+    update_session(session_id, state=state)
+
+
+def get_worker_sessions(parent_id: str) -> list[dict]:
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at",
+            (parent_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Session state log (v13+)
+# ---------------------------------------------------------------------------
+# Append-only log of state-machine transitions. Written synchronously by
+# sessions.state_v2.transition() under session.lock. See docs/workflow.md
+# and the state-machine migration plan for the reason vocabulary.
+
+
+def add_state_log(
+    session_id: str,
+    *,
+    turn_id: int,
+    from_state: str | None,
+    to_state: str,
+    reason: str,
+    timestamp_ms: int,
+    parent_turn_id: int | None = None,
+    retry_index: int = 0,
+    compaction_count: int = 0,
+    termination_reason: str | None = None,
+    reflect_count: int = 0,
+    eval_count: int = 0,
+    elapsed_ms: int | None = None,
+) -> int:
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """INSERT INTO session_state_log
+               (session_id, turn_id, parent_turn_id, retry_index, compaction_count,
+                from_state, to_state, reason, termination_reason,
+                reflect_count, eval_count, timestamp_ms, elapsed_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                turn_id,
+                parent_turn_id,
+                retry_index,
+                compaction_count,
+                from_state,
+                to_state,
+                reason,
+                termination_reason,
+                reflect_count,
+                eval_count,
+                timestamp_ms,
+                elapsed_ms,
+            ),
+        )
+        return int(cur.lastrowid or 0)
+
+
+def get_state_log(
+    session_id: str,
+    *,
+    since_id: int = 0,
+    limit: int = 500,
+) -> list[dict]:
+    """Return state transitions for a session, oldest-first, after since_id."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT * FROM session_state_log
+               WHERE session_id = ? AND id > ?
+               ORDER BY id ASC
+               LIMIT ?""",
+            (session_id, since_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def latest_turn_id(session_id: str) -> int:
+    """Max turn_id seen for this session, or 0 if no transitions logged."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(turn_id), 0) AS t FROM session_state_log WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row["t"]) if row else 0
+
+
+def prune_state_log(
+    max_age_days: int = 30,
+    keep_per_session: int = 500,
+) -> int:
+    """Retention: drop rows older than max_age_days, but always keep the
+    most recent `keep_per_session` rows per session regardless of age.
+    Returns count deleted."""
+    import time
+
+    cutoff_ms = int((time.time() - max_age_days * 86400) * 1000)
+    with connect_sessions() as conn:
+        # For each session, find the id threshold that would leave
+        # keep_per_session rows. Anything below AND older than cutoff goes.
+        rows = conn.execute(
+            """SELECT session_id,
+                      COALESCE(
+                          (SELECT id FROM session_state_log s2
+                           WHERE s2.session_id = s1.session_id
+                           ORDER BY id DESC
+                           LIMIT 1 OFFSET ?),
+                          0) AS keep_floor
+               FROM (SELECT DISTINCT session_id FROM session_state_log) s1""",
+            (keep_per_session,),
+        ).fetchall()
+        total = 0
+        for r in rows:
+            sid = r["session_id"]
+            floor = int(r["keep_floor"])
+            if floor == 0:
+                continue  # fewer rows than keep_per_session
+            cur = conn.execute(
+                """DELETE FROM session_state_log
+                   WHERE session_id = ? AND id < ? AND timestamp_ms < ?""",
+                (sid, floor, cutoff_ms),
+            )
+            total += cur.rowcount
+        return total
+
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+
+
+def add_message(
+    session_id: str,
+    role: str,
+    content: str = "",
+    tool_call_id: str | None = None,
+    tool_calls: str | None = None,
+    partial: int = 0,
+    token_count: int | None = None,
+    idempotency_key: str | None = None,
+    latency_ms: int | None = None,
+    metadata: str | None = None,
+) -> int:
+    """Insert a message. Returns message ID."""
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """INSERT INTO messages (session_id, role, content, tool_call_id,
+               tool_calls, char_count, token_count, partial, idempotency_key,
+               latency_ms, metadata, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                role,
+                content,
+                tool_call_id,
+                tool_calls,
+                len(content),
+                token_count,
+                partial,
+                idempotency_key,
+                latency_ms,
+                metadata,
+                _now(),
+            ),
+        )
+        msg_id = cur.lastrowid
+        # Keep messages_fts in sync
+        if role in ("user", "assistant", "tool") and len(content) > 10:
+            try:
+                conn.execute(
+                    "INSERT INTO messages_fts (rowid, session_id, role, content) VALUES (?, ?, ?, ?)",
+                    (msg_id, session_id, role, content),
+                )
+            except Exception as e:
+                logger.debug("FTS insert skipped for message %d: %s", msg_id, e)
+        return msg_id
+
+
+def get_messages(session_id: str) -> list[dict]:
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at, id",
+            (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_message(message_id: int) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_last_message_id(session_id: str) -> int | None:
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return row["id"] if row else None
+
+
+def get_orphaned_user_messages(session_id: str) -> list[dict]:
+    """Return user messages that have no subsequent assistant response.
+
+    Scans the session's message sequence and returns any user message that is
+    followed by another user message (or end-of-session) without an assistant
+    message in between. These are turns the agent never handled — typically
+    because the server restarted between the message being queued and
+    _process_pending draining it.
+
+    Injected user messages (metadata.injected=true) are skipped because they
+    were inserted for mid-turn context, not as new conversation turns.
+    """
+    import json as _json
+
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
+            (session_id,),
+        ).fetchall()
+    orphans: list[dict] = []
+    pending_user: dict | None = None
+    for r in rows:
+        m = dict(r)
+        role = m.get("role", "")
+        if role == "user":
+            try:
+                meta = _json.loads(m.get("metadata") or "{}")
+                if meta.get("injected"):
+                    continue
+            except Exception:
+                pass
+            if pending_user is not None:
+                orphans.append(pending_user)
+            pending_user = m
+        elif role == "assistant":
+            pending_user = None
+    if pending_user is not None:
+        orphans.append(pending_user)
+    return orphans
+
+
+def delete_message(message_id: int) -> None:
+    with connect_sessions() as conn:
+        # Delete FTS entry first — if it fails, the message is still intact
+        try:
+            conn.execute("DELETE FROM messages_fts WHERE rowid = ?", (message_id,))
+        except Exception as e:
+            logger.warning("FTS delete failed for message %d: %s", message_id, e)
+        conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+
+
+def delete_messages_from(session_id: str, from_id: int) -> None:
+    """Delete all messages in session with id >= from_id."""
+    with connect_sessions() as conn:
+        try:
+            conn.execute(
+                "DELETE FROM messages_fts WHERE rowid IN " "(SELECT id FROM messages WHERE session_id = ? AND id >= ?)",
+                (session_id, from_id),
+            )
+        except Exception as e:
+            logger.warning("FTS batch delete failed for session %s from id %d: %s", session_id, from_id, e)
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ? AND id >= ?",
+            (session_id, from_id),
+        )
+
+
+def mark_message_partial(message_id: int, partial: int = 1) -> None:
+    with connect_sessions() as conn:
+        conn.execute("UPDATE messages SET partial = ? WHERE id = ?", (partial, message_id))
+
+
+def update_message_content(message_id: int, content: str) -> None:
+    """Replace a message's content in place. Keeps FTS index in sync.
+
+    Used by the rapid-fire queue combiner: when several user messages land
+    within a short window, the queue collapses them into one DB row whose
+    content is rewritten to the formatted combined form. This is the one
+    sanctioned mutation of a message body — all other writes go through
+    add_message (append-only).
+    """
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE messages SET content = ?, char_count = ? WHERE id = ?",
+            (content, len(content), message_id),
+        )
+        # Keep FTS in sync — INSERT-OR-REPLACE is simpler than DELETE+INSERT
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO messages_fts (rowid, session_id, role, content) "
+                "SELECT id, session_id, role, content FROM messages WHERE id = ?",
+                (message_id,),
+            )
+        except Exception as e:
+            logger.debug("FTS update skipped for message %d: %s", message_id, e)
+
+
+def get_last_partial(session_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? AND partial = 1 ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def add_compaction(session_id: str, summary: str, compacted_up_to: int, original_count: int) -> int:
+    """Add a compaction marker message with metadata in dedicated column."""
+    import json
+
+    meta = json.dumps(
+        {
+            "compacted_up_to": compacted_up_to,
+            "original_count": original_count,
+        }
+    )
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """INSERT INTO messages (session_id, role, content, metadata,
+               char_count, partial, created_at)
+               VALUES (?, 'compaction', ?, ?, ?, 0, ?)""",
+            (session_id, summary, meta, len(summary), _now()),
+        )
+        return cur.lastrowid
+
+
+def clear_messages_only(session_id: str) -> None:
+    """Clear all messages but keep session and artifacts."""
+    with connect_sessions() as conn:
+        try:
+            conn.execute(
+                "DELETE FROM messages_fts WHERE rowid IN " "(SELECT id FROM messages WHERE session_id = ?)",
+                (session_id,),
+            )
+        except Exception:
+            pass
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+
+
+def search_messages_fts(
+    query: str,
+    limit: int = 15,
+    exclude_session: str = "",
+) -> list[dict]:
+    """FTS5 search across all session messages. Returns ranked results with session context."""
+    import re
+
+    # Convert to FTS5 query: words > 2 chars joined with OR
+    clean = re.sub(r"[^\w\s]", " ", query)
+    words = [w for w in clean.split() if len(w) > 2]
+    if not words:
+        return []
+    fts_query = " OR ".join(words)
+
+    with connect_sessions() as conn:
+        sql = """
+            SELECT f.rowid as msg_id, f.session_id, f.role, f.content,
+                   s.title as session_title,
+                   bm25(messages_fts, 1.0) as score
+            FROM messages_fts f
+            LEFT JOIN sessions s ON f.session_id = s.id
+            WHERE messages_fts MATCH ?
+              AND f.role IN ('user', 'assistant', 'tool')
+        """
+        params: list = [fts_query]
+
+        if exclude_session:
+            sql += " AND f.session_id != ?"
+            params.append(exclude_session)
+
+        sql += " ORDER BY score LIMIT ?"
+        params.append(limit)
+
+        try:
+            rows = conn.execute(sql, params).fetchall()
+            return [
+                {
+                    "msg_id": r["msg_id"],
+                    "session_id": r["session_id"],
+                    "session_title": r["session_title"] or "untitled",
+                    "role": r["role"],
+                    "content": (r["content"] or "")[:300],
+                    "score": abs(r["score"]),
+                }
+                for r in rows
+            ]
+        except Exception:
+            return []  # FTS table may not exist yet
+
+
+def get_message_context(session_id: str, message_id: int, window: int = 2) -> list[dict]:
+    """Get a message and its surrounding context (window messages before/after)."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT id, role, content FROM messages
+               WHERE session_id = ? AND id BETWEEN ? AND ?
+               AND role IN ('user', 'assistant', 'tool')
+               ORDER BY id""",
+            (session_id, message_id - window, message_id + window),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Token Usage
+# ---------------------------------------------------------------------------
+
+
+def add_token_usage(
+    session_id: str,
+    model: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    cost_estimate: float | None = None,
+    source: str = "provider",
+    provider: str = "",
+) -> None:
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO token_usage (session_id, model, prompt_tokens,
+               completion_tokens, total_tokens, cache_read_tokens,
+               cache_write_tokens, cost_estimate, source, provider)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                cost_estimate,
+                source,
+                provider,
+            ),
+        )
+
+
+def get_session_usage(session_id: str) -> dict:
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT COALESCE(SUM(prompt_tokens), 0) as prompt,
+                      COALESCE(SUM(completion_tokens), 0) as completion,
+                      COALESCE(SUM(total_tokens), 0) as total,
+                      COALESCE(SUM(cache_read_tokens), 0) as cache_read,
+                      COALESCE(SUM(cache_write_tokens), 0) as cache_write,
+                      COALESCE(SUM(cost_estimate), 0) as cost,
+                      COUNT(*) as calls
+               FROM token_usage WHERE session_id = ?""",
+            (session_id,),
+        ).fetchone()
+        return dict(row) if row else {}
+
+
+# ---------------------------------------------------------------------------
+# Questions
+# ---------------------------------------------------------------------------
+
+
+def add_question(
+    session_id: str,
+    question: str,
+    session_title: str = "",
+    session_type: str = "normal",
+    context: str = "",
+    urgency: str = "normal",
+    question_type: str = "question",
+) -> str:
+    qid = _new_id()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO questions (id, session_id, session_title, session_type,
+               question, context, urgency, question_type, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (qid, session_id, session_title, session_type, question, context, urgency, question_type, _now()),
+        )
+    return qid
+
+
+def get_questions(session_id: str | None = None) -> list[dict]:
+    with connect_sessions() as conn:
+        if session_id:
+            rows = conn.execute(
+                "SELECT * FROM questions WHERE session_id = ? ORDER BY created_at",
+                (session_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM questions ORDER BY created_at").fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_question(question_id: str) -> None:
+    with connect_sessions() as conn:
+        conn.execute("DELETE FROM questions WHERE id = ?", (question_id,))
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+
+def add_notification(
+    session_id: str = "",
+    title: str = "",
+    body: str = "",
+    urgency: str = "normal",
+) -> str:
+    nid = _new_id()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO notifications (id, session_id, title, body, urgency, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (nid, session_id, title, body, urgency, _now()),
+        )
+    return nid
+
+
+def get_notifications() -> list[dict]:
+    with connect_sessions() as conn:
+        rows = conn.execute("SELECT * FROM notifications ORDER BY created_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_notification(notification_id: str) -> None:
+    with connect_sessions() as conn:
+        conn.execute("DELETE FROM notifications WHERE id = ?", (notification_id,))
+
+
+# ---------------------------------------------------------------------------
+# Push subscriptions
+# ---------------------------------------------------------------------------
+
+
+def upsert_push_subscription(endpoint: str, p256dh: str, auth: str) -> str:
+    """Insert or update a push subscription (keyed by endpoint). Returns id."""
+    sid = _new_id()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO push_subscriptions (id, endpoint, p256dh, auth, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(endpoint) DO UPDATE SET
+                   p256dh=excluded.p256dh,
+                   auth=excluded.auth,
+                   created_at=excluded.created_at""",
+            (sid, endpoint, p256dh, auth, _now()),
+        )
+    return sid
+
+
+def get_push_subscriptions() -> list[dict]:
+    with connect_sessions() as conn:
+        rows = conn.execute("SELECT * FROM push_subscriptions").fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_push_subscription(endpoint: str) -> None:
+    with connect_sessions() as conn:
+        conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+
+
+# ---------------------------------------------------------------------------
+# Session Messages (inter-session)
+# ---------------------------------------------------------------------------
+
+
+def send_session_message(
+    sender_id: str,
+    recipient_id: str,
+    message_type: str,
+    payload: str,
+) -> None:
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO session_messages (sender_id, recipient_id,
+               message_type, payload, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (sender_id, recipient_id, message_type, payload, _now()),
+        )
+
+
+def recv_session_messages(recipient_id: str) -> list[dict]:
+    """Fetch unread messages and mark them read atomically."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM session_messages WHERE recipient_id = ? AND read_at IS NULL ORDER BY id",
+            (recipient_id,),
+        ).fetchall()
+        if rows:
+            ids = [r["id"] for r in rows]
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(
+                f"UPDATE session_messages SET read_at = ? WHERE id IN ({placeholders})",
+                [_now()] + ids,
+            )
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Cron Runs
+# ---------------------------------------------------------------------------
+
+
+def add_cron_run(job_name: str, session_id: str | None = None) -> int:
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "INSERT INTO cron_runs (job_name, session_id, started_at, status) VALUES (?, ?, ?, 'running')",
+            (job_name, session_id, _now()),
+        )
+        return cur.lastrowid
+
+
+def update_cron_run(run_id: int, status: str, error: str | None = None) -> None:
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE cron_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?",
+            (status, error, _now(), run_id),
+        )
+
+
+def list_cron_runs(job_name: str | None = None, limit: int = 50) -> list[dict]:
+    with connect_sessions() as conn:
+        if job_name:
+            rows = conn.execute(
+                "SELECT * FROM cron_runs WHERE job_name = ? ORDER BY started_at DESC LIMIT ?",
+                (job_name, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM cron_runs ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_cron_runs_paginated(
+    limit: int = 50,
+    offset: int = 0,
+    job_name: str | None = None,
+) -> tuple[list[dict], int]:
+    """Paginated cron run listing. Returns (rows, total_count)."""
+    with connect_sessions() as conn:
+        if job_name:
+            total = conn.execute("SELECT COUNT(*) as cnt FROM cron_runs WHERE job_name = ?", (job_name,)).fetchone()[
+                "cnt"
+            ]
+            rows = conn.execute(
+                "SELECT * FROM cron_runs WHERE job_name = ? ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                (job_name, limit, offset),
+            ).fetchall()
+        else:
+            total = conn.execute("SELECT COUNT(*) as cnt FROM cron_runs").fetchone()["cnt"]
+            rows = conn.execute(
+                "SELECT * FROM cron_runs ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [dict(r) for r in rows], total
+
+
+def get_cron_run_stats(job_name: str) -> dict:
+    """Get run count and last_run_at for a job."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) as run_count, MAX(started_at) as last_run_at
+               FROM cron_runs WHERE job_name = ?""",
+            (job_name,),
+        ).fetchone()
+        return dict(row) if row else {"run_count": 0, "last_run_at": None}
+
+
+def prune_cron_runs(max_age_days: int = 30, keep_per_job: int = 100) -> int:
+    """Delete old cron run records. Returns count deleted."""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """DELETE FROM cron_runs
+               WHERE started_at < ? AND id NOT IN (
+                   SELECT id FROM cron_runs cr2
+                   WHERE cr2.job_name = cron_runs.job_name
+                   ORDER BY cr2.started_at DESC LIMIT ?
+               )""",
+            (cutoff, keep_per_job),
+        )
+        return cur.rowcount
+
+
+def clear_cron_runs(job_name: str | None = None) -> int:
+    """Delete completed/error cron run records. Preserves running jobs. Returns count deleted."""
+    with connect_sessions() as conn:
+        if job_name:
+            cur = conn.execute(
+                "DELETE FROM cron_runs WHERE job_name = ? AND status NOT IN ('running')",
+                (job_name,),
+            )
+        else:
+            cur = conn.execute(
+                "DELETE FROM cron_runs WHERE status NOT IN ('running')",
+            )
+        return cur.rowcount
+
+
+def prune_cron_sessions(max_age_days: int = 7) -> int:
+    """Delete old auto-created cron sessions and their messages."""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT id FROM sessions WHERE title LIKE 'Cron: %' AND updated_at < ?",
+            (cutoff,),
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+    for sid in ids:
+        delete_session(sid)
+    return len(ids)
+
+
+# ---------------------------------------------------------------------------
+# Schema Meta
+# ---------------------------------------------------------------------------
+
+
+def get_schema_version() -> int:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+        return int(row["value"]) if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Maintenance helpers
+# ---------------------------------------------------------------------------
+
+
+def cleanup_old_partials(max_age_hours: int = 1) -> int:
+    """Delete partial messages older than max_age_hours. Returns count deleted."""
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM messages WHERE partial = 1 AND created_at < ?", (cutoff,))
+        return cur.rowcount
+
+
+def prune_orphaned_token_usage(max_age_days: int = 30) -> int:
+    """Delete token_usage rows with NULL session_id or older than max_age_days."""
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    with connect_sessions() as conn:
+        # Orphaned rows (session deleted, FK set to NULL)
+        cur1 = conn.execute("DELETE FROM token_usage WHERE session_id IS NULL")
+        # Old rows beyond retention
+        cur2 = conn.execute("DELETE FROM token_usage WHERE created_at < ?", (cutoff,))
+        total = (cur1.rowcount or 0) + (cur2.rowcount or 0)
+        return total
+
+
+def prune_old_session_messages(max_age_days: int = 7) -> int:
+    """Delete read session_messages older than max_age_days."""
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "DELETE FROM session_messages WHERE read_at IS NOT NULL AND created_at < ?",
+            (cutoff,),
+        )
+        return cur.rowcount or 0
+
+
+def prune_old_questions(max_age_days: int = 7) -> int:
+    """Delete questions older than max_age_days."""
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM questions WHERE created_at < ?", (cutoff,))
+        return cur.rowcount or 0
+
+
+def incremental_vacuum(pages: int = 100) -> None:
+    if not isinstance(pages, int) or pages < 0 or pages > 10000:
+        raise ValueError(f"Invalid vacuum pages value: {pages}")
+    with connect_sessions() as conn:
+        conn.execute(f"PRAGMA incremental_vacuum({pages})")
+
+
+def checkpoint() -> None:
+    with connect_sessions() as conn:
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+
+
+# ---------------------------------------------------------------------------
+# Snooze
+# ---------------------------------------------------------------------------
+
+
+def get_unreviewed_sessions(min_age_minutes: int = 10, limit: int = 5) -> list[dict]:
+    """Get sessions eligible for Snooze catch-up distillation."""
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes)).isoformat()
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT s.* FROM sessions s
+               WHERE s.snooze_reviewed_at IS NULL
+                 AND s.state = 'idle'
+                 AND s.updated_at < ?
+                 AND s.session_type != 'worker'
+                 AND (
+                     SELECT COUNT(*) FROM messages m
+                     WHERE m.session_id = s.id
+                       AND m.role IN ('user', 'assistant')
+                       AND m.content != ''
+                 ) >= 4
+                 AND (
+                     SELECT COALESCE(SUM(m.char_count), 0) FROM messages m
+                     WHERE m.session_id = s.id
+                       AND m.role IN ('user', 'assistant')
+                 ) >= 500
+               ORDER BY s.updated_at ASC
+               LIMIT ?""",
+            (cutoff, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_session_reviewed(session_id: str) -> None:
+    """Mark a session as reviewed by Snooze."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE sessions SET snooze_reviewed_at = ? WHERE id = ?",
+            (_now(), session_id),
+        )
+
+
+def get_unproposed_sessions(min_age_minutes: int = 10, limit: int = 5) -> list[dict]:
+    """Sessions eligible for snooze improvement-reflection.
+
+    Like get_unreviewed_sessions but tracks via snooze_state (not the
+    snooze_reviewed_at column), so the improvement pass and the distillation
+    pass operate on independent watermarks. Excludes worker sessions
+    (workflows already self-improve via core/workflows/reflect.py).
+    """
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes)).isoformat()
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT s.* FROM sessions s
+               WHERE s.state = 'idle'
+                 AND s.updated_at < ?
+                 AND s.session_type != 'worker'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM snooze_state ss
+                     WHERE ss.key = 'proposal_reviewed:' || s.id
+                 )
+                 AND EXISTS (
+                     SELECT 1 FROM messages m
+                     WHERE m.session_id = s.id AND m.role = 'reflect'
+                 )
+               ORDER BY s.updated_at ASC
+               LIMIT ?""",
+            (cutoff, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_snooze_state(key: str) -> str | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT value FROM snooze_state WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+
+def set_snooze_state(key: str, value: str) -> None:
+    with connect_sessions() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO snooze_state (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, value, _now()),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Post-mortems (Phase 2c): reflect-as-compiler artifact stream
+# ---------------------------------------------------------------------------
+
+
+def add_post_mortem(
+    session_id: str,
+    attempt: int,
+    verdict: str,
+    failure_cause: str,
+    confidence: float,
+    reflect_model: str,
+    reflect_latency_ms: int,
+    scout_viability: str | None,
+    execution_mode: str | None,
+    payload_json: str,
+) -> str:
+    """Insert a post-mortem row and return its id.
+
+    payload_json carries the full ReflectResult + scout-report summary so
+    snooze can re-derive anything the indexed columns don't expose.
+    """
+    pm_id = _new_id()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO post_mortems (
+                id, session_id, created_at, attempt, verdict, failure_cause,
+                confidence, reflect_model, reflect_latency_ms,
+                scout_viability, execution_mode, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pm_id,
+                session_id,
+                _now(),
+                attempt,
+                verdict,
+                failure_cause,
+                float(confidence),
+                reflect_model,
+                reflect_latency_ms,
+                scout_viability,
+                execution_mode,
+                payload_json,
+            ),
+        )
+    return pm_id
+
+
+def list_post_mortems(
+    session_id: str | None = None, failure_cause: str | None = None, since_iso: str | None = None, limit: int = 100
+) -> list[dict]:
+    """Query post-mortems with optional filters. Newest first."""
+    clauses = []
+    params: list = []
+    if session_id:
+        clauses.append("session_id = ?")
+        params.append(session_id)
+    if failure_cause:
+        clauses.append("failure_cause = ?")
+        params.append(failure_cause)
+    if since_iso:
+        clauses.append("created_at >= ?")
+        params.append(since_iso)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(int(limit))
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"""SELECT * FROM post_mortems {where}
+               ORDER BY created_at DESC LIMIT ?""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_post_mortem(pm_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT * FROM post_mortems WHERE id = ?",
+            (pm_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_unsynthesized_post_mortems(limit: int = 500) -> list[dict]:
+    """Return post-mortems not yet processed by snooze synthesis, oldest first."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT * FROM post_mortems WHERE synthesized_at IS NULL
+               ORDER BY created_at ASC LIMIT ?""",
+            (int(limit),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def search_post_mortems_for_scout(
+    failure_cause: str | None = None,
+    subject: str | None = None,
+    limit: int = 5,
+) -> list[dict]:
+    """Scout-facing search over post-mortems for on-demand failure lookup.
+
+    Filters:
+      - failure_cause: exact match on the indexed column
+      - subject: substring match against payload_json (tool/skill name etc.)
+
+    Both filters optional. Returns newest first, capped at 10.
+    """
+    limit = max(1, min(int(limit), 10))
+    clauses = []
+    params: list = []
+    if failure_cause:
+        clauses.append("failure_cause = ?")
+        params.append(failure_cause)
+    if subject:
+        clauses.append("payload_json LIKE ?")
+        # Wrap in quotes so we match subject appearances as JSON string values
+        # (e.g. `"recommended_skills": ["some-skill"]`) without matching
+        # arbitrary substrings in narrative text.
+        params.append(f'%"{subject}"%')
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"""SELECT id, session_id, created_at, attempt, verdict,
+                       failure_cause, confidence, scout_viability,
+                       execution_mode, payload_json
+                FROM post_mortems {where}
+                ORDER BY created_at DESC LIMIT ?""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_old_post_mortems(cutoff_iso: str) -> int:
+    """Delete synthesized post-mortems older than cutoff. Returns rowcount.
+
+    Only touches rows that have already been processed by synthesis — never
+    prunes the unsynthesized backlog, regardless of age.
+    """
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "DELETE FROM post_mortems " "WHERE synthesized_at IS NOT NULL AND created_at < ?",
+            (cutoff_iso,),
+        )
+        return cur.rowcount
+
+
+def mark_post_mortems_synthesized(pm_ids: list[str]) -> int:
+    """Mark post-mortems as processed. Returns rows updated. No-op on empty."""
+    if not pm_ids:
+        return 0
+    placeholders = ",".join(["?"] * len(pm_ids))
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            f"UPDATE post_mortems SET synthesized_at = ? WHERE id IN ({placeholders})",
+            [_now(), *pm_ids],
+        )
+        return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Tool/skill performance counters (observed from post-mortems)
+# ---------------------------------------------------------------------------
+#
+# One row per (signal_type, subject). Snooze upserts these based on
+# post_mortems aggregation. Displayed in Skills and Tools UI sections.
+#
+# Active signal_types: "tool" and "skill".
+# "execution_mode" rows may exist from prior runs — ignored going forward.
+
+
+def upsert_signal(
+    signal_type: str,
+    subject: str,
+    delta_successes: int = 0,
+    delta_failures: int = 0,
+    payload_json: str = "{}",
+) -> None:
+    """Upsert a signal row. Increments reinforcements by 1; adds deltas.
+
+    Call once per observation (e.g. once per post-mortem that touches this
+    subject). Does not touch user_approved.
+    """
+    now = _now()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO scout_signals (
+                signal_type, subject, reinforcements, successes, failures,
+                first_seen_at, last_reinforced_at, payload_json
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+            ON CONFLICT(signal_type, subject) DO UPDATE SET
+                reinforcements = reinforcements + 1,
+                successes = successes + excluded.successes,
+                failures = failures + excluded.failures,
+                last_reinforced_at = excluded.last_reinforced_at,
+                payload_json = excluded.payload_json""",
+            (signal_type, subject, int(delta_successes), int(delta_failures), now, now, payload_json),
+        )
+
+
+def get_signal(signal_type: str, subject: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT * FROM scout_signals WHERE signal_type = ? AND subject = ?",
+            (signal_type, subject),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_signals_by_subjects(subjects: list[tuple[str, str]]) -> list[dict]:
+    """Lookup performance rows by a list of (signal_type, subject) pairs."""
+    if not subjects:
+        return []
+    placeholders = ",".join(["(?, ?)"] * len(subjects))
+    params: list = []
+    for t, s in subjects:
+        params.extend([t, s])
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM scout_signals WHERE (signal_type, subject) IN ({placeholders})",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_top_signals(
+    since_iso: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Return tool and skill performance rows, newest-first.
+
+    Excludes execution_mode rows (no longer tracked).
+    limit is a safety cap.
+    """
+    clauses = ["signal_type IN ('tool', 'skill')"]
+    params: list = []
+    if since_iso:
+        clauses.append("last_reinforced_at >= ?")
+        params.append(since_iso)
+    where = "WHERE " + " AND ".join(clauses)
+    params.append(int(limit))
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"""SELECT * FROM scout_signals {where}
+               ORDER BY last_reinforced_at DESC LIMIT ?""",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_signal(signal_type: str, subject: str) -> bool:
+    """Hard-delete a performance row (used for testing and manual cleanup)."""
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "DELETE FROM scout_signals WHERE signal_type = ? AND subject = ?",
+            (signal_type, subject),
+        )
+        return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Workflow runs (migration v14)
+# ---------------------------------------------------------------------------
+
+
+def create_workflow_run(
+    run_id: str,
+    workflow_name: str,
+    run_dir: str,
+    step_count: int,
+) -> None:
+    """Insert a new workflow_runs row with status='running'."""
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO workflow_runs
+               (run_id, workflow_name, started_at, status, run_dir, step_count)
+               VALUES (?, ?, ?, 'running', ?, ?)""",
+            (run_id, workflow_name, _now(), run_dir, step_count),
+        )
+
+
+def finish_workflow_run(
+    run_id: str,
+    status: str,
+    steps_passed: int,
+    steps_failed: int,
+    proposal_count: int,
+) -> None:
+    """Mark a workflow run complete with final step counts."""
+    with connect_sessions() as conn:
+        conn.execute(
+            """UPDATE workflow_runs SET
+               status = ?, completed_at = ?,
+               steps_passed = ?, steps_failed = ?, proposal_count = ?
+               WHERE run_id = ?""",
+            (status, _now(), steps_passed, steps_failed, proposal_count, run_id),
+        )
+
+
+def update_workflow_run_proposals(run_id: str, proposal_count: int) -> None:
+    """Update proposal_count on an existing run row."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE workflow_runs SET proposal_count = ? WHERE run_id = ?",
+            (proposal_count, run_id),
+        )
+
+
+def fail_orphaned_workflow_runs() -> int:
+    """Mark any workflow_runs row stuck at status='running' as 'failed'.
+
+    Called once at startup. A row stuck at 'running' across a process restart
+    is by definition orphaned — the in-process driver that owned it is gone
+    (run_workflow is synchronous; there is no resume path). Without this sweep
+    such rows persist forever, blocking observability and giving the agent
+    misleading "still running" signals from list_workflow_runs.
+
+    Returns the number of rows updated.
+    """
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """UPDATE workflow_runs SET
+               status = 'failed', completed_at = ?
+               WHERE status = 'running' AND completed_at IS NULL""",
+            (_now(),),
+        )
+        return cur.rowcount
+
+
+def list_workflow_runs(workflow_name: str | None = None, limit: int = 20) -> list[dict]:
+    """Return workflow runs, newest first. Optionally filter by workflow_name."""
+    with connect_sessions() as conn:
+        if workflow_name:
+            rows = conn.execute(
+                """SELECT * FROM workflow_runs WHERE workflow_name = ?
+                   ORDER BY started_at DESC LIMIT ?""",
+                (workflow_name, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM workflow_runs ORDER BY started_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_workflow_run(run_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM workflow_runs WHERE run_id = ?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def delete_workflow_run(run_id: str) -> bool:
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM workflow_runs WHERE run_id = ?", (run_id,))
+        return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Skill improvement proposals (migration v14)
+# ---------------------------------------------------------------------------
+
+
+def add_skill_proposal(
+    workflow_name: str | None,
+    run_id: str | None,
+    skill_name: str,
+    section: str,
+    problem: str,
+    proposed_change: str,
+    confidence: float,
+    source_step_id: str = "",
+    source_worker_id: str = "",
+    source_origin: str = "workflow",
+    session_id: str | None = None,
+) -> str:
+    """Insert a skill improvement proposal. Returns proposal id.
+
+    `source_origin` is "workflow" (default — workflow_reflect) or "session"
+    (snooze_reflect on a regular session). Session-origin rows leave
+    workflow_name/run_id NULL and populate session_id instead.
+    """
+    pid = _new_id()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO skill_improvement_proposals
+               (id, workflow_name, run_id, session_id, source_origin, skill_name,
+                section, problem, proposed_change, confidence, source_step_id,
+                source_worker_id, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+            (
+                pid,
+                workflow_name,
+                run_id,
+                session_id,
+                source_origin,
+                skill_name,
+                section,
+                problem,
+                proposed_change,
+                float(confidence),
+                source_step_id,
+                source_worker_id,
+                _now(),
+            ),
+        )
+    return pid
+
+
+def list_skill_proposals(
+    skill_name: str | None = None,
+    status: str | None = None,
+    source_origin: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    clauses = []
+    params: list = []
+    if skill_name:
+        clauses.append("skill_name = ?")
+        params.append(skill_name)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if source_origin:
+        clauses.append("source_origin = ?")
+        params.append(source_origin)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM skill_improvement_proposals {where} ORDER BY created_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_pending_proposals_for_skill(
+    skill_name: str,
+    min_confidence: float = 0.6,
+    limit: int = 3,
+) -> list[dict]:
+    """Pending proposals for a skill, sorted by confidence desc then recency.
+
+    Used by the stuck-mode peek in sessions/hooks.py — returns proposals the
+    agent can try as trial hints. Caller MUST treat these as unapproved and
+    call record_proposal_trial_use(...) for each one injected.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT * FROM skill_improvement_proposals
+               WHERE skill_name = ?
+                 AND status = 'pending'
+                 AND confidence >= ?
+               ORDER BY confidence DESC, created_at DESC
+               LIMIT ?""",
+            (skill_name, float(min_confidence), limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def record_proposal_trial_use(proposal_id: str) -> None:
+    """Increment trial_uses counter and bump last_trial_at."""
+    with connect_sessions() as conn:
+        conn.execute(
+            """UPDATE skill_improvement_proposals
+               SET trial_uses = trial_uses + 1, last_trial_at = ?
+               WHERE id = ?""",
+            (_now(), proposal_id),
+        )
+
+
+def record_proposal_trial_success(proposal_id: str) -> None:
+    """Increment trial_successes counter."""
+    with connect_sessions() as conn:
+        conn.execute(
+            """UPDATE skill_improvement_proposals
+               SET trial_successes = trial_successes + 1
+               WHERE id = ?""",
+            (proposal_id,),
+        )
+
+
+def get_skill_proposal(proposal_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM skill_improvement_proposals WHERE id = ?", (proposal_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def resolve_skill_proposal(proposal_id: str, status: str) -> bool:
+    """Mark a proposal as approved, rejected, applied, or archived. Returns True if row existed."""
+    if status not in ("approved", "rejected", "applied", "archived"):
+        raise ValueError(f"Invalid proposal status: {status!r}")
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "UPDATE skill_improvement_proposals SET status = ?, resolved_at = ? WHERE id = ?",
+            (status, _now(), proposal_id),
+        )
+        return cur.rowcount > 0
+
+
+def archive_proposals_for_run(run_id: str) -> int:
+    """Archive all pending proposals associated with a deleted run."""
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """UPDATE skill_improvement_proposals
+               SET status = 'archived', resolved_at = ?
+               WHERE run_id = ? AND status = 'pending'""",
+            (_now(), run_id),
+        )
+        return cur.rowcount
+
+
+def get_db_stats() -> dict:
+    with connect_sessions() as conn:
+        tables = {}
+        for table in [
+            "sessions",
+            "messages",
+            "artifacts",
+            "token_usage",
+            "questions",
+            "notifications",
+            "session_messages",
+            "cron_runs",
+        ]:
+            row = conn.execute(f"SELECT COUNT(*) as cnt FROM {table}").fetchone()
+            tables[table] = row["cnt"]
+        # DB file size
+        row = conn.execute("PRAGMA page_count").fetchone()
+        page_count = row[0] if row else 0
+        row = conn.execute("PRAGMA page_size").fetchone()
+        page_size = row[0] if row else 4096
+        tables["db_size_bytes"] = page_count * page_size
+    return tables

@@ -1,0 +1,21 @@
+# Python dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+fastapi==0.135.*
+uvicorn[standard]==0.42.*
+httpx==0.28.*
+python-multipart==0.0.*
+apscheduler==3.11.*
+pyyaml>=6.0
+
+pywebpush>=2.0           # Web Push (VAPID) — background push notifications
+pypdf>=4.0               # PDF text extraction for attached PDFs at ingest
+
+# Optional (graceful degradation if absent)
+qrcode==8.*              # terminal QR code for mobile onboarding (network mode)
+tiktoken==0.9.*        # accurate token estimation
+playwright==1.49.*     # headless browser for browse_web + eval screenshots
+trafilatura==2.*       # HTML-to-markdown content extraction for browse_web
+ddgs==9.*              # fallback web search (formerly duckduckgo-search)
+tavily-python==0.5.*   # primary web search (needs API key)

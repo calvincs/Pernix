@@ -1,0 +1,1720 @@
+"""Pernix — Scout agent runner: lifecycle, caching, fallback, validation.
+
+The scout runs as a multi-turn tool-calling agent. It gathers context
+iteratively via read-only tools (memory, skills, tools, sessions), then
+submits a structured ScoutReport via the submit_report tool.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import re
+import time
+import traceback
+from pathlib import Path
+from typing import Callable
+
+import httpx
+
+from config import settings
+from core.llm.semaphore import PRIORITY_BACKGROUND, PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
+from core.llm.types import TokenUsage
+from core.scout.report import ScoutReport, SessionBrief
+from db import models as db
+
+logger = logging.getLogger("pernix.scout")
+
+
+# ---------------------------------------------------------------------------
+# Retry helpers
+# ---------------------------------------------------------------------------
+
+# HTTP status codes that are safe to retry (transient server issues, model loading)
+_RETRYABLE_STATUS_CODES = frozenset({500, 502, 503, 429})
+
+
+def _is_retryable(error: Exception) -> bool:
+    """Check if an error is transient and worth retrying."""
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code in _RETRYABLE_STATUS_CODES
+    if isinstance(error, (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)):
+        return True
+    if isinstance(error, ConnectionError | OSError):
+        return True
+    return False
+
+
+def _log_scout_error(error: Exception, session_id: str, attempt: int, max_attempts: int, elapsed_ms: int) -> None:
+    """Log detailed diagnostic info for scout failures."""
+    parts = [
+        f"Scout failed for session {session_id} (attempt {attempt}/{max_attempts}, {elapsed_ms}ms)",
+        f"  Error type: {type(error).__module__}.{type(error).__qualname__}",
+        f"  Error message: {error}",
+    ]
+    if isinstance(error, httpx.HTTPStatusError):
+        resp = error.response
+        parts.append(f"  HTTP status: {resp.status_code}")
+        parts.append(f"  URL: {resp.request.url}")
+        # Log response body for diagnostics (Ollama often includes error details)
+        try:
+            body = resp.text[:500]
+            parts.append(f"  Response body: {body}")
+        except Exception:
+            pass
+        if resp.status_code == 500 and "ollama" in str(resp.request.url):
+            parts.append(
+                "  Likely cause: Ollama internal error (tool call XML parsing failure or model issue — usually transient)"
+            )
+    if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout)):
+        parts.append("  Likely cause: Ollama server unreachable or model loading")
+    if isinstance(error, httpx.ReadTimeout):
+        parts.append("  Likely cause: Ollama request timed out (model may be loading or overloaded)")
+
+    parts.append(f"  Traceback: {traceback.format_exception_only(type(error), error)[-1].strip()}")
+    logger.warning("\n".join(parts))
+
+
+# ---------------------------------------------------------------------------
+# Scout system prompt (multi-turn, tool-calling)
+# ---------------------------------------------------------------------------
+
+SCOUT_SYSTEM_PROMPT = """You are a Scout Agent. Your job is to prepare context for a main agent that will handle the user's request. You do NOT handle the request yourself.
+
+Your initial context already includes baseline memory search results, available tools, available skills, cross-session findings, and SCOUT SIGNALS — observations from past sessions about which subjects (tools/skills/execution modes) have historically succeeded or failed. Review these carefully before deciding if you need more.
+
+When SCOUT SIGNALS are present:
+- PREFER entries are subjects with a positive track record; favor them when they fit the task.
+- AVOID entries are subjects with a history of failures; find alternatives unless the user explicitly named one on this list (user intent overrides signals).
+- These are weighted observations, not hard rules. Your recommendations can contradict them when you have a specific reason — just make that reason explicit in your rationale fields.
+
+You also have tools to search deeper if the baseline is insufficient:
+- search_memory: Run additional memory queries with different keywords or modes
+- search_sessions: Search other sessions with different queries
+- search_tools: Discover additional tools by capability
+- search_skills: Find more skill packages
+- read_skill_instructions: Read full instructions for a skill before recommending it
+- search_post_mortems: Look up past failure narratives (filter by failure_cause or subject tool/skill name). Use when you suspect a prior failure pattern is relevant.
+
+WORKFLOW:
+1. Review the user message, session context, and pre-loaded baseline data (memory, tools, skills).
+2. If the baseline data is sufficient, call submit_report immediately with your recommendations.
+3. If you need deeper context (e.g., a skill looks promising but you want to read its instructions, or you want to search memory with different keywords), use your tools first.
+4. Call submit_report exactly once to deliver your findings.
+
+IMPORTANT: You have a maximum of 6 tool rounds. You MUST call submit_report by round 5 at the latest — round 6 disables tools and is reserved for emergency text output. Do not exhaust all rounds searching — gather what you need quickly, then submit. If in doubt, submit with what you have rather than searching more.
+
+You MUST call submit_report to deliver your findings. If you cannot use tools, output a raw JSON report instead (same fields as submit_report).
+
+REPORT FIELD GUIDANCE:
+- identity: Relevant personality directives from SOUL.md (max 300 tokens). Omit if no file provided.
+- rules: Relevant operational rules from RULES.md (max 300 tokens). Omit if no file provided.
+- instructions: Relevant project instructions from AGENTS.md (max 300 tokens). Omit if no file provided.
+- memory_context: Relevant knowledge from your memory searches. Quote with attribution. Max 500 tokens.
+- cross_session_context: Relevant findings from session searches. Quote with session attribution. Max 500 tokens. Empty string if nothing relevant.
+- recommended_tools: Array of tool names the main agent will need (5-15 tools). Only include extension tools — builtin tools are always available.
+- tool_rationale: One sentence explaining your tool selection.
+- recommended_skills: Array of skill names (0-3). Skills are pre-built instruction packages with workflows, scripts, and reference material. The first skill listed will be auto-loaded. Prioritize skills that were successfully used in past sessions. Empty array only if no skills match.
+- skill_rationale: One sentence explaining skill selection and how the skill(s) apply. Empty string if no skills needed.
+- recommended_model: If the task requires specific capabilities (vision, code, long-context), recommend a model ID from the AVAILABLE MODELS list. Empty string if current model is fine.
+- model_rationale: One sentence explaining why this model is needed. Empty string if no model switch.
+- session_state: Brief session orientation. Max 200 tokens.
+- approach_guidance: Step-by-step plan for approaching this task. Number each step, name tools/skills, flag risks, incorporate lessons from memory/past sessions. Max 500 tokens.
+- deliverables_plan: Array of concrete work items the agent is expected to produce (0-6). Each item has a "description" (the artifact or outcome, e.g. "Write summary.md with key findings") and an optional "execution_hint" (inline | task | worker). Leave empty for pure Q&A. Reflect will check each item at turn end, so be specific and measurable.
+- execution_mode: Overall approach — "inline" (default, single-agent work) or "tasks" (multi-step sequential via task system).
+
+RULES:
+- Be terse. Every token costs the main agent context space.
+- Only include entries RELEVANT to this specific task.
+- You have read-only access. You cannot modify anything.
+- SKILLS are the highest-leverage recommendation — a single skill can replace many tool rounds of trial-and-error. If memory mentions a skill in a successful context, recommend it.
+- APPROACH GUIDANCE is the most important field — it becomes the agent's playbook. Write numbered steps, name tools/skills, flag risks, reference past lessons.
+- REFLECT RETRY: When the user message contains a [REFLECT — Retry #N] block, the agent's full prior-turn history is still in its conversation context — all file reads and tool results are already visible. Your approach_guidance MUST NOT repeat steps already completed. Start the plan from the first incomplete step. If the retry block lists "Tools already used," treat those as done; instruct the agent to use glob or file_read only to confirm workspace state, not to re-fetch data it already has.
+- WORKER DELEGATION: Recommend spawn_worker, check_workers, await_workers, get_worker_result when: (a) multiple independent subtasks benefit from parallelism, (b) a subtask needs a different model, (c) large divide-and-conquer scope, or (d) data fetching followed by processing. Do NOT recommend for simple tasks. If session type is "worker", NEVER recommend orchestration tools.
+- PYTHON PACKAGES: Workspace venv at data/workspace/.venv/ is auto-activated. Use bash with pip or discover_tools for package management.
+- USER INTENT: When the user names a specific action/tool, prioritize matching tools. User preference > efficiency.
+- Do NOT use <think> or reasoning tags. /no_think"""
+
+# ---------------------------------------------------------------------------
+# Scout tool schemas (OpenAI function-calling format)
+# ---------------------------------------------------------------------------
+
+_SCOUT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_memory",
+            "description": "Search persistent memory for relevant knowledge, lessons learned, past approaches, and skill usage history. Supports keyword and hybrid search.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query — use specific keywords for best results"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["hybrid", "bm25", "recent"],
+                        "description": "Search mode: hybrid (keyword+temporal, default), bm25 (keyword only), recent (last 24h)",
+                    },
+                    "limit": {"type": "integer", "description": "Max results to return (default 10, max 20)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_sessions",
+            "description": "Search other sessions for relevant past work, conversations, and findings via full-text search. Useful for finding how similar tasks were handled before.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_tools",
+            "description": "Search the tool registry for available tools matching a query. Returns tool names, descriptions, and categories.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Natural language description of needed capability"},
+                    "limit": {"type": "integer", "description": "Max results (default 15)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_skills",
+            "description": "Search for available skill packages (domain expertise with workflows, scripts, and references). Skills provide step-by-step instructions for specific task types.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Task or domain description"},
+                    "limit": {"type": "integer", "description": "Max results (default 5)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_skill_instructions",
+            "description": "Read the full instructions (L2 body) of a specific skill. Use after search_skills to inspect a promising skill's workflow before recommending it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Skill name (from search_skills results)"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_post_mortems",
+            "description": "Look up past reflect post-mortems for targeted failure analysis. Use when the current task resembles a pattern that may have failed before (e.g. checking how a specific skill performed, or what went wrong with a particular failure cause). Returns concise summaries — NOT full payloads.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "failure_cause": {
+                        "type": "string",
+                        "description": "Optional exact failure cause filter (e.g. 'skill', 'tool', 'scout', 'none').",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Optional tool or skill name to find post-mortems that referenced it.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 5, max 10).",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_report",
+            "description": "Submit the final scout report. Call this exactly once when you have gathered enough context. This ends the scout session.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "identity": {
+                        "type": "string",
+                        "description": "Relevant SOUL.md directives (max 300 tokens). Omit or empty if no file.",
+                    },
+                    "rules": {
+                        "type": "string",
+                        "description": "Relevant RULES.md directives (max 300 tokens). Omit or empty if no file.",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": "Relevant AGENTS.md directives (max 300 tokens). Omit or empty if no file.",
+                    },
+                    "memory_context": {
+                        "type": "string",
+                        "description": "Relevant memory entries with attribution (max 500 tokens)",
+                    },
+                    "cross_session_context": {
+                        "type": "string",
+                        "description": "Relevant findings from other sessions (max 500 tokens)",
+                    },
+                    "recommended_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Extension tool names the agent will need (5-15)",
+                    },
+                    "tool_rationale": {"type": "string", "description": "One sentence explaining tool selection"},
+                    "recommended_skills": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Skill names (0-3, first is auto-loaded)",
+                    },
+                    "skill_rationale": {"type": "string", "description": "One sentence explaining skill selection"},
+                    "recommended_model": {
+                        "type": "string",
+                        "description": "Model ID if specific capabilities needed, else empty",
+                    },
+                    "model_rationale": {"type": "string", "description": "Why this model is needed, else empty"},
+                    "session_state": {"type": "string", "description": "Brief session orientation (max 200 tokens)"},
+                    "approach_guidance": {
+                        "type": "string",
+                        "description": "Numbered step-by-step plan with tools, risks, and lessons (max 500 tokens)",
+                    },
+                    "deliverables_plan": {
+                        "type": "array",
+                        "description": "Concrete items the agent must produce (0-6). Each item: {description, execution_hint?}. Empty for pure Q&A.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {
+                                    "type": "string",
+                                    "description": "Concrete artifact or outcome (e.g. 'Write summary.md')",
+                                },
+                                "execution_hint": {
+                                    "type": "string",
+                                    "enum": ["inline", "task", "worker"],
+                                    "description": "Per-item execution suggestion",
+                                },
+                            },
+                            "required": ["description"],
+                        },
+                    },
+                    "execution_mode": {
+                        "type": "string",
+                        "enum": ["inline", "tasks"],
+                        "description": "Overall execution approach. Default 'inline' for simple tasks.",
+                    },
+                },
+                "required": ["recommended_tools", "approach_guidance"],
+            },
+        },
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Scout tool execution
+# ---------------------------------------------------------------------------
+
+
+def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
+    """Execute a scout tool and return the result as a string."""
+
+    if name == "search_memory":
+        try:
+            from core.memory.store import get_memory_store
+
+            store = get_memory_store()
+            if not store:
+                return "Memory store not available."
+            query = args.get("query", "")
+            mode = args.get("mode", "hybrid")
+            limit = min(args.get("limit", 10), 20)
+            results = store.search(query, mode=mode, limit=limit)
+            if not results:
+                return "No results found."
+            lines = []
+            for r in results:
+                lines.append(
+                    f"[{r.entry.file_name} score={r.score:.1f} type={r.entry.entry_type}] {r.entry.content[:400]}"
+                )
+            return "\n\n".join(lines)
+        except Exception as e:
+            return f"Memory search error: {e}"
+
+    elif name == "search_sessions":
+        try:
+            from core.scout.search import gather_cross_session_data
+
+            query = args.get("query", "")
+            result = gather_cross_session_data(query, brief.session_id)
+            return result or "No relevant findings in other sessions."
+        except Exception as e:
+            return f"Session search error: {e}"
+
+    elif name == "search_tools":
+        try:
+            from core.tools.registry import get_registry
+
+            registry = get_registry()
+            query = args.get("query", "")
+            limit = min(args.get("limit", 15), 30)
+            discovered = registry.discover(query, limit=limit)
+            if not discovered:
+                return "No matching tools found."
+            lines = []
+            for t in discovered:
+                lines.append(f"- {t.name} [{t.category}]: {t.description}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Tool discovery error: {e}"
+
+    elif name == "search_skills":
+        try:
+            from core.skills.registry import get_skill_registry
+
+            skill_reg = get_skill_registry()
+            query = args.get("query", "")
+            limit = min(args.get("limit", 5), 10)
+            discovered = skill_reg.discover(query, limit=limit)
+            if not discovered:
+                return "No matching skills found."
+            lines = []
+            for s in discovered:
+                tags_str = f" [{', '.join(s.tags[:5])}]" if s.tags else ""
+                extras = []
+                if s.has_scripts:
+                    extras.append("has scripts")
+                if s.has_references:
+                    extras.append("has references")
+                extra_str = f" ({', '.join(extras)})" if extras else ""
+                lines.append(f"- {s.name}{tags_str}: {s.description}{extra_str}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Skill discovery error: {e}"
+
+    elif name == "read_skill_instructions":
+        try:
+            from core.skills.registry import get_skill_registry
+
+            skill_reg = get_skill_registry()
+            skill_name = args.get("name", "")
+            if not skill_reg.exists(skill_name):
+                return f"Skill '{skill_name}' not found in registry."
+            instructions = skill_reg.load_instructions(skill_name)
+            if not instructions:
+                return f"Skill '{skill_name}' has no instructions (empty SKILL.md)."
+            return instructions[:5000]
+        except Exception as e:
+            return f"Skill read error: {e}"
+
+    elif name == "search_post_mortems":
+        try:
+            from db import models as db_mod
+
+            hits = db_mod.search_post_mortems_for_scout(
+                failure_cause=(args.get("failure_cause") or None),
+                subject=(args.get("subject") or None),
+                limit=int(args.get("limit", 5) or 5),
+            )
+            return _format_post_mortem_hits(hits)
+        except Exception as e:
+            return f"Post-mortem search error: {e}"
+
+    elif name == "submit_report":
+        # Handled by the loop — this should not be called directly
+        return "Report submitted."
+
+    else:
+        return f"Unknown tool: {name}"
+
+
+def _extract_report(args: dict) -> ScoutReport:
+    """Build a ScoutReport from submit_report tool arguments."""
+    from core.scout.report import DeliverableSpec
+
+    raw_deliv = args.get("deliverables_plan") or []
+    deliverables = []
+    if isinstance(raw_deliv, list):
+        for d in raw_deliv:
+            if isinstance(d, dict):
+                hint = d.get("execution_hint", "inline")
+                if hint not in ("inline", "task", "worker"):
+                    hint = "inline"
+                deliverables.append(
+                    DeliverableSpec(
+                        description=str(d.get("description", ""))[:500],
+                        execution_hint=hint,
+                    )
+                )
+            elif isinstance(d, str) and d.strip():
+                # Tolerate models that emit a plain string per deliverable.
+                deliverables.append(DeliverableSpec(description=d.strip()[:500]))
+
+    mode = str(args.get("execution_mode", "inline"))
+    if mode not in ("inline", "tasks"):
+        # Clamp unknown / deprecated values (e.g. legacy "workers") to inline.
+        mode = "inline"
+
+    return ScoutReport(
+        identity=str(args.get("identity", "")),
+        rules=str(args.get("rules", "")),
+        instructions=str(args.get("instructions", "")),
+        memory_context=str(args.get("memory_context", "")),
+        cross_session_context=str(args.get("cross_session_context", "")),
+        recommended_tools=args.get("recommended_tools", []) if isinstance(args.get("recommended_tools"), list) else [],
+        tool_rationale=str(args.get("tool_rationale", "")),
+        recommended_skills=(
+            args.get("recommended_skills", []) if isinstance(args.get("recommended_skills"), list) else []
+        ),
+        skill_rationale=str(args.get("skill_rationale", "")),
+        recommended_model=str(args.get("recommended_model", "")),
+        model_rationale=str(args.get("model_rationale", "")),
+        session_state=str(args.get("session_state", "")),
+        approach_guidance=str(args.get("approach_guidance", "")),
+        deliverables_plan=deliverables,
+        execution_mode=mode,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scout self-validation (Phase 2a)
+#
+# Runs a structured check on the report scout just submitted. If the report
+# has fixable issues, scout gets up to _MAX_REVISIONS revision rounds with
+# the issues injected. Pure Python (no extra LLM call) and bounded by the
+# revision counter — can never loop forever.
+# ---------------------------------------------------------------------------
+
+
+def _self_check_report(report: ScoutReport) -> list[str]:
+    """Check a ScoutReport for correctable issues. Returns list of issue strings.
+
+    Empty list = valid. Each issue string is suitable for injecting into the
+    scout's context as a revision request. Distinct from the sanitizing
+    `_validate_report` below, which mutates the report to enforce invariants
+    after scout completes. This runs during the scout loop for self-revision.
+    """
+    issues: list[str] = []
+
+    # 1. approach_guidance must be non-trivial.
+    guidance = (report.approach_guidance or "").strip()
+    if len(guidance) < 30:
+        issues.append(
+            "approach_guidance is empty or too short — write numbered, concrete steps "
+            "naming tools/skills and flagging risks."
+        )
+
+    # 2. Recommended tools must exist in the registry.
+    try:
+        from core.tools.registry import get_registry
+
+        reg = get_registry()
+        missing = [t for t in (report.recommended_tools or []) if not reg.exists(t)]
+        if missing:
+            issues.append(
+                f"Recommended tools do not exist in the registry: {', '.join(missing)}. "
+                "Use only tool names from the AVAILABLE TOOLS list or call search_tools."
+            )
+    except Exception as e:
+        logger.debug("Scout validator: tool registry check failed: %s", e)
+
+    # 3. Recommended skills must exist AND pass pre-flight validation.
+    try:
+        from core.skills.registry import get_skill_registry
+
+        skill_reg = get_skill_registry()
+        missing_skills = [s for s in (report.recommended_skills or []) if not skill_reg.exists(s)]
+        if missing_skills:
+            issues.append(
+                f"Recommended skills do not exist: {', '.join(missing_skills)}. "
+                "Drop them, or use search_skills to find real ones."
+            )
+        invalid_skills = [
+            s for s in (report.recommended_skills or []) if skill_reg.exists(s) and not skill_reg.is_valid(s)
+        ]
+        if invalid_skills:
+            issues.append(
+                f"Recommended skills failed pre-flight validation (broken scripts): "
+                f"{', '.join(invalid_skills)}. Drop them or recommend alternatives."
+            )
+    except Exception as e:
+        logger.debug("Scout validator: skill registry check failed: %s", e)
+
+    # 4. Recommended model, if set, must be known.
+    if report.recommended_model and _known_model_ids:
+        if report.recommended_model not in _known_model_ids:
+            issues.append(
+                f"recommended_model '{report.recommended_model}' is not in AVAILABLE MODELS. "
+                "Use an exact model id from the list, or leave empty to use the default."
+            )
+
+    # 5. deliverables_plan: if present, entries must have descriptions.
+    if report.deliverables_plan:
+        blank = [i for i, d in enumerate(report.deliverables_plan, 1) if not (d.description or "").strip()]
+        if blank:
+            issues.append(
+                f"deliverables_plan has {len(blank)} entries with empty descriptions. "
+                "Each deliverable must name a concrete artifact or outcome."
+            )
+
+    return issues
+
+
+def _format_revision_request(issues: list[str]) -> str:
+    """Format validator issues as a scout-facing revision request."""
+    bullets = "\n".join(f"- {issue}" for issue in issues)
+    return (
+        "[SCOUT SELF-CHECK — REVISION REQUESTED]\n"
+        "Your submitted report has the following fixable issues:\n"
+        f"{bullets}\n\n"
+        "RESPONSE FORMAT: Call submit_report again with corrected values. "
+        "Do NOT reply with prose explaining what you'll do — call the tool. "
+        "Revision rounds are limited — if you cannot resolve an issue, explain "
+        "why in tool_rationale/skill_rationale so the main agent is informed."
+    )
+
+
+def _format_post_mortem_hits(hits: list[dict]) -> str:
+    """Format post-mortem search results as a scout-facing summary.
+
+    Never returns raw payload_json — only structured fields plus a short
+    reasoning excerpt. Each entry capped at ~300 chars; whole output capped.
+    """
+    if not hits:
+        return "No matching post-mortems."
+
+    import json as _json
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
+
+    lines: list[str] = []
+    now = _dt.now(_tz.utc)
+    for h in hits:
+        # Parse payload safely; extract a short reasoning excerpt only.
+        reasoning = ""
+        try:
+            payload = _json.loads(h.get("payload_json") or "{}")
+            reasoning = str(payload.get("reasoning", ""))[:200]
+        except (ValueError, TypeError):
+            pass
+        # Humanize created_at into "Nd ago" / "Nh ago".
+        age = ""
+        try:
+            created = _dt.fromisoformat(str(h.get("created_at", "")).replace("Z", "+00:00"))
+            delta = now - created
+            if delta.days >= 1:
+                age = f"{delta.days}d ago"
+            else:
+                age = f"{delta.seconds // 3600}h ago"
+        except (ValueError, TypeError):
+            age = "unknown"
+        session = (h.get("session_id") or "")[:8]
+        line = (
+            f"[session {session}, verdict={h.get('verdict','?')}, "
+            f"cause={h.get('failure_cause','?')}, attempt={h.get('attempt','?')}, "
+            f"{age}] {reasoning}"
+        )
+        lines.append(line[:300])
+
+    out = "\n".join(lines)
+    return out[:3000]
+
+
+# ---------------------------------------------------------------------------
+# Core minimum tools (always available to the main agent)
+# ---------------------------------------------------------------------------
+
+# All builtin tools — always included regardless of scout recommendation.
+# Extension tools (orchestration, web, vcs, etc.) are still scout-curated.
+CORE_MINIMUM = frozenset(
+    {
+        "file_read",
+        "file_write",
+        "file_edit",
+        "multiedit",
+        "glob",
+        "grep",
+        "bash",
+        "remember",
+        "recall",
+        "ingest",
+        "ask_user",
+        "notify_user",
+        "discover_tools",
+        "get_tool_schema",
+        "discover_skills",
+        "load_skill",
+        "read_skill_resource",
+        # Workflow discovery is always on — cheap lookup that helps the agent
+        # recognize when an execute-intent request matches an installed workflow.
+        "discover_workflows",
+    }
+)
+
+# Phrases that indicate the user wants to execute an existing workflow
+# end-to-end. When matched, scout will bias toward run_workflow and avoid
+# recommending the agent replay steps inline.
+import re as _re_scout
+
+_WORKFLOW_EXECUTE_RE = _re_scout.compile(
+    r"\b(?:run|execute|trigger|kick[- ]off|start|invoke|launch)\b" r".{0,40}?" r"\bworkflow\b",
+    _re_scout.IGNORECASE,
+)
+
+
+def _looks_like_workflow_execute(message: str) -> bool:
+    """Heuristic: does the user message read as 'run X workflow'?"""
+    if not message:
+        return False
+    return bool(_WORKFLOW_EXECUTE_RE.search(message))
+
+
+# Cache
+import threading as _threading
+
+_cache: dict[str, tuple[ScoutReport, float]] = {}
+_cache_lock = _threading.Lock()
+CACHE_TTL = 300  # 5 minutes
+
+# Known model IDs (populated during scout LLM run for validation)
+_known_model_ids: set[str] = set()
+
+# Max tool rounds for the scout's internal loop.
+# IMPORTANT: keep the round counts in SCOUT_SYSTEM_PROMPT (line ~104) in sync
+# with this constant — the prompt is hardcoded and will drift if this changes.
+SCOUT_MAX_ROUNDS = 6
+# Max self-check revisions scout can request on a single run.
+# Extra slot lets scout fix multiple unrelated issues sequentially
+# (e.g. a contradictory signal AND an unknown model in the same submit).
+_MAX_REVISIONS = 2
+
+
+# ---------------------------------------------------------------------------
+# Build session brief
+# ---------------------------------------------------------------------------
+
+
+def build_session_brief(session_id: str, context_budget: int | None = None) -> SessionBrief:
+    """Build a SessionBrief deterministically from DB state.
+
+    `context_budget` overrides `settings.context_budget` when computing
+    `context_utilization`. Pass the effective per-session value
+    (session.context_budget_override or global default) so the brief
+    reflects the budget the session actually runs under.
+    """
+    session = db.get_session(session_id)
+    if not session:
+        return SessionBrief(session_id=session_id)
+
+    messages = db.get_messages(session_id)
+
+    # Legacy rows may hold base64 image data inlined as a JSON list. Collapse
+    # them to plain text markers before we compute previews or token totals,
+    # otherwise a single attachment can blow up context_utilization to >1000%.
+    from core.context.compiler import _legacy_multimodal_to_text
+
+    def _msg_text(m: dict) -> str:
+        return _legacy_multimodal_to_text(m.get("content") or "")
+
+    # Recent messages: last 3, role + first 200 chars
+    recent = []
+    for m in messages[-3:]:
+        content = _msg_text(m)[:200].replace("\n", " ")
+        recent.append(f"{m['role']}: {content}")
+
+    # Tools used recently (from last 3 tool-call rounds)
+    tools_used = set()
+    for m in messages[-20:]:
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            try:
+                tcs = json.loads(m["tool_calls"]) if isinstance(m["tool_calls"], str) else m["tool_calls"]
+                for tc in (tcs if isinstance(tcs, list) else []):
+                    if isinstance(tc, dict):
+                        tools_used.add(tc.get("function", {}).get("name", tc.get("name", "")))
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    # Compaction summary
+    compaction_summary = None
+    for m in reversed(messages):
+        if m["role"] == "compaction":
+            compaction_summary = (m.get("content") or "")[:500]
+            break
+
+    # Context utilization estimate. Use the text-only view so legacy rows
+    # with inlined base64 don't produce bogus 1000%+ utilization figures —
+    # those images are stripped at compile time anyway (except for the
+    # latest turn on vision models, which is counted separately upstream).
+    from core.context.tokens import get_estimator
+
+    estimator = get_estimator()
+
+    def _effective_tokens(m: dict) -> int:
+        cached = m.get("token_count")
+        if cached is not None:
+            return int(cached)
+        # Approximate: message overhead + text tokens. count_message would
+        # re-tokenize raw content (legacy base64), which is what we want
+        # to avoid here.
+        return 4 + estimator.count(_msg_text(m))
+
+    total_tokens = sum(_effective_tokens(m) for m in messages)
+    effective_budget = context_budget if context_budget is not None else settings.context_budget
+    utilization = total_tokens / max(effective_budget, 1)
+
+    # Count user turns
+    turn_count = sum(1 for m in messages if m["role"] == "user")
+
+    return SessionBrief(
+        session_id=session_id,
+        title=session.get("title", "New session"),
+        turn_count=turn_count,
+        session_type=session.get("session_type", "normal"),
+        compaction_summary=compaction_summary,
+        recent_messages=recent,
+        tools_used_recently=sorted(tools_used),
+        context_utilization=min(utilization, 1.0),
+        is_fresh=(turn_count == 0),
+    )
+
+
+# ---------------------------------------------------------------------------
+def _build_lessons_section(message: str) -> str:
+    """Format relevant lessons (entry_type='lesson') for scout injection.
+
+    Lessons are operational workarounds extracted by snooze_reflect from past
+    failed sessions. We surface up to 5 high-relevance matches; if none match
+    the current request, the section is omitted entirely (no empty header).
+    """
+    if not message or not message.strip():
+        return ""
+    try:
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if not store:
+            return ""
+        lessons = store.search_lessons(message, limit=5)
+    except Exception as e:
+        logger.debug("Scout lessons lookup failed: %s", e)
+        return ""
+
+    if not lessons:
+        return ""
+
+    import time as _time
+
+    now_ts = int(_time.time())
+    parts = [
+        "",
+        "RELEVANT PAST LESSONS (operational workarounds from prior sessions — "
+        "apply when the situation matches; codebase moves quickly so verify "
+        "the lesson still describes current behavior before acting on it):",
+    ]
+    for r in lessons:
+        snippet = (r.entry.content or "").replace("\n", " ").strip()
+        if len(snippet) > 400:
+            snippet = snippet[:400] + "…"
+        # Surface age so the agent can weigh lessons against recent code
+        # changes. A "manifest bug" lesson 2d old is suspect if the workflow
+        # engine was rewritten yesterday — let the agent see the freshness.
+        age_days = max(0, (now_ts - int(r.entry.epoch or now_ts)) // 86400)
+        age_str = f"{age_days}d ago" if age_days > 0 else "today"
+        parts.append(f"- [{r.entry.file_name}, {age_str}] {snippet}")
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Scout bypass logic
+# ---------------------------------------------------------------------------
+
+
+def should_bypass_scout(message: str, turn_count: int) -> bool:
+    """Determine if scout should be skipped for trivial interactions."""
+    if not settings.scout_enabled:
+        return True
+    # Short follow-ups in active sessions
+    if len(message.split()) <= 3 and turn_count > 0:
+        return True
+    # Slash commands
+    if message.startswith("/"):
+        return True
+    # Evaluation feedback
+    if message.startswith("## Evaluation Feedback"):
+        return True
+    # Context reset resumption
+    if message.startswith("[Context was reset"):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Scout cache
+# ---------------------------------------------------------------------------
+
+
+def _cache_key(message: str, brief: SessionBrief) -> str:
+    raw = f"{message}:{brief.turn_count}:{brief.phase}:{','.join(brief.tools_used_recently)}:{brief.context_utilization:.1f}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _get_cached(message: str, brief: SessionBrief) -> ScoutReport | None:
+    key = _cache_key(message, brief)
+    with _cache_lock:
+        entry = _cache.get(key)
+        if entry and time.time() < entry[1]:
+            report = entry[0]
+            report.from_cache = True
+            return report
+    return None
+
+
+MAX_CACHE_SIZE = 500
+
+
+def _put_cache(message: str, brief: SessionBrief, report: ScoutReport) -> None:
+    with _cache_lock:
+        now = time.time()
+        # Evict expired entries when cache is getting large
+        if len(_cache) > MAX_CACHE_SIZE // 2:
+            expired = [k for k, (_, ttl) in _cache.items() if now >= ttl]
+            for k in expired:
+                del _cache[k]
+        # Hard cap: evict oldest entries if still over limit
+        if len(_cache) >= MAX_CACHE_SIZE:
+            oldest = sorted(_cache.items(), key=lambda x: x[1][1])
+            for k, _ in oldest[: len(_cache) - MAX_CACHE_SIZE + 1]:
+                del _cache[k]
+        key = _cache_key(message, brief)
+        _cache[key] = (report, now + CACHE_TTL)
+
+
+# ---------------------------------------------------------------------------
+# Scout execution
+# ---------------------------------------------------------------------------
+
+
+async def run_scout(
+    session_id: str,
+    message: str,
+    session_brief: SessionBrief | None = None,
+    emit: Callable[[dict], None] | None = None,
+) -> ScoutReport:
+    """Run the scout agent. Returns ScoutReport (from cache, LLM, or fallback).
+
+    The scout:
+    1. Reads SOUL.md, RULES.md, AGENTS.md (if they exist)
+    2. Iteratively searches memory, tools, skills via tool calls
+    3. Submits a curated ScoutReport via submit_report tool
+    """
+    brief = session_brief or build_session_brief(session_id)
+
+    # Check bypass
+    if should_bypass_scout(message, brief.turn_count):
+        cached = _get_cached(message, brief)
+        if cached:
+            logger.debug("Scout bypassed, using cached report for session %s", session_id)
+            return cached
+        logger.debug("Scout bypassed, using fallback for session %s", session_id)
+        return _build_fallback_report(message, brief)
+
+    # Check cache
+    cached = _get_cached(message, brief)
+    if cached:
+        logger.debug("Scout cache hit for session %s", session_id)
+        return cached
+
+    # Run scout LLM with retry for transient errors (model loading, 500s, etc.)
+    max_attempts = 3
+    last_error: Exception | None = None
+    empty_approach_retried = False  # one-shot guard for structural-empty retry
+
+    def _is_empty_approach(rep: ScoutReport) -> bool:
+        """True when scout returned a structurally valid report with no
+        actionable guidance — the LLM gave up rather than the task needing none.
+        """
+        # Minor: this_time pure Q&A, scout may legitimately return brief approach.
+        # Only treat *completely empty* as a failure signal.
+        return not (getattr(rep, "approach_guidance", "") or "").strip()
+
+    # Use the session's own scheduling priority so concurrent worker scouts
+    # are not starved by lower-priority scouts from sibling workers.
+    sched_priority = PRIORITY_WORKER if brief.session_type == "worker" else PRIORITY_ORCHESTRATOR
+    try:
+        from datetime import datetime as _dt
+
+        sched_created_at = _dt.fromisoformat(
+            db.get_session(session_id).get("created_at", "").replace("Z", "+00:00")
+        ).timestamp()
+    except Exception:
+        sched_created_at = float("inf")
+
+    for attempt in range(1, max_attempts + 1):
+        start = time.monotonic()
+        try:
+            report = await asyncio.wait_for(
+                _run_scout_llm(
+                    message,
+                    brief,
+                    emit=emit,
+                    session_id=session_id,
+                    session_created_at=sched_created_at,
+                    session_priority=sched_priority,
+                ),
+                timeout=settings.scout_timeout,
+            )
+            report.scout_latency_ms = int((time.monotonic() - start) * 1000)
+            report = _validate_report(report)
+
+            # Empty-approach retry: the primary model returned a parseable but
+            # uselessly empty plan. Give it one more shot before falling through
+            # to the dedicated fallback model. Skipped on cached bypass turns
+            # (handled above) and when disabled by setting.
+            if (
+                not empty_approach_retried
+                and getattr(settings, "scout_retry_on_empty_approach", True)
+                and _is_empty_approach(report)
+                and attempt < max_attempts
+            ):
+                empty_approach_retried = True
+                logger.info(
+                    "Scout returned empty approach_guidance for session %s — " "retrying primary model (attempt %d)",
+                    session_id,
+                    attempt + 1,
+                )
+                await asyncio.sleep(1)
+                continue
+
+            _put_cache(message, brief, report)
+            if attempt > 1:
+                logger.info("Scout succeeded on attempt %d for session %s", attempt, session_id)
+            logger.info(
+                "Scout completed for session %s in %dms (tools: %s)",
+                session_id,
+                report.scout_latency_ms,
+                ", ".join(report.recommended_tools[:5]),
+            )
+            return report
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Scout timed out after %ds for session %s (attempt %d/%d)",
+                settings.scout_timeout,
+                session_id,
+                attempt,
+                max_attempts,
+            )
+            last_error = TimeoutError(f"Scout timed out after {settings.scout_timeout}s")
+            # Retry once on first timeout (cold-start / transient); bail after that
+            # so worst case is 2× scout_timeout, not 3×.
+            if attempt == 1:
+                await asyncio.sleep(3)
+                continue
+            break
+        except Exception as e:
+            last_error = e
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            _log_scout_error(e, session_id, attempt, max_attempts, elapsed_ms)
+            if attempt < max_attempts and _is_retryable(e):
+                # Short wait for 500s (Ollama parsing fluke), longer for connection issues
+                wait = 2 if isinstance(e, httpx.HTTPStatusError) else attempt * 5
+                logger.info(
+                    "Scout retrying in %ds for session %s (attempt %d/%d)", wait, session_id, attempt + 1, max_attempts
+                )
+                await asyncio.sleep(wait)
+                continue
+            break
+
+    # Fallback model — one last try on the unified settings.fallback_model
+    # (Settings → Models → Fallback Model) before returning the deterministic
+    # stub. Same knob as the main agent's rate-limit failover so operators
+    # configure it in one place.
+    fallback_model = (settings.fallback_model or "").strip()
+    primary_model = (settings.scout_model or "").strip()
+    if fallback_model and fallback_model != primary_model:
+        logger.info(
+            "Scout exhausted primary attempts for session %s — trying " "fallback_model=%s (last error: %s)",
+            session_id,
+            fallback_model,
+            last_error,
+        )
+        start = time.monotonic()
+        try:
+            report = await asyncio.wait_for(
+                _run_scout_llm(
+                    message,
+                    brief,
+                    emit=emit,
+                    model_override=fallback_model,
+                    session_id=session_id,
+                    session_created_at=sched_created_at,
+                    session_priority=sched_priority,
+                ),
+                timeout=settings.scout_timeout,
+            )
+            report.scout_latency_ms = int((time.monotonic() - start) * 1000)
+            report = _validate_report(report)
+            _put_cache(message, brief, report)
+            logger.info("Scout fallback model succeeded for session %s in %dms", session_id, report.scout_latency_ms)
+            return report
+        except Exception as e:
+            logger.warning("Scout fallback model also failed for session %s: %s", session_id, e)
+
+    logger.warning(
+        "Scout exhausted all attempts for session %s, using fallback (last error: %s)", session_id, last_error
+    )
+    return _build_fallback_report(message, brief)
+
+
+async def _run_scout_llm(
+    message: str,
+    brief: SessionBrief,
+    emit: Callable[[dict], None] | None = None,
+    model_override: str = "",
+    session_id: str = "",
+    session_created_at: float = float("inf"),
+    session_priority: int = PRIORITY_BACKGROUND,
+) -> ScoutReport:
+    """Execute the scout as a multi-turn tool-calling agent.
+
+    Pre-loads deterministic context (files, models), then enters a tool loop
+    where the scout LLM can iteratively search memory, tools, skills, and
+    sessions before submitting its final report via submit_report.
+    """
+    from core.llm.client import get_llm_client
+
+    def _step(step: str, detail: str = ""):
+        if emit:
+            emit({"type": "scout.step", "step": step, "detail": detail})
+
+    # --- Phase 1: Pre-load deterministic context (fast, no LLM) ---
+    # Legacy rows could pass a JSON-serialized multimodal list in `message`.
+    # Scout must see plain text only — vision payloads go directly to the
+    # main-model compile path, never here.
+    from core.context.compiler import _legacy_multimodal_to_text
+
+    scout_message = _legacy_multimodal_to_text(message) if isinstance(message, str) else str(message)
+
+    user_content_parts = [
+        f"USER MESSAGE: {scout_message}",
+        "",
+        f"SESSION CONTEXT:\n{brief.to_prompt_text()}",
+    ]
+
+    # Read instruction files
+    _step("reading", "Loading identity & rules")
+    for filename, label in [
+        ("data/agent/SOUL.md", "SOUL.md contents"),
+        ("data/agent/RULES.md", "RULES.md contents"),
+    ]:
+        path = Path(filename)
+        if path.exists():
+            content = path.read_text()[:4000]
+            user_content_parts.append(f"\n{label}:\n{content}")
+
+    # Check data/agent/ for AGENTS.md / INSTRUCTIONS.md
+    _step("reading", "Checking project instructions")
+    agent_dir = Path("data/agent")
+    for fname in ["AGENTS.md", "INSTRUCTIONS.md"]:
+        agent_path = agent_dir / fname
+        if agent_path.exists():
+            content = agent_path.read_text()[:4000]
+            user_content_parts.append(f"\nProject instructions ({fname}):\n{content}")
+            break
+
+    # Workflow-execute intent nudge. If the user clearly wants to run a named
+    # workflow, tell scout upfront so it pre-selects run_workflow instead of
+    # letting the main agent replay steps inline.
+    if _looks_like_workflow_execute(message):
+        user_content_parts.append(
+            "\n[WORKFLOW EXECUTION INTENT DETECTED]\n"
+            "The user's message reads as a request to run/execute a named workflow. "
+            "If discover_workflows returns a matching entry, your recommended_tools "
+            "MUST include run_workflow (plus discover_workflows, validate_workflow), "
+            "and your approach_guidance MUST tell the main agent to call "
+            "run_workflow(name, inputs) — NOT to replay the workflow's steps inline."
+        )
+
+    # Search memory (baseline — always included so scout has context even without tools)
+    _step("memory", "Searching memory")
+    try:
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if store:
+            results = store.search(message, limit=10)
+            if results:
+                _step("memory", f"Found {len(results)} relevant memories")
+                mem_lines = ["", "MEMORY SEARCH RESULTS (use search_memory tool for deeper/different queries):"]
+                # Per-item cap keeps the pre-load bundle from ballooning as the
+                # memory index grows across sessions. Configurable because small
+                # scout models (e.g. 35B Ollama) degrade under high input ctx.
+                _mem_cap = int(getattr(settings, "scout_preload_memory_char_limit", 300) or 300)
+                for r in results:
+                    mem_lines.append(
+                        f"[{r.entry.file_name} score={r.score:.1f} type={r.entry.entry_type}] "
+                        f"{r.entry.content[:_mem_cap]}"
+                    )
+                user_content_parts.append("\n".join(mem_lines))
+    except Exception as e:
+        logger.debug("Scout memory search failed: %s", e)
+
+    # Deep memory search (multi-query decomposition — baseline)
+    _step("memory", "Deep memory search")
+    try:
+        from core.scout.search import gather_deep_memory
+
+        deep_mem = gather_deep_memory(message)
+        if deep_mem:
+            _step("memory", "Deep search found additional results")
+            user_content_parts.append(f"\nDEEP MEMORY SEARCH:\n{deep_mem}")
+    except Exception as e:
+        logger.debug("Scout deep memory search failed: %s", e)
+
+    # Cross-session search (baseline)
+    _step("sessions", "Searching other sessions")
+    try:
+        from core.scout.search import gather_cross_session_data
+
+        cross = gather_cross_session_data(message, brief.session_id)
+        if cross:
+            _step("sessions", "Found relevant data in other sessions")
+            user_content_parts.append(f"\n{cross}")
+    except Exception as e:
+        logger.debug("Scout cross-session search failed: %s", e)
+
+    # Search tool registry (baseline)
+    _step("tools", "Discovering relevant tools")
+    try:
+        from core.tools.registry import get_registry
+
+        registry = get_registry()
+        discovered = registry.discover(message, limit=15)
+        if discovered:
+            _step("tools", f"Found {len(discovered)} candidate tools")
+            tool_lines = ["", "AVAILABLE TOOLS (from discovery search):"]
+            for t in discovered:
+                tool_lines.append(f"- {t.name} [{t.category}]: {t.description}")
+            user_content_parts.append("\n".join(tool_lines))
+    except Exception as e:
+        logger.debug("Scout tool discovery failed: %s", e)
+
+    # Search skill registry (baseline)
+    _step("skills", "Discovering relevant skills")
+    try:
+        from core.skills.registry import get_skill_registry
+
+        skill_reg = get_skill_registry()
+        discovered_skills = skill_reg.discover(message, limit=5)
+        if discovered_skills:
+            _step("skills", f"Found {len(discovered_skills)} candidate skills")
+            skill_lines = ["", "AVAILABLE SKILLS (domain expertise packages — recommend when task matches):"]
+            for s in discovered_skills:
+                tags_str = f" [{', '.join(s.tags[:3])}]" if s.tags else ""
+                extras = []
+                if s.has_scripts:
+                    extras.append("has scripts")
+                if s.has_references:
+                    extras.append("has references")
+                extra_str = f" ({', '.join(extras)})" if extras else ""
+                skill_lines.append(f"- {s.name}{tags_str}: {s.description}{extra_str}")
+            user_content_parts.append("\n".join(skill_lines))
+    except Exception as e:
+        logger.debug("Scout skill discovery failed: %s", e)
+
+    # Inject relevant past lessons (entry_type='lesson') — workarounds extracted
+    # by snooze_reflect from prior failed sessions, retrievable by hybrid search.
+    try:
+        lessons_section = _build_lessons_section(message)
+        if lessons_section:
+            _step("lessons", "Injecting relevant past lessons")
+            user_content_parts.append(lessons_section)
+    except Exception as e:
+        logger.debug("Scout lessons injection failed: %s", e)
+
+    # List available models
+    _step("models", "Listing available models")
+    global _known_model_ids
+    try:
+        llm_client = get_llm_client()
+        models = await asyncio.wait_for(llm_client.list_models(), timeout=8)
+        if models:
+            _known_model_ids = {m.id for m in models}
+            model_lines = ["", f"AVAILABLE MODELS (current: {settings.llm_model}):"]
+            for m in models:
+                caps = []
+                if m.supports_vision:
+                    caps.append("vision")
+                cap_str = f" [{', '.join(caps)}]" if caps else ""
+                model_lines.append(f"- {m.id} ({m.provider}, ctx={m.context_length:,}{cap_str})")
+            user_content_parts.append("\n".join(model_lines))
+    except Exception as e:
+        logger.debug("Scout model listing failed: %s", e)
+
+    user_content = "\n".join(user_content_parts)
+
+    # --- Phase 2: Multi-turn tool-calling loop ---
+    _step("thinking", "Scout analyzing context")
+    client = get_llm_client()
+    model = model_override or settings.scout_model or settings.background_model or settings.llm_model
+
+    if not client.has_capacity(model):
+        _step("waiting", "Waiting for LLM capacity")
+
+    messages = [
+        {"role": "system", "content": SCOUT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+    total_usage = TokenUsage()
+    report = None
+    # Scout self-validation state (Phase 2a).
+    # When scout submits a report that fails _self_check_report, we inject
+    # a revision request and let scout submit once more. Hard-capped at 1.
+    revisions_used = 0
+
+    for round_num in range(SCOUT_MAX_ROUNDS):
+        is_last_round = round_num == SCOUT_MAX_ROUNDS - 1
+        # On last round, remove tools to encourage text output
+        tools = _SCOUT_TOOLS if not is_last_round else None
+
+        # On penultimate round, inject a reminder to submit next round
+        if round_num == SCOUT_MAX_ROUNDS - 2 and report is None:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "[SYSTEM] You have 1 tool round remaining. You MUST call submit_report on your next response. Summarize your findings and submit now.",
+                }
+            )
+
+        response = await client.chat(
+            messages=messages,
+            model=model,
+            max_tokens=4096,
+            tools=tools,
+            session_id=session_id,
+            session_created_at=session_created_at,
+            session_priority=session_priority,
+        )
+
+        # Accumulate token usage
+        total_usage.prompt_tokens += response.usage.prompt_tokens
+        total_usage.completion_tokens += response.usage.completion_tokens
+        total_usage.total_tokens += response.usage.total_tokens
+
+        # No tool calls — LLM is done (or forced text on last round).
+        # Special case: if we JUST sent a revision request, the model
+        # sometimes responds with prose ("I'll fix the model ID...") instead
+        # of calling submit_report again. That is a recoverable model
+        # confusion — append a stricter format reminder and retry the round
+        # rather than restarting the entire scout from scratch (the previous
+        # behavior, which cost ~70-180s per occurrence on real workflow runs).
+        if not response.tool_calls:
+            just_sent_revision = (
+                revisions_used > 0
+                and messages
+                and messages[-1].get("role") == "tool"
+                and "[SCOUT SELF-CHECK — REVISION REQUESTED]" in (messages[-1].get("content") or "")
+            )
+            if just_sent_revision and response.content and not is_last_round:
+                # Record what the model said so we can show the loop is
+                # converging (or not), then ask once more in stricter form.
+                logger.info(
+                    "Scout returned prose after revision request; nudging "
+                    "with stricter format reminder. Prose excerpt: %r",
+                    response.content[:200],
+                )
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "[FORMAT ERROR] Your last response was prose. "
+                            "You must call the submit_report tool — explanations "
+                            "in plain text cannot be parsed. Apply your fix and "
+                            "call submit_report now."
+                        ),
+                    }
+                )
+                continue  # next loop iteration will re-prompt
+            if response.content:
+                # Try to parse as JSON report (graceful fallback)
+                report = _parse_scout_response(response.content)
+            break
+
+        # On last round, native tool-calling models (e.g. Qwen3) may still
+        # emit tool_calls even with tools=None. Only honor submit_report;
+        # for anything else, fall through to text parsing.
+        if is_last_round:
+            for tc in response.tool_calls:
+                if tc.name == "submit_report":
+                    try:
+                        args = json.loads(tc.arguments) if tc.arguments else {}
+                    except json.JSONDecodeError:
+                        args = {}
+                    _step("done", "Scout submitting report (last round)")
+                    report = _extract_report(args)
+                    break
+            if report is None and response.content:
+                logger.info("Scout emitted tool_calls on last round without submit_report, trying text parse")
+                report = _parse_scout_response(response.content)
+            break
+
+        # Process tool calls
+        # Build assistant message with tool_calls for conversation history
+        assistant_msg: dict = {"role": "assistant", "content": response.content or ""}
+        assistant_msg["tool_calls"] = [
+            {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
+            for tc in response.tool_calls
+        ]
+        messages.append(assistant_msg)
+
+        for tc in response.tool_calls:
+            try:
+                args = json.loads(tc.arguments) if tc.arguments else {}
+            except json.JSONDecodeError:
+                args = {}
+
+            if tc.name == "submit_report":
+                # Candidate report — run Phase 2a self-validation before accepting.
+                candidate = _extract_report(args)
+                issues = _self_check_report(candidate)
+
+                # No issues → accept and stop.
+                if not issues:
+                    _step("done", "Scout submitting report")
+                    candidate.viability = "verified"
+                    report = candidate
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": "Report submitted."})
+                    break
+
+                # Issues found. If we still have a revision slot AND at least one
+                # more round remaining, ask scout to revise. Otherwise accept the
+                # flawed report with viability=unverified.
+                rounds_remaining = SCOUT_MAX_ROUNDS - round_num - 1
+                if revisions_used < _MAX_REVISIONS and rounds_remaining >= 1:
+                    _step("revising", f"Scout self-check flagged {len(issues)} issue(s)")
+                    revisions_used += 1
+                    messages.append(
+                        {"role": "tool", "tool_call_id": tc.id, "content": _format_revision_request(issues)}
+                    )
+                    logger.info("Scout revision requested: %s", issues)
+                    # Don't break the outer loop — let the next round execute.
+                else:
+                    _step("done", "Scout submitting report (unverified)")
+                    candidate.viability = "unverified"
+                    candidate.viability_notes = issues
+                    report = candidate
+                    logger.warning(
+                        "Scout report accepted with unresolved issues after revision: %s",
+                        issues,
+                    )
+                    messages.append(
+                        {"role": "tool", "tool_call_id": tc.id, "content": "Report submitted (with notes)."}
+                    )
+                    break
+            else:
+                # Execute read-only tool
+                _step("tool", f"{tc.name}")
+                result = _exec_scout_tool(tc.name, args, brief)
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                logger.debug("Scout tool %s returned %d chars", tc.name, len(result))
+
+        if report is not None:
+            break
+
+    # If no report was produced, build from whatever we have
+    if report is None:
+        logger.warning("Scout did not submit report after %d rounds, using fallback parse", SCOUT_MAX_ROUNDS)
+        report = ScoutReport()
+        report.from_fallback = True
+
+    # Best-effort validation for reports that skipped the in-loop path
+    # (last-round native tool-call, text fallback, or fabricated empty report).
+    if report.viability == "pending":
+        issues = _self_check_report(report)
+        if issues:
+            report.viability = "unverified"
+            report.viability_notes = issues
+            logger.info("Scout post-loop report marked unverified: %s", issues)
+        else:
+            report.viability = "verified"
+
+    report.scout_model = model
+    report.scout_tokens = total_usage
+    return report
+
+
+def _parse_scout_response(text: str) -> ScoutReport:
+    """Parse JSON response from scout LLM.
+
+    Handles: raw JSON, markdown-fenced JSON, JSON embedded in thinking/reasoning text,
+    malformed JSON with trailing commas, and partial JSON.
+    """
+    if not text or not text.strip():
+        logger.warning("Scout returned empty response")
+        return ScoutReport()
+
+    text = text.strip()
+
+    # Strip markdown fences
+    if "```" in text:
+        # Extract content between first and last fence
+        parts = text.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:].strip()
+            if part.startswith("{"):
+                text = part
+                break
+
+    # Try direct parse
+    data = _try_parse_json(text)
+
+    # Try extracting JSON object from mixed content (thinking + JSON)
+    if data is None:
+        # Find the outermost { ... } block
+        brace_start = text.find("{")
+        if brace_start >= 0:
+            # Find matching closing brace
+            depth = 0
+            brace_end = -1
+            for i in range(brace_start, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        brace_end = i + 1
+                        break
+            if brace_end > brace_start:
+                data = _try_parse_json(text[brace_start:brace_end])
+
+    if data is None:
+        logger.warning("Scout response not valid JSON (possible truncation): %s", text[:300])
+        report = ScoutReport()
+        report.from_fallback = True
+        return report
+
+    return ScoutReport(
+        identity=str(data.get("identity", "")),
+        rules=str(data.get("rules", "")),
+        instructions=str(data.get("instructions", "")),
+        memory_context=str(data.get("memory_context", "")),
+        cross_session_context=str(data.get("cross_session_context", "")),
+        recommended_tools=data.get("recommended_tools", []) if isinstance(data.get("recommended_tools"), list) else [],
+        tool_rationale=str(data.get("tool_rationale", "")),
+        recommended_skills=(
+            data.get("recommended_skills", []) if isinstance(data.get("recommended_skills"), list) else []
+        ),
+        skill_rationale=str(data.get("skill_rationale", "")),
+        recommended_model=str(data.get("recommended_model", "")),
+        model_rationale=str(data.get("model_rationale", "")),
+        session_state=str(data.get("session_state", "")),
+        approach_guidance=str(data.get("approach_guidance", "")),
+    )
+
+
+def _try_parse_json(text: str) -> dict | None:
+    """Try parsing JSON with tolerance for common LLM errors."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Fix trailing commas (common LLM error)
+    cleaned = re.sub(r",\s*([\]}])", r"\1", text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Fix unquoted keys
+    cleaned2 = re.sub(r"(\w+)\s*:", r'"\1":', text)
+    try:
+        return json.loads(cleaned2)
+    except json.JSONDecodeError:
+        pass
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
+def _validate_report(report: ScoutReport) -> ScoutReport:
+    """Validate and sanitize scout report."""
+    from core.tools.registry import get_registry
+
+    registry = get_registry()
+
+    # Strip tool names that don't exist (hallucination guard)
+    valid_tools = [t for t in report.recommended_tools if registry.exists(t)]
+    invalid = set(report.recommended_tools) - set(valid_tools)
+    if invalid:
+        logger.warning("Scout hallucinated tools: %s", invalid)
+
+    # Ensure core minimum always present
+    tool_set = set(valid_tools) | CORE_MINIMUM
+    report.recommended_tools = sorted(tool_set)
+
+    # Validate recommended skills against skill registry
+    try:
+        from core.skills.registry import get_skill_registry
+
+        skill_reg = get_skill_registry()
+        valid_skills = [s for s in report.recommended_skills if skill_reg.exists(s)]
+        invalid_skills = set(report.recommended_skills) - set(valid_skills)
+        if invalid_skills:
+            logger.warning("Scout hallucinated skills: %s", invalid_skills)
+        report.recommended_skills = valid_skills
+
+        # Hybrid injection: auto-load L2 for top-1 skill that passed pre-flight validation
+        if valid_skills:
+            top_skill = valid_skills[0]
+            if not skill_reg.is_valid(top_skill):
+                logger.warning(
+                    "Skipping auto-injection of skill '%s' — failed pre-flight validation "
+                    "(missing/empty/broken scripts). Agent can still load it manually.",
+                    top_skill,
+                )
+            else:
+                report.injected_skill_name = top_skill
+                instructions = skill_reg.load_instructions(top_skill)
+                if instructions:
+                    report.injected_skill = instructions[:5000]  # Cap at ~5k tokens
+                    logger.info("Auto-injected skill '%s' (%d chars)", top_skill, len(report.injected_skill))
+                else:
+                    logger.warning(
+                        "Failed to load L2 instructions for skill '%s' — will recommend by name only", top_skill
+                    )
+                    report.injected_skill_name = ""  # Clear — can't inject what we can't load
+    except Exception as e:
+        logger.debug("Scout skill validation failed: %s", e)
+
+    # Validate recommended model against known models
+    if report.recommended_model:
+        if _known_model_ids and report.recommended_model not in _known_model_ids:
+            logger.warning("Scout recommended unknown model: %s", report.recommended_model)
+            report.recommended_model = ""
+            report.model_rationale = ""
+
+    # Truncate oversized fields
+    report.identity = report.identity[:1500]
+    report.rules = report.rules[:1500]
+    report.instructions = report.instructions[:1500]
+    report.memory_context = report.memory_context[:2500]
+    report.cross_session_context = report.cross_session_context[:2500]
+    report.session_state = report.session_state[:1000]
+    report.approach_guidance = report.approach_guidance[:2000]
+    report.model_rationale = report.model_rationale[:500]
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Fallback (deterministic, no LLM)
+# ---------------------------------------------------------------------------
+
+
+def _build_fallback_report(message: str, brief: SessionBrief) -> ScoutReport:
+    """Deterministic fallback when scout LLM fails or is bypassed.
+
+    Skills are intentionally excluded — skill discovery requires NLP matching
+    which is too expensive for a synchronous fallback. The agent can still
+    call discover_skills() / load_skill() mid-loop since they're in CORE_MINIMUM.
+    """
+    identity = ""
+    rules = ""
+    instructions = ""
+
+    # Load instruction files directly
+    soul_path = Path("data/agent/SOUL.md")
+    if soul_path.exists():
+        identity = soul_path.read_text()[:1200]
+
+    rules_path = Path("data/agent/RULES.md")
+    if rules_path.exists():
+        rules = rules_path.read_text()[:1200]
+
+    agent_dir = Path("data/agent")
+    for fname in ["AGENTS.md", "INSTRUCTIONS.md"]:
+        ipath = agent_dir / fname
+        if ipath.exists():
+            instructions = ipath.read_text()[:1200]
+            break
+
+    # Basic memory recall
+    memory_context = ""
+    try:
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if store:
+            memory_context = store.recall(message, top=3) or ""
+    except Exception:
+        pass
+
+    # Default tools: core + recently used
+    from core.tools.registry import get_registry
+
+    registry = get_registry()
+    tool_names = set(CORE_MINIMUM)
+    tool_names.update(brief.tools_used_recently)
+    # Add common tools
+    for name in ["remember", "recall", "glob", "grep", "ask_user", "call_model"]:
+        if registry.exists(name):
+            tool_names.add(name)
+
+    # Workflow-execution bias: if the user clearly wants to run a workflow,
+    # ensure run_workflow is on the tool list and nudge the approach to use it.
+    is_workflow_execute = _looks_like_workflow_execute(message)
+    if is_workflow_execute:
+        for name in ("discover_workflows", "run_workflow", "validate_workflow"):
+            if registry.exists(name):
+                tool_names.add(name)
+
+    base_guidance = (
+        "Scout unavailable — proceed conservatively. Use discover_tools / "
+        "discover_skills before assuming tool surface. Verify file paths "
+        "with glob/grep before file_write. Aim to write any deliverable early."
+    )
+    approach = base_guidance
+    if is_workflow_execute:
+        approach = (
+            "WORKFLOW EXECUTION DETECTED. Call discover_workflows() to confirm "
+            "the named workflow exists, then run_workflow(name, inputs). DO NOT "
+            "replay the workflow's steps inline — that defeats the context "
+            "isolation the workflow runner provides.\n\n" + base_guidance
+        )
+
+    return ScoutReport(
+        identity=identity,
+        rules=rules,
+        instructions=instructions,
+        memory_context=memory_context,
+        recommended_tools=sorted(tool_names),
+        tool_rationale="Fallback: core tools + recently used (scout unavailable)"
+        + (" + workflow tools (execute intent detected)" if is_workflow_execute else ""),
+        session_state=brief.to_prompt_text()[:500] if not brief.is_fresh else "",
+        approach_guidance=approach,
+        from_fallback=True,
+    )

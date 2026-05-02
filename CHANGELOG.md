@@ -1,0 +1,317 @@
+# Changelog
+
+## v2.1.0 — 2026-05-02
+
+- docs: add comprehensive end-user documentation; cleanup .gitignore and dead stubs
+- chore: add black/ruff/flake8 linting pipeline with check.sh
+- feat: rename --fresh to --rebuild with confirmation; set tool safety defaults
+- refactor: merge evaluate_one into evaluate; remove validate_workflow_content
+- refactor: remove VCS extension — all 6 git tools replaced by bash
+- feat: bring Tools tab in line with other Explorer tabs
+- feat: show and edit tool safety level in Explorer → Tools UI
+- fix: revert bash to safety_level=caution
+- fix: ensure agent always sees tool output — close 3 silent-failure paths
+- fix: second-pass safety level corrections (3 tools)
+- refactor: tool audit — safety levels, merged pairs, orphan registration
+- feat: add TEAM skill — 16 specialist agents for technical enablement
+- chore: post-change cleanup from signals refactor
+- refactor: replace scout signals with simple tool/skill performance tracking
+- fix: recover orphaned user messages and harden tool call parsing
+- perf: set PRAGMA synchronous=NORMAL on all SQLite connections
+- fix: track injected message element before the await, remove on failure
+- fix: persist model_divider and fix from/to fields on override restore
+- fix: switch_model — validate model exists before accepting override
+- fix: session 444e33b3968e — allow self-loopback through SSRF in network mode
+- fix: session 220a71bb post-mortem — 6 reliability fixes
+- docs: sync SPEC_v2 with 2026-04-27–30 reliability & observability wave
+- feat: persist model switches in chat as pill dividers + reflect-model chip
+- feat: surface reflect model in reflect.done event and card
+- fix: switch_model now actually moves the LLM mid-turn
+- feat: post-mortem fixes from session 7b5c19c78dde
+- feat: detect max_tokens truncation and continue in-turn instead of retry
+- feat: harden agent system prompt with three new behavioral rules
+- fix: force dark background on workspace sort select and its options
+- feat: expose bulk session cleanup in Settings; fix select dark-mode
+- feat: add Name / Date / Size sort to the workspace file list
+- fix: stop sidebar group toggle from un-collapsing on every SSE redraw
+- fix: stop reflect lessons from leaking into the queued-popped turn
+- fix: persist reflect-skipped marker so it survives page reload
+- fix: tighten auto-eval prompt + surface reflect-skipped to the UI
+- fix: make auto-eval discoverable and self-closing
+- feat: render eval results as a card instead of raw JSON
+- fix: eval tools now reach the running event loop
+- fix: parent no longer auto-resumes when worker pauses on ask_user
+- fix: cap consecutive stuck-loop nudges so an unresponsive LLM stops the turn
+- fix: idempotency_key dedup actually persists the key now
+- fix: cascade cancel no longer respawns workers via auto-resume race
+- fix: stop turn-scoping filter from dropping /api/chat/inject messages
+- chore: add test-mini-flow workflow as a harness regression fixture
+- fix: reaper now unsticks SCOUTING sessions when the agent task is gone
+- fix: record dropped queued messages on session cancel
+- fix: workers-complete notification used to truncate ids the agent then copied verbatim
+- fix: render assistants in logical-turn order via parent_user_msg_id metadata
+- fix: scope agent + reflect view to the current turn's user message
+- fix: collapse rapid-fire user messages into one queued turn
+- fix: surface scout's planned approach to reflect to stop skill false-negatives
+- feat: surface skill provenance + cancellation marker in session transcript
+- fix: align scout system prompt round counts with SCOUT_MAX_ROUNDS
+- feat: notify user when a session's LLM time budget is exhausted
+- test: AWAITING_USER answer also resets LLM time budget
+- fix: reset LLM time budget on each user prompt (no more locked sessions)
+- feat: per-step model override in WORKFLOW.md + ai-tech-daily-brief refinements
+- fix: workflow stale_threshold=300s + reflect coerces invalid verdict to retry
+- chore: parallel pytest by default (-n auto via pytest-xdist)
+- feat: per-call timeout override for bash tool + workflow guidance
+- test+fix: workflow harness handles AWAITING_USER, cron rerun, and LLM outage
+- fix: harness recovers when pass-verdict worker writes deliverable to a different path
+- fix: correct has_started check in await_workers (Task != None ≠ turn started)
+- fix: drain queued worker_ids appends in await_workers + extend asyncio.timeout fix
+- fix: harness remediation from 2026-04-27 ai-tech-daily-brief audit
+- fix: stop reflect-retry leak from suspended turn into synthesis turn
+- chore: add _finalize_step tests + gitignore TLS keys, .AI tooling/, *.bak
+- feat: handle worker.failed event in frontend + bundle system-message markdown
+- feat: persist v2 state and watched_worker_ids for restart recovery
+- fix: close AWAITING_WORKERS deadlock paths in worker orchestration
+- fix: cron orchestrator sessions dying mid-flight from sticky LLM session timeout
+- fix: ai-tech-brief workflow hallucination + reflect/finalize fidelity
+- fix: harden workflow orchestration after session 7b97cf7 post-mortem
+- fix: scout LLM priority starvation and cancelled-worker manifest fidelity
+- fix: schedule_workflow failed to persist job to cron_jobs.json
+- fix: add refresh button to Jobs panel and fix new-job visibility
+- fix: clarify cron times are UTC in Jobs UI
+- feat: expose llm_session_timeout in Settings UI
+- feat: session-aware LLM scheduling with FIFO, priority, and timeout
+- fix: prevent AWAITING_WORKERS deadlock when early workers complete before suspend
+- feat: harness improvements from session-42550cc spiral post-mortem
+- chore: switch DuckDuckGo search to renamed ddgs package
+- feat: extend self-improvement loop to non-workflow sessions
+- fix: rescan skills dir on GET /api/skills
+- fix: wrap file panel tabs on narrow screens
+- fix: harden workflows feature — state machine, context isolation, self-healing
+- chore: add linkedin-post-formatter skill, ignore whisper summaries
+- chore: add initial workflow definitions
+- fix: align workflow editor with workspace/skill editor pattern
+- fix: add workflow tools hint to BASE_SYSTEM_PROMPT
+- fix: add create_workflow tool and fix agent workflow creation failures
+- feat: workflow visualization, validation, and agent self-healing
+- feat: skill workflows — reusable multi-step skill pipelines
+- feat: move Scout Signals into Explorer panel as dedicated tab
+- feat: retry LLM stream errors with backoff and cross-infra fallback
+- fix: skip post-hooks when session is AWAITING_USER to prevent spurious reflect retry
+- feat: tool activity icons and model switch indicator in status bar
+- chore: remove redundant status text and model pulse covered by state badge
+- fix: always live-query Ollama for model dropdown so new models appear
+- fix: persist user message immediately and scope UI state per session
+- feat: show tool call tally in state timeline graph tab
+- fix: always show expand toggle when tool output overflows 150px clip
+- fix: replace opacity pulse with brightness to prevent badge bleed-through on mobile
+- fix: skip reflect when session is AWAITING_USER
+- fix: prevent reflect retries from re-doing completed work
+- feat: inject server URL into agent system prompt
+- chore: add MCP tool permissions + remove youtube-video-gallery skill
+- feat: youtube-whisper — add timeline, diarization, and speaker labels
+- refactor: clean and consolidate skills — 5 skills → 4
+- refactor: status bar — consolidate CSS, add divider, abbreviate scout info
+- feat: async multi-agent communication — AWAITING_WORKERS state + 4 gaps
+- fix: four state-machine v2 correctness issues found in post-merge review
+- feat: state-timeline modal — Mermaid graph + tool-call interleaving
+- feat: state-machine v2 (Stage 1) — wire 9-state machine alongside legacy
+- fix: harness remediation from session a79b9ebdc7ba deep dive
+- fix: treat touch-primary devices as mobile so iPad gets the drawer
+- fix: harness remediation from session b493 post-mortem
+- feat: crawl4ai browse-fallback skill + skill-index hardening
+- fix: worker-reliability remediation + 24h audit follow-ups
+- feat: session id badge in sidebar — hover to view, click to copy
+- fix: worker reliability — round-budget warnings, reflect retry, scout recovery
+- fix: vision self-awareness + stuck→ask_user + tool cohort expansion
+- fix: scout signals modal mobile layout + type filter active state
+- fix: honest ctx indicator + surface compaction state to UI
+- style: align signals-btn with settings-btn styling + force text flag glyph
+- fix: stop inlining base64 attachments in the DB; expand at compile-time
+- fix: bound memory and CPU on file_read / file_edit for large files
+- fix: harden file tools against silent edits, binary corruption, and wrapper bypass
+- feat: graceful frontend offline mode with reconnect pinger
+- fix: stop SSE consumer task leaks at shutdown and on disconnect
+- docs: spec alignment pass for 24h feedback-loop baseline
+- feat: post-mortem TTL cleanup with configurable retention
+- feat: snooze gates on idle state and runs every 15 min (was 1 hour)
+- fix: deduplicate retry post-mortems in synthesis (one signal update per session)
+- feat: search_post_mortems scout tool for targeted failure lookup
+- feat: scout self-check gets two revision attempts instead of one
+- fix: scout session brief uses per-session context budget
+- refactor: remove workers from execution_mode enum (unfulfilled, deferred)
+- docs: clarify synthesis attribution for cache vs fallback scout
+- Phase 0-4 baseline: scout signals, synthesis, post-mortems, metrics
+- Add scout retry with detailed error logging for transient Ollama failures
+- Fix scout fallback: handle native tool-calling models on last round
+- Fix scout: restore pre-gathered baseline context for hybrid approach
+- Convert scout from single-shot to multi-turn tool-calling agent
+- Audit and fix agent prompt ↔ source code alignment
+- Add multimodal image support for user attachments
+- Fix false positive in curl pipe security check
+- Suppress expected CancelledError tracebacks during graceful shutdown
+- Add pytest suite: 782 tests, 68% code coverage (up from 21%)
+- Fix 9 agent reliability issues with full test coverage
+- Fix inter-session queueing: raise LLM semaphore timeout from 60s to 1800s
+- Fix notification bell panel clearing user input on SSE updates
+- Fix clean shutdown by replacing BaseHTTPMiddleware with pure ASGI
+- Fix push notifications for reflect escalations and job failures
+- Fix VAPID private key format for pywebpush
+- Suppress /api/notifications polling logs
+- Fix Web Push for network mode: auth + SW scope
+- Add Web Push (VAPID) background notification support
+- Style bell icon to match status bar theme + add mkcert setup docs
+- Add standard mobile-web-app-capable meta tag alongside Apple-specific one
+- Add notification bell with unified panel for questions + notifications
+- Add notify_user tool and browser push notification support
+- Add PWA support, revoke-access button, SSE task cancellation fix, localStorage auth
+- Fix DB integrity, memory routing, reroute clusters, suppress polling logs
+- Add ask_user chat-flow display and multi-client modal sync
+- Fix DB integrity gaps + update SPEC_v2.md for memory routing changes
+- Balance reroute file creation: allow clusters, block single-entry new files
+- Fix _REROUTE_PROMPT: restrict moves to existing files only
+- Add snooze Activity 3c: re-route misplaced memory entries
+- Fix memory distillation routing: rich file catalog + explicit routing rules
+- Fix H4/H5/H7/H8/H9/M1/M5/M11/M12: concurrency and safety hardening
+- Mobile UI polish: fixed viewport, compact input, modal grab handles
+- Fix H2/M2/M3/M13/M14: security guards, symlink fix, swipe UX, job flicker
+- Mark M6/M7/M8/M9/M10/H6 as fixed in REVIEW_ISSUES.md
+- Fix M6/M7/M8/M9/M10/H6: thread safety, cancel race, state machine
+- Update SPEC_v2.md: document 10 commits since last amendment
+- Fix auth cookie reload bug, epoch collision loop, and dedup threshold
+- Fix token-in-URL security: use cookies for SSE auth, gate QR on --qr flag
+- Add workspace/ to gitignore
+- Enhance memory system: consolidation, ingestion, improved distillation and snooze
+- Fix mobile breakpoint mismatch and unblock browse_web tool
+- Add auth middleware, remote client onboarding, and critical bug fixes
+- Add LogAct-inspired reliability features: diagnostic reflect, tool safety levels, execution metadata, worker cross-pollination
+- Replace recursive workspace scan with directory-level navigation and search
+- Milestone: Mobile UI, scout grep awareness, settings Network tab, youtube skill
+- Add network access with HTTPS support and graceful server restart
+- Update SPEC_v2.md: align with milestone commit (15 features documented)
+- Milestone: App branding, Jobs UI overhaul, and quality-of-life improvements
+- Move source image and video assets to assets/ folder
+- Add app icon with animated GIF, favicon, and touch icons
+- Add per-provider concurrency, Ollama model list, and Settings reorganization
+- Overhaul tool call display with three-tier progressive disclosure
+- refactor gallery-7HKVvcNOQb0: apply AI tooling Sonnet improvements
+- Fix live SSE message ordering so assistant text and tool calls interleave correctly
+- Add memory provenance, usage tracking, staleness pruning, and skill cooccurrence
+- Fix stream GeneratorExit crashes, unstick dead PROCESSING sessions, and update youtube skill
+- Restrict ticker scroll to live activity, not idle previews
+- Fix stale activity ticker persisting for cron sessions after completion
+- Make truncation visible and actionable for LLMs
+- Add Monaco editor, file dates, and save button state management to Explorer
+- Fix workers silently dying on LLM errors and misrouted model names
+- Update SPEC_v2.md: align with 34 commits from past 72 hours
+- Fix ReferenceError: pathChildren is not defined in file viewer
+- Eliminate artifact abstraction, unify Explorer into Workspace
+- Harden APIs, fix stream persistence, add glob tool, rewrite gallery skill
+- Unify workspace/artifacts, protect skills, fix session deletion and shutdown
+- Guard against empty base URLs clobbering defaults
+- Fix settings: restore URL fields and refresh models on whitelist change
+- Enforce workspace venv for all Python package installs (never system pip)
+- Harden security and stability across 4 waves (27 fixes)
+- Add mid-turn message injection: send messages while agent is processing
+- Fix Explorer crash on large/binary files: add media preview, size guards
+- Fix auto-title: route Ollama chat through native API with think=False
+- Fix session cancellation: cascade to workers, kill processes, skip post-hooks
+- Fix thinking-process title display and restore ticker scrolling
+- Rename Chat to Session, add live activity ticker, fix thinking-process titles
+- Rename Files panel to Explorer, add Skills tab with full CRUD management
+- Fix settings tooltip clipping by using fixed positioning above modal overlay
+- Add settings section tooltips and wire auto-evaluation into post-task hooks
+- Fix snooze distillation crash when memory file parent directory doesn't exist
+- Add typed failover errors, compaction-retry, deterministic tool ordering, session lane queuing
+- Add disk-backed truncation, shlex bash security, structured tool metadata, atomic writes
+- Fix send/stop button state bugs, modernize input area, add /cancel and /retry commands
+- Polish UI: sidebar toggle, scrollbar placement, wider content, modal improvements, responsive fonts
+- Add skill resource management: delete tools, overwrite feedback, executable fix, file_write access
+- Fix toolmaker callable check, scout truncation, stuck detection drift, skill path messaging
+- Add Skills system — filesystem-based capability packages with progressive disclosure
+- Fix worker diagnostics, LLM slot starvation, memory bugs
+- Fix reflect reading tool names from DB-stored tool_calls
+- Fix tool name mapping for both tool_calls JSON formats
+- Preserve browse_web enriched card on page refresh
+- Pulse sidebar dots for active sessions (scouting/processing)
+- Fix Playwright greenlet thread-affinity crash
+- Update SPEC_v2.md: SSE drift prevention, reflect retry fix, model dedup
+- Add SSE drift prevention: gap detection, reconciliation, health monitor
+- Fix reflect retry state transition crash and model warning spam
+- Fix asyncio task leaks and streaming state recovery after refresh
+- Update SPEC_v2.md: single-stream SSE, stop button, snooze user insights
+- Refactor to single-stream SSE: eliminate dual-stream race condition
+- Add user insight extraction to Snooze idle-time agent
+- Add stop button, fix stale question cleanup race
+- Add ask_user notification system, reflect UI card, browse_web discovery
+- --fresh now wipes memory files; filter polling endpoints from access logs
+- Fix asyncio task leak, add tool arg visibility, add env settings tab
+- Update SPEC_v2.md: Reflect hardening, DB hygiene, maintenance schedule
+- Add DB hygiene: prune orphaned rows, WAL auto-checkpoint
+- Skip duplicate user message save on Reflect retries
+- Fix Reflect retry: use bounded while loop, verify each attempt
+- Fix Reflect lifecycle: eliminate double hooks, off-by-one, add context
+- Document Reflect in SPEC_v2.md: section 14.6, config, amendment
+- Add Reflect SSE events and frontend handling
+- Integrate Reflect into session lifecycle with retry support
+- Implement Reflect: post-execution verification agent
+- Add Reflect configuration: settings, session state, and UI section
+- Improve scout intent matching: respect user's explicit tool preferences
+- Always register browse_web, gate on browser_enabled at call time
+- Add browser status bar indicator and enriched browse_web tool card
+- Emit live browse.start/browse.done events from browse_web tool
+- Add web access guidance to RULES.md and tool co-occurrence links
+- Harden browse_web: SSRF protection, context isolation, resource limits
+- Update SPEC_v2.md: audit fixes, browse_web tool, state machine cleanup
+- Add Web/Browser section to settings modal
+- Add Playwright browser cleanup to app lifespan shutdown
+- Implement browse_web tool with Playwright + trafilatura
+- Add trafilatura to optional requirements for browse_web content extraction
+- Add browser settings: browser_enabled, browser_headless, browser_timeout
+- Fix search_web type coercion bug for num_results parameter
+- Show 'offline' in status bar when backend is unreachable
+- Fix question modal auto-reopening after dismissal
+- Fix shutdown event initialization race with threading lock
+- Log cron protection list read failures instead of silently swallowing
+- Lower compaction compression ratio gate from 50% to 35%
+- Move compaction metadata to dedicated column, optimize session listing
+- Remove dead RESETTING state from session state machine
+- Protect emit_event sequence counter with threading lock
+- Add thread-safe locking to scout cache
+- Fix Phase C trimming: preserve _pinned messages during last-resort drops
+- Fix worker spawn: remove deprecated asyncio.get_event_loop() fallback
+- Add scheduler shutdown to app lifespan cleanup
+- Fix scheduler init race condition with double-checked locking
+- Fix markdown XSS: sanitize iframe, object, embed, form, style elements
+- Fix FTS5 silent deletion failures: log errors instead of swallowing
+- Fix done_sent flag: eliminate duplicate stream.done events
+- WIP: snapshot before audit fixes
+- Replace session badges with colored type dots and add legend footer
+- Add sidebar session organization: time grouping, badges, tooltips, worker nesting
+- Add jobs management system, global event bus, and scheduling enhancements
+- Fix cross-session search: include user messages, add multi-query decomposition and context expansion
+- Add scout cross-session FTS5 search and deep memory decomposition
+- Auto-restore default model after agent-initiated switches
+- Fix model switch registry gap and add cross-session artifact discovery
+- Add model registry, fix OpenRouter streaming tool calls, normalize tool call formats
+- Add tabbed settings modal with OpenRouter model management
+- Redesign scout window: collapsed by default, show full report
+- Add temporal context, tool call grouping, artifact viewer, code copy buttons, UI tweaks
+- Add Snooze: idle-time memory consolidation and self-optimization
+- Add tool output toggle, ephemeral scout visibility, and semantic dedup
+- Fix event loop threading for tool extensions and harden scout fallback
+- Add model-aware workers and scout-driven model selection
+- Second-pass hardening: 9 fixes from verification audit
+- Harden codebase: fix 15 critical/high issues from audit
+- Fix tool chaining and final response after tool calls
+- Add question notification and answer modal
+- Fix bash fork error, ask_user aliases, and argument resilience
+- Preserve settings.json on --fresh start
+- Add --fresh flag and clean shutdown handling
+- Fix 500 error on stale session SSE connection
+- Fix Ollama native API tool message format
+- Add OpenRouter model filtering and improve web search
+- Add settings modal to frontend
+- Fix duplicate token streaming and Qwen3 thinking mode
+- Implement CAI v2 core system (Phases 1-10)
+- Add project specification, docs, and configuration

@@ -1,0 +1,365 @@
+"""Pernix — Health and settings endpoints."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+from config import Settings, settings
+
+router = APIRouter(tags=["health"])
+
+
+@router.get("/api/health")
+async def health():
+    from maintenance import get_maintenance
+    from sessions.manager import get_manager
+
+    manager = get_manager()
+    maint = get_maintenance()
+
+    return {
+        "status": "healthy",
+        "model": settings.llm_model or "(not set)",
+        "version": "2.1.0",
+        "sessions_active": manager.active_count(),
+        "maintenance": maint.get_stats(),
+    }
+
+
+@router.get("/api/health/detailed")
+async def health_detailed(request: Request):
+    # Restrict detailed diagnostics to localhost to prevent info disclosure
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(403, detail="Detailed health info restricted to localhost")
+
+    from core.llm.client import get_llm_client
+    from core.tools.registry import get_registry
+    from db.models import get_db_stats
+    from maintenance import get_maintenance
+    from sessions.manager import get_manager
+
+    manager = get_manager()
+    maint = get_maintenance()
+    db_stats = get_db_stats()
+    registry = get_registry()
+
+    # Provider health (redact error details)
+    provider_health = {}
+    try:
+        client = get_llm_client()
+        health_results = await client.check_health()
+        for name, status in health_results.items():
+            provider_health[name] = {
+                "healthy": status.healthy,
+                "latency_ms": status.latency_ms,
+                "has_error": bool(status.error),
+                "models_available": status.models_available,
+            }
+    except Exception:
+        provider_health["has_error"] = True
+
+    from core.snooze import get_snooze
+
+    snooze = get_snooze()
+
+    return {
+        "status": "healthy",
+        "model": settings.llm_model or "(not set)",
+        "version": "2.1.0",
+        "providers": provider_health,
+        "sessions": {
+            "active": manager.active_count(),
+        },
+        "database": db_stats,
+        "tools": {
+            "registered": len(registry.all_tools()),
+        },
+        "maintenance": maint.get_stats(),
+        "snooze": snooze.get_stats(),
+    }
+
+
+_REDACTED_FIELDS = {
+    "notify_webhook_url",
+    "db_path",
+    "memory_dir",
+    "workspace_dir",
+    "skills_dir",
+    "ssl_cert_path",
+    "ssl_key_path",
+    "auth_token",
+}
+
+_LOCKED_FIELDS = {
+    "shell_security_mode",
+    "shell_allowlist",
+    "shell_env_mode",
+    "shell_env_denylist",
+    "shell_env_allowlist",
+    "auto_approve_dangerous",
+    "auth_token",
+}
+
+
+@router.get("/api/settings")
+async def get_settings():
+    import os
+    from dataclasses import asdict
+
+    data = {k: v for k, v in asdict(settings).items() if k not in _REDACTED_FIELDS}
+    # Indicate whether API keys are set, but never send the actual values
+    data["openrouter_api_key_set"] = bool(os.environ.get("OPENROUTER_API_KEY"))
+    data["tavily_api_key_set"] = bool(os.environ.get("TAVILY_API_KEY"))
+    data["ssl_cert_path_set"] = bool(settings.ssl_cert_path)
+    data["ssl_key_path_set"] = bool(settings.ssl_key_path)
+    data["auth_token_set"] = bool(settings.auth_token)
+    return data
+
+
+_SETTING_BOUNDS = {
+    "shell_timeout": (1, 600),
+    "tool_timeout": (1, 3600),
+    "context_budget": (1000, 2_000_000),
+    "max_tokens": (100, 200_000),
+    "max_tool_rounds": (1, 100),
+    "max_continuations": (1, 50),
+    "llm_max_concurrent": (1, 20),
+    "openrouter_max_concurrent": (1, 20),
+    "max_concurrent_workers": (1, 20),
+    "max_fetch_size": (1024, 10_000_000),
+    "browser_timeout": (5, 120),
+    "scout_timeout": (5, 300),
+    "compaction_threshold": (0.1, 0.95),
+    "context_critical_threshold": (0.5, 0.99),
+    "plan_review_timeout": (10, 600),
+    "max_pending_messages": (1, 100),
+    "notify_webhook_timeout": (1, 60),
+    "port": (1024, 65535),
+    "post_mortem_retention_days": (7, 3650),
+}
+
+
+_RESTART_FIELDS = {"network_enabled", "ssl_mode", "ssl_cert_path", "ssl_key_path", "cors_origins"}
+
+
+@router.post("/api/settings")
+async def update_settings(body: dict):
+    from dataclasses import fields
+
+    from config import _NO_PERSIST
+
+    locked = set(_LOCKED_FIELDS)
+    if settings.network_enabled:
+        locked |= {"llm_base_url", "openrouter_base_url"}
+    valid_fields = {f.name for f in fields(settings)} - _NO_PERSIST - locked
+    updated = []
+    for key, value in body.items():
+        if key not in valid_fields:
+            continue
+        # Validate ssl_mode enum
+        if key == "ssl_mode" and value not in ("self_signed", "custom"):
+            continue
+        current = getattr(settings, key)
+        try:
+            # Reject empty strings for URL fields that have non-empty defaults
+            if isinstance(current, str) and current and value == "" and key.endswith("_url"):
+                continue
+            if isinstance(current, bool):
+                if isinstance(value, bool):
+                    setattr(settings, key, value)
+                else:
+                    setattr(settings, key, str(value).lower() in ("true", "1", "yes"))
+            elif isinstance(current, list):
+                if isinstance(value, list):
+                    setattr(settings, key, value)
+            else:
+                setattr(settings, key, type(current)(value))
+            # Bounds check for numeric settings
+            if key in _SETTING_BOUNDS:
+                lo, hi = _SETTING_BOUNDS[key]
+                val = getattr(settings, key)
+                if val < lo or val > hi:
+                    setattr(settings, key, current)  # revert
+                    continue
+            updated.append(key)
+        except (ValueError, TypeError):
+            pass
+    settings.save()
+
+    # If openrouter_models changed, refresh the model registry so
+    # GET /api/models returns the updated list immediately.
+    if "openrouter_models" in updated:
+        try:
+            from core.llm.client import get_llm_client
+
+            client = get_llm_client()
+            await client.refresh_registry()
+        except Exception:
+            pass  # Non-critical — next startup will pick it up
+
+    restart_required = bool(_RESTART_FIELDS & set(updated))
+
+    # Validate SSL config when network is being enabled
+    if restart_required and settings.network_enabled:
+        from core.certs import validate_ssl_config
+
+        errors = validate_ssl_config(settings.ssl_mode, settings.ssl_cert_path, settings.ssl_key_path)
+        if errors:
+            return {"updated": updated, "restart_required": True, "ssl_errors": errors}
+
+    return {"updated": updated, "restart_required": restart_required}
+
+
+@router.post("/api/settings/apikey")
+async def set_api_key(body: dict):
+    """Set or clear an API key. Persists to both os.environ and .env so the
+    key survives a restart. Never returned to the client.
+    """
+    import os
+
+    from config import write_env_var
+
+    key_name = body.get("key", "")
+    value = body.get("value", "")
+    allowed = {"OPENROUTER_API_KEY", "TAVILY_API_KEY"}
+    if key_name not in allowed:
+        return {"error": f"Key {key_name} not allowed"}
+    if value:
+        os.environ[key_name] = value
+    elif key_name in os.environ:
+        del os.environ[key_name]
+    # Round-trip .env on disk so the key isn't lost on restart. Failures are
+    # surfaced — the caller should know if persistence didn't take.
+    try:
+        write_env_var(key_name, value or None)
+    except OSError as e:
+        return {"updated": key_name, "is_set": bool(value), "persisted": False, "error": f"Failed to write .env: {e}"}
+    return {"updated": key_name, "is_set": bool(value), "persisted": True}
+
+
+@router.get("/api/settings/auth-token")
+async def get_auth_token(request: Request):
+    """Return the auth token. Localhost only."""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(403, detail="Auth token access restricted to localhost")
+    return {"token": settings.auth_token or "", "network_enabled": settings.network_enabled}
+
+
+@router.post("/api/settings/auth-token/regenerate")
+async def regenerate_auth_token(request: Request):
+    """Regenerate the auth token. Localhost only."""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(403, detail="Auth token access restricted to localhost")
+    import secrets
+
+    settings.auth_token = secrets.token_urlsafe(32)
+    settings.save()
+    return {
+        "token": settings.auth_token,
+        "message": "Token regenerated. Existing remote sessions will need the new token.",
+    }
+
+
+@router.get("/api/settings/access-qr")
+async def access_qr(request: Request):
+    """Return an SVG QR code for remote access. Requires auth (via middleware)."""
+    if not settings.network_enabled or not settings.auth_token:
+        raise HTTPException(404, detail="Network mode not enabled")
+
+    # Build access URL: use first cors_origin if configured, else LAN IP
+    if settings.cors_origins:
+        base = settings.cors_origins[0].rstrip("/")
+        access_url = f"{base}/?token={settings.auth_token}"
+    else:
+        import socket
+
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            lan_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            lan_ip = "localhost"
+        access_url = f"https://{lan_ip}:{settings.port}/?token={settings.auth_token}"
+
+    try:
+        import io as _io
+
+        import qrcode as _qr
+        import qrcode.image.svg as _qr_svg
+
+        qr = _qr.QRCode(box_size=10, border=2)
+        qr.add_data(access_url)
+        qr.make(fit=True)
+        img = qr.make_image(image_factory=_qr_svg.SvgPathImage)
+        buf = _io.BytesIO()
+        img.save(buf)
+        from starlette.responses import Response
+
+        return Response(content=buf.getvalue(), media_type="image/svg+xml")
+    except ImportError as e:
+        import logging
+
+        logging.getLogger("pernix.api").error("QR code generation failed: %s", e)
+        raise HTTPException(501, detail=f"qrcode package not available: {e}")
+    except Exception as e:
+        import logging
+
+        logging.getLogger("pernix.api").error("QR code generation error: %s", e)
+        raise HTTPException(500, detail=f"QR generation failed: {e}")
+
+
+@router.get("/api/env-vars")
+async def list_env_vars():
+    """Return names of relevant API key env vars (existence check only)."""
+    import os
+
+    CHECK_VARS = [
+        "TAVILY_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GOOGLE_API_KEY",
+    ]
+    return {"vars": [v for v in CHECK_VARS if v in os.environ]}
+
+
+# ---------------------------------------------------------------------------
+# Server restart
+# ---------------------------------------------------------------------------
+
+_restart_pending = False
+
+
+@router.post("/api/admin/restart")
+async def restart_server(request: Request):
+    """Signal the server to restart. Creates a flag file, then triggers graceful shutdown."""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(403, detail="Restart restricted to localhost")
+
+    import asyncio
+    import os
+    import signal
+    from pathlib import Path
+
+    global _restart_pending
+    if _restart_pending:
+        return {"status": "already_restarting"}
+    _restart_pending = True
+
+    Path("data/.restart").touch()
+
+    scheme = "https" if settings.network_enabled else "http"
+    port = settings.port
+
+    async def _delayed_shutdown():
+        await asyncio.sleep(1)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(_delayed_shutdown())
+    return {"status": "restarting", "url": f"{scheme}://localhost:{port}"}

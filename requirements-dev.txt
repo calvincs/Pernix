@@ -1,0 +1,11 @@
+# Development/testing dependencies
+-r requirements.txt
+
+pytest>=8.0
+pytest-asyncio>=1.0
+pytest-cov>=5.0
+pytest-xdist>=3.6        # `-n auto` parallel test execution (~2× speedup)
+coverage>=7.0
+ruff>=0.15
+black>=26.0
+flake8>=7.0

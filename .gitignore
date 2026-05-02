@@ -1,0 +1,120 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# =============================================================================
+# Dev tool caches & test/coverage artifacts
+# =============================================================================
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# =============================================================================
+# Environment / secrets
+# =============================================================================
+.env
+.env.local
+.env.*.local
+
+# =============================================================================
+# Pernix runtime data (auto-generated; never commit)
+# =============================================================================
+data/sessions.db
+data/sessions.db-wal
+data/sessions.db-shm
+data/settings.json
+data/registry.json
+data/registry_archive.json
+data/cron_jobs.json
+data/tools.json
+data/model_pref.txt
+data/pernix.log*
+data/logs/
+data/artifacts/
+data/.tool_output/
+data/workspace/
+data/memories/
+
+# Auto-generated TLS materials when network mode binds 0.0.0.0.
+# Regenerable on next start; never commit private keys to history.
+data/certs/
+data/cert.pem
+data/key.pem
+
+# =============================================================================
+# User-owned content (skills, workflows are user-authored)
+# Pernix creates the parent dirs at startup; nothing to commit here.
+# =============================================================================
+data/skills/*
+data/workflows/*
+
+# =============================================================================
+# Internal / WIP specs — not part of the public documentation set
+# (README, INSTALLATION, CONFIGURATION, docs/SECURITY, docs/SKILLS, docs/API
+#  are the user-facing docs; docs/spec/ holds in-flight design docs.)
+# =============================================================================
+docs/spec/
+
+# =============================================================================
+# Release tooling — local-only; never committed to source.
+# release.py produces a clean-room snapshot at ~/Desktop/pernix-release/.
+# .release-state.json tracks the last release version + source commit.
+# =============================================================================
+release.py
+.release-state.json
+
+# =============================================================================
+# Force-include: agent identity templates (ship with the repo)
+# These files are part of a fresh install. Users edit them locally; the
+# birthdate header in SOUL.md resets on --rebuild. To restore defaults:
+#   git checkout data/agent/
+# =============================================================================
+!data/.gitkeep
+!data/README.md
+!data/agent/
+!data/agent/**
+
+# =============================================================================
+# Workspace shortcut at repo root (occasionally created by tooling)
+# =============================================================================
+workspace/
+
+# =============================================================================
+# AI / agent CLI state (per-machine; never share)
+# =============================================================================
+.claude/
+CLAUDE.local.md
+.codex/
+*.codex
+.opencode/
+opencode.json
+
+# =============================================================================
+# Editor / IDE
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.bak
+
+# =============================================================================
+# OS junk
+# =============================================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+Thumbs.db
