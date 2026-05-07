@@ -76,7 +76,7 @@ class ScoutReport:
     # Curated context sections
     identity: str = ""  # From SOUL.md, max ~300 tokens
     rules: str = ""  # From RULES.md, max ~300 tokens
-    instructions: str = ""  # From AGENTS.md, max ~300 tokens
+    instructions: str = ""  # From SESSIONS.md, max ~300 tokens
     memory_context: str = ""  # Relevant memory entries, max ~500 tokens
     memory_queries_used: list[str] = field(default_factory=list)
     cross_session_context: str = ""  # Findings from other sessions, max ~500 tokens

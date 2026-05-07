@@ -2,7 +2,7 @@
 
 **A self-hosted AI agent server with persistent memory, tool execution, and a built-in web UI — runs locally with Ollama or in the cloud via OpenRouter.**
 
-> ⚠️ **Use at your own risk.** Pernix executes shell commands and writes files on the host machine. Run it in an environment you are comfortable having an AI agent modify — a dedicated VM or container is strongly recommended. See [docs/SECURITY.md](docs/SECURITY.md) for the full security model.
+> ⚠️ **Use at your own risk. This is NOT production software.** Pernix executes shell commands and writes files on the host machine. Run it in an environment you are comfortable having an AI agent modify — a dedicated VM or container is strongly recommended. See [docs/SECURITY.md](docs/SECURITY.md) for the full security model.
 
 ---
 
@@ -13,6 +13,12 @@ Pernix is a headless AI agent server you run on your own hardware. You own the d
 It ships with a full-featured web UI, a REST API with real-time streaming, persistent memory that survives across sessions, and a skill system that lets you teach the agent new capabilities without touching any code.
 
 Pernix is designed to be a personal AI workstation: always available, aware of your history and preferences, able to search the web, write and run code, manage files, and coordinate complex multi-step work across parallel workers.
+
+### Why this exists
+
+This is the harness I (the developer) use personally to automate tasks I do every day — drafting LinkedIn posts, summarizing YouTube videos, pulling weather forecasts, doing research, organizing files, scheduling recurring jobs. It was also a way for me to learn how to build an agent harness from scratch and try out different ideas about scout-then-act planning, append-only context compaction, worker orchestration, and skill-based progressive disclosure.
+
+It is **not** a polished commercial product. It is a working personal tool with rough edges that I find genuinely useful, shared as-is in case you find it useful too — or in case you want to fork it, take pieces of it, or learn from it. **Do not deploy this to production. Do not expose it to the public internet.** Run it on a dedicated machine or in a VM/container, treat it as a power tool, and have fun.
 
 ---
 
@@ -37,6 +43,7 @@ Pernix is designed to be a personal AI workstation: always available, aware of y
 ### Access & UI
 - **Built-in web UI** — PWA with real-time streaming, Monaco code editor, file explorer, and mobile support
 - **REST API + SSE streaming** — build integrations, scripts, or custom clients using the same API the UI uses
+- **Interactive API explorer** — because Pernix is built on FastAPI, a live Swagger UI is available at [http://localhost:8090/docs](http://localhost:8090/docs) (and ReDoc at `/redoc`). Browse every endpoint, see schemas, and try requests directly from the browser
 - **Local mode** — binds to localhost with no auth (default)
 - **Network mode** — HTTPS + Bearer token for LAN access from other devices
 - **Push notifications** — browser push via service worker when the agent needs your attention
@@ -47,7 +54,7 @@ Pernix is designed to be a personal AI workstation: always available, aware of y
 
 ### Prerequisites
 - Python 3.11+
-- [Ollama](https://ollama.ai) installed with at least one model pulled (e.g. `ollama pull llama3.2`)
+- [Ollama](https://ollama.ai) installed with at least one model pulled. Pick something current and capable — for example `ollama pull qwen3:8b` (good general-purpose), `ollama pull qwen3:32b` (if you have the VRAM), or `ollama pull qwen2.5-coder:32b` for code-heavy work. Avoid older models like `llama3.2` for serious use; agentic workloads benefit a lot from newer models with stronger tool-call and reasoning behavior.
 
 ### Setup
 
@@ -63,6 +70,9 @@ source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 # Install dependencies
 pip install -r requirements.txt
 
+# Install the Playwright browser binary (needed for browse_web)
+playwright install chromium
+
 # Set up your environment (optional API keys)
 cp .env.example .env
 # Edit .env to add OPENROUTER_API_KEY and/or TAVILY_API_KEY if you have them
@@ -76,11 +86,11 @@ Open **http://localhost:8090** in your browser.
 ### First Configuration
 
 1. Click the gear icon → **Settings**
-2. Set **`llm_model`** — the name of your Ollama model (e.g. `llama3.2`) or an OpenRouter model ID
-3. Set **`scout_model`** — a fast model for planning (can be the same as `llm_model` to start)
+2. Set **`llm_model`** — the name of your Ollama model (e.g. `qwen3:32b`) or an OpenRouter model ID (e.g. `anthropic/claude-sonnet-4.6`, `x-ai/grok-4.1-fast`)
+3. Set **`scout_model`** — a fast model for planning. Something like `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter, works well. You can use the same model as `llm_model` while getting started
 4. Click **Save**
 
-Start a new session and say hello.
+Start a new session and say hello. Then, while it's working, open [`/docs`](http://localhost:8090/docs) in another tab to see the live API.
 
 ---
 
@@ -109,12 +119,12 @@ Configure in Settings:
 
 ### OpenRouter (Cloud, Optional)
 
-[OpenRouter](https://openrouter.ai) provides access to dozens of frontier models (Claude, GPT-4, Gemini, etc.) through a single API.
+[OpenRouter](https://openrouter.ai) provides access to dozens of frontier models (Claude, GPT, Gemini, Grok, etc.) through a single API. For agent workloads, prefer current frontier models — they are markedly better at tool use, reasoning, and following instructions than older or smaller models.
 
 1. Create an account at [openrouter.ai](https://openrouter.ai) and get an API key
 2. Add `OPENROUTER_API_KEY=sk-or-v1-...` to your `.env`
-3. Set `OPENROUTER_MODELS` in `.env` to the model IDs you want available (comma-separated), or leave it empty to show all models on your account
-4. In Settings, set `llm_model` to an OpenRouter model ID (e.g. `anthropic/claude-sonnet-4-5`)
+3. Set `OPENROUTER_MODELS` in `.env` to the model IDs you want available (comma-separated), or leave it empty to show all models on your account. Reasonable starting set: `anthropic/claude-sonnet-4.6,anthropic/claude-haiku-4.5,x-ai/grok-4.1-fast`
+4. In Settings, set `llm_model` to an OpenRouter model ID (e.g. `anthropic/claude-sonnet-4.6`)
 
 ### Using Both Simultaneously
 
@@ -170,6 +180,31 @@ Full details on authentication, TLS certificates, SSRF protections, and safe con
 
 ---
 
+## Make It Your Own
+
+Pernix is built to be tinkered with. Some things to try once you have it running:
+
+- **Edit `data/agent/SOUL.md`** to change how the agent talks to you. Want it more terse? More verbose? More opinionated about coding style? Just write that in.
+- **Edit `data/agent/RULES.md`** to add operational guardrails specific to your workflow — for example, "always run tests before committing," or "never edit files in `/etc`."
+- **Write a skill** for any repetitive task — calling an internal API, formatting output a particular way, walking through a multi-step procedure. See [docs/SKILLS.md](docs/SKILLS.md) for the format. Skills are just markdown files; the agent discovers them automatically on the next turn.
+- **Browse the API at [`/docs`](http://localhost:8090/docs)** — every endpoint is documented and try-it-able right from the browser. This is the fastest way to learn the system.
+- **Understand how it works.** Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — a guided walkthrough of Sessions, Scout, the agent loop, Reflect, Snooze, and the 9-state session state machine, written from concepts down to implementation.
+- **Read the code.** It's a single Python codebase that fits in your head. The session state machine, agent loop, scout phase, compaction, and worker orchestration all live in `core/` and `sessions/`. Read [docs/workflow.md](docs/workflow.md) for the formal spec with file:line citations once you've got the concepts.
+- **Schedule recurring agents** for jobs you do daily — morning news brief, weekly summary of activity logs, watchdog scripts. Pernix has a built-in cron scheduler.
+- **Connect from your phone** — enable network mode, set up TLS with mkcert, scan the QR code, and you have a personal AI assistant in your pocket.
+
+### A note on safety
+
+You will probably break things while tinkering. That's fine and even encouraged on a dedicated machine — `python run.py --rebuild` wipes runtime state and gets you back to a clean slate without touching your settings or skills. But please:
+
+- **Don't run Pernix on your daily-driver workstation** unless you understand the risk surface
+- **Don't expose the network mode endpoint to the public internet** — it's designed for trusted LANs
+- **Don't use `--dangerous`** (the startup flag that bypasses tool approval) until you've watched the agent run for a while and trust its judgment. In normal mode the agent must ask your permission for each dangerous action it takes — that's the intended behavior.
+
+This is a power tool. Treat it like one.
+
+---
+
 ## Documentation
 
 | File | Contents |
@@ -178,9 +213,10 @@ Full details on authentication, TLS certificates, SSRF protections, and safe con
 | [CONFIGURATION.md](CONFIGURATION.md) | Every setting explained with defaults and examples |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security model, network mode, TLS, auth tokens, recommendations |
 | [docs/SKILLS.md](docs/SKILLS.md) | Skills system, SOUL.md, RULES.md, web capabilities, writing a skill |
-| [docs/API.md](docs/API.md) | Complete REST API reference and SSE event catalog |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How Pernix works: Sessions, Scout, agent loop, Reflect, Snooze, the 9-state state machine — concepts first, then details |
+| [docs/API.md](docs/API.md) | Complete REST API reference and SSE event catalog (live Swagger UI also available at `/docs` when the server is running) |
 | [docs/MKCERT_SETUP.md](docs/MKCERT_SETUP.md) | Trusted TLS certificates for LAN access |
-| [docs/workflow.md](docs/workflow.md) | Deep architectural reference: state machine, agent loop, compaction, workers |
+| [docs/workflow.md](docs/workflow.md) | Formal architecture spec with file:line citations and complete state transition graph |
 | [LICENSE](LICENSE) | MIT license |
 
 ---

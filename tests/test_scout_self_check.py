@@ -96,6 +96,186 @@ def test_blank_deliverable_description_flags_issue():
     assert any("empty descriptions" in i for i in issues)
 
 
+# ---------------------------------------------------------------------------
+# Disabled-recommendation handling — separate from hallucination
+# ---------------------------------------------------------------------------
+
+
+def test_disabled_tool_flags_issue_separate_from_hallucinated(monkeypatch, tmp_path):
+    """Disabled tool recommendation flagged with a 'disabled' issue, not 'hallucinated'."""
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(name="t_off", func=lambda: "ok", description="t", parameters={"type": "object", "properties": {}})
+    reg.disable("t_off")
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    report = ScoutReport(
+        recommended_tools=["t_off"],
+        approach_guidance="1. Do X.\n2. Do Y.\n3. Done.\n",
+    )
+    issues = _self_check_report(report)
+    # Must flag as disabled — not as a hallucination
+    assert any("disabled" in i.lower() and "t_off" in i for i in issues)
+    assert not any("do not exist" in i.lower() and "t_off" in i for i in issues)
+
+
+def test_disabled_skill_flags_issue_separate_from_hallucinated(tmp_path, monkeypatch):
+    from core.skills.registry import SkillRegistry
+
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path))
+    d = tmp_path / "ondisk-skill"
+    d.mkdir()
+    (d / "SKILL.md").write_text("---\nname: ondisk-skill\ndescription: x\ntags: t\n---\n# body\n")
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    reg.disable("ondisk-skill")
+    monkeypatch.setattr("core.skills.registry._skill_registry", reg)
+
+    report = ScoutReport(
+        recommended_skills=["ondisk-skill"],
+        approach_guidance="1. Use the skill.\n2. Done.\n3. Wrap.\n",
+    )
+    issues = _self_check_report(report)
+    assert any("disabled" in i.lower() and "ondisk-skill" in i for i in issues)
+    assert not any("do not exist" in i.lower() for i in issues)
+
+
+def test_validate_report_strips_disabled_tools(monkeypatch, tmp_path):
+    """_validate_report removes disabled tools from recommendations."""
+    from core.scout.runner import _validate_report
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(
+        name="custom_strip_me", func=lambda: "", description="x", parameters={"type": "object", "properties": {}}
+    )
+    reg.disable("custom_strip_me")
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    report = ScoutReport(
+        recommended_tools=["custom_strip_me"],
+        approach_guidance="1.\n2.\n3.\n",
+    )
+    out = _validate_report(report)
+    assert "custom_strip_me" not in out.recommended_tools
+
+
+def test_validate_report_strips_disabled_skills(tmp_path, monkeypatch):
+    """A disabled skill in recommended_skills must be stripped, AND any
+    pre-set auto-injection (injected_skill_name / injected_skill) must be
+    cleared — otherwise a stale L2 body for the disabled skill leaks into
+    the agent's system prompt. The pre-set values here are load-bearing:
+    if we leave them at the dataclass defaults of "", the assertions are
+    trivially true and never exercise the clearing path.
+    """
+    from core.scout.runner import _validate_report
+    from core.skills.registry import SkillRegistry
+
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path))
+    d = tmp_path / "off-skill"
+    d.mkdir()
+    (d / "SKILL.md").write_text("---\nname: off-skill\ndescription: x\ntags: t\n---\n# body\n")
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    reg.disable("off-skill")
+    monkeypatch.setattr("core.skills.registry._skill_registry", reg)
+
+    report = ScoutReport(
+        recommended_skills=["off-skill"],
+        injected_skill_name="off-skill",  # pre-set: must be cleared
+        injected_skill="# stale body that must not leak\n",  # pre-set: must be cleared
+        approach_guidance="1.\n2.\n3.\n",
+    )
+    out = _validate_report(report)
+    assert "off-skill" not in out.recommended_skills
+    # And the pre-set injection must be cleared (not just left as default).
+    assert out.injected_skill_name == "", "stale auto-injection name must be cleared"
+    assert out.injected_skill == "", "stale auto-injection body must be cleared"
+
+
+def test_validate_report_clears_stale_injected_when_no_recommended_skills(tmp_path, monkeypatch):
+    """Symmetric: report had no recommended_skills at all, but an auto-inject
+    block was already populated. Clearing must happen even when nothing was
+    stripped — it's purely about not letting stale state through.
+    """
+    from core.scout.report import ScoutReport
+    from core.scout.runner import _validate_report
+
+    report = ScoutReport(
+        recommended_skills=[],
+        injected_skill_name="ghost-skill",
+        injected_skill="# old body that should be cleared\nstuff\n",
+        approach_guidance="1.\n2.\n3.\n",
+    )
+    out = _validate_report(report)
+    assert out.injected_skill_name == ""
+    assert out.injected_skill == ""
+
+
+# ---------------------------------------------------------------------------
+# Scout baseline build — discover() must filter disabled before the
+# AVAILABLE TOOLS / AVAILABLE SKILLS section is built (lines ~1227 / 1243
+# in core/scout/runner.py). Auto-fixed by the registry-side filter; locked
+# in here so a future regression in registry.discover() can't silently
+# put disabled items back into scout's prompt.
+# ---------------------------------------------------------------------------
+
+
+def test_scout_baseline_skill_discovery_omits_disabled(tmp_path, monkeypatch):
+    from core.skills.registry import SkillRegistry
+
+    skills_dir = tmp_path
+    for n, desc in (("aboard", "deploy release ship"), ("bboard", "deploy release ship")):
+        d = skills_dir / n
+        d.mkdir()
+        (d / "SKILL.md").write_text(f"---\nname: {n}\ndescription: {desc}\ntags: deploy\n---\n# x\n")
+
+    fresh = SkillRegistry()
+    fresh.scan(skills_dir)
+    fresh.disable("aboard")
+    monkeypatch.setattr("core.skills.registry._skill_registry", fresh)
+
+    discovered = fresh.discover("deploy release", limit=10)
+    names = {s.name for s in discovered}
+    assert "bboard" in names
+    assert "aboard" not in names, "scout baseline must not surface disabled skill in AVAILABLE SKILLS"
+
+
+def test_scout_baseline_tool_discovery_omits_disabled(tmp_path, monkeypatch):
+    """Symmetric for tools: ToolRegistry.discover() must filter disabled.
+    A disabled tool's name must NOT appear in scout's AVAILABLE TOOLS section.
+    """
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(
+        name="search_one",
+        func=lambda: "",
+        description="search the web",
+        parameters={},
+        tags=["search", "web"],
+    )
+    reg.register(
+        name="search_two",
+        func=lambda: "",
+        description="search the web",
+        parameters={},
+        tags=["search", "web"],
+    )
+    reg.rebuild_index()
+    reg.disable("search_one")
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    discovered = reg.discover("search the web", limit=10)
+    names = {t.name for t in discovered}
+    assert "search_two" in names
+    assert "search_one" not in names
+
+
 def test_revision_budget_constants():
     """Item #5: scout gets up to 2 revision rounds, SCOUT_MAX_ROUNDS=6.
 

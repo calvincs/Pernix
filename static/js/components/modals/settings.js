@@ -68,11 +68,15 @@ const SECTIONS = [
     },
     {
         title: 'Shell & Tools',
-        description: 'Timeouts and security for tool execution. Strict shell security restricts commands to a built-in allowlist. Permissive mode allows any command.',
+        description: 'Timeouts and security for tool execution. Strict shell security restricts commands to a built-in allowlist. Permissive mode allows any command. Size caps below: 0 = no cap. RLIMIT_FSIZE caps each bash subprocess\'s file writes; lift it for large model/video downloads.',
         fields: [
             { key: 'tool_timeout', label: 'Tool Timeout (s)', type: 'number' },
             { key: 'shell_timeout', label: 'Shell Timeout (s)', type: 'number' },
             { key: 'shell_security_mode', label: 'Shell Security', type: 'select', options: ['permissive', 'strict'] },
+            { key: 'shell_address_space_limit_bytes', label: 'Bash RLIMIT_AS (bytes, 0 = no cap)', type: 'number' },
+            { key: 'shell_fsize_limit_bytes', label: 'Bash RLIMIT_FSIZE (bytes, 0 = no cap)', type: 'number' },
+            { key: 'max_file_write_size', label: 'Max file_write Size (bytes, 0 = no cap)', type: 'number' },
+            { key: 'max_edit_read_size', label: 'Max file_edit Read Size (bytes, 0 = no cap)', type: 'number' },
         ],
     },
     {
@@ -1282,13 +1286,100 @@ function buildSessionCleanupSection() {
     ]);
 }
 
+async function buildSecurityTab(settings) {
+    // Warning block
+    const warningBlock = el('div', { class: 'security-warning-block' }, [
+        el('div', { class: 'security-warning-title' }, [text('⚠  Danger Zone — Read Before Enabling')]),
+        el('ul', { class: 'security-warning-list' }, [
+            el('li', {}, [text('Bypasses the dangerous-tool confirmation gate for every tool call in every session.')]),
+            el('li', {}, [text('Shell commands, file writes, and network requests execute without asking for approval.')]),
+            el('li', {}, [text('Workers and cron jobs are fully exempt — there is no human in the loop.')]),
+            el('li', {}, [text('A prompt injection or a misbehaving workflow can cause irreversible damage silently.')]),
+            el('li', {}, [text('Only enable if you fully trust the current task context. Disable it when done.')]),
+        ]),
+    ]);
+
+    // Run Dangerously — read-only status badge (only settable via --dangerous at startup)
+    const isEnabled = !!settings.auto_approve_dangerous;
+    const statusBadge = el('span', {
+        style: 'font-size:var(--text-xs); font-weight:700; padding:2px 10px; border-radius:3px; '
+             + (isEnabled
+                 ? 'background:color-mix(in srgb,var(--error,#c25450) 15%,var(--bg)); color:var(--error,#c25450); border:1px solid var(--error,#c25450);'
+                 : 'background:var(--bg-surface); color:var(--text-faint); border:1px solid var(--border);'),
+    }, [text(isEnabled ? 'ENABLED' : 'DISABLED')]);
+    const toggleSection = el('div', { class: 'settings-section' }, [
+        el('h3', {}, [
+            text('Execution Mode'),
+            buildHelpIcon(
+                'Run Dangerously bypasses the dangerous-tool approval gate entirely. '
+                + 'This setting can only be activated by starting the server with the '
+                + '--dangerous flag: python run.py --dangerous. '
+                + 'It cannot be changed while the server is running to prevent a rogue '
+                + 'process or prompt injection from elevating its own privileges.'
+            ),
+        ]),
+        el('div', { class: 'setting-row' }, [
+            el('div', {}, [
+                el('label', {}, [text('Run Dangerously')]),
+                el('div', { style: 'font-size:var(--text-xs); color:var(--text-faint); margin-top:2px;' }, [
+                    text('Set at startup only: python run.py --dangerous'),
+                ]),
+            ]),
+            statusBadge,
+        ]),
+    ]);
+
+    // Approved Scopes section
+    const scopesContainer = el('div', {});
+    async function renderScopes() {
+        clear(scopesContainer);
+        let data = {};
+        try { data = await get('/api/settings/tool-approvals'); } catch { /* ignore */ }
+        const tools = Object.keys(data);
+        const clearBtn = el('button', { class: 'btn btn-secondary', style: 'font-size:var(--text-xs); padding:2px 8px;' }, [text('Clear all')]);
+        clearBtn.addEventListener('click', async () => {
+            try {
+                await fetch('/api/settings/tool-approvals', { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
+                renderScopes();
+            } catch { /* ignore */ }
+        });
+        scopesContainer.appendChild(el('div', { class: 'settings-section' }, [
+            el('h3', {}, [
+                text('Remembered Approvals'),
+                buildHelpIcon(
+                    'Scopes approved via approve_dangerous_tool() are persisted here so the '
+                    + 'agent does not need to ask again for previously approved actions. '
+                    + 'Clear all to require re-confirmation for every dangerous action.'
+                ),
+            ]),
+            tools.length === 0
+                ? el('div', { class: 'security-scopes-list' }, [
+                    el('div', { class: 'security-scopes-empty' }, [text('No remembered approvals.')]),
+                  ])
+                : el('div', { class: 'security-scopes-list' }, tools.map(toolName =>
+                    el('div', { class: 'security-scopes-tool' }, [
+                        el('div', { class: 'security-scopes-tool-name' }, [text(toolName)]),
+                        ...data[toolName].map(scope =>
+                            el('div', { class: 'security-scopes-scope' }, [text('• ' + scope)])
+                        ),
+                    ])
+                )),
+            el('div', { style: 'margin-top:var(--sp-2); display:flex; justify-content:flex-end;' }, [clearBtn]),
+        ]));
+    }
+    await renderScopes();
+
+    return el('div', {}, [warningBlock, toggleSection, scopesContainer]);
+}
+
 function buildTabs(settings) {
     // Tab buttons
     const generalTab = el('button', { class: 'tab-btn active', 'data-tab': 'general' }, [text('General')]);
     const modelsTab = el('button', { class: 'tab-btn', 'data-tab': 'models' }, [text('Models')]);
     const envTab = el('button', { class: 'tab-btn', 'data-tab': 'environment' }, [text('Environment')]);
     const networkTab = el('button', { class: 'tab-btn', 'data-tab': 'network' }, [text('Network')]);
-    const tabBar = el('div', { class: 'tab-bar' }, [generalTab, modelsTab, envTab, networkTab]);
+    const securityTab = el('button', { class: 'tab-btn', 'data-tab': 'security' }, [text('Security')]);
+    const tabBar = el('div', { class: 'tab-bar' }, [generalTab, modelsTab, envTab, networkTab, securityTab]);
 
     // General tab content
     const generalSections = SECTIONS.map(section => {
@@ -1313,9 +1404,18 @@ function buildTabs(settings) {
     // Network tab content
     const networkContent = el('div', { class: 'tab-content', 'data-tab': 'network' }, [buildNetworkTab(settings)]);
 
+    // Security tab content — async build, render placeholder then swap in
+    const securityPlaceholder = el('div', { class: 'tab-content', 'data-tab': 'security' }, [
+        el('div', { style: 'padding:var(--sp-4); color:var(--text-faint); font-size:var(--text-sm);' }, [text('Loading…')]),
+    ]);
+    buildSecurityTab(settings).then(content => {
+        securityPlaceholder.innerHTML = '';
+        securityPlaceholder.appendChild(content);
+    });
+
     // Tab switching
-    const tabs = [generalTab, modelsTab, envTab, networkTab];
-    const contents = [generalContent, modelsContent, envContent, networkContent];
+    const tabs = [generalTab, modelsTab, envTab, networkTab, securityTab];
+    const contents = [generalContent, modelsContent, envContent, networkContent, securityPlaceholder];
     tabs.forEach((tab, i) => {
         tab.addEventListener('click', () => {
             tabs.forEach(t => t.classList.remove('active'));
@@ -1332,8 +1432,15 @@ function buildTabs(settings) {
 // Modal lifecycle
 // ---------------------------------------------------------------------------
 
-export async function openSettings() {
-    if (_overlay) return;
+export async function openSettings(opts = {}) {
+    if (_overlay) {
+        // Already open — just switch to the requested tab if specified
+        if (opts.tab) {
+            const btn = _overlay.querySelector(`.tab-btn[data-tab="${opts.tab}"]`);
+            if (btn) btn.click();
+        }
+        return;
+    }
 
     let settings;
     try {
@@ -1468,6 +1575,12 @@ export async function openSettings() {
 
     document.body.appendChild(_overlay);
     document.addEventListener('keydown', _onEsc);
+
+    // If a specific tab was requested, activate it now that the DOM is live.
+    if (opts.tab) {
+        const btn = _overlay.querySelector(`.tab-btn[data-tab="${opts.tab}"]`);
+        if (btn) btn.click();
+    }
 
     // Wire network section visibility toggles (must be after DOM append)
     _wireNetworkSection();

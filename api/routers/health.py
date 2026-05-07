@@ -21,7 +21,7 @@ async def health():
     return {
         "status": "healthy",
         "model": settings.llm_model or "(not set)",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "sessions_active": manager.active_count(),
         "maintenance": maint.get_stats(),
     }
@@ -67,7 +67,7 @@ async def health_detailed(request: Request):
     return {
         "status": "healthy",
         "model": settings.llm_model or "(not set)",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "providers": provider_health,
         "sessions": {
             "active": manager.active_count(),
@@ -98,7 +98,7 @@ _LOCKED_FIELDS = {
     "shell_env_mode",
     "shell_env_denylist",
     "shell_env_allowlist",
-    "auto_approve_dangerous",
+    "auto_approve_dangerous",  # runtime-only: set via --dangerous flag at startup, never via API
     "auth_token",
 }
 
@@ -210,6 +210,32 @@ async def update_settings(body: dict):
             return {"updated": updated, "restart_required": True, "ssl_errors": errors}
 
     return {"updated": updated, "restart_required": restart_required}
+
+
+@router.get("/api/settings/tool-approvals")
+async def get_tool_approvals():
+    """Return the persisted dangerous-tool approval scopes from tool_approvals.json."""
+    import json
+    from pathlib import Path
+
+    p = Path("data/tool_approvals.json")
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except (ValueError, OSError):
+        return {}
+
+
+@router.delete("/api/settings/tool-approvals")
+async def clear_tool_approvals():
+    """Wipe all persisted dangerous-tool approval scopes."""
+    from pathlib import Path
+
+    p = Path("data/tool_approvals.json")
+    if p.exists():
+        p.unlink()
+    return {"cleared": True}
 
 
 @router.post("/api/settings/apikey")

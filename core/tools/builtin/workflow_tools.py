@@ -192,6 +192,31 @@ def validate_workflow(name: str, _context: dict | None = None) -> str:
     if not wf:
         available = sorted(w.name for w in reg.all_workflows())
 
+        # Common confusion: agent calls validate_workflow on a SKILL name. Skills
+        # (data/skills/) and workflows (data/workflows/) are separate namespaces;
+        # without this redirect, the agent gets a generic "not found" and burns a
+        # turn figuring out the mistake (session edb605c3e045 burned ~30s here).
+        try:
+            from core.skills.registry import get_skill_registry
+
+            skill_reg = get_skill_registry()
+            skill = skill_reg.get(name)
+            if skill:
+                if skill_reg.is_disabled(name):
+                    return (
+                        f"'{name}' is a SKILL (not a workflow), and it is currently disabled.\n"
+                        f"Enable it in Explorer > Skills before use.\n"
+                        f"validate_workflow is only for entries in data/workflows/."
+                    )
+                return (
+                    f"'{name}' is a SKILL, not a workflow.\n"
+                    f"Skills live in data/skills/ and do NOT need validation.\n"
+                    f"To use this skill: load_skill('{name}') and follow the instructions inside.\n"
+                    f"validate_workflow is only for entries in data/workflows/."
+                )
+        except Exception as e:
+            logger.debug("validate_workflow: skill cross-check skipped: %s", e)
+
         # Check common mistake: file written to workspace instead of data/workflows/
         workspace_path = Path("data/workspace") / "workflows" / name / "WORKFLOW.md"
         if workspace_path.exists():
@@ -221,6 +246,39 @@ def validate_workflow(name: str, _context: dict | None = None) -> str:
     wf_md = wf.path / "WORKFLOW.md"
     result = validate_file(wf_md, check_skills=True)
     return result.to_agent_text()
+
+
+def delete_workflow(name: str, _context: dict | None = None) -> str:
+    """Permanently delete a workflow and its directory from data/workflows/{name}/.
+
+    This is irreversible. The agent MUST call ask_user() describing the workflow
+    to be deleted and then approve_dangerous_tool() before this tool will execute.
+    """
+    import shutil
+
+    from core.workflows.registry import get_workflow_registry
+
+    root = _workflows_root()
+    wf_dir = root / name
+
+    if not wf_dir.exists():
+        reg = get_workflow_registry()
+        available = sorted(w.name for w in reg.all_workflows())
+        hint = f"Available: {', '.join(available)}" if available else "No workflows installed."
+        return f"Workflow '{name}' not found at {wf_dir}. {hint}"
+
+    try:
+        shutil.rmtree(wf_dir)
+    except OSError as e:
+        return f"Error deleting workflow '{name}': {e}"
+
+    try:
+        reg = get_workflow_registry()
+        reg.rescan(root)
+    except Exception as e:
+        logger.warning("delete_workflow: registry rescan failed: %s", e)
+
+    return f"Workflow '{name}' deleted (data/workflows/{name}/ removed)."
 
 
 def validate_workflow_content(content: str, _context: dict | None = None) -> str:
@@ -305,6 +363,34 @@ def register(reg) -> None:
         tags=wf_tags + ["discover", "list", "find"],
         timeout=10,
         parallel_safe=True,
+    )
+
+    reg.register(
+        name="delete_workflow",
+        func=delete_workflow,
+        description=(
+            "Permanently delete a workflow and its directory from data/workflows/{name}/. "
+            "IRREVERSIBLE. Required call sequence: "
+            "1) ask_user() naming the workflow to be deleted, "
+            "2) approve_dangerous_tool(tool_name='delete_workflow', scope='delete workflow <name>'), "
+            "3) delete_workflow(name). "
+            "The executor will block this call if approval has not been granted."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Workflow name (directory name in data/workflows/)",
+                },
+            },
+            "required": ["name"],
+        },
+        category="core",
+        tags=wf_tags + ["delete", "remove", "uninstall", "destroy"],
+        timeout=15,
+        parallel_safe=False,
+        safety_level="dangerous",
     )
 
     reg.register(

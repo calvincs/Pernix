@@ -301,3 +301,388 @@ def test_validate_invalid_tracked_in_set(tmp_path):
     reg = SkillRegistry()
     reg.scan(tmp_path)
     assert "tracked" in reg._invalid
+
+
+# ---------------------------------------------------------------------------
+# Disabled state — toggle, persistence, filtering
+# ---------------------------------------------------------------------------
+
+
+def _scan_two_skills(tmp_path):
+    _make_skill_dir(tmp_path, "alpha", "name: alpha\ndescription: web search helper\ntags: web,search")
+    _make_skill_dir(tmp_path, "beta", "name: beta\ndescription: deploy pipeline guide\ntags: deploy")
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    return reg
+
+
+def test_registry_disable_then_is_disabled(tmp_path):
+    reg = _scan_two_skills(tmp_path)
+    assert not reg.is_disabled("alpha")
+    reg.disable("alpha")
+    assert reg.is_disabled("alpha")
+    assert not reg.is_disabled("beta")
+
+
+def test_registry_enable_clears_disabled(tmp_path):
+    reg = _scan_two_skills(tmp_path)
+    reg.disable("alpha")
+    reg.enable("alpha")
+    assert not reg.is_disabled("alpha")
+
+
+def test_registry_disable_persists_across_rescan(tmp_path):
+    """Toggle survives PUT/DELETE rescan path."""
+    reg = _scan_two_skills(tmp_path)
+    reg.disable("alpha")
+    reg.rescan(tmp_path)
+    assert reg.is_disabled("alpha")
+    assert not reg.is_disabled("beta")
+
+
+def test_registry_disabled_persists_to_json_in_legacy_format(tmp_path):
+    """File format matches what the API router historically wrote: a sorted JSON array of names."""
+    import json as _json
+
+    reg = _scan_two_skills(tmp_path)
+    reg.disable("beta")
+    reg.disable("alpha")  # add out of order
+    saved = _json.loads((tmp_path / ".disabled.json").read_text())
+    assert saved == ["alpha", "beta"]  # sorted
+
+
+def test_registry_discover_excludes_disabled(tmp_path):
+    """Default discover() filters disabled out so scout/agent never see them."""
+    reg = _scan_two_skills(tmp_path)
+    results = reg.discover("web", limit=10)
+    assert "alpha" in {r.name for r in results}
+    reg.disable("alpha")
+    results = reg.discover("web", limit=10)
+    assert "alpha" not in {r.name for r in results}
+
+
+def test_registry_discover_include_disabled_kwarg_returns_all(tmp_path):
+    """Explorer UI uses include_disabled=True to render the toggle row."""
+    reg = _scan_two_skills(tmp_path)
+    reg.disable("alpha")
+    results = reg.discover("web", limit=10, include_disabled=True)
+    assert "alpha" in {r.name for r in results}
+
+
+def test_registry_load_instructions_disabled_returns_none(tmp_path):
+    reg = _scan_two_skills(tmp_path)
+    assert reg.load_instructions("alpha") is not None
+    reg.disable("alpha")
+    assert reg.load_instructions("alpha") is None
+    # Override path for the UI
+    assert reg.load_instructions("alpha", include_disabled=True) is not None
+
+
+def test_registry_list_resources_disabled_returns_empty(tmp_path):
+    """Disabled skill's resources hidden from agent paths but visible to UI."""
+    d = _make_skill_dir(tmp_path, "with-scripts", "name: with-scripts\ndescription: has scripts")
+    scripts = d / "scripts"
+    scripts.mkdir()
+    (scripts / "run.sh").write_text("#!/bin/sh\necho hi")
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    assert reg.list_resources("with-scripts").get("scripts") == ["run.sh"]
+    reg.disable("with-scripts")
+    assert reg.list_resources("with-scripts") == {}
+    assert reg.list_resources("with-scripts", include_disabled=True).get("scripts") == ["run.sh"]
+
+
+def test_registry_read_resource_disabled_returns_none(tmp_path):
+    d = _make_skill_dir(tmp_path, "rsrc", "name: rsrc\ndescription: r")
+    refs = d / "references"
+    refs.mkdir()
+    (refs / "note.md").write_text("hello")
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    assert reg.read_resource("rsrc", "references/note.md") == "hello"
+    reg.disable("rsrc")
+    assert reg.read_resource("rsrc", "references/note.md") is None
+
+
+def test_registry_enabled_skills_excludes_disabled(tmp_path):
+    reg = _scan_two_skills(tmp_path)
+    reg.disable("alpha")
+    enabled = {s.name for s in reg.enabled_skills()}
+    assert enabled == {"beta"}
+    # all_skills() unchanged — UI introspection must still see everything
+    assert {s.name for s in reg.all_skills()} == {"alpha", "beta"}
+
+
+def test_registry_exists_unchanged_by_disable(tmp_path):
+    """exists() means 'is registered' — disable doesn't remove it."""
+    reg = _scan_two_skills(tmp_path)
+    reg.disable("alpha")
+    assert reg.exists("alpha")  # still registered, just toggled off
+
+
+def test_skill_index_search_excludes_via_exclude_param():
+    idx = SkillIndex()
+    idx._entries["a"] = idx._entries.get("a")  # prime; just verify API accepts kwarg
+    # Build a minimal entry directly to keep test hermetic
+    from core.skills.registry import _SkillIndexEntry, _tokenize
+
+    idx._entries.clear()
+    idx._entries["a"] = _SkillIndexEntry(
+        name="a",
+        description="web search",
+        tags=["web"],
+        has_scripts=False,
+        has_references=False,
+        name_tokens=_tokenize("a"),
+        desc_tokens=_tokenize("web search"),
+        tag_tokens={"web"},
+    )
+    idx._entries["b"] = _SkillIndexEntry(
+        name="b",
+        description="web fetcher",
+        tags=["web"],
+        has_scripts=False,
+        has_references=False,
+        name_tokens=_tokenize("b"),
+        desc_tokens=_tokenize("web fetcher"),
+        tag_tokens={"web"},
+    )
+    names = {r.name for r in idx.search("web")}
+    assert names == {"a", "b"}
+    names = {r.name for r in idx.search("web", exclude={"a"})}
+    assert names == {"b"}
+
+
+# ---------------------------------------------------------------------------
+# Cooccurrence + exclude param: a disabled sibling promoted via cooccurrence
+# must NOT leak into results.
+# ---------------------------------------------------------------------------
+
+
+def test_skill_index_search_cooccurrence_respects_exclude_set():
+    """If a disabled skill is listed as a cooccurrence sibling of an enabled
+    neighbor, ``SkillIndex.search`` must drop it from the promoted results.
+    Without this, disabling 'foo' would still surface 'foo' whenever 'bar'
+    matches and 'foo' is in bar's cooccurrence list.
+    """
+    from core.skills.registry import (
+        SKILL_COOCCURRENCE,
+        SkillIndex,
+        _SkillIndexEntry,
+        _tokenize,
+    )
+
+    idx = SkillIndex()
+    idx._entries["primary"] = _SkillIndexEntry(
+        name="primary",
+        description="orchestrator deploy",
+        tags=["deploy"],
+        has_scripts=False,
+        has_references=False,
+        name_tokens=_tokenize("primary"),
+        desc_tokens=_tokenize("orchestrator deploy"),
+        tag_tokens={"deploy"},
+    )
+    idx._entries["sibling"] = _SkillIndexEntry(
+        name="sibling",
+        description="release helper",  # description does NOT match the query
+        tags=[],
+        has_scripts=False,
+        has_references=False,
+        name_tokens=_tokenize("sibling"),
+        desc_tokens=_tokenize("release helper"),
+        tag_tokens=set(),
+    )
+    # Make sibling promote whenever primary matches.
+    SKILL_COOCCURRENCE["primary"] = ["sibling"]
+    try:
+        names = {r.name for r in idx.search("deploy")}
+        assert names == {"primary", "sibling"}, "sibling should normally promote via cooccurrence"
+        names = {r.name for r in idx.search("deploy", exclude={"sibling"})}
+        assert names == {"primary"}, "disabled sibling must NOT leak through cooccurrence path"
+    finally:
+        SKILL_COOCCURRENCE.pop("primary", None)
+
+
+def test_registry_discover_excludes_cooccurring_disabled_sibling(tmp_path):
+    """End-to-end variant: disable a real skill, then trigger discover for an
+    enabled neighbor whose cooccurrence map mentions the disabled one. The
+    disabled sibling must NOT appear in the discover() output.
+    """
+    from core.skills.registry import SKILL_COOCCURRENCE
+
+    _make_skill_dir(
+        tmp_path,
+        "primary",
+        "name: primary\ndescription: orchestration deploy guide\ntags: deploy",
+    )
+    _make_skill_dir(
+        tmp_path,
+        "sibling",
+        "name: sibling\ndescription: unrelated text token zonk\ntags: zonk",
+    )
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    SKILL_COOCCURRENCE["primary"] = ["sibling"]
+    try:
+        # Sanity: sibling promotes when both enabled.
+        names = {r.name for r in reg.discover("deploy", limit=10)}
+        assert "sibling" in names
+        # Disable the sibling — discover() must drop it from the cooccurrence
+        # promotion path.
+        reg.disable("sibling")
+        names = {r.name for r in reg.discover("deploy", limit=10)}
+        assert "primary" in names
+        assert "sibling" not in names
+    finally:
+        SKILL_COOCCURRENCE.pop("primary", None)
+
+
+# ---------------------------------------------------------------------------
+# Persistence edge cases: malformed JSON, stale names, save-before-scan.
+# ---------------------------------------------------------------------------
+
+
+def test_registry_load_disabled_swallows_malformed_json(tmp_path, caplog):
+    """A corrupted .disabled.json must NOT block scan() — it should log a
+    warning and treat as empty."""
+    import logging
+
+    _make_skill_dir(tmp_path, "alpha", "name: alpha\ndescription: a")
+    # Pre-write a malformed disabled file BEFORE the first scan.
+    (tmp_path / ".disabled.json").write_text("not-valid-json{[", encoding="utf-8")
+
+    reg = SkillRegistry()
+    with caplog.at_level(logging.WARNING, logger="pernix.skills.registry"):
+        count = reg.scan(tmp_path)
+
+    assert count == 1
+    assert reg.exists("alpha")
+    # Disabled set ended up empty (corrupt → ignored).
+    assert reg._disabled == set()
+    assert not reg.is_disabled("alpha")
+    # And we logged about it.
+    assert any("Failed to read" in r.message and ".disabled.json" in r.message for r in caplog.records)
+
+
+def test_registry_prunes_stale_disabled_entries_on_scan(tmp_path):
+    """A name in .disabled.json that doesn't match any skill on disk is pruned
+    on scan — otherwise a future skill of the same name (recreated, restored
+    from backup) would silently come back disabled. The pruned set is
+    persisted so disk and memory stay consistent.
+    """
+    import json as _json
+
+    _make_skill_dir(tmp_path, "alpha", "name: alpha\ndescription: a")
+    # Pre-disable both a real skill and a ghost name that doesn't exist on disk.
+    (tmp_path / ".disabled.json").write_text(_json.dumps(["ghost-skill", "alpha"]), encoding="utf-8")
+
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    # Real skill stays disabled.
+    assert reg.is_disabled("alpha")
+    # Ghost name is pruned out of the in-memory set.
+    assert not reg.is_disabled("ghost-skill")
+    # And persisted back to disk so the file stays clean.
+    assert _json.loads((tmp_path / ".disabled.json").read_text()) == ["alpha"]
+    # enabled_skills() correctly excludes only the real disabled skill.
+    assert {s.name for s in reg.enabled_skills()} == set()
+
+
+def test_registry_disable_before_scan_raises(tmp_path):
+    """disable() before scan() raises rather than silently dropping state.
+
+    Without a known skills_dir there is no .disabled.json to write to, and the
+    in-memory entry would be wiped on the next scan() (which calls
+    _load_disabled). Failing loud beats failing silent.
+    """
+    import pytest as _pytest
+
+    reg = SkillRegistry()
+    assert reg._disabled_path is None
+    with _pytest.raises(RuntimeError, match="called before scan"):
+        reg.disable("never-scanned")
+    with _pytest.raises(RuntimeError, match="called before scan"):
+        reg.enable("never-scanned")
+    # Nothing was written anywhere
+    assert not (tmp_path / ".disabled.json").exists()
+
+
+def test_registry_legacy_format_round_trip(tmp_path):
+    """Lock the contract in BOTH directions: writing via disable()/enable()
+    must produce exactly what a fresh registry's _load_disabled() reads
+    back. The on-disk format is a sorted JSON array of names (the same shape
+    the API router historically wrote)."""
+    import json as _json
+
+    _make_skill_dir(tmp_path, "alpha", "name: alpha\ndescription: a")
+    _make_skill_dir(tmp_path, "beta", "name: beta\ndescription: b")
+    _make_skill_dir(tmp_path, "gamma", "name: gamma\ndescription: c")
+
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    reg.disable("gamma")
+    reg.disable("alpha")
+
+    # On-disk shape matches the legacy contract.
+    raw = (tmp_path / ".disabled.json").read_text(encoding="utf-8")
+    assert _json.loads(raw) == ["alpha", "gamma"]
+
+    # A second registry started from scratch reads the file and reproduces
+    # the same disabled set.
+    reg2 = SkillRegistry()
+    reg2.scan(tmp_path)
+    assert reg2.is_disabled("alpha")
+    assert reg2.is_disabled("gamma")
+    assert not reg2.is_disabled("beta")
+    assert {s.name for s in reg2.enabled_skills()} == {"beta"}
+
+
+def test_registry_concurrent_disable_and_discover(tmp_path):
+    """Smoke-test: many threads calling disable/enable + discover concurrently
+    must not raise (the registry holds an RLock and the index search is a
+    pure read of an immutable map). The assertion is "no exception escapes",
+    not a behavioral guarantee about which view a particular thread sees.
+    """
+    import threading
+
+    for n in ("a", "b", "c", "d", "e"):
+        _make_skill_dir(tmp_path, n, f"name: {n}\ndescription: web {n} thing\ntags: web")
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+
+    errors: list[Exception] = []
+    stop = threading.Event()
+
+    def toggler():
+        try:
+            i = 0
+            while not stop.is_set():
+                name = "abcde"[i % 5]
+                if i % 2:
+                    reg.disable(name)
+                else:
+                    reg.enable(name)
+                i += 1
+        except Exception as e:  # pragma: no cover - test will assert
+            errors.append(e)
+
+    def reader():
+        try:
+            while not stop.is_set():
+                _ = reg.discover("web", limit=10)
+                _ = reg.enabled_skills()
+        except Exception as e:  # pragma: no cover - test will assert
+            errors.append(e)
+
+    threads = [threading.Thread(target=toggler) for _ in range(2)] + [threading.Thread(target=reader) for _ in range(3)]
+    for t in threads:
+        t.start()
+    # Brief race window — enough for thousands of cycles.
+    import time as _time
+
+    _time.sleep(0.25)
+    stop.set()
+    for t in threads:
+        t.join(timeout=2)
+    assert not errors, f"thread error(s): {errors!r}"

@@ -1,10 +1,172 @@
-"""Pernix — Memory tools: remember, recall."""
+"""Pernix — Memory tools: remember, recall, deep_recall."""
 
 from __future__ import annotations
 
+import json
 import logging
 
 logger = logging.getLogger("pernix.tools.memory")
+
+# ---------------------------------------------------------------------------
+# deep_recall: LLM-backed memory agent
+# ---------------------------------------------------------------------------
+
+_DEEP_RECALL_SYSTEM = """\
+You are a memory search specialist. Search the user's persistent memory and \
+return a clear, attributed answer.
+
+Memory is stored in topic-specific markdown files (pernix.notes.md, \
+pernix.lessons.md, pernix.tools.md, etc.). Use search_memory first; if results \
+are empty or all scores < 2.0, try keyword variants or rg_memory as fallback.
+
+Strategy:
+1. Start with the primary query.
+2. If weak/empty: decompose into individual keywords, try @tags: prefix, try synonyms.
+3. Use rg_memory when search_memory returns nothing after 2 attempts.
+4. Synthesize findings into a concise attributed answer: [source_file] Relevant finding...
+5. If nothing found after exhausting strategies, say so clearly.
+
+Scores: > 3.0 strong · 1.0–3.0 weak · < 1.0 noise. Do not trust results below 1.0.\
+"""
+
+_DEEP_RECALL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_memory",
+            "description": (
+                "FTS5 keyword search over persistent memory. "
+                "Returns scored results. Score > 3.0 = strong, 1.0–3.0 = weak, < 1.0 = noise. "
+                "Try multiple queries with different phrasings if first attempt is weak/empty."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (natural language, @tags: prefix, or compound terms)",
+                    },
+                    "top": {"type": "integer", "description": "Max results (default 8, max 15)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rg_memory",
+            "description": (
+                "Ripgrep search over raw memory markdown files. "
+                "Use as fallback when search_memory returns nothing — "
+                "searches file content directly, bypassing the FTS5 index."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Search pattern (case-insensitive regex or plain term)",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+]
+
+
+def _execute_deep_recall_tool(name: str, args: dict, memory_dir: str) -> str:
+    if name == "search_memory":
+        query = args.get("query", "")
+        top = min(args.get("top", 8), 15)
+        try:
+            from core.memory.store import get_memory_store
+
+            store = get_memory_store()
+            if not store:
+                return "Memory unavailable."
+            results = store.search(query, limit=top)
+            if not results:
+                return "No results found."
+            lines = [f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:500]}" for r in results]
+            return "\n\n".join(lines)
+        except Exception as e:
+            return f"search_memory error: {e}"
+
+    if name == "rg_memory":
+        pattern = args.get("pattern", "")
+        if not pattern:
+            return "Error: pattern required."
+        try:
+            from core.memory.search import rg_memory_text
+
+            return rg_memory_text(pattern, memory_dir)
+        except Exception as e:
+            return f"rg_memory error: {e}"
+
+    return f"Unknown tool: {name}"
+
+
+async def _deep_recall_async(query: str, context: str) -> str:
+    from config import settings
+    from core.llm.client import get_llm_client
+
+    client = get_llm_client()
+    model = settings.background_model or settings.scout_model or settings.llm_model
+    memory_dir = settings.memory_dir
+
+    user_msg = f"Search for: {query}"
+    if context:
+        user_msg += f"\n\nContext: {context}"
+
+    messages: list[dict] = [
+        {"role": "system", "content": _DEEP_RECALL_SYSTEM},
+        {"role": "user", "content": user_msg},
+    ]
+
+    for round_num in range(4):
+        is_last = round_num >= 3
+        try:
+            response = await client.chat(
+                messages,
+                tools=None if is_last else _DEEP_RECALL_TOOLS,
+                model=model,
+                max_tokens=1200,
+            )
+        except Exception as e:
+            logger.warning("deep_recall LLM call failed on round %d: %s", round_num, e)
+            break
+
+        if not response.tool_calls or is_last:
+            return (response.content or "No relevant memory found.").strip()
+
+        # Append assistant turn with tool calls
+        messages.append(
+            {
+                "role": "assistant",
+                "content": response.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {"name": tc.name, "arguments": tc.arguments},
+                    }
+                    for tc in response.tool_calls
+                ],
+            }
+        )
+
+        # Execute each tool call and append results
+        for tc in response.tool_calls:
+            try:
+                args = json.loads(tc.arguments) if tc.arguments else {}
+            except json.JSONDecodeError:
+                args = {}
+            result = _execute_deep_recall_tool(tc.name, args, memory_dir)
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+
+    return "Search completed but no synthesis produced."
 
 
 def remember(content: str, file: str = "", tags: str = "", weight: str = "", _context: dict | None = None) -> str:
@@ -99,8 +261,11 @@ def ingest(
         return f"Error during ingestion: {e}"
 
 
-def recall(query: str, top: int = 5, _context: dict | None = None) -> str:
-    """Search persistent memory."""
+def recall(query: str, top: int = 5, file: str = "", _context: dict | None = None) -> str:
+    """Fast FTS5 memory search. Returns scored results (score > 3.0 = strong,
+    1.0–3.0 = weak, < 1.0 = noise). Content is capped at 400 chars per result.
+    On empty/weak results, use deep_recall() for LLM-synthesized search with
+    keyword reformulation. Never use grep or file_read for memory."""
     from core.memory.store import get_memory_store
 
     store = get_memory_store()
@@ -108,7 +273,10 @@ def recall(query: str, top: int = 5, _context: dict | None = None) -> str:
         return "Error: Memory system unavailable"
 
     try:
-        results = store.search(query, limit=top)
+        fetch = top * 2 if file else top
+        results = store.search(query, limit=fetch)
+        if file:
+            results = [r for r in results if r.entry.file_name == file][:top]
         if not results:
             return "No results found in memory."
 
@@ -119,6 +287,40 @@ def recall(query: str, top: int = 5, _context: dict | None = None) -> str:
     except Exception as e:
         logger.error("Recall failed: %s", e)
         return f"Error searching memory: {e}"
+
+
+def deep_recall(query: str, context: str = "", _context: dict | None = None) -> str:
+    """LLM-backed memory search with synthesis. Searches memory using multiple
+    strategies (FTS5 + ripgrep fallback), reformulates queries on weak/empty
+    results, and returns a clean attributed answer. Raw search results stay
+    inside the sub-agent — they do not pollute the caller's context.
+
+    Use when: recall() returns empty/weak results, the query is complex or
+    multi-faceted, or cross-file synthesis is needed. Pass context= to help
+    the model focus on what's relevant."""
+    import asyncio
+
+    from core.memory.store import get_memory_store
+
+    store = get_memory_store()
+    if store is None:
+        return "Error: Memory system unavailable"
+
+    try:
+        ctx = _context or {}
+        loop = ctx.get("_loop") or asyncio.get_running_loop()
+        future = asyncio.run_coroutine_threadsafe(_deep_recall_async(query, context), loop)
+        return future.result(timeout=60)
+    except Exception as e:
+        logger.warning("deep_recall LLM agent failed, falling back to basic recall: %s", e)
+        try:
+            results = store.search(query, limit=8)
+            if not results:
+                return "No results found in memory."
+            lines = [f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:400]}" for r in results]
+            return "\n\n".join(lines)
+        except Exception as e2:
+            return f"Error searching memory: {e2}"
 
 
 def register(reg) -> None:
@@ -177,17 +379,63 @@ def register(reg) -> None:
     reg.register(
         name="recall",
         func=recall,
-        description="Search persistent memory for relevant knowledge from previous sessions.",
+        description=(
+            "Fast FTS5 search over persistent memory. "
+            "Scores: > 3.0 strong · 1.0–3.0 weak · < 1.0 noise. "
+            "Content capped at 400 chars/result. "
+            "On empty/weak results, use deep_recall() for LLM-synthesized search. "
+            "Never use grep or file_read for memory — they cannot reach the memory directory."
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query (natural language)"},
+                "query": {
+                    "type": "string",
+                    "description": "Search query (natural language, @tags:, or compound terms)",
+                },
                 "top": {"type": "integer", "description": "Max results (default 5)"},
+                "file": {
+                    "type": "string",
+                    "description": "Optional: restrict search to one memory file by name (e.g. pernix.lessons)",
+                },
             },
             "required": ["query"],
         },
         category="memory",
         tags=["recall", "search", "memory", "retrieve", "find", "knowledge"],
         timeout=30,
+        parallel_safe=True,
+    )
+
+    reg.register(
+        name="deep_recall",
+        func=deep_recall,
+        description=(
+            "LLM-backed memory search with synthesis. Searches memory using multiple "
+            "strategies (FTS5 + ripgrep fallback), reformulates queries on weak/empty results, "
+            "and returns a clean attributed answer. Raw search noise stays inside the sub-agent. "
+            "Use when: recall() returns empty/weak results, the query is complex, "
+            "or cross-file synthesis is needed. Pass context= to focus the search."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to find (natural language, tags, epoch, topic, etc.)",
+                },
+                "context": {
+                    "type": "string",
+                    "description": (
+                        "Optional framing for the search model — why you need this and "
+                        "what would be relevant (e.g. 'debugging a whisper transcription failure')"
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+        category="memory",
+        tags=["recall", "search", "memory", "retrieve", "find", "knowledge", "deep", "synthesize"],
+        timeout=60,
         parallel_safe=True,
     )

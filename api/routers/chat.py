@@ -6,6 +6,7 @@ All real-time events flow through the persistent SSE connection
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -65,7 +66,7 @@ def _extract_pdf_text(pdf_path: Path) -> str | None:
         return None
 
 
-def _prepare_attachments(message: str) -> str:
+async def _prepare_attachments(message: str) -> str:
     """Rewrite attachment references in a fresh user message.
 
     - Leaves image `[attached: foo.jpg]` references untouched (compiler
@@ -119,7 +120,7 @@ def _prepare_attachments(message: str) -> str:
             )
             continue
 
-        text = _extract_pdf_text(pdf_path)
+        text = await asyncio.to_thread(_extract_pdf_text, pdf_path)
         if text is None:
             replacements.append(
                 (
@@ -181,7 +182,7 @@ async def chat(body: dict):
 
     # Rewrite attachment references: extract PDF text to sidecars, leave
     # image refs as-is for compile-time expansion. No base64 enters the DB.
-    stored_message = _prepare_attachments(message)
+    stored_message = await _prepare_attachments(message)
     await manager.prompt(
         session_id,
         stored_message,
@@ -284,12 +285,17 @@ async def get_partial(session_id: str):
 async def compact(session_id: str):
     """Force context compaction."""
     from sessions.manager import get_manager
-    from sessions.state import SessionState
 
     manager = get_manager()
     session = manager.get(session_id)
-    if session and session.state != SessionState.IDLE:
-        raise HTTPException(409, detail=f"Session is {session.state.value}, must be idle to compact")
+    if session:
+        from sessions import state_v2 as _sv2
+
+        if _sv2._current_state(session) is not _sv2.SessionStateV2.IDLE_READY:
+            raise HTTPException(
+                409,
+                detail=f"Session is {_sv2._current_state(session).value}, must be idle_ready to compact",
+            )
 
     from core.context.compaction import compact_with_llm
 

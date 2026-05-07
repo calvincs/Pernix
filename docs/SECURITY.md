@@ -157,11 +157,26 @@ These endpoints are only accessible from `127.0.0.1` or `::1`, regardless of aut
 
 ## Dangerous Tool Gate
 
-Tools classified as `dangerous` (primarily `bash`) require explicit user confirmation before each execution, unless `auto_approve_dangerous = true`.
+Tools classified as `dangerous` (primarily `bash`, file writes, unrestricted network access) require explicit per-invocation user confirmation before executing, unless the server was started with the `--dangerous` flag.
 
-When the agent wants to run a dangerous tool, it emits an `ask_user` event with the proposed command. The user approves or rejects it in the UI (or via `POST /api/sessions/{id}/questions/{qid}/answer`).
+### Normal mode (default — `auto_approve_dangerous = false`)
 
-**Keep `auto_approve_dangerous = false`** unless you fully trust the agent's judgment for your use case.
+The agent must go through a two-step handshake for every distinct dangerous action:
+
+1. **`ask_user()`** — the agent describes the exact action it intends to perform. You see the specific command, URL, or file path — not just the tool name. The session suspends until you respond.
+2. **`approve_dangerous_tool(tool_name, scope)`** — after you confirm, the agent registers approval for that specific action. Approvals are consumed after one use; a different call to the same tool requires a new confirmation.
+
+Approved scopes are persisted to `data/tool_approvals.json`. If you've confirmed an action before (e.g. "run ps aux to list processes"), the `ask_user` step is skipped automatically on future occurrences. View and clear remembered approvals in **Settings → Security**.
+
+Workers and cron jobs face the same gate — they cannot escalate privilege by spawning sub-agents.
+
+### Run Dangerously mode (`--dangerous` startup flag)
+
+Start the server with `python run.py --dangerous` to bypass the approval gate entirely. All dangerous tools execute immediately without confirmation in every session, including workers and cron jobs.
+
+**This flag is the only activation path.** It cannot be set via `settings.json`, the API, or any environment variable while the server is running — this prevents a rogue process or prompt injection from silently elevating privileges mid-session. The current mode is shown read-only in **Settings → Security** and as a persistent red banner in the **Explorer → Tools** panel.
+
+**Keep `auto_approve_dangerous = false` (do not use `--dangerous`)** unless you fully trust the current session context and plan to disable it immediately after.
 
 ---
 

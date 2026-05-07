@@ -5,6 +5,7 @@ import { get, post, del, getAuthToken, setAuthToken } from './api.js';
 import { connectSSE, disconnectSSE } from './sse.js';
 import { getPermission, requestPermission, connectGlobalNotifications, registerServiceWorker, subscribePush } from './notifications.js';
 import { el, text, clear, initMarked, renderMarkdown } from './render.js';
+import { initSigil } from './sigil.js';
 import { openSettings } from './components/modals/settings.js';
 import { openTimeline, appendTimelineRow, isTimelineOpen } from './components/modals/timeline.js';
 import { initBell, openBellPanel, closeBellPanel, refreshBell } from './components/notification-bell.js';
@@ -199,6 +200,7 @@ async function selectSession(sid) {
     _showSendButton();
     updateStatus('');
     _clearToolStatus();
+    _applyStateBadge('idle_ready', '');  // reset badge before fetching real state
     const _mEl = document.getElementById('status-model');
     if (_mEl) _mEl.textContent = state.model;
     try {
@@ -206,6 +208,7 @@ async function selectSession(sid) {
         // Set _lastSeq to server's current event_seq so SSE dedup skips
         // events already rendered from DB — prevents the load+replay race
         _lastSeq = status.event_seq || 0;
+        _applyStateBadge(status.state || 'idle_ready', '');
 
         if (status.status === 'processing' || status.status === 'scouting') {
             state.streaming = true;
@@ -347,23 +350,38 @@ function setupNewSession() {
 // Empty state
 // ---------------------------------------------------------------------------
 
+let _sigilStop = null;
 function showEmptyState() {
     const inner = _messagesInner();
+    if (_sigilStop) { _sigilStop(); _sigilStop = null; }
     clear(inner);
-    const icon = el('img', { class: 'empty-state-icon', src: '/static/img/app-icon.gif', alt: 'Pernix', width: '80', height: '80' });
-    const welcome = el('div', { class: 'empty-state' }, [
-        icon,
-        el('h2', {}, [text('Pernix')]),
-        el('p', {}, [
-            text('Start a conversation or drop a file to begin. '),
-            el('br'),
-            el('br'),
-            text('Type '),
-            el('kbd', {}, [text('/help')]),
-            text(' for available commands.'),
-        ]),
+    // Hero-style layout: animated sigil canvas as background, "Pernix" title
+    // overlaid in the center (gradient gold serif from the website),
+    // kicker etymology below the figure, then the help text.
+    const sigil = el('canvas', { class: 'empty-state-sigil', 'aria-hidden': 'true' });
+    const title = el('h2', { class: 'empty-state-title' }, [
+        el('span', { class: 'empty-state-title-line' }, [text('Pernix')]),
     ]);
+    const figure = el('div', { class: 'empty-state-figure' }, [sigil, title]);
+    const kicker = el('p', { class: 'empty-state-kicker' }, [
+        el('em', {}, [text('per·nix')]),
+        text('  '),
+        el('span', { class: 'ipa' }, [text('/ˈpɛɾ.nɪks/')]),
+        text('  '),
+        el('span', { class: 'def' }, [text('— Latin: nimble, swift of foot.')]),
+    ]);
+    const help = el('p', { class: 'empty-state-help' }, [
+        text('Start a conversation or drop a file to begin. '),
+        el('br'),
+        el('br'),
+        text('Type '),
+        el('kbd', {}, [text('/help')]),
+        text(' for available commands.'),
+    ]);
+    const welcome = el('div', { class: 'empty-state' }, [figure, kicker, help]);
     inner.appendChild(welcome);
+    // Init after attach so getBoundingClientRect() reflects laid-out size.
+    _sigilStop = initSigil(sigil);
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,6 +1172,7 @@ async function _syncStreamingState() {
     if (!state.sid) return;
     try {
         const status = await get(`/api/sessions/${state.sid}/status`);
+        _applyStateBadge(status.state || 'idle_ready', '');
         const serverActive = status.status === 'processing' || status.status === 'scouting';
         if (serverActive && !state.streaming) {
             state.streaming = true;
@@ -1173,18 +1192,26 @@ async function _syncStreamingState() {
 async function _softReload() {
     if (!state.sid) return;
     console.info('SSE: soft reload triggered (gap detected or reconciliation)');
-    // Preserve streaming state — don't reset if agent is mid-stream
-    const wasStreaming = state.streaming;
+    // loadMessages() clears and re-renders the DOM, which detaches any live
+    // _streamingEl reference. Reset it unconditionally so the next stream.token
+    // event creates a fresh element rather than updating a ghost node.
+    _streamingEl = null;
+    _collected = '';
+    state.streaming = false;
     await loadMessages(state.sid);
-    // Re-fetch server seq to stay in sync
+    // Re-fetch server state to re-wire streaming controls and badge.
     try {
         const status = await get(`/api/sessions/${state.sid}/status`);
         _lastSeq = status.event_seq || _lastSeq;
-        if (!wasStreaming && (status.status === 'processing' || status.status === 'scouting')) {
+        _applyStateBadge(status.state || 'idle_ready', '');
+        if (status.status === 'processing' || status.status === 'scouting') {
             state.streaming = true;
             _showStopButton();
             _streamingEl = appendMessage('assistant', '');
             _collected = '';
+        } else {
+            _showSendButton();
+            updateStatus('');
         }
     } catch {}
 }
@@ -1626,6 +1653,20 @@ function processFileRefs(container) {
         });
         link.parentNode.insertBefore(btn, link.nextSibling);
     });
+
+    // Make inline code spans that look like file paths clickable
+    const FILE_PATH_RE = /^[a-zA-Z0-9_.][a-zA-Z0-9_.\-]*(?:\/[a-zA-Z0-9_.][a-zA-Z0-9_.\-]*)+$/;
+    const codeEls = container.querySelectorAll('.content code');
+    codeEls.forEach(codeEl => {
+        if (codeEl.closest('pre')) return;
+        if (codeEl.classList.contains('file-path-link')) return;
+        const pathText = codeEl.textContent.trim();
+        if (pathText.length > 200 || pathText.includes('\n')) return;
+        if (!FILE_PATH_RE.test(pathText)) return;
+        codeEl.classList.add('file-path-link');
+        codeEl.title = 'Open in Explorer';
+        codeEl.addEventListener('click', () => openWorkspaceFile(pathText));
+    });
 }
 
 function openWorkspaceFile(path) {
@@ -1913,14 +1954,17 @@ const _STATE_LABELS = {
     awaiting_user: 'awaiting user',
 };
 
-function _renderStateBadge(event) {
+function _applyStateBadge(to, reason) {
     const el = document.getElementById('state-badge');
     if (!el) return;
-    const to = event.to || 'idle_ready';
     el.className = 'state-badge ' + to;
     el.textContent = _STATE_LABELS[to] || to;
-    const reason = event.reason ? ` (${event.reason})` : '';
-    el.title = `state: ${to}${reason}`;
+    el.title = reason ? `state: ${to} (${reason})` : `state: ${to}`;
+}
+
+function _renderStateBadge(event) {
+    const to = event.to || 'idle_ready';
+    _applyStateBadge(to, event.reason || '');
 
     if (isTimelineOpen()) {
         appendTimelineRow({

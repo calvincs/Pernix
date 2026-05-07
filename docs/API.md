@@ -2,6 +2,13 @@
 
 Pernix exposes a REST API for programmatic access. The web UI itself is built entirely on this API, so anything the UI can do, the API can do.
 
+> **Try it interactively first.** Pernix is built on FastAPI, which means a complete, live, click-to-try Swagger UI is auto-generated for every endpoint. Open it while the server is running:
+>
+> - **Swagger UI:** [http://localhost:8090/docs](http://localhost:8090/docs) — try requests directly in the browser
+> - **ReDoc:** [http://localhost:8090/redoc](http://localhost:8090/redoc) — a clean, reference-style view of every schema
+>
+> The reference below documents the same endpoints in narrative form. Most users will find the Swagger UI faster for exploration; this document is the right place for offline reading and stable links.
+
 ---
 
 ## Base URL
@@ -370,7 +377,7 @@ Verifies that a model is reachable and returns its capabilities.
 POST /api/models/switch
 ```
 ```json
-{ "session_id": "abc123", "model": "anthropic/claude-sonnet-4-5" }
+{ "session_id": "abc123", "model": "anthropic/claude-sonnet-4.6" }
 ```
 Sets a per-session model override (does not change global settings).
 
@@ -401,7 +408,7 @@ Returns all current settings. API keys are redacted (shown as `_set: true/false`
 POST /api/settings
 Content-Type: application/json
 
-{ "llm_model": "qwen2.5-coder", "max_tool_rounds": 15 }
+{ "llm_model": "qwen3:32b", "max_tool_rounds": 15 }
 ```
 Updates one or more settings. Partial updates are supported — only the provided keys are changed.
 

@@ -25,6 +25,27 @@ class ToolExecutionResult:
     metadata: dict = field(default_factory=dict)
 
 
+def _is_unattended_session(sid: str) -> bool:
+    """Return True for cron sessions and workers spawned from cron sessions.
+
+    These run without a user present, so the ask_user → approve_dangerous_tool
+    flow is not viable and the dangerous gate is skipped.
+    """
+    if not sid:
+        return False
+    from sessions.manager import get_manager
+
+    s = get_manager().get(sid)
+    if s is None:
+        return False
+    if s.session_type == "cron":
+        return True
+    if s.session_type == "worker" and s.parent_session_id:
+        parent = get_manager().get(s.parent_session_id)
+        return bool(parent and parent.session_type == "cron")
+    return False
+
+
 async def _execute_single(
     name: str,
     arguments: dict,
@@ -43,7 +64,7 @@ async def _execute_single(
     if registry.is_disabled(name):
         return ToolExecutionResult(
             tool_name=name,
-            content=f"Error: Tool '{name}' is currently disabled.",
+            content=(f"Error: Tool '{name}' is disabled. " "Enable it in Explorer > Tools before use."),
             was_error=True,
             latency_ms=0,
         )
@@ -64,24 +85,54 @@ async def _execute_single(
             latency_ms=0,
         )
 
-    # Enforce safety_level="dangerous" gate (LogAct-inspired voting concept).
-    # Both parent and worker sessions must pass this gate.
-    # Workers are not trusted to bypass user confirmation — an LLM could
-    # otherwise escalate by spawning a worker to call dangerous tools.
+    # Enforce safety_level="dangerous" gate.
+    # Both parent and worker sessions must pass — workers cannot escalate
+    # privilege by spawning a sub-agent to call dangerous tools.
+    # Three approval paths:
+    #   1. Global: settings.auto_approve_dangerous = True (disables gate entirely).
+    #   2. Unattended: cron sessions and workers spawned from cron sessions skip
+    #      the gate — no user is present to answer ask_user prompts.
+    #   3. Per-session: user confirmed via ask_user + approve_dangerous_tool(),
+    #      which sets session._approved_dangerous_tools. Persists for session lifetime.
     if tool.safety_level == "dangerous":
         from config import settings
 
-        if not settings.auto_approve_dangerous:
-            return ToolExecutionResult(
-                tool_name=name,
-                content=(
-                    f"Error: Tool '{name}' is classified as dangerous and requires "
-                    f"explicit confirmation. Use ask_user to confirm with the user "
-                    f"before calling this tool, or enable auto_approve_dangerous in settings."
-                ),
-                was_error=True,
-                latency_ms=0,
-            )
+        if not settings.auto_approve_dangerous and not _is_unattended_session(sid):
+            # Check per-session approval granted by approve_dangerous_tool().
+            # Non-persistent approvals are consumed (removed) on first use so
+            # each distinct dangerous call requires its own ask_user + approval.
+            _session_approved = False
+            if sid:
+                from sessions.manager import get_manager as _get_mgr
+
+                _s = _get_mgr().get(sid)
+                if _s:
+                    _approvals: dict = getattr(_s, "_approved_dangerous_tools", {})
+                    if name in _approvals:
+                        entry = _approvals[name]
+                        _session_approved = True
+                        if not entry.get("persistent", False):
+                            # Consume: this approval covers only this one call.
+                            del _approvals[name]
+
+            if not _session_approved:
+                return ToolExecutionResult(
+                    tool_name=name,
+                    content=(
+                        f"Error: Tool '{name}' requires explicit user approval for this specific call.\n"
+                        f"Step 1 — call ask_user() describing EXACTLY what you will do "
+                        f"(e.g. the command, URL, or file path — not just the tool name).\n"
+                        f"Step 2 — after the user confirms, call "
+                        f"approve_dangerous_tool(tool_name='{name}', scope='<exact description>') "
+                        f"to unlock this specific action. Approval is consumed after one use; "
+                        f"a different call to the same tool requires a new approval.\n"
+                        f"Use persistent=True only for genuinely repetitive low-risk actions "
+                        f"(e.g. 'browse several pages while researching').\n"
+                        f"Alternatively, enable auto_approve_dangerous in Settings."
+                    ),
+                    was_error=True,
+                    latency_ms=0,
+                )
 
     timeout = tool.timeout
     start = time.monotonic()

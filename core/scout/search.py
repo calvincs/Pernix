@@ -197,12 +197,26 @@ def gather_cross_session_data(message: str, current_session_id: str) -> str:
     if not results_by_session:
         return ""
 
+    # Enrich session keys with type and date from the first hit for each session
+    session_meta: dict[str, str] = {}
+    for hit in sorted_hits[:8]:
+        sid = hit["session_id"]
+        if sid not in session_meta:
+            stype = hit.get("session_type") or "normal"
+            date = (hit.get("session_created_at") or hit.get("session_updated_at") or "")[:10]
+            session_meta[sid] = f" type={stype}" + (f" {date}" if date else "")
+
     # Format grouped by session
     lines = ["CROSS-SESSION FINDINGS:"]
     for session_key, entries in results_by_session.items():
-        # Truncate long session keys for cleaner output
-        display_key = session_key[:60] + "..." if len(session_key) > 60 else session_key
-        lines.append(f"Session ({display_key}):")
+        sid_prefix = session_key.split('"')[0].strip()
+        meta = ""
+        for sid, m in session_meta.items():
+            if sid.startswith(sid_prefix):
+                meta = m
+                break
+        display_key = session_key[:60] + ("..." if len(session_key) > 60 else "")
+        lines.append(f"Session ({display_key}{meta}):")
         lines.extend(entries)
     return "\n".join(lines)
 

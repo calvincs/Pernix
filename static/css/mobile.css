@@ -227,8 +227,14 @@
         justify-content: center;
         font-size: var(--text-md);
     }
+    /* Bigger touch targets on mobile — brand and button bump together to
+       stay horizontally aligned. The desktop rule gives both 24px height;
+       mobile lifts both to 36px for thumb-friendly hit area. */
+    #sidebar header .brand,
+    #sidebar header #new-session-btn {
+        height: 36px;
+    }
     #new-session-btn {
-        min-height: 36px;
         padding: var(--sp-2) var(--sp-3);
     }
 
@@ -485,8 +491,13 @@
         padding: var(--sp-3) var(--sp-5);
         font-size: var(--text-md);
     }
+    .tab-bar {
+        padding: 0;
+    }
     .tab-btn {
+        flex: 1 1 auto;
         min-height: 44px;
+        text-align: center;
     }
 
     /* OpenRouter model list */
@@ -514,6 +525,12 @@
     .question-answer {
         font-size: 16px;
         min-height: 60px;
+    }
+    .q-yes-btn,
+    .q-no-btn,
+    .q-other-btn {
+        min-height: 52px;
+        font-size: var(--text-lg);
     }
 
     @keyframes slideUpMobile {
@@ -557,9 +574,47 @@
     .empty-state {
         padding: var(--sp-6);
     }
-    .empty-state-icon {
-        width: 64px;
-        height: 64px;
+    .empty-state-figure {
+        width: 240px;
+        height: 240px;
+    }
+    .empty-state-title {
+        font-size: 44px;
+    }
+    .empty-state-kicker {
+        font-size: 11px;
+    }
+    .empty-state-kicker em {
+        font-size: 13px;
+    }
+
+    /* ------------------------------------------------------------------
+       Notification bell panel — small-screen adjustments
+       ------------------------------------------------------------------ */
+    .bell-panel .notif-item {
+        padding: var(--sp-2) var(--sp-3);
+    }
+    .bell-panel .notif-item-type {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 65%;
+    }
+    .bell-panel .notif-item-text {
+        word-break: break-word;
+    }
+    .bell-panel .notif-item-buttons {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+    .bell-panel .notif-item-buttons .btn-sm {
+        min-height: 36px;
+        padding: var(--sp-2) var(--sp-3);
+    }
+    .bell-panel .notif-status {
+        width: 100%;
+        margin-right: 0;
+        margin-bottom: var(--sp-1);
     }
 }
 

@@ -456,3 +456,102 @@ async def test_run_agent_termination_reason_cancelled(monkeypatch):
     _setup_registry(monkeypatch)
     await run_agent(sid, "hi", session)
     assert session.termination_reason == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Bug C — _tried_fallback must be sticky across rounds
+# ---------------------------------------------------------------------------
+
+
+async def test_fallback_sticky_across_rounds(monkeypatch):
+    """Once the primary model fails and we fall back in round 0, the fallback
+    flag must persist for the rest of the turn. Subsequent rounds must go
+    directly to the fallback model without re-attempting the failing primary.
+
+    Before the fix: _tried_fallback = False was reset inside the outer
+    while tool_round loop, so every round re-attempted the primary.
+    After the fix: _tried_fallback lives outside the loop and is sticky.
+    """
+    from core.llm.types import StreamEvent, StreamEventType, ToolCall
+    from core.scout.report import ScoutReport
+    from db import models as db
+    from tests.conftest import FakeLLMClient
+
+    # Make is_openrouter_model("vendor/primary") return True and
+    # is_openrouter_model("local-fallback") return False.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-for-fallback-test")
+    monkeypatch.setattr("config.settings.llm_model", "vendor/primary-model")
+    monkeypatch.setattr("config.settings.fallback_model", "local-fallback")
+    monkeypatch.setattr("config.settings.max_tool_rounds", 10)
+
+    # Track every (model, attempt_type) call to verify fallback stickiness.
+    models_called: list[str] = []
+    fallback_round = 0
+
+    class FallbackTrackingClient(FakeLLMClient):
+        async def chat_stream(self, messages, tools=None, model="", **kwargs):
+            nonlocal fallback_round
+            models_called.append(model)
+            self.calls.append({"messages": messages, "tools": tools, "model": model})
+            self.call_count += 1
+
+            if "/" in model:
+                # Primary / OpenRouter model → non-retryable error (429-style).
+                # _is_stream_retryable returns False for this, so agent goes
+                # straight to fallback without sleeping.
+                yield StreamEvent(type=StreamEventType.ERROR, error="429 rate limit exceeded")
+            else:
+                # Fallback (local) model.
+                fallback_round += 1
+                if fallback_round == 1:
+                    # Round 0's fallback: emit a tool call to trigger a second round.
+                    yield StreamEvent(
+                        type=StreamEventType.TOOL_CALL,
+                        tool_calls=[ToolCall(id="tc1", name="noop_tool", arguments="{}")],
+                    )
+                else:
+                    # Round 1's fallback: emit a final text response to end the loop.
+                    yield StreamEvent(type=StreamEventType.TOKEN, content="all done")
+                yield StreamEvent(type=StreamEventType.DONE)
+
+        def resolve_provider(self, model=""):
+            return "openrouter" if "/" in model else "ollama"
+
+    fake = FallbackTrackingClient()
+    monkeypatch.setattr("core.agent.get_llm_client", lambda: fake)
+
+    # Register a no-op tool so the agent can actually call it.
+    from core.tools.registry import ToolRegistry
+
+    reg = ToolRegistry()
+
+    def noop_tool() -> str:
+        return "ok"
+
+    reg.register(
+        name="noop_tool",
+        func=noop_tool,
+        description="no-op",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+    monkeypatch.setattr("core.agent.get_registry", lambda: reg)
+
+    sid = db.create_session(title="Fallback Sticky Test")
+    session = _make_session(sid)
+    session.last_scout_report = ScoutReport(recommended_tools=["noop_tool"])
+
+    await run_agent(sid, "go", session)
+
+    primary_calls = [m for m in models_called if "/" in m]
+    fallback_calls = [m for m in models_called if "/" not in m]
+
+    assert len(primary_calls) == 1, (
+        f"Primary model must be attempted exactly ONCE (round 0 only); "
+        f"got {len(primary_calls)}. Full call sequence: {models_called}"
+    )
+    assert len(fallback_calls) >= 2, (
+        f"Fallback model must handle all subsequent rounds; "
+        f"got {len(fallback_calls)}. Full call sequence: {models_called}"
+    )

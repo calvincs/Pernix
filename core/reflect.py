@@ -49,6 +49,7 @@ RULES:
 - TOOL CALL FACTS ARE NOT NEGOTIABLE. The TOOL EXECUTION SUMMARY is observed truth, not interpretation. Before claiming the agent did NOT use a tool, verify: if the tool name appears in the summary with calls > 0, the agent DID call it. Do NOT write "agent did not call X" or "agent failed to use X" or "X was skipped" if X.calls > 0 in the summary. If you believe the call was *ineffective* (tool ran but didn't produce the expected result), say that — but do not deny the call happened. Hallucinating absence of a call that the summary records as present is a verifier-side correctness failure.
 - TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent, workflow result) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
 - WORKFLOW RUNS: If the WORKFLOW RUNS section is present, treat its `status` field as authoritative for whether the named workflow finished. status='running' or status='failed' both mean the workflow did NOT produce its terminal output, regardless of how many intermediate scratch files were written to the workspace — those are inputs to later steps, not deliverables. status='partial'/'failed'/'running' for a user-named workflow → retry (or escalate if the same failure has already occurred). status='complete' AND the terminal-step output_file is listed under WORKSPACE FILES → pass.
+- CEILING LOOP → ESCALATE: If TERMINATION HISTORY shows the same blocking reason (e.g. round_ceiling, budget_exhausted, compaction_failed) on the current turn AND at least one prior turn, the agent is hitting the same hard wall — another retry will hit it again. Verdict MUST be 'escalate'. In `missing`, name the wall: e.g. 'round_ceiling on consecutive attempts; agent cannot finish within max_tool_rounds — split the task or raise the limit.'
 - THRASHING → ESCALATE: If the summary shows ≥4 distinct tools used with no forward progress (empty outputs repeated, same files re-read, error count growing, or the agent drifting across unrelated checks), the agent is thrashing, not pursuing a coherent-but-wrong strategy. Prefer "escalate" with a clear "missing" field over "retry" — another round of the same thrashing will not help. A single failing tool being tried with sibling tools is NOT thrashing; reserve "escalate" for cases where the agent lost the thread.
 - For failure_cause attribution: if tools were hallucinated or the plan jumped straight to the wrong approach, lean "scout". If the plan was sensible but the agent used tools incorrectly or gave up early, lean "agent". Don't guess — use "none" with low confidence if unclear.
 
@@ -203,6 +204,8 @@ def _build_compact_evidence(
     attempt: int,
     tool_summary: dict | None,
     scout_report=None,
+    termination_reason: str | None = None,
+    prior_termination_reasons: list[str] | None = None,
 ) -> str:
     """Build a compact evidence blob for reflect.
 
@@ -237,6 +240,16 @@ def _build_compact_evidence(
         ws_files = [str(f.relative_to(workspace)) for f in candidates[:20]]
 
     parts.append("WORKSPACE FILES:\n" + ("\n".join(f"- {f}" for f in ws_files) if ws_files else "(none)"))
+
+    # Termination history — lets reflect detect ceiling-loops (same hard wall
+    # hit on multiple consecutive turns). When present, the prompt's CEILING
+    # LOOP rule fires: same reason ≥2 times in a row → escalate.
+    if termination_reason or prior_termination_reasons:
+        history = list(prior_termination_reasons or [])
+        if termination_reason and (not history or history[0] != termination_reason):
+            history = [termination_reason] + history
+        if history:
+            parts.append("TERMINATION HISTORY (newest first): " + ", ".join(history))
 
     # Scout's deliverables_plan — gives reflect a concrete checklist
     if scout_report is not None and getattr(scout_report, "deliverables_plan", None):
@@ -351,6 +364,8 @@ def _build_evidence(
     tool_summary: dict | None = None,
     scout_report=None,
     turn_user_msg_id: int | None = None,
+    termination_reason: str | None = None,
+    prior_termination_reasons: list[str] | None = None,
 ) -> tuple[str, str]:
     """Build evidence for reflect verification.
 
@@ -397,6 +412,8 @@ def _build_evidence(
             attempt,
             tool_summary,
             scout_report,
+            termination_reason=termination_reason,
+            prior_termination_reasons=prior_termination_reasons,
         )
         return user_request, evidence
 
@@ -446,7 +463,7 @@ def _build_evidence(
 
     # Format all messages as a conversation transcript
     # Exclude scout/compaction metadata and audit notices — reflect doesn't need them
-    substantive = [m for m in messages if m["role"] not in ("compaction", "scout", "notice")]
+    substantive = [m for m in messages if m["role"] not in ("compaction", "scout", "notice", "eval", "model_divider")]
     transcript_lines = [_format_message(m) for m in substantive]
     transcript = "\n\n---\n\n".join(transcript_lines)
 
@@ -739,6 +756,8 @@ async def reflect_on_session(
     scout_report=None,
     extra_evidence: str = "",
     turn_user_msg_id: int | None = None,
+    termination_reason: str | None = None,
+    prior_termination_reasons: list[str] | None = None,
 ) -> ReflectResult:
     """Analyze a completed session turn and decide if the task was fulfilled.
 
@@ -764,6 +783,8 @@ async def reflect_on_session(
         tool_summary=tool_summary,
         scout_report=scout_report,
         turn_user_msg_id=turn_user_msg_id,
+        termination_reason=termination_reason,
+        prior_termination_reasons=prior_termination_reasons,
     )
     if not user_request or not evidence:
         r = ReflectResult(verdict="pass", reasoning="No user request found to verify")
@@ -849,6 +870,30 @@ async def reflect_on_session(
                     raise
 
             result = _result_from_data(data, model, latency_ms)
+
+            # Defensive ceiling-loop guard: if the agent hit round_ceiling on
+            # this turn AND on at least one prior turn, retry is provably
+            # hopeless against the same hard wall. Override the LLM's verdict.
+            # Only round_ceiling is guarded; other terminal reasons (compaction,
+            # budget) often have legitimate retries — they get the prompt rule
+            # but not this code-level override.
+            if (
+                termination_reason == "round_ceiling"
+                and any(r == "round_ceiling" for r in (prior_termination_reasons or []))
+                and result.verdict == "retry"
+            ):
+                logger.info(
+                    "Reflect ceiling-loop guard: forcing escalate (was %s) for session %s",
+                    result.verdict,
+                    session_id,
+                )
+                result.verdict = "escalate"
+                result.failure_cause = result.failure_cause or "task"
+                if not result.missing:
+                    result.missing = (
+                        "Agent hit round_ceiling on consecutive attempts. Either split "
+                        "the task into smaller pieces or raise max_tool_rounds in settings."
+                    )
 
             logger.info(
                 "Reflect verdict=%s for session %s (%dms, inner=%d): %s",

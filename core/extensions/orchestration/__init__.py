@@ -1396,14 +1396,19 @@ _WORKER_ID_RE = __import__("re").compile(r"^Worker spawned:\s+(\S+)")
 _DEFAULT_MAX_RETRIES = 1
 
 
-def _emit_workflow_event(event: dict) -> None:
-    """Emit a workflow.* event to the global bus. Best-effort; never raises."""
+def _emit_workflow_event(event: dict, session=None) -> None:
+    """Emit a workflow.* event to the global bus and optionally to a session stream."""
     try:
         from core.events import get_event_bus
 
         get_event_bus().emit(event)
     except Exception as e:
-        logger.debug("Failed to emit workflow event: %s", e)
+        logger.debug("Failed to emit workflow event to global bus: %s", e)
+    if session is not None:
+        try:
+            session.emit_event(event)
+        except Exception as e:
+            logger.debug("Failed to emit workflow event to session: %s", e)
 
 
 def _build_step_task(
@@ -1701,24 +1706,49 @@ def _finalize_step(
         # edf1b8a83c89 — wrote ai_tech_brief_web_news.json (6.8KB) at round 4,
         # then reflect read its "I'm still fetching..." prose and asked to
         # retry, costing ~3 minutes on a fresh worker.
+        #
+        # Budget gate: only skip the retry when the step has already exhausted its
+        # retry budget. On the first attempt, let the retry loop fire so reflect's
+        # quality feedback is actually acted on — the retry worker can read the
+        # existing output file and improve or confirm it. Silently promoting to
+        # "complete" on attempt 1 masked real quality regressions (e.g. a step that
+        # only processed 2 of 5 required items passed as-is).
         output_file = step.output_file
         if output_file:
             output_path = run_dir / output_file
             if output_path.exists() and output_path.stat().st_size > 100:
-                logger.warning(
-                    "Workflow step '%s' worker %s verdict=retry but %s exists "
-                    "(%d bytes) — overriding to complete on file evidence. "
-                    "Reflect reasoning: %s",
-                    step.id,
-                    worker_id,
-                    output_file,
-                    output_path.stat().st_size,
-                    (reflect.get("reasoning") or "")[:200],
-                )
-                info["status"] = "complete"
-                info["reflect_verdict"] = "retry-overridden-by-file-evidence"
-                info["reflect_verdict_original"] = "retry"
-                return "complete"
+                attempts_so_far = info.get("attempts", 1)
+                max_retries_local = int(getattr(step, "max_retries", _DEFAULT_MAX_RETRIES) or _DEFAULT_MAX_RETRIES)
+                if attempts_so_far > max_retries_local:
+                    # Budget exhausted — file evidence is all we have; promote to complete.
+                    logger.warning(
+                        "Workflow step '%s' worker %s verdict=retry but %s exists "
+                        "(%d bytes) and retry budget exhausted (%d/%d) — "
+                        "overriding to complete on file evidence. Reflect: %s",
+                        step.id,
+                        worker_id,
+                        output_file,
+                        output_path.stat().st_size,
+                        attempts_so_far,
+                        max_retries_local,
+                        (reflect.get("reasoning") or "")[:200],
+                    )
+                    info["status"] = "complete"
+                    info["reflect_verdict"] = "retry-overridden-by-file-evidence"
+                    info["reflect_verdict_original"] = "retry"
+                    return "complete"
+                else:
+                    # Budget remains — let the retry loop act on reflect's feedback.
+                    logger.info(
+                        "Workflow step '%s' verdict=retry, %s exists (%d bytes) but "
+                        "retry budget not exhausted (attempt %d/%d) — allowing retry.",
+                        step.id,
+                        output_file,
+                        output_path.stat().st_size,
+                        attempts_so_far,
+                        max_retries_local,
+                    )
+                    # Fall through: info["status"] = "failed" below triggers retry loop.
 
     # verdict in {"retry" with no output, or any other unrecognised value} →
     # failed (caller's retry loop checks reflect_verdict == "retry" to decide
@@ -1751,15 +1781,60 @@ def run_workflow(
     from core.workflows.registry import get_workflow_registry
 
     wf_reg = get_workflow_registry()
+    skill_reg = get_skill_registry()
     wf = wf_reg.get(name)
     if not wf:
-        available = [w.name for w in wf_reg.all_workflows()]
-        return f"Error: Workflow '{name}' not found. " f"Available: {', '.join(available) or 'none'}"
+        import difflib
 
-    skill_reg = get_skill_registry()
+        available = [w.name for w in wf_reg.all_workflows()]
+        # Disambiguation 1: did the caller mean a skill with the same name?
+        if skill_reg.exists(name):
+            if skill_reg.is_disabled(name):
+                return (
+                    f"Error: '{name}' is a skill (not a workflow), and it is currently disabled. "
+                    f"Enable it in Explorer > Skills before use. "
+                    f"(Available workflows: {', '.join(available) or 'none'})"
+                )
+            return (
+                f"Error: '{name}' is a SKILL, not a workflow. "
+                f"Use load_skill(name='{name}') to activate it. "
+                f"(Available workflows: {', '.join(available) or 'none'})"
+            )
+        # Disambiguation 2: typo on a workflow name?
+        close_wf = difflib.get_close_matches(name, available, n=3, cutoff=0.6)
+        if close_wf:
+            return (
+                f"Error: Workflow '{name}' not found. "
+                f"Did you mean: {', '.join(close_wf)}? "
+                f"(All workflows: {', '.join(available) or 'none'})"
+            )
+        # Disambiguation 3: typo on a skill name?
+        # Suggest only enabled skills — pointing the agent at a disabled skill
+        # would just trade one wrong-tool error for another.
+        skill_names = [s.name for s in skill_reg.enabled_skills()]
+        close_skill = difflib.get_close_matches(name, skill_names, n=2, cutoff=0.7)
+        if close_skill:
+            return (
+                f"Error: Workflow '{name}' not found. "
+                f"There is a similarly named skill: {', '.join(close_skill)}. "
+                f"Use load_skill if you meant the skill. "
+                f"(Available workflows: {', '.join(available) or 'none'})"
+            )
+        return (
+            f"Error: Workflow '{name}' not found. "
+            f"Available: {', '.join(available) or 'none'}. "
+            f"Use discover_workflows() to search by capability."
+        )
+
     missing = [s.skill for s in wf.steps if s.skill and not skill_reg.exists(s.skill)]
     if missing:
         return f"Error: Workflow references skills not in registry: {', '.join(missing)}"
+    disabled = [s.skill for s in wf.steps if s.skill and skill_reg.is_disabled(s.skill)]
+    if disabled:
+        return (
+            f"Error: Workflow references disabled skills: {', '.join(disabled)}. "
+            "Enable them in Explorer > Skills before running this workflow."
+        )
 
     run_id = secrets.token_hex(4)
     workspace_dir = Path(settings.workspace_dir)
@@ -1875,7 +1950,8 @@ def run_workflow(
             "run_dir": str(run_dir),
             "step_count": len(wf.steps),
             "wave_count": len(waves),
-        }
+        },
+        session=_orch_session_obj,
     )
 
     try:
@@ -1898,7 +1974,8 @@ def run_workflow(
                         "wave_idx": wave_idx,
                         "wave_size": len(wave),
                         "step_ids": [s.id for s in wave],
-                    }
+                    },
+                    session=_orch_session_obj,
                 )
 
                 # ── Phase 1: determine which steps are eligible (upstream complete) ──
@@ -1916,7 +1993,8 @@ def run_workflow(
                                 "run_id": run_id,
                                 "step_id": step.id,
                                 "reason": reason,
-                            }
+                            },
+                            session=_orch_session_obj,
                         )
                         continue
                     eligible.append(step)
@@ -1947,7 +2025,8 @@ def run_workflow(
                                 "run_id": run_id,
                                 "step_id": step.id,
                                 "worker_id": worker_id,
-                            }
+                            },
+                            session=_orch_session_obj,
                         )
 
                 # ── Phase 3: wait for the wave ──
@@ -1991,7 +2070,8 @@ def run_workflow(
                                 "run_id": run_id,
                                 "step_id": step.id,
                                 "status": "spawn_failed",
-                            }
+                            },
+                            session=_orch_session_obj,
                         )
                         continue
 
@@ -2021,7 +2101,8 @@ def run_workflow(
                                 "step_id": step.id,
                                 "attempt": manifest["steps"][step.id]["attempts"] + 1,
                                 "reason": reason[:200],
-                            }
+                            },
+                            session=_orch_session_obj,
                         )
                         retry_result = retry_worker(
                             worker_id=worker_id,
@@ -2064,7 +2145,8 @@ def run_workflow(
                             "status": manifest["steps"][step.id]["status"],
                             "verdict": manifest["steps"][step.id].get("reflect_verdict"),
                             "attempts": manifest["steps"][step.id]["attempts"],
-                        }
+                        },
+                        session=_orch_session_obj,
                     )
 
                     if outcome == "escalated" and not escalated:
@@ -2129,6 +2211,29 @@ def run_workflow(
             final_status = "failed"
         db.finish_workflow_run(run_id, final_status, steps_passed, steps_failed, 0)
 
+        # Aggregate quality warnings: steps where reflect flagged a problem even
+        # if they ultimately completed (via retry or file-evidence override).
+        quality_warnings = []
+        for sid, sinfo in manifest["steps"].items():
+            if sinfo.get("reflect_verdict_original"):
+                quality_warnings.append(
+                    {
+                        "step_id": sid,
+                        "reflect_verdict_original": sinfo["reflect_verdict_original"],
+                        "reflect_reasoning": (sinfo.get("reflect_reasoning") or "")[:300],
+                    }
+                )
+            elif sinfo.get("attempts", 1) > 1:
+                quality_warnings.append(
+                    {
+                        "step_id": sid,
+                        "reflect_verdict_original": "retry",
+                        "reflect_reasoning": (sinfo.get("reflect_reasoning") or "")[:300],
+                    }
+                )
+        manifest["quality_warnings"] = quality_warnings
+        _write_manifest(run_dir, manifest)
+
         # Post-workflow reflect — generate skill improvement proposals
         proposal_count = 0
         try:
@@ -2150,7 +2255,8 @@ def run_workflow(
                 "steps_failed": steps_failed,
                 "steps_skipped": counts["skipped"],
                 "proposal_count": proposal_count,
-            }
+            },
+            session=_orch_session_obj,
         )
 
         # Build summary
@@ -2311,7 +2417,11 @@ def register(reg) -> None:
             "Spawn a worker agent for a subtask. Worker runs in fresh context with its own scout. "
             "Optionally runs on a specific model (e.g. vision model). Returns worker ID. "
             "Set auto_resume_parent=True to add this worker to the parent watch-set so the parent "
-            "auto-resumes when all watched workers finish (use with await_workers suspend=True)."
+            "auto-resumes when all watched workers finish (use with await_workers suspend=True). "
+            "Concurrency cap: configurable via max_concurrent_workers (default 5). When the cap is "
+            "hit, spawn returns an error immediately — there is no queue. For embarrassingly-parallel "
+            "work like N chunks: spawn up to the cap, call await_workers (suspend=True for cron/long "
+            "tasks), then spawn the next batch."
         ),
         parameters={
             "type": "object",

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from core.agent import (
+    _CROSS_ROUND_DEDUP_EXCLUDED,
     StuckDetector,
     _build_resource_status,
     _hash_args,
@@ -595,3 +596,131 @@ def test_tool_aliases_map_has_expected_entries():
     assert _TOOL_ALIASES["get_worker_output"] == "get_worker_result"
     assert _TOOL_ALIASES["worker_get"] == "get_worker_result"
     assert _TOOL_ALIASES["wait_for_workers"] == "await_workers"
+
+
+# ---------------------------------------------------------------------------
+# _expand_tools_from_discovery — disabled / unknown filter
+# ---------------------------------------------------------------------------
+
+
+def test_expand_tools_from_discovery_skips_disabled(monkeypatch, tmp_path):
+    """The agent's discovery-extraction helper must NOT add a disabled tool
+    to the active set, even if the model echoes its name in a markdown line.
+    Without this gate, a disabled tool's schema would re-enter the next
+    turn's tool-call schema and the model could call it again — defeating
+    the user's toggle.
+    """
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(
+        name="custom_xyz",
+        func=lambda: "ok",
+        description="x",
+        parameters={"type": "object", "properties": {}},
+    )
+    reg.register(
+        name="custom_abc",
+        func=lambda: "ok",
+        description="x",
+        parameters={"type": "object", "properties": {}},
+    )
+    reg.disable("custom_xyz")
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    from core.agent import _expand_tools_from_discovery
+
+    active: list[str] = []
+    discovery = "- **custom_xyz** [core]: x\n- **custom_abc** [core]: x\n"
+    _expand_tools_from_discovery(discovery, active)
+    assert "custom_abc" in active
+    assert "custom_xyz" not in active, "disabled tool must NOT be re-promoted via discovery markdown"
+
+
+def test_expand_tools_from_discovery_skips_unknown(monkeypatch, tmp_path):
+    """Unknown tools (model hallucinations / typos in the discovery markdown)
+    are dropped by the same gate. Regression cover so the existence check
+    can't regress alongside the disabled check.
+    """
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(
+        name="real_one",
+        func=lambda: "ok",
+        description="x",
+        parameters={"type": "object", "properties": {}},
+    )
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    from core.agent import _expand_tools_from_discovery
+
+    active: list[str] = []
+    _expand_tools_from_discovery("- **real_one** [core]: x\n- **fake_tool** [core]: x\n", active)
+    assert active == ["real_one"]
+
+
+def test_expand_tools_from_discovery_does_not_duplicate_existing(monkeypatch, tmp_path):
+    """If the tool is already in active_tools, the helper must not insert a
+    duplicate (the active list stays sorted)."""
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(
+        name="alpha",
+        func=lambda: "ok",
+        description="x",
+        parameters={"type": "object", "properties": {}},
+    )
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    from core.agent import _expand_tools_from_discovery
+
+    active = ["alpha"]
+    _expand_tools_from_discovery("- **alpha** [core]: x\n", active)
+    assert active == ["alpha"]
+
+
+# ---------------------------------------------------------------------------
+# Signal 2 threshold regression — tool cycle must increment repeat_count
+# ---------------------------------------------------------------------------
+
+
+def test_signal2_alone_increments_repeat_count():
+    """Signal 2 (tool cycle) with weight 0.4 must exceed the > 0.3 threshold
+    and increment repeat_count. Previously weight was 0.3 which tied the
+    threshold (0.3 > 0.3 is False), making pure tool loops undetectable.
+    """
+    sd = StuckDetector()
+    reg = _make_registry()
+    tc = [{"name": "bash", "arguments": '{"command": "whisper transcribe audio.mp3"}'}]
+    # Round 1: establishes sig in history, no match yet
+    _, count = sd.evaluate("", tc, {}, reg)
+    assert count == 0
+    # Round 2: sig found in history → score=0.4 > 0.3 → repeat_count=1
+    _, count = sd.evaluate("", tc, {}, reg)
+    assert count == 1
+    # Round 3 → repeat_count=2
+    _, count = sd.evaluate("", tc, {}, reg)
+    assert count == 2
+    # Round 4 → repeat_count=3 (stuck threshold)
+    _, count = sd.evaluate("", tc, {}, reg)
+    assert count == 3
+    assert "tool_cycle" in sd.behavioral_flags
+
+
+# ---------------------------------------------------------------------------
+# Cross-round dedup exclusion set
+# ---------------------------------------------------------------------------
+
+
+def test_cross_round_dedup_excluded_set():
+    """file_read and glob must be excluded (cheap reads where fresh state matters);
+    bash must NOT be excluded since repeated bash calls are the primary loop target.
+    """
+    assert "file_read" in _CROSS_ROUND_DEDUP_EXCLUDED
+    assert "glob" in _CROSS_ROUND_DEDUP_EXCLUDED
+    assert "bash" not in _CROSS_ROUND_DEDUP_EXCLUDED

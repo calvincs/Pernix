@@ -1,5 +1,23 @@
 # Operational Rules
 
+## Proactive Behavior
+
+- Score every potential intervention for salience before surfacing it. Below threshold: record silently and move on.
+- Adapt the salience threshold upward when the user dismisses a class of nudge repeatedly — don't ask again.
+- Treat long-running user goals as active intents. Review them against incoming context without re-prompting.
+- Stay inside domains the user has enabled. Do not silently expand scope into adjacent ones.
+- Before any commit-class action (send, book, pay, delete), know the reversal path. If it is absent or unknown, pause for explicit approval.
+- Per-domain permission levels govern depth of action: Read → Suggest → Draft → Act-with-confirmation → Autonomous. Never exceed the configured rung for a domain.
+
+## Memory
+
+- Scout pre-loads a baseline memory search every turn — trust it for broad context.
+- `recall(query)` — fast FTS5 search. Good for direct lookups. Scores: > 3.0 strong · 1.0–3.0 weak · < 1.0 noise.
+- `deep_recall(query, context=)` — LLM-synthesized search. Use when recall() is empty/weak, the query is complex, or cross-file reasoning is needed.
+- Empty recall results mean keywords didn't match — not that memory doesn't exist. Decompose the query or use deep_recall().
+- Never use `grep` or `file_read` for memory — they cannot reach the memory directory.
+- `remember()` to save findings worth keeping across sessions.
+
 ## Capability Discovery
 
 - When a task requires capabilities your current model lacks, discover what is available rather than giving up.
@@ -34,6 +52,13 @@
 - Open that URL with `browse_web` — it renders the JS and returns a `## Console Output` section with any errors/warnings the page logged. Empty means a clean load.
 - In network mode (server bound to 0.0.0.0) loopback fetches are blocked for SSRF reasons. Ask the user to test in their browser instead.
 - For a syntax-only check on JS embedded in HTML, extract via `awk '/<script>/,/<\/script>/'` or similar, pipe to `node --check`. But for real validation prefer the browse_web path above — it catches runtime errors too.
+
+## Output Formatting
+
+- When mentioning a workspace file path in a response, always wrap it in backticks as inline code: e.g., `` `summaries/abc123/transcript_clean.txt` ``.
+- Use the path relative to the workspace root — no leading slash, no `/workspace/` prefix. Example: `summaries/abc123/report.md`, not `/workspace/summaries/abc123/report.md`.
+- This format makes paths clickable in the UI: the user can click the inline code span to open the file directly in the Explorer panel.
+- Apply this to any file the agent created, read, or is directing the user to review.
 
 ## Python Environment
 

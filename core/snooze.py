@@ -72,9 +72,17 @@ class SnoozeRunner:
 
         manager = get_manager()
 
-        # 1. No active processing
+        # 1. No active processing (v2 state: AWAITING_USER/AWAITING_WORKERS are
+        # suspended-not-running, so they count as idle for snooze purposes)
+        from sessions import state_v2 as _sv2
+
+        _idle_v2 = (
+            _sv2.SessionStateV2.IDLE_READY,
+            _sv2.SessionStateV2.AWAITING_USER,
+            _sv2.SessionStateV2.AWAITING_WORKERS,
+        )
         for session in manager._sessions.values():
-            if session.state.name != "IDLE":
+            if _sv2._current_state(session) not in _idle_v2:
                 return False
 
         # 2. No background tasks
@@ -728,22 +736,32 @@ Output valid JSON only. No markdown fences. /no_think"""
             db.set_snooze_state(f"dedup_{target_file.name}", datetime.now(timezone.utc).isoformat())
             return
 
-        # Pairwise similarity check
-        archived_epochs = set()
-        for i in range(len(entries)):
-            if self._is_cancelled():
-                break
-            if entries[i].epoch in archived_epochs:
-                continue
-            for j in range(i + 1, len(entries)):
-                if entries[j].epoch in archived_epochs:
+        # Pairwise similarity check.
+        # Off-loop (asyncio.to_thread) so the event loop stays responsive even
+        # on large files, and use SequenceMatcher's O(1) real_quick_ratio() and
+        # O(N+M) quick_ratio() as upper-bound prescreens — pairs that can't
+        # reach 0.82 are skipped without ever computing the full O(N·M) ratio.
+        def _pairwise_dedup() -> set[int]:
+            archived: set[int] = set()
+            for i in range(len(entries)):
+                if self._is_cancelled():
+                    break
+                if entries[i].epoch in archived:
                     continue
-                sim = SequenceMatcher(None, entries[i].content, entries[j].content).ratio()
-                if sim > 0.82:
-                    # Archive the shorter/later entry
-                    to_archive = entries[j] if len(entries[j].content) <= len(entries[i].content) else entries[i]
-                    archived_epochs.add(to_archive.epoch)
-                    logger.debug("Snooze: archiving duplicate (epoch=%d, sim=%.2f)", to_archive.epoch, sim)
+                for j in range(i + 1, len(entries)):
+                    if entries[j].epoch in archived:
+                        continue
+                    sm = SequenceMatcher(None, entries[i].content, entries[j].content)
+                    if sm.real_quick_ratio() < 0.82 or sm.quick_ratio() < 0.82:
+                        continue
+                    sim = sm.ratio()
+                    if sim > 0.82:
+                        to_archive = entries[j] if len(entries[j].content) <= len(entries[i].content) else entries[i]
+                        archived.add(to_archive.epoch)
+                        logger.debug("Snooze: archiving duplicate (epoch=%d, sim=%.2f)", to_archive.epoch, sim)
+            return archived
+
+        archived_epochs = await asyncio.to_thread(_pairwise_dedup)
 
         if archived_epochs:
             # Mark entries as archived in markdown
@@ -843,14 +861,17 @@ Output valid JSON only. No markdown fences. /no_think"""
         if self._is_cancelled():
             return False
 
-        # Phase 1: Build signatures and find clusters (no LLM)
-        signatures = build_signatures(store)
+        # Phase 1: Build signatures and find clusters (no LLM).
+        # The pairwise SequenceMatcher in find_clusters is CPU-heavy on
+        # realistic stores — push it onto a worker thread so the asyncio
+        # loop stays responsive (HTTP, SSE heartbeats, snooze timeout).
+        signatures = await asyncio.to_thread(build_signatures, store)
         if len(signatures) < 2:
             db.set_snooze_state("last_consolidation_scan", datetime.now(timezone.utc).isoformat())
             return False
 
         sig_map = {s.name: s for s in signatures}
-        clusters = find_clusters(signatures)
+        clusters = await asyncio.to_thread(find_clusters, signatures, None, self._is_cancelled)
 
         if not clusters:
             db.set_snooze_state("last_consolidation_scan", datetime.now(timezone.utc).isoformat())
@@ -867,8 +888,9 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         used_llm = False
 
-        # Try trivial merge first (no LLM)
-        decision = plan_trivial_merge(cluster, store)
+        # Try trivial merge first (no LLM). Also CPU-heavy when a cluster
+        # has many entries — same offload reasoning as Phase 1.
+        decision = await asyncio.to_thread(plan_trivial_merge, cluster, store)
 
         if decision is None and not did_llm_already:
             # Need LLM for ambiguous merge
@@ -894,7 +916,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                     logger.warning("Snooze: consolidation LLM call failed: %s", e)
 
         if decision:
-            result = execute_merge(store, decision)
+            result = await asyncio.to_thread(execute_merge, store, decision)
             self._stats.setdefault("files_consolidated", 0)
             self._stats["files_consolidated"] += len(decision.source_files)
             logger.info(
@@ -969,76 +991,82 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         one_day_ago = int(time.time()) - 86400
 
-        # candidates: {"entry", "src_file", "target_file", "confidence"}
-        high_conf: list[dict] = []  # reroute without LLM
-        medium_conf: list[dict] = []  # send to LLM for confirmation
+        # The scoring loop is O(entries × files × keywords) and reads every
+        # markdown file from disk — push it onto a worker thread so the event
+        # loop stays responsive.  The inner function captures already-computed
+        # locals (files, store, file_keywords, one_day_ago) and accepts a
+        # cancel_check so snooze can bail early when work arrives.
+        def _scan_for_candidates() -> tuple[list[dict], list[dict]]:
+            from core.memory.format import parse_entries_from_markdown as _parse
 
-        for mem_file in files:
-            if self._is_cancelled():
-                break
-            if mem_file.entry_count < 2:
-                continue
-
-            md_content = store.read_file(mem_file.name)
-            if not md_content:
-                continue
-
-            entries = parse_entries_from_markdown(mem_file.name, md_content)
-            for entry in entries:
+            high: list[dict] = []
+            medium: list[dict] = []
+            for mem_file in files:
                 if self._is_cancelled():
                     break
-                # Never reroute entries written in the last 24 h
-                if entry.epoch > one_day_ago:
+                if mem_file.entry_count < 2:
                     continue
 
-                # ── Non-LLM check 1: type-file consistency ──────────────
-                # profile entries must live in user.profile
-                if entry.entry_type == "profile" and mem_file.name != "user.profile":
-                    high_conf.append(
-                        {
-                            "entry": entry,
-                            "src_file": mem_file.name,
-                            "target_file": "user.profile",
-                            "confidence": "high",
-                            "reason": "profile type outside user.profile",
-                        }
-                    )
+                md_content = store.read_file(mem_file.name)
+                if not md_content:
                     continue
 
-                # ── Non-LLM check 2: tag/keyword affinity scoring ───────
-                tag_str = " ".join(entry.tags).lower()
-                content_lower = entry.content.lower()
+                entries = _parse(mem_file.name, md_content)
+                for entry in entries:
+                    if self._is_cancelled():
+                        break
+                    if entry.epoch > one_day_ago:
+                        continue
 
-                scores: dict[str, float] = {}
-                for fname, fkws in file_keywords.items():
-                    # Tags carry 2× weight; content carries 0.5× (more noise)
-                    tag_hits = sum(2.0 for kw in fkws if kw in tag_str)
-                    content_hits = sum(0.5 for kw in fkws if kw in content_lower)
-                    scores[fname] = tag_hits + content_hits
+                    # Check 1: type-file consistency
+                    if entry.entry_type == "profile" and mem_file.name != "user.profile":
+                        high.append(
+                            {
+                                "entry": entry,
+                                "src_file": mem_file.name,
+                                "target_file": "user.profile",
+                                "confidence": "high",
+                                "reason": "profile type outside user.profile",
+                            }
+                        )
+                        continue
 
-                current_score = scores.get(mem_file.name, 0.0)
-                other = {k: v for k, v in scores.items() if k != mem_file.name}
-                if not other:
-                    continue
-                best_other = max(other, key=other.get)
-                best_score = other[best_other]
+                    # Check 2: tag/keyword affinity scoring
+                    tag_str = " ".join(entry.tags).lower()
+                    content_lower = entry.content.lower()
 
-                if best_score < 1.0:
-                    continue  # no meaningful signal for any alternative
+                    scores: dict[str, float] = {}
+                    for fname, fkws in file_keywords.items():
+                        tag_hits = sum(2.0 for kw in fkws if kw in tag_str)
+                        content_hits = sum(0.5 for kw in fkws if kw in content_lower)
+                        scores[fname] = tag_hits + content_hits
 
-                if current_score == 0.0 and best_score >= 1.0:
-                    # Zero affinity with current file; clear affinity elsewhere
-                    medium_conf.append(
-                        {
-                            "entry": entry,
-                            "src_file": mem_file.name,
-                            "target_file": best_other,
-                            "confidence": "medium",
-                            "reason": (
-                                f"no keyword affinity with {mem_file.name}; " f"score {best_score:.1f} for {best_other}"
-                            ),
-                        }
-                    )
+                    current_score = scores.get(mem_file.name, 0.0)
+                    other = {k: v for k, v in scores.items() if k != mem_file.name}
+                    if not other:
+                        continue
+                    best_other = max(other, key=other.get)
+                    best_score = other[best_other]
+
+                    if best_score < 1.0:
+                        continue
+
+                    if current_score == 0.0 and best_score >= 1.0:
+                        medium.append(
+                            {
+                                "entry": entry,
+                                "src_file": mem_file.name,
+                                "target_file": best_other,
+                                "confidence": "medium",
+                                "reason": (
+                                    f"no keyword affinity with {mem_file.name}; "
+                                    f"score {best_score:.1f} for {best_other}"
+                                ),
+                            }
+                        )
+            return high, medium
+
+        high_conf, medium_conf = await asyncio.to_thread(_scan_for_candidates)
 
         if not high_conf and not medium_conf:
             db.set_snooze_state("last_reroute_scan", datetime.now(timezone.utc).isoformat())
@@ -1610,17 +1638,22 @@ Output valid JSON only. No markdown fences. /no_think"""
         if self._is_cancelled():
             return
 
-        # Step 1: Query all entries with their hit counts
-        conn = store._connect()
-        try:
-            rows = conn.execute("""SELECT f.file_name, f.epoch, f.weight, f.content,
-                          COALESCE(h.hit_count, 0) as hit_count
-                   FROM memory_fts f
-                   LEFT JOIN memory_hits h
-                     ON f.file_name = h.file_name AND f.epoch = h.epoch
-                   ORDER BY CAST(f.epoch AS INTEGER) ASC""").fetchall()
-        finally:
-            conn.close()
+        # Step 1: Query all entries with their hit counts.
+        # No LIMIT — scans the full FTS table; push off-loop to keep event
+        # loop responsive as the store grows.
+        def _fetch_all_entries():
+            c = store._connect()
+            try:
+                return c.execute("""SELECT f.file_name, f.epoch, f.weight, f.content,
+                              COALESCE(h.hit_count, 0) as hit_count
+                       FROM memory_fts f
+                       LEFT JOIN memory_hits h
+                         ON f.file_name = h.file_name AND f.epoch = h.epoch
+                       ORDER BY CAST(f.epoch AS INTEGER) ASC""").fetchall()
+            finally:
+                c.close()
+
+        rows = await asyncio.to_thread(_fetch_all_entries)
 
         if not rows or len(rows) < 20:
             # Not enough data for meaningful cohort analysis
@@ -1844,9 +1877,12 @@ Output valid JSON only. No markdown fences. /no_think"""
         if self._is_cancelled():
             return
 
-        # Cross-reference with registered skills
+        # Cross-reference with registered, enabled skills only.
+        # Disabled skills shouldn't accumulate cooccurrence training data — when
+        # re-enabled they'd come back with stale boost links from a period the
+        # user had explicitly turned them off.
         registry = get_skill_registry()
-        registered_skills = registry.all_skills()
+        registered_skills = registry.enabled_skills()
         skill_tag_map: dict[str, set[str]] = {}  # skill_name -> tags
         for skill in registered_skills:
             skill_tag_map[skill.name] = {t.lower() for t in skill.tags}
@@ -1988,9 +2024,10 @@ Output valid JSON only. No markdown fences. /no_think"""
             try:
                 # Archive pending proposals before deleting
                 db.archive_proposals_for_run(run_id)
-                # Remove directory
+                # Remove directory — rmtree is blocking filesystem recursion;
+                # offload so the event loop stays responsive across many deletions.
                 if run_dir.exists():
-                    shutil.rmtree(run_dir)
+                    await asyncio.to_thread(shutil.rmtree, run_dir)
                 # Remove DB row
                 db.delete_workflow_run(run_id)
                 deleted += 1
@@ -2011,7 +2048,7 @@ Output valid JSON only. No markdown fences. /no_think"""
         from core import synthesis
 
         try:
-            stats = synthesis.run(batch_limit=500)
+            stats = await asyncio.to_thread(synthesis.run, 500)
             if stats.processed:
                 logger.info(
                     "Snooze synthesis: %d post-mortems → %d signal updates",

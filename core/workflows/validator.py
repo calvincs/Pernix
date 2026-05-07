@@ -71,6 +71,9 @@ class ValidationResult:
             missing = self.info.get("missing_skills", [])
             if missing:
                 lines.append(f"WARNING: Skills not found in registry: {', '.join(missing)}")
+            disabled = self.info.get("disabled_skills", [])
+            if disabled:
+                lines.append(f"WARNING: Skills are disabled (run_workflow will refuse): {', '.join(disabled)}")
             if self.warnings:
                 for w in self.warnings:
                     lines.append(f"Warning: {w.message}")
@@ -282,8 +285,9 @@ def validate_content(content: str, check_skills: bool = True) -> ValidationResul
     else:
         waves = []
 
-    # 5. Check skill references exist in registry
+    # 5. Check skill references exist in registry AND are not disabled
     missing_skills: list[str] = []
+    disabled_skills: list[str] = []
     if check_skills and skill_refs:
         try:
             from core.skills.registry import get_skill_registry
@@ -296,6 +300,13 @@ def validate_content(content: str, check_skills: bool = True) -> ValidationResul
                     f"Skill '{skill}' is referenced but not found in the registry. "
                     "The worker will still try to load it at runtime.",
                 )
+            disabled_skills = [s for s in skill_refs if reg.exists(s) and reg.is_disabled(s)]
+            for skill in disabled_skills:
+                warn(
+                    "disabled_skill",
+                    f"Skill '{skill}' is referenced but is currently disabled. "
+                    "run_workflow will refuse to start until it is re-enabled in Explorer > Skills.",
+                )
         except Exception:
             pass  # Registry unavailable — skip skill check, don't fail validation
 
@@ -306,6 +317,7 @@ def validate_content(content: str, check_skills: bool = True) -> ValidationResul
         "waves": waves,
         "skill_refs": sorted(skill_refs),
         "missing_skills": missing_skills,
+        "disabled_skills": disabled_skills,
     }
     return ValidationResult(valid=valid, issues=issues, info=info)
 

@@ -144,11 +144,17 @@ def build_signatures(store) -> list[FileSignature]:
 # ---------------------------------------------------------------------------
 
 
-def score_pair(a: FileSignature, b: FileSignature) -> float:
+def score_pair(a: FileSignature, b: FileSignature, threshold: float | None = None) -> float:
     """Compute weighted similarity between two file signatures.
 
     Weights: normalized-name 0.35, token-Jaccard 0.25,
              keyword-Jaccard 0.15, content-fingerprint 0.25.
+
+    When ``threshold`` is given, the expensive content-fingerprint pass is
+    skipped or short-circuited as soon as the verdict (>= or < threshold) is
+    decided. This is what keeps the snooze cycle off the event loop on
+    realistic memory stores; without it ``find_clusters`` is O(F² × E_a × E_b)
+    pairwise SequenceMatcher and runs for minutes.
     """
     # Normalized name similarity
     if a.normalized == b.normalized:
@@ -168,18 +174,37 @@ def score_pair(a: FileSignature, b: FileSignature) -> float:
     else:
         kw_jaccard = 0.0
 
-    # Content fingerprint: best pairwise match
+    partial = (0.35 * name_sim) + (0.25 * token_jaccard) + (0.15 * kw_jaccard)
+
+    # Even a perfect content match can only add 0.25. If partial + 0.25 is
+    # still below threshold, content can't flip the verdict — skip the loop.
+    if threshold is not None and partial + 0.25 < threshold:
+        return partial
+
+    # Content fingerprint: best pairwise match.
+    # SequenceMatcher exposes O(1) real_quick_ratio() and O(N+M) quick_ratio()
+    # as upper bounds on the true O(N·M) ratio(). Use them to prune pairs that
+    # can't matter — a fingerprint pair below the current best is dropped
+    # without ever computing the full ratio.
     content_sim = 0.0
     if a.content_fingerprints and b.content_fingerprints:
         best = 0.0
+        # Required content_sim to cross threshold. Once best meets it, we're done.
+        needed = (threshold - partial) / 0.25 if threshold is not None else None
         for fp_a in a.content_fingerprints:
             for fp_b in b.content_fingerprints:
-                sim = SequenceMatcher(None, fp_a, fp_b).ratio()
+                sm = SequenceMatcher(None, fp_a, fp_b)
+                if sm.real_quick_ratio() < best or sm.quick_ratio() < best:
+                    continue
+                sim = sm.ratio()
                 if sim > best:
                     best = sim
+                    if needed is not None and best >= needed:
+                        # Above threshold — exact value beyond this doesn't change clustering
+                        return partial + 0.25 * best
         content_sim = best
 
-    return (0.35 * name_sim) + (0.25 * token_jaccard) + (0.15 * kw_jaccard) + (0.25 * content_sim)
+    return partial + (0.25 * content_sim)
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +215,14 @@ def score_pair(a: FileSignature, b: FileSignature) -> float:
 def find_clusters(
     signatures: list[FileSignature],
     threshold: float | None = None,
+    cancel_check=None,
 ) -> list[list[str]]:
     """Single-linkage clustering of files by pairwise similarity.
 
     Returns clusters of 2+ file names, sorted largest first.
+
+    ``cancel_check`` is an optional zero-arg callable; when it returns True,
+    clustering exits early. Used by snooze to bail out when work arrives.
     """
     threshold = threshold or settings.snooze_consolidation_cluster_threshold
 
@@ -203,8 +232,10 @@ def find_clusters(
     # Build adjacency graph
     adj: dict[str, set[str]] = {n: set() for n in names}
     for i in range(len(names)):
+        if cancel_check is not None and cancel_check():
+            return []
         for j in range(i + 1, len(names)):
-            sim = score_pair(sig_map[names[i]], sig_map[names[j]])
+            sim = score_pair(sig_map[names[i]], sig_map[names[j]], threshold=threshold)
             if sim >= threshold:
                 adj[names[i]].add(names[j])
                 adj[names[j]].add(names[i])

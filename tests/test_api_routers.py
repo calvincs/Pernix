@@ -405,3 +405,99 @@ async def test_skills_list():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/skills")
     assert resp.status_code == 200
+
+
+async def test_skills_list_surfaces_disabled_with_enabled_false_flag(tmp_path, monkeypatch):
+    """The Explorer UI depends on disabled skills appearing in the list
+    response WITH 'enabled': False so the toggle row stays renderable.
+    Regression risk: if someone swaps reg.all_skills() for reg.enabled_skills()
+    in the router, disabled skills vanish from the UI entirely and the user
+    can never re-enable them.
+    """
+    from api.routers import skills as skills_router
+    from core.skills.registry import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    for name in ("alpha", "beta"):
+        d = skills_dir / name
+        d.mkdir()
+        (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name}\n---\n# {name}\n")
+
+    monkeypatch.setattr("config.settings.skills_dir", str(skills_dir))
+    fresh = SkillRegistry()
+    fresh.scan(skills_dir)
+    fresh.disable("alpha")
+    monkeypatch.setattr("core.skills.registry._skill_registry", fresh)
+
+    app = _make_app(skills_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/skills")
+    assert resp.status_code == 200
+    by_name = {s["name"]: s for s in resp.json()["skills"]}
+    assert "alpha" in by_name, "disabled skill missing from /api/skills — UI toggle row would be lost"
+    assert "beta" in by_name
+    assert by_name["alpha"]["enabled"] is False
+    assert by_name["beta"]["enabled"] is True
+
+
+async def test_skills_get_surfaces_disabled_skill_body_and_resources(tmp_path, monkeypatch):
+    """GET /api/skills/{name} must still return the body + resource tree for
+    a disabled skill so the user can inspect/edit it before re-enabling.
+    The router uses include_disabled=True for this — if it ever drops back
+    to the default-filtered call, the editor view goes blank for disabled skills.
+    """
+    from api.routers import skills as skills_router
+    from core.skills.registry import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    d = skills_dir / "off-one"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: off-one\ndescription: x\n---\n# Body text\n")
+    (d / "scripts").mkdir()
+    (d / "scripts" / "go.sh").write_text("#!/bin/sh\necho ok")
+
+    monkeypatch.setattr("config.settings.skills_dir", str(skills_dir))
+    fresh = SkillRegistry()
+    fresh.scan(skills_dir)
+    fresh.disable("off-one")
+    monkeypatch.setattr("core.skills.registry._skill_registry", fresh)
+
+    app = _make_app(skills_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/skills/off-one")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is False
+    assert "Body text" in body["instructions"], "disabled skill body must still surface in editor view"
+    assert "go.sh" in body["resources"].get("scripts", []), "disabled skill resources must still surface in editor"
+
+
+async def test_skills_patch_toggle_round_trips_through_registry(tmp_path, monkeypatch):
+    """PATCH must round-trip through reg.disable / reg.enable. After PATCH,
+    is_disabled() must reflect the new state, and a subsequent PATCH back
+    to enabled must clear it. Catches a regression where the router would
+    silently bypass the registry singleton (e.g. by reverting to the old
+    JSON-file dance).
+    """
+    from api.routers import skills as skills_router
+    from core.skills.registry import SkillRegistry, get_skill_registry
+
+    skills_dir = tmp_path / "skills"
+    d = skills_dir / "togg"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: togg\ndescription: x\n---\n# body\n")
+
+    monkeypatch.setattr("config.settings.skills_dir", str(skills_dir))
+    fresh = SkillRegistry()
+    fresh.scan(skills_dir)
+    monkeypatch.setattr("core.skills.registry._skill_registry", fresh)
+
+    app = _make_app(skills_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch("/api/skills/togg", json={"enabled": False})
+        assert resp.status_code == 200
+        assert get_skill_registry().is_disabled("togg")
+        resp = await client.patch("/api/skills/togg", json={"enabled": True})
+        assert resp.status_code == 200
+        assert not get_skill_registry().is_disabled("togg")

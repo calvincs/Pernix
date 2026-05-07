@@ -15,6 +15,7 @@ import pytest
 
 from core.llm.semaphore import FairLLMSemaphore, LLMConcurrencyError, LLMSessionTimeoutError
 from core.llm.types import ChatResponse, StreamEvent, StreamEventType, TokenUsage
+from sessions import state_v2 as sv2
 from sessions.state import AgentSession, SessionState
 
 # ---------------------------------------------------------------------------
@@ -328,8 +329,8 @@ class TestAgentWaitingEvent:
 
         sid = session_factory(title="waiting test")
         session = AgentSession(session_id=sid)
-        session.transition_to(SessionState.SCOUTING)
-        session.transition_to(SessionState.PROCESSING)
+        sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+        sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
         session.last_scout_report = mock_scout
 
         events = []
@@ -357,8 +358,8 @@ class TestAgentWaitingEvent:
 
         sid = session_factory(title="no-wait test")
         session = AgentSession(session_id=sid)
-        session.transition_to(SessionState.SCOUTING)
-        session.transition_to(SessionState.PROCESSING)
+        sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+        sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
         session.last_scout_report = mock_scout
 
         events = []

@@ -35,7 +35,7 @@ def rebuild_start():
 
     # Runtime state files
     # Note: settings.json and .env are preserved (user configuration)
-    # Note: data/agent/ (SOUL.md, RULES.md, AGENTS.md) is preserved — only the birthdate is reset.
+    # Note: data/agent/ (SOUL.md, RULES.md, SESSIONS.md) is preserved — only the birthdate is reset.
     for f in [
         "data/registry.json",
         "data/registry_archive.json",
@@ -86,6 +86,33 @@ def rebuild_start():
     print("\nRebuild complete. All state wiped.\n")
 
 
+def _setup_logging() -> None:
+    """Configure root logger before uvicorn boots so uvicorn's loggers
+    (which propagate to root when log_config=None) emit with the same
+    format as the rest of the app."""
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    log_dir = Path("data/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    root.setLevel(logging.INFO)
+    console = logging.StreamHandler()
+    console.setFormatter(log_fmt)
+    root.addHandler(console)
+    file_h = RotatingFileHandler(
+        log_dir / "pernix.log",
+        maxBytes=10_000_000,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_h.setFormatter(log_fmt)
+    root.addHandler(file_h)
+
+
 def _get_lan_ip() -> str:
     """Detect the machine's LAN IP via the default route. No packets sent."""
     import socket
@@ -108,10 +135,25 @@ def main():
     parser.add_argument("--host", default=None, help="Override host")
     parser.add_argument("--port", type=int, default=None, help="Override port")
     parser.add_argument("--qr", action="store_true", help="Show QR code and access URL on startup (network mode only)")
+    parser.add_argument(
+        "--dangerous",
+        action="store_true",
+        help=(
+            "Bypass the dangerous-tool approval gate for this process lifetime. "
+            "Shell commands, file writes, and web requests execute without ask_user confirmation. "
+            "This flag cannot be set via settings.json or environment variables — "
+            "it must be passed explicitly at startup."
+        ),
+    )
     args = parser.parse_args()
 
     # Clean stale restart flag from any prior interrupted restart
     Path("data/.restart").unlink(missing_ok=True)
+
+    # --dangerous: activate in-memory only (never saved to disk or read from env)
+    if args.dangerous:
+        settings.auto_approve_dangerous = True
+        print("  ⚠  WARNING: --dangerous flag active — all tool approvals are bypassed")
 
     if args.rebuild:
         print("\nWARNING: This will wipe all sessions, memories, workspace, and logs.")
@@ -229,6 +271,8 @@ def main():
 
     logging.getLogger("uvicorn.error").addFilter(_ShutdownNoiseFilter())
 
+    _setup_logging()
+
     # Let uvicorn handle signals for graceful shutdown.
     # The default SIGINT handler (KeyboardInterrupt) works with uvicorn's
     # graceful shutdown. We only install a handler for the second Ctrl+C
@@ -255,6 +299,7 @@ def main():
         **ssl_kwargs,
         timeout_graceful_shutdown=15,
         log_level="info",
+        log_config=None,
     )
 
     # Check for restart request (set by POST /api/admin/restart)

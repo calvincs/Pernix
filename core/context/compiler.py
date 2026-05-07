@@ -150,7 +150,7 @@ You can be interrupted and resumed at any time.
 Before acting, THINK about what you need:
 - What tools might help? Use discover_tools to find them.
 - What do you already know? Use recall to check memory.
-- What instructions apply? Check AGENTS.md if it exists.
+- What instructions apply? Check SESSIONS.md if it exists.
 - What has been done already? Check workspace files with glob or file_read.
 - What skills exist? Use discover_skills to find domain expertise.
 
@@ -160,9 +160,10 @@ All files go in the workspace, organized by project folder.
 - bash: CWD is already the workspace root — use "myproject/file" not "workspace/myproject/file"
 
 IMPORTANT: Tool output may be TRUNCATED if it exceeds the size limit. When you see
-"⚠ TRUNCATED" or "⚠ N lines remaining" in a tool result, you are missing data.
-You MUST call file_read again with offset/limit to retrieve the rest before proceeding.
-Do not assume the partial output is complete.
+"⚠ TRUNCATED" or "⚠ N lines remaining", you are missing data.
+The hint will say: Continue with: file_read(path="...", offset=N, limit=200)
+Use those offset and limit values EXACTLY. Do NOT invent your own pagination
+(no limit=1 to "probe", no random offsets). Do not assume partial output is complete.
 
 Core tools: file_read, file_write, file_edit, glob, grep, bash, remember, recall,
 ask_user, discover_tools, get_tool_schema, discover_skills, load_skill,
@@ -211,6 +212,13 @@ handling depends on your model's vision capability — see [ACTIVE MODEL] below.
 
 For any other capability, use discover_tools to find it.
 
+SKILLS vs WORKFLOWS — these are different things, do not confuse them:
+- SKILL = capability package in data/skills/. To use one: load_skill(name)
+  and follow the instructions inside. Skills do NOT need validation.
+- WORKFLOW = multi-step pipeline in data/workflows/. To use one:
+  discover_workflows + run_workflow. To check one: validate_workflow.
+NEVER call validate_workflow on a skill name — it will return "not found".
+
 Reusable multi-step pipelines — WORKFLOWS:
 - To CREATE a pipeline: get_workflow_schema() → create_workflow(name, content).
   Never use file_write to create workflows (wrong location, not registered).
@@ -219,38 +227,58 @@ Reusable multi-step pipelines — WORKFLOWS:
   THEN call run_workflow(name, inputs). You MUST NOT replay the workflow's steps
   inline in your own context — run_workflow spawns a dedicated worker per wave
   specifically to keep this session's context clean. Replaying steps inline is a
-  correctness bug, not a shortcut.
+  correctness bug, not a shortcut."""
 
-BUILD / IMPLEMENT TASKS — ACCEPTANCE-CRITERIA FLOW (auto-eval):
-USE this flow when the user's success criteria are SUBJECTIVE or hard to test
-with a direct shell/script run — and you want an LLM judge to score the work:
-- "writes idiomatic Python with proper error handling"
-- "produces a clean, well-formatted markdown report"
-- "handles edge cases gracefully" (without an enumerated test list)
-- multi-faceted features where individual criteria are not single asserts
-- larger deliverables where a second-opinion check is genuinely useful
 
-SKIP this flow when the user already provided concrete deterministic test
-cases ("returns 'Khoor, Zruog!' for input X") — running the test inline
-with bash/file_read is faster, more reliable, and zero-cost. Skip it for
-conversational / research / one-off questions too.
+# Conditional block — appended to the base prompt only when settings.eval_auto is True.
+# When auto-eval is OFF this is omitted entirely, so the model isn't biased toward
+# calling add_feature. Skip-first ordering: the most common over-trigger is treating
+# operational requests as tracked deliverables, so we lead with the rule that prevents that.
+_AUTO_EVAL_BLOCK = """ACCEPTANCE-CRITERIA FLOW (auto-eval is ON for this server).
 
-When you DO use it:
-1. add_feature(title, description, criteria) — register what success looks like.
-   `criteria` is newline-separated; each line is one judgeable condition.
-2. Implement: write files, run any scripted tests with bash, iterate as needed.
-3. After the turn completes, the auto-eval post-hook runs an LLM judge against
-   your evidence (workspace files + recent assistant messages), scores each
-   criterion, and explicitly looks for "cargo cult" implementations that LOOK
-   right but don't actually work. Results render as an eval card.
-4. If a criterion fails, the system can request a retry with the judge's
-   feedback (bounded by eval_max_retries).
+DO NOT use add_feature for operational requests. If the user asked you to:
+fetch, download, scrape, transcribe, summarize, translate, run, deploy,
+restart, install, look up, find, search, list, or show something — SKIP this
+flow entirely. Just deliver the result. Calling add_feature for these creates
+registry noise and triggers an unneeded auto-eval round that grades you on
+criteria you just made up.
 
-RESOURCE MANAGEMENT: The [RESOURCE STATUS] section shows your remaining tool rounds
+USE this flow ONLY when ALL three are true:
+- User asked you to BUILD or IMPLEMENT a non-trivial artifact
+  (code, document, report).
+- Success is subjective ("idiomatic", "clean", "handles edge cases gracefully").
+- User did NOT give concrete tests like "returns 'X' for input Y" — if they
+  did, just run the test inline with bash; that's faster and zero-cost.
+
+How to use:
+1. add_feature(title, description, criteria) BEFORE you start implementing.
+   Each line of `criteria` is one judgeable condition.
+2. Implement and iterate as usual.
+3. After your turn ends, an LLM judge scores each criterion automatically
+   against workspace files + your messages. Failed criteria may trigger a retry.
+
+NEVER call add_feature after the work is done. The flow is for setting
+expectations up-front, not for self-grading what you already produced."""
+
+
+_BASE_SYSTEM_PROMPT_TAIL = """RESOURCE MANAGEMENT: The [RESOURCE STATUS] section shows your remaining tool rounds
 and token usage. If rounds are low, prioritize completing the core deliverable over
 gathering more context. You can delegate data-heavy subtasks (web browsing, bulk
 processing) to workers via spawn_worker to preserve your tool budget for synthesis
 and user-facing output."""
+
+
+def _build_base_system_prompt() -> str:
+    """Assemble the base system prompt, including the auto-eval block only when
+    settings.eval_auto is True. Keeping the block conditional avoids biasing the
+    model toward add_feature on operational requests when the feature isn't even
+    active server-side.
+    """
+    parts = [BASE_SYSTEM_PROMPT]
+    if settings.eval_auto:
+        parts.append(_AUTO_EVAL_BLOCK)
+    parts.append(_BASE_SYSTEM_PROMPT_TAIL)
+    return "\n\n".join(parts)
 
 
 def _build_model_capability_block(model_name: str, supports_vision: bool) -> str:
@@ -299,7 +327,7 @@ def _build_server_context() -> str:
 
 
 def _build_available_skills_block(max_skills: int = 24, desc_chars: int = 180) -> str:
-    """List every registered skill (name + 1-line description) so the agent
+    """List every ENABLED registered skill (name + 1-line description) so the agent
     sees its full skill catalog on every turn.
 
     Why a fixed catalog: scout's NLP recall fails when a user's prompt shares
@@ -308,12 +336,17 @@ def _build_available_skills_block(max_skills: int = 24, desc_chars: int = 180) -
     SSRF block — never surfaces in scout's recommendations because the user's
     original prompt didn't say "Cloudflare" or "403". Listing the catalog
     here is cache-stable across turns and costs ~50 tokens.
+
+    Disabled skills are filtered out — if the user toggled a skill off in
+    Explorer, the agent should not see it as a candidate to load_skill on.
+    Otherwise the model burns a round calling load_skill('foo') and getting
+    back the disabled-error reply.
     """
     try:
         from core.skills.registry import get_skill_registry
 
         reg = get_skill_registry()
-        skills = sorted(reg.all_skills(), key=lambda s: s.name)
+        skills = sorted(reg.enabled_skills(), key=lambda s: s.name)
     except Exception:
         return ""
     if not skills:
@@ -401,7 +434,7 @@ def compile_context(
     estimator = get_estimator()
 
     # --- Build system prompt ---
-    system_parts = [BASE_SYSTEM_PROMPT]
+    system_parts = [_build_base_system_prompt()]
 
     # Model + vision capability (stable within a session; tells the agent
     # whether images are inlined for it or must be delegated to call_model).
@@ -485,7 +518,7 @@ def compile_context(
     history = [
         m
         for m in raw_messages
-        if m["role"] not in ("compaction", "scout", "notice")
+        if m["role"] not in ("compaction", "scout", "notice", "reflect", "model_divider", "eval")
         and m["id"] > compacted_up_to
         and not (
             turn_user_msg_id is not None and m["role"] == "user" and m["id"] > turn_user_msg_id and not _is_injected(m)
@@ -709,9 +742,15 @@ def normalize_for_openrouter(messages: list[dict]) -> list[dict]:
     valid_tc_ids = set()
     seen_system = False
 
+    _OPENAI_ROLES = {"system", "user", "assistant", "tool"}
+
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content")
+
+        # Drop any internal/metadata roles that are not valid OpenAI API roles
+        if role not in _OPENAI_ROLES:
+            continue
 
         # Ensure content is never None (but preserve lists for multimodal)
         if content is None:

@@ -460,7 +460,10 @@ def _to_native_format(messages: list[dict]) -> list[dict]:
                     text_parts.append(str(part))
             content = "\n".join(text_parts)
 
-        entry = {"role": msg.get("role", ""), "content": content}
+        role = msg.get("role", "")
+        if role not in ("system", "user", "assistant", "tool"):
+            continue
+        entry = {"role": role, "content": content}
         if images:
             entry["images"] = images
 

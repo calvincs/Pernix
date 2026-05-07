@@ -105,15 +105,17 @@ def create_skill(
         return f"Error: Instructions too large (max {MAX_INSTRUCTIONS_SIZE} bytes)"
 
     skill_path = _get_skill_path(name)
-    if skill_path.exists():
+    skill_md = skill_path / "SKILL.md"
+    if skill_md.exists():
         return f"Error: Skill '{name}' already exists. Use update_skill to modify it."
+    # Directory may exist without SKILL.md (e.g. cancelled creation or manual mkdir).
+    # That's an orphaned dir — proceed and write the SKILL.md into it.
 
     # Parse tags
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
     # Create directory and SKILL.md
     skill_path.mkdir(parents=True, exist_ok=True)
-    skill_md = skill_path / "SKILL.md"
     content = _build_skill_md(name, description, instructions, tag_list)
     skill_md.write_text(content, encoding="utf-8")
 
@@ -122,6 +124,10 @@ def create_skill(
 
     reg = get_skill_registry()
     reg.rescan(Path(settings.skills_dir))
+    # Clear any stale disabled flag from a prior skill of the same name
+    # (e.g. user disabled "foo", deleted the dir manually, then create_skill
+    # rebuilds it — without this, the new skill would be silently disabled).
+    reg.enable(name)
 
     if reg.exists(name):
         return (
@@ -199,11 +205,15 @@ def update_skill(
 
 
 def list_skills(_context: dict | None = None) -> str:
-    """List all installed skills with their metadata."""
+    """List all enabled installed skills with their metadata.
+
+    Disabled skills are hidden from the agent (they appear in the Explorer UI
+    only). The agent should not be told about skills it cannot use.
+    """
     from core.skills.registry import get_skill_registry
 
     reg = get_skill_registry()
-    skills = reg.all_skills()
+    skills = reg.enabled_skills()
 
     if not skills:
         return "No skills installed. Use create_skill to create one."

@@ -162,7 +162,7 @@ class StuckDetector:
         if tool_calls:
             sig = tuple(sorted(f"{tc.get('name','')}:{_hash_args(tc.get('arguments',''))}" for tc in tool_calls))
             if sig in self.tool_call_history:
-                score += 0.3
+                score += 0.4
                 self.behavioral_flags.add("tool_cycle")
             self.tool_call_history.append(sig)
 
@@ -318,6 +318,10 @@ def _summarize_args(args: dict, max_value_len: int = 200) -> dict:
 # Tools where semantic dedup is applied (expensive/LLM-wrapping tools)
 _SEMANTIC_DEDUP_TOOLS = {"call_model"}
 
+# Tools excluded from cross-round hard dedup — cheap reads where fresh state matters.
+# bash is intentionally absent: repeated bash calls (e.g. re-running transcription) are the primary target.
+_CROSS_ROUND_DEDUP_EXCLUDED = {"file_read", "glob"}
+
 
 def _parse_args_dict(tc: dict) -> dict:
     """Parse tool call arguments into a dict."""
@@ -440,7 +444,10 @@ async def run_agent(
         try:
             prior_tools = _prior_turn_tool_names(session_id)
             for tname in prior_tools:
-                if registry.exists(tname):
+                # Skip disabled — a tool the user toggled off between turns
+                # must NOT be re-promoted by the monotonic allowlist; otherwise
+                # disabling a previously-used tool has no effect on the next turn.
+                if registry.exists(tname) and not registry.is_disabled(tname):
                     active_tools_set.add(tname)
         except Exception as _e:
             logger.debug("Monotonic allowlist lookup failed for %s: %s", session_id, _e)
@@ -474,8 +481,10 @@ async def run_agent(
     stuck = StuckDetector()
     tool_failures: dict[str, list[str]] = {}
     nudges_fired: set[str] = set()  # one harness nudge per pattern per turn
+    _cross_round_calls: dict[str, tuple[int, str]] = {}  # hash → (round_num, truncated_result)
     did_tool_calls = False
     _compaction_retry_used = False  # at most one compaction-retry per turn
+    _tried_fallback = False  # sticky per-turn: once we fail over, stay on fallback for all remaining rounds
     _last_usage = None  # local tracker — avoids reading shared client.last_usage across sessions
     # Counter for "stuck + told to call ask_user but did not" consecutive rounds.
     # Without a cap, an LLM that ignores the ask_user nudge keeps the loop
@@ -668,8 +677,10 @@ async def run_agent(
 
         # --- Stream with retry/fallback ---
         _stream_retries = 0
-        _tried_fallback = False
-        _stream_current_model = model
+        # _tried_fallback is declared before the outer loop (per-turn sticky).
+        # If we already fell back this turn, skip straight to the fallback model
+        # rather than re-attempting the rate-limited primary on every round.
+        _stream_current_model = settings.fallback_model if _tried_fallback else model
         _compaction_triggered = False
         collected_content = ""
         collected_tool_calls: list[dict] = []
@@ -1038,7 +1049,15 @@ async def run_agent(
             # later separate stuck episode gets the full nudge budget.
             _stuck_ask_user_continues = 0
             if repeats >= 1 and score > 0.3:
-                db.add_message(session_id, "system", "You may be repeating yourself. Try a different approach.")
+                _nudge_tool_names = sorted({tc.get("name", "") for tc in (collected_tool_calls or [])})
+                _nudge_tool_str = ", ".join(_nudge_tool_names) if _nudge_tool_names else "unknown"
+                db.add_message(
+                    session_id,
+                    "system",
+                    f"You are repeating tool calls ({_nudge_tool_str}). "
+                    "Do NOT retry the same operation. "
+                    "Review what you have already accomplished and proceed to the next unfinished step.",
+                )
 
         # Deduplicate tool calls (exact hash)
         seen_calls: set[str] = set()
@@ -1046,10 +1065,22 @@ async def run_agent(
         for tc in collected_tool_calls:
             key = f"{tc['name']}:{_hash_args(tc.get('arguments', ''))}"
             if key in seen_calls:
-                # Return stub for duplicate
+                # Return stub for intra-round duplicate
                 _save_turn_msg("tool", "(duplicate call — see previous result)", tool_call_id=tc.get("id", ""))
                 continue
             seen_calls.add(key)
+            # Cross-round hard dedup: if this exact call already succeeded in a prior round,
+            # return an informative stub so the model can use the known result without re-executing.
+            if key in _cross_round_calls and tc["name"] not in _CROSS_ROUND_DEDUP_EXCLUDED:
+                prior_round, prior_result = _cross_round_calls[key]
+                stub = (
+                    f"(already executed in round {prior_round} with identical arguments — "
+                    f"prior result: {prior_result}. "
+                    "Use this result and do not call again. "
+                    "If you believe the state has changed, verify with file_read or glob instead.)"
+                )
+                _save_turn_msg("tool", stub, tool_call_id=tc.get("id", ""))
+                continue
             unique_calls.append(tc)
 
         # Semantic dedup for expensive tools (near-identical arguments)
@@ -1085,11 +1116,14 @@ async def run_agent(
         for tc in unique_calls:
             tc["name"] = tc["name"].strip()
             aliased = _TOOL_ALIASES.get(tc["name"])
-            # Only apply the alias if the target is both registered AND in the
-            # session's active_tools. Without the active-tools check, an alias
-            # silently promotes a tool past the active-set gate (e.g. scout
-            # didn't pick it, but the model hallucinated a matching name).
-            if aliased and registry.exists(aliased) and aliased in active_tools:
+            # Only apply the alias if the target is registered, NOT disabled,
+            # AND in the session's active_tools. Without the active-tools check,
+            # an alias silently promotes a tool past the active-set gate (e.g.
+            # scout didn't pick it, but the model hallucinated a matching name).
+            # The is_disabled gate is defense-in-depth: the monotonic allowlist
+            # already filters disabled, but an alias is exactly the kind of
+            # back-channel that could resurrect one if a future refactor forgets.
+            if aliased and registry.exists(aliased) and not registry.is_disabled(aliased) and aliased in active_tools:
                 original_name = tc["name"]
                 logger.info("tool.aliased: %s -> %s", original_name, aliased)
                 tc["name"] = aliased
@@ -1290,6 +1324,11 @@ async def run_agent(
                 stuck.mark_failure(tool_name=result.tool_name, args=item["parsed_args"])
             else:
                 stuck.mark_success(tool_name=result.tool_name, args=item["parsed_args"])
+                # Cache successful call for cross-round hard dedup.
+                # Only successful results are cached — failed calls stay eligible for retry.
+                if result.tool_name not in _CROSS_ROUND_DEDUP_EXCLUDED:
+                    _cr_key = f"{result.tool_name}:{_hash_args(tc.get('arguments', ''))}"
+                    _cross_round_calls[_cr_key] = (tool_round, result.content[:200])
             # Semantic-streak observation (signals 8-10): records the result
             # body's "low info" status and hostname for the new search-spiral
             # / bot-wall / same-domain-grind signals. Cheap bookkeeping only.
@@ -1501,7 +1540,7 @@ def _expand_tools_from_discovery(discovery_result: str, active_tools: list[str])
     for match in re.finditer(r"\*\*(\w+)\*\*", discovery_result):
         tool_name = match.group(1)
         registry = get_registry()
-        if registry.exists(tool_name) and tool_name not in active_tools:
+        if registry.exists(tool_name) and not registry.is_disabled(tool_name) and tool_name not in active_tools:
             bisect.insort(active_tools, tool_name)
 
 
@@ -1516,6 +1555,17 @@ def _build_hallucinated_tool_hint(bad_name: str, registry) -> str:
     Suggestion-only: the caller does NOT auto-substitute. The model must
     issue a fresh tool call to pick up the corrected name.
     """
+    # kimi-k2.6 sometimes leaks its native function-call tokens (e.g.
+    # <|tool_call_argument_begin|>) into the tool name field instead of using
+    # the OpenAI tool_calls schema. Fuzzy-matching on these garbage strings
+    # produces wrong suggestions, so bail early with a targeted correction.
+    if "<|" in bad_name:
+        return (
+            "Your response contained a raw model-specific token in the tool name. "
+            "Use the standard tool_calls API field: set `name` to the tool name "
+            "(e.g. `file_write`) and `arguments` to a JSON string of parameters."
+        )
+
     import difflib
 
     suggestions = registry.discover(bad_name, limit=3)

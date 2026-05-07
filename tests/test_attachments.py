@@ -33,18 +33,18 @@ from core.context.compiler import (
 # ---------------------------------------------------------------------------
 
 
-def test_prepare_attachments_leaves_images_as_refs(tmp_path, monkeypatch):
+async def test_prepare_attachments_leaves_images_as_refs(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     (tmp_path / "cat.jpg").write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 2000)  # dummy JPEG
     msg = "Look: [attached: cat.jpg]"
-    out = _prepare_attachments(msg)
+    out = await _prepare_attachments(msg)
     # The reference must stay; no base64, no data: URL, no JSON list.
     assert out == msg
     assert "base64" not in out
     assert "data:image" not in out
 
 
-def test_prepare_attachments_extracts_pdf(tmp_path, monkeypatch):
+async def test_prepare_attachments_extracts_pdf(tmp_path, monkeypatch):
     """PDF attachments get extracted to a sidecar .txt file."""
     from pypdf import PdfWriter
 
@@ -58,22 +58,22 @@ def test_prepare_attachments_extracts_pdf(tmp_path, monkeypatch):
         writer.write(f)
 
     msg = "Summarize this [attached: doc.pdf]"
-    out = _prepare_attachments(msg)
+    out = await _prepare_attachments(msg)
     # The reference is rewritten to mention the sidecar path.
     assert "doc.pdf.txt" in out or "extraction failed" in out
 
 
-def test_prepare_attachments_handles_missing_pdf(tmp_path, monkeypatch):
+async def test_prepare_attachments_handles_missing_pdf(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     msg = "See [attached: ghost.pdf]"
-    out = _prepare_attachments(msg)
+    out = await _prepare_attachments(msg)
     # Missing file: reference stays as-is (no crash, no rewrite).
     assert out == msg
 
 
-def test_prepare_attachments_no_op_when_no_refs(tmp_path, monkeypatch):
+async def test_prepare_attachments_no_op_when_no_refs(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
-    assert _prepare_attachments("plain question") == "plain question"
+    assert await _prepare_attachments("plain question") == "plain question"
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +191,7 @@ def test_expand_images_rejects_path_traversal(tmp_path, monkeypatch):
     assert spent == 0
 
 
-def test_prepare_attachments_rejects_pdf_traversal(tmp_path, monkeypatch):
+async def test_prepare_attachments_rejects_pdf_traversal(tmp_path, monkeypatch):
     """`[attached: ../escape.pdf]` must not land the sidecar outside workspace."""
     from pypdf import PdfWriter
 
@@ -207,7 +207,7 @@ def test_prepare_attachments_rejects_pdf_traversal(tmp_path, monkeypatch):
         writer.write(f)
 
     msg = "grab [attached: ../escape.pdf]"
-    out = _prepare_attachments(msg)
+    out = await _prepare_attachments(msg)
     # Reference left intact; no sidecar written outside workspace.
     assert out == msg
     assert not (tmp_path / "escape.pdf.txt").exists()

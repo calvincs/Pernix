@@ -1,5 +1,55 @@
 # Changelog
 
+## v2.2.0 — 2026-05-07
+
+- feat: make inline file paths in chat clickable to open Explorer
+- fix: expand fallback reasons, gate workflow retry on budget, and misc cleanup
+- fix: offload remaining sync blocking ops to asyncio.to_thread
+- fix: keep event loop responsive during snooze consolidation
+- fix: unify log format by routing uvicorn through root logger
+- docs: correct stale facts in AI tooling.md and add check.sh + companion docs
+- fix: stop FTS5 syntax errors from punctuation in BM25 queries
+- docs: update SPEC_v2 for 2026-05-05 changes
+- feat: overhaul cross-session tools with rich metadata
+- docs: update state_v2.py to reflect Stage 1 completion
+- refactor: extract _run_scout_and_process, migrate to v2 state machine
+- feat: overhaul memory search — query fix, ripgrep fallback, deep_recall agent
+- feat: add delete_skill and delete_workflow tools
+- feat: seed SESSIONS.md with spec-informed default structure
+- refactor: rename PROJECT.md to SESSIONS.md
+- refactor: rename agent instruction files for clarity, add proactive behavior rules
+- fix: recover from orphaned skill dirs and stale registry on load_skill
+- chore: disable clean-room-release skill, remove test-mini-flow workflow
+- fix: block internal message roles from reaching LLM providers
+- feat: enhance state timeline modal with richer workflow context
+- fix: scout bypass fires incorrectly on short first-turn messages
+- fix: improve kimi native-token error hint and surface reasoning deltas
+- fix: close three stuck-loop gaps exposed by session b8e40e45925e
+- feat: raise workspace upload limit from 10MB to 250MB
+- fix: exclude reflect role from LLM context, unbreak OpenRouter multi-turn
+- feat: filter disabled skills/tools across every agent surface
+- ui: align UI brand styling with pernix-website
+- docs: patch SPEC_v2 for 2026-05-03–04 commits
+- fix: state badge and soft-reload streaming sync
+- fix: prevent infinite orphan re-queue loop on consecutive ask_user answer chains
+- fix: yes/no quick-answer buttons, mobile tab wrapping, ask_user session stuck bug
+- fix: harness prompt nudges from session edb605c3e045 audit
+- fix: 7 issues from session cb41c12d92fe audit
+- docs: add playwright install chromium step to README, INSTALLATION, and Docker outline
+- docs: update AI tooling.md — venv restart caveat, playwright setup, cron gate exception
+- fix: bypass dangerous gate for cron sessions, hint file_read on stale edit, update playwright pin
+- fix: preserve notification input, mobile layout, auto-close on empty
+- docs: add Amendment 21 — Explorer panel search coverage + focus-safe pattern
+- feat: add search to Skills, Workflows, and Jobs Explorer panels
+- fix: retain search focus in Explorer → Tools by rendering list in-place
+- docs: update spec, security, architecture, and install docs for recent changes
+- feat: Security tab in Settings + Run Dangerously mode via --dangerous flag
+- fix: per-invocation dangerous tool approval with persistent scope memory
+- fix: implement per-session dangerous tool approval via ask_user handshake
+- fix: state machine correctness — 4 session lifecycle bugs + graph completeness
+- docs: modernize model recs, add Swagger UI references, add ARCHITECTURE.md
+- chore: gitignore docs/spec and release tooling
+
 ## v2.1.0 — 2026-05-02
 
 - docs: add comprehensive end-user documentation; cleanup .gitignore and dead stubs

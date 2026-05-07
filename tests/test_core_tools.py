@@ -454,19 +454,19 @@ def test_file_read_does_not_create_workspace_dir(tmp_path, monkeypatch):
 
 def test_protected_file_blocked_at_root(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
-    (tmp_path / "AGENTS.md").write_text("instructions")
-    result = file_read("AGENTS.md")
+    (tmp_path / "SESSIONS.md").write_text("instructions")
+    result = file_read("SESSIONS.md")
     assert "Error" in result
     assert "Protected" in result
 
 
 def test_protected_name_allowed_in_subdir(tmp_path, monkeypatch):
-    """A file named AGENTS.md deep in the tree is a legitimate skill file."""
+    """A file named SESSIONS.md deep in the tree is a legitimate skill file."""
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     sub = tmp_path / "skills" / "foo"
     sub.mkdir(parents=True)
-    (sub / "AGENTS.md").write_text("skill metadata")
-    result = file_read("skills/foo/AGENTS.md")
+    (sub / "SESSIONS.md").write_text("skill metadata")
+    result = file_read("skills/foo/SESSIONS.md")
     assert "skill metadata" in result
 
 

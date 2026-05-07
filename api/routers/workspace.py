@@ -17,7 +17,7 @@ router = APIRouter(tags=["workspace"])
 MAX_SEARCH_RESULTS = 50
 
 BLOCKED_EXTENSIONS = {".exe", ".sh", ".php", ".bat", ".cmd", ".com", ".scr", ".msi", ".dll"}
-MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_UPLOAD_SIZE = 250 * 1024 * 1024  # 250MB
 
 _CONTENT_TYPES = {
     ".html": "text/html",

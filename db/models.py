@@ -148,6 +148,16 @@ def get_sessions_in_state_v2(state_v2: str) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_sessions_in_legacy_processing_only() -> list[dict]:
+    """Return sessions where legacy state='processing' but state_v2 is NULL or empty.
+    Used by the boot reconcile to catch sessions that crashed before state_v2 was written."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sessions WHERE state = 'processing' AND (state_v2 IS NULL OR state_v2 = '')",
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def delete_session(session_id: str) -> None:
     """Delete session and cascade (messages, artifacts, questions)."""
     # Delete workers first (recursive), then parent — all in one transaction
@@ -517,17 +527,22 @@ def search_messages_fts(
     """FTS5 search across all session messages. Returns ranked results with session context."""
     import re
 
-    # Convert to FTS5 query: words > 2 chars joined with OR
-    clean = re.sub(r"[^\w\s]", " ", query)
-    words = [w for w in clean.split() if len(w) > 2]
+    # Strip only FTS5 syntax-breaking chars; commas → spaces; keep ≥ 2-char tokens
+    clean = re.sub(r'["\'()\[\]{};*^\\|]', " ", query)
+    clean = clean.replace(",", " ")
+    words = [w.strip("-@:.") for w in clean.split()]
+    words = [w for w in words if len(w) >= 2]
     if not words:
         return []
-    fts_query = " OR ".join(words)
+    _FTS5_KW = {"AND", "OR", "NOT", "NEAR"}
+    fts_query = " OR ".join(f'"{w}"' if w.upper() in _FTS5_KW else w for w in words)
 
     with connect_sessions() as conn:
         sql = """
             SELECT f.rowid as msg_id, f.session_id, f.role, f.content,
-                   s.title as session_title,
+                   s.title as session_title, s.session_type,
+                   s.created_at as session_created_at,
+                   s.updated_at as session_updated_at,
                    bm25(messages_fts, 1.0) as score
             FROM messages_fts f
             LEFT JOIN sessions s ON f.session_id = s.id
@@ -550,6 +565,9 @@ def search_messages_fts(
                     "msg_id": r["msg_id"],
                     "session_id": r["session_id"],
                     "session_title": r["session_title"] or "untitled",
+                    "session_type": r["session_type"] or "normal",
+                    "session_created_at": (r["session_created_at"] or "")[:16],
+                    "session_updated_at": (r["session_updated_at"] or "")[:16],
                     "role": r["role"],
                     "content": (r["content"] or "")[:300],
                     "score": abs(r["score"]),
@@ -558,6 +576,23 @@ def search_messages_fts(
             ]
         except Exception:
             return []  # FTS table may not exist yet
+
+
+def recent_termination_reasons(session_id: str, limit: int = 3) -> list[str]:
+    """Most recent N non-null termination_reason values for the session, newest-first.
+
+    Used by reflect to detect ceiling-loops: if termination_reason has been
+    'round_ceiling' on the current turn AND a prior turn, the agent is hitting
+    the same hard wall and reflect should escalate.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT termination_reason FROM session_state_log
+               WHERE session_id = ? AND termination_reason IS NOT NULL
+               ORDER BY id DESC LIMIT ?""",
+            (session_id, limit),
+        ).fetchall()
+        return [r["termination_reason"] for r in rows]
 
 
 def get_message_context(session_id: str, message_id: int, window: int = 2) -> list[dict]:

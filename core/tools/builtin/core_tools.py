@@ -607,6 +607,7 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
         import signal
 
         as_limit = int(getattr(settings, "shell_address_space_limit_bytes", 0) or 0)
+        fsize_limit = int(getattr(settings, "shell_fsize_limit_bytes", 0) or 0)
 
         def _child_setup():
             """Applied in child process: new session + resource limits."""
@@ -614,7 +615,8 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
             try:
                 if as_limit > 0:
                     resource.setrlimit(resource.RLIMIT_AS, (as_limit, as_limit))
-                resource.setrlimit(resource.RLIMIT_FSIZE, (100 * 1024 * 1024, 100 * 1024 * 1024))
+                if fsize_limit > 0:
+                    resource.setrlimit(resource.RLIMIT_FSIZE, (fsize_limit, fsize_limit))
             except (ValueError, resource.error):
                 pass
 

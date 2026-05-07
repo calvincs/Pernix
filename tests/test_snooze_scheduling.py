@@ -62,7 +62,9 @@ def test_has_active_work_detects_scouting_and_processing():
     sess._force_state_for_tests(SessionState.PROCESSING)
     assert mgr.has_active_work() is True
 
-    sess._force_state_for_tests(SessionState.ERROR)
+    # ERROR maps to FINALIZING via the v2 bridge (correctly treated as active).
+    # Use IDLE to assert the "not active" case.
+    sess._force_state_for_tests(SessionState.IDLE)
     assert mgr.has_active_work() is False
 
 

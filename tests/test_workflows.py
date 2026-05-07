@@ -968,12 +968,12 @@ steps:
     original_emit = orch._emit_workflow_event
     call_count = [0]
 
-    def angry_emit(event):
+    def angry_emit(event, session=None):
         call_count[0] += 1
         # Allow the workflow.started event through; blow up on wave_started
         if event.get("type") == "workflow.wave_started":
             raise RuntimeError("simulated unexpected exception")
-        return original_emit(event)
+        return original_emit(event, session=session)
 
     monkeypatch.setattr(orch, "_emit_workflow_event", angry_emit)
 
@@ -1181,10 +1181,10 @@ steps:
     # failure that the await_workers inner guard cannot catch.
     real_emit = orch._emit_workflow_event
 
-    def flaky_emit(payload):
+    def flaky_emit(payload, session=None):
         if payload.get("type") == "workflow.wave_started":
             raise RuntimeError("simulated event-bus failure")
-        return real_emit(payload)
+        return real_emit(payload, session=session)
 
     monkeypatch.setattr(orch, "_emit_workflow_event", flaky_emit)
 
@@ -1231,3 +1231,170 @@ steps:
     assert manifest["steps"]["b"]["status"] == "skipped"
     # Only 'a' was spawned; b never ran due to halt-on-escalate
     assert len(stub_worker_pipeline["spawned"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# run_workflow not-found disambiguation
+# ---------------------------------------------------------------------------
+
+
+def _install_skill(tmp_path, monkeypatch, name: str) -> None:
+    """Drop a minimal SKILL.md into a temp skills dir and rescan the registry."""
+    skills_dir = tmp_path / "skills"
+    target = skills_dir / name / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        f"---\nname: {name}\ndescription: test skill\nversion: '1.0'\n---\n# {name}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("config.settings.skills_dir", str(skills_dir))
+    from core.skills.registry import get_skill_registry
+
+    get_skill_registry().rescan(skills_dir)
+
+
+def test_run_workflow_unknown_with_no_close_match(tmp_path, monkeypatch):
+    """No skill collision and no near-match — falls back to plain not-found."""
+    # Empty workflow registry
+    from core.workflows.registry import get_workflow_registry
+
+    get_workflow_registry().rescan(tmp_path / "empty_wfs")
+    # Empty skill registry
+    _install_skill(tmp_path, monkeypatch, "completely-unrelated-skill")
+
+    from core.extensions.orchestration import run_workflow
+
+    out = run_workflow("nonexistent-thing", "", _context={"session_id": "s1"})
+    assert "Workflow 'nonexistent-thing' not found" in out
+    assert "discover_workflows" in out
+
+
+def test_run_workflow_suggests_skill_when_name_collides(tmp_path, monkeypatch):
+    """If a skill exists with the same name, point the agent at load_skill."""
+    from core.workflows.registry import get_workflow_registry
+
+    get_workflow_registry().rescan(tmp_path / "empty_wfs")
+    _install_skill(tmp_path, monkeypatch, "youtube-whisper")
+
+    from core.extensions.orchestration import run_workflow
+
+    out = run_workflow("youtube-whisper", "", _context={"session_id": "s1"})
+    assert "is a SKILL" in out
+    assert "load_skill(name='youtube-whisper')" in out
+
+
+def test_run_workflow_suggests_close_workflow(tmp_path, monkeypatch):
+    """Typo on a workflow name → suggest the close match."""
+    wf_yaml = """---
+name: data-export
+description: Export data
+steps:
+  - id: a
+    type: instruction
+    description: a
+    output_file: a.md
+    depends_on: []
+---
+"""
+    _install_wf(tmp_path, monkeypatch, "data-export", wf_yaml)
+
+    from core.extensions.orchestration import run_workflow
+
+    out = run_workflow("data_export", "", _context={"session_id": "s1"})
+    assert "Did you mean" in out
+    assert "data-export" in out
+
+
+def test_run_workflow_suggests_close_skill(tmp_path, monkeypatch):
+    """No matching workflow, but a skill name is close enough — suggest it."""
+    from core.workflows.registry import get_workflow_registry
+
+    get_workflow_registry().rescan(tmp_path / "empty_wfs")
+    _install_skill(tmp_path, monkeypatch, "nws-weather-forecast")
+
+    from core.extensions.orchestration import run_workflow
+
+    out = run_workflow("nws-weather-forecasts", "", _context={"session_id": "s1"})  # extra 's'
+    assert "similarly named skill" in out
+    assert "nws-weather-forecast" in out
+
+
+# ---------------------------------------------------------------------------
+# Disabled-skill handling in workflows
+# ---------------------------------------------------------------------------
+
+
+def test_run_workflow_rejects_disabled_skill_in_step(tmp_path, monkeypatch, stub_worker_pipeline):
+    """A workflow whose step references a disabled skill must fail fast with
+    a clear 'enable in Explorer > Skills' message — NOT silently skip the
+    skill or fall through to a generic 'skill missing' error.
+    """
+    _install_skill(tmp_path, monkeypatch, "off-skill")
+    from core.skills.registry import get_skill_registry
+
+    get_skill_registry().disable("off-skill")
+
+    wf_yaml = """---
+name: needs_off
+description: needs disabled skill
+steps:
+  - id: a
+    type: instruction
+    description: a
+    skill: off-skill
+    output_file: a.md
+    depends_on: []
+---
+"""
+    _install_wf(tmp_path, monkeypatch, "needs_off", wf_yaml)
+    from core.extensions.orchestration import run_workflow
+
+    out = run_workflow("needs_off", "", _context={"session_id": "s1"})
+    assert "disabled" in out.lower()
+    assert "off-skill" in out
+    assert "Explorer" in out
+    # Workflow must NOT have spawned any worker.
+    assert len(stub_worker_pipeline["spawned"]) == 0
+
+
+def test_run_workflow_disambiguation_disabled_skill(tmp_path, monkeypatch):
+    """run_workflow('foo') where 'foo' is a SKILL (not a workflow) AND that
+    skill is disabled — disambiguation must surface the disabled state
+    explicitly rather than redirecting to load_skill (which itself errors on
+    disabled skills, sending the agent on a wild goose chase).
+    """
+    from core.workflows.registry import get_workflow_registry
+
+    get_workflow_registry().rescan(tmp_path / "empty_wfs")
+    _install_skill(tmp_path, monkeypatch, "youtube-whisper")
+    from core.skills.registry import get_skill_registry
+
+    get_skill_registry().disable("youtube-whisper")
+
+    from core.extensions.orchestration import run_workflow
+
+    out = run_workflow("youtube-whisper", "", _context={"session_id": "s1"})
+    assert "disabled" in out.lower()
+    assert "youtube-whisper" in out
+    assert "Explorer" in out
+
+
+def test_validate_workflow_disambiguates_disabled_skill(tmp_path, monkeypatch):
+    """validate_workflow('foo') where 'foo' is a disabled SKILL must surface
+    the disabled state — not silently redirect to load_skill, which would
+    error out on its own and burn another agent turn."""
+    from core.workflows.registry import get_workflow_registry
+
+    get_workflow_registry().rescan(tmp_path / "empty_wfs")
+    _install_skill(tmp_path, monkeypatch, "off-skill")
+    from core.skills.registry import get_skill_registry
+
+    get_skill_registry().disable("off-skill")
+
+    from core.tools.builtin.workflow_tools import validate_workflow
+
+    out = validate_workflow("off-skill")
+    assert "off-skill" in out
+    assert "SKILL" in out
+    assert "disabled" in out.lower()
+    assert "Explorer" in out

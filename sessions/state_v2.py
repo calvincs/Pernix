@@ -1,13 +1,15 @@
 """Pernix — True session state machine (v2, successor to state.py).
 
-This module is DORMANT in Stage 0 of the state-machine migration — no
-existing code calls transition() yet. Stage 1 rewrites the 13 mutation
-sites in sessions/manager.py to route through this module; stages 2-5
-retire orthogonal flags and wire up observability.
+Migration status: Stage 1 complete. All state mutations in
+sessions/manager.py, core/agent.py, and core/extensions/ go through
+transition() — the legacy 5-state SessionState enum in state.py is now
+a read-only mirror updated by _set_state(). Remaining work (stages 2-5):
+retire the legacy mirror entirely, remove _persist_legacy_state() call
+sites, and delete the _LEGACY_TO_V2/_V2_TO_LEGACY bridge tables.
 
 Design summary:
 
-- 9 named states replace the old 5-state enum + 10 orthogonal flags.
+- 10 named states replace the old 5-state enum + orthogonal boolean flags.
 - Every transition has an explicit edge in TRANSITIONS with a bounded
   vocabulary of reasons. force_state() is gone; if you need to "force,"
   add the edge and give the reason a name (e.g. cancel-timeout).
@@ -15,14 +17,11 @@ Design summary:
   emits a session.state_changed SSE event. The log is the forensic record;
   the event is the live signal.
 - Invariants per state are checked on entry. Violations are logged loudly
-  (system event + log line + 'invariant-violation' log row) but do not
-  abort — the mutator still completes the transition. The point is
-  forensics, not crash-on-bug.
+  (log line + 'invariant-violation' log row) but do not abort — the mutator
+  still completes the transition. The point is forensics, not crash-on-bug.
 
-Cross-pollination does NOT go through transition(): it writes directly
-to the session_messages table as a memory write, not a prompt. Likewise,
-message_worker (Stage 3) will use inject_user_message() to write to the
-messages table when the target is mid-turn, bypassing the state machine.
+Cross-pollination writes directly to session_messages as a memory write,
+not a prompt, and does not go through transition().
 """
 
 from __future__ import annotations
@@ -137,12 +136,28 @@ TRANSITIONS: dict[tuple[S, str], S] = {
     (S.AWAITING_WORKERS, "worker-timeout"): S.IDLE_READY,
     (S.AWAITING_WORKERS, "cancel-requested"): S.CANCELLING,
     (S.AWAITING_WORKERS, "reaper-unstick"): S.IDLE_READY,
+    # Compaction phase: cancellation and error escape hatches
+    (S.COMPACTING, "cancel-requested"): S.CANCELLING,
+    (S.COMPACTING, "agent-error"): S.FINALIZING,
     # Reaper escape hatches (kept explicit rather than a generic force)
     (S.PROCESSING, "reaper-unstick"): S.IDLE_READY,
     (S.SCOUTING, "reaper-unstick"): S.IDLE_READY,
     (S.PAUSE_REQUESTED, "reaper-unstick"): S.IDLE_READY,
     (S.PAUSED, "reaper-unstick"): S.IDLE_READY,  # 24h safety net / orphaned parent
     (S.AWAITING_USER, "reaper-unstick"): S.IDLE_READY,
+    # cancel-timeout: emergency exit when cancel was requested but the session
+    # never reached CANCELLING (race between the cancel request and the agent
+    # returning normally, or a failed transition to CANCELLING). One edge per
+    # state that the cancel-finally handler in manager.py can realistically
+    # encounter. Mirrors the "reaper-unstick" coverage pattern.
+    (S.SCOUTING, "cancel-timeout"): S.IDLE_READY,
+    (S.PROCESSING, "cancel-timeout"): S.IDLE_READY,
+    (S.COMPACTING, "cancel-timeout"): S.IDLE_READY,
+    (S.PAUSE_REQUESTED, "cancel-timeout"): S.IDLE_READY,
+    (S.PAUSED, "cancel-timeout"): S.IDLE_READY,
+    (S.AWAITING_USER, "cancel-timeout"): S.IDLE_READY,
+    (S.AWAITING_WORKERS, "cancel-timeout"): S.IDLE_READY,
+    (S.FINALIZING, "cancel-timeout"): S.IDLE_READY,
 }
 
 # Reasons that trigger a new turn_id (vs. reusing the current one).
@@ -401,10 +416,12 @@ _LEGACY_TO_V2: dict[str, S] = {
 }
 
 # Internal mirror: keep session.state (legacy enum) coherent with v2 during
-# the migration so existing consumers (reaper, check_workers, etc.) don't
-# break. Distinct from COMPAT_STATUS (external API): FINALIZING/CANCELLING
-# must mirror as "idle" because today's code runs post-hooks while state=IDLE
-# with has_background_tasks=True — Stage 2 retires that convention.
+# the migration so remaining consumers (api/routers/sessions.py,
+# core/extensions/orchestration) that still read session.state directly
+# don't break. FINALIZING/CANCELLING/AWAITING_* map to "idle" because the
+# legacy enum has no equivalents; has_active_work() and snooze._is_idle()
+# now read v2 state directly and are no longer fooled by this collapse.
+# Stage 2 retires this map entirely.
 _V2_TO_LEGACY: dict[S, str] = {
     S.IDLE_READY: "idle",
     S.SCOUTING: "scouting",

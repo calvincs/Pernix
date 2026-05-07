@@ -138,3 +138,24 @@ def test_health_metrics():
     assert reg.metrics["t1"].total_calls == 3
     assert reg.metrics["t1"].success_rate == 2 / 3
     assert reg.metrics["t1"].avg_latency_ms == 350 / 3
+
+
+def test_discovery_excludes_disabled(monkeypatch, tmp_path):
+    """Disabled tools must not surface from discover() — same fix that closes
+    the gap for scout's baseline + search_tools wrapper."""
+    # Point the tools-config persistence at tmp so we don't write to data/.
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(name="search_web", func=lambda: "", description="search", parameters={}, tags=["search", "web"])
+    reg.register(name="file_read", func=lambda: "", description="read a file", parameters={}, tags=["read", "file"])
+    reg.rebuild_index()
+
+    # Both visible by default
+    names = {r.name for r in reg.discover("search the web")}
+    assert "search_web" in names
+
+    reg.disable("search_web")
+    names = {r.name for r in reg.discover("search the web")}
+    assert "search_web" not in names
+    # And still visible via all_tools (UI introspection)
+    assert "search_web" in {t.name for t in reg.all_tools()}

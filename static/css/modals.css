@@ -246,6 +246,7 @@
 /* Tabs */
 .tab-bar {
     display: flex;
+    flex-wrap: wrap;
     border-bottom: 1px solid var(--border);
     padding: 0 var(--sp-5);
     flex-shrink: 0;
@@ -459,6 +460,59 @@
 }
 .question-answer:focus { border-color: var(--accent-dim); }
 
+/* Yes / No / Other quick-answer buttons */
+.q-yesno-btns {
+    display: flex;
+    gap: var(--sp-2);
+    margin-top: var(--sp-1);
+}
+.q-yes-btn,
+.q-no-btn,
+.q-other-btn {
+    flex: 1;
+    padding: var(--sp-3) var(--sp-2);
+    font-size: var(--text-md);
+    font-weight: 600;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: var(--transition);
+    font-family: var(--mono);
+}
+.q-yes-btn {
+    background: var(--success-subtle);
+    color: var(--success);
+    border-color: var(--success);
+}
+.q-yes-btn:hover {
+    background: color-mix(in srgb, var(--success) 22%, var(--bg));
+}
+.q-no-btn {
+    background: var(--error-subtle);
+    color: var(--error);
+    border-color: var(--error);
+}
+.q-no-btn:hover {
+    background: color-mix(in srgb, var(--error) 22%, var(--bg));
+}
+.q-other-btn {
+    background: var(--bg-hover);
+    color: var(--text-dim);
+}
+.q-other-btn:hover {
+    color: var(--text-bright);
+    background: var(--bg-raised);
+}
+.question-other-area {
+    margin-top: var(--sp-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.question-other-area .btn {
+    align-self: flex-end;
+}
+
 /* Question badge */
 #question-badge {
     display: none;
@@ -659,5 +713,64 @@
 /* Question item accent border */
 .notif-question {
     border-left: 3px solid var(--accent);
+}
+
+/* ── Security tab — warning block ──────────────────────────── */
+.security-warning-block {
+    background: color-mix(in srgb, var(--error, #c25450) 8%, var(--bg));
+    border: 1px solid var(--error, #c25450);
+    border-radius: var(--radius);
+    padding: var(--sp-3);
+    margin-bottom: var(--sp-4);
+}
+.security-warning-title {
+    font-weight: 700;
+    color: var(--error, #c25450);
+    margin-bottom: var(--sp-2);
+    font-size: var(--text-sm);
+    letter-spacing: 0.02em;
+}
+.security-warning-list {
+    margin: 0;
+    padding-left: var(--sp-4);
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    line-height: 1.65;
+}
+.security-warning-list li {
+    margin-bottom: var(--sp-1);
+}
+
+/* Approved scopes list inside Security tab */
+.security-scopes-list {
+    max-height: 220px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-surface);
+}
+.security-scopes-tool {
+    padding: var(--sp-2) var(--sp-3);
+    border-bottom: 1px solid var(--border);
+}
+.security-scopes-tool:last-child { border-bottom: none; }
+.security-scopes-tool-name {
+    font-weight: 600;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: var(--sp-1);
+}
+.security-scopes-scope {
+    font-size: var(--text-xs);
+    color: var(--text);
+    padding: 2px 0;
+}
+.security-scopes-empty {
+    padding: var(--sp-3);
+    color: var(--text-faint);
+    font-size: var(--text-xs);
+    text-align: center;
 }
 

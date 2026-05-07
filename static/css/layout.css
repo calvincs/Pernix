@@ -31,18 +31,57 @@
     justify-content: space-between;
 }
 
-#sidebar header h1 {
-    font-size: var(--text-md);
+/* Brand + new-session button share a fixed visual height (24px) so the SVG
+   diamond, the serif wordmark, and the mono button text all sit on the same
+   horizontal line. Without the shared height the brand box collapses to 20px
+   (SVG dominates) while the button computes ~25px, and `align-items: center`
+   centers them on slightly different baselines — visually misaligned. */
+#sidebar header .brand,
+#sidebar header #new-session-btn {
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    line-height: 1;
+}
+#sidebar header .brand {
+    gap: var(--sp-2);
     color: var(--accent);
+    text-decoration: none;
+}
+#sidebar header .brand-mark {
+    width: 20px;
+    height: 20px;
+    color: var(--accent);
+    filter: drop-shadow(0 0 3px rgba(212, 168, 67, 0.35));
+    animation: brandBreathe 11.4s ease-in-out infinite;
+    flex-shrink: 0;
+    display: block;  /* drops baseline gap from inline default */
+}
+#sidebar header .brand-word {
+    font-family: var(--serif);
+    font-size: 17px;
     font-weight: 500;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.04em;
+    color: var(--text-bright);
+    /* Newsreader has a low baseline (caps sit high in the em-box, descender
+       space dominates the bottom). With `align-items: center` on the row,
+       the line box centers correctly but the visible glyphs land in the
+       upper portion of the line box — so "Pernix" reads ~4px above the SVG
+       diamond's geometric center and the button's mono-text center.
+       Empirical translate brings the cap-cluster's optical center down to
+       the row's true horizontal centerline. Tested at 17px/Newsreader. */
+    transform: translateY(4px);
+}
+@keyframes brandBreathe {
+    0%, 100% { opacity: 0.55; transform: scale(0.97); }
+    50%      { opacity: 1.00; transform: scale(1.03); }
 }
 
 #new-session-btn {
     background: none;
     border: 1px solid var(--border);
     color: var(--text-dim);
-    padding: var(--sp-1) var(--sp-3);
+    padding: 0 var(--sp-3);  /* vertical padding handled by fixed height */
     border-radius: var(--radius);
     cursor: pointer;
     font-family: var(--mono);
@@ -426,26 +465,73 @@
     padding: var(--sp-8);
     animation: fadeIn 0.4s ease;
 }
-.empty-state-icon {
-    width: 80px;
-    height: 80px;
+/* Sigil + overlaid title — mirrors the website hero layout. The figure is a
+   relatively-positioned box that holds the canvas (absolute, inset:0) and the
+   gradient title (centered via grid). Sized to give the diamond room to
+   breathe at peak inhale (1.05× scale + 18px shadow blur on desktop). */
+.empty-state-figure {
+    position: relative;
+    width: clamp(260px, 36vw, 380px);
+    height: clamp(260px, 36vw, 380px);
+    display: grid;
+    place-items: center;
     margin-bottom: var(--sp-4);
-    opacity: 0.85;
 }
-.empty-state h2 {
+.empty-state-sigil {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+    mix-blend-mode: screen;
+    pointer-events: none;
+}
+.empty-state-title {
+    position: relative;
+    z-index: 2;
     font-family: var(--serif);
-    font-size: 1.375rem;
     font-weight: 400;
+    /* Scaled down from website's clamp(80px,16vw,200px) to fit our compact figure. */
+    font-size: clamp(48px, 7vw, 72px);
+    line-height: 1.12;
+    letter-spacing: -0.02em;
     color: var(--text-bright);
-    margin-bottom: var(--sp-2);
+    text-shadow: 0 0 60px rgba(212, 168, 67, 0.18);
+    margin: 0;
 }
-.empty-state p {
+.empty-state-title-line {
+    /* Vertical gold gradient on the wordmark — copied verbatim from the website. */
+    display: inline-block;
+    background: linear-gradient(180deg, #ece1c4 0%, #d4a843 80%, #8a6720 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+/* Etymology kicker — same font/color treatment as the website hero. */
+.empty-state-kicker {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    letter-spacing: 0.04em;
+    margin-bottom: var(--sp-5);
+}
+.empty-state-kicker em {
+    color: var(--accent);
+    font-style: italic;
+    font-family: var(--serif);
+    font-size: 15px;
+}
+.empty-state-kicker .ipa { color: var(--text-faint); }
+.empty-state-kicker .def { color: var(--text-dim); }
+
+.empty-state-help {
     font-size: var(--text-sm);
     color: var(--text-dim);
     max-width: 360px;
     line-height: 1.6;
 }
-.empty-state kbd {
+.empty-state-help kbd {
     display: inline-block;
     background: var(--bg-surface);
     border: 1px solid var(--border);
@@ -763,6 +849,18 @@
     background: var(--accent-glow);
 }
 .file-view-btn.inline { margin-left: var(--sp-2); }
+
+.message.assistant .content code.file-path-link {
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dashed;
+    text-decoration-color: var(--accent-dim);
+    text-underline-offset: 2px;
+}
+.message.assistant .content code.file-path-link:hover {
+    background: var(--accent-glow);
+    text-decoration-color: var(--accent);
+}
 
 /* Code block copy buttons */
 .code-block-wrap {
@@ -1262,6 +1360,55 @@
 .tl-caption-current { color: #7ec4f0; }
 .tl-caption-term { color: var(--text); }
 .tl-caption-warn { color: #e88080; }
+.tl-caption-stat { color: var(--text-faint); }
+
+/* Turn header enrichment — secondary meta chips after the turn number */
+.tl-turn-meta {
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    font-weight: normal;
+}
+.tl-turn-meta::before { content: '·'; margin: 0 5px; opacity: 0.5; }
+.tl-turn-term {
+    font-size: var(--text-xxs);
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.tl-turn-term-complete { color: #7ec4f0; background: rgba(126,196,240,0.12); }
+.tl-turn-term-error,
+.tl-turn-term-scout-error { color: #e88080; background: rgba(232,128,128,0.12); }
+.tl-turn-term-cancelled { color: var(--text-faint); background: rgba(128,128,128,0.1); }
+.tl-turn-term-round-ceiling,
+.tl-turn-term-budget-exhausted { color: #d4a843; background: rgba(212,168,67,0.12); }
+.tl-turn-parent {
+    font-size: var(--text-xxs);
+    color: var(--accent-dim);
+    opacity: 0.7;
+    margin-left: 4px;
+}
+
+/* State row inline badges */
+.tl-badge-row {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-top: 2px;
+}
+.tl-badge {
+    display: inline-block;
+    font-size: 10px;
+    padding: 0 4px;
+    border-radius: 2px;
+    line-height: 1.6;
+    white-space: nowrap;
+}
+.tl-badge-compact { background: rgba(90,138,90,0.15); color: #7aaa7a; border: 1px solid rgba(90,138,90,0.25); }
+.tl-badge-retry   { background: rgba(212,168,67,0.15); color: #d4a843; border: 1px solid rgba(212,168,67,0.25); }
+.tl-badge-await   { background: rgba(126,166,200,0.15); color: #7ea6c8; border: 1px solid rgba(126,166,200,0.25); }
+.tl-badge-pause   { background: rgba(160,120,200,0.15); color: #a078c8; border: 1px solid rgba(160,120,200,0.25); }
 
 /* Tool call tally — shown in graph tab between diagram and caption */
 .tl-tool-tally {
@@ -1300,6 +1447,11 @@
     border-radius: 3px;
     padding: 1px 6px;
     white-space: nowrap;
+}
+.tl-tally-chip.error {
+    background: rgba(232, 128, 128, 0.10);
+    border-color: rgba(232, 128, 128, 0.30);
+    color: #e88080;
 }
 
 /* Timeline tab — turn headers + tool rows */

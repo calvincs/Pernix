@@ -11,7 +11,7 @@ from typing import Awaitable, Callable
 from config import settings
 from db import models as db
 from sessions import state_v2 as sv2
-from sessions.state import AgentSession, SessionState
+from sessions.state import AgentSession
 
 logger = logging.getLogger("pernix.sessions")
 
@@ -306,6 +306,78 @@ class SessionManager:
                     logger.error("reconcile resume failed for %s: %s", sid, e)
         return resumed
 
+    async def reconcile_processing_sessions(self) -> int:
+        """Boot-time sweep: find sessions persisted in PROCESSING and reset to IDLE_READY.
+
+        Any session in PROCESSING at startup has a dead agent task (the server
+        restarted before the turn could complete). Reset them immediately so users
+        can re-prompt rather than waiting up to 5 minutes for the reaper to fire.
+        Mirrors reconcile_awaiting_workers() which handles the AWAITING_WORKERS case.
+        Returns the count of sessions reset.
+        """
+        try:
+            rows = db.get_sessions_in_state_v2(sv2.SessionStateV2.PROCESSING.value)
+        except Exception as e:
+            logger.error("reconcile_processing_sessions: DB sweep failed: %s", e)
+            return 0
+        # Also catch sessions where state_v2 was never persisted (server crashed
+        # before the DB write completed) but legacy state='processing' was written.
+        try:
+            legacy_rows = db.get_sessions_in_legacy_processing_only()
+            seen = {r["id"] for r in rows}
+            rows = rows + [r for r in legacy_rows if r["id"] not in seen]
+        except Exception:
+            pass  # best-effort; the state_v2 sweep is the primary path
+
+        reset = 0
+        for row in rows:
+            sid = row["id"]
+            try:
+                session = self.get_or_create(sid)
+            except ValueError:
+                continue
+            current = sv2._current_state(session)
+            is_legacy_null = row.get("state_v2") in (None, "")
+
+            if current is sv2.SessionStateV2.PROCESSING:
+                # Normal v2 path: state_v2='processing' was persisted and restored.
+                logger.warning("Boot reconcile: resetting stuck PROCESSING session %s", sid[:12])
+                try:
+                    sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
+                    _persist_legacy_state(session)
+                except Exception as _e:
+                    logger.error("reconcile_processing reset failed for %s: %s", sid, _e)
+                    continue
+            elif is_legacy_null and current is sv2.SessionStateV2.IDLE_READY:
+                # Legacy path: state_v2 was NULL (crash before the v2 column was
+                # written). get_or_create already defaults to IDLE_READY in memory
+                # (correct end state), but the DB still has state='processing'.
+                # Fix the stale DB row so subsequent restarts don't re-detect it.
+                logger.warning(
+                    "Boot reconcile: fixing stale legacy processing state for session %s (state_v2 was NULL)",
+                    sid[:12],
+                )
+                try:
+                    db.set_session_state_v2(sid, sv2.SessionStateV2.IDLE_READY.value)
+                    _persist_legacy_state(session)
+                except Exception as _e:
+                    logger.error("reconcile_processing legacy fix failed for %s: %s", sid, _e)
+                    continue
+            else:
+                continue  # already recovered or in an unexpected state
+
+            session.emit_event(
+                {
+                    "type": "system",
+                    "content": (
+                        "Session was stuck in processing (server restarted) and has been reset. "
+                        "You can send a new message."
+                    ),
+                }
+            )
+            reset += 1
+        return reset
+
     def _persist_watched(self, session: AgentSession) -> None:
         """Centralized helper: persist the watch-set after every mutation.
 
@@ -559,14 +631,25 @@ class SessionManager:
             # Skip when there's a live agent task: that task is currently
             # processing the "orphan" candidate — it's not actually orphaned,
             # just mid-turn with no assistant message written yet.
+            #
+            # Skip when AWAITING_USER: this is an ask_user answer resuming the
+            # session, not a Window B restart scenario. Running _find_db_orphans
+            # here incorrectly detects rapid-fire prior answers as orphans, then
+            # routes via _process_pending which immediately returns (state ≠
+            # IDLE_READY), leaving the answer message queued but never run.
             import time as _time
 
             _task_alive = session.task is not None and not session.task.done()
-            _orphans = [] if _task_alive else self._find_db_orphans(session)
+            _orphans = (
+                [] if _task_alive or current_v2 is sv2.SessionStateV2.AWAITING_USER else self._find_db_orphans(session)
+            )
+            # Filter orphans already swept — same guard as _sweep_db_pending.
+            _orphans = [_o for _o in _orphans if _o["id"] not in session.swept_orphan_ids]
             if _orphans:
                 _now_m = _time.monotonic()
                 for _o in _orphans:
                     _oid = _o["id"]
+                    session.swept_orphan_ids.add(_oid)
                     if not any(len(_e) >= 5 and _e[4] == _oid for _e in session.pending_messages):
                         session.pending_messages.append((_o.get("content", ""), "", True, _now_m, _oid))
                         logger.warning(
@@ -675,72 +758,27 @@ class SessionManager:
 
             sv2.transition(session, sv2.SessionStateV2.SCOUTING, start_reason)
             _persist_legacy_state(session)
-            session.emit_event({"type": "scout.start"})
-            _check_session_budget_or_raise(session.session_id)
 
-            from core.scout.runner import build_session_brief, run_scout
-
-            effective_budget = session.context_budget_override or settings.context_budget
-            brief = build_session_brief(session.session_id, context_budget=effective_budget)
-
-            # Augment scout input with Reflect lessons from prior attempt
-            scout_message = message
-            if session.reflect_lessons:
-                scout_message = f"{message}\n\n{session.reflect_lessons}"
-
-            scout_report = await run_scout(
-                session.session_id,
-                scout_message,
-                brief,
-                emit=session.emit_event,
-            )
-            session.last_scout_report = scout_report
-
-            scout_event = {
-                "type": "scout.done",
-                "tools": scout_report.recommended_tools,
-                "tool_rationale": scout_report.tool_rationale,
-                "approach": scout_report.approach_guidance,
-                "memory": scout_report.memory_context[:500] if scout_report.memory_context else "",
-                "model": scout_report.recommended_model,
-                "model_rationale": scout_report.model_rationale,
-                "identity": scout_report.identity[:200] if scout_report.identity else "",
-                "skills": scout_report.recommended_skills,
-                "skill_rationale": scout_report.skill_rationale,
-                "injected_skill_name": scout_report.injected_skill_name,
-                "from_cache": scout_report.from_cache,
-                "from_fallback": scout_report.from_fallback,
-                "latency_ms": scout_report.scout_latency_ms,
-                "scout_model": scout_report.scout_model,
-            }
-            session.emit_event(scout_event)
-
-            # Persist scout report so it's visible when loading the session later
-            import json
-
-            db.add_message(session.session_id, "scout", json.dumps(scout_event))
-
-            # --- Agent processing phase ---
-            sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
-            _persist_legacy_state(session)
-
-            await self._agent_runner(
-                session_id=session.session_id,
-                message=message,
-                session=session,
-                pre_saved=_pre_saved,
-            )
+            await self._run_scout_and_process(session, message, pre_saved=_pre_saved)
 
         except asyncio.CancelledError:
             _was_cancelled = True
             session.termination_reason = "cancelled"
             current = sv2._current_state(session)
             if current != sv2.SessionStateV2.CANCELLING:
+                # Use "cancel-during-pause" for the two paused states — that's
+                # the reason name the graph defines for those edges. All other
+                # states use the standard "cancel-requested".
+                _cancel_reason = (
+                    "cancel-during-pause"
+                    if current in (sv2.SessionStateV2.PAUSED, sv2.SessionStateV2.PAUSE_REQUESTED)
+                    else "cancel-requested"
+                )
                 try:
                     sv2.transition(
                         session,
                         sv2.SessionStateV2.CANCELLING,
-                        "cancel-requested",
+                        _cancel_reason,
                         termination_reason=sv2.TerminationReason.CANCELLED,
                     )
                     _persist_legacy_state(session)
@@ -815,6 +853,9 @@ class SessionManager:
             if _was_cancelled or session.cancel_requested:
                 current = sv2._current_state(session)
                 cancel_reason = "cancel-complete"
+                # Clear the cancel flag before every IDLE_READY transition —
+                # the invariant check fires if cancel_requested is True on entry.
+                session.cancel_requested = False
                 if current == sv2.SessionStateV2.CANCELLING:
                     try:
                         sv2.transition(
@@ -1199,6 +1240,74 @@ class SessionManager:
         except Exception as e:
             logger.error("Failed to auto-stamp worker summary for %s: %s", session.session_id, e)
 
+    async def _run_scout_and_process(
+        self,
+        session: AgentSession,
+        message: str,
+        *,
+        pre_saved: bool = False,
+        is_retry: bool = False,
+    ) -> None:
+        """Shared scout → PROCESSING → agent runner pipeline.
+
+        Caller must have already transitioned the session to SCOUTING and called
+        _persist_legacy_state(). This coroutine handles everything from emitting
+        scout.start through calling _agent_runner. Exceptions propagate to the
+        caller's except/finally block unchanged.
+        """
+        session.emit_event({"type": "scout.start"})
+        _check_session_budget_or_raise(session.session_id)
+
+        from core.scout.runner import build_session_brief, run_scout
+
+        effective_budget = session.context_budget_override or settings.context_budget
+        brief = build_session_brief(session.session_id, context_budget=effective_budget)
+
+        scout_message = message
+        if session.reflect_lessons:
+            scout_message = f"{message}\n\n{session.reflect_lessons}"
+
+        scout_report = await run_scout(
+            session.session_id,
+            scout_message,
+            brief,
+            emit=session.emit_event,
+        )
+        session.last_scout_report = scout_report
+
+        import json
+
+        scout_event = {
+            "type": "scout.done",
+            "tools": scout_report.recommended_tools,
+            "tool_rationale": scout_report.tool_rationale,
+            "approach": scout_report.approach_guidance,
+            "memory": scout_report.memory_context[:500] if scout_report.memory_context else "",
+            "model": scout_report.recommended_model,
+            "model_rationale": scout_report.model_rationale,
+            "identity": scout_report.identity[:200] if scout_report.identity else "",
+            "skills": scout_report.recommended_skills,
+            "skill_rationale": scout_report.skill_rationale,
+            "injected_skill_name": scout_report.injected_skill_name,
+            "from_cache": scout_report.from_cache,
+            "from_fallback": scout_report.from_fallback,
+            "latency_ms": scout_report.scout_latency_ms,
+            "scout_model": scout_report.scout_model,
+        }
+        session.emit_event(scout_event)
+        db.add_message(session.session_id, "scout", json.dumps(scout_event))
+
+        sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
+        _persist_legacy_state(session)
+
+        await self._agent_runner(
+            session_id=session.session_id,
+            message=message,
+            session=session,
+            pre_saved=pre_saved,
+            is_retry=is_retry,
+        )
+
     async def _run_agent_retry(
         self,
         session: AgentSession,
@@ -1215,61 +1324,23 @@ class SessionManager:
             # FINALIZING → SCOUTING (new retry_index for the state log)
             sv2.transition(session, sv2.SessionStateV2.SCOUTING, retry_kind)
             _persist_legacy_state(session)
-            session.emit_event({"type": "scout.start"})
-            _check_session_budget_or_raise(session.session_id)
 
-            from core.scout.runner import build_session_brief, run_scout
-
-            effective_budget = session.context_budget_override or settings.context_budget
-            brief = build_session_brief(session.session_id, context_budget=effective_budget)
-
-            scout_message = message
-            if session.reflect_lessons:
-                scout_message = f"{message}\n\n{session.reflect_lessons}"
-
-            scout_report = await run_scout(
-                session.session_id,
-                scout_message,
-                brief,
-                emit=session.emit_event,
-            )
-            session.last_scout_report = scout_report
-
-            import json
-
-            scout_event = {
-                "type": "scout.done",
-                "tools": scout_report.recommended_tools,
-                "tool_rationale": scout_report.tool_rationale,
-                "approach": scout_report.approach_guidance,
-                "skills": scout_report.recommended_skills,
-                "skill_rationale": scout_report.skill_rationale,
-                "injected_skill_name": scout_report.injected_skill_name,
-                "from_cache": scout_report.from_cache,
-                "latency_ms": scout_report.scout_latency_ms,
-                "scout_model": scout_report.scout_model,
-            }
-            session.emit_event(scout_event)
-            db.add_message(session.session_id, "scout", json.dumps(scout_event))
-
-            # SCOUTING → PROCESSING
-            sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
-            _persist_legacy_state(session)
-
-            await self._agent_runner(
-                session_id=session.session_id,
-                message=message,
-                session=session,
-                is_retry=True,
-            )
+            await self._run_scout_and_process(session, message, is_retry=True)
 
         except asyncio.CancelledError:
             session.termination_reason = "cancelled"
             logger.info("Reflect retry cancelled for session %s", session.session_id)
             # Route through CANCELLING — outer _run_agent_safe cancel-finally
-            # will terminate cleanly.
+            # will terminate cleanly. COMPACTING is included because the retry's
+            # agent runner can enter that sub-state during context compaction.
+            # PAUSED/PAUSE_REQUESTED use "cancel-during-pause" (the graph's
+            # reason name for those from-states).
             current = sv2._current_state(session)
-            if current in (sv2.SessionStateV2.SCOUTING, sv2.SessionStateV2.PROCESSING):
+            if current in (
+                sv2.SessionStateV2.SCOUTING,
+                sv2.SessionStateV2.PROCESSING,
+                sv2.SessionStateV2.COMPACTING,
+            ):
                 try:
                     sv2.transition(
                         session,
@@ -1280,6 +1351,17 @@ class SessionManager:
                     _persist_legacy_state(session)
                 except Exception as _e:
                     logger.error("Retry cancel transition failed: %s", _e)
+            elif current in (sv2.SessionStateV2.PAUSED, sv2.SessionStateV2.PAUSE_REQUESTED):
+                try:
+                    sv2.transition(
+                        session,
+                        sv2.SessionStateV2.CANCELLING,
+                        "cancel-during-pause",
+                        termination_reason=sv2.TerminationReason.CANCELLED,
+                    )
+                    _persist_legacy_state(session)
+                except Exception as _e:
+                    logger.error("Retry cancel (pause) transition failed: %s", _e)
             raise  # outer finally handles the terminal IDLE_READY transition
         except Exception as e:
             logger.error("Reflect retry error in session %s: %s", session.session_id, e)
@@ -1457,7 +1539,7 @@ class SessionManager:
                         sv2.transition(
                             parent,
                             sv2.SessionStateV2.CANCELLING,
-                            "cancel-during-pause",
+                            "cancel-requested",
                             termination_reason=sv2.TerminationReason.CANCELLED,
                         )
                         sv2.transition(
@@ -1588,6 +1670,11 @@ class SessionManager:
         orphans = self._find_db_orphans(session)
         if exclude_msg_id is not None:
             orphans = [o for o in orphans if o["id"] != exclude_msg_id]
+        # Skip IDs already swept in this server run. Consecutive ask_user
+        # answer chains produce user→user→user rows with no assistant between
+        # them, so get_orphaned_user_messages finds them every sweep. Without
+        # this guard the sweep loops forever re-queuing the same messages.
+        orphans = [o for o in orphans if o["id"] not in session.swept_orphan_ids]
         if not orphans:
             return
         logger.warning(
@@ -1598,32 +1685,28 @@ class SessionManager:
         now = time.monotonic()
         for o in orphans:
             msg_id = o["id"]
+            session.swept_orphan_ids.add(msg_id)
             if any(len(e) >= 5 and e[4] == msg_id for e in session.pending_messages):
                 continue
             session.pending_messages.append((o.get("content", ""), "", True, now, msg_id))
-        session.last_user_msg_id = orphans[-1]["id"]
-        session.last_user_msg_at = now
+        # Only advance the watermark — never regress it. A concurrent prompt()
+        # running without the lock may have already set last_user_msg_id to a
+        # higher value (a freshly-queued normal message). Overwriting it with a
+        # lower orphan ID would corrupt the rapid-fire combiner, causing new
+        # user messages to be folded into an already-processed orphan DB row.
+        if orphans[-1]["id"] > (session.last_user_msg_id or 0):
+            session.last_user_msg_id = orphans[-1]["id"]
+            session.last_user_msg_at = now
 
     async def _run_post_hooks(self, session: AgentSession) -> None:
         """Run post-task hooks (auto-title, distillation, reflect)."""
-        if session.state != SessionState.IDLE:
-            return
-        # AWAITING_USER and AWAITING_WORKERS both mirror legacy IDLE — skip
-        # post-hooks for either so Reflect doesn't issue a spurious RETRY on
-        # a deliberately-suspended turn. AWAITING_WORKERS specifically: the
-        # transcript ends mid-task at "Session suspended..." and reflect
-        # naturally classifies that as incomplete (verdict=retry), setting
-        # reflect_retry_requested=True. That stale flag then races with the
-        # _resume_from_workers reset and can leak into the synthesis turn,
-        # forcing one redundant retry pass after a clean reflect=pass. The
-        # synthesis turn IS the right place for reflect to run; this turn
-        # is not.
-        from sessions import state_v2 as sv2
-
-        if sv2._current_state(session) in (
-            sv2.SessionStateV2.AWAITING_USER,
-            sv2.SessionStateV2.AWAITING_WORKERS,
-        ):
+        # Only run when the session is in FINALIZING — that's the only state
+        # where the agent loop has completed and post-hooks are appropriate.
+        # All other states (SCOUTING, PROCESSING, AWAITING_USER, AWAITING_WORKERS,
+        # IDLE_READY) must not trigger post-hooks. Using the v2 state directly
+        # avoids the fragility of the legacy "idle" mapping, which collapses
+        # FINALIZING, AWAITING_USER, and AWAITING_WORKERS into the same value.
+        if sv2._current_state(session) is not sv2.SessionStateV2.FINALIZING:
             return
         if session.pending_messages:
             return  # Don't distill if more work queued
@@ -1743,13 +1826,20 @@ class SessionManager:
         return len(self._sessions)
 
     def has_active_work(self) -> bool:
-        """Return True if any in-memory session is non-idle (SCOUTING or PROCESSING).
+        """Return True if any in-memory session is non-idle.
 
-        Used by snooze to skip cycles while real work is happening. Workers are
-        sessions too, so this also catches active worker delegations.
+        Uses the v2 state machine directly. AWAITING_USER and AWAITING_WORKERS
+        are excluded (agent genuinely suspended); FINALIZING is caught by the
+        has_background_tasks check below (post-hooks hold a ref).
+        Used by snooze to skip cycles while real work is happening.
         """
+        _idle_v2 = (
+            sv2.SessionStateV2.IDLE_READY,
+            sv2.SessionStateV2.AWAITING_USER,
+            sv2.SessionStateV2.AWAITING_WORKERS,
+        )
         for session in self._sessions.values():
-            if session.state.name in ("SCOUTING", "PROCESSING"):
+            if sv2._current_state(session) not in _idle_v2:
                 return True
             if session.has_background_tasks:
                 return True
@@ -1827,6 +1917,15 @@ class SessionManager:
             if v2 is sv2.SessionStateV2.PAUSE_REQUESTED:
                 if idle >= 60:
                     logger.warning("Unsticking stuck PAUSE_REQUESTED session %s (idle=%ds)", sid, int(idle))
+                    # Mirror the PAUSED unstick pattern: set cancel_requested so the
+                    # agent loop exits cooperatively if it wakes normally, set
+                    # pause_event so the task unblocks from pause_event.wait()
+                    # (satisfying the IDLE_READY invariant), then cancel the task
+                    # as a backstop in case the loop doesn't reach its checkpoint.
+                    session.cancel_requested = True
+                    session.pause_event.set()
+                    if session.task and not session.task.done():
+                        session.task.cancel()
                     try:
                         sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
                         _persist_legacy_state(session)
@@ -1860,7 +1959,7 @@ class SessionManager:
                 continue
 
             if v2 is sv2.SessionStateV2.FINALIZING:
-                if idle >= 120:
+                if idle >= 120 and not session.has_background_tasks:
                     logger.warning("Force-unsticking stuck FINALIZING session %s (idle=%ds)", sid, int(idle))
                     try:
                         sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "finalize-error")

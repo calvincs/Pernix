@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -147,13 +148,21 @@ class SkillIndex:
                 continue
             self._entries[name] = entry
 
-    def search(self, query: str, limit: int = 10) -> list[SkillSummary]:
-        """Search skills by natural language query."""
+    def search(self, query: str, limit: int = 10, exclude: set[str] | None = None) -> list[SkillSummary]:
+        """Search skills by natural language query.
+
+        exclude: optional set of skill names to skip. Used by SkillRegistry to
+        filter out disabled skills (and their co-occurring siblings) so they
+        never surface to scout, discover_skills, or any other consumer.
+        """
+        excl = exclude or set()
         query_tokens = _tokenize(query)
         expanded = _expand_synonyms(query_tokens)
 
         scored: list[tuple[_SkillIndexEntry, float]] = []
         for entry in self._entries.values():
+            if entry.name in excl:
+                continue
             score = 0.0
             # Name match (strongest signal)
             score += len(expanded & entry.name_tokens) * 3.0
@@ -167,7 +176,8 @@ class SkillIndex:
 
         scored.sort(key=lambda x: -x[1])
 
-        # Apply co-occurrence
+        # Apply co-occurrence (also filtered against exclude set so a disabled
+        # sibling can't be promoted by an enabled neighbor's match)
         results: list[SkillSummary] = []
         seen: set[str] = set()
         for entry, _score in scored[:limit]:
@@ -175,7 +185,7 @@ class SkillIndex:
                 results.append(entry.to_summary())
                 seen.add(entry.name)
                 for co_name in SKILL_COOCCURRENCE.get(entry.name, []):
-                    if co_name not in seen and co_name in self._entries:
+                    if co_name not in seen and co_name in self._entries and co_name not in excl:
                         results.append(self._entries[co_name].to_summary())
                         seen.add(co_name)
 
@@ -188,11 +198,23 @@ class SkillIndex:
 
 
 class SkillRegistry:
-    """Central registry for all skills. Thread-safe for concurrent access."""
+    """Central registry for all skills. Thread-safe for concurrent access.
+
+    Owns the disabled-skill set so every consumer (scout, builtin tools,
+    workflows, agent loop) gets consistent filtering through one set of
+    methods. Persisted to ``data/skills/.disabled.json`` as a sorted JSON
+    array — same on-disk format the API router historically used.
+
+    Disabling takes effect on the next scout run; mid-turn agent loops keep
+    a previously auto-injected skill in their system prompt for the rest of
+    that turn.
+    """
 
     def __init__(self):
         self._skills: dict[str, SkillDef] = {}
         self._invalid: set[str] = set()  # Skills that failed pre-flight validation
+        self._disabled: set[str] = set()  # User-toggled-off skills
+        self._disabled_path: Path | None = None  # Set when scan() learns the dir
         self.index = SkillIndex()
         self._lock = threading.RLock()
 
@@ -248,7 +270,26 @@ class SkillRegistry:
                     logger.warning("Failed to parse skill in %s: %s", skill_dir, e)
 
             self.index.rebuild(self._skills)
-        logger.info("Skill registry: %d skills scanned (%d invalid)", count, len(self._invalid))
+            # Remember dir for save_disabled, then reload disabled state so
+            # toggle persists across rescans (which happen on PUT/PATCH/DELETE).
+            self._disabled_path = skills_dir / ".disabled.json"
+            self._load_disabled()
+            # Prune stale entries: a name in .disabled.json that no longer
+            # corresponds to a skill on disk would otherwise lurk forever and
+            # silently re-disable a future skill of the same name (e.g. one
+            # created via create_skill or restored from backup). Persist the
+            # pruned set so disk and memory stay consistent.
+            stale = self._disabled - self._skills.keys()
+            if stale:
+                logger.info("Pruning %d stale disabled entries: %s", len(stale), sorted(stale))
+                self._disabled -= stale
+                self._save_disabled()
+        logger.info(
+            "Skill registry: %d skills scanned (%d invalid, %d disabled)",
+            count,
+            len(self._invalid),
+            len(self._disabled),
+        )
         return count
 
     def rescan(self, skills_dir: Path | None = None) -> int:
@@ -256,7 +297,79 @@ class SkillRegistry:
         with self._lock:
             self._skills.clear()
             self._invalid.clear()
+            # Note: don't clear _disabled — scan() reloads it from disk.
         return self.scan(skills_dir)
+
+    # --- Enable/Disable -----------------------------------------------------
+
+    def _load_disabled(self) -> None:
+        """Read the on-disk disabled set into ``self._disabled``.
+
+        Silently treats a missing or malformed file as "nothing disabled" so
+        a corrupted ``.disabled.json`` never blocks the registry from
+        starting.
+        """
+        if self._disabled_path is None or not self._disabled_path.exists():
+            self._disabled = set()
+            return
+        try:
+            data = json.loads(self._disabled_path.read_text(encoding="utf-8"))
+            self._disabled = {str(n) for n in data}
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Failed to read %s: %s — treating as empty", self._disabled_path, e)
+            self._disabled = set()
+
+    def _save_disabled(self) -> None:
+        """Persist ``self._disabled`` to ``.disabled.json`` as a sorted array.
+
+        Caller is responsible for ensuring ``self._disabled_path`` is set
+        (which happens at the end of ``scan()``). Callers that mutate
+        ``_disabled`` outside that contract will see ``RuntimeError`` from
+        ``disable()`` / ``enable()``.
+        """
+        try:
+            self._disabled_path.write_text(json.dumps(sorted(self._disabled)), encoding="utf-8")
+        except OSError as e:
+            logger.error("Failed to write %s: %s", self._disabled_path, e)
+
+    def disable(self, name: str) -> None:
+        """Mark a skill disabled and persist. Idempotent.
+
+        Raises ``RuntimeError`` if called before ``scan()`` — without a known
+        ``skills_dir`` the new entry would be lost on the next scan and the
+        caller would silently lose state. Better to fail loudly.
+        """
+        if self._disabled_path is None:
+            raise RuntimeError(
+                "SkillRegistry.disable() called before scan() — "
+                "no skills_dir is known, the toggle would not persist. "
+                "Call scan(skills_dir) first."
+            )
+        with self._lock:
+            self._disabled.add(name)
+            self._save_disabled()
+
+    def enable(self, name: str) -> None:
+        """Mark a skill enabled and persist. Idempotent.
+
+        Raises ``RuntimeError`` if called before ``scan()`` — see ``disable()``.
+        """
+        if self._disabled_path is None:
+            raise RuntimeError(
+                "SkillRegistry.enable() called before scan() — "
+                "no skills_dir is known, the toggle would not persist. "
+                "Call scan(skills_dir) first."
+            )
+        with self._lock:
+            self._disabled.discard(name)
+            self._save_disabled()
+
+    def is_disabled(self, name: str) -> bool:
+        return name in self._disabled
+
+    def enabled_skills(self) -> list[SkillDef]:
+        """Return only currently-enabled skills."""
+        return [s for s in self._skills.values() if s.name not in self._disabled]
 
     def _validate(self, skill: SkillDef) -> list[str]:
         """Run pre-flight validation on a skill. Returns a list of issue strings (empty = valid)."""
@@ -316,9 +429,14 @@ class SkillRegistry:
     def all_skills(self) -> list[SkillDef]:
         return list(self._skills.values())
 
-    def discover(self, query: str, limit: int = 10) -> list[SkillSummary]:
-        """Search for skills by natural language query."""
-        return self.index.search(query, limit=limit)
+    def discover(self, query: str, limit: int = 10, include_disabled: bool = False) -> list[SkillSummary]:
+        """Search for skills by natural language query.
+
+        Disabled skills are excluded by default. Pass ``include_disabled=True``
+        for the Explorer UI to surface toggled-off skills with their flag.
+        """
+        exclude = set() if include_disabled else self._disabled
+        return self.index.search(query, limit=limit, exclude=exclude)
 
     def update_cooccurrence(self, mapping: dict[str, list[str]]) -> None:
         """Update the skill co-occurrence map at runtime.
@@ -329,13 +447,16 @@ class SkillRegistry:
         with self._lock:
             SKILL_COOCCURRENCE.update(mapping)
 
-    def load_instructions(self, name: str) -> str | None:
+    def load_instructions(self, name: str, include_disabled: bool = False) -> str | None:
         """Read the SKILL.md body (L2 instructions) for a skill.
 
-        Returns None if skill not found.
+        Returns None if skill not found or disabled (unless ``include_disabled``
+        is True — used by the Explorer UI's edit view).
         """
         skill = self._skills.get(name)
         if not skill:
+            return None
+        if not include_disabled and name in self._disabled:
             return None
 
         skill_md = skill.path / "SKILL.md"
@@ -349,14 +470,17 @@ class SkillRegistry:
             logger.warning("Failed to load instructions for skill '%s': %s", name, e)
             return None
 
-    def list_resources(self, name: str) -> dict:
+    def list_resources(self, name: str, include_disabled: bool = False) -> dict:
         """List L3 resources (scripts, references, assets) for a skill.
 
         Returns dict with keys: scripts, references, assets — each a list of filenames.
-        Returns empty dict if skill not found.
+        Returns empty dict if skill not found or disabled (unless
+        ``include_disabled`` is True — used by the Explorer UI).
         """
         skill = self._skills.get(name)
         if not skill:
+            return {}
+        if not include_disabled and name in self._disabled:
             return {}
 
         resources: dict[str, list[str]] = {}
@@ -369,15 +493,17 @@ class SkillRegistry:
 
         return resources
 
-    def read_resource(self, name: str, resource_path: str) -> str | None:
+    def read_resource(self, name: str, resource_path: str, include_disabled: bool = False) -> str | None:
         """Read an L3 resource file from a skill.
 
         resource_path is relative to the skill directory (e.g. 'scripts/check.sh').
-        Returns None if skill not found or path is invalid.
+        Returns None if skill not found, disabled, or path is invalid.
         Rejects path traversal attempts.
         """
         skill = self._skills.get(name)
         if not skill:
+            return None
+        if not include_disabled and name in self._disabled:
             return None
 
         # Prevent path traversal

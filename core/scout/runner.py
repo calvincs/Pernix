@@ -20,6 +20,7 @@ from typing import Callable
 import httpx
 
 from config import settings
+from core.llm.errors import FailoverError, FailoverReason
 from core.llm.semaphore import PRIORITY_BACKGROUND, PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
 from core.llm.types import TokenUsage
 from core.scout.report import ScoutReport, SessionBrief
@@ -35,9 +36,26 @@ logger = logging.getLogger("pernix.scout")
 # HTTP status codes that are safe to retry (transient server issues, model loading)
 _RETRYABLE_STATUS_CODES = frozenset({500, 502, 503, 429})
 
+# FailoverReasons worth retrying. AUTH / MODEL_NOT_FOUND / CONTEXT_OVERFLOW /
+# FORMAT_ERROR will not fix themselves on retry.
+_RETRYABLE_FAILOVER_REASONS = frozenset(
+    {
+        FailoverReason.RATE_LIMIT,
+        FailoverReason.OVERLOADED,
+        FailoverReason.TIMEOUT,
+        FailoverReason.UNKNOWN,
+    }
+)
+
 
 def _is_retryable(error: Exception) -> bool:
     """Check if an error is transient and worth retrying."""
+    if isinstance(error, FailoverError):
+        if error.reason in _RETRYABLE_FAILOVER_REASONS:
+            return True
+        if isinstance(error.original, httpx.HTTPStatusError):
+            return error.original.response.status_code in _RETRYABLE_STATUS_CODES
+        return False
     if isinstance(error, httpx.HTTPStatusError):
         return error.response.status_code in _RETRYABLE_STATUS_CODES
     if isinstance(error, (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)):
@@ -47,6 +65,18 @@ def _is_retryable(error: Exception) -> bool:
     return False
 
 
+def _retry_wait_seconds(error: Exception, attempt: int) -> int:
+    """Backoff schedule for a failed scout attempt before the next retry.
+
+    Server-side errors (FailoverError, HTTPStatusError) recover quickly so we
+    keep their wait short. Connection / timeout errors may indicate the model
+    is loading or the server is saturated, so we back off more aggressively.
+    """
+    if isinstance(error, FailoverError) or isinstance(error, httpx.HTTPStatusError):
+        return 2 * attempt  # 2s, 4s
+    return 5 * attempt  # 5s, 10s
+
+
 def _log_scout_error(error: Exception, session_id: str, attempt: int, max_attempts: int, elapsed_ms: int) -> None:
     """Log detailed diagnostic info for scout failures."""
     parts = [
@@ -54,6 +84,13 @@ def _log_scout_error(error: Exception, session_id: str, attempt: int, max_attemp
         f"  Error type: {type(error).__module__}.{type(error).__qualname__}",
         f"  Error message: {error}",
     ]
+    # Unwrap FailoverError so the diagnostic block below sees the underlying
+    # httpx error (response body, "Likely cause" hint) rather than the wrapper.
+    if isinstance(error, FailoverError):
+        parts.append(f"  Failover reason: {error.reason.value}")
+        if error.original is not None:
+            error = error.original
+            parts.append(f"  Wrapped error: {type(error).__module__}.{type(error).__qualname__}: {error}")
     if isinstance(error, httpx.HTTPStatusError):
         resp = error.response
         parts.append(f"  HTTP status: {resp.status_code}")
@@ -111,7 +148,7 @@ You MUST call submit_report to deliver your findings. If you cannot use tools, o
 REPORT FIELD GUIDANCE:
 - identity: Relevant personality directives from SOUL.md (max 300 tokens). Omit if no file provided.
 - rules: Relevant operational rules from RULES.md (max 300 tokens). Omit if no file provided.
-- instructions: Relevant project instructions from AGENTS.md (max 300 tokens). Omit if no file provided.
+- instructions: Relevant project instructions from SESSIONS.md (max 300 tokens). Omit if no file provided.
 - memory_context: Relevant knowledge from your memory searches. Quote with attribution. Max 500 tokens.
 - cross_session_context: Relevant findings from session searches. Quote with session attribution. Max 500 tokens. Empty string if nothing relevant.
 - recommended_tools: Array of tool names the main agent will need (5-15 tools). Only include extension tools — builtin tools are always available.
@@ -262,7 +299,7 @@ _SCOUT_TOOLS = [
                     },
                     "instructions": {
                         "type": "string",
-                        "description": "Relevant AGENTS.md directives (max 300 tokens). Omit or empty if no file.",
+                        "description": "Relevant SESSIONS.md directives (max 300 tokens). Omit or empty if no file.",
                     },
                     "memory_context": {
                         "type": "string",
@@ -415,6 +452,8 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
             skill_name = args.get("name", "")
             if not skill_reg.exists(skill_name):
                 return f"Skill '{skill_name}' not found in registry."
+            if skill_reg.is_disabled(skill_name):
+                return f"Skill '{skill_name}' is disabled — do not recommend it."
             instructions = skill_reg.load_instructions(skill_name)
             if not instructions:
                 return f"Skill '{skill_name}' has no instructions (empty SKILL.md)."
@@ -519,7 +558,7 @@ def _self_check_report(report: ScoutReport) -> list[str]:
             "naming tools/skills and flagging risks."
         )
 
-    # 2. Recommended tools must exist in the registry.
+    # 2. Recommended tools must exist in the registry AND not be disabled.
     try:
         from core.tools.registry import get_registry
 
@@ -530,10 +569,16 @@ def _self_check_report(report: ScoutReport) -> list[str]:
                 f"Recommended tools do not exist in the registry: {', '.join(missing)}. "
                 "Use only tool names from the AVAILABLE TOOLS list or call search_tools."
             )
+        disabled_tools = [t for t in (report.recommended_tools or []) if reg.exists(t) and reg.is_disabled(t)]
+        if disabled_tools:
+            issues.append(
+                f"Recommended tools are disabled: {', '.join(disabled_tools)}. "
+                "Drop them — the user has toggled them off in Explorer > Tools."
+            )
     except Exception as e:
         logger.debug("Scout validator: tool registry check failed: %s", e)
 
-    # 3. Recommended skills must exist AND pass pre-flight validation.
+    # 3. Recommended skills must exist, not be disabled, AND pass pre-flight validation.
     try:
         from core.skills.registry import get_skill_registry
 
@@ -544,8 +589,18 @@ def _self_check_report(report: ScoutReport) -> list[str]:
                 f"Recommended skills do not exist: {', '.join(missing_skills)}. "
                 "Drop them, or use search_skills to find real ones."
             )
+        disabled_skills = [
+            s for s in (report.recommended_skills or []) if skill_reg.exists(s) and skill_reg.is_disabled(s)
+        ]
+        if disabled_skills:
+            issues.append(
+                f"Recommended skills are disabled: {', '.join(disabled_skills)}. "
+                "Drop them — the user has toggled them off in Explorer > Skills."
+            )
         invalid_skills = [
-            s for s in (report.recommended_skills or []) if skill_reg.exists(s) and not skill_reg.is_valid(s)
+            s
+            for s in (report.recommended_skills or [])
+            if skill_reg.exists(s) and not skill_reg.is_disabled(s) and not skill_reg.is_valid(s)
         ]
         if invalid_skills:
             issues.append(
@@ -652,6 +707,7 @@ CORE_MINIMUM = frozenset(
         "bash",
         "remember",
         "recall",
+        "deep_recall",
         "ingest",
         "ask_user",
         "notify_user",
@@ -849,7 +905,7 @@ def should_bypass_scout(message: str, turn_count: int) -> bool:
     if not settings.scout_enabled:
         return True
     # Short follow-ups in active sessions
-    if len(message.split()) <= 3 and turn_count > 0:
+    if len(message.split()) <= 3 and turn_count > 1:
         return True
     # Slash commands
     if message.startswith("/"):
@@ -918,7 +974,7 @@ async def run_scout(
     """Run the scout agent. Returns ScoutReport (from cache, LLM, or fallback).
 
     The scout:
-    1. Reads SOUL.md, RULES.md, AGENTS.md (if they exist)
+    1. Reads SOUL.md, RULES.md, SESSIONS.md (if they exist)
     2. Iteratively searches memory, tools, skills via tool calls
     3. Submits a curated ScoutReport via submit_report tool
     """
@@ -1011,7 +1067,7 @@ async def run_scout(
             )
             return report
 
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             logger.warning(
                 "Scout timed out after %ds for session %s (attempt %d/%d)",
                 settings.scout_timeout,
@@ -1020,10 +1076,12 @@ async def run_scout(
                 max_attempts,
             )
             last_error = TimeoutError(f"Scout timed out after {settings.scout_timeout}s")
-            # Retry once on first timeout (cold-start / transient); bail after that
-            # so worst case is 2× scout_timeout, not 3×.
-            if attempt == 1:
-                await asyncio.sleep(3)
+            if attempt < max_attempts:
+                wait = _retry_wait_seconds(e, attempt)
+                logger.info(
+                    "Scout retrying in %ds for session %s (attempt %d/%d)", wait, session_id, attempt + 1, max_attempts
+                )
+                await asyncio.sleep(wait)
                 continue
             break
         except Exception as e:
@@ -1031,8 +1089,7 @@ async def run_scout(
             elapsed_ms = int((time.monotonic() - start) * 1000)
             _log_scout_error(e, session_id, attempt, max_attempts, elapsed_ms)
             if attempt < max_attempts and _is_retryable(e):
-                # Short wait for 500s (Ollama parsing fluke), longer for connection issues
-                wait = 2 if isinstance(e, httpx.HTTPStatusError) else attempt * 5
+                wait = _retry_wait_seconds(e, attempt)
                 logger.info(
                     "Scout retrying in %ds for session %s (attempt %d/%d)", wait, session_id, attempt + 1, max_attempts
                 )
@@ -1127,10 +1184,10 @@ async def _run_scout_llm(
             content = path.read_text()[:4000]
             user_content_parts.append(f"\n{label}:\n{content}")
 
-    # Check data/agent/ for AGENTS.md / INSTRUCTIONS.md
+    # Check data/agent/ for SESSIONS.md / INSTRUCTIONS.md
     _step("reading", "Checking project instructions")
     agent_dir = Path("data/agent")
-    for fname in ["AGENTS.md", "INSTRUCTIONS.md"]:
+    for fname in ["SESSIONS.md", "INSTRUCTIONS.md"]:
         agent_path = agent_dir / fname
         if agent_path.exists():
             content = agent_path.read_text()[:4000]
@@ -1171,6 +1228,14 @@ async def _run_scout_llm(
                         f"{r.entry.content[:_mem_cap]}"
                     )
                 user_content_parts.append("\n".join(mem_lines))
+            else:
+                # Explicit 0-result signal — tells the scout LLM to call search_memory
+                # with keyword variants rather than assuming memory is empty.
+                user_content_parts.append(
+                    "\nMEMORY BASELINE: 0 results for this query. "
+                    "Call search_memory with decomposed keywords or @tags: queries before "
+                    "concluding memory is empty — FTS5 requires matching terms."
+                )
     except Exception as e:
         logger.debug("Scout memory search failed: %s", e)
 
@@ -1561,30 +1626,43 @@ def _try_parse_json(text: str) -> dict | None:
 
 
 def _validate_report(report: ScoutReport) -> ScoutReport:
-    """Validate and sanitize scout report."""
+    """Validate and sanitize scout report.
+
+    Strips tool/skill names that are unknown (hallucinations) AND that are
+    disabled (user toggled them off). The two cases are logged separately so
+    the operational distinction stays visible in the logs.
+    """
     from core.tools.registry import get_registry
 
     registry = get_registry()
 
-    # Strip tool names that don't exist (hallucination guard)
-    valid_tools = [t for t in report.recommended_tools if registry.exists(t)]
-    invalid = set(report.recommended_tools) - set(valid_tools)
-    if invalid:
-        logger.warning("Scout hallucinated tools: %s", invalid)
+    # Strip tools that don't exist (hallucinations) or are disabled
+    existing_tools = [t for t in report.recommended_tools if registry.exists(t)]
+    hallucinated_tools = set(report.recommended_tools) - set(existing_tools)
+    if hallucinated_tools:
+        logger.warning("Scout hallucinated tools: %s", hallucinated_tools)
+    valid_tools = [t for t in existing_tools if not registry.is_disabled(t)]
+    disabled_tools = set(existing_tools) - set(valid_tools)
+    if disabled_tools:
+        logger.warning("Scout recommended disabled tools (stripped): %s", disabled_tools)
 
     # Ensure core minimum always present
     tool_set = set(valid_tools) | CORE_MINIMUM
     report.recommended_tools = sorted(tool_set)
 
-    # Validate recommended skills against skill registry
+    # Validate recommended skills — same two-case strip + log
     try:
         from core.skills.registry import get_skill_registry
 
         skill_reg = get_skill_registry()
-        valid_skills = [s for s in report.recommended_skills if skill_reg.exists(s)]
-        invalid_skills = set(report.recommended_skills) - set(valid_skills)
-        if invalid_skills:
-            logger.warning("Scout hallucinated skills: %s", invalid_skills)
+        existing_skills = [s for s in report.recommended_skills if skill_reg.exists(s)]
+        hallucinated_skills = set(report.recommended_skills) - set(existing_skills)
+        if hallucinated_skills:
+            logger.warning("Scout hallucinated skills: %s", hallucinated_skills)
+        valid_skills = [s for s in existing_skills if not skill_reg.is_disabled(s)]
+        disabled_skills = set(existing_skills) - set(valid_skills)
+        if disabled_skills:
+            logger.warning("Scout recommended disabled skills (stripped): %s", disabled_skills)
         report.recommended_skills = valid_skills
 
         # Hybrid injection: auto-load L2 for top-1 skill that passed pre-flight validation
@@ -1596,6 +1674,10 @@ def _validate_report(report: ScoutReport) -> ScoutReport:
                     "(missing/empty/broken scripts). Agent can still load it manually.",
                     top_skill,
                 )
+                # Pre-flight failed — clear any stale injection from prior state
+                # so a previously-set name/body doesn't leak through.
+                report.injected_skill_name = ""
+                report.injected_skill = ""
             else:
                 report.injected_skill_name = top_skill
                 instructions = skill_reg.load_instructions(top_skill)
@@ -1607,6 +1689,14 @@ def _validate_report(report: ScoutReport) -> ScoutReport:
                         "Failed to load L2 instructions for skill '%s' — will recommend by name only", top_skill
                     )
                     report.injected_skill_name = ""  # Clear — can't inject what we can't load
+                    report.injected_skill = ""
+        else:
+            # No valid skills survived stripping (all hallucinated, all disabled,
+            # or none were ever recommended). Clear any pre-set auto-injection
+            # so a stale name/body from prior state doesn't leak into the
+            # agent's system prompt.
+            report.injected_skill_name = ""
+            report.injected_skill = ""
     except Exception as e:
         logger.debug("Scout skill validation failed: %s", e)
 
@@ -1656,7 +1746,7 @@ def _build_fallback_report(message: str, brief: SessionBrief) -> ScoutReport:
         rules = rules_path.read_text()[:1200]
 
     agent_dir = Path("data/agent")
-    for fname in ["AGENTS.md", "INSTRUCTIONS.md"]:
+    for fname in ["SESSIONS.md", "INSTRUCTIONS.md"]:
         ipath = agent_dir / fname
         if ipath.exists():
             instructions = ipath.read_text()[:1200]

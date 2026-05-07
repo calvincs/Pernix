@@ -92,7 +92,14 @@ def register(reg) -> None:
     reg.register(
         name="add_feature",
         func=add_feature,
-        description="Add a feature with acceptance criteria to the registry. Criteria are newline-separated.",
+        description=(
+            "Register acceptance criteria for a deliverable BEFORE you implement it. "
+            "Use ONLY for BUILD/IMPLEMENT tasks where success is subjective "
+            "(e.g. 'writes idiomatic Python', 'produces a clean report'). "
+            "DO NOT use for operational requests (fetch, transcribe, run, look up, etc.) "
+            "or to log work already done — that creates registry noise and triggers an "
+            "unneeded auto-eval round. Criteria are newline-separated; one judgeable condition per line."
+        ),
         parameters={
             "type": "object",
             "properties": {

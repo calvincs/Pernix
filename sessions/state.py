@@ -96,6 +96,14 @@ class AgentSession:
     last_user_msg_id: int | None = None
     last_user_msg_at: float = 0.0  # time.monotonic() value
 
+    # Tracks message IDs already re-queued by the orphan sweep or Window B
+    # recovery. Prevents perpetual re-queuing of consecutive ask_user answer
+    # chains (user→user→user rows with no assistant between them in the DB
+    # sequence) — once an orphan ID is swept once, it is never swept again in
+    # this server run. Clears on restart (which is fine: genuine orphans from
+    # before a restart get one re-queue, then are tracked going forward).
+    swept_orphan_ids: set = field(default_factory=set)
+
     # The user message id that the CURRENTLY RUNNING agent turn is processing.
     # Stable across the whole turn (scout + agent rounds + reflect/retries) so
     # compile_context and reflect can scope to this turn's request and ignore
@@ -148,11 +156,28 @@ class AgentSession:
     # Background task reference counting (immune to reaping when > 0)
     _background_refs: int = 0
 
-    def transition_to(self, new_state: SessionState) -> None:
-        """Transition to a new state with validation."""
-        if not self.state.can_transition_to(new_state):
-            raise ValueError(f"Invalid state transition: {self.state.value} → {new_state.value}")
-        self.state = new_state
+    # Per-session dangerous tool approvals. Populated by approve_dangerous_tool()
+    # after the user confirms via ask_user.
+    #
+    # Structure: {tool_name: {"scope": str, "persistent": bool}}
+    #   scope      — human-readable description of the SPECIFIC action approved
+    #                (e.g. "list running processes" not just "bash")
+    #   persistent — False (default): consumed after one use, next call needs
+    #                new approval; True: stays for session lifetime (for genuinely
+    #                repetitive low-risk actions like "browse several web pages").
+    #
+    # In-memory only — cleared on server restart, requiring re-approval.
+    _approved_dangerous_tools: dict = field(default_factory=dict)
+
+    # v2 state machine fields — written exclusively by sessions.state_v2.transition().
+    # Declared here so they appear in __repr__, satisfy type checkers, and avoid
+    # getattr() fallbacks at every read site. _state_v2 typed Any to prevent a
+    # circular import with state_v2.py (which imports AgentSession under TYPE_CHECKING).
+    _state_v2: Any = field(default=None)
+    _turn_id: int = field(default=0)
+    _retry_index: int = field(default=0)
+    _compaction_count: int = field(default=0)
+    _state_entered_ms: int | None = field(default=None)
 
     def _force_state_for_tests(self, new_state: SessionState, reason: str = "") -> None:
         """TEST-ONLY: force a legacy-enum state change without validation.

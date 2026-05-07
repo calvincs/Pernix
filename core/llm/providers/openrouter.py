@@ -216,6 +216,13 @@ class OpenRouterProvider:
                 json=payload,
                 headers=self._headers(),
             ) as resp:
+                if resp.status_code >= 400:
+                    body = await resp.aread()
+                    logger.error(
+                        "OpenRouter %d error body: %s",
+                        resp.status_code,
+                        body.decode("utf-8", errors="replace")[:500],
+                    )
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
@@ -296,6 +303,10 @@ class OpenRouterProvider:
                         flushed = _flush_tool_calls()
                         if flushed:
                             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
+
+                    reasoning = delta.get("reasoning") or delta.get("reasoning_content")
+                    if reasoning:
+                        logger.debug("OpenRouter reasoning delta (%d chars) model=%s", len(reasoning), model)
 
                     content = delta.get("content")
                     if content:

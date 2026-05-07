@@ -390,6 +390,18 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
     try:
         from core.reflect import build_lessons_context, reflect_on_session
 
+        # Termination history lets reflect detect ceiling-loops (same hard wall
+        # hit on multiple consecutive turns). Index 0 is this turn's reason
+        # (just logged); [1:] is genuinely prior.
+        termination_history: list[str] = []
+        try:
+            termination_history = db.recent_termination_reasons(session_id, limit=3)
+        except Exception as e:
+            logger.debug("Failed to fetch termination history for %s: %s", session_id, e)
+
+        current_reason = getattr(session_obj, "termination_reason", None)
+        prior_reasons = termination_history[1:] if termination_history else []
+
         result = await reflect_on_session(
             session_id,
             emit=emit,
@@ -398,6 +410,8 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             scout_report=session_obj.last_scout_report,
             extra_evidence=extra_evidence,
             turn_user_msg_id=session_obj.current_turn_user_msg_id,
+            termination_reason=current_reason,
+            prior_termination_reasons=prior_reasons,
         )
 
         # If trial hints were injected and reflect now reports pass, count

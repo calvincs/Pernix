@@ -53,7 +53,20 @@ def load_skill(
 
     registry = get_skill_registry()
 
+    # Distinguish "doesn't exist" from "exists but disabled" so the model
+    # gets an actionable message instead of a generic not-found.
+    if registry.is_disabled(name):
+        return f"Error: Skill '{name}' is disabled. " "Enable it in Explorer > Skills before use."
     instructions = registry.load_instructions(name)
+    if instructions is None:
+        # Registry may be stale (skill written externally or after a cancelled
+        # creation). Rescan once before giving up.
+        from pathlib import Path
+
+        from config import settings
+
+        registry.rescan(Path(settings.skills_dir))
+        instructions = registry.load_instructions(name)
     if instructions is None:
         return f"Error: Skill '{name}' not found. Use discover_skills to search."
 
@@ -90,6 +103,8 @@ def read_skill_resource(
     if content is None:
         if not registry.exists(name):
             return f"Error: Skill '{name}' not found. Use discover_skills to search."
+        if registry.is_disabled(name):
+            return f"Error: Skill '{name}' is disabled. " "Enable it in Explorer > Skills before use."
 
         resources = registry.list_resources(name)
         if resources:
@@ -103,6 +118,50 @@ def read_skill_resource(
         return f"Error: Resource '{resource_path}' not found in skill '{name}'. No resources available."
 
     return content
+
+
+def delete_skill(name: str, _context: dict | None = None) -> str:
+    """Permanently delete a skill and its directory from data/skills/{name}/.
+
+    This is irreversible. The agent MUST call ask_user() describing the skill
+    to be deleted and then approve_dangerous_tool() before this tool will execute.
+    """
+    import shutil
+    from pathlib import Path
+
+    from config import settings
+    from core.skills.registry import get_skill_registry
+
+    registry = get_skill_registry()
+    skill = registry.get(name)
+
+    if skill is None:
+        # Check disabled skills too
+        if not registry.exists(name):
+            available = sorted(s.name for s in registry.all_skills())
+            hint = f"Available: {', '.join(available)}" if available else "No skills installed."
+            return f"Skill '{name}' not found. {hint}"
+        # Exists but is disabled — still allow deletion
+        skills_dir = Path(settings.skills_dir).resolve()
+        skill_dir = skills_dir / name
+    else:
+        skill_dir = skill.path
+
+    if not skill_dir.exists():
+        return f"Skill directory not found at {skill_dir}."
+
+    try:
+        shutil.rmtree(skill_dir)
+    except OSError as e:
+        return f"Error deleting skill '{name}': {e}"
+
+    try:
+        skills_root = Path(settings.skills_dir).resolve()
+        registry.rescan(skills_root)
+    except Exception as e:
+        logger.warning("delete_skill: registry rescan failed: %s", e)
+
+    return f"Skill '{name}' deleted (data/skills/{name}/ removed)."
 
 
 def register(reg) -> None:
@@ -152,6 +211,34 @@ def register(reg) -> None:
         tags=["skill", "activate", "load", "instructions", "expertise"],
         timeout=15,
         parallel_safe=True,
+    )
+
+    reg.register(
+        name="delete_skill",
+        func=delete_skill,
+        description=(
+            "Permanently delete a skill and its directory from data/skills/{name}/. "
+            "IRREVERSIBLE. Required call sequence: "
+            "1) ask_user() naming the skill to be deleted, "
+            "2) approve_dangerous_tool(tool_name='delete_skill', scope='delete skill <name>'), "
+            "3) delete_skill(name). "
+            "The executor will block this call if approval has not been granted."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact skill name (directory name in data/skills/)",
+                },
+            },
+            "required": ["name"],
+        },
+        category="core",
+        tags=["skill", "delete", "remove", "uninstall", "destroy"],
+        timeout=15,
+        parallel_safe=False,
+        safety_level="dangerous",
     )
 
     reg.register(

@@ -309,31 +309,61 @@ def test_recovery_succeeds_with_escalate_marks_escalated(mgr, tmp_path, monkeypa
 # ---------------------------------------------------------------------------
 
 
-def test_retry_verdict_overridden_by_substantial_output(mgr, tmp_path):
-    """When reflect says retry but the worker shipped a non-trivial output
-    file, trust the file. This was the web-news failure mode in workflow run
-    1ec11d2b — reflect read the agent's "still fetching" prose and asked for
-    a retry that re-did 3 minutes of work for no benefit."""
+def test_retry_verdict_allows_retry_when_budget_remains(mgr, tmp_path):
+    """When reflect says retry, a substantial output file exists, but the step
+    still has retry budget (attempt 1 of max 1) — do NOT override to complete.
+    Let the retry loop fire so reflect's quality feedback is acted on.
+
+    Contrast with test_retry_verdict_overridden_when_budget_exhausted below,
+    which covers the fallback override after retries are used up."""
+    wid = _make_worker(
+        mgr,
+        reflect_verdict="retry",
+        reasoning="agent only researched 2 of 5 required players",
+    )
+    step = _FakeStep(id="step-1")
+    # attempts=1, max_retries=1 → budget NOT exhausted (need attempts > max_retries)
+    manifest = _build_manifest()
+    out = tmp_path / "out.json"
+    out.write_text(
+        '[{"title": "Partial result", "url": "https://example.com/a"},'
+        ' {"title": "Second result", "url": "https://example.com/b"}]'
+    )
+    assert out.stat().st_size > 100
+
+    outcome = _finalize_step(step, wid, manifest, tmp_path)
+
+    assert outcome == "failed", "verdict=retry with budget remaining should return 'failed' so the retry loop fires"
+    assert manifest["steps"]["step-1"]["status"] == "failed"
+    # reflect_verdict must remain "retry" so the retry-loop condition fires
+    assert manifest["steps"]["step-1"]["reflect_verdict"] == "retry"
+
+
+def test_retry_verdict_overridden_when_budget_exhausted(mgr, tmp_path):
+    """When reflect says retry but the step has exhausted its retry budget
+    (attempts > max_retries) AND the output file exists, fall back to
+    file-evidence override so the workflow can proceed. This was the original
+    web-news failure mode in run 1ec11d2b — reflect read stale prose after
+    the file was already written."""
     wid = _make_worker(
         mgr,
         reflect_verdict="retry",
         reasoning="agent's final message says still fetching",
     )
     step = _FakeStep(id="step-1")
+    # attempts=2 > max_retries=1 → budget exhausted
     manifest = _build_manifest()
-    # Substantive output (>100 bytes) — what a real worker would produce
+    manifest["steps"]["step-1"]["attempts"] = 2
     out = tmp_path / "out.json"
     out.write_text(
         '[{"title": "Real result with content", "url": "https://example.com/a"},'
         ' {"title": "Second result here", "url": "https://example.com/b"}]'
     )
-    assert out.stat().st_size > 100, "test fixture should be over threshold"
+    assert out.stat().st_size > 100
 
     outcome = _finalize_step(step, wid, manifest, tmp_path)
 
-    assert outcome == "complete", (
-        "verdict=retry with substantial output should be honored as complete — " "retrying discards real work"
-    )
+    assert outcome == "complete", "verdict=retry with budget exhausted + substantial output should override to complete"
     assert manifest["steps"]["step-1"]["status"] == "complete"
     assert manifest["steps"]["step-1"]["reflect_verdict"] == "retry-overridden-by-file-evidence"
     assert manifest["steps"]["step-1"]["reflect_verdict_original"] == "retry"

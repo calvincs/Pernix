@@ -389,3 +389,156 @@ async def test_reflect_model_fallback_to_background(monkeypatch, mock_llm_client
 
     await reflect_on_session(sid)
     assert mock_llm_client.calls[-1]["model"] == "bg-model"
+
+
+# ---------------------------------------------------------------------------
+# Termination-history awareness + ceiling-loop guard
+# ---------------------------------------------------------------------------
+
+
+async def test_reflect_evidence_includes_termination_history(mock_llm_client):
+    """Termination history must surface in the evidence sent to the LLM."""
+    from db import models as db
+
+    sid = db.create_session(title="History Test")
+    db.add_message(sid, "user", "Do a complex task")
+    db.add_message(sid, "assistant", "I made some progress but ran out of rounds.")
+
+    mock_llm_client.responses = [
+        ChatResponse(
+            content=json.dumps({"verdict": "retry", "reasoning": "more rounds needed"}),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+
+    await reflect_on_session(
+        sid,
+        termination_reason="round_ceiling",
+        prior_termination_reasons=[],
+    )
+    # The user-content portion of the call must contain the termination block.
+    user_content = mock_llm_client.calls[-1]["messages"][-1]["content"]
+    assert "TERMINATION HISTORY" in user_content
+    assert "round_ceiling" in user_content
+
+
+async def test_reflect_ceiling_loop_overrides_retry_to_escalate(mock_llm_client):
+    """Two consecutive round_ceiling hits → guard forces verdict to escalate."""
+    from db import models as db
+
+    sid = db.create_session(title="Ceiling Loop")
+    db.add_message(sid, "user", "Transcribe massive video")
+    db.add_message(sid, "assistant", "Hit max rounds before completing")
+
+    mock_llm_client.responses = [
+        ChatResponse(
+            # LLM picks 'retry' — guard must override.
+            content=json.dumps(
+                {
+                    "verdict": "retry",
+                    "reasoning": "More rounds might help",
+                    "strategy": "Retry with smaller chunks",
+                }
+            ),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+
+    result = await reflect_on_session(
+        sid,
+        termination_reason="round_ceiling",
+        prior_termination_reasons=["round_ceiling"],
+    )
+    assert result.verdict == "escalate"
+    assert "round_ceiling" in result.missing.lower() or "max_tool_rounds" in result.missing.lower()
+
+
+async def test_reflect_first_ceiling_does_not_override(mock_llm_client):
+    """Single round_ceiling (no prior) leaves the LLM's verdict alone."""
+    from db import models as db
+
+    sid = db.create_session(title="First Ceiling")
+    db.add_message(sid, "user", "Do something")
+    db.add_message(sid, "assistant", "First attempt hit ceiling")
+
+    mock_llm_client.responses = [
+        ChatResponse(
+            content=json.dumps({"verdict": "retry", "reasoning": "first attempt"}),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+
+    result = await reflect_on_session(
+        sid,
+        termination_reason="round_ceiling",
+        prior_termination_reasons=[],  # no prior
+    )
+    # First ceiling — guard does NOT fire; verdict stays 'retry'.
+    assert result.verdict == "retry"
+
+
+async def test_reflect_other_terminal_reason_no_override(mock_llm_client):
+    """Repeated non-ceiling reasons (e.g. compaction_failed) DON'T override."""
+    from db import models as db
+
+    sid = db.create_session(title="Compaction")
+    db.add_message(sid, "user", "Do something")
+    db.add_message(sid, "assistant", "Compaction blew up twice")
+
+    mock_llm_client.responses = [
+        ChatResponse(
+            content=json.dumps({"verdict": "retry", "reasoning": "transient compaction issue"}),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+
+    result = await reflect_on_session(
+        sid,
+        termination_reason="compaction_failed",
+        prior_termination_reasons=["compaction_failed"],
+    )
+    # Code guard is round_ceiling-only; compaction stays LLM-decided.
+    assert result.verdict == "retry"
+
+
+def test_recent_termination_reasons_helper():
+    """db.recent_termination_reasons returns most-recent reasons newest-first."""
+    from db import models as db
+
+    sid = db.create_session(title="Helper Test")
+    # Manually insert state-log rows.
+    from db.database import connect_sessions
+
+    with connect_sessions() as conn:
+        for i, reason in enumerate(["complete", "round_ceiling", "round_ceiling"], start=1):
+            conn.execute(
+                """INSERT INTO session_state_log
+                   (session_id, turn_id, retry_index, compaction_count,
+                    from_state, to_state, reason, termination_reason,
+                    reflect_count, eval_count, timestamp_ms)
+                   VALUES (?, 1, 0, 0, 'processing', 'finalizing', 'loop-complete', ?, 0, 0, ?)""",
+                (sid, reason, 1_700_000_000_000 + i),
+            )
+        conn.commit()
+
+    out = db.recent_termination_reasons(sid, limit=3)
+    # Newest-first
+    assert out[0] == "round_ceiling"
+    assert out[1] == "round_ceiling"
+    assert out[2] == "complete"

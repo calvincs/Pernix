@@ -12,7 +12,7 @@ from config import settings
 # file or sample data with the same name.
 PROTECTED_FILES = frozenset(
     {
-        "agents.md",
+        "sessions.md",
         "instructions.md",
         "soul.md",
         "rules.md",

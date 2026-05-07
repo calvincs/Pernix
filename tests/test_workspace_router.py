@@ -113,7 +113,9 @@ async def test_workspace_write_too_large(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     app = _make_app()
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.put("/workspace/big.txt", json={"content": "x" * (11 * 1024 * 1024)})  # 11MB > 10MB limit
+        resp = await client.put(
+            "/workspace/big.txt", json={"content": "x" * (251 * 1024 * 1024)}
+        )  # 251MB > 250MB limit
     assert resp.status_code == 413
 
 

@@ -442,7 +442,11 @@ def file_edit(path: str, old_string: str, new_string: str, replace_all: bool = F
         hint = ""
         if candidates:
             hint = "\n\nPossible matches:\n" + "\n".join(candidates[:5])
-        return f"Error: old_string not found in {path}.{hint}"
+        return (
+            f"Error: old_string not found in {path}.{hint}\n\n"
+            f"The file may have changed since you last read it. "
+            f"Call file_read(path='{path}') to see the current content before retrying."
+        )
 
     if eol != "\n":
         result = result.replace("\n", eol)
@@ -523,7 +527,9 @@ def multiedit(path: str, edits: list[dict]) -> str:
         if result is None:
             return (
                 f"Error: Edit {i + 1} failed — old_string not found. "
-                f"{applied}/{len(edits)} edits matched in memory; aborted, no file changes written."
+                f"{applied}/{len(edits)} edits matched in memory; aborted, no file changes written.\n\n"
+                f"The file may have changed since you last read it. "
+                f"Call file_read(path='{path}') to see the current content before retrying."
             )
         content = result
         applied += 1

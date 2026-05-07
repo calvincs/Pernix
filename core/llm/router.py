@@ -74,8 +74,9 @@ def sanitize_for_fallback(messages: list[dict]) -> list[dict]:
         elif role == "system" and cleaned:
             # Drop mid-conversation system messages
             continue
-        else:
+        elif role in ("system", "user", "assistant"):
             cleaned.append({"role": role, "content": content})
+        # else: drop any non-standard internal roles (eval, model_divider, etc.)
 
     return cleaned
 
@@ -147,7 +148,7 @@ class ProviderRouter:
         return session_id, session_created_at, session_priority
 
     async def chat(self, messages: list[dict], **kwargs) -> ChatResponse:
-        """Route chat with per-provider semaphore and fallback on rate limit."""
+        """Route chat with per-provider semaphore and fallback on transient errors."""
         sid, s_at, s_pri = self._pop_session_kwargs(kwargs)
         model = kwargs.get("model", "") or settings.llm_model
         provider = self.get_provider(model)

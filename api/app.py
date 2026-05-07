@@ -15,28 +15,30 @@ logger = logging.getLogger("pernix.api")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
-    # Startup — configure logging with console + rotating file
-    from logging.handlers import RotatingFileHandler
-    from pathlib import Path as _P
-
-    log_dir = _P("data/logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    # Startup — configure logging with console + rotating file.
+    # Skip if run.py already configured the root logger (the normal path);
+    # this branch covers test imports and other entry points that load the
+    # app without going through run.py.
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    # Console handler
-    console = logging.StreamHandler()
-    console.setFormatter(log_fmt)
-    root.addHandler(console)
-    # Rotating file handler: 10MB x 3 backups
-    file_h = RotatingFileHandler(
-        log_dir / "pernix.log",
-        maxBytes=10_000_000,
-        backupCount=3,
-        encoding="utf-8",
-    )
-    file_h.setFormatter(log_fmt)
-    root.addHandler(file_h)
+    if not root.handlers:
+        from logging.handlers import RotatingFileHandler
+        from pathlib import Path as _P
+
+        log_dir = _P("data/logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        root.setLevel(logging.INFO)
+        console = logging.StreamHandler()
+        console.setFormatter(log_fmt)
+        root.addHandler(console)
+        file_h = RotatingFileHandler(
+            log_dir / "pernix.log",
+            maxBytes=10_000_000,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        file_h.setFormatter(log_fmt)
+        root.addHandler(file_h)
     logger.info("Pernix starting on %s:%d", settings.host, settings.port)
 
     # 1. Database
@@ -122,6 +124,17 @@ async def lifespan(app: FastAPI):
             logger.info("Reconciled %d AWAITING_WORKERS session(s) at startup", resumed)
     except Exception as e:
         logger.warning("AWAITING_WORKERS reconcile failed (continuing): %s", e)
+
+    # 3.2 Reconcile sessions left in PROCESSING by the previous run.
+    # Any session still in PROCESSING at startup has a dead agent task
+    # (server restarted mid-turn). Reset them to IDLE_READY immediately
+    # rather than waiting up to 5 minutes for the reaper to fire.
+    try:
+        reset = await manager.reconcile_processing_sessions()
+        if reset:
+            logger.info("Reconciled %d stuck PROCESSING session(s) at startup", reset)
+    except Exception as e:
+        logger.warning("PROCESSING reconcile failed (continuing): %s", e)
 
     # 1.5 VAPID key generation (idempotent — skipped if keys already present)
     if not settings.vapid_private_key or not settings.vapid_public_key:
@@ -225,7 +238,8 @@ async def lifespan(app: FastAPI):
     try:
         from core.extensions.web import _close_browser, _kill_driver
 
-        await asyncio.wait_for(asyncio.to_thread(_close_browser), timeout=3)
+        # Async _close_browser runs directly on this loop — no to_thread bridge.
+        await asyncio.wait_for(_close_browser(), timeout=3)
     except asyncio.TimeoutError:
         logger.warning("Browser close timed out, forcing driver kill")
         _kill_driver()

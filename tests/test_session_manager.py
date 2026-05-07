@@ -873,3 +873,76 @@ def test_paused_reaper_edge_exists_in_transition_table():
 
     assert (sv2.SessionStateV2.PAUSED, "reaper-unstick") in sv2.TRANSITIONS
     assert sv2.TRANSITIONS[(sv2.SessionStateV2.PAUSED, "reaper-unstick")] is sv2.SessionStateV2.IDLE_READY
+
+
+# ---------------------------------------------------------------------------
+# Bug B — FINALIZING reaper must respect has_background_tasks
+# ---------------------------------------------------------------------------
+
+
+def test_finalizing_reaper_respects_background_refs():
+    """The FINALIZING reaper must not force-unstick a session while
+    post-hooks (e.g. reflect) are still running. _run_post_hooks holds a
+    background ref during its execution; the reaper should honour it the
+    same way the PROCESSING reaper already does."""
+    import time
+
+    from sessions import state_v2 as sv2
+
+    mgr = _make_manager()
+    sid = mgr.create_session(title="Finalizing With Hooks")
+    session = mgr.get(sid)
+
+    # Drive into FINALIZING via the state machine.
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    session.termination_reason = "complete"
+    sv2.transition(
+        session,
+        sv2.SessionStateV2.FINALIZING,
+        "loop-complete",
+        termination_reason=sv2.TerminationReason.COMPLETE,
+    )
+
+    # Simulate post-hooks holding a background ref (as _run_post_hooks does).
+    session.add_background_ref()
+
+    # Make the session look idle for longer than the 120s FINALIZING threshold.
+    session.last_activity_time = time.time() - 200
+
+    mgr.reap_idle_sessions(max_idle=1800)
+
+    assert sv2._current_state(session) is sv2.SessionStateV2.FINALIZING, (
+        "Reaper must not force-unstick a FINALIZING session while "
+        "background tasks (post-hooks / reflect) are still running."
+    )
+
+
+def test_finalizing_reaper_fires_when_no_background_refs():
+    """When there are no background tasks and FINALIZING has been idle
+    for > 120s (genuine stuck), the reaper should force it to IDLE_READY."""
+    import time
+
+    from sessions import state_v2 as sv2
+
+    mgr = _make_manager()
+    sid = mgr.create_session(title="Truly Stuck FINALIZING")
+    session = mgr.get(sid)
+
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    session.termination_reason = "complete"
+    sv2.transition(
+        session,
+        sv2.SessionStateV2.FINALIZING,
+        "loop-complete",
+        termination_reason=sv2.TerminationReason.COMPLETE,
+    )
+
+    # No background ref — genuinely stuck.
+    session.last_activity_time = time.time() - 200
+
+    mgr.reap_idle_sessions(max_idle=1800)
+
+    assert sv2._current_state(session) is sv2.SessionStateV2.IDLE_READY, (
+        "A genuinely stuck FINALIZING session (no background tasks, idle > 120s) "
+        "must be force-unstuck to IDLE_READY by the reaper."
+    )

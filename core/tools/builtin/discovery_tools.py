@@ -51,6 +51,8 @@ def get_tool_schema(name: str, _context: dict | None = None) -> str:
     tool = registry.get(name)
     if not tool:
         return f"Error: Tool '{name}' not found. Use discover_tools to search."
+    if registry.is_disabled(name):
+        return f"Error: Tool '{name}' is disabled. " "Enable it in Explorer > Tools before use."
 
     schema = tool.to_openai_schema()
     return json.dumps(schema, indent=2)

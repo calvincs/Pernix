@@ -1,8 +1,14 @@
-"""Pernix — Skills management API: list, view, enable/disable, delete."""
+"""Pernix — Skills management API: list, view, enable/disable, delete.
+
+Disabled-skill state is owned by ``SkillRegistry`` (see
+``core/skills/registry.py``). This router only proxies to the registry's
+``is_disabled`` / ``enable`` / ``disable`` methods so there is one source of
+truth for what's disabled — same JSON file, same in-memory set, used by every
+agent path (scout, builtins, workflows, agent loop).
+"""
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 from pathlib import Path
@@ -16,24 +22,6 @@ router = APIRouter(tags=["skills"])
 logger = logging.getLogger("pernix.api.skills")
 
 
-def _disabled_path() -> Path:
-    return Path(settings.skills_dir) / ".disabled.json"
-
-
-def _load_disabled() -> set[str]:
-    path = _disabled_path()
-    if not path.exists():
-        return set()
-    try:
-        return set(json.loads(path.read_text()))
-    except (json.JSONDecodeError, OSError):
-        return set()
-
-
-def _save_disabled(names: set[str]) -> None:
-    _disabled_path().write_text(json.dumps(sorted(names)), encoding="utf-8")
-
-
 @router.get("/api/skills")
 async def list_skills():
     """List all installed skills with metadata, enabled state, and performance."""
@@ -44,7 +32,6 @@ async def list_skills():
     reg = get_skill_registry()
     reg.rescan(Path(settings.skills_dir))
     skills = reg.all_skills()
-    disabled = _load_disabled()
 
     # Batch-load performance counters for all skills
     skill_names = [s.name for s in skills]
@@ -53,14 +40,16 @@ async def list_skills():
 
     result = []
     for s in sorted(skills, key=lambda x: x.name):
-        resources = reg.list_resources(s.name)
+        # include_disabled=True so disabled skills still expose their resource
+        # tree to the UI's edit/inspect view.
+        resources = reg.list_resources(s.name, include_disabled=True)
         result.append(
             {
                 "name": s.name,
                 "description": s.description,
                 "version": s.version,
                 "tags": s.tags,
-                "enabled": s.name not in disabled,
+                "enabled": not reg.is_disabled(s.name),
                 "has_scripts": "scripts" in resources,
                 "has_references": "references" in resources,
                 "has_assets": "assets" in resources,
@@ -82,9 +71,10 @@ async def get_skill(name: str):
     if not skill:
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
-    instructions = reg.load_instructions(name) or ""
-    resources = reg.list_resources(name)
-    disabled = _load_disabled()
+    # include_disabled=True so a toggled-off skill still shows its body in the
+    # UI editor (the agent paths use the default-filtered overload).
+    instructions = reg.load_instructions(name, include_disabled=True) or ""
+    resources = reg.list_resources(name, include_disabled=True)
 
     # Read SKILL.md raw content for editing
     skill_md = skill.path / "SKILL.md"
@@ -95,7 +85,7 @@ async def get_skill(name: str):
         "description": skill.description,
         "version": skill.version,
         "tags": skill.tags,
-        "enabled": skill.name not in disabled,
+        "enabled": not reg.is_disabled(name),
         "instructions": instructions,
         "raw_content": raw_content,
         "resources": resources,
@@ -140,12 +130,10 @@ async def toggle_skill(name: str, body: SkillToggle):
     if not reg.exists(name):
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
-    disabled = _load_disabled()
     if body.enabled:
-        disabled.discard(name)
+        reg.enable(name)
     else:
-        disabled.add(name)
-    _save_disabled(disabled)
+        reg.disable(name)
 
     logger.info("Skill '%s' %s", name, "enabled" if body.enabled else "disabled")
     return {"ok": True, "enabled": body.enabled}
@@ -164,10 +152,9 @@ async def delete_skill(name: str):
     # Remove from filesystem
     shutil.rmtree(skill.path)
 
-    # Remove from disabled list if present
-    disabled = _load_disabled()
-    disabled.discard(name)
-    _save_disabled(disabled)
+    # Clear from disabled set first (idempotent — no-op if not disabled)
+    # so a future skill of the same name doesn't inherit a stale disabled flag.
+    reg.enable(name)
 
     # Rescan registry
     reg.rescan(Path(settings.skills_dir))

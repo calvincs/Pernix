@@ -48,7 +48,12 @@ def test_load_skill_with_resources(tmp_path, monkeypatch):
     from core.tools.builtin.skill_tools import load_skill
 
     result = load_skill("scripted-skill")
-    assert "scripts" in result.lower() or "Instructions" in result
+    # Body is rendered AND the resource manifest section is present.
+    # (Original test used "scripts" in result.lower() OR "Instructions" — the
+    # OR made it trivially true because Instructions is always in the body.)
+    assert "Instructions" in result, "skill body should be rendered"
+    assert "scripts" in result.lower(), "resource manifest should list scripts/"
+    assert "run.sh" in result, "resource manifest should name the script file"
 
 
 def test_read_skill_resource_exists(tmp_path, monkeypatch):
@@ -79,8 +84,208 @@ def test_read_skill_resource_not_found(tmp_path, monkeypatch):
     assert "Error" in result
 
 
+def test_load_skill_disabled_returns_clear_error(tmp_path, monkeypatch):
+    """Disabled skill explicit load returns an actionable error, not silent skip."""
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path))
+    _make_skill_in_tmp(tmp_path, "off-skill", "# Stuff\nDo things.")
+    from core.skills.registry import SkillRegistry
+
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    reg.disable("off-skill")
+    monkeypatch.setattr("core.skills.registry._skill_registry", reg)
+    from core.tools.builtin.skill_tools import load_skill
+
+    out = load_skill("off-skill")
+    assert "disabled" in out.lower()
+    assert "Explorer" in out  # tells user where to re-enable
+
+
+def test_read_skill_resource_disabled_returns_clear_error(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path))
+    _make_skill_in_tmp(tmp_path, "off-rsrc", "# Stuff", has_scripts=True)
+    from core.skills.registry import SkillRegistry
+
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    reg.disable("off-rsrc")
+    monkeypatch.setattr("core.skills.registry._skill_registry", reg)
+    from core.tools.builtin.skill_tools import read_skill_resource
+
+    out = read_skill_resource("off-rsrc", "scripts/run.sh")
+    assert "disabled" in out.lower()
+
+
+def test_discover_skills_excludes_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path))
+    _make_skill_in_tmp(tmp_path, "release-tool", "# Release tooling\nDo it.")
+    from core.skills.registry import SkillRegistry
+
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    monkeypatch.setattr("core.skills.registry._skill_registry", reg)
+    from core.tools.builtin.skill_tools import discover_skills
+
+    assert "release-tool" in discover_skills("release")
+    reg.disable("release-tool")
+    out = discover_skills("release")
+    assert "release-tool" not in out  # gone from agent-facing discovery
+
+
+def test_get_tool_schema_disabled_returns_clear_error(monkeypatch, tmp_path):
+    """Disabled tool's schema is hidden from get_tool_schema with a clear error."""
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(name="t1", func=lambda: "ok", description="t", parameters={"type": "object", "properties": {}})
+    reg.disable("t1")
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+    from core.tools.builtin.discovery_tools import get_tool_schema
+
+    out = get_tool_schema("t1")
+    assert "disabled" in out.lower()
+    assert "Explorer" in out
+
+
+def test_discover_tools_excludes_disabled(monkeypatch, tmp_path):
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(
+        name="my_search",
+        func=lambda: "",
+        description="search the web for things",
+        parameters={},
+        tags=["search", "web"],
+    )
+    reg.rebuild_index()
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+    from core.tools.builtin.discovery_tools import discover_tools
+
+    assert "my_search" in discover_tools("search the web")
+    reg.disable("my_search")
+    out = discover_tools("search the web")
+    assert "my_search" not in out
+
+
+def test_system_prompt_catalog_excludes_disabled_skills(tmp_path, monkeypatch):
+    """The static [AVAILABLE SKILLS] block in every turn's system prompt must
+    drop disabled skills — otherwise the agent burns a round calling
+    load_skill('foo') just to be told it's disabled."""
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path))
+    _make_skill_in_tmp(tmp_path, "shown-skill", "# x")
+    _make_skill_in_tmp(tmp_path, "hidden-skill", "# y")
+    from core.skills.registry import SkillRegistry
+
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    reg.disable("hidden-skill")
+    monkeypatch.setattr("core.skills.registry._skill_registry", reg)
+    from core.context.compiler import _build_available_skills_block
+
+    block = _build_available_skills_block()
+    assert "shown-skill" in block
+    assert "hidden-skill" not in block
+
+
+def test_create_skill_clears_stale_disabled_flag(tmp_path, monkeypatch):
+    """Re-creating a skill with the same name as a previously-disabled one
+    must come back enabled — otherwise create_skill silently lands in a
+    disabled state because .disabled.json kept the old name."""
+    import shutil
+
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path))
+    _make_skill_in_tmp(tmp_path, "ghost", "# old body")
+    from core.skills.registry import SkillRegistry
+
+    reg = SkillRegistry()
+    reg.scan(tmp_path)
+    reg.disable("ghost")
+    assert reg.is_disabled("ghost")
+    # Simulate a manual rm -rf — the on-disk .disabled.json still has "ghost".
+    shutil.rmtree(tmp_path / "ghost")
+    monkeypatch.setattr("core.skills.registry._skill_registry", reg)
+    from core.extensions.skillmaker import create_skill
+
+    result = create_skill(
+        name="ghost",
+        description="brand new skill, totally different",
+        instructions="# fresh body\nDo new things, in detail and with care.",
+        approved=True,
+    )
+    assert "created" in result.lower()
+    assert not reg.is_disabled("ghost")  # stale disabled flag cleared
+
+
+async def test_e2e_patch_disables_skill_then_load_skill_returns_error(tmp_path, monkeypatch):
+    """End-to-end: PATCH /api/skills/{name} {enabled: false} → builtin
+    load_skill('{name}') returns the disabled-error string. Catches a class
+    of regression where the API and the registry get out of sync (e.g. the
+    router falls back to its old JSON-file dance and bypasses the in-memory
+    set, so the agent path stays oblivious until the next process restart).
+    Also checks the reverse direction: re-enabling via PATCH restores the
+    body in the same process.
+    """
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from api.routers import skills as skills_router
+    from core.skills.registry import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    d = skills_dir / "e2e-skill"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: e2e-skill\ndescription: x\n---\n# Body\n")
+    monkeypatch.setattr("config.settings.skills_dir", str(skills_dir))
+    fresh = SkillRegistry()
+    fresh.scan(skills_dir)
+    monkeypatch.setattr("core.skills.registry._skill_registry", fresh)
+
+    app = FastAPI()
+    app.include_router(skills_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch("/api/skills/e2e-skill", json={"enabled": False})
+        assert resp.status_code == 200
+
+    from core.tools.builtin.skill_tools import load_skill
+
+    out = load_skill("e2e-skill")
+    assert "disabled" in out.lower()
+    assert "Explorer" in out
+
+    # Re-enable via PATCH; load_skill must return the body again.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch("/api/skills/e2e-skill", json={"enabled": True})
+        assert resp.status_code == 200
+    assert "Body" in load_skill("e2e-skill")
+
+
+def test_monotonic_allowlist_skips_disabled_tools(monkeypatch, tmp_path):
+    """A tool used in a prior turn must NOT be re-promoted into active_tools
+    if the user disabled it between turns — that would defeat the disable."""
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(name="prior_tool", func=lambda: "ok", description="x", parameters={"type": "object", "properties": {}})
+    reg.disable("prior_tool")
+
+    # Mirror the agent.py loop body that populates active_tools_set.
+    active_tools_set = set()
+    prior_tools = ["prior_tool"]
+    for tname in prior_tools:
+        if reg.exists(tname) and not reg.is_disabled(tname):
+            active_tools_set.add(tname)
+    assert "prior_tool" not in active_tools_set
+
+
 def test_discover_skills_with_results(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.skills_dir", str(tmp_path))
+    # Use a description with strong, indexable tokens so the test isn't at
+    # the mercy of synonym tables. Tightened from the original `assert
+    # isinstance(result, str)` smoke check, which proved nothing.
     _make_skill_in_tmp(tmp_path, "web-search-skill", "# Instructions\nSearch the web.")
     from core.skills.registry import SkillRegistry
 
@@ -89,9 +294,9 @@ def test_discover_skills_with_results(tmp_path, monkeypatch):
     monkeypatch.setattr("core.skills.registry._skill_registry", reg)
     from core.tools.builtin.skill_tools import discover_skills
 
-    result = discover_skills("web search")
-    # May or may not match depending on tokenization
-    assert isinstance(result, str)
+    # Query against the skill name token, which the index always tokenizes.
+    result = discover_skills("web-search-skill")
+    assert "web-search-skill" in result, f"discover_skills should surface the name; got: {result!r}"
 
 
 # ===========================================================================

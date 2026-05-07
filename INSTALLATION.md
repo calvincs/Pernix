@@ -103,12 +103,14 @@ Before you can have a conversation, you need to tell Pernix which model to use:
 
 1. Click the gear icon in the sidebar → **Settings**
 2. Set **`llm_model`** to a model you have available:
-   - For Ollama: the name of a model you've already pulled (e.g. `llama3.2`, `qwen2.5-coder`)
-   - For OpenRouter: the full model ID (e.g. `anthropic/claude-sonnet-4-5`)
-3. Set **`scout_model`** — this is used for the planning phase. A small, fast model works well (e.g. `llama3.2:3b`). You can use the same model as `llm_model` while getting started.
+   - For Ollama: the name of a model you've already pulled (e.g. `qwen3:32b`, `qwen2.5-coder:32b`, or `qwen3:8b` if you have less VRAM). Older models like Llama 3.2 work but tend to be weaker at tool use and multi-step reasoning — agentic workloads do much better on current Qwen 3.x or comparable frontier-tier local models
+   - For OpenRouter: the full model ID (e.g. `anthropic/claude-sonnet-4.6`, `x-ai/grok-4.1-fast`, or any current frontier model from your account)
+3. Set **`scout_model`** — this is used for the planning phase. A small, fast model works well (e.g. `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter). You can use the same model as `llm_model` while getting started.
 4. Click **Save**
 
 > **Verify:** Navigate to `http://localhost:8090/api/health` — it should return `{"status": "ok", ...}`.
+
+> **Tip:** Open `http://localhost:8090/docs` in your browser. Pernix is built on FastAPI, so a live Swagger UI is auto-generated for every endpoint. ReDoc is also available at `/redoc`. These are the easiest way to explore what the API can do without reading [docs/API.md](docs/API.md) end to end.
 
 ---
 
@@ -120,14 +122,15 @@ None of these are required. Pernix detects which optional packages are available
 
 Enables the `browse_web` tool, which renders JavaScript-heavy pages using a headless Chromium browser.
 
+`playwright` and `trafilatura` are already included in `requirements.txt` and installed by the standard `pip install -r requirements.txt` step. You only need to download the browser binary once:
+
 ```bash
-pip install playwright trafilatura
 playwright install chromium
 ```
 
 Then enable in Settings: `browser_enabled = true`.
 
-Without Playwright, `browse_web` is unavailable. The `search_web` and `http_get` tools still work.
+Without the browser binary, `browse_web` is unavailable. The `search_web` and `http_get` tools still work.
 
 ### tiktoken — Accurate Token Counting
 
@@ -169,6 +172,7 @@ pip install qrcode
 ```
 python run.py                       Normal start (http://localhost:8090)
 python run.py --rebuild             Wipe all state, start clean (see below)
+python run.py --dangerous           Bypass dangerous-tool approval gate (see below)
 python run.py --qr                  Print LAN access URL + QR code (network mode)
 python run.py --port 9000           Override port (default: 8090)
 python run.py --host 0.0.0.0        Override bind address
@@ -193,6 +197,16 @@ Wipes all sessions, memory, and workspace data. The server will prompt you to ty
 - `data/agent/` — agent identity files (SOUL.md, RULES.md, AGENTS.md). The birthdate header in SOUL.md is reset; user-authored content below it is preserved. To restore defaults, run `git checkout data/agent/`.
 
 Use `--rebuild` when you want a completely fresh start or are troubleshooting state corruption.
+
+### `--dangerous` — Bypass Tool Approval Gate
+
+Starts the server with the dangerous-tool approval gate disabled. Every tool call executes immediately — no `ask_user` confirmation, no `approve_dangerous_tool()` step required.
+
+**This flag is the only way to enable this mode.** It cannot be toggled via Settings, the API, or any environment variable while the server is running. This prevents a rogue process or prompt injection from silently elevating its own privileges mid-session. The mode is visible in **Settings → Security** (read-only status badge) and in a red banner at the top of the **Explorer → Tools** panel.
+
+**The flag survives server restarts** — if `POST /api/admin/restart` is used, the new process inherits `--dangerous` from the original `sys.argv`.
+
+Use only when you fully trust the current session context. Disable by restarting without the flag.
 
 ---
 
@@ -232,6 +246,7 @@ RUN apt-get update && apt-get install -y git openssl
 WORKDIR /app
 COPY . .
 RUN python -m venv .venv && .venv/bin/pip install -r requirements.txt
+RUN .venv/bin/playwright install chromium --with-deps
 EXPOSE 8090
 CMD [".venv/bin/python", "run.py"]
 ```

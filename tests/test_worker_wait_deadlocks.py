@@ -630,3 +630,136 @@ async def test_resume_from_workers_extends_session_budget(mgr, monkeypatch):
     sid, secs = extend_calls[0]
     assert sid == parent_id
     assert secs == 2 * 1800.0
+
+
+# ---------------------------------------------------------------------------
+# Bug A — boot-time PROCESSING reconciliation
+# ---------------------------------------------------------------------------
+
+
+async def test_reconcile_processing_resets_stuck_session(mgr, monkeypatch):
+    """Sessions persisted in PROCESSING at boot (dead agent task) must be
+    reset to IDLE_READY by reconcile_processing_sessions() so users can
+    re-prompt without waiting up to 5 minutes for the reaper."""
+    import time as _time
+
+    from db import models as db
+
+    # Create a session in the DB and persist state_v2='processing' directly
+    # (simulating a crash mid-turn with no live agent task).
+    sid = db.create_session(title="Stuck Processing")
+    db.update_session(sid, state="processing", state_v2="processing")
+
+    # Do NOT add it to the manager's in-memory dict — it should be invisible
+    # to the normal reaper and only visible via the DB sweep.
+    assert mgr.get(sid) is None
+
+    reset = await mgr.reconcile_processing_sessions()
+
+    assert reset == 1, f"Expected 1 session reset, got {reset}"
+    session = mgr.get(sid)
+    assert session is not None
+    assert (
+        sv2._current_state(session) is sv2.SessionStateV2.IDLE_READY
+    ), "Session should be IDLE_READY after boot reconcile"
+    # A 'system' event should have been emitted to inform the user.
+    events = [e for e in session.events if e.get("type") == "system"]
+    assert events, "Boot reconcile should emit a system event to notify the user"
+
+
+async def test_reconcile_processing_skips_if_already_recovered(mgr):
+    """If a session somehow ends up in memory as IDLE_READY (e.g., recovered
+    by another path) before reconcile runs, it must not be touched."""
+    from db import models as db
+
+    sid = db.create_session(title="Already Recovered")
+    db.update_session(sid, state="processing", state_v2="processing")
+
+    # Load into memory and set to IDLE_READY before reconcile runs.
+    session = mgr.get_or_create(sid)
+    sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
+
+    reset = await mgr.reconcile_processing_sessions()
+
+    assert reset == 0, "Already-recovered session should not be counted"
+    assert sv2._current_state(mgr.get(sid)) is sv2.SessionStateV2.IDLE_READY
+
+
+async def test_reconcile_processing_handles_legacy_only_rows(mgr):
+    """Sessions where state='processing' but state_v2 is NULL (crashed before
+    state_v2 was written) must also be caught and reset."""
+    from db import models as db
+
+    sid = db.create_session(title="Legacy Processing Only")
+    # Write legacy state without state_v2 to simulate a pre-v2 crash.
+    db.update_session(sid, state="processing", state_v2=None)
+
+    reset = await mgr.reconcile_processing_sessions()
+
+    assert reset == 1
+    session = mgr.get(sid)
+    assert sv2._current_state(session) is sv2.SessionStateV2.IDLE_READY
+
+
+# ---------------------------------------------------------------------------
+# Bug D — _run_post_hooks must use v2 state, not legacy enum
+# ---------------------------------------------------------------------------
+
+
+async def test_post_hooks_only_run_in_finalizing(mgr, monkeypatch):
+    """_run_post_hooks must return early for every state except FINALIZING.
+    With the legacy-enum guard removed, new v2 states that map to "idle"
+    in the legacy enum can no longer accidentally trigger post-hooks."""
+    hooks_called: list[str] = []
+
+    async def fake_hooks(_sid, *, emit, session_obj):
+        hooks_called.append(_sid)
+
+    monkeypatch.setattr("sessions.hooks.run_post_task_hooks", fake_hooks)
+
+    non_finalizing = [
+        sv2.SessionStateV2.SCOUTING,
+        sv2.SessionStateV2.PROCESSING,
+        sv2.SessionStateV2.AWAITING_USER,
+        sv2.SessionStateV2.AWAITING_WORKERS,
+        sv2.SessionStateV2.IDLE_READY,
+    ]
+
+    for state in non_finalizing:
+        sid = mgr.create_session(title=f"test-{state.value}")
+        session = mgr.get(sid)
+        # Force the v2 state directly (bypassing invariant checks — test only).
+        session._state_v2 = state
+        session.state = session.state.IDLE  # keep legacy mirror quiet
+
+        await mgr._run_post_hooks(session)
+
+    assert hooks_called == [], (
+        f"Post-hooks ran for non-FINALIZING states: {hooks_called}. " "Only FINALIZING should trigger post-hooks."
+    )
+
+
+async def test_post_hooks_run_when_finalizing(mgr, monkeypatch):
+    """Confirm post-hooks DO run when the session is in FINALIZING."""
+    hooks_called: list[str] = []
+
+    async def fake_hooks(_sid, *, emit, session_obj):
+        hooks_called.append(_sid)
+
+    monkeypatch.setattr("sessions.hooks.run_post_task_hooks", fake_hooks)
+
+    sid = mgr.create_session(title="finalizing-session")
+    session = mgr.get(sid)
+    # Enter FINALIZING via the state machine (requires PROCESSING first).
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "prompt-arrived")
+    session.termination_reason = "complete"
+    sv2.transition(
+        session,
+        sv2.SessionStateV2.FINALIZING,
+        "loop-complete",
+        termination_reason=sv2.TerminationReason.COMPLETE,
+    )
+
+    await mgr._run_post_hooks(session)
+
+    assert hooks_called == [sid], "Post-hooks must run exactly once when the session is FINALIZING"

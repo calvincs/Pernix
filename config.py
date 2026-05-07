@@ -15,6 +15,11 @@ ENV_PATH = Path(".env")
 # Fields that are machine-specific and should not be persisted
 _NO_PERSIST = {"db_path", "host", "port", "workspace_dir", "memory_dir", "skills_dir", "workflows_dir"}
 
+# Fields that are runtime-only — set via CLI flags, never read from settings.json
+# or .env, and never written back to disk. Their default in the dataclass is
+# always the safe value; the CLI is the only activation path.
+_RUNTIME_ONLY = {"auto_approve_dangerous"}
+
 
 def _parse_env(path: Path = ENV_PATH) -> dict[str, str]:
     """Parse .env file into dict. Handles KEY=value and KEY="quoted value"."""
@@ -90,6 +95,15 @@ class Settings:
     # RLIMIT_AS. Must be high enough for Node.js/V8 (CodeRange reserve ~1GB),
     # Playwright, and NumPy/OpenBLAS thread pools. 0 disables the cap.
     shell_address_space_limit_bytes: int = 8 * 1024 * 1024 * 1024  # 8 GB
+    # Per-bash-subprocess file write cap (RLIMIT_FSIZE). 0 = no cap.
+    # Was hardcoded to 100 MB; raised to 2 GB so legitimate downloads (model
+    # files, video, build artifacts) work while still catching dd-loop runaways.
+    shell_fsize_limit_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GB
+    # Max bytes for file_write / file_edit / multiedit per call. 0 = no cap.
+    max_file_write_size: int = 100 * 1024 * 1024  # 100 MB
+    # Max file size for file_edit's whole-file fuzzy-match path. Above this the
+    # agent should grep + targeted old_string, or sed/awk via bash. 0 = no cap.
+    max_edit_read_size: int = 5 * 1024 * 1024  # 5 MB
     shell_allowlist: list = field(
         default_factory=lambda: [
             "python",
@@ -240,7 +254,7 @@ class Settings:
         import tempfile
 
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        data = {k: v for k, v in asdict(self).items() if k not in _NO_PERSIST}
+        data = {k: v for k, v in asdict(self).items() if k not in _NO_PERSIST | _RUNTIME_ONLY}
         # Atomic write: temp file + rename prevents corruption on concurrent saves
         tmp_fd, tmp_path = tempfile.mkstemp(dir=str(DATA_DIR), suffix=".tmp")
         try:
@@ -267,7 +281,7 @@ class Settings:
             logger.warning("Failed to load settings: %s", e)
             return instance
 
-        valid_fields = {f.name for f in fields(instance)} - _NO_PERSIST
+        valid_fields = {f.name for f in fields(instance)} - _NO_PERSIST - _RUNTIME_ONLY
         for key, value in data.items():
             if key not in valid_fields:
                 continue

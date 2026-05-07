@@ -135,6 +135,163 @@ def notify_user(
     return f"Notification broadcast to {reached} connected client(s)."
 
 
+_APPROVALS_PATH = None  # resolved lazily from settings
+
+
+def _approvals_path():
+    """Return the path to the persistent tool approvals file."""
+    global _APPROVALS_PATH
+    if _APPROVALS_PATH is None:
+        from pathlib import Path as _Path
+
+        _APPROVALS_PATH = _Path("data") / "tool_approvals.json"
+    return _APPROVALS_PATH
+
+
+def _load_approvals() -> dict:
+    """Load persisted approved scopes: {tool_name: [scope, ...]}."""
+    import json as _json
+
+    p = _approvals_path()
+    if not p.exists():
+        return {}
+    try:
+        return _json.loads(p.read_text()) or {}
+    except (ValueError, OSError):
+        return {}
+
+
+def _save_approvals(store: dict) -> None:
+    """Persist the approved scopes store to disk."""
+    import json as _json
+
+    p = _approvals_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps(store, indent=2))
+    except OSError:
+        pass  # best-effort; in-session approval still works
+
+
+def _scope_key(scope: str) -> str:
+    """Normalise a scope string for storage/lookup."""
+    return scope.strip().lower()
+
+
+def approve_dangerous_tool(
+    tool_name: str = "",
+    scope: str = "",
+    persistent: bool = False,
+    _context: dict | None = None,
+) -> str:
+    """Register user approval for a specific dangerous tool action.
+
+    REQUIRED call sequence (first time):
+      1. ask_user() — describe the EXACT action (command, URL, file path).
+         Show the user precisely what will be executed, not just the tool name.
+      2. approve_dangerous_tool(tool_name, scope) — records approval.
+      3. Call the dangerous tool.
+
+    Previously approved scopes are remembered across sessions: if the user
+    approved "run ps aux to list processes" before, calling this tool with the
+    same scope skips the ask_user step automatically.
+
+    Args:
+        tool_name:  Exact tool name (e.g. 'bash', 'browse_web').
+        scope:      Description of the SPECIFIC action (e.g. 'run ps aux to list
+                    processes', 'fetch https://example.com'). Must match what was
+                    told to the user. Previously approved scopes are recognised
+                    automatically — no need to call ask_user again for those.
+        persistent: False (default) — approval consumed after ONE use so a
+                    different action on the same tool needs its own approval.
+                    True — stays for the session; use only for repetitive low-risk
+                    actions (e.g. 'browse several pages while researching').
+    """
+    if not tool_name:
+        return "Error: tool_name is required."
+    if not scope:
+        return (
+            "Error: scope is required. Describe the SPECIFIC action being approved "
+            "(e.g. 'run ps aux to list processes', not just 'bash'). "
+            "Previously approved scopes are remembered — use the same description."
+        )
+
+    session_id = (_context or {}).get("session_id", "")
+    if not session_id:
+        return "Error: No session context."
+
+    norm_scope = _scope_key(scope)
+
+    # Check the persistent approval store first. If this exact scope was
+    # approved in a prior session, skip the ask_user validation — the user
+    # already said yes to this action and doesn't want to be asked again.
+    stored = _load_approvals()
+    previously_approved = norm_scope in [_scope_key(s) for s in stored.get(tool_name, [])]
+
+    if not previously_approved:
+        # New action — validate that ask_user was called recently so the
+        # user was shown what the agent intends to do.
+        import json as _json
+
+        from db import models as _db
+
+        messages = _db.get_messages(session_id)
+        found_ask_user = False
+        for m in reversed(messages[-40:]):
+            if m.get("role") != "assistant":
+                continue
+            try:
+                parts = _json.loads(m.get("content") or "[]")
+                if not isinstance(parts, list):
+                    continue
+                for part in parts:
+                    if isinstance(part, dict) and part.get("name") == "ask_user":
+                        found_ask_user = True
+                        break
+            except (ValueError, TypeError):
+                pass
+            if found_ask_user:
+                break
+
+        if not found_ask_user:
+            return (
+                f"Error: Cannot approve '{tool_name}' (scope: {scope!r}) without "
+                f"first asking the user. Call ask_user() with the exact action, "
+                f"then call this tool after the user responds. "
+                f"(Previously approved scopes skip this step automatically.)"
+            )
+
+        # Persist this new approval so future sessions don't need to re-ask.
+        if tool_name not in stored:
+            stored[tool_name] = []
+        if scope not in stored[tool_name]:
+            stored[tool_name].append(scope)
+        _save_approvals(stored)
+
+    from sessions.manager import get_manager
+
+    session_obj = get_manager().get(session_id)
+    if session_obj is None:
+        return "Error: Session not found."
+
+    session_obj._approved_dangerous_tools[tool_name] = {
+        "scope": scope,
+        "persistent": persistent,
+    }
+
+    recalled = " (recalled from prior session — no re-confirmation needed)" if previously_approved else ""
+    if persistent:
+        return (
+            f"Tool '{tool_name}' approved persistently for this session"
+            f"{recalled} (scope: {scope!r}). Approval will not be consumed on use."
+        )
+    return (
+        f"Tool '{tool_name}' approved for one use"
+        f"{recalled} (scope: {scope!r}). Approval is consumed after the next call; "
+        f"a different action on the same tool will need its own approval."
+    )
+
+
 def register(reg) -> None:
     reg.register(
         name="ask_user",
@@ -183,5 +340,48 @@ def register(reg) -> None:
         category="dialog",
         tags=["notify", "notification", "alert", "push", "attention", "ping"],
         timeout=10,
+        parallel_safe=False,
+    )
+    reg.register(
+        name="approve_dangerous_tool",
+        func=approve_dangerous_tool,
+        description=(
+            "Register user approval for a specific dangerous tool action. "
+            "Must be called AFTER ask_user() where you described the EXACT action "
+            "(command, URL, file path — not just the tool name). "
+            "Approval is one-time-use by default: approving 'bash' for 'ps aux' does NOT "
+            "cover a later 'mv' call — each distinct action requires its own ask_user + approval. "
+            "Use persistent=True only for genuinely repetitive low-risk actions."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "description": "Exact tool name to approve (e.g. 'bash', 'browse_web')",
+                },
+                "scope": {
+                    "type": "string",
+                    "description": (
+                        "Description of the SPECIFIC action being approved — must match "
+                        "what you told the user in ask_user "
+                        "(e.g. 'run ps aux to list processes', 'fetch https://example.com')"
+                    ),
+                },
+                "persistent": {
+                    "type": "boolean",
+                    "description": (
+                        "False (default): approval consumed after one use. "
+                        "True: approval persists for the session. "
+                        "Only use True for repetitive low-risk actions."
+                    ),
+                },
+            },
+            "required": ["tool_name", "scope"],
+        },
+        safety_level="safe",
+        category="dialog",
+        tags=["approve", "dangerous", "confirm", "permission", "unlock"],
+        timeout=5,
         parallel_safe=False,
     )

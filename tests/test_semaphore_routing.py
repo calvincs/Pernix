@@ -348,6 +348,49 @@ class TestRouterSemaphores:
 
         assert router._ollama_semaphore.available == 1  # released despite error
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reason_name", ["TIMEOUT", "UNKNOWN"])
+    async def test_fallback_on_transient_failover_reasons(self, reason_name):
+        """OpenRouter timeouts and unknown errors fall back to Ollama."""
+        from core.llm.errors import FailoverError, FailoverReason
+
+        reason = FailoverReason[reason_name]
+        router = self._make_router(ollama_max=1, openrouter_max=1)
+        router.registry.resolve_provider.return_value = "openrouter"
+        router._openrouter.chat = AsyncMock(side_effect=FailoverError(reason, "fail"))
+
+        with patch("core.llm.router.settings") as mock_settings:
+            mock_settings.llm_model = "test"
+            mock_settings.fallback_model = "llama3"
+
+            resp = await router.chat([{"role": "user", "content": "hi"}], model="anthropic/claude")
+
+        assert resp.content == "ollama"  # served by fallback
+        assert router._openrouter_semaphore.available == 1
+        assert router._ollama_semaphore.available == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reason_name", ["AUTH", "MODEL_NOT_FOUND", "CONTEXT_OVERFLOW", "FORMAT_ERROR"])
+    async def test_no_fallback_on_config_or_logic_errors(self, reason_name):
+        """Config/logic errors must surface, not be masked by a silent fallback."""
+        from core.llm.errors import FailoverError, FailoverReason
+
+        reason = FailoverReason[reason_name]
+        router = self._make_router(ollama_max=1, openrouter_max=1)
+        router.registry.resolve_provider.return_value = "openrouter"
+        router._openrouter.chat = AsyncMock(side_effect=FailoverError(reason, "config"))
+
+        with patch("core.llm.router.settings") as mock_settings:
+            mock_settings.llm_model = "test"
+            mock_settings.fallback_model = "llama3"
+
+            with pytest.raises(FailoverError) as exc_info:
+                await router.chat([{"role": "user", "content": "hi"}], model="anthropic/claude")
+
+        assert exc_info.value.reason == reason
+        assert router._openrouter_semaphore.available == 1
+        assert router._ollama_semaphore.available == 1  # never acquired
+
 
 # ---------------------------------------------------------------------------
 # Integration: _get_semaphore_stats

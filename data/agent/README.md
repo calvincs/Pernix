@@ -33,19 +33,19 @@ Behavioral rules and operational constraints. Injected as `[RULES]`.
 - **How it's used**: Same pattern as SOUL.md — up to 4,000 chars, scout extracts
   ~300 tokens for `[RULES]`. Full content in fallback path.
 
-### `AGENTS.md` *(optional)*
+### `SESSIONS.md` *(optional)*
 
-Project-level instructions: workflows, conventions, task context. Injected as `[INSTRUCTIONS]`.
+Session-specific context: naming conventions, output conventions, standing facts. Injected as `[INSTRUCTIONS]`.
 
-- Use this for standing project context the agent should always be aware of:
-  how to create workflows, where outputs live, project-specific conventions, etc.
-- **How it's used**: Scout reads up to 4,000 chars (first of AGENTS.md or INSTRUCTIONS.md
+- Use this for things specific to *this installation* that the agent should always know.
+  Do not duplicate tool protocols here — workflow and skill creation instructions are already built into the system.
+- **How it's used**: Scout reads up to 4,000 chars (first of SESSIONS.md or INSTRUCTIONS.md
   found) and passes it as `[INSTRUCTIONS]`. Full content in fallback path.
 - Falls back to `INSTRUCTIONS.md` if this file is absent.
 
-### `INSTRUCTIONS.md` *(optional, fallback for AGENTS.md)*
+### `INSTRUCTIONS.md` *(optional, fallback for SESSIONS.md)*
 
-Alternative to AGENTS.md — used if AGENTS.md is not present. Same injection behavior.
+Alternative to SESSIONS.md — used if SESSIONS.md is not present. Same injection behavior.
 
 ---
 
@@ -55,7 +55,7 @@ Alternative to AGENTS.md — used if AGENTS.md is not present. Same injection be
 Scout Phase 1
   ├─ Reads SOUL.md    (up to 4,000 chars)
   ├─ Reads RULES.md   (up to 4,000 chars)
-  └─ Reads AGENTS.md  (up to 4,000 chars, falls back to INSTRUCTIONS.md)
+  └─ Reads SESSIONS.md  (up to 4,000 chars, falls back to INSTRUCTIONS.md)
      └─ LLM extracts relevant excerpt (~300 tokens each) → ScoutReport fields
 
 Agent Context (every turn)

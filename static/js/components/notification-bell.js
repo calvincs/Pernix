@@ -6,6 +6,7 @@ import { get, post } from '../api.js';
 let _overlay = null;
 let _pollTimer = null;
 let _items = [];  // merged list of questions + notifications
+let _hadItemsWhileOpen = false;  // for auto-close when last item is cleared
 
 // ---------------------------------------------------------------------------
 // Init + polling
@@ -36,8 +37,14 @@ async function _poll() {
 
         _updateBadge(_items.length);
 
-        // If panel is open, re-render
-        if (_overlay) _renderItems();
+        if (_overlay) {
+            if (_items.length > 0) _hadItemsWhileOpen = true;
+            if (_hadItemsWhileOpen && _items.length === 0) {
+                closeBellPanel();
+                return;
+            }
+            _renderItems();
+        }
     } catch { /* silent */ }
 }
 
@@ -62,6 +69,7 @@ function _updateBadge(count) {
 
 export function openBellPanel() {
     if (_overlay) { closeBellPanel(); return; }  // toggle
+    _hadItemsWhileOpen = false;
     _poll();  // refresh before opening
 
     const itemsContainer = el('div', { class: 'bell-items', id: 'bell-items' });
@@ -99,8 +107,21 @@ function _onEsc(e) { if (e.key === 'Escape') closeBellPanel(); }
 function _renderItems() {
     const container = document.getElementById('bell-items');
     if (!container) return;
-    // Don't wipe the panel while the user is typing an answer
-    if (container.contains(document.activeElement) && document.activeElement.tagName !== 'BUTTON') return;
+
+    // Save any in-progress answer text keyed by question id
+    const savedInputs = {};
+    container.querySelectorAll('[data-qid]').forEach(row => {
+        const ta = row.querySelector('.question-answer');
+        if (ta && ta.value) savedInputs[row.dataset.qid] = ta.value;
+    });
+
+    // Skip wipe if a non-button element is focused OR any textarea still has content
+    const focused = document.activeElement;
+    if (
+        (container.contains(focused) && focused.tagName !== 'BUTTON') ||
+        Object.keys(savedInputs).length > 0
+    ) return;
+
     container.innerHTML = '';
 
     if (_items.length === 0) {
@@ -113,6 +134,12 @@ function _renderItems() {
     for (const item of _items) {
         container.appendChild(item._kind === 'question' ? _renderQuestion(item) : _renderNotification(item));
     }
+
+    // Restore saved values after re-render
+    container.querySelectorAll('[data-qid]').forEach(row => {
+        const ta = row.querySelector('.question-answer');
+        if (ta && savedInputs[row.dataset.qid]) ta.value = savedInputs[row.dataset.qid];
+    });
 }
 
 function _renderQuestion(q) {
@@ -123,7 +150,7 @@ function _renderQuestion(q) {
     });
     const statusEl = el('span', { class: 'notif-status' });
 
-    const row = el('div', { class: 'notif-item notif-question' }, [
+    const row = el('div', { class: 'notif-item notif-question', 'data-qid': q.id }, [
         el('div', { class: 'notif-item-header' }, [
             el('span', { class: 'notif-item-type' }, [text(q.session_title ? `Question from: ${q.session_title}` : 'Agent Question')]),
             el('span', { class: 'notif-item-time' }, [text(_timeAgo(q.created_at))]),

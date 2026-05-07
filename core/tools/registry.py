@@ -381,8 +381,15 @@ class ToolRegistry:
         logger.info("Tool index rebuilt: %d tools indexed", len(self._tools))
 
     def discover(self, query: str, category: str | None = None, limit: int = 10) -> list[ToolSummary]:
-        """Search for tools by natural language query."""
-        return self.index.search(query, category=category, limit=limit)
+        """Search for tools by natural language query.
+
+        Disabled tools are filtered out so they never surface to the scout,
+        the agent's discover_tools call, or any other consumer.
+        """
+        results = self.index.search(query, category=category, limit=limit)
+        if not self._disabled:
+            return results
+        return [s for s in results if s.name not in self._disabled]
 
     def expand_cooccurrence(self, names: set[str] | list[str]) -> set[str]:
         """Return names plus their co-occurring siblings that exist + are enabled.

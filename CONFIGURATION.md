@@ -14,10 +14,12 @@ Some settings (marked **requires restart**) only take effect when the server is 
 ```bash
 curl -X POST http://localhost:8090/api/settings \
   -H "Content-Type: application/json" \
-  -d '{"llm_model": "llama3.2", "scout_model": "llama3.2"}'
+  -d '{"llm_model": "qwen3:32b", "scout_model": "qwen3:8b"}'
 ```
 
 **Via direct file edit:** Edit `data/settings.json` while the server is stopped. Unknown keys are silently ignored on load.
+
+**Via Swagger UI (try-it interactively):** Pernix is FastAPI-based, so a live API explorer is available at [`http://localhost:8090/docs`](http://localhost:8090/docs). The `POST /api/settings` endpoint is right there — click "Try it out", paste a JSON body, and execute. ReDoc lives at `/redoc` for a more reference-style view of the schema.
 
 ---
 
@@ -41,7 +43,7 @@ These are the most important settings to configure before first use.
 |---|---|---|
 | `openrouter_base_url` | `https://openrouter.ai/api/v1` | OpenRouter API endpoint. Locked in network mode. |
 | `openrouter_max_concurrent` | `2` | Simultaneous requests to OpenRouter. |
-| `openrouter_models` | *(empty list)* | Comma-separated list of OpenRouter model IDs to make available (e.g. `anthropic/claude-sonnet-4-5,openai/gpt-4o`). If empty, all models from your OpenRouter account are shown. |
+| `openrouter_models` | *(empty list)* | Comma-separated list of OpenRouter model IDs to make available (e.g. `anthropic/claude-sonnet-4.6,anthropic/claude-haiku-4.5,x-ai/grok-4.1-fast`). If empty, all models on your OpenRouter account are shown. Use current frontier models — agent workloads benefit a lot from strong tool-call and reasoning behavior. |
 | `vision_model_overrides` | *(empty list)* | Force `supports_vision = true` for specific models where auto-detection fails. |
 
 ### How Model Resolution Works
@@ -117,7 +119,7 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 
 | Setting | Default | Description |
 |---|---|---|
-| `auto_approve_dangerous` | `false` | When `false`, the agent must ask the user before executing any tool classified as `dangerous` (primarily `bash`). Set to `true` to allow automatic execution without prompting. |
+| `auto_approve_dangerous` | `false` | **Read-only via API.** When `false`, dangerous tools require explicit per-invocation user approval (see below). Can only be set to `true` at startup via the `--dangerous` flag — it cannot be changed while the server is running. |
 | `shell_security_mode` | `"permissive"` | `"permissive"`: only `shell_allowlist` applies. `"restrictive"`: additional syscall-level restrictions. |
 | `shell_allowlist` | *(large default list)* | Commands the agent is permitted to run. The default includes common development tools (`python3`, `git`, `grep`, `curl`, `npm`, etc.). Edit to restrict or expand. |
 | `shell_timeout` | `30` | Seconds before a shell command is killed. |
@@ -126,6 +128,17 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 | `shell_env_mode` | `"passthrough"` | How environment variables are passed to the shell: `passthrough` (inherit all), `denylist` (all except listed), `allowlist` (only listed). |
 | `shell_env_denylist` | *(empty)* | Variables to exclude when `shell_env_mode = "denylist"`. |
 | `shell_env_allowlist` | *(empty)* | Variables to include when `shell_env_mode = "allowlist"`. |
+
+### Dangerous Tool Approval Flow
+
+When `auto_approve_dangerous` is `false` (the default), every tool marked `dangerous` goes through a two-step human-in-the-loop confirmation before it runs:
+
+1. **`ask_user()`** — the agent describes the exact action it intends to take (command, URL, file path). The session suspends until you respond.
+2. **`approve_dangerous_tool(tool_name, scope)`** — after you confirm, the agent registers the approval. `scope` is a short description of what was approved (e.g. `"run ps aux to list processes"`).
+
+Approvals are **per-invocation by default** — approving `bash` for `ps aux` does not cover a later `mv /etc/passwd`. Pass `persistent=True` only for genuinely repetitive low-risk actions (e.g. browsing several pages during research) where re-asking each call would be noise.
+
+**Previously approved scopes are remembered** in `data/tool_approvals.json`. The next time the agent calls `approve_dangerous_tool()` with the same scope, the `ask_user` step is skipped automatically. You can view and clear this file in **Settings → Security → Remembered Approvals**.
 
 ---
 

@@ -795,11 +795,13 @@ class MemoryStore:
 
 _store: MemoryStore | None = None
 _store_lock = threading.Lock()
+_startup_health_checked = False
 
 
 def get_memory_store() -> MemoryStore | None:
-    """Thread-safe lazy singleton."""
-    global _store
+    """Thread-safe lazy singleton. Runs a health check on first init to catch
+    index drift caused by external file edits or backup restorations."""
+    global _store, _startup_health_checked
     if _store is not None:
         return _store
     with _store_lock:
@@ -811,4 +813,16 @@ def get_memory_store() -> MemoryStore | None:
         except Exception as e:
             logger.warning("Failed to init memory store: %s. Memory features disabled.", e)
             return None
+        if not _startup_health_checked:
+            _startup_health_checked = True
+            try:
+                result = _store.health_check(fix=True)
+                if result.get("action") == "reindexed":
+                    logger.info(
+                        "Memory index was stale on startup; reindexed %d entries across %d file(s)",
+                        result.get("indexed_entries", 0),
+                        result.get("files", 0),
+                    )
+            except Exception as hc_err:
+                logger.warning("Startup memory health check failed (non-fatal): %s", hc_err)
     return _store

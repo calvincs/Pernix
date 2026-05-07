@@ -3,6 +3,7 @@
 import { el, text, clear, renderMarkdown } from '../render.js';
 import { get, post, del, getAuthToken } from '../api.js';
 import { isMobile } from '../mobile.js';
+import { openSettings } from './modals/settings.js';
 
 function _authHdr() { const t = getAuthToken(); return t ? { 'Authorization': `Bearer ${t}` } : {}; }
 import {
@@ -180,9 +181,20 @@ let _selectSessionFn = null;
 let _jobsSubTab = 'scheduled'; // active | scheduled | history
 let _skills = [];
 let _tools = [];
+let _autoApproveDangerous = false;
 let _toolsSearchQuery = '';
 let _toolsSearchTimer = null;
 let _toolsSortBy = 'name';
+let _toolsListEl = null;  // stable container for the filtered list; updated in-place on search
+let _skillsSearchQuery = '';
+let _skillsSearchTimer = null;
+let _skillsListEl = null;
+let _workflowsSearchQuery = '';
+let _workflowsSearchTimer = null;
+let _workflowsListEl = null;
+let _jobsSearchQuery = '';
+let _jobsSearchTimer = null;
+let _jobsContentEl = null;
 let _pendingProposals = [];
 let _searchTimer = null;
 
@@ -1280,16 +1292,49 @@ function renderSkills() {
         container.appendChild(banner);
     }
 
-    if (_skills.length === 0) {
-        container.appendChild(el('div', { class: 'fp-empty' }, [text('No skills installed')]));
+    // Search input
+    const skillSearch = el('input', {
+        class: 'fp-search-input',
+        type: 'text',
+        placeholder: 'Search skills…',
+        value: _skillsSearchQuery,
+    });
+    skillSearch.addEventListener('input', () => {
+        _skillsSearchQuery = skillSearch.value.trim();
+        if (_skillsSearchTimer) clearTimeout(_skillsSearchTimer);
+        _skillsSearchTimer = setTimeout(_renderSkillsFiltered, 150);
+    });
+    container.appendChild(el('div', { class: 'fp-search-bar' }, [skillSearch]));
+
+    _skillsListEl = el('div', {});
+    container.appendChild(_skillsListEl);
+    _renderSkillsFiltered();
+}
+
+function _renderSkillsFiltered() {
+    if (!_skillsListEl) return;
+    clear(_skillsListEl);
+
+    const q = _skillsSearchQuery.toLowerCase();
+    const visible = q
+        ? _skills.filter(s =>
+            s.name.toLowerCase().includes(q) ||
+            (s.description || '').toLowerCase().includes(q) ||
+            (s.tags || []).some(t => t.toLowerCase().includes(q))
+          )
+        : [..._skills];
+
+    if (visible.length === 0) {
+        _skillsListEl.appendChild(el('div', { class: 'fp-empty' }, [
+            text(q ? `No skills match "${q}"` : 'No skills installed'),
+        ]));
         return;
     }
 
     const listEl = el('div', { class: 'fp-skills-list' });
-    for (const skill of _skills) {
+    for (const skill of visible) {
         const item = el('div', { class: `fp-skill-item${skill.enabled ? '' : ' disabled'}` });
 
-        // Top row: name + version + toggle
         const toggle = el('button', {
             class: `fp-skill-toggle${skill.enabled ? ' on' : ''}`,
             title: skill.enabled ? 'Disable skill' : 'Enable skill',
@@ -1316,10 +1361,8 @@ function renderSkills() {
             el('div', { class: 'fp-skill-actions' }, [toggle, deleteBtn]),
         ]));
 
-        // Description
         item.appendChild(el('div', { class: 'fp-skill-desc' }, [text(skill.description)]));
 
-        // Tags
         if (skill.tags && skill.tags.length > 0) {
             const tagsEl = el('div', { class: 'fp-skill-tags' });
             for (const tag of skill.tags.slice(0, 6)) {
@@ -1328,7 +1371,6 @@ function renderSkills() {
             item.appendChild(tagsEl);
         }
 
-        // Performance indicator (only shown when observations exist)
         if (skill.performance && skill.performance.uses > 0) {
             const p = skill.performance;
             const perfText = p.failures > 0
@@ -1339,11 +1381,10 @@ function renderSkills() {
             }, [text(perfText)]));
         }
 
-        // Click to view
         item.addEventListener('click', () => viewSkill(skill.name));
         listEl.appendChild(item);
     }
-    container.appendChild(listEl);
+    _skillsListEl.appendChild(listEl);
 }
 
 async function viewSkill(name) {
@@ -1703,6 +1744,20 @@ async function renderJobs() {
         'Scheduled jobs run the agent on a cron schedule without user input. Active shows currently running worker sessions. History records past runs — open any entry to browse its full transcript.',
     ));
 
+    // Search input (filters visible items across all sub-tabs)
+    const jobSearch = el('input', {
+        class: 'fp-search-input',
+        type: 'text',
+        placeholder: 'Filter jobs…',
+        value: _jobsSearchQuery,
+    });
+    jobSearch.addEventListener('input', () => {
+        _jobsSearchQuery = jobSearch.value.trim();
+        if (_jobsSearchTimer) clearTimeout(_jobsSearchTimer);
+        _jobsSearchTimer = setTimeout(_refreshJobsContent, 200);
+    });
+    container.appendChild(el('div', { class: 'fp-search-bar' }, [jobSearch]));
+
     // Sub-tab bar
     const subTabs = [
         { key: 'scheduled', label: 'Scheduled' },
@@ -1729,21 +1784,36 @@ async function renderJobs() {
     const subTabRow = el('div', { class: 'fp-jobs-header-row' }, [subTabBar, refreshBtn]);
     container.appendChild(subTabRow);
 
-    // Content area
-    const content = el('div', { class: 'fp-jobs-content' });
-    container.appendChild(content);
+    // Stable content wrapper — updated in-place by _refreshJobsContent
+    _jobsContentEl = el('div', { class: 'fp-jobs-content' });
+    container.appendChild(_jobsContentEl);
 
-    // Loading state
-    content.appendChild(el('div', { class: 'jobs-empty' }, [text('Loading...')]));
+    await _refreshJobsContent();
+}
+
+async function _refreshJobsContent() {
+    if (!_jobsContentEl) return;
+    clear(_jobsContentEl);
+    _jobsContentEl.appendChild(el('div', { class: 'jobs-empty' }, [text('Loading...')]));
 
     try {
         const builders = { active: buildActiveTab, scheduled: buildScheduledTab, history: buildHistoryTab };
         const built = await builders[_jobsSubTab]();
-        clear(content);
-        content.appendChild(built);
+        clear(_jobsContentEl);
+
+        // Apply text filter to .jobs-item elements if a query is active
+        if (_jobsSearchQuery) {
+            const q = _jobsSearchQuery.toLowerCase();
+            built.querySelectorAll('.jobs-item').forEach(item => {
+                const matches = item.textContent.toLowerCase().includes(q);
+                item.style.display = matches ? '' : 'none';
+            });
+        }
+
+        _jobsContentEl.appendChild(built);
     } catch (e) {
-        clear(content);
-        content.appendChild(el('div', { class: 'jobs-empty' }, [text(`Error: ${e.message}`)]));
+        clear(_jobsContentEl);
+        _jobsContentEl.appendChild(el('div', { class: 'jobs-empty' }, [text(`Error: ${e.message}`)]));
     }
 }
 
@@ -1851,13 +1921,47 @@ function renderWorkflows() {
         'Each workflow is a WORKFLOW.md file in data/workflows/. Define steps as skill or instruction types. Steps with no shared dependencies run in parallel. Run with: run_workflow(name, inputs).',
     ));
 
-    if (_workflows.length === 0) {
-        container.appendChild(el('div', { class: 'fp-empty' }, [text('No workflows installed')]));
+    // Search input
+    const wfSearch = el('input', {
+        class: 'fp-search-input',
+        type: 'text',
+        placeholder: 'Search workflows…',
+        value: _workflowsSearchQuery,
+    });
+    wfSearch.addEventListener('input', () => {
+        _workflowsSearchQuery = wfSearch.value.trim();
+        if (_workflowsSearchTimer) clearTimeout(_workflowsSearchTimer);
+        _workflowsSearchTimer = setTimeout(_renderWorkflowsFiltered, 150);
+    });
+    container.appendChild(el('div', { class: 'fp-search-bar' }, [wfSearch]));
+
+    _workflowsListEl = el('div', {});
+    container.appendChild(_workflowsListEl);
+    _renderWorkflowsFiltered();
+}
+
+function _renderWorkflowsFiltered() {
+    if (!_workflowsListEl) return;
+    clear(_workflowsListEl);
+
+    const q = _workflowsSearchQuery.toLowerCase();
+    const visible = q
+        ? _workflows.filter(w =>
+            w.name.toLowerCase().includes(q) ||
+            (w.description || '').toLowerCase().includes(q) ||
+            (w.tags || []).some(t => t.toLowerCase().includes(q))
+          )
+        : [..._workflows];
+
+    if (visible.length === 0) {
+        _workflowsListEl.appendChild(el('div', { class: 'fp-empty' }, [
+            text(q ? `No workflows match "${q}"` : 'No workflows installed'),
+        ]));
         return;
     }
 
     const listEl = el('div', { class: 'fp-wf-list' });
-    for (const wf of _workflows) {
+    for (const wf of visible) {
         const item = el('div', { class: 'fp-wf-item' });
 
         const deleteBtn = el('button', { class: 'fp-tree-action danger', title: 'Delete workflow' }, [text('\u00d7')]);
@@ -1881,7 +1985,6 @@ function renderWorkflows() {
         ]));
         item.appendChild(el('div', { class: 'fp-skill-desc' }, [text(wf.description)]));
 
-        // Step count + tags
         const meta = el('div', { class: 'fp-wf-meta' });
         meta.appendChild(el('span', { class: 'fp-wf-steps' }, [
             text(`${wf.step_count} step${wf.step_count !== 1 ? 's' : ''}`)
@@ -1898,7 +2001,7 @@ function renderWorkflows() {
         item.addEventListener('click', () => viewWorkflow(wf.name));
         listEl.appendChild(item);
     }
-    container.appendChild(listEl);
+    _workflowsListEl.appendChild(listEl);
 }
 
 async function viewWorkflow(name) {
@@ -2323,10 +2426,15 @@ Describe when and how to run this workflow.
 
 async function loadTools() {
     try {
-        const data = await get('/api/tools');
-        _tools = data.tools || [];
+        const [toolsData, settingsData] = await Promise.all([
+            get('/api/tools'),
+            get('/api/settings'),
+        ]);
+        _tools = toolsData.tools || [];
+        _autoApproveDangerous = settingsData.auto_approve_dangerous || false;
     } catch {
         _tools = [];
+        _autoApproveDangerous = false;
     }
     renderTools();
 }
@@ -2348,7 +2456,7 @@ function renderTools() {
     ]);
     sortSelect.addEventListener('change', () => {
         _toolsSortBy = sortSelect.value;
-        renderTools();
+        _renderToolsFiltered();
     });
 
     const enabledCount = _tools.filter(t => t.enabled).length;
@@ -2366,6 +2474,35 @@ function renderTools() {
         'Tools are the agent\'s hands — file operations, shell commands, web access, memory, orchestration, and more. Disable to remove a tool from the active schema without deleting it. Adjust the safety level to control whether the dangerous-tool gate applies.',
     ));
 
+    // Run Dangerously banner — shown when auto_approve_dangerous is on
+    if (_autoApproveDangerous) {
+        const tip = el('div', { class: 'fp-danger-banner-tip' }, [
+            el('strong', {}, [text('Run Dangerously is ON')]),
+            el('br', {}),
+            text(
+                'All dangerous-tool approvals are bypassed. Shell commands, file writes, and ' +
+                'web requests execute without confirmation in every session, including workers ' +
+                'and cron jobs. Click to open Security settings.'
+            ),
+        ]);
+        const helpBtn = el('button', { class: 'fp-danger-banner-help', 'aria-label': 'More info' }, [text('?')]);
+        const banner = el('div', { class: 'fp-danger-mode-banner' }, [
+            el('div', { class: 'fp-danger-banner-inner' }, [
+                el('span', { class: 'fp-danger-banner-icon' }, [text('⚠')]),
+                el('span', { class: 'fp-danger-banner-text' }, [
+                    text('Run Dangerously mode is enabled — all tool approvals are bypassed'),
+                ]),
+                el('span', { class: 'fp-danger-banner-help-wrap' }, [helpBtn, tip]),
+            ]),
+        ]);
+        banner.addEventListener('click', (e) => {
+            // ? button shows tooltip via CSS hover — clicking it shouldn't open settings
+            if (e.target === helpBtn || helpBtn.contains(e.target)) return;
+            openSettings({ tab: 'security' });
+        });
+        container.appendChild(banner);
+    }
+
     // Search
     const searchInput = el('input', {
         class: 'fp-search-input',
@@ -2376,11 +2513,22 @@ function renderTools() {
     searchInput.addEventListener('input', () => {
         _toolsSearchQuery = searchInput.value.trim();
         if (_toolsSearchTimer) clearTimeout(_toolsSearchTimer);
-        _toolsSearchTimer = setTimeout(renderTools, 150);
+        // Update the list in-place: don't call renderTools() which would destroy
+        // the search input and steal focus on every keystroke.
+        _toolsSearchTimer = setTimeout(_renderToolsFiltered, 150);
     });
     container.appendChild(el('div', { class: 'fp-search-bar' }, [searchInput]));
 
-    // Filter + sort
+    // Stable wrapper for the filtered list — only this gets cleared on re-filter.
+    _toolsListEl = el('div', {});
+    container.appendChild(_toolsListEl);
+    _renderToolsFiltered();
+}
+
+function _renderToolsFiltered() {
+    if (!_toolsListEl) return;
+    clear(_toolsListEl);
+
     const q = _toolsSearchQuery.toLowerCase();
     const safetyOrder = { dangerous: 0, caution: 1, safe: 2 };
     let visible = q
@@ -2408,7 +2556,7 @@ function renderTools() {
     });
 
     if (visible.length === 0) {
-        container.appendChild(el('div', { class: 'fp-empty' }, [
+        _toolsListEl.appendChild(el('div', { class: 'fp-empty' }, [
             text(q ? `No tools match "${q}"` : 'No tools loaded'),
         ]));
         return;
@@ -2507,7 +2655,7 @@ function renderTools() {
 
         listEl.appendChild(item);
     }
-    container.appendChild(listEl);
+    _toolsListEl.appendChild(listEl);
 }
 
 // ---------------------------------------------------------------------------

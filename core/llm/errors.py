@@ -18,8 +18,18 @@ class FailoverReason(str, Enum):
     UNKNOWN = "unknown"
 
 
-# Reasons where falling back to another provider is appropriate
-FALLBACK_REASONS = frozenset({FailoverReason.RATE_LIMIT, FailoverReason.OVERLOADED})
+# Reasons where falling back to another provider is appropriate.
+# Covers transient and unspecified failures. Excludes AUTH, MODEL_NOT_FOUND,
+# CONTEXT_OVERFLOW, and FORMAT_ERROR — those are config/logic problems that
+# should surface loudly rather than be masked by a silent fallback.
+FALLBACK_REASONS = frozenset(
+    {
+        FailoverReason.RATE_LIMIT,
+        FailoverReason.OVERLOADED,
+        FailoverReason.TIMEOUT,
+        FailoverReason.UNKNOWN,
+    }
+)
 
 # Keywords in error bodies that indicate context/token overflow
 _CONTEXT_OVERFLOW_KEYWORDS = ("token", "context", "length", "too long", "maximum", "exceed")

@@ -191,6 +191,25 @@ async function _renderGraph(pane) {
             text(`${invariantViolations.length} invariant violation${invariantViolations.length === 1 ? '' : 's'}`),
         ]));
     }
+
+    // Summary stat chips: turns, tool calls, compactions, retries, total elapsed.
+    const stateLog = _data.stateLog;
+    const messages = _data.messages;
+    const distinctTurns = new Set(stateLog.map(r => r.turn_id).filter(t => t != null)).size;
+    const toolMsgs = messages.filter(m => m.role === 'tool');
+    const totalToolCalls = toolMsgs.length;
+    const compactions = stateLog.filter(r =>
+        r.reason === 'compact-proactive' || r.reason === 'compact-critical' || r.reason === 'compact-overflow'
+    ).length;
+    const retries = stateLog.filter(r => r.reason === 'reflect-retry' || r.reason === 'eval-retry').length;
+    const totalElapsed = stateLog.reduce((s, r) => s + (r.elapsed_ms || 0), 0);
+
+    if (distinctTurns > 0) captionParts.push(el('span', { class: 'tl-caption-stat' }, [text(`${distinctTurns} turn${distinctTurns === 1 ? '' : 's'}`)]));
+    if (totalToolCalls > 0) captionParts.push(el('span', { class: 'tl-caption-stat' }, [text(`${totalToolCalls} tool call${totalToolCalls === 1 ? '' : 's'}`)]));
+    if (compactions > 0) captionParts.push(el('span', { class: 'tl-caption-stat' }, [text(`${compactions} compaction${compactions === 1 ? '' : 's'}`)]));
+    if (retries > 0) captionParts.push(el('span', { class: 'tl-caption-stat' }, [text(`${retries} retr${retries === 1 ? 'y' : 'ies'}`)]));
+    if (totalElapsed > 0) captionParts.push(el('span', { class: 'tl-caption-stat' }, [text(_fmtMs(totalElapsed))]));
+
     captionParts.forEach(p => caption.appendChild(p));
 }
 
@@ -229,7 +248,25 @@ function _buildMermaidSource(rows) {
         lines.push(`    ${fromNode} --> ${to}${label ? `: ${label}` : ''}`);
     }
 
-    // Highlight current state.
+    // Phase color hints — applied before current/violation so they can always override.
+    const phaseGroups = {
+        work: ['processing', 'compacting'],
+        wait: ['awaiting_user', 'awaiting_workers', 'paused', 'pause_requested'],
+        end:  ['finalizing', 'cancelling'],
+    };
+    const phaseStyles = {
+        work: 'fill:#162116,stroke:#4a7a4a,color:#bbb',
+        wait: 'fill:#231f10,stroke:#7a6a30,color:#bbb',
+        end:  'fill:#231616,stroke:#6a3838,color:#bbb',
+    };
+    for (const [phaseName, stateList] of Object.entries(phaseGroups)) {
+        const present = stateList.filter(s => nodes.has(s));
+        if (!present.length) continue;
+        lines.push(`    classDef phase_${phaseName} ${phaseStyles[phaseName]}`);
+        lines.push(`    class ${present.join(',')} phase_${phaseName}`);
+    }
+
+    // Highlight current state (applied after phase hints — wins on any overlap).
     if (current) {
         lines.push('    classDef current fill:#1e3a4f,stroke:#7ec4f0,color:#fff,stroke-width:2px');
         lines.push(`    class ${current} current`);
@@ -283,7 +320,14 @@ function _buildToolTallyEl(stateLog, messages) {
     for (const m of messages) {
         if (m.role !== 'tool') continue;
         const meta = tcMeta.get(m.tool_call_id) || { name: 'tool' };
-        entries.push({ kind: 'tool', ts: _isoToMs(m.created_at), turn: null, name: meta.name });
+        entries.push({
+            kind: 'tool',
+            ts: _isoToMs(m.created_at),
+            turn: null,
+            name: meta.name,
+            was_error: _isErrorContent(m.content),
+            latency_ms: m.latency_ms || null,
+        });
     }
     entries.sort((a, b) => (a.ts || 0) - (b.ts || 0));
 
@@ -294,28 +338,42 @@ function _buildToolTallyEl(stateLog, messages) {
         else if (e.kind === 'tool') e.turn = currentTurn;
     }
 
-    // Aggregate: Map<turn, Map<name, count>>
+    // Aggregate: Map<turn, Map<name, count>>, plus per-name error tracking.
     const byTurn = new Map();
+    const nameErrors = new Map(); // tool name -> error count
+    let totalErrors = 0;
+    let totalSlow = 0;
     for (const e of entries) {
         if (e.kind !== 'tool') continue;
         const t = e.turn ?? 0;
         if (!byTurn.has(t)) byTurn.set(t, new Map());
         const m = byTurn.get(t);
         m.set(e.name, (m.get(e.name) || 0) + 1);
+        if (e.was_error) {
+            nameErrors.set(e.name, (nameErrors.get(e.name) || 0) + 1);
+            totalErrors++;
+        }
+        if (e.latency_ms >= 2000) totalSlow++;
     }
     if (!byTurn.size) return null;
 
     const multiTurn = byTurn.size > 1;
     const totalCalls = [...byTurn.values()].reduce((s, m) => s + [...m.values()].reduce((a, b) => a + b, 0), 0);
 
+    let headerText = `Tool calls (${totalCalls}`;
+    if (totalErrors) headerText += ` · ${totalErrors} error${totalErrors === 1 ? '' : 's'}`;
+    if (totalSlow) headerText += ` · ${totalSlow} slow`;
+    headerText += ')';
+
     const rows = [...byTurn.entries()]
         .sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0))
         .map(([turn, counts]) => {
             const chips = [...counts.entries()]
                 .sort((a, b) => b[1] - a[1])
-                .map(([name, count]) =>
-                    el('span', { class: 'tl-tally-chip' }, [text(`${name} (${count})`)])
-                );
+                .map(([name, count]) => {
+                    const hasError = nameErrors.has(name);
+                    return el('span', { class: `tl-tally-chip${hasError ? ' error' : ''}` }, [text(`${name} (${count})`)]);
+                });
             const parts = [];
             if (multiTurn) {
                 parts.push(el('span', { class: 'tl-tally-turn-label' }, [text(`T${turn}:`)]));
@@ -324,7 +382,7 @@ function _buildToolTallyEl(stateLog, messages) {
         });
 
     return el('div', { class: 'tl-tool-tally' }, [
-        el('div', { class: 'tl-tally-header' }, [text(`Tool calls (${totalCalls})`)]),
+        el('div', { class: 'tl-tally-header' }, [text(headerText)]),
         ...rows,
     ]);
 }
@@ -357,11 +415,12 @@ function _renderTimeline(body) {
         return;
     }
 
+    const turnMeta = _computeTurnMeta(rows);
     let lastTurn = null;
     for (const row of rows) {
         const turn = row.kind === 'state' ? row.data.turn_id : row.turnHint;
         if (turn != null && turn !== lastTurn) {
-            body.appendChild(_buildTurnHeader(turn));
+            body.appendChild(_buildTurnHeader(turn, turnMeta.get(turn) || {}));
             lastTurn = turn;
         }
         if (row.kind === 'state') {
@@ -448,14 +507,45 @@ function _isoToMs(iso) {
     return isNaN(t) ? 0 : t;
 }
 
+function _fmtMs(ms) {
+    if (!ms) return '';
+    return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
 function _isErrorContent(content) {
     if (!content) return false;
     const head = content.slice(0, 120).toLowerCase();
     return head.startsWith('error:') || head.includes('traceback');
 }
 
-function _buildTurnHeader(turn) {
-    return el('div', { class: 'timeline-turn-header' }, [text(`Turn ${turn}`)]);
+function _computeTurnMeta(rows) {
+    const meta = new Map();
+    for (const row of rows) {
+        const turn = row.kind === 'state' ? row.data.turn_id : row.turnHint;
+        if (turn == null) continue;
+        if (!meta.has(turn)) meta.set(turn, { elapsedMs: 0, toolCount: 0, termination: null, parentTurnId: null });
+        const m = meta.get(turn);
+        if (row.kind === 'state') {
+            if (row.data.elapsed_ms != null) m.elapsedMs += row.data.elapsed_ms;
+            if (row.data.termination_reason) m.termination = row.data.termination_reason;
+            if (row.data.parent_turn_id != null && m.parentTurnId == null) m.parentTurnId = row.data.parent_turn_id;
+        } else if (row.kind === 'tool') {
+            m.toolCount++;
+        }
+    }
+    return meta;
+}
+
+function _buildTurnHeader(turn, meta = {}) {
+    const parts = [el('span', {}, [text(`Turn ${turn}`)])];
+    if (meta.elapsedMs) parts.push(el('span', { class: 'tl-turn-meta' }, [text(_fmtMs(meta.elapsedMs))]));
+    if (meta.toolCount) parts.push(el('span', { class: 'tl-turn-meta' }, [text(`${meta.toolCount} tool${meta.toolCount === 1 ? '' : 's'}`)]));
+    if (meta.termination) {
+        const slug = meta.termination.replace(/_/g, '-');
+        parts.push(el('span', { class: `tl-turn-term tl-turn-term-${slug}` }, [text(meta.termination)]));
+    }
+    if (meta.parentTurnId != null) parts.push(el('span', { class: 'tl-turn-parent' }, [text(`↳ T${meta.parentTurnId}`)]));
+    return el('div', { class: 'timeline-turn-header' }, parts);
 }
 
 function _buildStateRow(row) {
@@ -477,12 +567,34 @@ function _buildStateRow(row) {
     reasonEl.textContent = row.reason || '';
     const elapsed = document.createElement('span');
     elapsed.className = 'tl-elapsed';
-    elapsed.textContent = row.elapsed_ms != null ? `${row.elapsed_ms}ms` : '';
+    elapsed.textContent = row.elapsed_ms != null ? _fmtMs(row.elapsed_ms) : '';
     div.appendChild(turn);
     const combined = document.createElement('span');
     combined.appendChild(states);
     combined.appendChild(document.createElement('br'));
     combined.appendChild(reasonEl);
+
+    // Small inline badges for notable transition types.
+    const reason = row.reason || '';
+    const toState = row.to_state || '';
+    const badges = [];
+    if (reason === 'compact-proactive' || reason === 'compact-critical' || reason === 'compact-overflow') {
+        badges.push(el('span', { class: 'tl-badge tl-badge-compact' }, [text('compact')]));
+    } else if (reason === 'compact-done') {
+        badges.push(el('span', { class: 'tl-badge tl-badge-compact' }, [text('compact done')]));
+    }
+    if (reason === 'reflect-retry') badges.push(el('span', { class: 'tl-badge tl-badge-retry' }, [text('↻ reflect')]));
+    else if (reason === 'eval-retry') badges.push(el('span', { class: 'tl-badge tl-badge-retry' }, [text('↻ eval')]));
+    if (toState === 'awaiting_user') badges.push(el('span', { class: 'tl-badge tl-badge-await' }, [text('⏳ awaiting')]));
+    else if (toState === 'awaiting_workers') badges.push(el('span', { class: 'tl-badge tl-badge-await' }, [text('⏳ workers')]));
+    if (toState === 'paused' || toState === 'pause_requested') badges.push(el('span', { class: 'tl-badge tl-badge-pause' }, [text('⏸ paused')]));
+    if (badges.length) {
+        const badgeRow = document.createElement('span');
+        badgeRow.className = 'tl-badge-row';
+        badges.forEach(b => badgeRow.appendChild(b));
+        combined.appendChild(badgeRow);
+    }
+
     div.appendChild(combined);
     div.appendChild(elapsed);
     return div;

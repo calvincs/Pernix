@@ -56,22 +56,96 @@ export function closeQuestionById(qid) {
     if (_currentQuestionId === qid) closeQuestion();
 }
 
+/**
+ * Heuristic: does this question expect a yes/no answer?
+ * Checks for explicit y/n markers, approval phrasing, and common question starters.
+ */
+function isYesNo(questionText) {
+    const q = questionText.toLowerCase();
+    if (/\(y\/n\)|\(yes\/no\)|yes or no|answer yes|answer no/.test(q)) return true;
+    if (/^(approve|confirm|proceed|allow|enable|disable|delete|remove|reset|restart|continue|stop|cancel|skip|retry|overwrite|replace|create|update|install|uninstall|deploy|revert|merge|push|pull|run|execute)\b/.test(q)) return true;
+    if (/^(would you|do you want|should i|can i|shall i|is this|are you|will you|have you|did you|does this|is it|are these|should we|can we|do you|shall we)\b/.test(q)) return true;
+    if (/\?\s*$/.test(q) && q.length < 120 && /(want|like|ok|okay|good|correct|right|agree|sure|ready|proceed|confirm|approve)\?/.test(q)) return true;
+    return false;
+}
+
 function openQuestion(q) {
     if (_overlay) closeQuestion();
     _currentQuestionId = q.id;
 
-    const answerInput = el('textarea', {
-        class: 'question-answer',
-        placeholder: 'Type your answer...',
-        rows: '3',
-    });
-
     const statusEl = el('span', { class: 'save-status' });
+
+    async function submitAnswer(answer) {
+        try {
+            await post(`/api/questions/${q.id}/answer`, { answer });
+            statusEl.textContent = 'Sent!';
+            setTimeout(closeQuestion, 500);
+            checkQuestions();
+        } catch (e) {
+            statusEl.textContent = `Error: ${e.message}`;
+        }
+    }
+
+    let answerSection;
+
+    if (isYesNo(q.question)) {
+        // Yes / No / Other buttons
+        const otherArea = el('div', { class: 'question-other-area', style: 'display:none' });
+        const answerInput = el('textarea', {
+            class: 'question-answer',
+            placeholder: 'Type your answer...',
+            rows: '3',
+        });
+        const sendBtn = el('button', { class: 'btn btn-primary', onClick: async () => {
+            const answer = answerInput.value.trim();
+            if (!answer) { statusEl.textContent = 'Please type an answer'; return; }
+            await submitAnswer(answer);
+        }}, [text('Send')]);
+        otherArea.appendChild(answerInput);
+        otherArea.appendChild(sendBtn);
+
+        const yesBtn = el('button', { class: 'btn q-yes-btn', onClick: () => submitAnswer('Yes') }, [text('Yes')]);
+        const noBtn  = el('button', { class: 'btn q-no-btn',  onClick: () => submitAnswer('No')  }, [text('No')]);
+        const otherBtn = el('button', { class: 'btn q-other-btn', onClick: () => {
+            otherArea.style.display = '';
+            answerInput.focus();
+        }}, [text('Other…')]);
+
+        answerSection = el('div', { class: 'question-answer-section' }, [
+            el('div', { class: 'q-yesno-btns' }, [yesBtn, noBtn, otherBtn]),
+            otherArea,
+        ]);
+    } else {
+        // Free-text for non-yes/no questions
+        const answerInput = el('textarea', {
+            class: 'question-answer',
+            placeholder: 'Type your answer...',
+            rows: '3',
+        });
+        answerSection = el('div', { class: 'question-answer-section' }, [
+            el('label', {}, [text('Your answer:')]),
+            answerInput,
+        ]);
+        // Override submitAnswer to read from textarea, attach footer Send
+        answerSection._input = answerInput;
+    }
+
+    const footer = el('div', { class: 'modal-footer' }, [
+        statusEl,
+        el('button', { class: 'btn btn-secondary', onClick: () => dismissAndClose(q.id) }, [text('Dismiss')]),
+        // For non-yes/no, add Send Answer button in footer
+        ...(!isYesNo(q.question) ? [el('button', { class: 'btn btn-primary', onClick: async () => {
+            const input = answerSection._input;
+            const answer = input ? input.value.trim() : '';
+            if (!answer) { statusEl.textContent = 'Please type an answer'; return; }
+            await submitAnswer(answer);
+        }}, [text('Send Answer')])] : []),
+    ]);
 
     const card = el('div', { class: 'modal-card' }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text('Agent Question')]),
-            el('button', { class: 'modal-close', onClick: () => dismissAndClose(q.id) }, [text('\u00d7')]),
+            el('button', { class: 'modal-close', onClick: () => dismissAndClose(q.id) }, [text('×')]),
         ]),
         el('div', { class: 'modal-body' }, [
             // Source session
@@ -83,30 +157,9 @@ function openQuestion(q) {
             // Context if any
             q.context ? el('div', { class: 'question-context' }, [text(q.context)]) : null,
             // Answer input
-            el('div', { class: 'question-answer-section' }, [
-                el('label', {}, [text('Your answer:')]),
-                answerInput,
-            ]),
+            answerSection,
         ].filter(Boolean)),
-        el('div', { class: 'modal-footer' }, [
-            statusEl,
-            el('button', { class: 'btn btn-secondary', onClick: () => dismissAndClose(q.id) }, [text('Dismiss')]),
-            el('button', { class: 'btn btn-primary', onClick: async () => {
-                const answer = answerInput.value.trim();
-                if (!answer) {
-                    statusEl.textContent = 'Please type an answer';
-                    return;
-                }
-                try {
-                    await post(`/api/questions/${q.id}/answer`, { answer });
-                    statusEl.textContent = 'Sent!';
-                    setTimeout(closeQuestion, 500);
-                    checkQuestions(); // refresh badge
-                } catch (e) {
-                    statusEl.textContent = `Error: ${e.message}`;
-                }
-            }}, [text('Send Answer')]),
-        ]),
+        footer,
     ]);
 
     _overlay = el('div', { class: 'modal-overlay', onClick: (e) => {
@@ -114,7 +167,11 @@ function openQuestion(q) {
     }}, [card]);
 
     document.body.appendChild(_overlay);
-    answerInput.focus();
+
+    // Auto-focus: textarea for open questions, nothing for yes/no (buttons are the CTA)
+    if (!isYesNo(q.question) && answerSection._input) {
+        answerSection._input.focus();
+    }
     document.addEventListener('keydown', _onEsc);
 }
 

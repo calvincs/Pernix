@@ -55,119 +55,110 @@ def _emit_backend_alert(title: str, body: str, urgency: str = "normal") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Browser lifecycle — dedicated thread for Playwright greenlet affinity.
-# Playwright's sync API uses greenlets that are bound to a specific thread.
-# Since tools run on asyncio's ThreadPoolExecutor (varying threads),
-# all Playwright calls must be dispatched to a single persistent thread.
+# Browser lifecycle — async Playwright on the FastAPI loop.
+#
+# Playwright 1.58+ rejects sync_api use in any process where an asyncio loop
+# is running. We run Playwright natively on the FastAPI loop using async_api,
+# and bridge from the executor's worker thread (where sync tool functions
+# execute) via asyncio.run_coroutine_threadsafe — the same pattern used by
+# the evaluation, model_mgmt, scheduling, and orchestration extensions.
 # ---------------------------------------------------------------------------
 
-_browser_lock = threading.Lock()
-_browser = None  # Playwright Browser instance
-_playwright = None  # Playwright context manager instance
+_browser = None  # Playwright async Browser instance (lives on _browser_loop)
+_playwright = None  # AsyncPlaywright context manager
 _browser_headless = None  # tracks mode for recycling on setting change
 _driver_pid = None  # Playwright node driver subprocess PID
-_pw_thread = None  # Dedicated thread for all Playwright operations
-_pw_queue = None  # Queue for dispatching work to the Playwright thread
+_browser_loop = None  # asyncio.AbstractEventLoop the browser is bound to
+_browser_init_lock = None  # asyncio.Lock — created lazily on the loop
 
 
-def _pw_thread_main():
-    """Main loop for the dedicated Playwright thread. Processes callables from queue."""
-    import queue as _q
+def _ensure_init_lock():
+    """Lazy-create the asyncio init lock on the loop. Must be called on the loop."""
+    global _browser_init_lock
+    if _browser_init_lock is None:
+        import asyncio as _asyncio
 
-    while True:
-        item = _pw_queue.get()
-        if item is None:  # Shutdown sentinel
-            break
-        func, result_queue = item
-        try:
-            result = func()
-            result_queue.put((True, result))
-        except Exception as e:
-            result_queue.put((False, e))
+        _browser_init_lock = _asyncio.Lock()
+    return _browser_init_lock
 
 
-def _run_on_pw_thread(func):
-    """Dispatch a callable to the Playwright thread and wait for the result.
+async def _get_browser_async():
+    """Get or lazily create the browser. Must run on the FastAPI loop."""
+    global _browser, _playwright, _browser_headless, _driver_pid, _browser_loop
+    import asyncio as _asyncio
 
-    This ensures all Playwright operations (browser creation, page navigation,
-    context management) happen on the same thread, satisfying greenlet affinity.
-    """
-    global _pw_thread, _pw_queue
-    import queue as _q
-
-    if _pw_queue is None:
-        with _browser_lock:
-            if _pw_queue is None:
-                _pw_queue = _q.Queue()
-                _pw_thread = threading.Thread(target=_pw_thread_main, daemon=True, name="playwright-thread")
-                _pw_thread.start()
-                logger.info("Playwright dedicated thread started")
-
-    result_queue = _q.Queue()
-    _pw_queue.put((func, result_queue))
-    ok, result = result_queue.get()
-    if ok:
-        return result
-    raise result
-
-
-def _get_browser():
-    """Get or lazily create the Playwright browser. Runs on the Playwright thread."""
-    global _browser, _playwright, _browser_headless, _driver_pid
     desired_headless = settings.browser_headless
 
-    # Recycle if headless mode changed
-    if _browser is not None and _browser_headless != desired_headless:
-        logger.info("Browser mode changed (headless=%s -> %s), recycling", _browser_headless, desired_headless)
-        old_browser, old_pw = _browser, _playwright
-        _browser = None
-        _playwright = None
-        _browser_headless = None
-        _driver_pid = None
-        try:
-            old_browser.close()
-            old_pw.stop()
-        except Exception as e:
-            logger.warning("Error closing old browser during recycle: %s", e)
-
-    if _browser is not None and _browser.is_connected():
-        return _browser
-
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        raise RuntimeError(
-            "Playwright is not installed. Install with: " "pip install playwright && playwright install chromium"
-        )
-
-    try:
-        _playwright = sync_playwright().start()
-        # Track driver subprocess PID for forceful cleanup on shutdown
-        try:
-            _driver_pid = _playwright._connection._transport._proc.pid
-        except Exception:
+    async with _ensure_init_lock():
+        # Recycle if headless mode changed
+        if _browser is not None and _browser_headless != desired_headless:
+            logger.info(
+                "Browser mode changed (headless=%s -> %s), recycling",
+                _browser_headless,
+                desired_headless,
+            )
+            old_browser, old_pw = _browser, _playwright
+            _browser = None
+            _playwright = None
+            _browser_headless = None
             _driver_pid = None
-        _browser = _playwright.chromium.launch(
-            headless=desired_headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        _browser_headless = desired_headless
-        logger.info("Playwright browser launched (headless=%s, driver_pid=%s)", desired_headless, _driver_pid)
-        return _browser
-    except Exception as e:
-        _playwright = None
-        _browser = None
-        _driver_pid = None
-        err = str(e).lower()
-        if "executable doesn't exist" in err or "browser" in err:
-            raise RuntimeError(f"Chromium not installed. Run: playwright install chromium\n" f"Original error: {e}")
-        raise
+            try:
+                await old_browser.close()
+                await old_pw.stop()
+            except Exception as e:
+                logger.warning("Error closing old browser during recycle: %s", e)
+
+        if _browser is not None and _browser.is_connected():
+            return _browser
+
+        # Stale handle: clear so launch path runs cleanly
+        if _browser is not None:
+            _browser = None
+            _playwright = None
+            _driver_pid = None
+
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            raise RuntimeError(
+                "Playwright is not installed. Install with: " "pip install playwright && playwright install chromium"
+            )
+
+        try:
+            _playwright = await async_playwright().start()
+            # Track driver subprocess PID for forceful cleanup on shutdown.
+            # async_api wraps the impl in _impl_obj; sync_api exposes it directly.
+            try:
+                _driver_pid = _playwright._impl_obj._connection._transport._proc.pid
+            except Exception:
+                _driver_pid = None
+            _browser = await _playwright.chromium.launch(
+                headless=desired_headless,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            _browser_headless = desired_headless
+            _browser_loop = _asyncio.get_running_loop()
+            logger.info(
+                "Playwright browser launched (headless=%s, driver_pid=%s)",
+                desired_headless,
+                _driver_pid,
+            )
+            return _browser
+        except Exception as e:
+            _playwright = None
+            _browser = None
+            _driver_pid = None
+            _browser_loop = None
+            err = str(e).lower()
+            if "executable doesn't exist" in err or "browser" in err:
+                raise RuntimeError(f"Chromium not installed. Run: playwright install chromium\n" f"Original error: {e}")
+            raise
 
 
 def _kill_driver():
     """Forcefully kill and reap the Playwright node driver subprocess.
 
-    Safe to call multiple times or when no driver is running.
+    Sync — safe to call from atexit. Safe to call multiple times.
     """
     global _driver_pid
     pid = _driver_pid
@@ -192,35 +183,23 @@ def _kill_driver():
         pass
 
 
-def _close_browser():
-    """Shut down the browser and Playwright. Called at app shutdown."""
-    global _browser, _playwright, _browser_headless
-
-    def _do_close():
-        global _browser, _playwright, _browser_headless
-        if _browser:
-            try:
-                _browser.close()
-            except Exception as e:
-                logger.debug("Error closing browser: %s", e)
-            _browser = None
-        if _playwright:
-            try:
-                _playwright.stop()
-            except Exception as e:
-                logger.warning("Error stopping Playwright: %s", e)
-            _playwright = None
-        _browser_headless = None
-
-    if _pw_queue is not None:
+async def _close_browser():
+    """Shut down browser + Playwright. Must run on the loop the browser was bound to."""
+    global _browser, _playwright, _browser_headless, _browser_loop
+    if _browser is not None:
         try:
-            _run_on_pw_thread(_do_close)
-        except Exception:
-            pass
-    else:
-        _do_close()
-
-    # Force-kill driver if graceful close didn't reap it
+            await _browser.close()
+        except Exception as e:
+            logger.debug("Error closing browser: %s", e)
+        _browser = None
+    if _playwright is not None:
+        try:
+            await _playwright.stop()
+        except Exception as e:
+            logger.warning("Error stopping Playwright: %s", e)
+        _playwright = None
+    _browser_headless = None
+    _browser_loop = None
     _kill_driver()
     logger.info("Playwright browser closed")
 
@@ -574,137 +553,117 @@ def _validate_url(url: str, *, allow_loopback: bool = False) -> str:
 _MAX_HTML_BYTES = 5_000_000
 
 
-def browse_web(url: str, _context: dict | None = None) -> str:
-    """Navigate to a URL with a real browser, extract clean content as markdown."""
-    if not settings.browser_enabled:
-        return (
-            "Error: Browser is disabled. Enable it in Settings → Web / Browser → "
-            "Enable Browser (Playwright), then try again. No restart required."
+async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | None) -> str:
+    """Full nav + content extraction as one coroutine. Runs on the FastAPI loop."""
+    browser = await _get_browser_async()
+    timeout_ms = settings.browser_timeout * 1000
+    context = None
+    page = None
+    console_msgs: list[str] = []
+    page_errors: list[str] = []
+    html = ""
+    title = ""
+    final_url = url
+    try:
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
+        page = await context.new_page()
 
-    allow_loopback = _loopback_allowed()
+        # Console + runtime-error capture so agents iterating on local HTML
+        # get direct feedback instead of guessing from silent renders.
+        def _on_console(msg):
+            try:
+                t = getattr(msg, "type", "") or ""
+                if t in ("error", "warning"):
+                    text = getattr(msg, "text", "") or ""
+                    if len(console_msgs) < 50:
+                        console_msgs.append(f"[{t}] {text[:500]}")
+            except Exception:
+                pass
 
-    try:
-        url = _validate_url(url, allow_loopback=allow_loopback)
-    except ValueError as e:
-        return f"Error: {e}"
+        def _on_pageerror(exc):
+            try:
+                if len(page_errors) < 20:
+                    page_errors.append(str(exc)[:1000])
+            except Exception:
+                pass
 
-    _emit_browse_event(_context, {"type": "browse.start", "url": url})
-
-    # All Playwright operations must run on the dedicated thread
-    def _do_browse():
-        browser = _get_browser()
-        timeout_ms = settings.browser_timeout * 1000
-        context = None
-        page = None
-        console_msgs: list[str] = []
-        page_errors: list[str] = []
         try:
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            page = context.new_page()
+            page.on("console", _on_console)
+            page.on("pageerror", _on_pageerror)
+        except Exception:
+            pass
 
-            # Console + runtime-error capture so agents iterating on local HTML
-            # get direct feedback instead of guessing from silent renders.
-            def _on_console(msg):
-                try:
-                    t = getattr(msg, "type", "") or ""
-                    if t in ("error", "warning"):
-                        text = getattr(msg, "text", "") or ""
-                        if len(console_msgs) < 50:
-                            console_msgs.append(f"[{t}] {text[:500]}")
-                except Exception:
-                    pass
+        # SSRF: intercept requests to block navigation to internal hosts.
+        # Self-loopback (harness's own port) is allowed even in network mode.
+        async def _ssrf_route_handler(route, request):
+            from urllib.parse import urlparse as _urlparse
 
-            def _on_pageerror(exc):
-                try:
-                    if len(page_errors) < 20:
-                        page_errors.append(str(exc)[:1000])
-                except Exception:
-                    pass
+            parsed_req = _urlparse(request.url)
+            req_host = parsed_req.hostname or ""
+            if (
+                req_host
+                and not _is_self_loopback(req_host, parsed_req.port)
+                and _is_blocked_host(req_host, allow_loopback=allow_loopback)
+            ):
+                await route.abort("blockedbyclient")
+            else:
+                await route.continue_()
 
+        await page.route("**/*", _ssrf_route_handler)
+
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 10_000))
+        except Exception:
+            pass
+
+        final_url = page.url
+        try:
+            final_parsed = urlparse(final_url)
+            final_host = final_parsed.hostname or ""
+            if (
+                final_host
+                and not _is_self_loopback(final_host, final_parsed.port)
+                and _is_blocked_host(final_host, allow_loopback=allow_loopback)
+            ):
+                return f"Error: Redirect to blocked internal address: {final_host}"
+        except Exception:
+            pass
+
+        html = await page.content()
+        title = await page.title()
+    except Exception as e:
+        err = str(e)
+        if "timeout" in err.lower():
+            return f"Error: Page load timed out after {settings.browser_timeout}s for {url}"
+        return f"Error navigating to {url}: {err}"
+    finally:
+        if page:
             try:
-                page.on("console", _on_console)
-                page.on("pageerror", _on_pageerror)
+                await page.close()
+            except Exception:
+                pass
+        if context:
+            try:
+                await context.close()
             except Exception:
                 pass
 
-            # SSRF: intercept requests to block navigation to internal hosts.
-            # Self-loopback (harness's own port) is allowed even in network mode.
-            def _ssrf_route_handler(route, request):
-                from urllib.parse import urlparse as _urlparse
-
-                parsed_req = _urlparse(request.url)
-                req_host = parsed_req.hostname or ""
-                if (
-                    req_host
-                    and not _is_self_loopback(req_host, parsed_req.port)
-                    and _is_blocked_host(req_host, allow_loopback=allow_loopback)
-                ):
-                    route.abort("blockedbyclient")
-                else:
-                    route.continue_()
-
-            page.route("**/*", _ssrf_route_handler)
-
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            try:
-                page.wait_for_load_state("networkidle", timeout=min(timeout_ms, 10_000))
-            except Exception:
-                pass
-
-            final_url = page.url
-            try:
-                final_parsed = urlparse(final_url)
-                final_host = final_parsed.hostname or ""
-                if (
-                    final_host
-                    and not _is_self_loopback(final_host, final_parsed.port)
-                    and _is_blocked_host(final_host, allow_loopback=allow_loopback)
-                ):
-                    return None, None, f"Error: Redirect to blocked internal address: {final_host}", []
-            except Exception:
-                pass
-
-            diag: list[str] = []
-            for e in page_errors:
-                diag.append(f"[pageerror] {e}")
-            diag.extend(console_msgs)
-            return page.content(), page.title(), final_url, diag
-        except Exception as e:
-            err = str(e)
-            if "timeout" in err.lower():
-                return None, None, f"Error: Page load timed out after {settings.browser_timeout}s for {url}", []
-            return None, None, f"Error navigating to {url}: {err}", []
-        finally:
-            if page:
-                try:
-                    page.close()
-                except Exception:
-                    pass
-            if context:
-                try:
-                    context.close()
-                except Exception:
-                    pass
-
-    try:
-        html, title, final_url, diag = _run_on_pw_thread(_do_browse)
-    except RuntimeError as e:
-        return f"Error: {e}"
-
-    # Check if _do_browse returned an error string
-    if html is None:
-        return final_url  # This is the error message
+    diag: list[str] = []
+    for e in page_errors:
+        diag.append(f"[pageerror] {e}")
+    diag.extend(console_msgs)
 
     # Cap HTML size before extraction to prevent OOM
     if len(html) > _MAX_HTML_BYTES:
         html = html[:_MAX_HTML_BYTES]
         logger.warning("HTML truncated to %d bytes before extraction for %s", _MAX_HTML_BYTES, url)
 
-    # Try trafilatura for clean markdown extraction
+    # Trafilatura — pure CPU. Capped at 5MB above; runs inline. If profiling
+    # later shows blocking, wrap in `await asyncio.to_thread(...)`.
     content = None
     try:
         import trafilatura
@@ -722,7 +681,6 @@ def browse_web(url: str, _context: dict | None = None) -> str:
     except Exception as e:
         logger.warning("trafilatura extraction failed: %s, falling back to raw text", e)
 
-    # Fallback: strip HTML with stdlib parser
     if not content:
         try:
 
@@ -752,22 +710,67 @@ def browse_web(url: str, _context: dict | None = None) -> str:
         except Exception:
             content = "(Failed to extract content)"
 
-    # Truncate output
     max_size = settings.max_fetch_size
     if len(content) > max_size:
         content = content[:max_size] + f"\n\n[truncated at {max_size} bytes]"
 
     header = f"# {title}\n**URL:** {final_url}\n\n---\n\n" if title else f"**URL:** {final_url}\n\n---\n\n"
 
-    # Surface runtime diagnostics so agents iterating on local HTML can see
-    # what the page did at load time — errors first, warnings after.
     diag_section = ""
     if diag:
         joined = "\n".join(f"- {line}" for line in diag[:60])
         diag_section = f"\n\n---\n\n## Console Output\n\n{joined}\n"
 
-    _emit_browse_event(_context, {"type": "browse.done", "url": final_url, "title": title or ""})
+    _emit_browse_event(ctx, {"type": "browse.done", "url": final_url, "title": title or ""})
     return header + content + diag_section
+
+
+def browse_web(url: str, _context: dict | None = None) -> str:
+    """Navigate to a URL with a real browser, extract clean content as markdown.
+
+    Stays sync to fit the tool registry signature. Internally bridges from the
+    executor's worker thread to the FastAPI asyncio loop via
+    asyncio.run_coroutine_threadsafe — async Playwright runs on the loop.
+    """
+    if not settings.browser_enabled:
+        return (
+            "Error: Browser is disabled. Enable it in Settings → Web / Browser → "
+            "Enable Browser (Playwright), then try again. No restart required."
+        )
+
+    allow_loopback = _loopback_allowed()
+
+    try:
+        url = _validate_url(url, allow_loopback=allow_loopback)
+    except ValueError as e:
+        return f"Error: {e}"
+
+    _emit_browse_event(_context, {"type": "browse.start", "url": url})
+
+    import asyncio as _asyncio
+    import concurrent.futures as _futures
+
+    loop = (_context or {}).get("_loop")
+    if loop is None:
+        return "Error: browse_web requires the event loop context. Internal error."
+
+    coro = _browse_and_extract_async(url, allow_loopback, _context)
+    try:
+        fut = _asyncio.run_coroutine_threadsafe(coro, loop)
+    except RuntimeError as e:
+        return f"Error: browser unavailable (loop not running): {e}"
+
+    # Inner timeout = browser_timeout + 10s grace; the executor's outer timeout
+    # (registered tool timeout) is the upper bound.
+    try:
+        return fut.result(timeout=settings.browser_timeout + 10)
+    except _futures.TimeoutError:
+        fut.cancel()
+        return f"Error: browse_web timed out after {settings.browser_timeout}s for {url}"
+    except _futures.CancelledError:
+        return "Error: browse_web was cancelled"
+    except Exception as e:
+        return f"Error navigating to {url}: {e}"
 
 
 # ---------------------------------------------------------------------------
