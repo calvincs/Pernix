@@ -8,4 +8,5 @@ exclude =
     static,
     docs,
     __pycache__,
-    .git
+    .git,
+    core/tools/builtin/custom_*.py

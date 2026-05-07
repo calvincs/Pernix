@@ -194,6 +194,7 @@ body.fp-resizing #main { pointer-events: none; }
     transition: background 0.1s, color 0.1s;
     white-space: nowrap;
     overflow: hidden;
+    position: relative;
 }
 .fp-tree-item:hover {
     background: var(--bg-hover);
@@ -232,19 +233,31 @@ body.fp-resizing #main { pointer-events: none; }
     min-width: 0;
 }
 
-.fp-tree-meta {
-    font-size: 9px;
+.fp-tree-count {
+    font-size: var(--text-xxs);
     color: var(--text-faint);
     flex-shrink: 0;
-    margin-left: auto;
+    width: 56px;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.fp-tree-meta {
+    font-size: var(--text-xxs);
+    color: var(--text-dim);
+    flex-shrink: 0;
+    width: 44px;
+    text-align: right;
     padding-left: var(--sp-2);
+    overflow: hidden;
 }
 
 .fp-tree-date {
-    font-size: 9px;
-    color: var(--text-faint);
+    font-size: var(--text-xxs);
+    color: var(--text-dim);
     flex-shrink: 0;
-    padding-left: var(--sp-2);
+    width: 72px;
+    text-align: right;
     white-space: nowrap;
 }
 
@@ -253,7 +266,13 @@ body.fp-resizing #main { pointer-events: none; }
     gap: 2px;
     opacity: 0;
     transition: opacity 0.1s;
-    flex-shrink: 0;
+    position: absolute;
+    right: var(--sp-2);
+    top: 50%;
+    transform: translateY(-50%);
+    background: var(--bg-hover);
+    border-radius: var(--radius-sm, 2px);
+    padding: 0 2px;
 }
 .fp-tree-item:hover .fp-tree-actions { opacity: 1; }
 
@@ -532,6 +551,27 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-breadcrumb-sep {
     color: var(--text-faint);
 }
+
+/* Column headers (workspace file list) */
+.fp-col-headers {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1);
+    padding: 3px var(--sp-3) 3px var(--sp-2);
+    border-bottom: 1px solid var(--border);
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    user-select: none;
+}
+.fp-col-h { flex-shrink: 0; white-space: nowrap; }
+.fp-col-h.sortable { cursor: pointer; transition: color 0.1s; }
+.fp-col-h.sortable:hover { color: var(--text-dim); }
+.fp-col-h.active { color: var(--text); }
+.fp-col-h.col-h-icon  { width: 14px; }
+.fp-col-h.col-h-name  { flex: 1; min-width: 0; }
+.fp-col-h.col-h-count { width: 56px; text-align: right; }
+.fp-col-h.col-h-meta  { width: 44px; text-align: right; padding-left: var(--sp-2); }
+.fp-col-h.col-h-date  { width: 72px; text-align: right; }
 
 .fp-memory-list {
     flex: 1;

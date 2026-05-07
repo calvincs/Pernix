@@ -98,3 +98,19 @@ def safe_read_path(path: str) -> Path:
 def safe_write_path(path: str) -> Path:
     """Resolve path for writing (workspace only). Ensures workspace exists."""
     return _resolve_within(path, allowed_write_roots(), create_roots=True)
+
+
+def ensure_workspace_venv_on_path() -> None:
+    """Add workspace venv site-packages to sys.path (idempotent).
+
+    Core tools run in the project venv. Custom tools (source='custom') need
+    packages installed via install_package into data/workspace/.venv.
+    Called before any custom_* module is imported or reloaded.
+    """
+    import glob
+    import sys
+
+    ws_lib = Path(settings.workspace_dir).resolve() / ".venv" / "lib"
+    site_pkgs = next(glob.iglob(str(ws_lib / "python*" / "site-packages")), None)
+    if site_pkgs and site_pkgs not in sys.path:
+        sys.path.insert(0, site_pkgs)

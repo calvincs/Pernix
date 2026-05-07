@@ -13,6 +13,8 @@ from config import settings
 
 logger = logging.getLogger("pernix.ext.toolmaker")
 
+from core.tools.paths import ensure_workspace_venv_on_path
+
 CUSTOM_TOOLS_DIR = Path("core/tools/builtin")
 
 PROHIBITED_PATTERNS = [
@@ -30,7 +32,29 @@ PROHIBITED_PATTERNS = [
 ]
 
 
-def create_tool(name: str, description: str, code: str, tags: str = "", _context: dict | None = None) -> str:
+def _parse_requirements(raw: str) -> list[str]:
+    """Parse a requirements string (newline- or comma-separated) into a clean list."""
+    pkgs = []
+    for line in re.split(r"[\n,]", raw):
+        line = line.strip()
+        if line and not line.startswith("#"):
+            pkgs.append(line)
+    return pkgs
+
+
+def _write_requirements_file(name: str, pkgs: list[str]) -> None:
+    req_file = CUSTOM_TOOLS_DIR / f"custom_{name}.requirements.txt"
+    lines = [
+        f"# Requirements for custom tool: {name}",
+        f"# Reinstall: pip install -r custom_{name}.requirements.txt",
+        "",
+    ] + pkgs
+    req_file.write_text("\n".join(lines) + "\n")
+
+
+def create_tool(
+    name: str, description: str, code: str, tags: str = "", requirements: str = "", _context: dict | None = None
+) -> str:
     """Create a custom tool. The code must define a function and a register(reg) function."""
     # Validate name
     if not re.match(r"^[a-z][a-z0-9_]*$", name):
@@ -63,6 +87,7 @@ def create_tool(name: str, description: str, code: str, tags: str = "", _context
         from core.tools.registry import get_registry
 
         registry = get_registry()
+        ensure_workspace_venv_on_path()
         mod = importlib.import_module(f"core.tools.builtin.custom_{name}")
         importlib.reload(mod)
 
@@ -81,22 +106,33 @@ def create_tool(name: str, description: str, code: str, tags: str = "", _context
             filepath.unlink(missing_ok=True)
             return f"Error: Tool '{name}' not found after registration"
 
-        # Cap custom tool timeout
+        # Mark as custom and cap timeout
         tool = registry.get(name)
-        if tool and tool.timeout > 60:
-            tool.timeout = 60
+        if tool:
+            tool.source = "custom"
+            if tool.timeout > 60:
+                tool.timeout = 60
 
-        return f"Tool '{name}' created and available for discovery."
+        # Write requirements.txt and install packages
+        req_summary = ""
+        pkgs = _parse_requirements(requirements)
+        if pkgs:
+            _write_requirements_file(name, pkgs)
+            installed = sum(1 for p in pkgs if not install_package(p).startswith("Error"))
+            req_summary = f" Packages installed: {installed}/{len(pkgs)}."
+
+        return f"Tool '{name}' created and available for discovery.{req_summary}"
     except Exception as e:
         filepath.unlink(missing_ok=True)
         return (
             f"Error loading tool '{name}': {type(e).__name__}: {e}. "
-            f"Ensure your code defines 'def register(reg):' that calls "
-            f"reg.register(name=..., func=..., ...)."
+            f"Your register(reg) must call: "
+            f"reg.register(name='tool_name', func=my_func, description='...', "
+            f"parameters={{'type':'object','properties':{{...}},'required':[...]}})"
         )
 
 
-def update_tool(name: str, code: str, _context: dict | None = None) -> str:
+def update_tool(name: str, code: str, requirements: str = "", _context: dict | None = None) -> str:
     """Update an existing custom tool. Keeps backup of previous version."""
     filepath = CUSTOM_TOOLS_DIR / f"custom_{name}.py"
     if not filepath.exists():
@@ -123,6 +159,7 @@ def update_tool(name: str, code: str, _context: dict | None = None) -> str:
         from core.tools.registry import get_registry
 
         registry = get_registry()
+        ensure_workspace_venv_on_path()
         mod = importlib.import_module(f"core.tools.builtin.custom_{name}")
         importlib.reload(mod)
 
@@ -134,12 +171,25 @@ def update_tool(name: str, code: str, _context: dict | None = None) -> str:
 
         mod.register(registry)
         registry.rebuild_index()
+
+        # Re-mark as custom
+        tool = registry.get(name)
+        if tool:
+            tool.source = "custom"
+
+        # Update requirements if provided; leave existing file untouched if not
+        if requirements:
+            pkgs = _parse_requirements(requirements)
+            if pkgs:
+                _write_requirements_file(name, pkgs)
+
         return f"Tool '{name}' updated (backup: v{version})"
     except Exception as e:
         return (
             f"Error reloading tool '{name}': {type(e).__name__}: {e}. "
-            f"Ensure your code defines 'def register(reg):' that calls "
-            f"reg.register(name=..., func=..., ...)."
+            f"Your register(reg) must call: "
+            f"reg.register(name='tool_name', func=my_func, description='...', "
+            f"parameters={{'type':'object','properties':{{...}},'required':[...]}})"
         )
 
 
@@ -152,8 +202,31 @@ def list_custom_tools(_context: dict | None = None) -> str:
     for f in custom_files:
         name = f.stem.replace("custom_", "")
         size = f.stat().st_size
-        lines.append(f"- {name} ({size} bytes)")
+        req_file = CUSTOM_TOOLS_DIR / f"custom_{name}.requirements.txt"
+        req_str = ""
+        if req_file.exists():
+            pkgs = _parse_requirements(req_file.read_text())
+            if pkgs:
+                req_str = f" [requires: {', '.join(pkgs)}]"
+        lines.append(f"- {name} ({size} bytes){req_str}")
     return "\n".join(lines)
+
+
+def restore_tool_packages(name: str, _context: dict | None = None) -> str:
+    """Reinstall a custom tool's declared packages into the workspace venv.
+
+    Use this after the workspace venv is rebuilt or corrupted to restore
+    all packages the tool declared when it was created.
+    """
+    req_file = CUSTOM_TOOLS_DIR / f"custom_{name}.requirements.txt"
+    if not req_file.exists():
+        return f"No requirements file for '{name}'. Pass requirements= when calling create_tool."
+    pkgs = _parse_requirements(req_file.read_text())
+    if not pkgs:
+        return f"requirements.txt for '{name}' is empty — nothing to restore."
+    results = [install_package(p) for p in pkgs]
+    ok = sum(1 for r in results if not r.startswith("Error"))
+    return f"Restored {ok}/{len(pkgs)} packages for '{name}': {', '.join(pkgs)}"
 
 
 def install_package(package: str, _context: dict | None = None) -> str:
@@ -206,7 +279,14 @@ def register(reg) -> None:
     reg.register(
         name="create_tool",
         func=create_tool,
-        description="Create a custom tool. Provide name, description, and Python code with a register(reg) function.",
+        description=(
+            "Create a custom tool (source='custom', uses workspace venv). "
+            "Code must define a function and register(reg) that calls: "
+            "reg.register(name='tool_name', func=my_func, description='...', "
+            "parameters={'type':'object','properties':{...},'required':[...]}). "
+            "Pass requirements='pkg1\\npkg2' to record and install dependencies — "
+            "use restore_tool_packages to reinstall after a workspace venv rebuild."
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -214,6 +294,14 @@ def register(reg) -> None:
                 "description": {"type": "string", "description": "What the tool does"},
                 "code": {"type": "string", "description": "Python code defining the tool and register(reg)"},
                 "tags": {"type": "string", "description": "Comma-separated discovery tags"},
+                "requirements": {
+                    "type": "string",
+                    "description": (
+                        "Newline- or comma-separated pip packages this tool needs "
+                        "(e.g. 'pychromecast==14.0.10\\nroku'). Saved to requirements.txt "
+                        "and installed into workspace venv automatically."
+                    ),
+                },
             },
             "required": ["name", "description", "code"],
         },
@@ -226,12 +314,16 @@ def register(reg) -> None:
     reg.register(
         name="update_tool",
         func=update_tool,
-        description="Update an existing custom tool. Previous version backed up.",
+        description="Update an existing custom tool. Previous version backed up. Pass requirements= to update the tool's requirements.txt.",
         parameters={
             "type": "object",
             "properties": {
                 "name": {"type": "string"},
                 "code": {"type": "string"},
+                "requirements": {
+                    "type": "string",
+                    "description": "Updated pip requirements (leave empty to keep existing).",
+                },
             },
             "required": ["name", "code"],
         },
@@ -244,7 +336,7 @@ def register(reg) -> None:
     reg.register(
         name="list_custom_tools",
         func=list_custom_tools,
-        description="List all agent-created custom tools.",
+        description="List all agent-created custom tools, including their declared requirements.",
         parameters={"type": "object", "properties": {}},
         tags=tags + ["list", "show"],
         timeout=15,
@@ -252,9 +344,33 @@ def register(reg) -> None:
         **common,
     )
     reg.register(
+        name="restore_tool_packages",
+        func=restore_tool_packages,
+        description=(
+            "Reinstall a custom tool's declared packages into the workspace venv "
+            "(data/workspace/.venv). Use after the workspace venv is rebuilt or corrupted."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Custom tool name"},
+            },
+            "required": ["name"],
+        },
+        tags=["tool", "restore", "repair", "requirements", "venv", "recovery", "dependencies"],
+        timeout=180,
+        parallel_safe=False,
+        safety_level="safe",
+        **common,
+    )
+    reg.register(
         name="install_package",
         func=install_package,
-        description="Install a Python package via pip in the virtual environment.",
+        description=(
+            "Install a Python package into the workspace venv (data/workspace/.venv). "
+            "Available to custom tools (source='custom'). "
+            "Core built-in tools use the project venv instead."
+        ),
         parameters={
             "type": "object",
             "properties": {

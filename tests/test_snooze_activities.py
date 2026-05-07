@@ -110,7 +110,7 @@ async def test_reroute_with_multiple_files(tmp_path, monkeypatch):
 
     store = MemoryStore(str(tmp_path / "memories"))
     store.add_entry("Database configuration and settings", file_name="pernix.config")
-    store.add_entry("User name is Calvin, works at Anthropic", file_name="pernix.notes")  # misplaced?
+    store.add_entry("User name is Alice, works at Example Corp", file_name="pernix.notes")  # misplaced?
     store.add_entry("Debug: fixed bug in auth module", file_name="pernix.debugging")
 
     runner = SnoozeRunner()

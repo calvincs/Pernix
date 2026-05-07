@@ -80,13 +80,29 @@ async def list_workspace(
                 rel = os.path.relpath(entry.path, workspace)
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        child_count = sum(1 for _ in os.scandir(entry.path))
+                        child_count = 0
+                        dir_size = 0
+                        dir_mtime = 0.0
+                        try:
+                            dir_mtime = entry.stat(follow_symlinks=False).st_mtime
+                            with os.scandir(entry.path) as sub_it:
+                                for child in sub_it:
+                                    child_count += 1
+                                    if child.is_file(follow_symlinks=False):
+                                        try:
+                                            dir_size += child.stat(follow_symlinks=False).st_size
+                                        except OSError:
+                                            pass
+                        except OSError:
+                            pass
                         entries.append(
                             {
                                 "name": entry.name,
                                 "type": "dir",
                                 "path": rel,
                                 "children": child_count,
+                                "size": dir_size,
+                                "modified": dir_mtime,
                             }
                         )
                     elif entry.is_file(follow_symlinks=False):

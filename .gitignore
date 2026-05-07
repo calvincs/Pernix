@@ -27,6 +27,13 @@ htmlcov/
 .env.*.local
 
 # =============================================================================
+# Agent-created custom tools (runtime artifacts; user-generated at session time)
+# =============================================================================
+core/tools/builtin/custom_*.py
+core/tools/builtin/custom_*.requirements.txt
+core/tools/builtin/custom_*.v*.bak
+
+# =============================================================================
 # Pernix runtime data (auto-generated; never commit)
 # =============================================================================
 data/sessions.db

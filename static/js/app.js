@@ -1320,7 +1320,33 @@ function appendQuestionBubble(questionId, questionText, context) {
     const emptyEl = inner.querySelector('.empty-state');
     if (emptyEl) emptyEl.remove();
 
-    const answerArea = el('div', { class: 'q-answer-area' });
+    // Inline reply form — always present so the user can respond even if the
+    // notification popup was closed or dismissed.
+    const inlineInput = el('textarea', {
+        class: 'q-inline-input',
+        placeholder: 'Type your answer…',
+        rows: '2',
+    });
+    const inlineStatus = el('span', { class: 'q-inline-status' });
+    const inlineSend = el('button', { class: 'btn btn-primary q-inline-send', onClick: async () => {
+        const answer = inlineInput.value.trim();
+        if (!answer) return;
+        inlineSend.disabled = true;
+        try {
+            await post(`/api/questions/${questionId}/answer`, { answer });
+            markQuestionAnswered(questionId, answer);
+        } catch {
+            inlineStatus.textContent = 'Error sending';
+            inlineSend.disabled = false;
+        }
+    }}, [text('Send')]);
+
+    const answerArea = el('div', { class: 'q-answer-area' }, [
+        el('div', { class: 'q-inline-form' }, [
+            inlineInput,
+            el('div', { class: 'q-inline-actions' }, [inlineStatus, inlineSend]),
+        ]),
+    ]);
 
     const msgEl = el('div', { class: 'message question-bubble' }, [
         el('div', { class: 'q-label' }, [text('Agent Question')]),
@@ -1341,6 +1367,8 @@ function markQuestionAnswered(questionId, answer) {
     if (!bubble) return;
     const area = bubble.querySelector('.q-answer-area');
     if (!area || area.querySelector('.q-answer')) return; // already marked
+    // Replace inline form (if still present) with the final answer display.
+    area.innerHTML = '';
     area.appendChild(
         el('div', { class: 'q-answer' }, [
             el('div', { class: 'q-answer-label' }, [text('Your answer')]),

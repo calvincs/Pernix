@@ -685,6 +685,116 @@ def test_expand_tools_from_discovery_does_not_duplicate_existing(monkeypatch, tm
 
 
 # ---------------------------------------------------------------------------
+# _inject_created_tool — custom tool promotion after create_tool/update_tool
+# ---------------------------------------------------------------------------
+
+
+def test_inject_created_tool_adds_to_active(monkeypatch, tmp_path):
+    """A newly created custom tool must enter active_tools immediately so the
+    LLM schema is updated on the next round without a separate discover_tools call."""
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(
+        name="scan_home_devices",
+        func=lambda: "ok",
+        description="Scan home network",
+        parameters={"type": "object", "properties": {}},
+    )
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    from core.agent import _inject_created_tool
+
+    active: list[str] = []
+    _inject_created_tool("scan_home_devices", active)
+    assert active == ["scan_home_devices"]
+
+
+def test_inject_created_tool_skips_disabled(monkeypatch, tmp_path):
+    """A disabled tool must not be injected even if create_tool succeeded — matches
+    the same guard in _expand_tools_from_discovery."""
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(
+        name="my_tool",
+        func=lambda: "ok",
+        description="x",
+        parameters={"type": "object", "properties": {}},
+    )
+    reg.disable("my_tool")
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    from core.agent import _inject_created_tool
+
+    active: list[str] = []
+    _inject_created_tool("my_tool", active)
+    assert active == []
+
+
+def test_inject_created_tool_skips_unknown(monkeypatch, tmp_path):
+    """If create_tool failed silently and the tool isn't in the registry, nothing
+    is injected."""
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    from core.agent import _inject_created_tool
+
+    active: list[str] = []
+    _inject_created_tool("nonexistent_tool", active)
+    assert active == []
+
+
+def test_inject_created_tool_no_duplicate(monkeypatch, tmp_path):
+    """If the tool is somehow already in active_tools, no duplicate is inserted."""
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    reg.register(
+        name="scan_home_devices",
+        func=lambda: "ok",
+        description="x",
+        parameters={"type": "object", "properties": {}},
+    )
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    from core.agent import _inject_created_tool
+
+    active = ["scan_home_devices"]
+    _inject_created_tool("scan_home_devices", active)
+    assert active == ["scan_home_devices"]
+
+
+def test_inject_created_tool_maintains_sort_order(monkeypatch, tmp_path):
+    """Insertion must preserve sorted order so prompt-cache stability is maintained."""
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
+    reg = ToolRegistry()
+    for name in ("bash", "scan_home_devices", "recall"):
+        reg.register(
+            name=name,
+            func=lambda: "ok",
+            description="x",
+            parameters={"type": "object", "properties": {}},
+        )
+    monkeypatch.setattr("core.tools.registry._registry", reg)
+
+    from core.agent import _inject_created_tool
+
+    active = ["bash", "recall"]
+    _inject_created_tool("scan_home_devices", active)
+    assert active == sorted(active)
+    assert "scan_home_devices" in active
+
+
+# ---------------------------------------------------------------------------
 # Signal 2 threshold regression — tool cycle must increment repeat_count
 # ---------------------------------------------------------------------------
 

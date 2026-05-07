@@ -85,7 +85,7 @@ def test_clean_section_content_strips():
 
 
 def test_route_section_keywords_user_profile():
-    result = route_section_keywords("Who I Am", "My name is Calvin, I live in Seattle")
+    result = route_section_keywords("Who I Am", "My name is Alice, I live in Portland")
     assert result == "user.profile"
 
 

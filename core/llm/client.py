@@ -23,6 +23,22 @@ def _get_router() -> ProviderRouter:
     return _router
 
 
+async def reset_router() -> None:
+    """Close and discard the cached router so the next request rebuilds it.
+
+    Called after settings changes to llm_base_url or openrouter_base_url so
+    providers pick up the new URL without requiring a server restart.
+    """
+    global _router, _client
+    if _router is not None:
+        try:
+            await _router.close()
+        except Exception:
+            pass
+        _router = None
+    _client = None
+
+
 def _get_semaphore_stats() -> dict:
     """Get combined semaphore stats from the router (for diagnostics)."""
     return _get_router().semaphore_stats

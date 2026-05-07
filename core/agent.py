@@ -1362,6 +1362,12 @@ async def run_agent(
             if result.tool_name == "discover_tools" and not result.was_error:
                 _expand_tools_from_discovery(result.content, active_tools)
 
+            # Inject a newly created/updated custom tool directly into active_tools
+            # so it appears in the LLM schema on the next round without requiring
+            # a separate discover_tools call.
+            if result.tool_name in ("create_tool", "update_tool") and not result.was_error:
+                _inject_created_tool(item["parsed_args"].get("name", ""), active_tools)
+
         session.touch()
 
         # Post-round cancellation checkpoint
@@ -1541,6 +1547,20 @@ def _expand_tools_from_discovery(discovery_result: str, active_tools: list[str])
         tool_name = match.group(1)
         registry = get_registry()
         if registry.exists(tool_name) and not registry.is_disabled(tool_name) and tool_name not in active_tools:
+            bisect.insort(active_tools, tool_name)
+
+
+def _inject_created_tool(tool_name: str, active_tools: list[str]) -> None:
+    """Add a tool registered by create_tool/update_tool into the sorted active tools list.
+
+    Mirrors _expand_tools_from_discovery so a newly minted custom tool enters
+    the LLM schema on the very next round without a separate discover_tools call.
+    """
+    import bisect
+
+    registry = get_registry()
+    if tool_name and registry.exists(tool_name) and not registry.is_disabled(tool_name):
+        if tool_name not in active_tools:
             bisect.insort(active_tools, tool_name)
 
 

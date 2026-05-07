@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.3.0 — 2026-05-07
+
+- chore: exclude agent-created custom tools from formatters and git
+- fix: inject custom tool into active schema immediately after create_tool
+- feat: workspace Explorer column headers, folder metadata, and sort fix
+- feat: custom tool venv routing, requirements tracking, and release prep
+
 ## v2.2.0 — 2026-05-07
 
 - feat: make inline file paths in chat clickable to open Explorer

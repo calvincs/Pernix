@@ -36,6 +36,12 @@
 - If you lack a tool or capability, search for alternatives — the system is extensible.
 - Exhaust your options before telling the user something cannot be done.
 
+## Scheduling
+
+- When a user asks for a recurring, periodic, or automatically scheduled task, **always use the internal scheduler** (`schedule_job` or `schedule_workflow`) — never use system cron (`crontab`, `systemd timers`, etc.) unless the user explicitly asks for system-level cron.
+- Before creating any recurring job, confirm the schedule with the user: state the human-readable interpretation of the cron expression (e.g. "every day at 8:00 AM UTC, Monday–Friday") and wait for explicit approval before calling `schedule_job` or `schedule_workflow`.
+- If the user does explicitly ask for system cron, confirm before writing to crontab — state exactly what will be added and ask for approval.
+
 ## Web Access
 
 - **search_web**: Use first for broad research or finding URLs. Returns titles, URLs, and snippets.
@@ -62,6 +68,7 @@
 
 ## Python Environment
 
+- **Venv routing**: Core built-in tools run in the project venv (`.venv/` at repo root). Custom tools (created via `create_tool`, marked `source='custom'`) use packages from `data/workspace/.venv/`. Use `install_package` to add dependencies for custom tools; use `restore_tool_packages` to recover after the workspace venv is rebuilt or corrupted.
 - All file tools and `bash` run with CWD = workspace. Never prefix paths with `data/workspace/` — that's already where you are.
 - NEVER install Python packages to the system Python. Always use the workspace virtual environment at `data/workspace/.venv/`.
 - Use `install_package` (toolmaker) for Python dependencies — it targets the workspace venv automatically.

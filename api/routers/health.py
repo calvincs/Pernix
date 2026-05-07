@@ -21,7 +21,7 @@ async def health():
     return {
         "status": "healthy",
         "model": settings.llm_model or "(not set)",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "sessions_active": manager.active_count(),
         "maintenance": maint.get_stats(),
     }
@@ -67,7 +67,7 @@ async def health_detailed(request: Request):
     return {
         "status": "healthy",
         "model": settings.llm_model or "(not set)",
-        "version": "2.2.0",
+        "version": "2.3.0",
         "providers": provider_health,
         "sessions": {
             "active": manager.active_count(),
@@ -187,6 +187,16 @@ async def update_settings(body: dict):
         except (ValueError, TypeError):
             pass
     settings.save()
+
+    # If a provider URL changed, tear down the cached router so the next LLM
+    # request builds a fresh one using the updated URL — no restart required.
+    if {"llm_base_url", "openrouter_base_url"} & set(updated):
+        try:
+            from core.llm.client import reset_router
+
+            await reset_router()
+        except Exception:
+            pass  # Non-critical — restart will always recover
 
     # If openrouter_models changed, refresh the model registry so
     # GET /api/models returns the updated list immediately.

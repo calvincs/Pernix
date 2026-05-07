@@ -134,6 +134,13 @@ async def _execute_single(
                     latency_ms=0,
                 )
 
+    # Route custom tools to the workspace venv before execution.
+    # ensure_workspace_venv_on_path() is idempotent — no-op if already set.
+    if tool.source == "custom":
+        from core.tools.paths import ensure_workspace_venv_on_path
+
+        ensure_workspace_venv_on_path()
+
     timeout = tool.timeout
     start = time.monotonic()
     try:

@@ -145,7 +145,7 @@ function openQuestion(q) {
     const card = el('div', { class: 'modal-card' }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text('Agent Question')]),
-            el('button', { class: 'modal-close', onClick: () => dismissAndClose(q.id) }, [text('×')]),
+            el('button', { class: 'modal-close', onClick: () => closeQuestion() }, [text('×')]),
         ]),
         el('div', { class: 'modal-body' }, [
             // Source session

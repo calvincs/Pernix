@@ -52,11 +52,12 @@ exclude = '''
   | __pycache__
 )/
 '''
+force-exclude = 'core/tools/builtin/custom_.*\.py'
 
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-exclude = [".venv", "venv", "data", "static", "docs", "__pycache__"]
+exclude = [".venv", "venv", "data", "static", "docs", "__pycache__", "core/tools/builtin/custom_*.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]

@@ -500,20 +500,6 @@ function renderWorkspace() {
     const uploadBtn = el('button', { class: 'fp-icon-btn', title: 'Upload file' }, [text('\u2191')]);
     uploadBtn.addEventListener('click', triggerUpload);
 
-    const sortSelect = el('select', {
-        class: 'fp-ws-sort',
-        title: 'Sort files by\u2026',
-    }, [
-        el('option', { value: 'name', ...(_state.wsSortBy === 'name' ? { selected: '' } : {}) }, [text('Name')]),
-        el('option', { value: 'date', ...(_state.wsSortBy === 'date' ? { selected: '' } : {}) }, [text('Date')]),
-        el('option', { value: 'size', ...(_state.wsSortBy === 'size' ? { selected: '' } : {}) }, [text('Size')]),
-    ]);
-    sortSelect.addEventListener('change', () => {
-        _state.wsSortBy = sortSelect.value;
-        saveState();
-        renderWorkspace();
-    });
-
     const fileCount = _wsEntries.filter(e => e.type === 'file').length;
     const dirCount = _wsEntries.filter(e => e.type === 'dir').length;
     const totalSize = _wsEntries.reduce((sum, e) => sum + (e.size || 0), 0);
@@ -528,7 +514,7 @@ function renderWorkspace() {
             el('span', { class: 'fp-section-label' }, [text('Workspace')]),
             el('div', { class: 'fp-section-sub' }, [text(subtitle)]),
         ]),
-        el('div', { class: 'fp-section-actions' }, [sortSelect, refreshBtn, uploadBtn]),
+        el('div', { class: 'fp-section-actions' }, [refreshBtn, uploadBtn]),
     ]));
     container.appendChild(_buildTabDesc(
         'Your agent\'s working directory — browse, upload, and edit files.',
@@ -565,6 +551,8 @@ function renderWorkspace() {
         return;
     }
 
+    container.appendChild(_buildColumnHeaders());
+
     // Render entries
     const treeEl = el('div', { class: 'fp-tree' });
     _renderEntries(treeEl, _sortedWsEntries(_wsEntries, _state.wsSortBy));
@@ -577,6 +565,35 @@ function renderWorkspace() {
             searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
         });
     }
+}
+
+const _WS_SORT_INDICATOR = { name: '↑', size: '↓', date: '↓' };
+
+function _buildColumnHeaders() {
+    const sortBy = _state.wsSortBy;
+
+    function makeCol(label, key, colClass) {
+        const isActive = key && sortBy === key;
+        const indicator = isActive ? ` ${_WS_SORT_INDICATOR[key] || '↑'}` : '';
+        const classes = ['fp-col-h', colClass, key ? 'sortable' : '', isActive ? 'active' : ''].filter(Boolean).join(' ');
+        const span = el('span', { class: classes }, [text(label + indicator)]);
+        if (key) {
+            span.addEventListener('click', () => {
+                _state.wsSortBy = key;
+                saveState();
+                renderWorkspace();
+            });
+        }
+        return span;
+    }
+
+    return el('div', { class: 'fp-col-headers' }, [
+        el('span', { class: 'fp-col-h col-h-icon' }),
+        makeCol('Name', 'name', 'col-h-name'),
+        el('span', { class: 'fp-col-h col-h-count' }),
+        makeCol('Size', 'size', 'col-h-meta'),
+        makeCol('Modified', 'date', 'col-h-date'),
+    ]);
 }
 
 function _buildBreadcrumb() {
@@ -607,18 +624,20 @@ function _buildBreadcrumb() {
 }
 
 function _sortedWsEntries(entries, sortBy) {
-    // Directories always first (alpha by name) — match standard file-explorer behavior.
-    const dirs = entries.filter(e => e.type === 'dir')
-        .slice().sort((a, b) => a.name.localeCompare(b.name));
-    const files = entries.filter(e => e.type !== 'dir').slice();
+    const all = entries.slice();
     if (sortBy === 'date') {
-        files.sort((a, b) => (b.modified || 0) - (a.modified || 0));
+        // Sort all entries (dirs + files) by modified date, newest first.
+        all.sort((a, b) => (b.modified || 0) - (a.modified || 0));
     } else if (sortBy === 'size') {
-        files.sort((a, b) => (b.size || 0) - (a.size || 0));
+        // Sort all entries by size, largest first.
+        all.sort((a, b) => (b.size || 0) - (a.size || 0));
     } else {
-        files.sort((a, b) => a.name.localeCompare(b.name));
+        // Name: dirs first (alpha), then files (alpha) — standard file-explorer behavior.
+        const dirs  = all.filter(e => e.type === 'dir').sort((a, b) => a.name.localeCompare(b.name));
+        const files = all.filter(e => e.type !== 'dir').sort((a, b) => a.name.localeCompare(b.name));
+        return [...dirs, ...files];
     }
-    return [...dirs, ...files];
+    return all;
 }
 
 function _renderEntries(parent, entries) {
@@ -634,10 +653,13 @@ function _renderEntries(parent, entries) {
 
     for (const entry of entries) {
         if (entry.type === 'dir') {
+            const childLabel = `${entry.children} item${entry.children !== 1 ? 's' : ''}`;
             const item = el('div', { class: 'fp-tree-item dir' }, [
                 el('span', { class: 'fp-tree-icon' }, [text('\u25A0')]),
                 el('span', { class: 'fp-tree-name' }, [text(entry.name)]),
-                el('span', { class: 'fp-tree-meta' }, [text(`${entry.children} item${entry.children !== 1 ? 's' : ''}`)]),
+                el('span', { class: 'fp-tree-count' }, [text(childLabel)]),
+                el('span', { class: 'fp-tree-meta' }, [text(entry.size > 0 ? formatSize(entry.size) : '')]),
+                el('span', { class: 'fp-tree-date' }, [text(formatDate(entry.modified))]),
             ]);
             item.addEventListener('click', () => {
                 _wsSearchQuery = '';
@@ -650,6 +672,7 @@ function _renderEntries(parent, entries) {
             const item = el('div', { class: `fp-tree-item file${isActive ? ' active' : ''}` }, [
                 el('span', { class: 'fp-tree-icon' }, [text(isImage(entry.name) ? '\u25A3' : '\u25AB')]),
                 el('span', { class: 'fp-tree-name' }, [text(displayName)]),
+                el('span', { class: 'fp-tree-count' }),
                 el('span', { class: 'fp-tree-meta' }, [text(formatSize(entry.size))]),
                 el('span', { class: 'fp-tree-date' }, [text(formatDate(entry.modified))]),
             ]);
