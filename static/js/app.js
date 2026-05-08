@@ -220,6 +220,7 @@ async function selectSession(sid) {
         _lastSeq = 0;
     }
 
+    await loadPendingQuestions(sid);
     connectSSE(sid, handleEvent);
 
 }
@@ -228,6 +229,7 @@ async function loadMessages(sid) {
     const inner = _messagesInner();
     const scroll = _messagesScroll();
     clear(inner);
+    _questionBubbles.clear();
     try {
         const data = await get(`/api/sessions/${sid}`);
         const messages = data.messages || [];
@@ -295,6 +297,9 @@ async function loadMessages(sid) {
             } else if (m.role === 'user' && (m.content || '').startsWith('[User answered your question]')) {
                 closeToolGroup();
                 renderAnsweredQuestion(m.content);
+            } else if (m.role === 'user' && (m.content || '').startsWith('[User dismissed your question')) {
+                closeToolGroup();
+                renderDismissedQuestion(m.content);
             } else if (m.role === 'notice') {
                 // Persisted notices (cancellations, reflect-skipped, queue-dropped, etc.)
                 // render with system-message styling so they're visible but unobtrusive,
@@ -1315,6 +1320,7 @@ function appendMessage(role, content) {
  * The bubble can later be updated with an answer or marked dismissed.
  */
 function appendQuestionBubble(questionId, questionText, context) {
+    if (_questionBubbles.has(questionId)) return _questionBubbles.get(questionId);
     const inner = _messagesInner();
     const scroll = _messagesScroll();
     const emptyEl = inner.querySelector('.empty-state');
@@ -1377,12 +1383,13 @@ function markQuestionAnswered(questionId, answer) {
     );
 }
 
-/** Update a question bubble to show it was dismissed. */
+/** Update a question bubble to show it was dismissed (clears the inline form). */
 function markQuestionDismissed(questionId) {
     const bubble = _questionBubbles.get(questionId);
     if (!bubble) return;
     const area = bubble.querySelector('.q-answer-area');
     if (!area || area.querySelector('.q-dismissed')) return;
+    area.innerHTML = '';
     area.appendChild(el('div', { class: 'q-dismissed' }, [text('Dismissed')]));
 }
 
@@ -1414,6 +1421,45 @@ function renderAnsweredQuestion(content) {
 
     inner.appendChild(msgEl);
     scroll.scrollTop = scroll.scrollHeight;
+}
+
+/**
+ * Render a persisted dismissed-question message (from loadMessages history).
+ * Content format: "[User dismissed your question without answering]\nQ: ..."
+ */
+function renderDismissedQuestion(content) {
+    const inner = _messagesInner();
+    const scroll = _messagesScroll();
+
+    const lines = content.split('\n');
+    let questionText = '';
+    for (const line of lines) {
+        if (line.startsWith('Q: ')) { questionText = line.slice(3); break; }
+    }
+
+    const msgEl = el('div', { class: 'message question-bubble' }, [
+        el('div', { class: 'q-label' }, [text('Agent Question')]),
+        el('div', { class: 'q-text' }, [text(questionText || content)]),
+        el('div', { class: 'q-answer-area' }, [
+            el('div', { class: 'q-dismissed' }, [text('Dismissed')]),
+        ]),
+    ]);
+
+    inner.appendChild(msgEl);
+    scroll.scrollTop = scroll.scrollHeight;
+}
+
+/**
+ * Fetch pending questions for the given session and render question bubbles.
+ * Called on session load so bubbles survive page refresh.
+ */
+async function loadPendingQuestions(sid) {
+    try {
+        const data = await get('/api/questions');
+        for (const q of (data.questions || []).filter(q => q.session_id === sid)) {
+            appendQuestionBubble(q.id, q.question, q.context || '');
+        }
+    } catch { /* non-fatal — bell panel will still show the question */ }
 }
 
 /** Render a compact command-result card. rows = [{key, value, badge?}], customBody = optional DOM node */

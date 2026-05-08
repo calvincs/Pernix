@@ -1,0 +1,175 @@
+# Extensions
+
+Pernix loads its non-core capability through an **extension** layer. Each extension is a Python module under `core/extensions/`. Extensions register tools into the agent's schema conditionally — based on settings, environment, and dependencies — so a fresh install with all defaults exposes a different surface than one with `browser_enabled=true` and a `TAVILY_API_KEY` configured.
+
+This page is the inventory: what extensions exist, what each registers, and how each is gated.
+
+For per-feature usage, see the relevant guide. For tool authoring, see [../authoring/custom-tools.md](../authoring/custom-tools.md).
+
+---
+
+## How extensions register
+
+Each extension exposes a `register()` function called at server startup. `register()` reads settings + environment + available imports and registers zero or more tools into the global tool registry. Tools registered here behave the same as builtin tools — same safety levels, same execution path, same approval gating.
+
+If a setting that gates an extension changes (e.g., turning `browser_enabled` on), Pernix needs a restart to pick up the change. The registry is built once per process.
+
+---
+
+## The nine extensions
+
+### `web`
+
+`core/extensions/web/__init__.py`
+
+| Tool | Safety | Gated on |
+|---|---|---|
+| `search_web` | dangerous | `web_search_enabled` (default `true`) AND `TAVILY_API_KEY` set |
+| `browse_web` | dangerous | `browser_enabled` (default `false`) AND Playwright/Chromium installed |
+| `summarize_webpage` | safe | always (uses trafilatura) |
+| `http_get` | safe | always; max bytes capped by `max_fetch_size` (default 100 KB) |
+
+In network mode, `http_get` and `browse_web` block RFC-1918 private IPs and loopback to mitigate SSRF.
+
+### `orchestration`
+
+`core/extensions/orchestration/__init__.py`
+
+Always enabled. The worker model lives here.
+
+| Tool | Safety | What |
+|---|---|---|
+| `spawn_worker` | safe | Create a parallel sub-agent on a chosen model |
+| `check_workers` | safe | List workers and their states |
+| `get_worker_result` | safe | Fetch a finished worker's final response |
+| `message_worker` | safe | Inject a message into a running worker mid-turn |
+| `pause_worker` / `resume_worker` | safe | Park/unpause at next round boundary |
+| `await_workers` | safe | Block parent until specified workers settle |
+
+See [../guides/workers.md](../guides/workers.md).
+
+### `planning`
+
+`core/extensions/planning/__init__.py`
+
+Lightweight feature-tracker for spec-driven development. Always enabled.
+
+| Tool | Safety | What |
+|---|---|---|
+| `add_feature` | safe | Add a feature/task to the active plan |
+| `mark_feature_passed` | safe | Mark complete |
+| `list_features` | safe | Show outstanding plan items |
+
+`plan_review_timeout` (default 120 s) limits how long the planning extension waits for user review before timing out.
+
+### `scheduling`
+
+`core/extensions/scheduling/__init__.py`
+
+Always enabled. Cron job lifecycle.
+
+| Tool | Safety | What |
+|---|---|---|
+| `schedule_job` | safe | Create a recurring session |
+| `update_scheduled_job` | safe | Modify schedule or instructions |
+| `pause_job` / `resume_job` | safe | Toggle |
+| `list_scheduled_jobs` | safe | List all jobs |
+
+Cron-spawned sessions are flagged unattended in `_is_unattended_session()` (`core/tools/executor.py`) and skip the dangerous-tool gate. Workers spawned from such sessions inherit that. See [../guides/scheduling-cron.md](../guides/scheduling-cron.md).
+
+### `session_tools`
+
+`core/extensions/session_tools/__init__.py`
+
+Always enabled. Lets the agent introspect prior sessions.
+
+| Tool | Safety | What |
+|---|---|---|
+| `list_recent_sessions` | safe | List sessions from a window of dates |
+| `read_session_summary` | safe | Read the auto-titled summary + key points of a prior session |
+
+Useful for "what was I working on yesterday?" memory-style queries.
+
+### `skillmaker`
+
+`core/extensions/skillmaker/__init__.py`
+
+Always enabled. Skill authoring without leaving the chat.
+
+| Tool | Safety | What |
+|---|---|---|
+| `create_skill` | safe | Author a new SKILL.md from inside a chat |
+| `update_skill` | safe | Modify an existing skill |
+| `add_skill_script` | safe | Drop a script into a skill's `scripts/` |
+| `add_skill_reference` | safe | Drop a doc into `references/` |
+| `remove_skill_script` | safe | Delete a script |
+
+`delete_skill` lives in builtin tools (`core/tools/builtin/skill_tools.py`) and is **dangerous**.
+
+See [../authoring/writing-skills.md](../authoring/writing-skills.md).
+
+### `toolmaker`
+
+`core/extensions/toolmaker/__init__.py`
+
+Always enabled. Custom Python tool authoring.
+
+| Tool | Safety | What |
+|---|---|---|
+| `create_tool` | safe | Author a new tool: name, JSON schema, Python body |
+| `update_tool` | safe | Modify an existing custom tool |
+| `list_custom_tools` | safe | List user-authored vs builtin tools |
+| `install_package` | caution | pip install into `data/workspace/.venv/` |
+| `restore_tool_packages` | caution | Reinstall after a venv wipe |
+
+Custom tools install packages into the workspace venv (`data/workspace/.venv/`), kept separate from the project venv. See [../authoring/custom-tools.md](../authoring/custom-tools.md).
+
+### `evaluation`
+
+`core/extensions/evaluation/__init__.py`
+
+Mostly internal. Auto-evaluates outcomes when `eval_auto = true` (default `false`). Settings:
+
+- `eval_auto` — enable automatic evaluation
+- `eval_threshold` (default 0.7) — pass threshold
+- `eval_max_retries` (default 2) — eval-driven retries per turn
+- `eval_browser_verify` (default `false`) — use a headless browser to verify outcomes (useful for frontend changes)
+
+Most users leave this off. Reflect (the always-on quality gate) covers most of the value.
+
+### `model_mgmt`
+
+`core/extensions/model_mgmt/__init__.py`
+
+Internal. Provides tools the agent uses to introspect and switch models. Not user-facing in the typical sense, though `list_available_models` may surface in chats.
+
+---
+
+## Gating summary table
+
+| Extension | Default state | Settings that gate it |
+|---|---|---|
+| web — `search_web` | available only with key | `web_search_enabled`, `TAVILY_API_KEY` |
+| web — `browse_web` | off | `browser_enabled`, Playwright/Chromium |
+| web — `http_get`, `summarize_webpage` | on | none |
+| orchestration | on | none |
+| planning | on | none |
+| scheduling | on | none |
+| session_tools | on | none |
+| skillmaker | on | none |
+| toolmaker | on | none |
+| evaluation | mostly off | `eval_auto` |
+| model_mgmt | on | none |
+
+The total number of registered tools varies by configuration. With a default install (no Tavily, no browser), the web extension contributes only `http_get` and `summarize_webpage`; with a fully-loaded install, it adds `search_web` and `browse_web`.
+
+---
+
+## Adding a new extension
+
+If the existing extensions don't cover what you need, two options:
+
+1. **Custom tool** via `toolmaker` — for one-off tools, no Pernix code change. See [../authoring/custom-tools.md](../authoring/custom-tools.md).
+2. **New extension module** — for a coherent group of related tools. Drop a directory under `core/extensions/yourmodule/` with an `__init__.py` exposing `register()`. Pernix discovers it on next start.
+
+The second path is appropriate for serious capability extensions you'd want to maintain or share. Use the existing extensions as patterns — `core/extensions/scheduling/` is a clean example of "tools + persistent state on disk + REST endpoints."

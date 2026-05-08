@@ -60,11 +60,11 @@ Always use the workspace virtualenv at `data/workspace/.venv/`. Never install pa
 
 **You can and should edit RULES.md** to add project-specific constraints or workflows. For example: "always run tests before committing," "use this company's internal API for X," or "never delete files without asking."
 
-### `data/agent/AGENTS.md` — Project Protocols
+### `data/agent/SESSIONS.md` — Deployment Context
 
-AGENTS.md holds project-specific procedures and protocols the agent should follow — for example, the exact sequence of tool calls required to create a workflow safely, or how to handle a specific multi-step process. The default content covers built-in workflows; you can add your own protocols for repeatable tasks.
+SESSIONS.md holds deployment-specific context the agent should know across sessions — your timezone, a few facts about your environment, anything that's true *for you* but not obvious to a fresh agent. It's also injected into every session's system prompt alongside SOUL.md and RULES.md.
 
-The file is also loaded into every session's system prompt, alongside SOUL.md and RULES.md.
+Older notes may reference a file called `AGENTS.md` or `INSTRUCTIONS.md` — those are legacy or fallback names. The current canonical filename is `SESSIONS.md`.
 
 ---
 
@@ -80,9 +80,9 @@ Returns a list of results (titles, URLs, snippets) for a query. Best for:
 - Getting a list of relevant links to investigate further
 - Quick factual lookups
 
-**Primary provider:** [Tavily](https://tavily.com) — requires `TAVILY_API_KEY` in `.env`. Tavily returns an AI summary plus structured results and tends to be more accurate than raw web search.
+**Provider:** [Tavily](https://tavily.com) — requires `TAVILY_API_KEY` in `.env`. Tavily returns an AI summary plus structured results.
 
-**Fallback:** DuckDuckGo — no API key required. Activates automatically if Tavily is not configured or hits a usage limit. Rate-limited at high volume.
+`search_web` is **gated on the Tavily key** as of recent versions — without a key, the tool returns a setup hint rather than degrading silently. There is no longer an automatic free-tier fallback.
 
 ### `http_get` — Direct Fetch (~1–2 seconds)
 
@@ -112,15 +112,14 @@ Best for:
 
 #### Enabling Playwright
 
-Playwright is an optional dependency. Install it separately:
+Playwright and trafilatura are already in `requirements.txt` and installed by the standard `pip install -r requirements.txt`. You only need to download the browser binary once:
 
 ```bash
 source .venv/bin/activate
-pip install playwright trafilatura
 playwright install chromium
 ```
 
-Then enable in Settings: `browser_enabled = true`.
+Then enable in Settings: `browser_enabled = true`. Without that setting, `browse_web` is not registered as a tool.
 
 ---
 

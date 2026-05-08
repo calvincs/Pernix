@@ -498,3 +498,119 @@ def test_file_read_small_file_returns_verbatim(tmp_path, monkeypatch):
     f.write_text("tiny\ncontent\n")
     result = file_read("s.txt")
     assert result == "tiny\ncontent\n"
+
+
+# ---------------------------------------------------------------------------
+# approve_dangerous_tool — ask_user detection via tool_calls column
+# ---------------------------------------------------------------------------
+# conftest.py isolate_data patches settings.db_path + runs init_db() for each
+# test, so we just insert rows directly via db.models helpers or raw SQL.
+
+
+def test_approve_dangerous_tool_finds_ask_user_in_tool_calls_col(tmp_path, monkeypatch):
+    """approve_dangerous_tool must succeed when ask_user appears in the tool_calls
+    column — the primary storage path for Pernix tool-use blocks.
+
+    Regression: approve_dangerous_tool only searched m['content'], which is plain
+    text in Pernix, so found_ask_user was always False and every approval attempt
+    failed, causing the agent to loop calling ask_user repeatedly.
+    """
+    import json
+
+    import db.models as _db
+    from db.database import connect_sessions
+
+    sid = _db.create_session(title="test")
+
+    # Insert an assistant message that has ask_user in the tool_calls column —
+    # exactly how Pernix stores tool-use blocks.
+    tc_json = json.dumps([{"id": "call_abc", "name": "ask_user", "arguments": '{"question": "ok?"}'}])
+    with connect_sessions() as conn:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
+            (sid, tc_json),
+        )
+
+    class _FakeSession:
+        _approved_dangerous_tools: dict = {}
+
+    monkeypatch.setattr(
+        "sessions.manager.get_manager", lambda: type("M", (), {"get": lambda self, s: _FakeSession()})()
+    )
+    monkeypatch.setattr("core.tools.builtin.dialog_tools._approvals_path", lambda: tmp_path / "approvals.json")
+
+    from core.tools.builtin.dialog_tools import approve_dangerous_tool
+
+    result = approve_dangerous_tool(
+        tool_name="search_web",
+        scope="search for Rockford IL news",
+        _context={"session_id": sid},
+    )
+    assert "approved" in result.lower(), f"Expected approval, got: {result}"
+    assert "Error" not in result
+
+
+def test_approve_dangerous_tool_finds_ask_user_in_content_fallback(tmp_path, monkeypatch):
+    """approve_dangerous_tool also recognises ask_user embedded in the content
+    field (legacy / alternative message format)."""
+    import json
+
+    import db.models as _db
+    from db.database import connect_sessions
+
+    sid = _db.create_session(title="test")
+
+    content_json = json.dumps([{"type": "tool_use", "name": "ask_user", "input": {"question": "ok?"}}])
+    with connect_sessions() as conn:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)",
+            (sid, content_json),
+        )
+
+    class _FakeSession:
+        _approved_dangerous_tools: dict = {}
+
+    monkeypatch.setattr(
+        "sessions.manager.get_manager", lambda: type("M", (), {"get": lambda self, s: _FakeSession()})()
+    )
+    monkeypatch.setattr("core.tools.builtin.dialog_tools._approvals_path", lambda: tmp_path / "approvals.json")
+
+    from core.tools.builtin.dialog_tools import approve_dangerous_tool
+
+    result = approve_dangerous_tool(
+        tool_name="search_web",
+        scope="search for Rockford IL news",
+        _context={"session_id": sid},
+    )
+    assert "approved" in result.lower(), f"Expected approval, got: {result}"
+    assert "Error" not in result
+
+
+def test_approve_dangerous_tool_fails_without_ask_user(tmp_path, monkeypatch):
+    """approve_dangerous_tool must reject when ask_user was never called."""
+    import json
+
+    import db.models as _db
+    from db.database import connect_sessions
+
+    sid = _db.create_session(title="test")
+
+    # Assistant message with bash only — no ask_user
+    tc_json = json.dumps([{"id": "call_xyz", "name": "bash", "arguments": '{"command": "ls"}'}])
+    with connect_sessions() as conn:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
+            (sid, tc_json),
+        )
+
+    monkeypatch.setattr("core.tools.builtin.dialog_tools._approvals_path", lambda: tmp_path / "approvals.json")
+
+    from core.tools.builtin.dialog_tools import approve_dangerous_tool
+
+    result = approve_dangerous_tool(
+        tool_name="search_web",
+        scope="search for news",
+        _context={"session_id": sid},
+    )
+    assert "Error" in result
+    assert "ask_user" in result

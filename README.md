@@ -2,7 +2,7 @@
 
 **A self-hosted AI agent server with persistent memory, tool execution, and a built-in web UI — runs locally with Ollama or in the cloud via OpenRouter.**
 
-> ⚠️ **Use at your own risk. This is NOT production software.** Pernix executes shell commands and writes files on the host machine. Run it in an environment you are comfortable having an AI agent modify — a dedicated VM or container is strongly recommended. See [docs/SECURITY.md](docs/SECURITY.md) for the full security model.
+> ⚠️ **Use at your own risk. This is NOT production software.** Pernix executes shell commands and writes files on the host machine. Run it in an environment you are comfortable having an AI agent modify — a dedicated VM or container is strongly recommended. See [docs/security.md](docs/security.md) for the full security model.
 
 ---
 
@@ -32,7 +32,7 @@ It is **not** a polished commercial product. It is a working personal tool with 
 
 ### Agent Capabilities
 - **Persistent memory** — the agent remembers facts, decisions, and lessons across sessions using a full-text-searchable collection of markdown files
-- **Web search** — Tavily (with AI summaries) or DuckDuckGo as a no-key fallback
+- **Web search** — Tavily (with AI summaries, requires API key at tavily.com)
 - **Headless browser** — Playwright renders JavaScript-heavy pages, SPAs, and dynamic content
 - **Workspace** — sandboxed file area the agent can read, write, and organize
 - **Worker orchestration** — spawn parallel sub-agents running on different models for complex multi-part work
@@ -103,7 +103,7 @@ Good options:
 - Any Python 3.11+ container
 - A separate physical machine or SBC
 
-See [INSTALLATION.md](INSTALLATION.md#isolated-deployment-recommended) for details.
+See [docs/installation.md](docs/installation.md#isolated-deployment-recommended) for details.
 
 ---
 
@@ -161,7 +161,7 @@ Pernix's behavior beyond raw LLM responses is shaped by three things:
 
 **RULES.md** (`data/agent/RULES.md`) defines how Pernix should act — which tools to prefer, how to handle failures, when to delegate to workers. Edit it to add project-specific constraints or workflows.
 
-See [docs/SKILLS.md](docs/SKILLS.md) for the full guide including how to write your own skills.
+See [docs/authoring/writing-skills.md](docs/authoring/writing-skills.md) for the full guide including how to write your own skills.
 
 ---
 
@@ -174,9 +174,9 @@ To access from your phone or another machine on your LAN:
 1. Enable `network_enabled` in Settings
 2. Restart the server
 3. Run `python run.py --qr` — it prints a QR code link you can scan on your phone
-4. For a smooth mobile experience (no certificate warnings), set up trusted TLS with [mkcert](docs/MKCERT_SETUP.md)
+4. For a smooth mobile experience (no certificate warnings), set up trusted TLS with [mkcert](docs/deployment/mkcert.md)
 
-Full details on authentication, TLS certificates, SSRF protections, and safe configuration: **[docs/SECURITY.md](docs/SECURITY.md)**
+Full details on authentication, TLS certificates, SSRF protections, and safe configuration: **[docs/security.md](docs/security.md)**
 
 ---
 
@@ -186,10 +186,10 @@ Pernix is built to be tinkered with. Some things to try once you have it running
 
 - **Edit `data/agent/SOUL.md`** to change how the agent talks to you. Want it more terse? More verbose? More opinionated about coding style? Just write that in.
 - **Edit `data/agent/RULES.md`** to add operational guardrails specific to your workflow — for example, "always run tests before committing," or "never edit files in `/etc`."
-- **Write a skill** for any repetitive task — calling an internal API, formatting output a particular way, walking through a multi-step procedure. See [docs/SKILLS.md](docs/SKILLS.md) for the format. Skills are just markdown files; the agent discovers them automatically on the next turn.
+- **Write a skill** for any repetitive task — calling an internal API, formatting output a particular way, walking through a multi-step procedure. See [docs/authoring/writing-skills.md](docs/authoring/writing-skills.md) for the format. Skills are just markdown files; the agent discovers them automatically on the next turn.
 - **Browse the API at [`/docs`](http://localhost:8090/docs)** — every endpoint is documented and try-it-able right from the browser. This is the fastest way to learn the system.
-- **Understand how it works.** Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — a guided walkthrough of Sessions, Scout, the agent loop, Reflect, Snooze, and the 9-state session state machine, written from concepts down to implementation.
-- **Read the code.** It's a single Python codebase that fits in your head. The session state machine, agent loop, scout phase, compaction, and worker orchestration all live in `core/` and `sessions/`. Read [docs/workflow.md](docs/workflow.md) for the formal spec with file:line citations once you've got the concepts.
+- **Understand how it works.** Start with [docs/architecture.md](docs/architecture.md) — a guided walkthrough of Sessions, Scout, the agent loop, Reflect, Snooze, and the 10-state session state machine, written from concepts down to implementation.
+- **Read the code.** It's a single Python codebase that fits in your head. The session state machine, agent loop, scout phase, compaction, and worker orchestration all live in `core/` and `sessions/`. Read [docs/internals/state-machine.md](docs/internals/state-machine.md) for the formal spec with file:line citations once you've got the concepts.
 - **Schedule recurring agents** for jobs you do daily — morning news brief, weekly summary of activity logs, watchdog scripts. Pernix has a built-in cron scheduler.
 - **Connect from your phone** — enable network mode, set up TLS with mkcert, scan the QR code, and you have a personal AI assistant in your pocket.
 
@@ -207,16 +207,21 @@ This is a power tool. Treat it like one.
 
 ## Documentation
 
-| File | Contents |
+The complete documentation lives in **[docs/](docs/)**. Start at **[docs/README.md](docs/README.md)** — it's organized by what you're trying to do.
+
+Most-visited entry points:
+
+| Doc | When to read |
 |---|---|
-| [INSTALLATION.md](INSTALLATION.md) | Full setup, environment variables, optional dependencies, startup flags, isolated deployment |
-| [CONFIGURATION.md](CONFIGURATION.md) | Every setting explained with defaults and examples |
-| [docs/SECURITY.md](docs/SECURITY.md) | Security model, network mode, TLS, auth tokens, recommendations |
-| [docs/SKILLS.md](docs/SKILLS.md) | Skills system, SOUL.md, RULES.md, web capabilities, writing a skill |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How Pernix works: Sessions, Scout, agent loop, Reflect, Snooze, the 9-state state machine — concepts first, then details |
-| [docs/API.md](docs/API.md) | Complete REST API reference and SSE event catalog (live Swagger UI also available at `/docs` when the server is running) |
-| [docs/MKCERT_SETUP.md](docs/MKCERT_SETUP.md) | Trusted TLS certificates for LAN access |
-| [docs/workflow.md](docs/workflow.md) | Formal architecture spec with file:line citations and complete state transition graph |
+| [docs/quickstart.md](docs/quickstart.md) | Five-minute path from zero to first chat |
+| [docs/installation.md](docs/installation.md) | Full setup, environment variables, optional dependencies, isolated deployment |
+| [docs/configuration.md](docs/configuration.md) | Every setting explained with defaults |
+| [docs/security.md](docs/security.md) | Security model, network mode, TLS, auth tokens |
+| [docs/architecture.md](docs/architecture.md) | How Pernix works: sessions, scout, agent loop, reflect, snooze |
+| [docs/api.md](docs/api.md) | REST API + SSE event reference (live Swagger at `/docs` when running) |
+| [docs/authoring/writing-skills.md](docs/authoring/writing-skills.md) | Skills system, SKILL.md schema, writing your own |
+| [docs/guides/recipes.md](docs/guides/recipes.md) | Runnable end-to-end examples |
+| [docs/faq.md](docs/faq.md) | Common gotchas |
 | [LICENSE](LICENSE) | MIT license |
 
 ---

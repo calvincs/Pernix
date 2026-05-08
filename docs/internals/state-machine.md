@@ -91,7 +91,7 @@ Enforced in `Manager.prompt()` (`sessions/manager.py`):
 - **SCOUTING** / **PROCESSING** / **COMPACTING** / **PAUSE_REQUESTED** / **PAUSED** / **FINALIZING** → queue on `pending_messages`.
 - **CANCELLING** → reject with `session.prompt_rejected{reason:"cancelling"}`.
 
-### 0.7 Reaper rules (9-state)
+### 0.7 Reaper rules (10-state)
 
 Sessions/manager.py `reap_idle_sessions()`:
 
@@ -106,10 +106,11 @@ Sessions/manager.py `reap_idle_sessions()`:
 | CANCELLING | Force IDLE_READY (cancel-timeout) at 30s |
 | FINALIZING | Force IDLE_READY (finalize-error) at 120s |
 | AWAITING_USER | Never reap for inactivity. Force IDLE_READY only if the question row is gone and `idle > max_idle` |
+| AWAITING_WORKERS | Resume or force IDLE_READY when watched workers settle, or after 3600s idle as a safety timeout |
 
 ### 0.8 API / observability
 
-- `GET /api/sessions/{id}/status` — now includes `state` (new 9-value enum), `compat_status` (legacy 3-value for CLI compat), `turn_id`, `retry_index`, `termination_reason`.
+- `GET /api/sessions/{id}/status` — now includes `state` (new 10-value enum, defined in `sessions/state_v2.py:SessionStateV2`), `compat_status` (legacy 3-value for CLI compat), `turn_id`, `retry_index`, `termination_reason`.
 - `GET /api/sessions/{id}/state-log?since_id=<id>&limit=<n>` — paginated replay of the transition log.
 - `POST /api/sessions/{id}/workers/{wid}/pause` / `/resume` — HTTP wrappers over the state-machine-aware `pause_worker` / `resume_worker` tools.
 - Frontend timeline drawer (`static/js/app.js:_toggleTimelineDrawer`) reads from `/state-log` and subscribes to `session.state_changed` for live updates.
@@ -617,6 +618,5 @@ Every claim above cites the file and line range it was drawn from. When these dr
 2. `sessions/manager.py` — the turn driver, including the retry loop and post-hooks gating
 3. `core/agent.py` — the tool-round loop, cancel/ask_user/pause interactions
 4. `core/extensions/orchestration/__init__.py` — worker spawn, check, await, get_worker_result
-5. `docs/spec/SPEC_v2.md` — dated amendments that supersede older behavior in the above
 
 If you find a mismatch between this doc and the code, the code wins — please update this doc in the same change.

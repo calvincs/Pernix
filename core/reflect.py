@@ -20,9 +20,9 @@ logger = logging.getLogger("pernix.reflect")
 
 REFLECT_PROMPT = """You are a Reflect Agent. You review completed agent sessions to verify the user's request was fulfilled.
 
-Given: the user's original message, the agent's final response, any files created, scout's deliverables plan (if any), and a tool execution summary with per-tool call counts, failures, and the last few error messages.
+Given: the user's original message, the full transcript of the current attempt (from scout's start to the agent's final response — every tool call, tool result, and assistant message in order), workspace files created, scout's deliverables plan (if any), and a tool execution summary with per-tool call counts, failures, and the last few error messages.
 
-Output a JSON object:
+Output a JSON object — emit fields in THIS order so the verdict is committed before any narrative could bias it:
 - verdict: "pass" | "retry" | "escalate"
   - pass: task was completed satisfactorily
   - retry: task was NOT completed, and another attempt could succeed
@@ -36,6 +36,17 @@ Output a JSON object:
 - what_failed: If retry — tools/approaches that failed or wasted time (avoid). Empty string if pass.
 - strategy: If retry — concrete instruction for the retry attempt. Must propose a DIFFERENT approach if the same tools failed repeatedly. Empty string if pass.
 - missing: If escalate — what specific information or clarification is needed from the user. Empty string otherwise.
+- turn_digest: REQUIRED when verdict is "retry" or "escalate"; optional on "pass" (you may omit the key entirely). When emitted, structure exactly as:
+    {
+      "scout_plan_summary": "1-2 sentences capturing what scout planned",
+      "tool_calls": [
+        {"tool": "<name>", "args": "<short args summary>", "outcome": "success"|"error"|"partial", "result_excerpt": "<verbatim text from the tool result, NOT paraphrased — max 2000 chars per call>"}
+      ],
+      "agent_final_response": "<verbatim final assistant message, may be truncated to ~1500 chars>",
+      "key_findings": ["bullet 1", "bullet 2"],
+      "what_was_tried": "1-3 sentences on the approach taken"
+    }
+  Include only tool calls that produced evidence informing your verdict — skip pure bookkeeping calls (memory writes, task admin, switch_*, approve_*). On retry, the next scout will read this digest as the carry-forward record of what was tried. result_excerpt MUST be verbatim text from the actual tool result so the next scout sees real evidence, not your interpretation. If a result was very long, take the most relevant ~2000 chars and note "[+N chars truncated]" at the end.
 
 RULES:
 - Be strict: if the user asked for a file/deliverable and none was created, that's a retry.
@@ -47,6 +58,7 @@ RULES:
 - TRUST THE PLAN: If the evidence includes ACTIVE SKILL / PLANNED APPROACH / TOOL RATIONALE, treat those as the contract the agent was given. If the agent followed the planned approach using the planned tools, do NOT call hallucination just because the tools look "generic" (e.g. browse_web). Skills routinely mandate generic tools — that's expected, not a failure. Only flag hallucination when the agent invented data with no supporting tool calls AND the plan called for a tool that wasn't run.
 - Use the TOOL EXECUTION SUMMARY to identify failure patterns. If a tool failed 2+ times with the same error, the retry strategy MUST suggest a different tool or approach.
 - TOOL CALL FACTS ARE NOT NEGOTIABLE. The TOOL EXECUTION SUMMARY is observed truth, not interpretation. Before claiming the agent did NOT use a tool, verify: if the tool name appears in the summary with calls > 0, the agent DID call it. Do NOT write "agent did not call X" or "agent failed to use X" or "X was skipped" if X.calls > 0 in the summary. If you believe the call was *ineffective* (tool ran but didn't produce the expected result), say that — but do not deny the call happened. Hallucinating absence of a call that the summary records as present is a verifier-side correctness failure.
+- EVIDENCE PRIMACY. The transcript's tool RESULTS are ground truth. When a tool result body in the transcript supports or contradicts a claim in the agent's final response, that body outranks your priors about the topic. If the agent fetched URL X and the transcript shows the fetch returned real content, do NOT call hallucination just because your training data doesn't recognize X. Verify against what the tools actually returned, not what you "know" about the topic. The verifier-side failure mode this prevents: dismissing a fact as fabricated when the session contains real evidence for it.
 - TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent, workflow result) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
 - WORKFLOW RUNS: If the WORKFLOW RUNS section is present, treat its `status` field as authoritative for whether the named workflow finished. status='running' or status='failed' both mean the workflow did NOT produce its terminal output, regardless of how many intermediate scratch files were written to the workspace — those are inputs to later steps, not deliverables. status='partial'/'failed'/'running' for a user-named workflow → retry (or escalate if the same failure has already occurred). status='complete' AND the terminal-step output_file is listed under WORKSPACE FILES → pass.
 - CEILING LOOP → ESCALATE: If TERMINATION HISTORY shows the same blocking reason (e.g. round_ceiling, budget_exhausted, compaction_failed) on the current turn AND at least one prior turn, the agent is hitting the same hard wall — another retry will hit it again. Verdict MUST be 'escalate'. In `missing`, name the wall: e.g. 'round_ceiling on consecutive attempts; agent cannot finish within max_tool_rounds — split the task or raise the limit.'
@@ -115,11 +127,30 @@ class ReflectResult:
     deliverables: list = field(default_factory=list)  # list[Deliverable]
     artifact_id: str = ""  # set by post_mortems writer
 
+    # Turn digest — structured record of what happened during the attempt.
+    # Populated when verdict in {"retry","escalate"} so the next scout can
+    # plan around what was tried; optional on "pass" (controlled by
+    # settings.reflect_emit_digest_on_pass). Empty dict when absent.
+    # Schema documented in REFLECT_PROMPT.
+    turn_digest: dict = field(default_factory=dict)
 
-def build_lessons_context(
+
+def build_retry_context(
     result: ReflectResult, attempt: int, max_attempts: int, tool_summary: dict | None = None
 ) -> str:
-    """Build a lessons-learned string for injection into the next scout/agent cycle."""
+    """Build the retry-context string injected into the next scout invocation.
+
+    On retry, scout-N reads this block to plan around what the prior attempt
+    tried. Includes:
+
+    - Reflect's verdict reasoning, diagnostic, what_worked/what_failed, strategy.
+    - The prior attempt's turn_digest (when reflect emitted one) — gives scout
+      the structured record of tool calls, args, outcomes, and verbatim
+      result excerpts so it doesn't have to interpret a free-form summary.
+    - A list of tools already used.
+    - A context-carryover note so the agent doesn't re-read files / re-run
+      searches that are already in conversation history.
+    """
     parts = [f"[REFLECT — Retry #{attempt} of {max_attempts}]"]
     parts.append(f"Previous attempt did not complete the task: {result.reasoning}")
     if result.diagnostic:
@@ -130,6 +161,14 @@ def build_lessons_context(
         parts.append(f"What failed (DO NOT repeat): {result.what_failed}")
     if result.strategy:
         parts.append(f"Strategy for this attempt: {result.strategy}")
+
+    # Prior turn_digest — the structured record reflect built from the previous
+    # attempt's transcript. Scout reads this to know what was actually tried
+    # and what the tools returned, instead of grading reflect's free-form
+    # summary against its own priors.
+    if result.turn_digest:
+        parts.append("PRIOR ATTEMPT DIGEST (from reflect):")
+        parts.append(_format_digest_for_scout(result.turn_digest))
 
     # Tell the scout and agent that all prior turn tool outputs are still live in
     # the conversation context — they must NOT re-read files or re-run searches
@@ -153,8 +192,60 @@ def build_lessons_context(
     return "\n".join(parts)
 
 
-def _format_message(msg: dict) -> str:
-    """Format a single message as a readable transcript line."""
+# Back-compat alias — older callers (and external tests) still import the
+# pre-rename name. The function moved from "lessons" framing to "retry context"
+# but the contract is identical.
+build_lessons_context = build_retry_context
+
+
+def _format_digest_for_scout(digest: dict) -> str:
+    """Render a turn_digest dict as a readable block for scout's input.
+
+    Kept compact — scout already has its own context budget. We pass through
+    the structured fields; if a tool_call result_excerpt is long, it will have
+    been trimmed by ``_sanitize_turn_digest`` already.
+    """
+    lines: list[str] = []
+    plan = digest.get("scout_plan_summary", "")
+    if plan:
+        lines.append(f"  Prior scout plan: {plan}")
+    tried = digest.get("what_was_tried", "")
+    if tried:
+        lines.append(f"  What was tried: {tried}")
+    findings = digest.get("key_findings") or []
+    if findings:
+        lines.append("  Key findings:")
+        for f in findings:
+            lines.append(f"    - {f}")
+    calls = digest.get("tool_calls") or []
+    if calls:
+        lines.append("  Prior tool calls (verbatim excerpts):")
+        for i, tc in enumerate(calls, 1):
+            lines.append(
+                f"    [{i}] {tc.get('tool', '?')} "
+                f"args={tc.get('args', '')[:200]} → outcome={tc.get('outcome', '?')}"
+            )
+            excerpt = tc.get("result_excerpt", "") or ""
+            if excerpt:
+                # Indent the excerpt so it's clearly a sub-block.
+                indented = "\n".join(f"        {ln}" for ln in excerpt.splitlines())
+                lines.append(indented)
+    final = digest.get("agent_final_response", "")
+    if final:
+        lines.append(f"  Prior agent final response: {final[:500]}")
+    return "\n".join(lines) if lines else "  (digest empty)"
+
+
+def _format_message(msg: dict, tool_result_char_cap: int | None = None) -> str:
+    """Format a single message as a readable transcript line.
+
+    When ``tool_result_char_cap`` is set, tool result bodies longer than the
+    cap are truncated with a ``[+N chars truncated]`` marker. Reflect's
+    transcript-mode default uses a generous cap so result bodies are still
+    legible (a 5000-char window typically covers the meaningful header of a
+    fetched page or the relevant section of a long file), but a single
+    multi-megabyte result can't drown the budget.
+    """
     role = msg.get("role", "unknown")
     content = msg.get("content") or ""
 
@@ -183,9 +274,14 @@ def _format_message(msg: dict) -> str:
                 pass
         return "\n".join(parts) if parts else "[ASSISTANT]\n(empty)"
     elif role == "tool":
+        if tool_result_char_cap is not None and len(content) > tool_result_char_cap:
+            truncated = len(content) - tool_result_char_cap
+            return f"[TOOL RESULT]\n{content[:tool_result_char_cap]}\n[+{truncated} chars truncated]"
         return f"[TOOL RESULT]\n{content}"
     elif role == "system":
         return f"[SYSTEM]\n{content}"
+    elif role == "scout":
+        return f"[SCOUT]\n{content}"
     elif role == "reflect":
         return f"[REFLECT]\n{content}"
     else:
@@ -195,6 +291,87 @@ def _format_message(msg: dict) -> str:
 # Default reflect context budget (tokens). If conversation exceeds this,
 # older messages are summarized to fit.
 _REFLECT_CONTEXT_BUDGET = 100_000
+
+# Per-tool-result body cap when formatting the attempt transcript. Bigger than
+# the legacy 300-char preview so reflect can actually verify claims against
+# what the tool returned (e.g., a fetched page body), but bounded so a single
+# 200kb result can't dominate the budget.
+_PER_TOOL_RESULT_CHAR_CAP = 5000
+
+
+def _messages_since_attempt_start(messages: list[dict], turn_user_msg_id: int | None = None) -> list[dict]:
+    """Slice messages to the current attempt's transcript.
+
+    Walks the message list end→start to find the most recent ``scout`` role
+    marker (written when scout finishes for an attempt — see
+    ``sessions/manager.py``). Returns everything from that marker forward.
+
+    Fallbacks, in order:
+    - No scout marker found → slice from ``turn_user_msg_id`` forward.
+    - Neither marker available → return all messages unchanged.
+
+    The scout marker is the natural per-attempt boundary: on a retry, scout-N
+    runs first and writes a new scout message, so the slice from "latest scout"
+    captures exactly what happened during attempt N.
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "scout":
+            return messages[i:]
+
+    if turn_user_msg_id is not None:
+        for i, msg in enumerate(messages):
+            if msg.get("id") == turn_user_msg_id and msg.get("role") == "user":
+                return messages[i:]
+
+    return list(messages)
+
+
+def _build_attempt_transcript_section(
+    messages: list[dict],
+    budget_tokens: int,
+    turn_user_msg_id: int | None = None,
+) -> str:
+    """Format the current attempt's transcript with verbatim tool results.
+
+    Slices via `_messages_since_attempt_start` so we never include messages
+    from earlier attempts (those are carried forward to scout via the prior
+    turn_digest, not re-included here).
+
+    Budget handling: try at progressively tighter per-tool-result caps; if
+    still over, drop oldest non-final messages with a one-line elision marker.
+    """
+    from core.context.tokens import get_estimator
+
+    estimator = get_estimator()
+    attempt_msgs = _messages_since_attempt_start(messages, turn_user_msg_id)
+    drop_roles = ("notice", "eval", "model_divider", "compaction")
+    substantive = [m for m in attempt_msgs if m.get("role") not in drop_roles]
+
+    if not substantive:
+        return ""
+
+    for cap in (_PER_TOOL_RESULT_CHAR_CAP, 1500, 500):
+        formatted = [_format_message(m, tool_result_char_cap=cap) for m in substantive]
+        transcript = "\n\n---\n\n".join(formatted)
+        if estimator.count(transcript) <= budget_tokens:
+            return transcript
+
+    # Still over budget — keep most recent verbatim (cap=500), elide older.
+    kept: list[str] = []
+    used = 0
+    for msg in reversed(substantive):
+        formatted_msg = _format_message(msg, tool_result_char_cap=500)
+        msg_tokens = estimator.count(formatted_msg)
+        if used + msg_tokens > budget_tokens - 200:  # leave room for marker
+            break
+        kept.insert(0, formatted_msg)
+        used += msg_tokens
+
+    dropped = len(substantive) - len(kept)
+    if dropped > 0:
+        marker = f"[earlier {dropped} message(s) of this attempt elided to fit budget]"
+        return marker + "\n\n---\n\n" + "\n\n---\n\n".join(kept)
+    return "\n\n---\n\n".join(kept)
 
 
 def _build_compact_evidence(
@@ -206,13 +383,16 @@ def _build_compact_evidence(
     scout_report=None,
     termination_reason: str | None = None,
     prior_termination_reasons: list[str] | None = None,
+    turn_user_msg_id: int | None = None,
 ) -> str:
-    """Build a compact evidence blob for reflect.
+    """Build the evidence blob for reflect.
 
-    Drops the mid-conversation transcript — reflect rarely needs it, and when
-    it does the tool execution summary (already capturing errors) carries the
-    signal. Includes: user ask, final assistant message, workspace files,
-    scout deliverables_plan (if any), and the structured tool summary.
+    Includes the current attempt's transcript (from the most recent scout-role
+    marker forward — earlier attempts are not re-included), workspace files,
+    scout's deliverables_plan and approach (if any), tool execution summary,
+    workflow runs, and the user's request paired with the agent's final
+    response. Tool result bodies are kept verbatim up to ``_PER_TOOL_RESULT_CHAR_CAP``
+    chars so reflect can verify claims against what tools actually returned.
     """
     from pathlib import Path
 
@@ -297,8 +477,31 @@ def _build_compact_evidence(
     if wf_lines:
         parts.append("WORKFLOW RUNS:\n" + "\n".join(wf_lines))
 
-    # User's ask (echoed) and the agent's final response
+    # User's ask (echoed) so reflect anchors against the original goal even when
+    # the transcript scrolls through tool calls.
     parts.append(f"USER REQUEST:\n{user_request}")
+
+    # Per-attempt transcript with verbatim tool results — this is the change
+    # that lets reflect verify claims against what tools actually returned,
+    # rather than against its training-data priors. Scoped to the current
+    # attempt so retries don't drown the verifier in stale messages.
+    from core.context.tokens import get_estimator
+
+    estimator = get_estimator()
+    preamble_tokens = estimator.count("\n\n".join(parts))
+    final_response_tokens = estimator.count(final_assistant or "")
+    transcript_budget = max(_REFLECT_CONTEXT_BUDGET - preamble_tokens - final_response_tokens - 2000, 5000)
+    transcript = _build_attempt_transcript_section(
+        messages,
+        budget_tokens=transcript_budget,
+        turn_user_msg_id=turn_user_msg_id,
+    )
+    if transcript:
+        parts.append("=" * 60)
+        parts.append("ATTEMPT TRANSCRIPT (current attempt only — prior attempts elided)")
+        parts.append("=" * 60)
+        parts.append(transcript)
+
     parts.append(f"AGENT FINAL RESPONSE:\n{final_assistant or '(no final assistant message)'}")
 
     return "\n\n".join(parts)
@@ -369,19 +572,20 @@ def _build_evidence(
 ) -> tuple[str, str]:
     """Build evidence for reflect verification.
 
-    Default path (reflect_full_transcript=False): compact — user ask,
-    final agent message, workspace files, deliverables plan, tool summary.
-    Escape hatch (reflect_full_transcript=True): full transcript with
-    summarization of older messages when over budget.
+    Always emits per-attempt evidence: preamble (workspace files, termination
+    history, scout plan, tool summary, workflow runs) + the current attempt's
+    transcript with verbatim tool results + the agent's final response.
+    Earlier attempts are NOT included — they are carried forward to scout via
+    the prior turn_digest stored in post_mortems, not re-shown to reflect.
 
-    `turn_user_msg_id` scopes the evidence to the user message that triggered
-    THIS turn — without it, reflect would grade against the latest user
-    message, which can be a queued one for a future turn.
+    The legacy ``reflect_full_transcript`` setting is now a no-op
+    (deprecated): reflect always sees the per-attempt transcript.
+
+    `turn_user_msg_id` is used as a fallback boundary when no scout-role
+    marker exists in the messages (older sessions, scout-skipped paths).
 
     Returns (user_request, evidence_summary).
     """
-    from core.context.tokens import get_estimator
-
     messages = db.get_messages(session_id)
     if not messages:
         return "", ""
@@ -403,146 +607,40 @@ def _build_evidence(
     if not user_request:
         return "", ""
 
-    # Compact path (default) — no transcript, signal from tool summary + deliverables.
-    if not settings.reflect_full_transcript:
-        evidence = _build_compact_evidence(
-            session_id,
-            user_request,
-            messages,
-            attempt,
-            tool_summary,
-            scout_report,
-            termination_reason=termination_reason,
-            prior_termination_reasons=prior_termination_reasons,
-        )
-        return user_request, evidence
-
-    # Below: legacy full-transcript path, kept as opt-in for debugging.
-
-    # Check for workspace files created during this session
-    from pathlib import Path
-
-    workspace = Path(settings.workspace_dir)
-    ws_files = []
-    if workspace.exists():
-        # List recent non-hidden files (top 20 by mtime)
-        candidates = [
-            f
-            for f in workspace.rglob("*")
-            if f.is_file() and not any(p.startswith(".") for p in f.relative_to(workspace).parts)
-        ]
-        candidates.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-        ws_files = [str(f.relative_to(workspace)) for f in candidates[:20]]
-
-    # Build preamble
-    preamble_parts = []
-    if attempt > 1:
-        preamble_parts.append(
-            f"REFLECT CONTEXT: This is attempt #{attempt}. Previous attempt(s) "
-            "did not complete the task. If same issues persist, consider verdict "
-            "'escalate' instead of 'retry'."
-        )
-
-    if ws_files:
-        preamble_parts.append("WORKSPACE FILES:\n" + "\n".join(f"- {f}" for f in ws_files))
-    else:
-        preamble_parts.append("WORKSPACE FILES: None")
-
-    # Inject structured tool execution summary for diagnostic analysis
-    if tool_summary:
-        summary_lines = ["TOOL EXECUTION SUMMARY:"]
-        for tool_name, stats in sorted(tool_summary.items()):
-            line = f"- {tool_name}: {stats['calls']} call(s), {stats['failures']} failure(s), {stats['total_latency_ms']}ms total"
-            summary_lines.append(line)
-            # Show each distinct error message (up to 5) on its own line for readability
-            for err in stats.get("errors", [])[:5]:
-                summary_lines.append(f"    ERROR: {err}")
-        preamble_parts.append("\n".join(summary_lines))
-
-    preamble = "\n\n".join(preamble_parts)
-
-    # Format all messages as a conversation transcript
-    # Exclude scout/compaction metadata and audit notices — reflect doesn't need them
-    substantive = [m for m in messages if m["role"] not in ("compaction", "scout", "notice", "eval", "model_divider")]
-    transcript_lines = [_format_message(m) for m in substantive]
-    transcript = "\n\n---\n\n".join(transcript_lines)
-
-    evidence = f"{preamble}\n\n{'=' * 60}\nFULL CONVERSATION TRANSCRIPT\n{'=' * 60}\n\n{transcript}"
-
-    # Check if evidence fits within budget
-    estimator = get_estimator()
-    evidence_tokens = estimator.count(evidence)
-
-    if evidence_tokens <= _REFLECT_CONTEXT_BUDGET:
-        return user_request, evidence
-
-    # Conversation too large — summarize older messages, keep recent ones in full.
-    # Strategy: keep the last N messages in full (where N messages fit in ~60% of
-    # budget), summarize everything before that.
-    recent_budget = int(_REFLECT_CONTEXT_BUDGET * 0.6)
-    preamble_tokens = estimator.count(preamble)
-
-    # Walk backwards to find how many recent messages fit
-    recent_messages = []
-    recent_tokens = 0
-    for msg in reversed(substantive):
-        formatted = _format_message(msg)
-        msg_tokens = estimator.count(formatted)
-        if recent_tokens + msg_tokens > recent_budget:
-            break
-        recent_messages.insert(0, formatted)
-        recent_tokens += msg_tokens
-
-    # Everything not in recent gets summarized as a condensed overview
-    older_count = len(substantive) - len(recent_messages)
-    older_messages = substantive[:older_count]
-
-    # Build a condensed summary of older messages
-    older_summary_parts = []
-    for msg in older_messages:
-        role = msg.get("role", "unknown")
-        content = msg.get("content") or ""
-        if role == "user":
-            older_summary_parts.append(f"- [USER] {content[:300]}")
-        elif role == "assistant":
-            preview = content[:200] if content else ""
-            tool_calls = msg.get("tool_calls")
-            if tool_calls:
-                try:
-                    tcs = json.loads(tool_calls) if isinstance(tool_calls, str) else tool_calls
-                    names = [
-                        tc.get("name") or tc.get("function", {}).get("name", "?")
-                        for tc in (tcs if isinstance(tcs, list) else [])
-                    ]
-                    older_summary_parts.append(
-                        f"- [ASSISTANT] called: {', '.join(names)}" + (f" | text: {preview}" if preview else "")
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    older_summary_parts.append(f"- [ASSISTANT] {preview}")
-            elif preview:
-                older_summary_parts.append(f"- [ASSISTANT] {preview}")
-        elif role == "tool":
-            # Include first 300 chars of tool results in summary
-            older_summary_parts.append(f"- [TOOL RESULT] {content[:300]}")
-        elif role == "system":
-            older_summary_parts.append(f"- [SYSTEM] {content[:200]}")
-
-    older_summary = "\n".join(older_summary_parts)
-    recent_transcript = "\n\n---\n\n".join(recent_messages)
-
-    evidence = (
-        f"{preamble}\n\n"
-        f"{'=' * 60}\n"
-        f"EARLIER CONVERSATION ({older_count} messages, condensed)\n"
-        f"{'=' * 60}\n\n"
-        f"{older_summary}\n\n"
-        f"{'=' * 60}\n"
-        f"RECENT CONVERSATION (full detail)\n"
-        f"{'=' * 60}\n\n"
-        f"{recent_transcript}"
+    evidence = _build_compact_evidence(
+        session_id,
+        user_request,
+        messages,
+        attempt,
+        tool_summary,
+        scout_report,
+        termination_reason=termination_reason,
+        prior_termination_reasons=prior_termination_reasons,
+        turn_user_msg_id=turn_user_msg_id,
     )
-
     return user_request, evidence
+
+
+def _count_unmatched_braces(s: str) -> int:
+    """Count net unclosed `{` braces, skipping those inside JSON strings."""
+    depth = 0
+    in_string = False
+    escape_next = False
+    for ch in s:
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+        elif not in_string:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+    return max(0, depth)
 
 
 def _try_repair_json(raw: str) -> dict | None:
@@ -584,8 +682,9 @@ def _try_repair_json(raw: str) -> dict | None:
         # Count unescaped quotes after the last key
         if candidate.count('"') % 2 != 0:
             candidate += '"'
-        # Ensure object is closed
-        open_braces = candidate.count("{") - candidate.count("}")
+        # Ensure object is closed — count only braces outside strings to
+        # avoid miscounting { or } that appear inside JSON string values.
+        open_braces = _count_unmatched_braces(candidate)
         candidate += "}" * open_braces
         try:
             result = json.loads(candidate)
@@ -661,7 +760,59 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
                 )
             )
 
+    # Turn digest — structured record of what happened during the attempt.
+    # Defensively trim per-call result_excerpts so a misbehaving model can't
+    # exfiltrate megabytes through this field. The prompt asks for ≤2000
+    # chars per excerpt; we enforce here regardless.
+    # On pass verdicts, only store if reflect_emit_digest_on_pass is enabled
+    # (default off — saves tokens since the next turn starts fresh anyway).
+    raw_digest = data.get("turn_digest")
+    if isinstance(raw_digest, dict) and raw_digest:
+        emit_on_pass = bool(getattr(settings, "reflect_emit_digest_on_pass", False))
+        if result.verdict != "pass" or emit_on_pass:
+            result.turn_digest = _sanitize_turn_digest(raw_digest)
+
     return result
+
+
+def _sanitize_turn_digest(digest: dict) -> dict:
+    """Defensively trim a turn_digest dict to enforce per-field caps.
+
+    Trust-but-verify: the prompt specifies caps, but we enforce them here so
+    a misbehaving or runaway model can't blow up the post_mortem payload or
+    the next scout's input.
+    """
+    cap = max(int(getattr(settings, "reflect_digest_max_chars_per_excerpt", 2000) or 2000), 200)
+    cleaned: dict = {}
+    cleaned["scout_plan_summary"] = str(digest.get("scout_plan_summary", ""))[:1000]
+    cleaned["agent_final_response"] = str(digest.get("agent_final_response", ""))[:2000]
+    cleaned["what_was_tried"] = str(digest.get("what_was_tried", ""))[:1000]
+
+    raw_findings = digest.get("key_findings") or []
+    if isinstance(raw_findings, list):
+        cleaned["key_findings"] = [str(f)[:500] for f in raw_findings if f][:10]
+    else:
+        cleaned["key_findings"] = []
+
+    raw_calls = digest.get("tool_calls") or []
+    cleaned_calls: list[dict] = []
+    if isinstance(raw_calls, list):
+        for tc in raw_calls[:30]:  # bounded fan-in
+            if not isinstance(tc, dict):
+                continue
+            outcome = tc.get("outcome", "unknown")
+            if outcome not in ("success", "error", "partial"):
+                outcome = "unknown"
+            cleaned_calls.append(
+                {
+                    "tool": str(tc.get("tool", ""))[:120],
+                    "args": str(tc.get("args", ""))[:500],
+                    "outcome": outcome,
+                    "result_excerpt": str(tc.get("result_excerpt", ""))[:cap],
+                }
+            )
+    cleaned["tool_calls"] = cleaned_calls
+    return cleaned
 
 
 def _has_pass_with_lessons(result: ReflectResult) -> bool:
@@ -710,6 +861,11 @@ def _write_post_mortem(
             ],
             "tool_summary": tool_summary or {},
         }
+        # Persist turn_digest when present so the next scout can read it on
+        # retry (sessions/manager.py composes scout_message from this).
+        # Older readers use .get(), so adding the key is back-compat-safe.
+        if result.turn_digest:
+            payload["turn_digest"] = result.turn_digest
         if extra_payload:
             payload.update(extra_payload)
         scout_viability = None
@@ -804,7 +960,9 @@ async def reflect_on_session(
     # is a verifier-side problem; re-running scout + the agent loop (~5-10 min)
     # to recover from a malformed JSON response is a large mismatch in cost,
     # so we retry the reflect call locally before falling back to a soft pass.
-    INNER_REPROMPT_LIMIT = 1
+    # Bumped to 2 (was 1) because the turn_digest is now load-bearing on retry —
+    # a parse-loss at this layer means the next scout flies blind.
+    INNER_REPROMPT_LIMIT = 2
     raw = ""
     last_parse_err: Exception | None = None
 
@@ -835,10 +993,16 @@ async def reflect_on_session(
                     }
                 )
 
+            # Output budget bumped from 2048 → 8192. A passing verdict still
+            # generates only a few hundred tokens (model self-regulates), but a
+            # retry/escalate verdict now also emits the turn_digest with
+            # verbatim tool-result excerpts, which can easily exceed 2k tokens.
+            # Output cost is per-token-generated, so the headroom is free until
+            # actually used.
             response = await client.chat(
                 messages=messages,
                 model=model,
-                max_tokens=2048,
+                max_tokens=8192,
             )
 
             latency_ms = int((time.monotonic() - start) * 1000)

@@ -18,7 +18,7 @@ This guide covers everything you need to get Pernix running, from system require
 | Key | Purpose |
 |---|---|
 | `OPENROUTER_API_KEY` | Access to cloud models (GPT-4o, Claude, Gemini, etc.) via [openrouter.ai](https://openrouter.ai) |
-| `TAVILY_API_KEY` | Higher-quality web search via [tavily.com](https://tavily.com). Falls back to DuckDuckGo if absent. |
+| `TAVILY_API_KEY` | Web search via [tavily.com](https://tavily.com). Required for the `search_web` tool. |
 
 ---
 
@@ -79,7 +79,7 @@ OPENROUTER_API_KEY=sk-or-v1-...
 OPENROUTER_MODELS=anthropic/claude-sonnet-4.6,anthropic/claude-haiku-4.5,x-ai/grok-4.1-fast
 ```
 
-All three variables are optional — Pernix starts without any of them. Without an OpenRouter key you can still use Ollama models. Without a Tavily key, web search falls back to DuckDuckGo automatically.
+All three variables are optional — Pernix starts without any of them. Without an OpenRouter key you can still use Ollama models. Without a Tavily key, the `search_web` tool is unavailable.
 
 ### 6. Start Pernix
 
@@ -110,7 +110,7 @@ Before you can have a conversation, you need to tell Pernix which model to use:
 
 > **Verify:** Navigate to `http://localhost:8090/api/health` — it should return `{"status": "ok", ...}`.
 
-> **Tip:** Open `http://localhost:8090/docs` in your browser. Pernix is built on FastAPI, so a live Swagger UI is auto-generated for every endpoint. ReDoc is also available at `/redoc`. These are the easiest way to explore what the API can do without reading [docs/API.md](docs/API.md) end to end.
+> **Tip:** Open `http://localhost:8090/docs` in your browser. Pernix is built on FastAPI, so a live Swagger UI is auto-generated for every endpoint. ReDoc is also available at `/redoc`. These are the easiest way to explore what the API can do without reading [api.md](api.md) end to end.
 
 ---
 
@@ -140,21 +140,13 @@ Without tiktoken, Pernix estimates token counts using a character-based heuristi
 pip install tiktoken
 ```
 
-### Tavily — Enhanced Web Search
+### Tavily — Web Search
 
-Better search quality than DuckDuckGo, with AI-generated summaries alongside results. Requires an account at [tavily.com](https://tavily.com) (free tier available).
-
-```bash
-pip install tavily-python
-# Then add TAVILY_API_KEY to .env
-```
-
-### DuckDuckGo Search — No-Key Fallback
-
-Pernix uses DuckDuckGo automatically when Tavily is not configured. If you want to explicitly install the search library:
+AI-powered web search with summaries alongside results. Requires an account at [tavily.com](https://tavily.com) (free tier available). Without a key, the `search_web` tool is unavailable.
 
 ```bash
-pip install ddgs
+# tavily-python is already in requirements.txt — just add the key:
+# Add TAVILY_API_KEY=tvly-... to .env, or set it in Settings → Web → Tavily API Key
 ```
 
 ### QR Code — LAN Access URL
@@ -285,6 +277,6 @@ If you want to use Pernix from a phone, tablet, or another machine on your netwo
 2. **Restart** the server
 3. **Scan the QR code**: run `python run.py --qr` and scan with your phone, or visit the URL printed in the terminal
 
-For the best experience on mobile (no browser certificate warnings, push notifications support), set up trusted TLS certificates with mkcert. See **[docs/MKCERT_SETUP.md](docs/MKCERT_SETUP.md)** for instructions.
+For the best experience on mobile (no browser certificate warnings, push notifications support), set up trusted TLS certificates with mkcert. See **[deployment/mkcert.md](deployment/mkcert.md)** for instructions.
 
-For the full security model (auth tokens, locked settings, SSRF protections), see **[docs/SECURITY.md](docs/SECURITY.md)**.
+For the full security model (auth tokens, locked settings, SSRF protections), see **[security.md](security.md)**.

@@ -89,7 +89,15 @@ def _execute_deep_recall_tool(name: str, args: dict, memory_dir: str) -> str:
             results = store.search(query, limit=top)
             if not results:
                 return "No results found."
-            lines = [f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:500]}" for r in results]
+            lines = []
+            for r in results:
+                content = r.entry.content
+                if len(content) > 6144:  # ~2048 tokens at 3 chars/token
+                    logger.warning(
+                        "Large memory entry in %s (%d chars, ~%d tokens)",
+                        r.entry.file_name, len(content), len(content) // 3,
+                    )
+                lines.append(f"[{r.entry.file_name} score={r.score:.1f}] {content}")
             return "\n\n".join(lines)
         except Exception as e:
             return f"search_memory error: {e}"
@@ -263,7 +271,7 @@ def ingest(
 
 def recall(query: str, top: int = 5, file: str = "", _context: dict | None = None) -> str:
     """Fast FTS5 memory search. Returns scored results (score > 3.0 = strong,
-    1.0–3.0 = weak, < 1.0 = noise). Content is capped at 400 chars per result.
+    1.0–3.0 = weak, < 1.0 = noise). Full content is returned per result.
     On empty/weak results, use deep_recall() for LLM-synthesized search with
     keyword reformulation. Never use grep or file_read for memory."""
     from core.memory.store import get_memory_store
@@ -276,13 +284,19 @@ def recall(query: str, top: int = 5, file: str = "", _context: dict | None = Non
         fetch = top * 2 if file else top
         results = store.search(query, limit=fetch)
         if file:
-            results = [r for r in results if r.entry.file_name == file][:top]
+            results = [r for r in results if r.entry.file_name.lower() == file.lower()][:top]
         if not results:
             return "No results found in memory."
 
         lines = []
         for r in results:
-            lines.append(f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:400]}")
+            content = r.entry.content
+            if len(content) > 6144:  # ~2048 tokens at 3 chars/token
+                logger.warning(
+                    "Large memory entry in %s (%d chars, ~%d tokens)",
+                    r.entry.file_name, len(content), len(content) // 3,
+                )
+            lines.append(f"[{r.entry.file_name} score={r.score:.1f}] {content}")
         return "\n\n".join(lines)
     except Exception as e:
         logger.error("Recall failed: %s", e)
@@ -317,7 +331,15 @@ def deep_recall(query: str, context: str = "", _context: dict | None = None) -> 
             results = store.search(query, limit=8)
             if not results:
                 return "No results found in memory."
-            lines = [f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:400]}" for r in results]
+            lines = []
+            for r in results:
+                content = r.entry.content
+                if len(content) > 6144:  # ~2048 tokens at 3 chars/token
+                    logger.warning(
+                        "Large memory entry in %s (%d chars, ~%d tokens)",
+                        r.entry.file_name, len(content), len(content) // 3,
+                    )
+                lines.append(f"[{r.entry.file_name} score={r.score:.1f}] {content}")
             return "\n\n".join(lines)
         except Exception as e2:
             return f"Error searching memory: {e2}"
@@ -382,7 +404,7 @@ def register(reg) -> None:
         description=(
             "Fast FTS5 search over persistent memory. "
             "Scores: > 3.0 strong · 1.0–3.0 weak · < 1.0 noise. "
-            "Content capped at 400 chars/result. "
+            "Full content returned per result. "
             "On empty/weak results, use deep_recall() for LLM-synthesized search. "
             "Never use grep or file_read for memory — they cannot reach the memory directory."
         ),

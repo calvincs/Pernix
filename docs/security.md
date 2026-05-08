@@ -72,7 +72,7 @@ Browsers will display an "untrusted certificate" warning. You can click through 
 
 For a seamless experience on mobile and for push notification support, use [mkcert](https://github.com/FiloSottile/mkcert) to generate a certificate signed by a locally-trusted CA.
 
-See **[docs/MKCERT_SETUP.md](MKCERT_SETUP.md)** for step-by-step instructions including Android and iOS trust installation.
+See **[deployment/mkcert.md](deployment/mkcert.md)** for step-by-step instructions including Android and iOS trust installation.
 
 To use custom certificates:
 

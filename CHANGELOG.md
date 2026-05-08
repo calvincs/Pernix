@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.4.0 — 2026-05-08
+
+- fix: patch bugs found in post-merge validation
+- feat: reflect emits turn_digest, sees per-attempt transcript with verbatim tool results
+- fix: raise scout memory preload cap, uncap active recall, scrub spec links from public docs
+- feat: folder delete + mobile swipe-to-delete in Explorer
+- docs: tighten quickstart, contributing, and workflows examples
+- docs: write changelog and upgrade guide
+- docs: write internals reference (extensions, reflect+snooze)
+- docs: write deployment guides
+- docs: write authoring guides + refresh writing-skills staleness
+- docs: write user-facing guides
+- docs: write contributing guide
+- docs: write quickstart and FAQ
+- docs: update state-machine references to 10-state model
+- docs: reorganize into role-based /docs/ tree
+- fix: persist ask_user dialog on refresh and unblock agent on dismiss
+- feat: remove DuckDuckGo fallback, gate search_web on Tavily API key
+- fix: approve_dangerous_tool finds ask_user in tool_calls column
+
 ## v2.3.0 — 2026-05-07
 
 - chore: exclude agent-created custom tools from formatters and git

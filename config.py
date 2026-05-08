@@ -76,7 +76,7 @@ class Settings:
     scout_timeout: int = 90
     # Per-item char cap on memory search results injected into scout's user
     # content. Smaller = less context pressure on long-running sessions.
-    scout_preload_memory_char_limit: int = 150
+    scout_preload_memory_char_limit: int = 300
     # Retry once when primary scout returns a structurally-valid but empty
     # approach_guidance — this pattern indicates the LLM gave up, not that the
     # task needed no planning.
@@ -209,8 +209,16 @@ class Settings:
         2  # Separate (lower) cap for worker sessions — bounds fan-out cost (1 retry allowed)
     )
     reflect_min_messages: int = 3  # Min messages to trigger (skip trivial exchanges)
-    reflect_full_transcript: bool = False  # Include full transcript in reflect evidence (debugging); default compact
+    reflect_full_transcript: bool = (
+        False  # DEPRECATED: reflect now always sees the per-attempt transcript; kept as a no-op for backwards compat
+    )
     reflect_model: str = ""  # Model for failure analysis (empty = use background_model)
+    reflect_emit_digest_on_pass: bool = (
+        False  # Have reflect emit a turn_digest even on pass verdicts (debug/audit; default off saves tokens)
+    )
+    reflect_digest_max_chars_per_excerpt: int = (
+        2000  # Per-call result_excerpt cap inside the turn_digest (defensive trim at parse time)
+    )
     post_mortem_retention_days: int = 90  # Days to keep synthesized post-mortems before snooze sweeps them
 
     # --- Notifications ---

@@ -661,11 +661,19 @@ function _renderEntries(parent, entries) {
                 el('span', { class: 'fp-tree-meta' }, [text(entry.size > 0 ? formatSize(entry.size) : '')]),
                 el('span', { class: 'fp-tree-date' }, [text(formatDate(entry.modified))]),
             ]);
+            const dirDelBtn = el('button', { class: 'fp-tree-action danger', title: 'Delete' }, [text('\u00d7')]);
+            dirDelBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteEntry(entry.path, 'dir'); });
+            item.appendChild(el('span', { class: 'fp-tree-actions' }, [dirDelBtn]));
             item.addEventListener('click', () => {
                 _wsSearchQuery = '';
                 loadWorkspace({ path: entry.path });
             });
-            parent.appendChild(item);
+            const dirWrap = el('div', { class: 'fp-tree-item-wrap' }, [
+                el('div', { class: 'fp-swipe-delete-bg' }, [text('Delete')]),
+                item,
+            ]);
+            if (isMobile()) _attachSwipeDelete(item, entry.path, 'dir');
+            parent.appendChild(dirWrap);
         } else {
             const displayName = _wsSearchQuery ? entry.path : entry.name;
             const isActive = _state.currentFile?.path === entry.path;
@@ -678,11 +686,16 @@ function _renderEntries(parent, entries) {
             ]);
 
             const delBtn = el('button', { class: 'fp-tree-action danger', title: 'Delete' }, [text('\u00d7')]);
-            delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteFile(entry.path); });
+            delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteEntry(entry.path); });
             item.appendChild(el('span', { class: 'fp-tree-actions' }, [delBtn]));
 
             item.addEventListener('click', () => viewFile(entry.path, 'workspace'));
-            parent.appendChild(item);
+            const fileWrap = el('div', { class: 'fp-tree-item-wrap' }, [
+                el('div', { class: 'fp-swipe-delete-bg' }, [text('Delete')]),
+                item,
+            ]);
+            if (isMobile()) _attachSwipeDelete(item, entry.path, 'file');
+            parent.appendChild(fileWrap);
         }
     }
 }
@@ -1003,11 +1016,13 @@ async function saveFile(container) {
 // File operations
 // ---------------------------------------------------------------------------
 
-async function deleteFile(path) {
-    if (!confirm(`Delete ${path}?`)) return;
+async function deleteEntry(path, type = 'file') {
+    const label = type === 'dir' ? `folder "${path}" and all its contents` : path;
+    if (!confirm(`Delete ${label}?`)) return;
     try {
-        await del(`/workspace/${path}`);
-        if (_state.currentFile?.path === path) {
+        await del(`/workspace/${path.split('/').map(encodeURIComponent).join('/')}`);
+        if (_state.currentFile?.path === path ||
+            _state.currentFile?.path?.startsWith(path + '/')) {
             _state.currentFile = null;
             _state.viewMode = 'tree';
         }
@@ -1015,6 +1030,68 @@ async function deleteFile(path) {
     } catch (e) {
         console.error('Delete failed:', e);
     }
+}
+
+function _attachSwipeDelete(item, path, type) {
+    let startX = 0, startY = 0;
+    let tracking = false, direction = null;
+    const THRESHOLD = 60;
+    const MAX_SHIFT = 80;
+
+    const _resetItem = () => {
+        item.style.transition = '';
+        item.style.transform = '';
+        item.parentElement?.classList.remove('fp-swipe-active');
+    };
+
+    item.addEventListener('touchstart', (e) => {
+        const touch = e.touches[0];
+        startX = touch.clientX;
+        startY = touch.clientY;
+        direction = null;
+        tracking = true;
+        item.style.transition = 'none';
+    }, { passive: true });
+
+    item.addEventListener('touchmove', (e) => {
+        if (!tracking) return;
+        const touch = e.touches[0];
+        const dx = touch.clientX - startX;
+        const dy = touch.clientY - startY;
+        if (!direction && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+            direction = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
+        }
+        if (direction === 'horizontal' && dx < 0) {
+            e.preventDefault();
+            item.parentElement?.classList.add('fp-swipe-active');
+            const offset = Math.max(-MAX_SHIFT, dx);
+            item.style.transform = `translateX(${offset}px)`;
+        } else if (direction === 'vertical') {
+            tracking = false;
+            _resetItem();
+        }
+    }, { passive: false });
+
+    item.addEventListener('touchend', (e) => {
+        if (!tracking) return;
+        tracking = false;
+        const touch = e.changedTouches[0];
+        const dx = touch.clientX - startX;
+        if (direction === 'horizontal') {
+            e.preventDefault();
+            _resetItem();
+            if (dx < -THRESHOLD) {
+                deleteEntry(path, type);
+            }
+        } else {
+            _resetItem();
+        }
+    }, { passive: false });
+
+    item.addEventListener('touchcancel', () => {
+        tracking = false;
+        _resetItem();
+    }, { passive: true });
 }
 
 function triggerUpload() {

@@ -72,46 +72,47 @@ async def answer_question(question_id: str, body: dict):
 
 @router.post("/api/questions/{question_id}/dismiss")
 async def dismiss_question(question_id: str):
-    # Look up session before deleting so we can transition the state.
+    # Look up question before deleting so we have the text for the agent message.
     questions = db.get_questions()
     question = next((q for q in questions if q["id"] == question_id), None)
-    if question:
-        from sessions import state_v2 as sv2
-        from sessions.manager import get_manager
 
-        manager = get_manager()
-        session_obj = manager.get(question["session_id"])
-        if session_obj is not None:
-            # AWAITING_USER → IDLE_READY on dismiss. No turn runs; the agent
-            # is not resumed. Consumers see the state_log row and can surface
-            # "question dismissed, session idle" in the UI.
-            current = sv2._current_state(session_obj)
-            if current == sv2.SessionStateV2.AWAITING_USER:
-                try:
-                    sv2.transition(
-                        session_obj,
-                        sv2.SessionStateV2.IDLE_READY,
-                        "question-dismissed",
-                    )
-                    db.set_session_state(question["session_id"], session_obj.state.value)
-                except Exception:
-                    pass
-
-    # Atomic delete — safe against concurrent dismiss
+    # Atomic delete — safe against concurrent dismiss/answer
     from db.database import connect_sessions
 
     with connect_sessions() as conn:
-        conn.execute("DELETE FROM questions WHERE id = ?", (question_id,))
+        cur = conn.execute("DELETE FROM questions WHERE id = ?", (question_id,))
+        already_handled = cur.rowcount == 0
 
-    # Notify all connected clients so other tabs can close the modal
-    if question:
-        manager.emit(
-            question["session_id"],
-            {
-                "type": "dialog.dismissed",
-                "question_id": question_id,
-            },
-        )
+    if not question or already_handled:
+        return {"status": "dismissed"}
+
+    from sessions import state_v2 as sv2
+    from sessions.manager import get_manager
+
+    manager = get_manager()
+    session_id = question["session_id"]
+
+    # Notify clients first so the modal closes and the bubble is marked
+    # dismissed before the agent's follow-up turn arrives.
+    manager.emit(session_id, {"type": "dialog.dismissed", "question_id": question_id})
+
+    # Deliver a dismissal message to the agent so it can continue the
+    # workflow rather than staying silently blocked.
+    session_obj = manager.get(session_id)
+    if session_obj is not None:
+        current = sv2._current_state(session_obj)
+        if current == sv2.SessionStateV2.AWAITING_USER:
+            formatted = "[User dismissed your question without answering]\n" f"Q: {question['question']}"
+            try:
+                await manager.prompt(session_id, formatted)
+            except Exception:
+                # Fallback: transition to idle so the session isn't stuck
+                # with no question row in AWAITING_USER.
+                try:
+                    sv2.transition(session_obj, sv2.SessionStateV2.IDLE_READY, "question-dismissed")
+                    db.set_session_state(session_id, session_obj.state.value)
+                except Exception:
+                    pass
 
     return {"status": "dismissed"}
 

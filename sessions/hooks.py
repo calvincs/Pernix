@@ -388,7 +388,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
     session_obj._injected_trial_proposals = injected_trial_proposals
 
     try:
-        from core.reflect import build_lessons_context, reflect_on_session
+        from core.reflect import build_retry_context, reflect_on_session
 
         # Termination history lets reflect detect ceiling-loops (same hard wall
         # hit on multiple consecutive turns). Index 0 is this turn's reason
@@ -444,7 +444,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
 
         if result.verdict == "retry":
             session_obj.reflect_count += 1
-            session_obj.reflect_lessons = build_lessons_context(
+            session_obj.reflect_lessons = build_retry_context(
                 result,
                 session_obj.reflect_count,
                 max_retries,
