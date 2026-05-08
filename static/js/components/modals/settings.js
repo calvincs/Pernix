@@ -81,7 +81,7 @@ const SECTIONS = [
     },
     {
         title: 'Web',
-        description: 'Web search uses Tavily (primary) with DuckDuckGo fallback. Browser uses Playwright for JS-rendered page extraction. Disable headless for login flows or visual debugging.',
+        description: 'Web search uses Tavily (requires API key — free tier at tavily.com). Browser uses Playwright for JS-rendered page extraction. Disable headless for login flows or visual debugging.',
         fields: [
             { key: 'web_search_enabled', label: 'Web Search', type: 'bool' },
             { key: 'tavily_api_key', label: 'Tavily API Key', type: 'apikey', envKey: 'TAVILY_API_KEY' },

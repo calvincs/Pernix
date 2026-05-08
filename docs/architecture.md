@@ -1,6 +1,6 @@
 # How Pernix Works
 
-A guided tour of what happens between "you send a message" and "the agent answers." Read this in order — it goes from the bird's-eye view down to the implementation details. If you want the formal state-machine specification with file:line citations, that lives in [workflow.md](workflow.md); this document is the conceptual companion.
+A guided tour of what happens between "you send a message" and "the agent answers." Read this in order — it goes from the bird's-eye view down to the implementation details. If you want the formal state-machine specification with file:line citations, that lives in [internals/state-machine.md](internals/state-machine.md); this document is the conceptual companion.
 
 ---
 
@@ -84,11 +84,7 @@ The main agent is defined in `core/agent.py`.
 
 ### 4. Reflect — the quality gate
 
-After the main agent loop ends, **Reflect** checks whether the user's intent was actually fulfilled. It's a separate, lightweight LLM call that looks at:
-
-- The original user message
-- The agent's final response
-- A summary of what tools were called
+After the main agent loop ends, **Reflect** checks whether the user's intent was actually fulfilled. It's a separate LLM call that sees the **current attempt's transcript** with verbatim tool result bodies — sliced from the most recent `scout` role marker forward — alongside the user's original ask, scout's plan, and a tool-execution summary. Tool result bodies are kept verbatim up to a 5000-char cap so reflect can verify factual claims against what the tools actually returned, not against its own training-data priors.
 
 It produces a verdict — one of three values:
 
@@ -98,7 +94,7 @@ It produces a verdict — one of three values:
 | `retry` | The agent missed the intent. Try again with these lessons. |
 | `escalate` | Cannot fix automatically — surface this to the user. |
 
-When Reflect returns `retry`, the same turn re-runs from Scout with the lessons appended to the system prompt. This is bounded by `reflect_max_retries` (default 2) — so a single user request can result in up to three Scout/Agent/Reflect cycles before giving up.
+On `retry` or `escalate`, Reflect also emits a structured **turn digest** alongside the verdict (scout plan summary, tool calls with verbatim `result_excerpt` per call, key findings, what was tried). The digest is persisted inside the post-mortem and carried forward to the *next* Scout invocation as `PRIOR ATTEMPT DIGEST` — so Scout-N+1 plans against real evidence from the previous attempt, not just a free-form summary. Reflect-N never sees attempt-(N-1)'s transcript directly; only the digest crosses the boundary. This is bounded by `reflect_max_retries` (default 2), so a single user request can result in up to three Scout/Agent/Reflect cycles before giving up.
 
 Reflect also classifies the *cause* of any failure (scout / agent / skill / task / env). This data feeds into Snooze for offline analysis.
 
@@ -119,9 +115,9 @@ Snooze stops immediately when you start a new session — your work always takes
 
 ## The Session State Machine
 
-Everything above is governed by a 9-state state machine. Each session is in exactly one state at any time. State transitions are logged to a `session_state_log` table and emitted as SSE `session.state_changed` events for the UI to follow along.
+Everything above is governed by a 10-state state machine (defined in `sessions/state_v2.py`). Each session is in exactly one state at any time. State transitions are logged to a `session_state_log` table and emitted as SSE `session.state_changed` events for the UI to follow along.
 
-### The 9 states
+### The 10 active states
 
 | State | What's happening |
 |---|---|
@@ -134,6 +130,9 @@ Everything above is governed by a 9-state state machine. Each session is in exac
 | `CANCELLING` | User pressed cancel; agent is being torn down |
 | `FINALIZING` | Post-hooks running (auto-title, distillation, worker cleanup) |
 | `AWAITING_USER` | Agent paused via `ask_user` and is waiting for input |
+| `AWAITING_WORKERS` | Parent session blocked on one or more spawned workers |
+
+The enum also defines several **terminal/error markers** (`COMPLETE`, `ROUND_CEILING`, `COMPACTION_FAILED`, `CANCELLED`, `ERROR`, `SCOUT_ERROR`, `BUDGET_EXHAUSTED`) used as turn outcomes rather than active session states.
 
 ### A typical turn (the happy path)
 
@@ -174,7 +173,7 @@ IDLE_READY → SCOUTING → PROCESSING → COMPACTING → PROCESSING → FINALIZ
 
 Compaction is non-destructive: original messages are kept in the database. It's a *view transform* — old messages are replaced with a compact summary in the prompt, but you can still scroll back through the full history in the UI.
 
-For the complete transition graph (every edge with its trigger reason), see [workflow.md §0.2](workflow.md).
+For the complete transition graph (every edge with its trigger reason), see [internals/state-machine.md §0.2](internals/state-machine.md).
 
 ### Boot-time reconciliation
 
@@ -322,7 +321,7 @@ Key event types:
 
 Every event has a `_seq` (monotonically increasing sequence number). On reconnect, the client sends `Last-Event-ID: <last_seq>` and the server replays anything it missed.
 
-Full event catalog: [API.md](API.md#real-time-events-sse).
+Full event catalog: [api.md](api.md#real-time-events-sse).
 
 ---
 
@@ -330,10 +329,10 @@ Full event catalog: [API.md](API.md#real-time-events-sse).
 
 Now that you have the conceptual model, drill into specific areas:
 
-- **[CONFIGURATION.md](../CONFIGURATION.md)** — every knob and dial
-- **[SKILLS.md](SKILLS.md)** — write your own capabilities
-- **[API.md](API.md)** — full REST + SSE reference
-- **[workflow.md](workflow.md)** — the formal architecture spec with file:line citations and complete state transition graph
+- **[configuration.md](configuration.md)** — every knob and dial
+- **[authoring/writing-skills.md](authoring/writing-skills.md)** — write your own capabilities
+- **[api.md](api.md)** — full REST + SSE reference
+- **[internals/state-machine.md](internals/state-machine.md)** — the formal architecture spec with file:line citations and complete state transition graph
 
 If you want to read the code:
 

@@ -10,8 +10,10 @@ from core.reflect import (
     _format_message,
     _has_pass_with_lessons,
     _result_from_data,
+    _sanitize_turn_digest,
     _try_repair_json,
     build_lessons_context,
+    build_retry_context,
     reflect_on_session,
 )
 
@@ -515,6 +517,291 @@ async def test_reflect_other_terminal_reason_no_override(mock_llm_client):
     )
     # Code guard is round_ceiling-only; compaction stays LLM-decided.
     assert result.verdict == "retry"
+
+
+# ---------------------------------------------------------------------------
+# turn_digest emission, sanitization, and persistence
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_turn_digest_clamps_excerpt_length():
+    """A misbehaving model can't blow up the post_mortem payload by emitting
+    a megabyte excerpt — the sanitizer enforces the per-call char cap."""
+    raw = {
+        "scout_plan_summary": "X" * 5000,
+        "agent_final_response": "Y" * 5000,
+        "what_was_tried": "Z" * 5000,
+        "key_findings": ["A" * 1000 for _ in range(20)],
+        "tool_calls": [
+            {
+                "tool": "browse_web",
+                "args": "url=https://example.com/" + "q" * 1000,
+                "outcome": "success",
+                "result_excerpt": "B" * 50_000,
+            }
+        ],
+    }
+    cleaned = _sanitize_turn_digest(raw)
+    assert len(cleaned["scout_plan_summary"]) <= 1000
+    assert len(cleaned["agent_final_response"]) <= 2000
+    assert len(cleaned["what_was_tried"]) <= 1000
+    assert len(cleaned["key_findings"]) <= 10
+    assert all(len(f) <= 500 for f in cleaned["key_findings"])
+    assert len(cleaned["tool_calls"][0]["result_excerpt"]) <= 2000
+    assert len(cleaned["tool_calls"][0]["args"]) <= 500
+
+
+def test_sanitize_turn_digest_normalizes_outcome():
+    raw = {"tool_calls": [{"tool": "x", "outcome": "weird-status", "result_excerpt": "y"}]}
+    cleaned = _sanitize_turn_digest(raw)
+    assert cleaned["tool_calls"][0]["outcome"] == "unknown"
+
+
+def test_sanitize_turn_digest_handles_missing_fields():
+    """A minimal digest (just verdict's worth of fields filled) parses OK."""
+    cleaned = _sanitize_turn_digest({})
+    assert cleaned["scout_plan_summary"] == ""
+    assert cleaned["tool_calls"] == []
+    assert cleaned["key_findings"] == []
+
+
+def test_result_from_data_parses_turn_digest():
+    data = {
+        "verdict": "retry",
+        "reasoning": "missed the deliverable",
+        "turn_digest": {
+            "scout_plan_summary": "search then crawl",
+            "tool_calls": [
+                {
+                    "tool": "search_web",
+                    "args": "query=foo",
+                    "outcome": "success",
+                    "result_excerpt": "some real result body",
+                }
+            ],
+            "agent_final_response": "Done.",
+            "key_findings": ["Found X"],
+            "what_was_tried": "Tried Y",
+        },
+    }
+    r = _result_from_data(data, "m", 0)
+    assert r.turn_digest["scout_plan_summary"] == "search then crawl"
+    assert len(r.turn_digest["tool_calls"]) == 1
+    assert r.turn_digest["tool_calls"][0]["result_excerpt"] == "some real result body"
+
+
+def test_result_from_data_omits_digest_when_absent():
+    """When verdict is pass and digest is absent, ReflectResult.turn_digest
+    is an empty dict — not None, not a partial. Downstream consumers can
+    treat empty as 'no digest available'."""
+    r = _result_from_data({"verdict": "pass", "reasoning": "ok"}, "m", 0)
+    assert r.turn_digest == {}
+
+
+# ---------------------------------------------------------------------------
+# build_retry_context (renamed from build_lessons_context)
+# ---------------------------------------------------------------------------
+
+
+def test_build_retry_context_includes_prior_digest():
+    """The retry-context string injected into scout-N must carry the prior
+    turn_digest so scout can plan around the actual evidence the previous
+    attempt collected, not just reflect's free-form summary."""
+    digest = {
+        "scout_plan_summary": "search then verify URL",
+        "tool_calls": [
+            {
+                "tool": "crawl4ai-fetch",
+                "args": "url=https://www.war.gov/ufo/",
+                "outcome": "success",
+                "result_excerpt": "verbatim page body about disclosure images",
+            }
+        ],
+        "agent_final_response": "URL is https://www.war.gov/ufo/",
+        "key_findings": ["page returned 200 with real content"],
+        "what_was_tried": "search → 403 on browse → fallback to crawl",
+    }
+    result = ReflectResult(
+        verdict="retry",
+        reasoning="claim looked unsupported",
+        strategy="verify the URL is canonical via official .gov index",
+        turn_digest=digest,
+    )
+    out = build_retry_context(result, attempt=1, max_attempts=2)
+    assert "Retry #1 of 2" in out
+    assert "PRIOR ATTEMPT DIGEST" in out
+    assert "crawl4ai-fetch" in out
+    assert "verbatim page body about disclosure images" in out
+    assert "war.gov/ufo" in out
+    assert "URL is https://www.war.gov/ufo/" in out
+
+
+def test_build_retry_context_no_digest_still_works():
+    """Back-compat: an old reflect run without a digest still produces a
+    sensible retry-context string (just no PRIOR ATTEMPT DIGEST block)."""
+    result = ReflectResult(
+        verdict="retry",
+        reasoning="failed",
+        strategy="try X next",
+    )
+    out = build_retry_context(result, attempt=2, max_attempts=3)
+    assert "Retry #2 of 3" in out
+    assert "PRIOR ATTEMPT DIGEST" not in out
+    assert "try X next" in out
+
+
+def test_build_lessons_context_alias_is_back_compat():
+    """The renamed function preserves the old import name as an alias."""
+    result = ReflectResult(verdict="retry", reasoning="x")
+    a = build_lessons_context(result, attempt=1, max_attempts=2)
+    b = build_retry_context(result, attempt=1, max_attempts=2)
+    assert a == b
+
+
+# ---------------------------------------------------------------------------
+# Reflect emits and persists turn_digest end-to-end
+# ---------------------------------------------------------------------------
+
+
+async def test_reflect_emits_digest_on_retry(mock_llm_client):
+    """When the LLM returns a retry verdict with a turn_digest, the digest
+    must land on ReflectResult AND be persisted in the post_mortem
+    payload_json so the next scout can read it."""
+    from db import models as db
+
+    sid = db.create_session(title="Digest emission test")
+    db.add_message(sid, "user", "find the official US gov UFO disclosure site")
+    db.add_message(sid, "assistant", "URL is https://www.war.gov/ufo/")
+
+    digest = {
+        "scout_plan_summary": "search + crawl",
+        "tool_calls": [
+            {
+                "tool": "crawl4ai-fetch",
+                "args": "url=https://www.war.gov/ufo/",
+                "outcome": "success",
+                "result_excerpt": "PURSUE program disclosure page",
+            }
+        ],
+        "agent_final_response": "Done. URL is war.gov/ufo/",
+        "key_findings": ["page fetched with real body"],
+        "what_was_tried": "fetched the site directly",
+    }
+    mock_llm_client.responses = [
+        ChatResponse(
+            content=json.dumps(
+                {
+                    "verdict": "retry",
+                    "reasoning": "URL was not validated against official directory",
+                    "strategy": "verify via canonical .gov index",
+                    "turn_digest": digest,
+                }
+            ),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+
+    result = await reflect_on_session(sid)
+    assert result.verdict == "retry"
+    assert result.turn_digest["scout_plan_summary"] == "search + crawl"
+    assert result.turn_digest["tool_calls"][0]["result_excerpt"] == "PURSUE program disclosure page"
+    # The post_mortem row should have the digest too.
+    pms = db.list_post_mortems(session_id=sid)
+    assert pms, "post_mortem row was not written"
+    payload = json.loads(pms[0]["payload_json"])
+    assert "turn_digest" in payload
+    assert payload["turn_digest"]["tool_calls"][0]["tool"] == "crawl4ai-fetch"
+    assert payload["turn_digest"]["tool_calls"][0]["result_excerpt"] == "PURSUE program disclosure page"
+
+
+async def test_reflect_omits_digest_on_pass_by_default(mock_llm_client):
+    """Common-case optimization: pass verdicts skip the digest. The model is
+    free to omit the key entirely, and ReflectResult.turn_digest stays empty."""
+    from db import models as db
+
+    sid = db.create_session(title="Pass without digest")
+    db.add_message(sid, "user", "what time is it")
+    db.add_message(sid, "assistant", "It is 3pm")
+
+    mock_llm_client.responses = [
+        ChatResponse(
+            content=json.dumps({"verdict": "pass", "reasoning": "answered the simple question"}),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+
+    result = await reflect_on_session(sid)
+    assert result.verdict == "pass"
+    assert result.turn_digest == {}
+
+
+# ---------------------------------------------------------------------------
+# Cornerstone: reflect sees real tool result body, not just stats
+# (Regression for session f7885259462e — war.gov UFO disclosure case.)
+# ---------------------------------------------------------------------------
+
+
+async def test_reflect_sees_tool_result_body_in_evidence(mock_llm_client):
+    """Cornerstone test for the turn-digest redesign.
+
+    Pre-redesign, reflect saw only per-tool counts/failures and the agent's
+    final response — never the actual tool result bodies. When the agent
+    answered "URL is https://www.war.gov/ufo/" backed by a successful
+    crawl4ai-fetch returning real content, reflect couldn't see that body
+    and dismissed the URL as hallucinated based on its own training-data
+    priors.
+
+    Post-redesign, the per-attempt transcript is in the evidence and the
+    crawl result body appears verbatim. This test verifies that — it does
+    NOT assert a specific verdict (LLM nondeterminism out of scope); it
+    asserts what reflect actually sees."""
+    from db import models as db
+
+    sid = db.create_session(title="war.gov regression")
+    db.add_message(sid, "user", "find the website that has the UFO disclosure images from the US government")
+    db.add_message(sid, "scout", '{"type":"scout.done","attempt":1}')
+    db.add_message(
+        sid,
+        "assistant",
+        "I'll search, then crawl the top result.",
+        tool_calls=json.dumps([{"name": "crawl4ai-fetch", "arguments": '{"url": "https://www.war.gov/ufo/"}'}]),
+    )
+    real_page_body = (
+        "PURSUE: Presidential Unsealing and Reporting System for UAP Encounters. "
+        "Official disclosure images are available below. " + ("LOREM " * 100)
+    )
+    db.add_message(sid, "tool", real_page_body)
+    db.add_message(sid, "assistant", "Done. The URL is https://www.war.gov/ufo/.")
+
+    # Capture what evidence reaches the LLM. Don't care what verdict it picks.
+    mock_llm_client.responses = [
+        ChatResponse(
+            content=json.dumps({"verdict": "pass", "reasoning": "URL backed by fetched content"}),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+    await reflect_on_session(sid)
+
+    user_content = mock_llm_client.calls[-1]["messages"][-1]["content"]
+    # The crawl result body must appear verbatim — this is the change that
+    # lets reflect verify URL claims against real evidence.
+    assert "PURSUE: Presidential Unsealing and Reporting System" in user_content
+    # The fetch's URL argument must appear so reflect can match the answer to the call.
+    assert "https://www.war.gov/ufo/" in user_content
+    # Section ordering: USER REQUEST appears before the transcript header.
+    assert user_content.index("USER REQUEST") < user_content.index("ATTEMPT TRANSCRIPT")
 
 
 def test_recent_termination_reasons_helper():

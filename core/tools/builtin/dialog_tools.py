@@ -240,16 +240,30 @@ def approve_dangerous_tool(
         for m in reversed(messages[-40:]):
             if m.get("role") != "assistant":
                 continue
-            try:
-                parts = _json.loads(m.get("content") or "[]")
-                if not isinstance(parts, list):
-                    continue
-                for part in parts:
-                    if isinstance(part, dict) and part.get("name") == "ask_user":
-                        found_ask_user = True
-                        break
-            except (ValueError, TypeError):
-                pass
+            # Primary: check tool_calls column — Pernix stores tool-use blocks
+            # here as [{"id": ..., "name": ..., "arguments": ...}, ...]
+            tool_calls_raw = m.get("tool_calls")
+            if tool_calls_raw:
+                try:
+                    tcs = _json.loads(tool_calls_raw)
+                    if isinstance(tcs, list):
+                        for tc in tcs:
+                            if isinstance(tc, dict) and tc.get("name") == "ask_user":
+                                found_ask_user = True
+                                break
+                except (ValueError, TypeError):
+                    pass
+            # Fallback: content field (legacy or alternative message formats)
+            if not found_ask_user:
+                try:
+                    parts = _json.loads(m.get("content") or "[]")
+                    if isinstance(parts, list):
+                        for part in parts:
+                            if isinstance(part, dict) and part.get("name") == "ask_user":
+                                found_ask_user = True
+                                break
+                except (ValueError, TypeError):
+                    pass
             if found_ask_user:
                 break
 

@@ -17,5 +17,4 @@ qrcode==8.*              # terminal QR code for mobile onboarding (network mode)
 tiktoken==0.9.*        # accurate token estimation
 playwright==1.58.*     # headless browser for browse_web + eval screenshots
 trafilatura==2.*       # HTML-to-markdown content extraction for browse_web
-ddgs==9.*              # fallback web search (formerly duckduckgo-search)
 tavily-python==0.5.*   # primary web search (needs API key)

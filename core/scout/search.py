@@ -221,7 +221,7 @@ def gather_cross_session_data(message: str, current_session_id: str) -> str:
     return "\n".join(lines)
 
 
-def gather_deep_memory(message: str) -> str:
+def gather_deep_memory(message: str, char_cap: int = 400) -> str:
     """Multi-query memory search for broader recall.
 
     Decomposes the message into keywords and runs parallel BM25 searches
@@ -266,7 +266,7 @@ def gather_deep_memory(message: str) -> str:
     lines = []
     total = 0
     for r in deduped:
-        line = f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:400]}"
+        line = f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:char_cap]}"
         if total + len(line) > 4000:
             break
         lines.append(line)

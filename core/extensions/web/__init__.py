@@ -1,13 +1,12 @@
 """Pernix — Web extension: search_web, http_get, browse_web.
 
-Tavily (primary) with DuckDuckGo fallback. Retry logic from v1.
-browse_web uses Playwright + trafilatura for JS-rendered page extraction.
+Tavily-only web search. browse_web uses Playwright + trafilatura for
+JS-rendered page extraction.
 """
 
 from __future__ import annotations
 
 import atexit
-import collections
 import logging
 import os
 import signal as _signal
@@ -20,24 +19,10 @@ from config import settings
 
 logger = logging.getLogger("pernix.ext.web")
 
-RETRY_DELAYS = [2, 5, 10]
-
-# Backend health tracking. We don't want to spam the operator on every Tavily
-# fallback (the wrapper falls through silently per-call, which made a 21h
-# outage of Tavily invisible during the 2026-04-27 ai-tech-daily-brief run).
-# Instead, fire a single notification on first occurrence in a session.
+# Backend health tracking — fire a single notification on first Tavily fault
+# rather than spamming the operator on every call.
 _tavily_alert_lock = threading.Lock()
 _tavily_alerted: bool = False
-# DuckDuckGo's anti-abuse layer returns empty results (not exceptions) when
-# the same IP fires 5+ concurrent queries. The wrapper previously surfaced
-# these as "No results found", indistinguishable from a genuine empty query.
-# Track recent empty results — if too many cluster within a short window,
-# raise a distinct rate-limit error so the agent knows to back off rather
-# than rapid-fire more queries.
-_ddg_empty_history_lock = threading.Lock()
-_ddg_empty_history: "collections.deque[float]" = collections.deque(maxlen=20)
-_DDG_RATE_LIMIT_WINDOW_S = 60.0
-_DDG_RATE_LIMIT_THRESHOLD = 4  # 4+ empties within window = backend throttling
 
 
 def _emit_backend_alert(title: str, body: str, urgency: str = "normal") -> None:
@@ -210,9 +195,9 @@ atexit.register(_kill_driver)
 
 
 def search_web(query: str, num_results: int = 5, _context: dict | None = None) -> str:
-    """Search the web using Tavily (primary) or DuckDuckGo (fallback)."""
+    """Search the web using Tavily. Requires TAVILY_API_KEY."""
     if not settings.web_search_enabled:
-        return "Error: Web search is disabled. Enable it in Settings → Web → " "Web Search, then try again."
+        return "Error: Web search is disabled. Enable it in Settings → Web → Web Search, then try again."
     if not query.strip():
         return "Error: Empty search query"
 
@@ -222,45 +207,35 @@ def search_web(query: str, num_results: int = 5, _context: dict | None = None) -
         num_results = 5
     num_results = min(max(num_results, 1), 10)
 
-    # Try Tavily first
     tavily_key = os.environ.get("TAVILY_API_KEY", "")
-    if tavily_key:
-        try:
-            return _tavily_search(query, num_results, tavily_key)
-        except _TavilyKeyError:
-            logger.warning("Tavily API key invalid, falling back to DuckDuckGo")
-            _alert_tavily_once(
-                "Tavily API key rejected",
-                "TAVILY_API_KEY is invalid. Search calls fall back to "
-                "DuckDuckGo (slower, lower quality). Update the key in "
-                "Settings → Web → Tavily API Key.",
-                "high",
-            )
-        except _TavilyLimitError:
-            logger.warning("Tavily usage limit exceeded, falling back to DuckDuckGo")
-            _alert_tavily_once(
-                "Tavily plan limit reached",
-                "TAVILY_API_KEY is over its usage limit. Search calls fall "
-                "back to DuckDuckGo until the plan resets or you upgrade. "
-                "Update the key in Settings → Web → Tavily API Key.",
-                "normal",
-            )
-        except Exception as e:
-            logger.warning("Tavily search failed: %s, trying DuckDuckGo", e)
-
-    # Fallback to DuckDuckGo with retry
-    try:
-        return _ddg_search_with_retry(query, num_results)
-    except _DDGRateLimitError as e:
-        # Distinct from "no results" — surface the backend throttling so
-        # the agent can pause / try other tools instead of rapid-firing.
+    if not tavily_key:
         return (
-            f"Error: DuckDuckGo backend appears rate-limited "
-            f"({e}). Try a different tool (browse_web for known sites) or "
-            f"slow down concurrent search_web calls."
+            "Error: Web search requires a Tavily API key. "
+            "Add yours in Settings → Web → Tavily API Key "
+            "(free tier available at tavily.com)."
         )
+
+    try:
+        return _tavily_search(query, num_results, tavily_key)
+    except _TavilyKeyError:
+        logger.warning("Tavily API key invalid")
+        _alert_tavily_once(
+            "Tavily API key rejected",
+            "TAVILY_API_KEY is invalid. Update it in Settings → Web → Tavily API Key.",
+            "high",
+        )
+        return "Error: Tavily API key is invalid. Update it in Settings → Web → Tavily API Key."
+    except _TavilyLimitError:
+        logger.warning("Tavily usage limit exceeded")
+        _alert_tavily_once(
+            "Tavily plan limit reached",
+            "TAVILY_API_KEY is over its usage limit. Upgrade your plan or wait for the monthly reset.",
+            "normal",
+        )
+        return "Error: Tavily usage limit reached. Upgrade your plan or wait for the monthly reset."
     except Exception as e:
-        return f"Error: Web search failed after all retries: {e}"
+        logger.warning("Tavily search failed: %s", e)
+        return f"Error: Web search failed: {e}"
 
 
 def _alert_tavily_once(title: str, body: str, urgency: str) -> None:
@@ -317,88 +292,11 @@ def _tavily_search(query: str, num_results: int, api_key: str) -> str:
     return "\n\n---\n\n".join(lines)
 
 
-def _ddg_search_with_retry(query: str, num_results: int) -> str:
-    """Search DuckDuckGo with retry on rate limit.
-
-    Distinguishes three failure modes:
-      - genuine empty result for the query
-      - concurrent rate-limiting from same IP (returns empty silently)
-      - explicit rate-limit/timeout exceptions
-    The middle case looks identical to "no results" but recovers if the
-    caller backs off. We track empty results within a 60s sliding window
-    and raise _DDGRateLimitError once a threshold is crossed so the agent
-    sees a distinct error instead of treating real backend throttling as
-    "the topic has no coverage".
-    """
-    try:
-        from ddgs import DDGS
-        from ddgs.exceptions import RatelimitException, TimeoutException
-    except ImportError:
-        # Fall back to legacy package name for environments not yet upgraded.
-        try:
-            from duckduckgo_search import DDGS
-            from duckduckgo_search.exceptions import RatelimitException, TimeoutException
-        except ImportError:
-            raise RuntimeError("ddgs (or legacy duckduckgo-search) not installed")
-
-    last_error = None
-    for attempt, delay in enumerate(RETRY_DELAYS):
-        try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=num_results))
-
-            if not results:
-                # Record the empty result and check if we're seeing burst
-                # silence — the signature of DDG's anti-abuse layer.
-                now_ts = time.time()
-                with _ddg_empty_history_lock:
-                    _ddg_empty_history.append(now_ts)
-                    cutoff = now_ts - _DDG_RATE_LIMIT_WINDOW_S
-                    recent_empties = sum(1 for t in _ddg_empty_history if t >= cutoff)
-                if recent_empties >= _DDG_RATE_LIMIT_THRESHOLD:
-                    logger.warning(
-                        "DuckDuckGo: %d consecutive empty results in %ds — " "treating as concurrent rate-limit",
-                        recent_empties,
-                        int(_DDG_RATE_LIMIT_WINDOW_S),
-                    )
-                    raise _DDGRateLimitError(
-                        f"{recent_empties} empty results in "
-                        f"{int(_DDG_RATE_LIMIT_WINDOW_S)}s "
-                        f"(suggests anti-abuse throttling)"
-                    )
-                return f"No results found for: {query}"
-
-            lines = []
-            for r in results:
-                title = r.get("title", "")
-                url = r.get("href", "")
-                body = r.get("body", "")[:300]
-                lines.append(f"**{title}**\n{url}\n{body}")
-            return "\n\n---\n\n".join(lines)
-
-        except (RatelimitException, TimeoutException) as e:
-            last_error = e
-            logger.info("DuckDuckGo attempt %d failed (%s), retrying in %ds", attempt + 1, type(e).__name__, delay)
-            time.sleep(delay)
-        except _DDGRateLimitError:
-            raise  # propagate the dedicated error to the search_web wrapper
-        except Exception:
-            raise  # Don't retry on unknown errors
-
-    raise last_error or RuntimeError("DuckDuckGo search failed after retries")
-
-
 class _TavilyKeyError(Exception):
     pass
 
 
 class _TavilyLimitError(Exception):
-    pass
-
-
-class _DDGRateLimitError(Exception):
-    """DuckDuckGo backend appears rate-limited (burst of empty results)."""
-
     pass
 
 
@@ -783,7 +681,7 @@ def register(reg) -> None:
     reg.register(
         name="search_web",
         func=search_web,
-        description="Search the web for information. Uses Tavily (primary, needs TAVILY_API_KEY) with DuckDuckGo fallback. Returns titles, URLs, and snippets.",
+        description="Search the web for information using Tavily. Requires TAVILY_API_KEY set in Settings → Web. Returns titles, URLs, and snippets.",
         parameters={
             "type": "object",
             "properties": {

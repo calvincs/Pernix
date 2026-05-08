@@ -22,9 +22,9 @@
         opacity: 0.7;
     }
 
-    /* File tree actions — always visible on touch */
+    /* File tree actions — hidden on touch; swipe-to-delete is used instead */
     .fp-tree-item .fp-tree-actions {
-        opacity: 1;
+        display: none;
     }
 
     /* Code copy buttons — always visible on touch */

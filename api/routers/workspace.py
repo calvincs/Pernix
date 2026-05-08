@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import unicodedata
 import uuid
 from pathlib import Path
@@ -195,16 +196,26 @@ async def save_workspace_file(path: str, body: dict):
 
 
 @router.delete("/workspace/{path:path}")
-async def delete_workspace_file(path: str):
+async def delete_workspace_entry(path: str):
     workspace = Path(settings.workspace_dir).resolve()
-    file_path = (workspace / path).resolve()
-    if not file_path.is_relative_to(workspace):
+    target = (workspace / path).resolve()
+    if not target.is_relative_to(workspace):
         raise HTTPException(403, detail="Path traversal blocked")
-    if not file_path.exists():
-        raise HTTPException(404, detail="File not found")
-    if not file_path.is_file():
-        raise HTTPException(400, detail="Path is not a file")
-    file_path.unlink()
+    if target == workspace:
+        raise HTTPException(400, detail="Cannot delete workspace root")
+    if not target.exists():
+        raise HTTPException(404, detail="Not found")
+    if target.is_file():
+        target.unlink()
+    elif target.is_dir():
+        for dirpath, dirnames, filenames in os.walk(str(target)):
+            for name in dirnames + filenames:
+                entry = Path(dirpath) / name
+                if entry.is_symlink() and not entry.resolve().is_relative_to(workspace):
+                    raise HTTPException(400, detail=f"Refusing to delete: external symlink at {entry.relative_to(workspace)}")
+        shutil.rmtree(target)
+    else:
+        raise HTTPException(400, detail="Not a file or directory")
     return {"deleted": True, "path": path}
 
 

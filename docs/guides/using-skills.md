@@ -1,0 +1,104 @@
+# Using skills
+
+A **skill** is a capability pack — a markdown file plus optional scripts that teaches the agent a specific workflow. Skills live in `data/skills/` and load on-demand: the agent discovers what skills exist on every turn, but only loads the full instructions for the ones it needs.
+
+This page is about **using** skills (the ones that ship with Pernix or that you've installed). To author your own, see [../authoring/writing-skills.md](../authoring/writing-skills.md).
+
+---
+
+## What ships out of the box
+
+Look in `data/skills/`. The current set covers things like:
+
+- Drafting LinkedIn posts
+- Transcribing YouTube videos via Whisper
+- Spec-driven development workflow
+- Cleaning up a workspace
+- Casting media to a TV
+- Reviewing code quality
+- Security hardening review
+- Crawling a site with crawl4ai
+
+Each one is a directory containing a `SKILL.md` file and optional `scripts/`, `resources/`, and `references/` subfolders.
+
+---
+
+## How skills get used
+
+You don't have to do anything explicit. On every turn, scout reads the metadata of every available skill (just the YAML frontmatter — name, description, tags) and decides whether one matches the user's request. If a top-scoring skill matches, scout injects it into the system prompt automatically.
+
+You can also invoke a skill explicitly:
+
+> *"Use the linkedin-post-formatter skill to write me a post about ..."*
+
+Or, in the UI, type `/skill <name>` to give the agent a strong hint.
+
+Once invoked, the agent calls `load_skill(name)` to pull the full instruction body (level 2). Scripts in the skill's `scripts/` directory run via `bash` — there are no dynamic Python imports.
+
+---
+
+## Progressive disclosure: L1, L2, L3
+
+Skills load in three layers, all controlled by Pernix:
+
+- **L1 — metadata** is always loaded into context. This is the YAML frontmatter: name, description, tags, version. Cheap, always available.
+- **L2 — instructions** are loaded only when the skill is selected. The body of `SKILL.md`, including step-by-step procedure, examples, and references.
+- **L3 — scripts** run on demand. The agent calls `bash` to execute a script from the skill's `scripts/` directory. The script can be anything — Python, shell, even a curl call.
+
+This is the "pull model" in action: 14 skills loaded as L1 metadata costs almost nothing in tokens. Only the 1–2 skills relevant to the current turn pay the L2 cost.
+
+---
+
+## Discovering what's available
+
+In a chat:
+
+> *"What skills do you have available?"*
+
+The agent uses `discover_skills` and lists them. Or look in `data/skills/` directly — every subdirectory with a `SKILL.md` is a skill.
+
+In the REST API:
+
+```bash
+GET /api/skills
+```
+
+Returns the same list with metadata.
+
+---
+
+## Installing a skill someone else wrote
+
+Skills are filesystem packages. Adding one is just dropping a directory into `data/skills/`:
+
+```bash
+cd data/skills/
+git clone https://example.com/some-skill-repo.git some-skill-name/
+```
+
+The next turn picks it up. There's no install command — discovery is just a directory scan.
+
+To uninstall: delete the directory, or use the agent's `delete_skill` tool (it's a dangerous tool, so it'll ask you to confirm first).
+
+---
+
+## Per-session skill control
+
+You can disable a particular skill from being auto-injected for a session by including a hint:
+
+> *"Don't use the workspace-organizer skill this session."*
+
+This isn't a hard switch — there's no `disabled_skills` setting yet — but the scout respects in-conversation guidance.
+
+For permanent disabling, move the skill out of `data/skills/` (e.g., to `data/skills.disabled/`).
+
+---
+
+## When skills aren't enough
+
+If you find yourself wishing for a skill but the workflow is small or one-off, you have two options:
+
+- **Just teach the agent in-conversation.** Tell it the procedure once, ask it to remember it. The relevant lesson lands in long-term memory and Snooze may eventually distill it.
+- **Author a skill** if it's a workflow you'd want to reuse across sessions or share with others. See [../authoring/writing-skills.md](../authoring/writing-skills.md) for the full format.
+
+Skills are especially valuable for **multi-step procedures with specific tools or APIs** — calling a particular service, formatting output a particular way, walking through a checklist that's hard to fit into a single prompt.

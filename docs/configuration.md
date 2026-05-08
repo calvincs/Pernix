@@ -86,7 +86,7 @@ The scout is a fast sub-agent that runs at the start of each turn to plan the ap
 | `scout_enabled` | `true` | Enable/disable the scout phase. Disable only for debugging; the scout significantly improves response quality. |
 | `scout_timeout` | `90` | Seconds before the scout is abandoned and the main agent runs without its guidance. |
 | `scout_retry_on_empty_approach` | `true` | Retry scout once if it returns no guidance (empty plan). |
-| `scout_preload_memory_char_limit` | `150` | Characters per memory result injected into the scout prompt. Keeps the scout context lean. |
+| `scout_preload_memory_char_limit` | `300` | Characters per memory result in the scout's auto-injected baseline. Only affects the preload phase — active recall tool calls return full entry content. |
 
 ---
 
@@ -115,7 +115,7 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 
 ## Shell & Tool Safety
 
-> See also: [docs/SECURITY.md](docs/SECURITY.md)
+> See also: [security.md](security.md)
 
 | Setting | Default | Description |
 |---|---|---|
@@ -153,7 +153,7 @@ Approvals are **per-invocation by default** — approving `bash` for `ps aux` do
 
 ## Network & Authentication
 
-> See also: [docs/SECURITY.md](docs/SECURITY.md) for the full security model.
+> See also: [security.md](security.md) for the full security model.
 
 | Setting | Default | Requires restart | Description |
 |---|---|---|---|
@@ -181,9 +181,9 @@ Approvals are **per-invocation by default** — approving `bash` for `ps aux` do
 |---|---|---|
 | `web_search_enabled` | `true` | Enable the `search_web` tool. |
 
-The search provider is selected automatically:
-- If `TAVILY_API_KEY` is set in `.env` → Tavily is used as the primary provider
-- Otherwise → DuckDuckGo is used (no key required, rate-limited at high volume)
+`search_web` requires a Tavily API key. Add it in Settings → Web → Tavily API Key
+(free tier at tavily.com). Without it the tool returns a setup hint rather than
+silently degrading. `web_search_enabled` can be used to disable the tool entirely.
 
 ---
 
@@ -222,7 +222,9 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `eval_max_retries` | `2` | Max evaluation-driven retries per turn. |
 | `eval_browser_verify` | `false` | Use browser-based verification when evaluating frontend changes. |
 | `reflect_max_retries_worker` | inherits `reflect_max_retries` | Separate retry cap for worker sub-agents. |
-| `reflect_full_transcript` | `false` | Include the full transcript in reflect evidence (debug-only; verbose). |
+| `reflect_emit_digest_on_pass` | `false` | Have reflect emit a turn digest even on `pass` verdicts. Default off; the digest is always emitted on `retry`/`escalate` so the next scout can plan around real evidence. |
+| `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Enforced at parse time. |
+| `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op kept for back-compat. |
 | `reflect_model` | *(empty)* | Override model for reflect; empty uses `background_model`. |
 | `post_mortem_retention_days` | `90` | Days to keep synthesized post-mortem records before snooze cleans them. |
 | `notify_webhook_timeout` | `10` | HTTP timeout for `notify_webhook_url` POST (seconds). |
@@ -237,5 +239,5 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 
 For a deep dive into the session state machine, agent turn loop, compaction algorithm, worker orchestration, and reflect/snooze internals, see:
 
-- **[docs/workflow.md](docs/workflow.md)** — detailed architectural walkthrough
-- **[docs/API.md](docs/API.md)** — REST API and SSE event reference
+- **[internals/state-machine.md](internals/state-machine.md)** — detailed architectural walkthrough
+- **[api.md](api.md)** — REST API and SSE event reference

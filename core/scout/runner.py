@@ -128,7 +128,7 @@ When SCOUT SIGNALS are present:
 - These are weighted observations, not hard rules. Your recommendations can contradict them when you have a specific reason — just make that reason explicit in your rationale fields.
 
 You also have tools to search deeper if the baseline is insufficient:
-- search_memory: Run additional memory queries with different keywords or modes
+- search_memory: Run additional memory queries with different keywords or modes. If a preloaded snippet is truncated and looks relevant, call search_memory with keywords from that entry and file=<file_name> to retrieve the complete content from that file.
 - search_sessions: Search other sessions with different queries
 - search_tools: Discover additional tools by capability
 - search_skills: Find more skill packages
@@ -194,6 +194,10 @@ _SCOUT_TOOLS = [
                         "description": "Search mode: hybrid (keyword+temporal, default), bm25 (keyword only), recent (last 24h)",
                     },
                     "limit": {"type": "integer", "description": "Max results to return (default 10, max 20)"},
+                    "file": {
+                        "type": "string",
+                        "description": "Restrict results to a specific memory file (e.g. pernix.lessons). Use to get full content from a file seen in the preloaded baseline.",
+                    },
                 },
                 "required": ["query"],
             },
@@ -381,14 +385,21 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
             query = args.get("query", "")
             mode = args.get("mode", "hybrid")
             limit = min(args.get("limit", 10), 20)
-            results = store.search(query, mode=mode, limit=limit)
+            file_filter = args.get("file", "")
+            results = store.search(query, mode=mode, limit=limit * 2 if file_filter else limit)
+            if file_filter:
+                results = [r for r in results if r.entry.file_name.lower() == file_filter.lower()][:limit]
             if not results:
                 return "No results found."
             lines = []
             for r in results:
-                lines.append(
-                    f"[{r.entry.file_name} score={r.score:.1f} type={r.entry.entry_type}] {r.entry.content[:400]}"
-                )
+                content = r.entry.content
+                if len(content) > 6144:  # ~2048 tokens at 3 chars/token
+                    logger.warning(
+                        "Large memory entry in %s (%d chars, ~%d tokens) — injecting full content into scout",
+                        r.entry.file_name, len(content), len(content) // 3,
+                    )
+                lines.append(f"[{r.entry.file_name} score={r.score:.1f} type={r.entry.entry_type}] {content}")
             return "\n\n".join(lines)
         except Exception as e:
             return f"Memory search error: {e}"
@@ -1209,6 +1220,7 @@ async def _run_scout_llm(
 
     # Search memory (baseline — always included so scout has context even without tools)
     _step("memory", "Searching memory")
+    _mem_cap = int(getattr(settings, "scout_preload_memory_char_limit", 300) or 300)
     try:
         from core.memory.store import get_memory_store
 
@@ -1221,7 +1233,6 @@ async def _run_scout_llm(
                 # Per-item cap keeps the pre-load bundle from ballooning as the
                 # memory index grows across sessions. Configurable because small
                 # scout models (e.g. 35B Ollama) degrade under high input ctx.
-                _mem_cap = int(getattr(settings, "scout_preload_memory_char_limit", 300) or 300)
                 for r in results:
                     mem_lines.append(
                         f"[{r.entry.file_name} score={r.score:.1f} type={r.entry.entry_type}] "
@@ -1244,7 +1255,7 @@ async def _run_scout_llm(
     try:
         from core.scout.search import gather_deep_memory
 
-        deep_mem = gather_deep_memory(message)
+        deep_mem = gather_deep_memory(message, char_cap=_mem_cap)
         if deep_mem:
             _step("memory", "Deep search found additional results")
             user_content_parts.append(f"\nDEEP MEMORY SEARCH:\n{deep_mem}")
