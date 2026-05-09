@@ -97,7 +97,7 @@ def _execute_deep_recall_tool(name: str, args: dict, memory_dir: str) -> str:
                         "Large memory entry in %s (%d chars, ~%d tokens)",
                         r.entry.file_name, len(content), len(content) // 3,
                     )
-                lines.append(f"[{r.entry.file_name} score={r.score:.1f}] {content}")
+                lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
             return "\n\n".join(lines)
         except Exception as e:
             return f"search_memory error: {e}"
@@ -296,7 +296,7 @@ def recall(query: str, top: int = 5, file: str = "", _context: dict | None = Non
                     "Large memory entry in %s (%d chars, ~%d tokens)",
                     r.entry.file_name, len(content), len(content) // 3,
                 )
-            lines.append(f"[{r.entry.file_name} score={r.score:.1f}] {content}")
+            lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
         return "\n\n".join(lines)
     except Exception as e:
         logger.error("Recall failed: %s", e)
@@ -339,10 +339,36 @@ def deep_recall(query: str, context: str = "", _context: dict | None = None) -> 
                         "Large memory entry in %s (%d chars, ~%d tokens)",
                         r.entry.file_name, len(content), len(content) // 3,
                     )
-                lines.append(f"[{r.entry.file_name} score={r.score:.1f}] {content}")
+                lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
             return "\n\n".join(lines)
         except Exception as e2:
             return f"Error searching memory: {e2}"
+
+
+def update_memory(file: str, epoch: int, content: str, _context: dict | None = None) -> str:
+    """Replace the content of a specific memory entry. Use recall() first to find the file
+    and epoch of the entry to correct. All metadata (type, tags, weight) is preserved."""
+    from core.memory.store import get_memory_store
+
+    store = get_memory_store()
+    if store is None:
+        return "Error: Memory system unavailable"
+    if not file or not content.strip():
+        return "Error: file and content are required"
+    return store.update_entry(file, int(epoch), content)
+
+
+def forget(file: str, epoch: int, _context: dict | None = None) -> str:
+    """Permanently delete a specific memory entry. Use recall() first to find the file
+    and epoch of the entry to remove. This cannot be undone."""
+    from core.memory.store import get_memory_store
+
+    store = get_memory_store()
+    if store is None:
+        return "Error: Memory system unavailable"
+    if not file:
+        return "Error: file is required"
+    return store.delete_entry(file, int(epoch))
 
 
 def register(reg) -> None:
@@ -460,4 +486,53 @@ def register(reg) -> None:
         tags=["recall", "search", "memory", "retrieve", "find", "knowledge", "deep", "synthesize"],
         timeout=60,
         parallel_safe=True,
+    )
+
+    reg.register(
+        name="update_memory",
+        func=update_memory,
+        description=(
+            "Correct or rewrite an existing memory entry. "
+            "First call recall() to find the entry — the output shows [file epoch=N score=X.X]. "
+            "Then call update_memory with that file and epoch to replace its content. "
+            "Use when a stored fact is wrong, outdated, or needs clarification."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Memory file name (e.g. pernix.lessons)"},
+                "epoch": {"type": "integer", "description": "Epoch of the entry to update (from recall output)"},
+                "content": {"type": "string", "description": "Replacement content for the entry"},
+            },
+            "required": ["file", "epoch", "content"],
+        },
+        category="memory",
+        tags=["memory", "update", "correct", "fix", "edit", "amend"],
+        safety_level="caution",
+        timeout=15,
+        parallel_safe=False,
+    )
+
+    reg.register(
+        name="forget",
+        func=forget,
+        description=(
+            "Permanently delete a memory entry. "
+            "First call recall() to find the entry — the output shows [file epoch=N score=X.X]. "
+            "Then call forget with that file and epoch. Cannot be undone. "
+            "Prefer update_memory to correct wrong facts rather than deleting them entirely."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "Memory file name (e.g. pernix.lessons)"},
+                "epoch": {"type": "integer", "description": "Epoch of the entry to delete (from recall output)"},
+            },
+            "required": ["file", "epoch"],
+        },
+        category="memory",
+        tags=["memory", "delete", "forget", "remove", "purge"],
+        safety_level="caution",
+        timeout=15,
+        parallel_safe=False,
     )

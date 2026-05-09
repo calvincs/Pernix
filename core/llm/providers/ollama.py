@@ -224,6 +224,7 @@ class OllamaProvider:
         client = self._get_client()
         collected_tokens = 0
         done_sent = False
+        _closing = False  # set when GeneratorExit is in flight; gates the finally yield
         done_reason: str | None = None  # captured from final chunk if present
 
         try:
@@ -308,12 +309,24 @@ class OllamaProvider:
         except GeneratorExit:
             # Caller abandoned the stream (e.g. returned/broke out of async for).
             # Cannot yield here — just clean up silently.
+            _closing = True
             return
         except Exception as e:
             logger.error("Ollama stream error: %s", e)
-            yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
+            try:
+                yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
+            except GeneratorExit:
+                # GeneratorExit arrived while we were yielding the ERROR event
+                # (caller broke out of their async-for after receiving it).
+                # Mark closing so the finally block skips its yield.
+                _closing = True
+                return
         finally:
-            if not done_sent:
+            # Only yield DONE if we completed normally or via an error that the
+            # caller consumed. If GeneratorExit is in flight, yielding here would
+            # raise RuntimeError("async generator ignored GeneratorExit") at the
+            # C level — the try/except GeneratorExit pattern cannot catch that.
+            if not done_sent and not _closing:
                 done_sent = True
                 try:
                     yield StreamEvent(type=StreamEventType.DONE, finish_reason=done_reason)

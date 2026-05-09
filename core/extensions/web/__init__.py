@@ -678,25 +678,26 @@ def browse_web(url: str, _context: dict | None = None) -> str:
 
 def register(reg) -> None:
     """Register web extension tools."""
-    reg.register(
-        name="search_web",
-        func=search_web,
-        description="Search the web for information using Tavily. Requires TAVILY_API_KEY set in Settings → Web. Returns titles, URLs, and snippets.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
-                "num_results": {"type": "integer", "description": "Number of results (default 5, max 10)"},
+    if settings.web_search_enabled:
+        reg.register(
+            name="search_web",
+            func=search_web,
+            description="Search the web for information using Tavily. Requires TAVILY_API_KEY set in Settings → Web. Returns titles, URLs, and snippets.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "num_results": {"type": "integer", "description": "Number of results (default 5, max 10)"},
+                },
+                "required": ["query"],
             },
-            "required": ["query"],
-        },
-        category="web",
-        tags=["search", "web", "internet", "find", "lookup", "research", "google", "information"],
-        timeout=60,
-        parallel_safe=True,
-        source="extension",
-        safety_level="dangerous",
-    )
+            category="web",
+            tags=["search", "web", "internet", "find", "lookup", "research", "google", "information"],
+            timeout=60,
+            parallel_safe=True,
+            source="extension",
+            safety_level="dangerous",
+        )
 
     reg.register(
         name="http_get",
@@ -717,9 +718,13 @@ def register(reg) -> None:
         safety_level="safe",
     )
 
-    # Register browse_web if playwright is installed (runtime-gated by browser_enabled setting)
+    # Register browse_web if playwright is installed and browser_enabled is set
     try:
         import playwright  # noqa: F401
+
+        if not settings.browser_enabled:
+            logger.info("browse_web tool not registered (browser_enabled=False)")
+            return
 
         reg.register(
             name="browse_web",

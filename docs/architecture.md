@@ -245,7 +245,7 @@ Persistent facts, decisions, and lessons live as **markdown files** in `data/mem
 
 Memory is searched at the start of each turn via BM25 full-text search. Top-scoring entries get injected into the system prompt. The agent can also read or write entries directly using memory tools.
 
-The memory store is **append-only and human-readable**. You can open the markdown files in any editor and read what your agent has learned about you. You can also delete or edit them — they're just files.
+The memory store is **human-readable and append-by-default**. New entries are appended to topic files; the agent can correct or remove a specific entry through the `update_memory` and `forget` tools (epochs stay stable across updates). You can also open the markdown files in any editor and edit or delete them directly — they're just files.
 
 Memory entries are scored, and old "lessons" decay over time (entries tagged as lessons get progressively deweighted after 14, 60, and 180 days). Deduplication runs during Snooze.
 

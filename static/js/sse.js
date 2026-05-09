@@ -9,6 +9,10 @@ let _onEvent = null;
 let _sessionId = null;
 let _lastEventTime = 0;
 let _healthTimer = null;
+// Tracked here (separate from app.js's _lastSeq) so the watchdog can pass it
+// on reconnect via query param — EventSource cannot set request headers, so
+// `Last-Event-ID` is unreachable for JS-driven reconnects.
+let _lastSeq = 0;
 
 window.addEventListener('pernix:offline', () => {
     if (_source) { _source.close(); _source = null; }
@@ -74,6 +78,7 @@ export function connectSSE(sessionId, onEvent) {
             }
             try {
                 const data = JSON.parse(e.data);
+                if (typeof data.seq === 'number' && data.seq > _lastSeq) _lastSeq = data.seq;
                 _onEvent({ type, ...data });
             } catch {
                 _onEvent({ type, raw: e.data });
@@ -93,6 +98,7 @@ export function disconnectSSE() {
     _sessionId = null;
     _connectionState = 'disconnected';
     _updateHealthIndicator('disconnected');
+    _lastSeq = 0;
     if (_healthTimer) {
         clearInterval(_healthTimer);
         _healthTimer = null;
@@ -114,11 +120,14 @@ function _startHealthCheck() {
             console.warn(`SSE: no events for ${Math.round(elapsed / 1000)}s, forcing reconnect`);
             _connectionState = 'reconnecting';
             _updateHealthIndicator('reconnecting');
-            // Close and reopen
+            // Close and reopen. Pass last seen seq as a query param so the
+            // server replays anything we missed — EventSource won't let us
+            // set the Last-Event-ID header on a JS-instantiated reconnect.
             const sid = _sessionId;
             const handler = _onEvent;
             _source.close();
-            _source = new EventSource(`/api/sessions/${sid}/events`);
+            const replayQuery = _lastSeq > 0 ? `?last_event_id=${_lastSeq}` : '';
+            _source = new EventSource(`/api/sessions/${sid}/events${replayQuery}`);
             _lastEventTime = Date.now();
 
             _source.onopen = () => {
@@ -158,6 +167,7 @@ function _startHealthCheck() {
                     }
                     try {
                         const data = JSON.parse(e.data);
+                        if (typeof data.seq === 'number' && data.seq > _lastSeq) _lastSeq = data.seq;
                         handler({ type, ...data });
                     } catch {
                         handler({ type, raw: e.data });

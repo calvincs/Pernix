@@ -43,15 +43,17 @@ You can disable recall entirely with `memory_recall = false`, or tighten the thr
 
 ## How writes happen
 
-The agent writes new entries via memory tools:
+The agent writes and mutates entries via memory tools:
 
-- **`memory_add`** — append a new entry to the appropriate file, creating the file if needed
-- **`memory_update`** — amend an existing entry (preserves the original by appending a revision marker)
-- **`memory_search`** — query the store directly without going through scout
+- **`remember`** — append a new entry to the appropriate file (auto-routed if no file given), creating the file if needed
+- **`ingest`** — bulk import a structured document, routing sections to the right files
+- **`update_memory`** — replace the content of a specific entry by `(file, epoch)`. Metadata is preserved; the epoch stays stable. Use this to correct a wrong fact rather than appending a contradiction.
+- **`forget`** — permanently delete a specific entry by `(file, epoch)`. Cannot be undone — prefer `update_memory` when you can.
+- **`recall`** / **`deep_recall`** — read-side; output now includes `epoch=N` so the agent can identify which entry to update or forget
 
 Writes happen at three points:
 
-- **Inside a turn** — when the agent learns something it explicitly wants to remember.
+- **Inside a turn** — when the agent learns something it explicitly wants to remember, or when it discovers a stored entry is wrong and needs correcting.
 - **Reflect's distillation** — after a successful turn, a background hook may distill 1–3 entries from the turn into long-term memory.
 - **Snooze consolidation** — during idle periods, similar entries get clustered and merged.
 

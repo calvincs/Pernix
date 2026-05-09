@@ -469,7 +469,8 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                 # cap mid-scout and cascade to LLMSessionTimeoutError on the
                 # agent — exactly what session 4b184273f4b5 hit (remaining 420s,
                 # old guard 390s let it through, scout consumed 420s).
-                min_needed = float(settings.scout_timeout) * 3 + 30.0
+                raw_needed = float(settings.scout_timeout) * 3 + 30.0
+                min_needed = min(raw_needed, float(settings.reflect_retry_budget_cap_s))
             except Exception:
                 remaining = float("inf")
                 min_needed = 0.0
