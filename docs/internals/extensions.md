@@ -24,8 +24,8 @@ If a setting that gates an extension changes (e.g., turning `browser_enabled` on
 
 | Tool | Safety | Gated on |
 |---|---|---|
-| `search_web` | dangerous | `web_search_enabled` (default `true`) AND `TAVILY_API_KEY` set |
-| `browse_web` | dangerous | `browser_enabled` (default `false`) AND Playwright/Chromium installed |
+| `search_web` | dangerous | `web_search_enabled` (default `true`) AND `TAVILY_API_KEY` set — skips registration entirely when flag is off |
+| `browse_web` | dangerous | `browser_enabled` (default `false`) AND Playwright/Chromium installed — skips registration entirely when flag is off |
 | `summarize_webpage` | safe | always (uses trafilatura) |
 | `http_get` | safe | always; max bytes capped by `max_fetch_size` (default 100 KB) |
 
@@ -85,10 +85,10 @@ Always enabled. Lets the agent introspect prior sessions.
 
 | Tool | Safety | What |
 |---|---|---|
-| `list_recent_sessions` | safe | List sessions from a window of dates |
+| `list_recent_sessions` | safe | List most-recent sessions ordered by last activity (newest first) |
 | `read_session_summary` | safe | Read the auto-titled summary + key points of a prior session |
 
-Useful for "what was I working on yesterday?" memory-style queries.
+Use `list_recent_sessions` for chronological queries ("what did we do today/yesterday?"). Use `search_sessions` (builtin) for topic lookups ("find sessions where we discussed X") — it runs FTS5 keyword search over message content, not timestamp filtering.
 
 ### `skillmaker`
 

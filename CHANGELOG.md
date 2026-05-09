@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.5.0 — 2026-05-08
+
+- fix: route injected messages to prompt() outside live-loop states
+- fix: prevent RuntimeError in Ollama stream generator on HTTP 500 + retry
+- feat: UTC+local temporal context, session-history guidance, docs update
+- feat: inject current datetime into scout context; gate web tools on settings flags
+- fix: SSE watchdog reconnect now replays missed events via query param
+- docs: reflect that memory is no longer strictly append-only
+- feat: cap retry budget gate + add update_memory / forget tools
+
 ## v2.4.0 — 2026-05-08
 
 - fix: patch bugs found in post-merge validation

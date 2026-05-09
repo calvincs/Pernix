@@ -21,7 +21,7 @@ from core.context.tokens import get_estimator
 
 def test_temporal_context_has_time():
     text = _build_temporal_context()
-    assert "Current time:" in text
+    assert "Current time (UTC):" in text
     assert "TEMPORAL CONTEXT" in text
 
 

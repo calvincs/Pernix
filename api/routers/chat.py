@@ -199,6 +199,15 @@ async def inject(body: dict):
     Unlike /api/chat which queues for a new turn, this writes the message
     directly to the DB. The agent sees it at the next tool round via
     compile_context(), which reads fresh from the DB each round.
+
+    Inject-only ("context drop") semantics only work while the agent loop
+    has more compile_context() calls ahead — i.e. PROCESSING /
+    AWAITING_WORKERS / COMPACTING. In any other state (FINALIZING,
+    IDLE_READY, AWAITING_USER, paused, cancelling) no further round will
+    run and get_orphaned_user_messages skips injected rows by design, so
+    the message would be permanently stranded. Fall through to
+    manager.prompt() in those cases so the message lands as a queued or
+    new turn instead.
     """
     session_id = body.get("session_id")
     message = body.get("message", "")
@@ -215,6 +224,21 @@ async def inject(body: dict):
     if not session_db:
         raise HTTPException(404, detail=f"Session {session_id} not found")
 
+    manager = get_manager()
+    session = manager.get(session_id)
+
+    from sessions import state_v2 as sv2
+
+    LIVE_LOOP_STATES = {
+        sv2.SessionStateV2.PROCESSING,
+        sv2.SessionStateV2.AWAITING_WORKERS,
+        sv2.SessionStateV2.COMPACTING,
+    }
+    current = sv2._current_state(session) if session is not None else None
+    if current not in LIVE_LOOP_STATES:
+        await manager.prompt(session_id, message)
+        return {"status": "queued", "session_id": session_id}
+
     # Tag with metadata.injected so compile_context's turn-scoping filter
     # doesn't drop this row. The filter (in core/context/compiler.py) hides
     # user messages with id > turn_user_msg_id to prevent turn N from
@@ -229,8 +253,6 @@ async def inject(body: dict):
         metadata=_json.dumps({"injected": True}),
     )
 
-    manager = get_manager()
-    session = manager.get(session_id)
     if session:
         session.emit_event({"type": "message.injected", "content": message[:100]})
 

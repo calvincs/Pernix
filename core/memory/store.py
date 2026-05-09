@@ -1,7 +1,12 @@
 """Pernix — Internalized memory store (replaces HyperKB).
 
-Append-only markdown files + SQLite FTS5 index. ~800 lines replacing ~8000.
+Markdown files + SQLite FTS5 index. ~800 lines replacing ~8000.
 Markdown files are source of truth; FTS5 index is rebuildable.
+
+Writes are append-by-default (remember, ingest, distill, snooze) with
+explicit per-entry mutation via update_entry / delete_entry — used by the
+agent's update_memory / forget tools to correct or remove specific entries.
+Epochs are immutable: an updated entry keeps its original epoch.
 """
 
 from __future__ import annotations
@@ -44,7 +49,12 @@ _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
 
 class MemoryStore:
-    """Persistent memory with append-only markdown + FTS5 search."""
+    """Persistent memory with markdown files + FTS5 search.
+
+    Append-by-default (add_entry) with explicit per-entry mutation
+    (update_entry, delete_entry). File-level archival (archive_file) and
+    cross-file moves (move_entries) for consolidation.
+    """
 
     def __init__(self, memory_dir: str | None = None):
         self._dir = Path(memory_dir or settings.memory_dir)
@@ -381,6 +391,134 @@ class MemoryStore:
                     return True
 
         return False
+
+    # ------------------------------------------------------------------
+    # Entry-level mutations (update / delete)
+    # ------------------------------------------------------------------
+
+    def _reindex_file(self, conn, file_name: str, new_raw: str, delta_count: int = 0) -> None:
+        """Rebuild FTS5 index for a file from updated raw markdown content.
+
+        Deletes all existing rows for the file and re-inserts from parsed entries.
+        Uses a file-level delete because FTS5 compound WHERE on UNINDEXED columns
+        is unreliable — only equality on FTS-indexed columns or rowid is safe.
+        delta_count is added to the stored entry_count (use -1 for a deleted entry).
+        """
+        from core.memory.format import parse_entries_from_markdown
+
+        conn.execute("DELETE FROM memory_fts WHERE file_name = ?", (file_name,))
+        entries = parse_entries_from_markdown(file_name, new_raw)
+        for e in entries:
+            tag_str = ",".join(e.tags) if e.tags else ""
+            conn.execute(
+                "INSERT INTO memory_fts (file_name, content, tags, entry_type, weight, epoch) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (file_name, e.content, tag_str, e.entry_type, e.weight, str(e.epoch)),
+            )
+        now = int(time.time())
+        conn.execute(
+            "UPDATE memory_files SET entry_count = MAX(0, entry_count + ?), updated_at = ? WHERE name = ?",
+            (delta_count, now, file_name),
+        )
+
+    def update_entry(self, file_name: str, epoch: int, new_content: str) -> str:
+        """Replace the content of an existing entry (identified by epoch).
+
+        Preserves all metadata (type, tags, weight, source). Syncs FTS5 index.
+        Returns a confirmation string or an error string.
+        """
+        file_name = self._validate_name(file_name)
+        md_path = self._dir / f"{file_name}.md"
+        if not md_path.exists():
+            return f"Error: memory file '{file_name}' not found"
+        if not new_content.strip():
+            return "Error: new content must not be empty"
+
+        epoch_marker = f"<!-- @epoch: {epoch} -->"
+
+        with self._lock:
+            raw = md_path.read_text(encoding="utf-8")
+            sections = raw.split("\n---\n")
+
+            found = False
+            new_sections = []
+            for section in sections:
+                if epoch_marker in section:
+                    found = True
+                    # Preserve all HTML comment metadata lines exactly as-is,
+                    # replace only the content (non-comment) lines.
+                    meta_lines = [ln for ln in section.split("\n") if ln.strip().startswith("<!--")]
+                    new_sections.append("\n".join(meta_lines) + "\n" + new_content + "\n")
+                else:
+                    new_sections.append(section)
+
+            if not found:
+                return f"Error: no entry with epoch={epoch} in '{file_name}'"
+
+            new_raw = "\n---\n".join(new_sections)
+
+            with open(md_path, "w", encoding="utf-8") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.write(new_raw)
+                    f.flush()
+                    conn = self._connect()
+                    try:
+                        self._reindex_file(conn, file_name, new_raw, delta_count=0)
+                        conn.commit()
+                    finally:
+                        conn.close()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+        logger.info("Updated memory entry epoch=%d in '%s'", epoch, file_name)
+        return f"Updated entry epoch={epoch} in '{file_name}'"
+
+    def delete_entry(self, file_name: str, epoch: int) -> str:
+        """Remove an entry (identified by epoch) from its file and FTS5 index.
+
+        Returns a confirmation string or an error string.
+        """
+        file_name = self._validate_name(file_name)
+        md_path = self._dir / f"{file_name}.md"
+        if not md_path.exists():
+            return f"Error: memory file '{file_name}' not found"
+
+        epoch_marker = f"<!-- @epoch: {epoch} -->"
+
+        with self._lock:
+            raw = md_path.read_text(encoding="utf-8")
+            sections = raw.split("\n---\n")
+
+            found = False
+            new_sections = []
+            for section in sections:
+                if epoch_marker in section:
+                    found = True  # drop this section
+                else:
+                    new_sections.append(section)
+
+            if not found:
+                return f"Error: no entry with epoch={epoch} in '{file_name}'"
+
+            new_raw = "\n---\n".join(new_sections)
+
+            with open(md_path, "w", encoding="utf-8") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                try:
+                    f.write(new_raw)
+                    f.flush()
+                    conn = self._connect()
+                    try:
+                        self._reindex_file(conn, file_name, new_raw, delta_count=-1)
+                        conn.commit()
+                    finally:
+                        conn.close()
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+        logger.info("Deleted memory entry epoch=%d from '%s'", epoch, file_name)
+        return f"Deleted entry epoch={epoch} from '{file_name}'"
 
     # ------------------------------------------------------------------
     # Archive & merge operations (used by consolidation)

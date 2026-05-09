@@ -364,10 +364,14 @@ def _build_available_skills_block(max_skills: int = 24, desc_chars: int = 180) -
 
 
 def _build_temporal_context() -> str:
-    """Build temporal context section with current time and birthdate."""
+    """Build temporal context section with current time (UTC + local) and birthdate."""
     import re as _re
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now_utc = datetime.now(timezone.utc)
+    utc_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+    local_now = now_utc.astimezone()
+    local_str = local_now.strftime("%Y-%m-%d %H:%M:%S %Z")
+
     birthdate = ""
     try:
         soul = Path("data/agent/SOUL.md")
@@ -381,11 +385,25 @@ def _build_temporal_context() -> str:
 
     lines = [
         "[TEMPORAL CONTEXT]",
-        f"Current time: {now}",
+        f"Current time (UTC):   {utc_str}",
+        f"Current time (local): {local_str}",
     ]
     if birthdate:
         lines.append(f"Agent birthdate: {birthdate}")
-    lines.append('To get an updated timestamp, use bash("date -Iseconds").')
+    lines += [
+        "",
+        "All harness timestamps (sessions, messages, cron runs) are stored in UTC (+00:00).",
+        "When the user says 'today' or 'yesterday', interpret relative to LOCAL time above.",
+        'For a fresh timestamp: bash("date") → local,  bash("date -u") → UTC.',
+        "",
+        "FINDING SESSION HISTORY:",
+        "- list_recent_sessions(limit=N)  →  sessions newest-first by updated_at. Use for",
+        "  'what did we do today/yesterday/recently' — this is the chronological lookup tool.",
+        "- read_session_summary(session_id)  →  full metadata + recent messages for one session.",
+        "- search_sessions(query)  →  FTS5 keyword search over message CONTENT.",
+        "  Use to find sessions where a TOPIC was discussed ('sessions about web scraping').",
+        "  Do NOT use search_sessions to find sessions by date — it searches text, not timestamps.",
+    ]
     return "\n".join(lines)
 
 

@@ -172,6 +172,8 @@ RULES:
 - WORKER DELEGATION: Recommend spawn_worker, check_workers, await_workers, get_worker_result when: (a) multiple independent subtasks benefit from parallelism, (b) a subtask needs a different model, (c) large divide-and-conquer scope, or (d) data fetching followed by processing. Do NOT recommend for simple tasks. If session type is "worker", NEVER recommend orchestration tools.
 - PYTHON PACKAGES: Workspace venv at data/workspace/.venv/ is auto-activated. Use bash with pip or discover_tools for package management.
 - USER INTENT: When the user names a specific action/tool, prioritize matching tools. User preference > efficiency.
+- SESSION HISTORY QUERIES: For "what did we do today/yesterday/recently" — recommend list_recent_sessions (chronological, timestamp-ordered). search_sessions is FTS5 keyword search over message CONTENT; use it to find sessions where a topic was discussed, never to find sessions by date. Pair list_recent_sessions + read_session_summary for deep dives into specific sessions.
+- TIME ZONES: The injected CURRENT DATE/TIME shows both UTC and local time. All harness timestamps (sessions, messages, cron runs) are stored in UTC (+00:00). "Today" and "yesterday" mean local time, not UTC — use the local time for date math. Never assume a date boundary from UTC alone.
 - Do NOT use <think> or reasoning tags. /no_think"""
 
 # ---------------------------------------------------------------------------
@@ -399,7 +401,7 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
                         "Large memory entry in %s (%d chars, ~%d tokens) — injecting full content into scout",
                         r.entry.file_name, len(content), len(content) // 3,
                     )
-                lines.append(f"[{r.entry.file_name} score={r.score:.1f} type={r.entry.entry_type}] {content}")
+                lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f} type={r.entry.entry_type}] {content}")
             return "\n\n".join(lines)
         except Exception as e:
             return f"Memory search error: {e}"
@@ -1178,8 +1180,19 @@ async def _run_scout_llm(
 
     scout_message = _legacy_multimodal_to_text(message) if isinstance(message, str) else str(message)
 
+    from datetime import datetime as _dt, timezone as _tz
+
+    _now_utc = _dt.now(_tz.utc)
+    _now_local = _now_utc.astimezone()
+    _now_str = (
+        f"{_now_utc.strftime('%Y-%m-%d %H:%M UTC')}"
+        f" / {_now_local.strftime('%Y-%m-%d %H:%M %Z')} (local)"
+    )
+
     user_content_parts = [
         f"USER MESSAGE: {scout_message}",
+        "",
+        f"CURRENT DATE/TIME: {_now_str}",
         "",
         f"SESSION CONTEXT:\n{brief.to_prompt_text()}",
     ]

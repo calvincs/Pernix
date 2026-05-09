@@ -219,6 +219,11 @@ class Settings:
     reflect_digest_max_chars_per_excerpt: int = (
         2000  # Per-call result_excerpt cap inside the turn_digest (defensive trim at parse time)
     )
+    reflect_retry_budget_cap_s: int = (
+        600  # Ceiling on the computed min-budget-for-retry threshold (seconds). Prevents high
+        # scout_timeout values from blocking retries when plenty of wall-clock time remains.
+        # Formula is min(scout_timeout × 3 + 30, this cap). Raise to be more conservative.
+    )
     post_mortem_retention_days: int = 90  # Days to keep synthesized post-mortems before snooze sweeps them
 
     # --- Notifications ---

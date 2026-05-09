@@ -63,11 +63,15 @@ async def session_events(session_id: str, request: Request):
     except ValueError:
         raise HTTPException(404, detail=f"Session {session_id} not found")
 
+    # Header takes precedence (native browser auto-reconnect uses it).
+    # Query-param fallback exists because JS-instantiated EventSource (used by
+    # the client's stale-stream watchdog) cannot set request headers; without
+    # this fallback every watchdog reconnect would skip replay and lose events.
     last_id = 0
-    raw = request.headers.get("Last-Event-ID", "0")
+    raw = request.headers.get("Last-Event-ID") or request.query_params.get("last_event_id", "0")
     try:
         last_id = int(raw)
-    except ValueError:
+    except (ValueError, TypeError):
         pass
 
     return sse_response(event_stream(session, last_event_id=last_id))
