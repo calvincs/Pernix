@@ -14,6 +14,58 @@ let _healthTimer = null;
 // `Last-Event-ID` is unreachable for JS-driven reconnects.
 let _lastSeq = 0;
 
+// Single source of truth for every event type the server may emit on the
+// per-session SSE stream. EventSource only dispatches to listeners registered
+// by exact `event:` name, so an event missing from this list is silently
+// dropped on the client — _lastSeq never advances for it, which then causes
+// gap-detection in app.js to fire a spurious soft reload whenever the next
+// subscribed event arrives. Keep this list synced with the emitters in
+// core/, sessions/, api/ — verify with:
+//   grep -rEho '"type":\s*"[a-z][a-z_.]+"' core/ sessions/ api/ | sort -u
+const EVENT_TYPES = [
+    // Stream lifecycle
+    'stream.token', 'stream.done', 'stream.error',
+    'stream.fallback', 'stream.retry', 'stream.length_continuation',
+    'stream.budget_exhausted',
+    // Tools / context / scout
+    'tool.call',
+    'context.compacting', 'context.compacted', 'context.reset',
+    'scout.start', 'scout.step', 'scout.done',
+    // Session lifecycle
+    'session.queued', 'session.title', 'session.cancelled',
+    'session.state_changed', 'session.prompt_rejected',
+    'session.waiting_llm', 'session.message_combined',
+    'session.queue_dropped', 'session.queue_full',
+    // Injected mid-turn messages
+    'message.injected',
+    // Workers
+    'worker.started', 'worker.done', 'worker.failed',
+    // Partial save (mid-stream persistence)
+    'partial.saved',
+    // Ask-user dialogs (questions + notifications + replies)
+    'dialog.question', 'user_question',
+    'dialog.answered', 'dialog.dismissed', 'dialog.notification',
+    // Browse (visible web-tool activity)
+    'browse.start', 'browse.done',
+    // Reflect (post-turn verification)
+    'reflect.start', 'reflect.done', 'reflect.skipped',
+    'reflect.retry', 'reflect.exhausted', 'reflect.escalate',
+    'reflect.budget_exhausted',
+    // Eval (autonomous evaluation pass)
+    'eval.start', 'eval.pass', 'eval.done', 'eval.retry', 'eval.exhausted',
+    // Snooze (idle-time consolidation)
+    'snooze.start', 'snooze.activity', 'snooze.done',
+    // Model switches (mid-turn override + scout-routed pill)
+    'model.divider', 'model.override',
+    // Workflows (orchestration extension)
+    'workflow.started', 'workflow.completed', 'workflow.cancelled',
+    'workflow.wave_started',
+    'workflow.step_started', 'workflow.step_completed',
+    'workflow.step_retry', 'workflow.step_skipped',
+    // Turn boundary (safety-net for button reset)
+    'turn.complete',
+];
+
 window.addEventListener('pernix:offline', () => {
     if (_source) { _source.close(); _source = null; }
     if (_healthTimer) { clearInterval(_healthTimer); _healthTimer = null; }
@@ -31,6 +83,25 @@ let _connectionState = 'disconnected';
 
 const HEALTH_CHECK_INTERVAL = 15000;  // Check every 15s
 const STALE_THRESHOLD = 45000;        // Consider dead after 45s without any event/heartbeat
+
+function _attachListeners(source, handler) {
+    EVENT_TYPES.forEach(type => {
+        source.addEventListener(type, (e) => {
+            _lastEventTime = Date.now();
+            if (_connectionState !== 'connected') {
+                _connectionState = 'connected';
+                _updateHealthIndicator('connected');
+            }
+            try {
+                const data = JSON.parse(e.data);
+                if (typeof data.seq === 'number' && data.seq > _lastSeq) _lastSeq = data.seq;
+                handler({ type, ...data });
+            } catch {
+                handler({ type, raw: e.data });
+            }
+        });
+    });
+}
 
 export function connectSSE(sessionId, onEvent) {
     disconnectSSE();
@@ -53,38 +124,7 @@ export function connectSSE(sessionId, onEvent) {
         console.warn('SSE error, reconnecting...');
     };
 
-    // Listen to all event types
-    const eventTypes = [
-        'stream.token', 'stream.done', 'stream.error',
-        'tool.call', 'context.info', 'context.compacting', 'context.compacted', 'context.reset',
-        'session.queued', 'session.title', 'session.cancelled',
-        'session.state_changed', 'session.prompt_rejected',
-        'message.injected',
-        'scout.start', 'scout.step', 'scout.done',
-        'worker.started', 'worker.done', 'worker.failed',
-        'partial.saved',
-        'dialog.question', 'user_question', 'dialog.answered', 'dialog.dismissed', 'dialog.notification',
-        'browse.start', 'browse.done',
-        'reflect.start', 'reflect.done', 'reflect.retry', 'reflect.exhausted', 'reflect.escalate',
-        'turn.complete',
-    ];
-
-    eventTypes.forEach(type => {
-        _source.addEventListener(type, (e) => {
-            _lastEventTime = Date.now();
-            if (_connectionState !== 'connected') {
-                _connectionState = 'connected';
-                _updateHealthIndicator('connected');
-            }
-            try {
-                const data = JSON.parse(e.data);
-                if (typeof data.seq === 'number' && data.seq > _lastSeq) _lastSeq = data.seq;
-                _onEvent({ type, ...data });
-            } catch {
-                _onEvent({ type, raw: e.data });
-            }
-        });
-    });
+    _attachListeners(_source, onEvent);
 
     // Start health monitoring
     _startHealthCheck();
@@ -143,37 +183,7 @@ function _startHealthCheck() {
                 _updateHealthIndicator('reconnecting');
             };
 
-            // Re-register event listeners
-            const eventTypes = [
-                'stream.token', 'stream.done', 'stream.error',
-                'tool.call', 'context.info', 'context.compacting', 'context.compacted', 'context.reset',
-                'session.queued', 'session.title', 'session.cancelled',
-                'session.state_changed', 'session.prompt_rejected',
-                'message.injected',
-                'scout.start', 'scout.step', 'scout.done',
-                'worker.started', 'worker.done', 'worker.failed',
-                'partial.saved',
-                'dialog.question', 'user_question', 'dialog.answered', 'dialog.dismissed', 'dialog.notification',
-                'browse.start', 'browse.done',
-                'reflect.start', 'reflect.done', 'reflect.retry', 'reflect.exhausted', 'reflect.escalate',
-                'turn.complete',
-            ];
-            eventTypes.forEach(type => {
-                _source.addEventListener(type, (e) => {
-                    _lastEventTime = Date.now();
-                    if (_connectionState !== 'connected') {
-                        _connectionState = 'connected';
-                        _updateHealthIndicator('connected');
-                    }
-                    try {
-                        const data = JSON.parse(e.data);
-                        if (typeof data.seq === 'number' && data.seq > _lastSeq) _lastSeq = data.seq;
-                        handler({ type, ...data });
-                    } catch {
-                        handler({ type, raw: e.data });
-                    }
-                });
-            });
+            _attachListeners(_source, handler);
         }
     }, HEALTH_CHECK_INTERVAL);
 }

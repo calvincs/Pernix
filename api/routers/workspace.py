@@ -212,7 +212,9 @@ async def delete_workspace_entry(path: str):
             for name in dirnames + filenames:
                 entry = Path(dirpath) / name
                 if entry.is_symlink() and not entry.resolve().is_relative_to(workspace):
-                    raise HTTPException(400, detail=f"Refusing to delete: external symlink at {entry.relative_to(workspace)}")
+                    raise HTTPException(
+                        400, detail=f"Refusing to delete: external symlink at {entry.relative_to(workspace)}"
+                    )
         shutil.rmtree(target)
     else:
         raise HTTPException(400, detail="Not a file or directory")

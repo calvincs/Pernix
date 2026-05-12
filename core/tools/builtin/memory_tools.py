@@ -95,7 +95,9 @@ def _execute_deep_recall_tool(name: str, args: dict, memory_dir: str) -> str:
                 if len(content) > 6144:  # ~2048 tokens at 3 chars/token
                     logger.warning(
                         "Large memory entry in %s (%d chars, ~%d tokens)",
-                        r.entry.file_name, len(content), len(content) // 3,
+                        r.entry.file_name,
+                        len(content),
+                        len(content) // 3,
                     )
                 lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
             return "\n\n".join(lines)
@@ -294,7 +296,9 @@ def recall(query: str, top: int = 5, file: str = "", _context: dict | None = Non
             if len(content) > 6144:  # ~2048 tokens at 3 chars/token
                 logger.warning(
                     "Large memory entry in %s (%d chars, ~%d tokens)",
-                    r.entry.file_name, len(content), len(content) // 3,
+                    r.entry.file_name,
+                    len(content),
+                    len(content) // 3,
                 )
             lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
         return "\n\n".join(lines)
@@ -337,7 +341,9 @@ def deep_recall(query: str, context: str = "", _context: dict | None = None) -> 
                 if len(content) > 6144:  # ~2048 tokens at 3 chars/token
                     logger.warning(
                         "Large memory entry in %s (%d chars, ~%d tokens)",
-                        r.entry.file_name, len(content), len(content) // 3,
+                        r.entry.file_name,
+                        len(content),
+                        len(content) // 3,
                     )
                 lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
             return "\n\n".join(lines)
@@ -428,11 +434,14 @@ def register(reg) -> None:
         name="recall",
         func=recall,
         description=(
-            "Fast FTS5 search over persistent memory. "
-            "Scores: > 3.0 strong · 1.0–3.0 weak · < 1.0 noise. "
-            "Full content returned per result. "
-            "On empty/weak results, use deep_recall() for LLM-synthesized search. "
-            "Never use grep or file_read for memory — they cannot reach the memory directory."
+            "Fast FTS5 search over CURATED long-term memory (insights, decisions, "
+            "summaries — not raw transcript). Scores: > 3.0 strong · 1.0–3.0 weak · "
+            "< 1.0 noise. Full content returned per result. On empty/weak results, "
+            "use deep_recall() for LLM-synthesized search. NOTE: for verbatim "
+            "message history of this or any other session, use `search_sessions` "
+            "instead — `recall` cannot see raw transcript or trimmed-from-view "
+            "messages. Never use grep or file_read for memory — they cannot reach "
+            "the memory directory."
         ),
         parameters={
             "type": "object",

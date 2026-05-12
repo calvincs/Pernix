@@ -21,7 +21,7 @@ async def health():
     return {
         "status": "healthy",
         "model": settings.llm_model or "(not set)",
-        "version": "2.5.0",
+        "version": "2.6.0",
         "sessions_active": manager.active_count(),
         "maintenance": maint.get_stats(),
     }
@@ -67,7 +67,7 @@ async def health_detailed(request: Request):
     return {
         "status": "healthy",
         "model": settings.llm_model or "(not set)",
-        "version": "2.5.0",
+        "version": "2.6.0",
         "providers": provider_health,
         "sessions": {
             "active": manager.active_count(),

@@ -1,0 +1,148 @@
+"""Pernix — Composed internal recall (memory + cross-session FTS).
+
+A single entry point that gathers persistent memory hits AND prior-session
+hits for a query, formats them for tool output, and flags whether the
+internal signal is strong enough to nudge the agent away from blindly
+trusting external results.
+
+Composes existing search primitives — no new search logic:
+  - core.memory.store.MemoryStore.search()      (BM25 + temporal)
+  - core.scout.search.gather_cross_session_data (FTS5 over message history,
+                                                 with context expansion)
+
+This is invoked at the moment of `search_web` to honor the user's intent:
+"if we are going to do an external search, also search our memories and
+sessions." Memory recall already happens at scout time into the system
+prompt; this re-surfaces it at the point of decision so the agent can
+weigh it against the live web result.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+logger = logging.getLogger("pernix.memory.internal_recall")
+
+
+@dataclass
+class InternalRecall:
+    """Bundle of internal-knowledge findings for a query.
+
+    Fields:
+      memory_text:    Formatted memory entries (BM25-ranked), "" if none.
+      session_text:   Formatted cross-session hits, "" if none.
+      memory_strong:  True if any memory entry scored > 3.0 (matches
+                      RULES.md threshold — strong vs weak vs noise).
+      session_strong: True if any cross-session hit returned (any FTS
+                      match against prior messages is signal worth
+                      surfacing — bar is intentionally lower than memory).
+      queried:        Always True when this object is returned (call
+                      sites can distinguish "we asked" from "we skipped").
+    """
+
+    memory_text: str = ""
+    session_text: str = ""
+    memory_strong: bool = False
+    session_strong: bool = False
+    queried: bool = False
+
+
+# Score threshold matching the documentation in data/agent/RULES.md:
+# "> 3.0 strong · 1.0–3.0 weak · < 1.0 noise"
+_MEMORY_STRONG_SCORE = 3.0
+
+# Per-entry character cap when formatting memory hits. Mirrors the cap
+# scout uses (scout_preload_memory_char_limit, default 300) so the agent
+# sees consistent excerpt lengths whether it reads the scout baseline or
+# this search_web augmentation.
+_MEMORY_ENTRY_CHAR_CAP = 400
+
+
+def internal_recall(
+    query: str,
+    current_session_id: str | None = None,
+    memory_limit: int = 5,
+) -> InternalRecall:
+    """Run memory + cross-session recall for `query`. Failure-quiet.
+
+    `current_session_id` is excluded from the cross-session search to
+    avoid self-reference noise when the agent searches mid-turn.
+
+    Never raises — on any backend error, returns a partially or fully
+    empty InternalRecall and logs at DEBUG.
+    """
+    result = InternalRecall(queried=True)
+
+    if not query or not query.strip():
+        return result
+
+    # --- Memory (BM25 + hybrid) ---
+    try:
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if store is not None:
+            mem_results = store.search(query, mode="hybrid", limit=memory_limit)
+            if mem_results:
+                lines = []
+                max_score = 0.0
+                for r in mem_results:
+                    snippet = (r.entry.content or "")[:_MEMORY_ENTRY_CHAR_CAP]
+                    lines.append(f"[{r.entry.file_name} score={r.score:.1f} " f"type={r.entry.entry_type}] {snippet}")
+                    if r.score > max_score:
+                        max_score = r.score
+                result.memory_text = "\n\n".join(lines)
+                result.memory_strong = max_score > _MEMORY_STRONG_SCORE
+    except Exception as e:
+        logger.debug("Internal memory recall failed: %s", e)
+
+    # --- Cross-session FTS ---
+    try:
+        from core.scout.search import gather_cross_session_data
+
+        # gather_cross_session_data requires a session id string; pass empty
+        # string for unattached callers (no session context to exclude).
+        sid = current_session_id or ""
+        session_text = gather_cross_session_data(query, sid)
+        if session_text:
+            result.session_text = session_text
+            result.session_strong = True
+    except Exception as e:
+        logger.debug("Internal cross-session recall failed: %s", e)
+
+    return result
+
+
+def format_for_tool_output(recall: InternalRecall) -> str:
+    """Format an InternalRecall as a model-facing text block.
+
+    Returns "" when both memory and sessions came back empty so callers
+    can skip prepending a useless header.
+    """
+    if not recall.memory_text and not recall.session_text:
+        return ""
+
+    parts = ["=== INTERNAL KNOWLEDGE (memory + prior sessions) ==="]
+
+    if recall.memory_text:
+        parts.append("MEMORY:")
+        parts.append(recall.memory_text)
+    else:
+        parts.append("MEMORY: no matching entries.")
+
+    if recall.session_text:
+        parts.append("")
+        parts.append(recall.session_text)
+    else:
+        parts.append("")
+        parts.append("PRIOR SESSIONS: no matching hits.")
+
+    if recall.memory_strong or recall.session_strong:
+        parts.append("")
+        parts.append(
+            "[!] Strong internal match — synthesize from the above before "
+            "treating the external results below as the source of truth."
+        )
+
+    return "\n".join(parts)

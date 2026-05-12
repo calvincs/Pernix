@@ -1132,6 +1132,125 @@ function handleEvent(event) {
         }
     }
 
+    else if (type === 'stream.fallback') {
+        // Rate-limit / provider failover switched the model mid-stream.
+        appendMessage('system', `LLM failover → ${event.model || 'fallback'}`);
+        const mEl = document.getElementById('status-model');
+        if (mEl) mEl.textContent = event.model || state.model;
+        if (state.sid) updateSessionActivity(state.sid, `failover: ${event.model || ''}`);
+    }
+
+    else if (type === 'stream.retry') {
+        updateStatus(`LLM retry #${event.attempt || '?'}…`);
+        if (state.sid) updateSessionActivity(state.sid, `retrying #${event.attempt || ''}`);
+    }
+
+    else if (type === 'stream.length_continuation') {
+        const max = event.max ? `/${event.max}` : '';
+        updateStatus(`Continuing (length limit hit, ${event.attempt || '?'}${max})…`);
+    }
+
+    else if (type === 'stream.budget_exhausted') {
+        appendMessage('system', `LLM budget exhausted: ${event.message || 'no further retries'}`);
+        updateStatus('');
+        if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+        _collected = '';
+        _streamingEl = null;
+        state.streaming = false;
+        _showSendButton();
+        _clearToolStatus();
+    }
+
+    else if (type === 'session.waiting_llm') {
+        updateStatus('Waiting for model…');
+    }
+
+    else if (type === 'session.queue_full') {
+        appendMessage('system',
+            `⚠ Message queue full (${event.pending}/${event.max}) — wait for some to drain.`);
+    }
+
+    else if (type === 'session.queue_dropped') {
+        const reason = event.reason ? ` (${event.reason})` : '';
+        appendMessage('notice', `[${event.count} queued message(s) dropped${reason}]`);
+    }
+
+    else if (type === 'eval.start') {
+        updateStatus(`Eval: checking ${event.features || ''} feature(s)…`);
+        if (state.sid) updateSessionActivity(state.sid, 'evaluating…');
+    }
+
+    else if (type === 'eval.pass') {
+        appendMessage('system', `✓ Eval passed (${event.features || 0} feature(s))`);
+        updateStatus('');
+    }
+
+    else if (type === 'eval.retry') {
+        if (!state.streaming) {
+            state.streaming = true;
+            _showStopButton();
+        }
+        appendMessage('system',
+            `Eval: feature(s) failed — retrying (attempt ${event.attempt}/${event.max}).`);
+        updateStatus(`Eval: retry #${event.attempt}…`);
+    }
+
+    else if (type === 'eval.exhausted') {
+        appendMessage('system', `Eval: max retries reached (${event.attempts}/${event.max}).`);
+        updateStatus('');
+    }
+
+    else if (type === 'reflect.budget_exhausted') {
+        appendMessage('system',
+            `Reflect skipped (time budget exhausted, ${event.remaining_s}s remaining < ${event.needed_s}s needed).`);
+    }
+
+    else if (type === 'workflow.started') {
+        appendMessage('system', `Workflow started: ${event.workflow} (${event.step_count} step${event.step_count === 1 ? '' : 's'})`);
+        if (state.sid) updateSessionActivity(state.sid, `workflow: ${event.workflow}`);
+    }
+
+    else if (type === 'workflow.wave_started') {
+        updateStatus(`Workflow ${event.workflow}: wave ${(event.wave_idx ?? 0) + 1} (${event.wave_size} step(s))`);
+    }
+
+    else if (type === 'workflow.step_started') {
+        updateStatus(`Workflow ${event.workflow}: step ${event.step_id}…`);
+        if (state.sid) updateSessionActivity(state.sid, `${event.workflow}/${event.step_id}`);
+    }
+
+    else if (type === 'workflow.step_completed') {
+        const status = event.status || 'done';
+        if (status !== 'passed' && status !== 'done') {
+            appendMessage('system', `Workflow step ${event.step_id}: ${status}`);
+        }
+    }
+
+    else if (type === 'workflow.step_skipped') {
+        appendMessage('system', `Workflow step ${event.step_id} skipped: ${event.reason || ''}`);
+    }
+
+    else if (type === 'workflow.step_retry') {
+        updateStatus(`Workflow ${event.workflow}: ${event.step_id} retry #${event.attempt}…`);
+    }
+
+    else if (type === 'workflow.completed') {
+        const passed = event.steps_passed ?? '?';
+        appendMessage('system', `Workflow ${event.workflow} ${event.status || 'completed'} (${passed} step(s) passed)`);
+        updateStatus('');
+    }
+
+    else if (type === 'workflow.cancelled') {
+        const killed = (event.cancelled_workers || []).length;
+        appendMessage('system', `Workflow ${event.workflow} cancelled${killed ? ` (${killed} worker(s) killed)` : ''}`);
+        updateStatus('');
+    }
+
+    // Snooze (background idle-time consolidation) and session.message_combined
+    // are intentionally silent — they're informational only, but listing them
+    // in sse.js EVENT_TYPES keeps _lastSeq advancing so gap detection stays
+    // honest.
+
     else if (type === 'turn.complete') {
         // Safety net: ensure button is always reset when turn finishes
         if (state.streaming) {
