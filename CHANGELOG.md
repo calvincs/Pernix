@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.6.0 — 2026-05-11
+
+- test: pin internal_recall contract + search_web augmentation
+- feat: surface internal memory + prior-session hits alongside search_web
+- fix: subscribe SSE client to all server-emitted event types
+- docs: sync SPEC_v2 with 2026-05-08–11 commits
+- fix: search_sessions actually finds rows — escape %, log FTS errors, resolve id prefixes
+- feat: trim-aware short-term memory recovery (pin user msg, trim notice, current-session search)
+
 ## v2.5.0 — 2026-05-08
 
 - fix: route injected messages to prompt() outside live-loop states

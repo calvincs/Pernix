@@ -120,7 +120,7 @@ def _log_scout_error(error: Exception, session_id: str, attempt: int, max_attemp
 
 SCOUT_SYSTEM_PROMPT = """You are a Scout Agent. Your job is to prepare context for a main agent that will handle the user's request. You do NOT handle the request yourself.
 
-Your initial context already includes baseline memory search results, available tools, available skills, cross-session findings, and SCOUT SIGNALS — observations from past sessions about which subjects (tools/skills/execution modes) have historically succeeded or failed. Review these carefully before deciding if you need more.
+Your initial context already includes baseline memory search results, available tools, available skills, cross-session findings, and SCOUT SIGNALS — observations from past sessions about which subjects (tools/skills/execution modes) have historically succeeded or failed. Review these carefully before deciding if you need more. When baseline memory or cross-session findings substantively cover the user's request, your approach_guidance must synthesize from those findings first — treat external search (search_web/browse_web) as supplementation, not the default opening move.
 
 When SCOUT SIGNALS are present:
 - PREFER entries are subjects with a positive track record; favor them when they fit the task.
@@ -158,7 +158,7 @@ REPORT FIELD GUIDANCE:
 - recommended_model: If the task requires specific capabilities (vision, code, long-context), recommend a model ID from the AVAILABLE MODELS list. Empty string if current model is fine.
 - model_rationale: One sentence explaining why this model is needed. Empty string if no model switch.
 - session_state: Brief session orientation. Max 200 tokens.
-- approach_guidance: Step-by-step plan for approaching this task. Number each step, name tools/skills, flag risks, incorporate lessons from memory/past sessions. Max 500 tokens.
+- approach_guidance: Step-by-step plan for approaching this task. Number each step, name tools/skills, flag risks, incorporate lessons from memory/past sessions. Max 500 tokens. **MEMORY-FIRST ORDERING**: If the baseline MEMORY SEARCH RESULTS or cross-session findings substantively cover the user's request, step 1 of approach_guidance MUST synthesize from those findings before any external research. Treat search_web/browse_web as supplementation for verification or gap-filling, not the default first move. Only when memory baseline is empty or clearly insufficient should external search lead the plan.
 - deliverables_plan: Array of concrete work items the agent is expected to produce (0-6). Each item has a "description" (the artifact or outcome, e.g. "Write summary.md with key findings") and an optional "execution_hint" (inline | task | worker). Leave empty for pure Q&A. Reflect will check each item at turn end, so be specific and measurable.
 - execution_mode: Overall approach — "inline" (default, single-agent work) or "tasks" (multi-step sequential via task system).
 
@@ -399,9 +399,13 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
                 if len(content) > 6144:  # ~2048 tokens at 3 chars/token
                     logger.warning(
                         "Large memory entry in %s (%d chars, ~%d tokens) — injecting full content into scout",
-                        r.entry.file_name, len(content), len(content) // 3,
+                        r.entry.file_name,
+                        len(content),
+                        len(content) // 3,
                     )
-                lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f} type={r.entry.entry_type}] {content}")
+                lines.append(
+                    f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f} type={r.entry.entry_type}] {content}"
+                )
             return "\n\n".join(lines)
         except Exception as e:
             return f"Memory search error: {e}"
@@ -1180,14 +1184,12 @@ async def _run_scout_llm(
 
     scout_message = _legacy_multimodal_to_text(message) if isinstance(message, str) else str(message)
 
-    from datetime import datetime as _dt, timezone as _tz
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
 
     _now_utc = _dt.now(_tz.utc)
     _now_local = _now_utc.astimezone()
-    _now_str = (
-        f"{_now_utc.strftime('%Y-%m-%d %H:%M UTC')}"
-        f" / {_now_local.strftime('%Y-%m-%d %H:%M %Z')} (local)"
-    )
+    _now_str = f"{_now_utc.strftime('%Y-%m-%d %H:%M UTC')}" f" / {_now_local.strftime('%Y-%m-%d %H:%M %Z')} (local)"
 
     user_content_parts = [
         f"USER MESSAGE: {scout_message}",

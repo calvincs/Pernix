@@ -619,26 +619,46 @@ def compile_context(
         entry = {"role": msg["role"], "content": content}
         if msg.get("tool_call_id") and msg["tool_call_id"] != "None":
             entry["tool_call_id"] = msg["tool_call_id"]
+        tool_names: list[str] | None = None
         if msg.get("tool_calls") and msg["role"] == "assistant":
             try:
                 raw_tcs = json.loads(msg["tool_calls"])
                 # Normalize to OpenAI format
                 openai_tcs = []
+                tool_names = []
                 for tc in (raw_tcs if isinstance(raw_tcs, list) else []):
+                    name = tc.get("name", tc.get("function", {}).get("name", ""))
+                    if name:
+                        tool_names.append(name)
                     openai_tcs.append(
                         {
                             "id": tc.get("id", ""),
                             "type": "function",
                             "function": {
-                                "name": tc.get("name", tc.get("function", {}).get("name", "")),
+                                "name": name,
                                 "arguments": tc.get("arguments", tc.get("function", {}).get("arguments", "{}")),
                             },
                         }
                     )
                 if openai_tcs:
                     entry["tool_calls"] = openai_tcs
+                if not tool_names:
+                    tool_names = None
             except (json.JSONDecodeError, TypeError):
                 pass
+
+        # Internal metadata used by trim-notice generation and pin protection.
+        # These keys are stripped before LLM dispatch (see _strip_private_fields).
+        entry["_db_id"] = msg["id"]
+        entry["_created_at"] = msg.get("created_at")
+        if tool_names:
+            entry["_tool_names"] = tool_names
+        # Pin the active turn's root user message so trim cannot drop the
+        # user's actual ask. Without this, large parallel tool returns can
+        # overflow history_budget and evict the prompt itself.
+        if turn_user_msg_id is not None and msg["id"] == turn_user_msg_id and msg["role"] == "user":
+            entry["_pinned"] = True
+
         messages.append(entry)
 
     # --- Trim to budget ---
@@ -646,13 +666,34 @@ def compile_context(
         (msg.get("token_count") or estimator.count_message(msg)) for msg in messages[1:]  # skip system
     )
     messages_trimmed = 0
+    dropped_groups: list[dict] = []
     if history_tokens > history_budget:
-        messages, messages_trimmed = _trim_history(messages, history_budget, estimator)
+        messages, messages_trimmed, dropped_groups = _trim_history(messages, history_budget, estimator)
         history_tokens = sum(estimator.count_message(m) for m in messages[1:])
+
+    # --- Insert trim notice (pinned) if anything was dropped ---
+    if dropped_groups:
+        notice_text = _build_trim_notice(dropped_groups)
+        if notice_text:
+            notice_entry = {
+                "role": "system",
+                "content": notice_text,
+                "_pinned": True,  # survives any further trim
+            }
+            # Place right after the system prompt + (optional) compaction
+            # summary, before surviving history. messages[0] is the base
+            # system prompt; messages[1] (if present) is the compaction
+            # summary when has_compaction is True.
+            insert_at = 2 if has_compaction and len(messages) >= 2 else 1
+            messages.insert(insert_at, notice_entry)
+            history_tokens += estimator.count_message(notice_entry)
 
     # --- Check if compaction needed ---
     total_tokens = system_tokens + history_tokens + tool_tokens
     needs_compaction = history_tokens > int(history_budget * settings.compaction_threshold)
+
+    # --- Strip internal `_`-prefixed fields before returning to the agent ---
+    messages = _strip_private_fields(messages)
 
     return ContextPayload(
         messages=messages,
@@ -694,17 +735,49 @@ def _trim_history(
     messages: list[dict],
     budget: int,
     estimator,
-) -> tuple[list[dict], int]:
-    """Trim message history to fit budget. Returns (messages, count_trimmed).
+) -> tuple[list[dict], int, list[dict]]:
+    """Trim message history to fit budget.
+
+    Returns (messages, count_trimmed, dropped_groups). Each entry in
+    dropped_groups is a snapshot dict describing one drop event:
+        {
+            "kind": "user" | "assistant_group" | "tool_orphan" | "other",
+            "msgs": [snapshot, snapshot, ...],   # each: _db_id, role, _tool_names, _created_at, content_preview
+        }
+    The caller uses these snapshots to build a single pinned trim notice so
+    the agent can recover via session_read(msg_id) / search_sessions.
 
     Phase A: Prune old tool results (view transform — already done by caller)
     Phase B: Drop assistant+tool groups oldest-first (skip pinned, prefer middle)
     Phase C: Last resort — drop pinned oldest-first
     """
     trimmed = 0
+    dropped_groups: list[dict] = []
 
     def _total():
         return sum(estimator.count_message(m) for m in messages[1:])
+
+    def _snapshot(msg: dict, preview_limit: int = 80) -> dict:
+        content = msg.get("content") or ""
+        if isinstance(content, list):
+            # Multimodal — extract text blocks for preview
+            parts = []
+            for blk in content:
+                if isinstance(blk, dict) and blk.get("type") == "text":
+                    parts.append(blk.get("text", ""))
+            content = " ".join(parts)
+        if not isinstance(content, str):
+            content = str(content)
+        return {
+            "_db_id": msg.get("_db_id"),
+            "role": msg.get("role"),
+            "_tool_names": msg.get("_tool_names"),
+            "_created_at": msg.get("_created_at"),
+            "content_len": len(content),
+            "content_preview": content[:preview_limit].replace("\n", " "),
+            # Full content kept only for user messages (we want to quote intent verbatim).
+            "content_full": content if msg.get("role") == "user" else None,
+        }
 
     # Phase B: Drop non-pinned groups oldest-first
     if _total() > budget:
@@ -720,12 +793,16 @@ def _trim_history(
                 group_end = i + 1
                 while group_end < len(messages) and messages[group_end].get("role") == "tool":
                     group_end += 1
+                snaps = [_snapshot(m) for m in messages[i:group_end]]
+                dropped_groups.append({"kind": "assistant_group", "msgs": snaps})
                 removed = group_end - i
                 messages = messages[:i] + messages[group_end:]
                 trimmed += removed
                 continue
 
             # Drop individual message
+            kind = "user" if msg.get("role") == "user" else ("tool_orphan" if msg.get("role") == "tool" else "other")
+            dropped_groups.append({"kind": kind, "msgs": [_snapshot(msg, preview_limit=500)]})
             messages = messages[:i] + messages[i + 1 :]
             trimmed += 1
 
@@ -737,10 +814,98 @@ def _trim_history(
             if msg.get("role") == "system" or msg.get("_pinned"):
                 i += 1
                 continue
+            kind = "user" if msg.get("role") == "user" else ("tool_orphan" if msg.get("role") == "tool" else "other")
+            dropped_groups.append({"kind": kind, "msgs": [_snapshot(msg, preview_limit=500)]})
             messages = messages[:i] + messages[i + 1 :]
             trimmed += 1
 
-    return messages, trimmed
+    return messages, trimmed, dropped_groups
+
+
+# ---------------------------------------------------------------------------
+# Trim notice builder
+# ---------------------------------------------------------------------------
+
+
+def _build_trim_notice(dropped_groups: list[dict]) -> str:
+    """Render a single pinned system-role notice describing what trim dropped.
+
+    The notice names msg_ids so the agent can recover via session_read(msg_id),
+    and quotes any dropped user message verbatim (up to ~500 chars) so the
+    user's intent survives even after eviction.
+    """
+    if not dropped_groups:
+        return ""
+
+    total_msgs = sum(len(g.get("msgs", [])) for g in dropped_groups)
+
+    lines: list[str] = []
+    lines.append("[Context trim notice — current turn]")
+    lines.append(
+        f"{total_msgs} message(s) from this turn or earlier were dropped from your view to fit the "
+        "context budget. The full content is still in the database; use "
+        "session_read(msg_id) to retrieve any specific item, or "
+        "search_sessions(query) to query the transcript (defaults to this session)."
+    )
+    lines.append("")
+    lines.append("Dropped (oldest first):")
+
+    for grp in dropped_groups:
+        kind = grp.get("kind")
+        msgs = grp.get("msgs") or []
+        if not msgs:
+            continue
+
+        if kind == "user":
+            m = msgs[0]
+            mid = m.get("_db_id")
+            created = (m.get("_created_at") or "")[:16]
+            full = m.get("content_full") or m.get("content_preview") or ""
+            quote = full[:500]
+            if len(full) > 500:
+                quote += "…"
+            quote = quote.replace("\n", " ")
+            lines.append(f'  • user msg {mid} ({created}) — "{quote}"')
+
+        elif kind == "assistant_group":
+            ids = [str(m.get("_db_id")) for m in msgs if m.get("_db_id") is not None]
+            head = msgs[0]
+            tool_names = head.get("_tool_names") or []
+            total_chars = sum(int(m.get("content_len") or 0) for m in msgs)
+            ids_str = ",".join(ids)
+            if tool_names:
+                tools_label = (
+                    f"{tool_names[0]} ×{len(tool_names)}"
+                    if len(tool_names) > 1 and len(set(tool_names)) == 1
+                    else "+".join(tool_names) if len(tool_names) <= 4 else f"{len(tool_names)} tool calls"
+                )
+            else:
+                tools_label = "tool call"
+            lines.append(f"  • assistant+tools {ids_str} ({tools_label}) — ~{total_chars} chars")
+
+        else:
+            # tool_orphan or other — show ids only
+            for m in msgs:
+                mid = m.get("_db_id")
+                role = m.get("role")
+                preview = (m.get("content_preview") or "").strip()
+                lines.append(f"  • {role} msg {mid} — {preview[:80]}")
+
+    return "\n".join(lines)
+
+
+def _strip_private_fields(messages: list[dict]) -> list[dict]:
+    """Remove internal `_`-prefixed keys before LLM dispatch.
+
+    Compaction summary and trim notice carry `_pinned: True` to survive
+    further trim cycles, and the conversion loop tags entries with
+    `_db_id`/`_tool_names`/`_created_at` for trim-notice generation. None
+    of these keys are valid OpenAI/OpenRouter top-level message fields.
+    """
+    cleaned: list[dict] = []
+    for m in messages:
+        cleaned.append({k: v for k, v in m.items() if not (isinstance(k, str) and k.startswith("_"))})
+    return cleaned
 
 
 # ---------------------------------------------------------------------------

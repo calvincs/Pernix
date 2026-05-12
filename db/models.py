@@ -1,6 +1,7 @@
 """Pernix — Database query helpers organized by table."""
 
 import logging
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 
@@ -523,12 +524,21 @@ def search_messages_fts(
     query: str,
     limit: int = 15,
     exclude_session: str = "",
+    include_session: str = "",
 ) -> list[dict]:
-    """FTS5 search across all session messages. Returns ranked results with session context."""
+    """FTS5 search across session messages. Returns ranked results with session context.
+
+    Filter semantics (mutually exclusive — `include_session` wins if both set):
+      - include_session=""   → search all sessions (with optional exclude_session)
+      - include_session=<id> → restrict to that single session (exclude_session ignored)
+    """
+    import logging
     import re
 
-    # Strip only FTS5 syntax-breaking chars; commas → spaces; keep ≥ 2-char tokens
-    clean = re.sub(r'["\'()\[\]{};*^\\|]', " ", query)
+    # Strip FTS5 syntax-breaking chars. `%` is not a tokenizer char but FTS5
+    # rejects it as a query syntax error; same for `?` and `:` outside columns.
+    # Commas → spaces; then drop ≥ 2-char tokens.
+    clean = re.sub(r'["\'()\[\]{};*^\\|%?]', " ", query)
     clean = clean.replace(",", " ")
     words = [w.strip("-@:.") for w in clean.split()]
     words = [w for w in words if len(w) >= 2]
@@ -536,6 +546,11 @@ def search_messages_fts(
         return []
     _FTS5_KW = {"AND", "OR", "NOT", "NEAR"}
     fts_query = " OR ".join(f'"{w}"' if w.upper() in _FTS5_KW else w for w in words)
+
+    log = logging.getLogger("pernix.db")
+    if include_session and exclude_session:
+        # include wins; surface a soft warning so callers learn the precedence.
+        log.warning("search_messages_fts called with both include_session and exclude_session — include wins")
 
     with connect_sessions() as conn:
         sql = """
@@ -551,7 +566,10 @@ def search_messages_fts(
         """
         params: list = [fts_query]
 
-        if exclude_session:
+        if include_session:
+            sql += " AND f.session_id = ?"
+            params.append(include_session)
+        elif exclude_session:
             sql += " AND f.session_id != ?"
             params.append(exclude_session)
 
@@ -574,8 +592,39 @@ def search_messages_fts(
                 }
                 for r in rows
             ]
-        except Exception:
-            return []  # FTS table may not exist yet
+        except sqlite3.OperationalError as e:
+            # Most likely FTS5 query syntax error (rare special chars slip through)
+            # or missing FTS table on a fresh DB. Log so the agent isn't lied to
+            # via a silent empty result.
+            log.warning("search_messages_fts SQL error (query=%r): %s", fts_query, e)
+            return []
+        except Exception as e:
+            log.warning("search_messages_fts unexpected error: %s", e)
+            return []
+
+
+def resolve_session_id(prefix_or_id: str) -> str | None:
+    """Resolve a session id, accepting either the full id or an unambiguous prefix.
+
+    Returns the full session id on a unique match, or None if the prefix matches
+    zero or more than one session. Used by tools that accept agent-supplied ids
+    where the agent may copy back the 8/12-char prefix it saw in tool output.
+    """
+    if not prefix_or_id:
+        return None
+    with connect_sessions() as conn:
+        # Exact match wins regardless of length.
+        row = conn.execute("SELECT id FROM sessions WHERE id = ?", (prefix_or_id,)).fetchone()
+        if row:
+            return row["id"]
+        # Prefix match — only accept unambiguous resolution.
+        rows = conn.execute(
+            "SELECT id FROM sessions WHERE id LIKE ? LIMIT 2",
+            (prefix_or_id + "%",),
+        ).fetchall()
+        if len(rows) == 1:
+            return rows[0]["id"]
+        return None
 
 
 def recent_termination_reasons(session_id: str, limit: int = 3) -> list[str]:

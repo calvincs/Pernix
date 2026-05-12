@@ -194,8 +194,20 @@ async def _close_browser():
 atexit.register(_kill_driver)
 
 
-def search_web(query: str, num_results: int = 5, _context: dict | None = None) -> str:
-    """Search the web using Tavily. Requires TAVILY_API_KEY."""
+def search_web(
+    query: str,
+    num_results: int = 5,
+    consult_memory: bool = True,
+    _context: dict | None = None,
+) -> str:
+    """Search the web using Tavily. Requires TAVILY_API_KEY.
+
+    When `consult_memory` is True (default), persistent memory + prior-session
+    hits for the same query are surfaced alongside the Tavily results so the
+    agent can weigh internal knowledge against the live web. Set False only
+    when the caller explicitly wants fresh external data (e.g. live prices,
+    breaking news) without the internal recall preamble.
+    """
     if not settings.web_search_enabled:
         return "Error: Web search is disabled. Enable it in Settings → Web → Web Search, then try again."
     if not query.strip():
@@ -215,8 +227,22 @@ def search_web(query: str, num_results: int = 5, _context: dict | None = None) -
             "(free tier available at tavily.com)."
         )
 
+    # Internal recall first: compose memory + cross-session FTS for the same
+    # query. Always failure-quiet — the external search must still work if
+    # the memory store is unreachable.
+    internal_block = ""
+    if consult_memory:
+        try:
+            from core.memory.internal_recall import format_for_tool_output, internal_recall
+
+            sid = (_context or {}).get("session_id") if _context else None
+            recall = internal_recall(query, current_session_id=sid)
+            internal_block = format_for_tool_output(recall)
+        except Exception as e:
+            logger.debug("search_web internal recall skipped: %s", e)
+
     try:
-        return _tavily_search(query, num_results, tavily_key)
+        web_text = _tavily_search(query, num_results, tavily_key)
     except _TavilyKeyError:
         logger.warning("Tavily API key invalid")
         _alert_tavily_once(
@@ -224,6 +250,11 @@ def search_web(query: str, num_results: int = 5, _context: dict | None = None) -
             "TAVILY_API_KEY is invalid. Update it in Settings → Web → Tavily API Key.",
             "high",
         )
+        # On error paths, return the error directly so executor.py's
+        # `result.startswith("Error:")` was_error detection still trips.
+        # The internal-knowledge augmentation is a success-path enhancement;
+        # if the agent wants memory after a search failure it can call
+        # `recall()` / `search_sessions()` directly.
         return "Error: Tavily API key is invalid. Update it in Settings → Web → Tavily API Key."
     except _TavilyLimitError:
         logger.warning("Tavily usage limit exceeded")
@@ -236,6 +267,10 @@ def search_web(query: str, num_results: int = 5, _context: dict | None = None) -
     except Exception as e:
         logger.warning("Tavily search failed: %s", e)
         return f"Error: Web search failed: {e}"
+
+    if internal_block:
+        return f"{internal_block}\n\n=== WEB SEARCH RESULTS (Tavily) ===\n{web_text}"
+    return web_text
 
 
 def _alert_tavily_once(title: str, body: str, urgency: str) -> None:
@@ -682,12 +717,30 @@ def register(reg) -> None:
         reg.register(
             name="search_web",
             func=search_web,
-            description="Search the web for information using Tavily. Requires TAVILY_API_KEY set in Settings → Web. Returns titles, URLs, and snippets.",
+            description=(
+                "Search the web for information using Tavily. Requires TAVILY_API_KEY "
+                "set in Settings → Web. Returns titles, URLs, and snippets. "
+                "Also surfaces matching entries from persistent memory and prior "
+                "sessions alongside Tavily results — review those internal hits "
+                "before treating external results as the source of truth. Set "
+                "consult_memory=False to suppress the internal-knowledge preamble "
+                "when you explicitly want fresh external data (live prices, "
+                "breaking news, etc.)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
                     "num_results": {"type": "integer", "description": "Number of results (default 5, max 10)"},
+                    "consult_memory": {
+                        "type": "boolean",
+                        "description": (
+                            "Surface matching memory + prior-session hits alongside "
+                            "web results. Default true. Set false only when you "
+                            "specifically want fresh external data without the "
+                            "internal-knowledge preamble."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -739,7 +792,9 @@ def register(reg) -> None:
                 "http://localhost:8090/workspace/<file> to verify rendering and "
                 "catch console errors without spinning up your own server. "
                 "Slower than http_get (~2-10s) but much more reliable for modern websites. "
-                "Requires browser_enabled=True in settings."
+                "Requires browser_enabled=True in settings. "
+                "For research questions, prefer search_web first — it surfaces "
+                "matching memory and prior-session hits alongside web results."
             ),
             parameters={
                 "type": "object",

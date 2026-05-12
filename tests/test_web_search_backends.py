@@ -128,3 +128,134 @@ def test_search_web_disabled_returns_error(monkeypatch):
     out = web.search_web("query")
     assert "Error" in out
     assert "disabled" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Internal-knowledge augmentation (search_web prepends memory + session hits)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _stub_tavily(monkeypatch):
+    """Force search_web's external path to deterministic text so we can assert
+    augmentation behavior without relying on a real API call."""
+    import core.extensions.web as web
+
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    monkeypatch.setattr(web, "_tavily_search", lambda *a, **kw: "STUB-WEB-RESULT")
+    monkeypatch.setattr(web, "_emit_backend_alert", lambda *a, **kw: None)
+    return web
+
+
+def _stub_internal_recall(monkeypatch, *, memory_text="MEM-HIT", session_text="SESS-HIT", strong=True):
+    """Replace internal_recall so we control exactly what augmentation sees."""
+    import core.memory.internal_recall as ir_mod
+
+    class _StubRecall:
+        def __init__(self):
+            self.memory_text = memory_text
+            self.session_text = session_text
+            self.memory_strong = strong
+            self.session_strong = strong
+            self.queried = True
+
+    monkeypatch.setattr(ir_mod, "internal_recall", lambda *a, **kw: _StubRecall())
+
+
+def test_default_prepends_internal_knowledge_block(_stub_tavily, monkeypatch):
+    """consult_memory defaults to True; internal-knowledge block must appear
+    BEFORE the Tavily output."""
+    _stub_internal_recall(monkeypatch)
+    out = _stub_tavily.search_web("anything")
+    assert "INTERNAL KNOWLEDGE" in out
+    assert "WEB SEARCH RESULTS" in out
+    assert out.index("INTERNAL KNOWLEDGE") < out.index("WEB SEARCH RESULTS")
+    assert "STUB-WEB-RESULT" in out
+    assert "MEM-HIT" in out
+
+
+def test_consult_memory_false_suppresses_block(_stub_tavily, monkeypatch):
+    """consult_memory=False short-circuits the internal recall entirely."""
+    called: list = []
+
+    import core.memory.internal_recall as ir_mod
+
+    monkeypatch.setattr(ir_mod, "internal_recall", lambda *a, **kw: called.append(1) or None)
+
+    out = _stub_tavily.search_web("anything", consult_memory=False)
+    assert "INTERNAL KNOWLEDGE" not in out
+    assert "WEB SEARCH RESULTS" not in out  # no merged-output header either
+    assert out == "STUB-WEB-RESULT"
+    assert called == [], "internal_recall must NOT be called when consult_memory=False"
+
+
+def test_internal_recall_failure_does_not_break_search_web(_stub_tavily, monkeypatch):
+    """If internal_recall raises, search_web must still return Tavily output."""
+    import core.memory.internal_recall as ir_mod
+
+    def boom(*a, **kw):
+        raise RuntimeError("recall blew up")
+
+    monkeypatch.setattr(ir_mod, "internal_recall", boom)
+
+    out = _stub_tavily.search_web("anything")
+    # Augmentation skipped → just the raw stub result, no error surfaced
+    assert out == "STUB-WEB-RESULT"
+
+
+def test_error_paths_still_trip_was_error_detection(monkeypatch):
+    """executor.py classifies a tool result as was_error when it
+    `startswith("Error:")`. The augmentation must not break that — error
+    returns are NOT wrapped in the internal-knowledge block."""
+    import core.extensions.web as web
+    import core.memory.internal_recall as ir_mod
+
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key")
+    monkeypatch.setattr(web, "_emit_backend_alert", lambda *a, **kw: None)
+    _stub_internal_recall(monkeypatch)  # would prepend if reached
+
+    # Invalid-key error path
+    monkeypatch.setattr(web, "_tavily_search", lambda *a, **kw: (_ for _ in ()).throw(web._TavilyKeyError("bad")))
+    out = web.search_web("anything")
+    assert out.startswith("Error:"), "error result must remain a leading Error: string"
+    assert "INTERNAL KNOWLEDGE" not in out, "error returns must not be wrapped with augmentation"
+
+    # Generic exception path
+    monkeypatch.setattr(web, "_tavily_search", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = web.search_web("anything")
+    assert out.startswith("Error:")
+    assert "INTERNAL KNOWLEDGE" not in out
+
+
+def test_empty_internal_recall_produces_no_header(_stub_tavily, monkeypatch):
+    """When recall finds nothing, search_web returns raw Tavily output — no
+    bare 'INTERNAL KNOWLEDGE' header sitting on top of empty content."""
+    _stub_internal_recall(monkeypatch, memory_text="", session_text="", strong=False)
+    out = _stub_tavily.search_web("anything")
+    assert "INTERNAL KNOWLEDGE" not in out
+    assert out == "STUB-WEB-RESULT"
+
+
+def test_session_id_threaded_through_context(_stub_tavily, monkeypatch):
+    """search_web pulls session_id from its _context and forwards it to
+    internal_recall so the caller's own session is excluded from cross-session
+    hits."""
+    import core.memory.internal_recall as ir_mod
+
+    captured: dict = {}
+
+    def fake_recall(query, current_session_id=None, **_kw):
+        captured["query"] = query
+        captured["sid"] = current_session_id
+        # Return a stub-shaped object
+        return type(
+            "R",
+            (),
+            {"memory_text": "", "session_text": "", "memory_strong": False, "session_strong": False, "queried": True},
+        )()
+
+    monkeypatch.setattr(ir_mod, "internal_recall", fake_recall)
+
+    _stub_tavily.search_web("hello", _context={"session_id": "sess-xyz"})
+    assert captured["query"] == "hello"
+    assert captured["sid"] == "sess-xyz"
