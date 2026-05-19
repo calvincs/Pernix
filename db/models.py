@@ -535,17 +535,18 @@ def search_messages_fts(
     import logging
     import re
 
-    # Strip FTS5 syntax-breaking chars. `%` is not a tokenizer char but FTS5
-    # rejects it as a query syntax error; same for `?` and `:` outside columns.
-    # Commas → spaces; then drop ≥ 2-char tokens.
-    clean = re.sub(r'["\'()\[\]{};*^\\|%?]', " ", query)
+    # Wrap each word in `"..."` so FTS5 treats it as a literal phrase. This
+    # neutralises every operator char in one shot: `:` (column syntax),
+    # `-` (NOT, e.g. `Re-run` → "no such column: run"), `.` (syntax error),
+    # `/`, `=`, `%`, `?`, plus the AND/OR/NOT/NEAR keywords. We still strip
+    # the quote/bracket family because they break the wrapper itself, and
+    # collapse commas to spaces so `"a,b"` doesn't become one phrase.
+    clean = re.sub(r'["\'()\[\]{}]', " ", query)
     clean = clean.replace(",", " ")
-    words = [w.strip("-@:.") for w in clean.split()]
-    words = [w for w in words if len(w) >= 2]
+    words = [w for w in clean.split() if len(w) >= 2]
     if not words:
         return []
-    _FTS5_KW = {"AND", "OR", "NOT", "NEAR"}
-    fts_query = " OR ".join(f'"{w}"' if w.upper() in _FTS5_KW else w for w in words)
+    fts_query = " OR ".join(f'"{w}"' for w in words)
 
     log = logging.getLogger("pernix.db")
     if include_session and exclude_session:

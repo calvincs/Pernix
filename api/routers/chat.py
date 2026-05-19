@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -24,6 +25,17 @@ logger = logging.getLogger("pernix.chat")
 # this keeps the DB small and prevents every future turn from re-shipping
 # the full payload.
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+
+# Audio formats other than WAV. Ollama's gemma4/nemotron3 audio path only
+# accepts WAV (RIFF/WAVE magic bytes), so anything else has to be
+# transcoded at ingest. ffmpeg is invoked once per attachment; the result
+# is cached as a sidecar `.wav` next to the original.
+AUDIO_CONVERT_EXTENSIONS = {".mp3", ".m4a", ".ogg", ".flac", ".aac", ".opus", ".webm"}
+
+# Hard cap on the time we'll wait for ffmpeg per attachment. A 10-minute
+# audio file at 16kHz mono 16-bit decodes in well under 30s on modest
+# hardware; longer means something's wrong (corrupt input, hung process).
+AUDIO_CONVERT_TIMEOUT_S = 60
 
 # Upper bound on extracted PDF text written to the sidecar file. At 200k
 # chars it's a large read but still paginatable via file_read offset/limit.
@@ -66,6 +78,44 @@ def _extract_pdf_text(pdf_path: Path) -> str | None:
         return None
 
 
+async def _convert_audio_to_wav(src_path: Path, dst_path: Path) -> tuple[bool, str]:
+    """Transcode `src_path` → `dst_path` (WAV, 16kHz mono PCM s16le) via ffmpeg.
+
+    Returns (success, error_msg). 16kHz mono matches what Ollama's audio
+    encoder resamples to internally (gemma4/process_audio.go), so doing it
+    upfront keeps the inlined payload small.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",  # overwrite dst
+        "-loglevel",
+        "error",
+        "-i",
+        str(src_path),
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-c:a",
+        "pcm_s16le",
+        "-f",
+        "wav",
+        str(dst_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=AUDIO_CONVERT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False, f"ffmpeg timed out after {AUDIO_CONVERT_TIMEOUT_S}s"
+    if proc.returncode != 0:
+        msg = (stderr.decode(errors="replace").strip().splitlines() or ["unknown ffmpeg error"])[-1]
+        return False, msg[:200]
+    return True, ""
+
+
 async def _prepare_attachments(message: str) -> str:
     """Rewrite attachment references in a fresh user message.
 
@@ -76,6 +126,9 @@ async def _prepare_attachments(message: str) -> str:
       in the workspace and rewrites the reference so the agent (and the
       LLM) can `file_read` the text directly. Falls back to a hint if
       extraction fails.
+    - Transcodes non-WAV audio (mp3/m4a/ogg/flac/aac/opus/webm) into a
+      sidecar `foo.mp3.wav` via ffmpeg, since Ollama's audio path only
+      reads WAV. If ffmpeg isn't installed, leaves a hint pointing at it.
     - Does NOT base64-inline anything into the stored message body.
     """
     matches = _ATTACHED_RE.findall(message)
@@ -85,10 +138,64 @@ async def _prepare_attachments(message: str) -> str:
     from core.tools.paths import safe_read_path, safe_write_path
 
     replacements: list[tuple[str, str]] = []
+    # shutil.which is cheap but not free; check once per message rather
+    # than per attachment.
+    ffmpeg_available: bool | None = None
 
     for raw in matches:
         filename = raw.strip()
         ext = Path(filename).suffix.lower()
+
+        if ext in AUDIO_CONVERT_EXTENSIONS:
+            try:
+                src = safe_read_path(filename)
+            except ValueError as e:
+                logger.warning("audio attachment rejected (path): %s — %s", filename, e)
+                continue
+            if not src.exists():
+                logger.warning("Attached audio not found: %s", src)
+                continue
+
+            sidecar_name = f"{filename}.wav"
+            try:
+                sidecar = safe_write_path(sidecar_name)
+            except ValueError as e:
+                logger.warning("audio sidecar rejected (path): %s — %s", sidecar_name, e)
+                continue
+            if sidecar.exists() and sidecar.stat().st_mtime >= src.stat().st_mtime:
+                replacements.append(
+                    (f"[attached: {filename}]", f"[attached: {sidecar_name}]"),
+                )
+                continue
+
+            if ffmpeg_available is None:
+                ffmpeg_available = shutil.which("ffmpeg") is not None
+            if not ffmpeg_available:
+                logger.warning("ffmpeg not installed — cannot transcode %s to WAV", filename)
+                replacements.append(
+                    (
+                        f"[attached: {filename}]",
+                        f"[attached: {filename} (audio not transcoded — install ffmpeg "
+                        f"to enable {ext} support; Ollama's audio path only reads WAV)]",
+                    )
+                )
+                continue
+
+            ok, err = await _convert_audio_to_wav(src, sidecar)
+            if not ok:
+                logger.warning("ffmpeg failed for %s: %s", filename, err)
+                replacements.append(
+                    (
+                        f"[attached: {filename}]",
+                        f"[attached: {filename} (ffmpeg transcode failed: {err})]",
+                    )
+                )
+                continue
+            replacements.append(
+                (f"[attached: {filename}]", f"[attached: {sidecar_name}]"),
+            )
+            continue
+
         if ext != ".pdf":
             continue
 

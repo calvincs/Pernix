@@ -466,15 +466,19 @@ async def run_agent(
     # field on `session`, mutated by the model_mgmt extension).
     _baseline_model = settings.llm_model
 
-    def _resolve_effective_model() -> tuple[str, bool]:
+    def _resolve_effective_model() -> tuple[str, bool, bool]:
         raw = session.model_override or settings.llm_model
         resolved_id = client.router.registry.resolve_model_id(raw)
         if resolved_id != raw:
             logger.info("Session %s: resolved model '%s' -> '%s'", session_id, raw, resolved_id)
         info = client.router.registry.get_model_info(resolved_id)
-        return resolved_id, (info.supports_vision if info else False)
+        return (
+            resolved_id,
+            (info.supports_vision if info else False),
+            (info.supports_audio if info else False),
+        )
 
-    effective_model, model_supports_vision = _resolve_effective_model()
+    effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
     _last_effective_model = effective_model
 
     # Tool loop state
@@ -547,7 +551,7 @@ async def run_agent(
         # can render as an "<orig> ⇄ <override>" indicator while active, and
         # persist a model_divider message so the chat shows the switch even
         # after a page reload (live SSE events aren't replayed from DB).
-        effective_model, model_supports_vision = _resolve_effective_model()
+        effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
         if effective_model != _last_effective_model:
             override_active = session.model_override is not None
             session.emit_event(
@@ -601,6 +605,7 @@ async def run_agent(
             scout_report_text=scout_text,
             resource_status=resource_status,
             supports_vision=model_supports_vision,
+            supports_audio=model_supports_audio,
             context_budget=effective_budget,
             model_name=effective_model,
             turn_user_msg_id=_turn_user_msg_id,
@@ -1424,6 +1429,7 @@ async def run_agent(
             scout_report_text=scout_text,
             resource_status=resource_status,
             supports_vision=model_supports_vision,
+            supports_audio=model_supports_audio,
             context_budget=session.context_budget_override or settings.context_budget,
             model_name=effective_model,
             turn_user_msg_id=_turn_user_msg_id,

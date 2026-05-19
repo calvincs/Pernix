@@ -30,18 +30,22 @@ class InternalRecall:
     """Bundle of internal-knowledge findings for a query.
 
     Fields:
-      memory_text:    Formatted memory entries (BM25-ranked), "" if none.
-      session_text:   Formatted cross-session hits, "" if none.
-      memory_strong:  True if any memory entry scored > 3.0 (matches
-                      RULES.md threshold — strong vs weak vs noise).
-      session_strong: True if any cross-session hit returned (any FTS
-                      match against prior messages is signal worth
-                      surfacing — bar is intentionally lower than memory).
-      queried:        Always True when this object is returned (call
-                      sites can distinguish "we asked" from "we skipped").
+      memory_text:        Formatted memory entries (BM25-ranked), "" if none.
+      memory_seen_footer: Reference footer for memory entries that were
+                          already surfaced earlier in this session
+                          (per-session dedup ledger). "" if none.
+      session_text:       Formatted cross-session hits, "" if none.
+      memory_strong:      True if any memory entry scored > 3.0 (matches
+                          RULES.md threshold — strong vs weak vs noise).
+      session_strong:     True if any cross-session hit returned (any FTS
+                          match against prior messages is signal worth
+                          surfacing — bar is intentionally lower than memory).
+      queried:            Always True when this object is returned (call
+                          sites can distinguish "we asked" from "we skipped").
     """
 
     memory_text: str = ""
+    memory_seen_footer: str = ""
     session_text: str = ""
     memory_strong: bool = False
     session_strong: bool = False
@@ -85,15 +89,25 @@ def internal_recall(
         if store is not None:
             mem_results = store.search(query, mode="hybrid", limit=memory_limit)
             if mem_results:
-                lines = []
-                max_score = 0.0
-                for r in mem_results:
-                    snippet = (r.entry.content or "")[:_MEMORY_ENTRY_CHAR_CAP]
-                    lines.append(f"[{r.entry.file_name} score={r.score:.1f} " f"type={r.entry.entry_type}] {snippet}")
-                    if r.score > max_score:
-                        max_score = r.score
-                result.memory_text = "\n\n".join(lines)
+                # Score signal is computed before dedup so a strong-but-seen entry
+                # still nudges the agent ("[!] Strong internal match") even when
+                # its body is collapsed to the footer reference.
+                max_score = max((r.score for r in mem_results), default=0.0)
                 result.memory_strong = max_score > _MEMORY_STRONG_SCORE
+
+                from core.memory.dedup import partition_seen
+
+                new_results, _seen, footer = partition_seen(mem_results, current_session_id or "")
+                result.memory_seen_footer = footer
+
+                lines = []
+                for r in new_results:
+                    snippet = (r.entry.content or "")[:_MEMORY_ENTRY_CHAR_CAP]
+                    lines.append(
+                        f"[{r.entry.file_name} epoch={r.entry.epoch} "
+                        f"score={r.score:.1f} type={r.entry.entry_type}] {snippet}"
+                    )
+                result.memory_text = "\n\n".join(lines)
     except Exception as e:
         logger.debug("Internal memory recall failed: %s", e)
 
@@ -117,10 +131,10 @@ def internal_recall(
 def format_for_tool_output(recall: InternalRecall) -> str:
     """Format an InternalRecall as a model-facing text block.
 
-    Returns "" when both memory and sessions came back empty so callers
-    can skip prepending a useless header.
+    Returns "" when memory (including dedup footer) and sessions all came
+    back empty so callers can skip prepending a useless header.
     """
-    if not recall.memory_text and not recall.session_text:
+    if not recall.memory_text and not recall.memory_seen_footer and not recall.session_text:
         return ""
 
     parts = ["=== INTERNAL KNOWLEDGE (memory + prior sessions) ==="]
@@ -128,6 +142,13 @@ def format_for_tool_output(recall: InternalRecall) -> str:
     if recall.memory_text:
         parts.append("MEMORY:")
         parts.append(recall.memory_text)
+        if recall.memory_seen_footer:
+            parts.append(recall.memory_seen_footer)
+    elif recall.memory_seen_footer:
+        # All matching memory entries were already surfaced earlier in this
+        # session — show the footer so the model knows they exist.
+        parts.append("MEMORY:")
+        parts.append(recall.memory_seen_footer)
     else:
         parts.append("MEMORY: no matching entries.")
 

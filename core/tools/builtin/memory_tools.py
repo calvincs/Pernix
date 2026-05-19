@@ -271,11 +271,22 @@ def ingest(
         return f"Error during ingestion: {e}"
 
 
-def recall(query: str, top: int = 5, file: str = "", _context: dict | None = None) -> str:
+def recall(
+    query: str,
+    top: int = 5,
+    file: str = "",
+    include_seen: bool = False,
+    _context: dict | None = None,
+) -> str:
     """Fast FTS5 memory search. Returns scored results (score > 3.0 = strong,
     1.0–3.0 = weak, < 1.0 = noise). Full content is returned per result.
     On empty/weak results, use deep_recall() for LLM-synthesized search with
-    keyword reformulation. Never use grep or file_read for memory."""
+    keyword reformulation. Never use grep or file_read for memory.
+
+    Entries already surfaced earlier in this session are collapsed to a short
+    `file@epoch` reference footer to avoid re-emitting the same body twice.
+    Set include_seen=True to bypass that dedup and re-pull full text.
+    """
     from core.memory.store import get_memory_store
 
     store = get_memory_store()
@@ -290,6 +301,17 @@ def recall(query: str, top: int = 5, file: str = "", _context: dict | None = Non
         if not results:
             return "No results found in memory."
 
+        sid = (_context or {}).get("session_id", "")
+        footer = ""
+        if not include_seen:
+            from core.memory.dedup import partition_seen
+
+            new_results, _seen, footer = partition_seen(results, sid)
+            if not new_results and footer:
+                # Every result was already surfaced — return just the footer.
+                return footer
+            results = new_results
+
         lines = []
         for r in results:
             content = r.entry.content
@@ -301,13 +323,21 @@ def recall(query: str, top: int = 5, file: str = "", _context: dict | None = Non
                     len(content) // 3,
                 )
             lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
-        return "\n\n".join(lines)
+        body = "\n\n".join(lines)
+        if footer:
+            return f"{body}\n\n{footer}"
+        return body
     except Exception as e:
         logger.error("Recall failed: %s", e)
         return f"Error searching memory: {e}"
 
 
-def deep_recall(query: str, context: str = "", _context: dict | None = None) -> str:
+def deep_recall(
+    query: str,
+    context: str = "",
+    include_seen: bool = False,
+    _context: dict | None = None,
+) -> str:
     """LLM-backed memory search with synthesis. Searches memory using multiple
     strategies (FTS5 + ripgrep fallback), reformulates queries on weak/empty
     results, and returns a clean attributed answer. Raw search results stay
@@ -315,7 +345,9 @@ def deep_recall(query: str, context: str = "", _context: dict | None = None) -> 
 
     Use when: recall() returns empty/weak results, the query is complex or
     multi-faceted, or cross-file synthesis is needed. Pass context= to help
-    the model focus on what's relevant."""
+    the model focus on what's relevant. include_seen=True bypasses the
+    per-session dedup ledger (only matters for the fallback path, which
+    emits raw entries; the LLM path returns synthesis)."""
     import asyncio
 
     from core.memory.store import get_memory_store
@@ -335,6 +367,17 @@ def deep_recall(query: str, context: str = "", _context: dict | None = None) -> 
             results = store.search(query, limit=8)
             if not results:
                 return "No results found in memory."
+
+            sid = (_context or {}).get("session_id", "")
+            footer = ""
+            if not include_seen:
+                from core.memory.dedup import partition_seen
+
+                new_results, _seen, footer = partition_seen(results, sid)
+                if not new_results and footer:
+                    return footer
+                results = new_results
+
             lines = []
             for r in results:
                 content = r.entry.content
@@ -346,7 +389,10 @@ def deep_recall(query: str, context: str = "", _context: dict | None = None) -> 
                         len(content) // 3,
                     )
                 lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
-            return "\n\n".join(lines)
+            body = "\n\n".join(lines)
+            if footer:
+                return f"{body}\n\n{footer}"
+            return body
         except Exception as e2:
             return f"Error searching memory: {e2}"
 
@@ -441,7 +487,9 @@ def register(reg) -> None:
             "message history of this or any other session, use `search_sessions` "
             "instead — `recall` cannot see raw transcript or trimmed-from-view "
             "messages. Never use grep or file_read for memory — they cannot reach "
-            "the memory directory."
+            "the memory directory. Entries already surfaced earlier in this "
+            "session are collapsed to a `file@epoch` reference footer; pass "
+            "include_seen=true to re-pull full text."
         ),
         parameters={
             "type": "object",
@@ -454,6 +502,15 @@ def register(reg) -> None:
                 "file": {
                     "type": "string",
                     "description": "Optional: restrict search to one memory file by name (e.g. pernix.lessons)",
+                },
+                "include_seen": {
+                    "type": "boolean",
+                    "description": (
+                        "Default false — entries already shown this session collapse to "
+                        "a reference footer. Set true to bypass dedup and re-pull full "
+                        "content (only needed if the original tool result has scrolled "
+                        "out of view or you genuinely need to re-examine the body)."
+                    ),
                 },
             },
             "required": ["query"],
@@ -472,7 +529,9 @@ def register(reg) -> None:
             "strategies (FTS5 + ripgrep fallback), reformulates queries on weak/empty results, "
             "and returns a clean attributed answer. Raw search noise stays inside the sub-agent. "
             "Use when: recall() returns empty/weak results, the query is complex, "
-            "or cross-file synthesis is needed. Pass context= to focus the search."
+            "or cross-file synthesis is needed. Pass context= to focus the search. "
+            "include_seen=true bypasses the per-session dedup ledger (only affects "
+            "the fallback path — the LLM path returns synthesis, not raw entries)."
         ),
         parameters={
             "type": "object",
@@ -486,6 +545,13 @@ def register(reg) -> None:
                     "description": (
                         "Optional framing for the search model — why you need this and "
                         "what would be relevant (e.g. 'debugging a whisper transcription failure')"
+                    ),
+                },
+                "include_seen": {
+                    "type": "boolean",
+                    "description": (
+                        "Default false — fallback-path entries already shown this session "
+                        "collapse to a reference footer. Set true to re-pull full text."
                     ),
                 },
             },

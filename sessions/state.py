@@ -169,6 +169,15 @@ class AgentSession:
     # In-memory only — cleared on server restart, requiring re-approval.
     _approved_dangerous_tools: dict = field(default_factory=dict)
 
+    # Per-session memory-recall ledger. Tracks "file_name@epoch" keys for memory
+    # entries already surfaced to the model in this session so a follow-up recall
+    # (or the search_web internal-knowledge preamble) can collapse duplicates to
+    # a short reference instead of re-emitting full bodies. In-memory only.
+    # Lock guards check-and-record against parallel tool calls in the same round
+    # (e.g. recall + search_web fanned out via asyncio.gather).
+    _seen_memory_keys: set = field(default_factory=set)
+    _seen_memory_lock: threading.Lock = field(default_factory=threading.Lock)
+
     # v2 state machine fields — written exclusively by sessions.state_v2.transition().
     # Declared here so they appear in __repr__, satisfy type checkers, and avoid
     # getattr() fallbacks at every read site. _state_v2 typed Any to prevent a

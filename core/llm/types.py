@@ -67,6 +67,7 @@ class ModelInfo:
     provider: str
     context_length: int
     supports_vision: bool = False
+    supports_audio: bool = False
     supports_tools: bool = True
     supports_streaming: bool = True
     max_output_tokens: int | None = None

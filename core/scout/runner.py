@@ -1084,22 +1084,18 @@ async def run_scout(
             )
             return report
 
-        except asyncio.TimeoutError as e:
+        except asyncio.TimeoutError:
             logger.warning(
-                "Scout timed out after %ds for session %s (attempt %d/%d)",
+                "Scout timed out after %ds for session %s (attempt %d/%d) — skipping remaining primary retries",
                 settings.scout_timeout,
                 session_id,
                 attempt,
                 max_attempts,
             )
             last_error = TimeoutError(f"Scout timed out after {settings.scout_timeout}s")
-            if attempt < max_attempts:
-                wait = _retry_wait_seconds(e, attempt)
-                logger.info(
-                    "Scout retrying in %ds for session %s (attempt %d/%d)", wait, session_id, attempt + 1, max_attempts
-                )
-                await asyncio.sleep(wait)
-                continue
+            # A full-budget wall-clock timeout means the model isn't going to
+            # respond — retrying the same hung endpoint just burns another
+            # scout_timeout per attempt. Escalate straight to the fallback model.
             break
         except Exception as e:
             last_error = e
@@ -1147,7 +1143,7 @@ async def run_scout(
             logger.info("Scout fallback model succeeded for session %s in %dms", session_id, report.scout_latency_ms)
             return report
         except Exception as e:
-            logger.warning("Scout fallback model also failed for session %s: %s", session_id, e)
+            logger.warning("Scout fallback model also failed for session %s: %r", session_id, e)
 
     logger.warning(
         "Scout exhausted all attempts for session %s, using fallback (last error: %s)", session_id, last_error
