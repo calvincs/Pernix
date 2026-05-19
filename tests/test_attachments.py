@@ -15,6 +15,7 @@ turn plus the scout agent. These tests pin the new contract:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from pathlib import Path
@@ -23,7 +24,7 @@ import pytest
 
 from api.routers.chat import _extract_pdf_text, _prepare_attachments
 from core.context.compiler import (
-    _expand_user_message_with_images,
+    _expand_user_message_with_attachments,
     _extract_attached_filenames,
     _legacy_multimodal_to_text,
 )
@@ -71,6 +72,57 @@ async def test_prepare_attachments_handles_missing_pdf(tmp_path, monkeypatch):
     assert out == msg
 
 
+async def test_prepare_attachments_transcodes_mp3_to_wav(tmp_path, monkeypatch):
+    """Non-WAV audio gets transcoded via ffmpeg into a sidecar `.wav`.
+
+    Skipped if ffmpeg isn't on PATH — the no-ffmpeg fallback is covered
+    separately by `test_prepare_attachments_warns_when_ffmpeg_missing`.
+    """
+    import shutil as _shutil
+
+    if _shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    src = tmp_path / "tone.mp3"
+    # Synthesize a real ~0.5s sine-wave mp3 with ffmpeg so the decoder
+    # has actual audio to process. lavfi `sine` is built into ffmpeg.
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=0.5",
+        str(src),
+    )
+    await proc.wait()
+    assert src.exists() and src.stat().st_size > 0
+
+    out = await _prepare_attachments("Identify [attached: tone.mp3]")
+    assert "[attached: tone.mp3.wav]" in out
+    sidecar = tmp_path / "tone.mp3.wav"
+    assert sidecar.exists()
+    # Real WAV header — what Ollama's audio path matches on.
+    assert sidecar.read_bytes()[:4] == b"RIFF"
+    assert sidecar.read_bytes()[8:12] == b"WAVE"
+
+
+async def test_prepare_attachments_warns_when_ffmpeg_missing(tmp_path, monkeypatch):
+    """No-ffmpeg path: marker is rewritten with an installation hint."""
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    (tmp_path / "song.mp3").write_bytes(b"\xff\xfb\x90\x44" + b"\x00" * 100)
+    monkeypatch.setattr("shutil.which", lambda name: None if name == "ffmpeg" else "/usr/bin/" + name)
+    out = await _prepare_attachments("Listen [attached: song.mp3]")
+    assert "install ffmpeg" in out
+    # Original marker reference must stay so the agent can still see the file.
+    assert "song.mp3" in out
+    # No sidecar should have been written.
+    assert not (tmp_path / "song.mp3.wav").exists()
+
+
 async def test_prepare_attachments_no_op_when_no_refs(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     assert await _prepare_attachments("plain question") == "plain question"
@@ -88,12 +140,12 @@ def test_extract_attached_filenames():
     assert "b.pdf" in names
 
 
-def test_expand_user_message_with_images_inlines_b64(tmp_path, monkeypatch):
+def test_expand_user_message_with_attachments_inlines_b64(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     img = tmp_path / "pic.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 500)
 
-    blocks, spent = _expand_user_message_with_images(
+    blocks, spent = _expand_user_message_with_attachments(
         "Look [attached: pic.png]",
         budget=10_000_000,
     )
@@ -105,12 +157,32 @@ def test_expand_user_message_with_images_inlines_b64(tmp_path, monkeypatch):
     assert spent > 0
 
 
+def test_expand_inlines_wav_as_audio_data_url(tmp_path, monkeypatch):
+    """Audio attachments ride the same image_url block; Ollama dispatches by
+    RIFF/WAVE magic bytes from its `images[]` field."""
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    wav = tmp_path / "birds.wav"
+    # Minimal RIFF/WAVE header so this is a recognizable WAV (Ollama checks
+    # these magic bytes to dispatch image vs audio).
+    wav.write_bytes(b"RIFF\x24\x00\x00\x00WAVE" + b"\x00" * 500)
+
+    blocks, spent = _expand_user_message_with_attachments(
+        "Identify the birds [attached: birds.wav]",
+        budget=10_000_000,
+    )
+    media = [b for b in blocks if b.get("type") == "image_url"]
+    assert len(media) == 1
+    assert media[0]["image_url"]["url"].startswith("data:audio/wav;base64,")
+    assert media[0]["_kind"] == "audio"
+    assert spent > 0
+
+
 def test_expand_honors_budget(tmp_path, monkeypatch):
     """When payload exceeds the cap, image falls back to text marker."""
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
     img = tmp_path / "big.jpg"
     img.write_bytes(b"\xff\xd8" + b"y" * 10_000)
-    blocks, spent = _expand_user_message_with_images(
+    blocks, spent = _expand_user_message_with_attachments(
         "See [attached: big.jpg]",
         budget=100,
     )
@@ -184,7 +256,7 @@ def test_expand_images_rejects_path_traversal(tmp_path, monkeypatch):
     evil.write_bytes(b"\xff\xd8" + b"x" * 400)
 
     text = "look at [attached: ../outside.jpg]"
-    blocks, spent = _expand_user_message_with_images(text, budget=10_000_000)
+    blocks, spent = _expand_user_message_with_attachments(text, budget=10_000_000)
     # Only the text block, no image block. Nothing inlined.
     assert len(blocks) == 1
     assert blocks[0]["type"] == "text"
@@ -308,18 +380,38 @@ def test_build_session_brief_handles_legacy_blob(tmp_path, monkeypatch):
 def test_capability_block_vision_enabled():
     from core.context.compiler import _build_model_capability_block
 
-    block = _build_model_capability_block("qwen3.6:35b-a3b-q8_0", True)
+    block = _build_model_capability_block("qwen3.6:35b-a3b-q8_0", True, False)
     assert "qwen3.6:35b-a3b-q8_0" in block
     assert "Vision: ENABLED" in block
     assert "analyze them directly" in block
+    assert "Audio: DISABLED" in block
 
 
 def test_capability_block_vision_disabled():
     from core.context.compiler import _build_model_capability_block
 
-    block = _build_model_capability_block("tiny-text-model", False)
+    block = _build_model_capability_block("tiny-text-model", False, False)
     assert "Vision: DISABLED" in block
     assert "call_model" in block
+    assert "Audio: DISABLED" in block
+
+
+def test_capability_block_audio_enabled():
+    """Audio-capable model: agent is told the wav is inlined for it directly."""
+    from core.context.compiler import _build_model_capability_block
+
+    block = _build_model_capability_block("nemotron3:33b-q8", False, True)
+    assert "Audio: ENABLED" in block
+    assert "[attached: foo.wav]" in block
+
+
+def test_capability_block_audio_disabled_advises_switch_model():
+    """Text-only model: agent is steered to switch_model rather than just retrying."""
+    from core.context.compiler import _build_model_capability_block
+
+    block = _build_model_capability_block("deepseek/deepseek-v4-pro", False, False)
+    assert "Audio: DISABLED" in block
+    assert "switch_model" in block
 
 
 def test_compile_context_includes_capability_block(tmp_path):

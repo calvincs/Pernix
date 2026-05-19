@@ -377,11 +377,25 @@ class OllamaProvider:
             )
         self._vision_cache[model] = supports_vision
 
+        # Audio detection mirrors vision. Ollama dispatches WAV bytes from the
+        # same Message.Images field by inspecting RIFF/WAVE magic bytes
+        # (gemma4/process_audio.go), so capability is purely about whether the
+        # model has an audio encoder. `modalit` already catches the generic
+        # multimodal `modalities=[…audio…]` declaration on models like
+        # nemotron3; the explicit terms cover model files that don't.
+        if model in _settings.audio_model_overrides:
+            supports_audio = True
+        else:
+            supports_audio = any(
+                k for k in model_info if any(v in k.lower() for v in ("audio", "whisper", "speech", "modalit"))
+            )
+
         return ModelInfo(
             id=model,
             provider=self.name,
             context_length=ctx,
             supports_vision=supports_vision,
+            supports_audio=supports_audio,
         )
 
     async def list_models(self) -> list[ModelInfo]:

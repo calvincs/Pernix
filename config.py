@@ -59,6 +59,10 @@ class Settings:
     openrouter_models: list = field(default_factory=list)
     # Force supports_vision=True for models where auto-detection misses multimodal capability.
     vision_model_overrides: list = field(default_factory=list)
+    # Force supports_audio=True for models where auto-detection misses audio capability.
+    # Audio-capable Ollama models (gemma4, nemotron3, …) accept WAV bytes via the
+    # same `images[]` field; the server dispatches by RIFF/WAVE magic bytes.
+    audio_model_overrides: list = field(default_factory=list)
 
     # --- Context ---
     context_budget: int = 192_000
@@ -198,7 +202,7 @@ class Settings:
     max_fetch_size: int = 100_000
 
     # --- Browser (Playwright) ---
-    browser_enabled: bool = False  # browse_web tool only registered when True
+    browser_enabled: bool = True  # browse_web tool only registered when True
     browser_headless: bool = True  # False = headed mode (for login flows, debugging)
     browser_timeout: int = 30  # Page load timeout in seconds
 

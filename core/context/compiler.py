@@ -25,19 +25,25 @@ logger = logging.getLogger("pernix.context.compiler")
 # --- Attachment expansion (compile-time, per-turn) ---------------------------
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+# Audio: Ollama's gemma4/nemotron3 audio path detects WAV via RIFF/WAVE magic
+# bytes and reads PCM/IEEE-float at 8/16/24/32-bit, any sample rate (auto
+# resampled to 16kHz mono). mp3/flac would need pre-decoding upstream.
+_AUDIO_EXTENSIONS = {".wav"}
 _MIME_MAP = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".gif": "image/gif",
     ".webp": "image/webp",
+    ".wav": "audio/wav",
 }
 _ATTACHED_RE = re.compile(r"\[attached:\s*([^\]\s]+(?:\s+[^\]]*)?)\]")
 
-# Upper bound on the total byte size of image data we'll inline into a
-# single compile. Beyond this, we drop the oldest images first and fall
+# Upper bound on the total byte size of attachment data we'll inline into a
+# single compile. Beyond this, we drop the oldest attachments first and fall
 # back to text markers. Settings-overridable via max_inline_attach_bytes.
-MAX_INLINE_ATTACH_BYTES = 4 * 1024 * 1024
+# Bumped to 32MB to accommodate audio (a 19MB WAV → ~25MB base64).
+MAX_INLINE_ATTACH_BYTES = 32 * 1024 * 1024
 
 
 def _extract_attached_filenames(text: str) -> list[str]:
@@ -51,12 +57,17 @@ def _extract_attached_filenames(text: str) -> list[str]:
     return out
 
 
-def _expand_user_message_with_images(text: str, budget: int) -> tuple[list[dict], int]:
-    """Expand [attached: image] references in `text` into multimodal blocks.
+def _expand_user_message_with_attachments(text: str, budget: int) -> tuple[list[dict], int]:
+    """Expand [attached: image|audio] references in `text` into multimodal blocks.
 
-    Reads image bytes fresh from workspace each call — nothing inlined
-    sits in the DB. Honors a byte budget; when exceeded, remaining images
+    Reads attachment bytes fresh from workspace each call — nothing inlined
+    sits in the DB. Honors a byte budget; when exceeded, remaining attachments
     are left as text markers.
+
+    Audio (.wav) is emitted as an `image_url` block with an `audio/*` MIME on
+    the data URL. Ollama's native /api/chat dispatches by RIFF/WAVE magic
+    bytes from the same `images[]` field, so the existing OpenAI→native
+    conversion in core/llm/providers/ollama.py works unmodified.
 
     Returns (content_blocks, bytes_spent).
     """
@@ -70,21 +81,21 @@ def _expand_user_message_with_images(text: str, budget: int) -> tuple[list[dict]
     spent = 0
     for fname in filenames:
         ext = Path(fname).suffix.lower()
-        if ext not in _IMAGE_EXTENSIONS:
+        if ext not in _IMAGE_EXTENSIONS and ext not in _AUDIO_EXTENSIONS:
             continue
         # Reject path traversal — `[attached: ../../etc/some.jpg]` must not
         # read outside the allowed roots even if the extension gate passes.
         try:
-            img = safe_read_path(fname)
+            src = safe_read_path(fname)
         except ValueError as e:
             logger.warning("attachment rejected (path): %s — %s", fname, e)
             continue
-        if not img.exists() or not img.is_file():
+        if not src.exists() or not src.is_file():
             continue
         try:
-            data = img.read_bytes()
+            data = src.read_bytes()
         except OSError as e:
-            logger.warning("attachment read failed for %s: %s", img, e)
+            logger.warning("attachment read failed for %s: %s", src, e)
             continue
         # ~33% overhead for base64. Check against remaining budget.
         projected = int(len(data) * 1.34)
@@ -104,6 +115,7 @@ def _expand_user_message_with_images(text: str, budget: int) -> tuple[list[dict]
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{b64}"},
                 "_filename": fname,
+                "_kind": "audio" if ext in _AUDIO_EXTENSIONS else "image",
             }
         )
         spent += len(b64)
@@ -138,7 +150,8 @@ def _legacy_multimodal_to_text(content_str: str) -> str:
             parts.append(block.get("text", ""))
         elif block.get("type") == "image_url":
             name = block.get("_filename", "image")
-            parts.append(f"[image: {name}]")
+            kind = block.get("_kind", "image")
+            parts.append(f"[{kind}: {name}]")
     return "\n".join(parts)
 
 
@@ -281,12 +294,14 @@ def _build_base_system_prompt() -> str:
     return "\n\n".join(parts)
 
 
-def _build_model_capability_block(model_name: str, supports_vision: bool) -> str:
-    """Tell the agent what model it is and whether vision is active this turn.
+def _build_model_capability_block(model_name: str, supports_vision: bool, supports_audio: bool) -> str:
+    """Tell the agent what model it is and which modalities are active this turn.
 
     Self-awareness fixes a failure mode where a multimodal agent delegated image
     analysis to call_model because it couldn't tell whether images in the current
-    turn were already inlined for it.
+    turn were already inlined for it. The same applies to audio: when a wav is
+    attached but the active model can't accept audio, the bytes stay as a text
+    marker — agent should switch_model to an audio-capable model first.
     """
     name = model_name or "(unknown)"
     lines = ["[ACTIVE MODEL]", f"Model: {name}"]
@@ -304,6 +319,20 @@ def _build_model_capability_block(model_name: str, supports_vision: bool) -> str
             "You cannot view attached images directly. For any image analysis, "
             "use call_model(model=<vision-capable>, image_path=...) — pick a "
             "vision model from discover_tools/list or the model registry."
+        )
+    if supports_audio:
+        lines.append("Audio: ENABLED for this turn.")
+        lines.append(
+            "Audio marked [attached: foo.wav] in THIS turn's user message is "
+            "already inlined for you — listen/analyze directly. Non-WAV audio "
+            "uploads have been transcoded to .wav by the ingest layer."
+        )
+    else:
+        lines.append("Audio: DISABLED for your current model.")
+        lines.append(
+            "Audio attachments stay as text markers. To process audio, "
+            "switch_model to an audio-capable model (e.g. nemotron3, gemma4) "
+            "and try again, or transcribe via bash + whisper first."
         )
     return "\n".join(lines)
 
@@ -437,6 +466,7 @@ def compile_context(
     scout_report_text: str = "",
     resource_status: str = "",
     supports_vision: bool = True,
+    supports_audio: bool = False,
     context_budget: int | None = None,
     model_name: str = "",
     turn_user_msg_id: int | None = None,
@@ -454,9 +484,9 @@ def compile_context(
     # --- Build system prompt ---
     system_parts = [_build_base_system_prompt()]
 
-    # Model + vision capability (stable within a session; tells the agent
-    # whether images are inlined for it or must be delegated to call_model).
-    system_parts.append(_build_model_capability_block(model_name, supports_vision))
+    # Model + vision/audio capability (stable within a session; tells the agent
+    # whether images/audio are inlined for it or must be delegated/transcribed).
+    system_parts.append(_build_model_capability_block(model_name, supports_vision, supports_audio))
 
     # Server URL — lets the agent open or examine workspace artifacts in a browser.
     system_parts.append(_build_server_context())
@@ -601,9 +631,12 @@ def compile_context(
         content: str | list[dict] = text_form
 
         is_latest_user = idx == last_user_idx and msg["role"] == "user"
-        if is_latest_user and supports_vision:
-            blocks, _spent = _expand_user_message_with_images(text_form, attach_budget)
-            # Only wrap in a list if we actually produced image blocks.
+        # Strict gate: only inline binary blobs the active model can actually
+        # accept. Otherwise OpenRouter routes a wav to a vision endpoint and
+        # 404s (no image-input modality), or a text-only Ollama model 500s.
+        # Marker stays as text, agent decides — typically calls switch_model.
+        if is_latest_user and (supports_vision or supports_audio):
+            blocks, _spent = _expand_user_message_with_attachments(text_form, attach_budget)
             if any(b.get("type") == "image_url" for b in blocks):
                 content = blocks
 

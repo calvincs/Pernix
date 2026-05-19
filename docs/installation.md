@@ -132,6 +132,20 @@ Then enable in Settings: `browser_enabled = true`.
 
 Without the browser binary, `browse_web` is unavailable. The `search_web` and `http_get` tools still work.
 
+### ffmpeg — Non-WAV Audio Attachments
+
+Ollama's audio-capable models (gemma4, nemotron3, …) only ingest WAV. When a user attaches `.mp3`, `.m4a`, `.ogg`, `.flac`, `.aac`, `.opus`, or `.webm`, Pernix transcodes it once at ingest into a `<filename>.wav` sidecar (16kHz mono PCM s16le — the format the encoder resamples to internally) and rewrites the chat reference to point at the sidecar. WAV uploads pass through untouched.
+
+```bash
+# Debian / Ubuntu
+sudo apt install ffmpeg
+
+# macOS
+brew install ffmpeg
+```
+
+Without ffmpeg the original `.mp3` (or other non-WAV) attachment marker stays in place and the agent gets a hint telling it to install ffmpeg. Image, PDF, and `.wav` attachments are unaffected.
+
 ### tiktoken — Accurate Token Counting
 
 Without tiktoken, Pernix estimates token counts using a character-based heuristic. The estimate is conservative and works fine in practice, but tiktoken gives exact counts for OpenAI-compatible tokenizers.

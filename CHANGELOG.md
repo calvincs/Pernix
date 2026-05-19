@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.7.0 — 2026-05-19
+
+- chore: black auto-format core/llm/providers/ollama.py
+- feat: default browser_enabled=True; pin browse_web independence
+- feat: per-session memory recall dedup ledger
+- fix: skip primary scout retries on wall-clock timeout
+- fix: gate audio inlining on supports_audio, mirror vision strictness
+- feat: audio attachments — pass WAV to Ollama, transcode others via ffmpeg
+- fix: quote every FTS5 query word as a literal phrase
+- fix: strip `:` `.` `/` `=` from FTS5 search queries
+
 ## v2.6.0 — 2026-05-11
 
 - test: pin internal_recall contract + search_web augmentation

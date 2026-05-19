@@ -44,7 +44,8 @@ def sanitize_for_fallback(messages: list[dict]) -> list[dict]:
                     if part.get("type") == "text":
                         parts.append(part.get("text", ""))
                     elif part.get("type") == "image_url":
-                        parts.append("[image omitted]")
+                        kind = part.get("_kind", "image")
+                        parts.append(f"[{kind} omitted]")
                 else:
                     parts.append(str(part))
             content = "\n".join(parts)

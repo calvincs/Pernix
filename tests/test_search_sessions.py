@@ -196,6 +196,28 @@ def test_search_sessions_handles_percent_in_query():
     assert "marker_pct_aaa" in out
 
 
+def test_search_sessions_handles_url_in_query():
+    """URLs contain `:` (FTS5 column syntax) and `/` — must not be parsed as columns."""
+    sid = db.create_session(title="UrlTest")
+    db.add_message(sid, "user", "marker_url_aaa video reference")
+    out = search_sessions(
+        query="marker_url_aaa https://youtu.be/kwEtOyaFhCA si=nZGTpeemQsHiqIVv",
+        _context={"session_id": sid},
+    )
+    assert "marker_url_aaa" in out
+
+
+def test_search_sessions_handles_hyphen_and_dotted_tokens():
+    """`Re-run`, `baseline-research`, `watch_items.md` raised "no such column" / syntax errors."""
+    sid = db.create_session(title="HyphenTest")
+    db.add_message(sid, "user", "marker_hyphen_aaa Re-run baseline-research watch_items.md notes")
+    out = search_sessions(
+        query="Re-run baseline-research watch_items.md marker_hyphen_aaa",
+        _context={"session_id": sid},
+    )
+    assert "marker_hyphen_aaa" in out
+
+
 def test_search_sessions_resolves_short_prefix():
     """Agent often copies the short id it sees in earlier tool output."""
     sid_target = db.create_session(title="PrefixTarget")

@@ -154,6 +154,7 @@ def _stub_internal_recall(monkeypatch, *, memory_text="MEM-HIT", session_text="S
     class _StubRecall:
         def __init__(self):
             self.memory_text = memory_text
+            self.memory_seen_footer = ""
             self.session_text = session_text
             self.memory_strong = strong
             self.session_strong = strong
@@ -201,6 +202,57 @@ def test_internal_recall_failure_does_not_break_search_web(_stub_tavily, monkeyp
     out = _stub_tavily.search_web("anything")
     # Augmentation skipped → just the raw stub result, no error surfaced
     assert out == "STUB-WEB-RESULT"
+
+
+# ---------------------------------------------------------------------------
+# Registration decoupling — browse_web must register independently of
+# web_search_enabled and the Tavily key.
+# ---------------------------------------------------------------------------
+
+
+def test_browse_web_registers_without_search_web_or_tavily(monkeypatch):
+    """browse_web is a separate capability from search_web. With
+    web_search_enabled=False and no TAVILY_API_KEY, browser_enabled=True
+    must still register browse_web (and http_get), and search_web must NOT
+    register. The agent can browse pages without a Tavily subscription."""
+    import core.extensions.web as web
+    from config import settings as _settings
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setattr(_settings, "web_search_enabled", False)
+    monkeypatch.setattr(_settings, "browser_enabled", True)
+
+    reg = ToolRegistry()
+    web.register(reg)
+
+    assert reg.get("browse_web") is not None, "browse_web must register when browser_enabled=True"
+    assert reg.get("http_get") is not None, "http_get must always register"
+    assert reg.get("search_web") is None, "search_web must NOT register when web_search_enabled=False"
+
+
+def test_browse_web_omitted_when_browser_disabled(monkeypatch):
+    """browser_enabled=False suppresses browse_web even if web_search is on."""
+    import core.extensions.web as web
+    from config import settings as _settings
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(_settings, "web_search_enabled", True)
+    monkeypatch.setattr(_settings, "browser_enabled", False)
+
+    reg = ToolRegistry()
+    web.register(reg)
+
+    assert reg.get("browse_web") is None
+    assert reg.get("search_web") is not None
+
+
+def test_browser_enabled_defaults_to_true():
+    """Default install ships with the Playwright tool active. Pin the
+    default so future config refactors don't silently flip it back."""
+    from config import Settings
+
+    assert Settings().browser_enabled is True
 
 
 def test_error_paths_still_trip_was_error_detection(monkeypatch):

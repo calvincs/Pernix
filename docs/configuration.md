@@ -170,7 +170,7 @@ Approvals are **per-invocation by default** — approving `bash` for `ps aux` do
 
 | Setting | Default | Description |
 |---|---|---|
-| `browser_enabled` | `false` | Enable the `browse_web` tool (requires Playwright installed). |
+| `browser_enabled` | `true` | Enable the `browse_web` tool (requires Playwright installed). Independent of `web_search_enabled` — `browse_web` works without a Tavily key. |
 | `browser_headless` | `true` | Run Chromium without a visible window. Set to `false` to debug browser sessions visually (local mode only). |
 
 ---
