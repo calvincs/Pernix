@@ -85,7 +85,8 @@ body {
     background: var(--bg);
     color: var(--text);
     overflow: hidden;
-    height: 100vh;
+    height: 100vh; /* fallback for browsers without dvh */
+    height: 100dvh; /* visible viewport — excludes mobile browser toolbar */
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }

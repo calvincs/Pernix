@@ -84,6 +84,39 @@ def test_evidence_includes_deliverables_when_scout_provides():
     assert "Run linter on it" in evidence
 
 
+def test_evidence_emits_turn_scope_for_ask_user_answer():
+    """When the user's message is an ask_user answer, evidence must include
+    a TURN SCOPE block telling reflect to grade narrowly. Regression target:
+    session 2098d1b26d31 — reflect graded a 'yes, approve the skill update'
+    turn against the session's broader 'create a LinkedIn post' goal and
+    looped on retries the user never asked for."""
+    sid = db.create_session(title="Create LinkedIn Post")
+    db.add_message(
+        sid,
+        "user",
+        "[User answered your question]\nQ: Approve skill update?\nA: yes",
+    )
+    db.add_message(sid, "assistant", "Approved. Skill updated.")
+    scout = ScoutReport(
+        approach_guidance="Draft a LinkedIn post from the source file.",
+        deliverables_plan=[
+            DeliverableSpec(description="Read source file", execution_hint="file_read"),
+            DeliverableSpec(description="Write post to workspace", execution_hint="file_write"),
+        ],
+    )
+    _, evidence = _build_evidence(sid, attempt=1, scout_report=scout)
+    assert "TURN SCOPE: ask_user answer." in evidence
+    # Scout's stale plan still appears, but TURN SCOPE precedes it in the parts
+    # list so the prompt rule can flag it as out of scope.
+    assert evidence.index("TURN SCOPE:") < evidence.index("SCOUT DELIVERABLES PLAN")
+
+
+def test_evidence_omits_turn_scope_for_normal_user_message():
+    sid = _make_session_with_transcript()
+    _, evidence = _build_evidence(sid, attempt=1)
+    assert "TURN SCOPE:" not in evidence
+
+
 def test_evidence_handles_missing_scout_report():
     sid = _make_session_with_transcript()
     _, evidence = _build_evidence(sid, attempt=1)  # scout_report=None

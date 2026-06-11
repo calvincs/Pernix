@@ -87,34 +87,6 @@ def evaluate(feature_ids: str = "", _context: dict | None = None) -> str:
     return "\n".join(results)
 
 
-def evaluate_one(feature_id: str, _context: dict | None = None) -> str:
-    """Evaluate a single feature."""
-    from pathlib import Path
-
-    registry_path = Path("data/registry.json")
-    if not registry_path.exists():
-        return "No features registered."
-
-    features = json.loads(registry_path.read_text())
-    feat = next((f for f in features if f["id"] == feature_id), None)
-    if not feat:
-        return f"Feature {feature_id} not found."
-
-    ctx = _context or {}
-    session_id = ctx.get("session_id", "")
-    loop = ctx.get("_loop")
-    result = _evaluate_single(feat, session_id, loop=loop)
-
-    status = "PASS" if result.get("passed") else "FAIL"
-    output = f"{feat['title']}: {status}\n"
-    if result.get("scores"):
-        for criterion, score in result["scores"].items():
-            output += f"  [{score}] {criterion}\n"
-    if result.get("feedback"):
-        output += f"\nFeedback: {result['feedback']}"
-    return output
-
-
 def _evaluate_single(feat: dict, session_id: str, loop=None) -> dict:
     """Evaluate a single feature. Returns {passed, scores, feedback}.
 

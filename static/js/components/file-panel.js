@@ -32,6 +32,16 @@ function loadMonaco() {
     _monacoReady = new Promise((resolve, reject) => {
         if (window.monaco) { resolve(window.monaco); return; }
         if (!window.require) { reject(new Error('Monaco loader not available')); return; }
+        // On a LAN without internet the AMD module fetch can hang (rather
+        // than fail), which left createCodeEditor awaiting forever and the
+        // file panel without any editor. Time out to the textarea fallback,
+        // and clear the memoized promise so a later attempt can retry.
+        const timer = setTimeout(() => {
+            _monacoReady = null;
+            reject(new Error('Monaco load timed out (offline/LAN?)'));
+        }, 8000);
+        const _resolve = resolve;
+        resolve = (m) => { clearTimeout(timer); _resolve(m); };
         window.require.config({
             paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' },
         });
@@ -1453,11 +1463,19 @@ function _renderSkillsFiltered() {
             await deleteSkill(skill.name);
         });
 
+        const nameChildren = [
+            text(skill.name),
+            el('span', { class: 'fp-skill-version' }, [text(`v${skill.version}`)]),
+        ];
+        const pendingCount = skill.pending_proposals_count || 0;
+        if (pendingCount > 0) {
+            nameChildren.push(el('span', {
+                class: 'fp-skill-pending-badge',
+                title: `${pendingCount} pending proposal${pendingCount === 1 ? '' : 's'} — see banner above to review`,
+            }, [text(`⚠ ${pendingCount} pending`)]));
+        }
         item.appendChild(el('div', { class: 'fp-skill-header' }, [
-            el('div', { class: 'fp-skill-name' }, [
-                text(skill.name),
-                el('span', { class: 'fp-skill-version' }, [text(`v${skill.version}`)]),
-            ]),
+            el('div', { class: 'fp-skill-name' }, nameChildren),
             el('div', { class: 'fp-skill-actions' }, [toggle, deleteBtn]),
         ]));
 

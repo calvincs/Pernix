@@ -54,6 +54,9 @@ class InternalRecall:
 
 # Score threshold matching the documentation in data/agent/RULES.md:
 # "> 3.0 strong · 1.0–3.0 weak · < 1.0 noise"
+# Scores are length-normalized (per query token) by search_bm25, so this
+# absolute threshold holds across query lengths — un-normalized, a long
+# query crossed 3.0 on summed token noise alone.
 _MEMORY_STRONG_SCORE = 3.0
 
 # Per-entry character cap when formatting memory hits. Mirrors the cap
@@ -87,7 +90,9 @@ def internal_recall(
 
         store = get_memory_store()
         if store is not None:
-            mem_results = store.search(query, mode="hybrid", limit=memory_limit)
+            # Automated augmentation (fires on search_web), not a deliberate
+            # agent recall — don't inflate usage hit counts.
+            mem_results = store.search(query, mode="hybrid", limit=memory_limit, _track_hits=False)
             if mem_results:
                 # Score signal is computed before dedup so a strong-but-seen entry
                 # still nudges the agent ("[!] Strong internal match") even when
@@ -96,17 +101,12 @@ def internal_recall(
                 result.memory_strong = max_score > _MEMORY_STRONG_SCORE
 
                 from core.memory.dedup import partition_seen
+                from core.memory.search import format_result_line
 
                 new_results, _seen, footer = partition_seen(mem_results, current_session_id or "")
                 result.memory_seen_footer = footer
 
-                lines = []
-                for r in new_results:
-                    snippet = (r.entry.content or "")[:_MEMORY_ENTRY_CHAR_CAP]
-                    lines.append(
-                        f"[{r.entry.file_name} epoch={r.entry.epoch} "
-                        f"score={r.score:.1f} type={r.entry.entry_type}] {snippet}"
-                    )
+                lines = [format_result_line(r, char_cap=_MEMORY_ENTRY_CHAR_CAP) for r in new_results]
                 result.memory_text = "\n\n".join(lines)
     except Exception as e:
         logger.debug("Internal memory recall failed: %s", e)

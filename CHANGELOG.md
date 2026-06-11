@@ -1,5 +1,83 @@
 # Changelog
 
+## v2.8.0 — 2026-06-11
+
+- chore: gitignore data/tool_approvals.json (runtime state)
+- feat(skills): media-cast youtube subcommand + linkedin formatter voice guidance
+- feat(ui): group session model picker by provider
+- fix(ui): mobile usability pass — viewport, overflow, touch affordances
+- feat(model_mgmt): add scope param to switch_model (turn|session)
+- fix(state): harden turn workflow — reaper guards, multi-compaction, turn-scoped reflect
+- feat(ui): state timeline upgrades + chat session UX enhancements
+- chore: remove dead API/DB helpers
+- chore: remove dead code across core, config, and sessions
+- chore(memory): remove dead recall_enhanced
+- fix(memory): length-normalize BM25 scores so documented thresholds hold
+- fix(memory): temporal results pad hybrid search instead of displacing matches
+- feat(memory): show entry age and provenance at recall time
+- refactor(memory): single home for routing vocabulary and name canonicalization
+- fix(memory): stop hit-tracking on automated recall paths
+- feat(memory): point duplicate-skipped saves at the entry to supersede
+- fix(memory): neutralize bare '---' lines in entry content
+- fix(memory): enforce unique (file, epoch) entry identity
+- fix(memory): stop reindex from resurrecting archived files
+- chore(pwa): bump shell cache to v2 for the wave-3 UI changes
+- feat(ui): de-emphasize cron sessions in the sidebar
+- fix(ui): login hint covers the QR path, not just the server console
+- fix(ui): stop infinite SSE reconnects to a deleted session
+- perf(ui): skip sidebar/health polling while the tab is hidden
+- fix(ui): model-generated links open in a new tab; strip inline styles
+- fix(ui): offline banner instead of blocking modal; gate restart by host
+- feat(sessions): user-facing pause/resume for any session
+- feat(ui): worker activity strip — live view of the fleet during fan-outs
+- feat(ui): surface per-session cost
+- feat(ui): upload progress, client-side size precheck, and no silent partial sends
+- feat(ux): make the product's capabilities discoverable
+- feat(ui): sidebar session search over the existing FTS index
+- fix(mobile): Enter inserts a newline instead of sending
+- fix(ui): stop-button errors, visibility recovery, notification stream, rejected bubbles
+- fix(agent): LLM scheduling fairness was silently disabled (created_at AttributeError)
+- feat(pwa): precache the app shell in the service worker
+- fix(ui): vendor marked.js and add a Monaco load timeout (LAN-only deployments)
+- perf(ui): incremental streaming render — stop re-parsing the whole answer per tick
+- feat(ui): paginate session history — bounded initial load + load-earlier
+- perf(scout): make the report cache hittable + bypass conversational follow-ups
+- perf(scout): gather baseline searches concurrently
+- perf(db): move hot DB work off the event loop
+- fix(tools): run long-poll tools on a dedicated executor (pool starvation)
+- fix(state): marshal tool-thread state transitions onto the event loop
+- fix(events): marshal subscriber-queue delivery onto the event loop
+- style: black formatting for orchestration gate and db tests
+- fix(snooze): dedup must not archive entries that carry unique information
+- fix(orchestration): exact sentinel match in worker quality gate + visible truncation
+- fix(reflect): hard do-not-repeat guard for executed side-effecting tools
+- feat(ux): gesture-driven notification enable + cron schedule presets
+- feat(ux): first-run setup card when no model is configured
+- fix(ux): require confirmation before destroying sessions
+- fix(ux): show status text on mobile as a floating strip instead of hiding it
+- fix(ux): pinned scrolling — stop yanking readers to the bottom, follow the stream
+- feat(ux): emit tool.start so the UI shows live progress during tool execution
+- perf(db): bound the tail-reader get_messages calls
+- perf(context): memoize attachment base64 encoding across tool rounds
+- perf(context): cache token counts instead of re-encoding history every round
+- perf(db): reuse SQLite connections per thread
+- perf(context): keep volatile state out of the system head (prompt cache)
+- fix(db): run each migration in an explicit transaction (crash no longer bricks startup)
+- fix(db): stop leaking messages_fts rows when sessions are deleted
+- fix(boot): sweep all non-terminal session states at startup, not just 2 of 8
+- fix(scheduling): create cron job sessions with session_type="cron"
+- fix(ui): resync when server event_seq goes backwards (restart left UI dead)
+- fix(tools): enforce dangerous-tool approval scope and require an answered ask_user
+- fix(web): validate every redirect hop in http_get (SSRF bypass)
+- fix(sessions): don't reaper-unstick PROCESSING sessions with a live agent task
+- fix: invalidate bash cross-round dedup after file mutations
+- feat: add paperclip attach button to chat input (desktop + mobile)
+- docs: reconcile SPEC_v2 with current code state (audit pass)
+- feat: refine pass — whole-session skill/lesson extraction at snooze tail
+- fix: scope reflect verdict to ask_user answer when user replied to a question
+- chore: identify as Pernix.cc to OpenRouter attribution
+- fix: salvage XML-style tool calls that leak as text
+
 ## v2.7.0 — 2026-05-19
 
 - chore: black auto-format core/llm/providers/ollama.py

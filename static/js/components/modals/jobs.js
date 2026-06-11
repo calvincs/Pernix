@@ -330,6 +330,50 @@ function _buildJobRow(job, models) {
 // Add job — collapsed button that expands into form
 // ---------------------------------------------------------------------------
 
+/** Convert a LOCAL wall-clock time (and optional local weekday) to a UTC
+ * cron expression — the scheduler runs cron in UTC, but users think in
+ * local time. Weekday conversion goes through a real Date so day shifts
+ * across the UTC boundary are handled. */
+function _localToUtcCron(hour, minute, localDow = null) {
+    const d = new Date();
+    d.setHours(hour, minute, 0, 0);
+    if (localDow !== null) {
+        const delta = (localDow - d.getDay() + 7) % 7;
+        d.setDate(d.getDate() + delta);
+        return `${d.getUTCMinutes()} ${d.getUTCHours()} * * ${d.getUTCDay()}`;
+    }
+    return `${d.getUTCMinutes()} ${d.getUTCHours()} * * *`;
+}
+
+const _CRON_PRESETS = [
+    ['', 'Preset…'],
+    ['*/15 * * * *', 'Every 15 minutes'],
+    ['0 * * * *', 'Every hour'],
+    ['daily:9:0', 'Daily at 9:00 (local)'],
+    ['daily:18:0', 'Daily at 18:00 (local)'],
+    ['weekly:1:9:0', 'Mondays at 9:00 (local)'],
+];
+
+/** Human-readable description of common cron shapes, with the UTC time
+ * translated back to local so the user can sanity-check the schedule. */
+function _cronHint(expr) {
+    const parts = expr.trim().split(/\s+/);
+    if (parts.length !== 5) return '';
+    const [min, hr, , , dow] = parts;
+    let stepM = min.match(/^\*\/(\d+)$/);
+    if (stepM && hr === '*') return `runs every ${stepM[1]} minutes`;
+    if (/^\d+$/.test(min) && hr === '*') return `runs hourly at :${min.padStart(2, '0')}`;
+    if (/^\d+$/.test(min) && /^\d+$/.test(hr)) {
+        const d = new Date();
+        d.setUTCHours(+hr, +min, 0, 0);
+        const local = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const when = /^\d+$/.test(dow) ? `${days[+dow % 7]}s (UTC day)` : 'daily';
+        return `runs ${when} at ${local} local (${hr.padStart(2, '0')}:${min.padStart(2, '0')} UTC)`;
+    }
+    return '';
+}
+
 function _buildAddSection(models) {
     const wrapper = el('div');
     let editorInstance = null;
@@ -356,6 +400,27 @@ function _buildAddSection(models) {
         const editorHost = el('div', { class: 'jobs-editor-host' });
         const statusMsg = el('span', { style: { fontSize: 'var(--text-xs)', color: 'var(--text-dim)' } });
 
+        // Schedule presets + live description — hand-writing UTC cron is a
+        // wall for non-developers, so common schedules are one click and the
+        // hint translates whatever lands in the field back to local time.
+        const cronHint = el('span', { style: { fontSize: 'var(--text-xxs)', color: 'var(--text-faint)' } });
+        const presetSelect = el('select');
+        for (const [value, label] of _CRON_PRESETS) {
+            presetSelect.appendChild(el('option', { value }, [text(label)]));
+        }
+        presetSelect.addEventListener('change', () => {
+            let v = presetSelect.value;
+            const daily = v.match(/^daily:(\d+):(\d+)$/);
+            const weekly = v.match(/^weekly:(\d+):(\d+):(\d+)$/);
+            if (daily) v = _localToUtcCron(+daily[1], +daily[2]);
+            else if (weekly) v = _localToUtcCron(+weekly[2], +weekly[3], +weekly[1]);
+            if (v) {
+                cronInput.value = v;
+                cronHint.textContent = _cronHint(v);
+            }
+        });
+        cronInput.addEventListener('input', () => { cronHint.textContent = _cronHint(cronInput.value); });
+
         const modelSelect = el('select');
         modelSelect.appendChild(el('option', { value: '' }, [text('Default (system model)')]));
         const current = models?.current || '';
@@ -367,7 +432,8 @@ function _buildAddSection(models) {
         const form = el('div', { class: 'jobs-add-form' }, [
             el('div', { style: { fontSize: 'var(--text-sm)', color: 'var(--text-dim)', marginBottom: '4px' } },
                 [text('Add Job — cron schedule is UTC')]),
-            el('div', { class: 'jobs-add-row' }, [nameInput, cronInput]),
+            el('div', { class: 'jobs-add-row' }, [nameInput, cronInput, presetSelect]),
+            el('div', { style: { margin: '2px 0 4px' } }, [cronHint]),
             editorHost,
             el('div', { class: 'jobs-add-row' }, [
                 modelSelect,

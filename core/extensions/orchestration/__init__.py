@@ -592,28 +592,51 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
             return f"# INCOMPLETE (worker terminated: {term_reason})\n\n"
         return "# UNVERIFIED (no reflect verdict recorded — quality not gated)\n\n"
 
+    def _cap(full_text: str) -> str:
+        """Truncate to 3000 chars WITH a visible marker — silently cutting a
+        worker's report mid-sentence left the parent with no signal that
+        content was lost or where to find the rest."""
+        if len(full_text) <= 3000:
+            return full_text
+        return (
+            full_text[:3000] + f"\n[truncated at 3000 of {len(full_text)} chars — call "
+            f"get_worker_transcript({worker_id[:12]!r}) for the full output]"
+        )
+
+    # Exact sentinel prefixes _finalize_worker stamps. Matching any leading
+    # "#" here suppressed the quality gate whenever a worker began its own
+    # summary with a markdown heading ("# Results") — unverified output was
+    # then returned to the parent as trusted.
+    _SENTINELS = (
+        "# INCOMPLETE (",
+        "# CANCELLED (",
+        "# ERROR (",
+        "# ESCALATED (",
+        "# UNVERIFIED (",
+        "# AUTO-STAMPED (",
+    )
+
     # Per-worker summary file (new convention). The file itself is trusted
     # (either written by the worker, or auto-stamped with a marker header).
     per_worker = workspace / f".worker_{worker_id[:12]}_summary.md"
     if per_worker.exists():
-        body = per_worker.read_text()[:3000]
-        gate = _gate_header()
+        body = per_worker.read_text()
         # If the summary already carries a sentinel marker from _finalize_worker,
         # don't double up — just return as-is (the stamp already encodes state).
-        if body.startswith("#"):
-            return body
-        return gate + body
+        if body.startswith(_SENTINELS):
+            return _cap(body)
+        return _gate_header() + _cap(body)
 
     # Backward compat: shared summary.md from pre-fix workers
     legacy_path = workspace / "summary.md"
     if legacy_path.exists():
-        return _gate_header() + legacy_path.read_text()[:3000]
+        return _gate_header() + _cap(legacy_path.read_text())
 
     # Fallback: last assistant message, always wrapped in a quality header.
     messages = db.get_messages(worker_id)
     for m in reversed(messages):
         if m["role"] == "assistant" and m.get("content"):
-            return _gate_header() + m["content"][:3000]
+            return _gate_header() + _cap(m["content"])
 
     # No output at all
     if _worker_obj and _worker_obj.error:
@@ -789,62 +812,74 @@ def await_workers(
 
     # --- Suspend mode (Gap 2) -------------------------------------------
     if suspend:
+        from core.events import call_on_loop
         from sessions import state_v2 as sv2
 
-        # Idempotency guard: if the parent is already AWAITING_WORKERS,
-        # a second call would cumulatively .update() new IDs into the
-        # watch-set (potentially adding workers that were spawned for
-        # a different purpose). Refuse rather than silently corrupt the
-        # set — the LLM should call check_workers() and let the existing
-        # suspension resolve.
-        if sv2._current_state(parent) is sv2.SessionStateV2.AWAITING_WORKERS:
-            already = len(getattr(parent, "_watched_worker_ids", set()))
+        # The ENTIRE suspend sequence runs as one callable on the event
+        # loop. Two reasons: (1) transition() is loop-affine by contract;
+        # (2) _on_watched_worker_done fires on the loop — if a watched
+        # worker finished between this thread computing still_running and
+        # registering the watch-set, its done-callback found an empty set
+        # and never fired again, suspending the parent on a worker that
+        # already completed (recovery only via the reaper, minutes later).
+        # Running compute+register atomically on the loop closes that race.
+        def _suspend_on_loop() -> str:
+            # Idempotency guard: if the parent is already AWAITING_WORKERS,
+            # a second call would cumulatively .update() new IDs into the
+            # watch-set (potentially adding workers that were spawned for
+            # a different purpose). Refuse rather than silently corrupt the
+            # set — the LLM should call check_workers() and let the existing
+            # suspension resolve.
+            if sv2._current_state(parent) is sv2.SessionStateV2.AWAITING_WORKERS:
+                already = len(getattr(parent, "_watched_worker_ids", set()))
+                return (
+                    f"Already suspended on {already} worker(s). The previous "
+                    "await_workers(suspend=True) call is still pending — wait "
+                    "for the parent to auto-resume rather than re-issuing."
+                )
+            target_ids: set = set(worker_ids) if worker_ids else set(parent.worker_ids)
+            if not target_ids:
+                return "Error: no worker IDs to watch"
+
+            # Filter out already-completed workers. Completed workers have already
+            # fired _on_watched_worker_done and will never do so again. Including them
+            # in the watch-set permanently stalls it — the set never empties and the
+            # parent never resumes.
+            still_running: set = set()
+            for wid in target_ids:
+                w = manager.get(wid)
+                if w is None:
+                    continue  # reaped = done
+                w_v2 = sv2._current_state(w)
+                # See await_workers blocking-mode rationale: only `_turn_id > 0`
+                # truly indicates a turn started. `w.task is not None` fires
+                # too early (Task scheduled but not yet executed).
+                has_started = getattr(w, "_turn_id", 0) > 0
+                if w_v2 is sv2.SessionStateV2.IDLE_READY and has_started:
+                    continue  # already done
+                still_running.add(wid)
+
+            already_done = len(target_ids) - len(still_running)
+            if not still_running:
+                return (
+                    f"All {len(target_ids)} watched worker(s) have already completed. "
+                    "Call get_worker_result() to retrieve their outputs."
+                )
+
+            # Register watch-set on the parent so _on_watched_worker_done can fire.
+            parent._watched_worker_ids.update(still_running)
+            manager._persist_watched(parent)
+            # Transition PROCESSING → AWAITING_WORKERS so the agent loop exits cleanly.
+            current_v2 = sv2._current_state(parent)
+            if current_v2 is sv2.SessionStateV2.PROCESSING:
+                sv2.transition(parent, sv2.SessionStateV2.AWAITING_WORKERS, "workers-dispatched")
+            done_note = f" ({already_done} already completed)" if already_done else ""
             return (
-                f"Already suspended on {already} worker(s). The previous "
-                "await_workers(suspend=True) call is still pending — wait "
-                "for the parent to auto-resume rather than re-issuing."
-            )
-        target_ids: set = set(worker_ids) if worker_ids else set(parent.worker_ids)
-        if not target_ids:
-            return "Error: no worker IDs to watch"
-
-        # Filter out already-completed workers. Completed workers have already
-        # fired _on_watched_worker_done and will never do so again. Including them
-        # in the watch-set permanently stalls it — the set never empties and the
-        # parent never resumes.
-        still_running: set = set()
-        for wid in target_ids:
-            w = manager.get(wid)
-            if w is None:
-                continue  # reaped = done
-            w_v2 = sv2._current_state(w)
-            # See await_workers blocking-mode rationale: only `_turn_id > 0`
-            # truly indicates a turn started. `w.task is not None` fires
-            # too early (Task scheduled but not yet executed).
-            has_started = getattr(w, "_turn_id", 0) > 0
-            if w_v2 is sv2.SessionStateV2.IDLE_READY and has_started:
-                continue  # already done
-            still_running.add(wid)
-
-        already_done = len(target_ids) - len(still_running)
-        if not still_running:
-            return (
-                f"All {len(target_ids)} watched worker(s) have already completed. "
-                "Call get_worker_result() to retrieve their outputs."
+                f"Session suspended — watching {len(still_running)} worker(s){done_note}. "
+                "Parent will auto-resume with get_worker_result() context once all finish."
             )
 
-        # Register watch-set on the parent so _on_watched_worker_done can fire.
-        parent._watched_worker_ids.update(still_running)
-        manager._persist_watched(parent)
-        # Transition PROCESSING → AWAITING_WORKERS so the agent loop exits cleanly.
-        current_v2 = sv2._current_state(parent)
-        if current_v2 is sv2.SessionStateV2.PROCESSING:
-            sv2.transition(parent, sv2.SessionStateV2.AWAITING_WORKERS, "workers-dispatched")
-        done_note = f" ({already_done} already completed)" if already_done else ""
-        return (
-            f"Session suspended — watching {len(still_running)} worker(s){done_note}. "
-            "Parent will auto-resume with get_worker_result() context once all finish."
-        )
+        return call_on_loop(_suspend_on_loop, loop=ctx.get("_loop"))
 
     # --- Blocking poll mode (existing behavior + Gap 3 enhancements) -----
     loop = ctx.get("_loop")
@@ -1089,16 +1124,23 @@ def pause_worker(worker_id: str, _context: dict | None = None) -> str:
     session = get_manager().get(worker_id)
     if not session:
         return f"Worker {worker_id} not found"
-    current = sv2._current_state(session)
-    if current is not sv2.SessionStateV2.PROCESSING:
-        return f"Worker {worker_id[:8]} is in state {current.value}; " f"pause only applies to PROCESSING workers"
-    session.pause_event.clear()
-    try:
-        sv2.transition(session, sv2.SessionStateV2.PAUSE_REQUESTED, "pause-requested")
-        _m.set_session_state(worker_id, session.state.value)
-    except Exception as e:
-        logger.error("pause-requested transition failed for %s: %s", worker_id, e)
-    return f"Worker {worker_id[:8]} will pause at next checkpoint"
+
+    # State read + pause_event.clear + transition run as one loop callable —
+    # this tool executes on a worker thread, and transition() is loop-affine.
+    def _pause_on_loop() -> str:
+        current = sv2._current_state(session)
+        if current is not sv2.SessionStateV2.PROCESSING:
+            return f"Worker {worker_id[:8]} is in state {current.value}; " f"pause only applies to PROCESSING workers"
+        session.pause_event.clear()
+        try:
+            sv2.transition(session, sv2.SessionStateV2.PAUSE_REQUESTED, "pause-requested")
+        except Exception as e:
+            logger.error("pause-requested transition failed for %s: %s", worker_id, e)
+        return f"Worker {worker_id[:8]} will pause at next checkpoint"
+
+    from core.events import call_on_loop
+
+    return call_on_loop(_pause_on_loop, loop=(_context or {}).get("_loop"))
 
 
 def resume_worker(worker_id: str, _context: dict | None = None) -> str:
@@ -1116,16 +1158,24 @@ def resume_worker(worker_id: str, _context: dict | None = None) -> str:
     session = get_manager().get(worker_id)
     if not session:
         return f"Worker {worker_id} not found"
-    session.pause_event.set()
-    current = sv2._current_state(session)
-    if current is sv2.SessionStateV2.PAUSE_REQUESTED:
-        try:
-            sv2.transition(session, sv2.SessionStateV2.PROCESSING, "resume")
-            _m.set_session_state(worker_id, session.state.value)
-        except Exception as e:
-            logger.error("resume (from pause-requested) failed for %s: %s", worker_id, e)
-    # If current == PAUSED, the agent loop will transition on its own.
-    return f"Worker {worker_id[:8]} resumed"
+
+    # Loop-marshaled for the same reason as pause_worker: transition() is
+    # loop-affine, and setting pause_event must not interleave with the
+    # agent loop's own PAUSE_REQUESTED→PAUSED observation.
+    def _resume_on_loop() -> str:
+        session.pause_event.set()
+        current = sv2._current_state(session)
+        if current is sv2.SessionStateV2.PAUSE_REQUESTED:
+            try:
+                sv2.transition(session, sv2.SessionStateV2.PROCESSING, "resume")
+            except Exception as e:
+                logger.error("resume (from pause-requested) failed for %s: %s", worker_id, e)
+        # If current == PAUSED, the agent loop will transition on its own.
+        return f"Worker {worker_id[:8]} resumed"
+
+    from core.events import call_on_loop
+
+    return call_on_loop(_resume_on_loop, loop=(_context or {}).get("_loop"))
 
 
 def set_worker_state(worker_id: str, paused: bool, _context: dict | None = None) -> str:
@@ -2535,6 +2585,7 @@ def register(reg) -> None:
         tags=orch_tags + ["wait", "block", "sync", "suspend"],
         timeout=1800,
         parallel_safe=False,
+        long_poll=True,
         **common,
     )
     reg.register(
@@ -2650,6 +2701,7 @@ def register(reg) -> None:
         timeout=3600,
         parallel_safe=False,
         safety_level="safe",
+        long_poll=True,
         **common,
     )
     reg.register(

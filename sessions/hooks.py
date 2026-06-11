@@ -67,12 +67,9 @@ async def _cleanup_stale_questions(session_id: str, session_obj=None) -> None:
     if not questions:
         return
 
-    messages = db.get_messages(session_id)
-    user_timestamps = [m["created_at"] for m in messages if m["role"] == "user" and m.get("created_at")]
-    if not user_timestamps:
+    last_user_ts = db.get_last_message_at(session_id, "user")
+    if not last_user_ts:
         return
-
-    last_user_ts = max(user_timestamps)
     cleaned = 0
     for q in questions:
         if q.get("created_at", "") < last_user_ts:
@@ -94,7 +91,6 @@ async def _cleanup_stale_questions(session_id: str, session_obj=None) -> None:
                         sv2.SessionStateV2.IDLE_READY,
                         "question-dismissed",
                     )
-                    db.set_session_state(session_id, session_obj.state.value)
                 except Exception as e:
                     logger.error("stale-question cleanup transition failed: %s", e)
         logger.info("Cleaned up %d stale question(s) for session %s", cleaned, session_id)
@@ -265,7 +261,8 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             # Notify user that reflect retries are exhausted
             last_reflect = None
             try:
-                messages = db.get_messages(session_id)
+                # Reflect rows land at the end of a turn — tail read suffices.
+                messages = db.get_messages(session_id, last=100)
                 for msg in reversed(messages):
                     if msg["role"] == "reflect":
                         last_reflect = msg.get("content", "")
@@ -289,9 +286,33 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
         )
         return
 
-    # Quality gate: need enough substance to verify
+    # Quality gate: need enough substance to verify. Scoped to THIS turn —
+    # counting the whole session meant any session with history passed the
+    # gate, so trivial follow-up turns ("thanks") paid a full reflect LLM
+    # call and could draw spurious retry verdicts. Reflect itself is already
+    # turn-scoped via turn_user_msg_id; the gate now matches. Turn membership
+    # comes from the parent_user_msg_id tag that _save_turn_msg stamps on
+    # every assistant/tool row.
     messages = db.get_messages(session_id)
-    substantive = [m for m in messages if m["role"] in ("user", "assistant", "tool")]
+    turn_msg_id = getattr(session_obj, "current_turn_user_msg_id", None)
+    if turn_msg_id is not None:
+        import json as _gate_json
+
+        def _in_turn(m: dict) -> bool:
+            if m.get("id") == turn_msg_id:
+                return True
+            try:
+                meta = _gate_json.loads(m.get("metadata") or "{}")
+            except (ValueError, TypeError):
+                return False
+            return meta.get("parent_user_msg_id") == turn_msg_id
+
+        gate_pool = [m for m in messages if _in_turn(m)]
+    else:
+        # No turn id recorded (legacy path / synthetic resume) — fall back to
+        # the historical session-wide count rather than skipping reflect.
+        gate_pool = messages
+    substantive = [m for m in gate_pool if m["role"] in ("user", "assistant", "tool")]
     if len(substantive) < settings.reflect_min_messages:
         # Surface the skip so the UI can render a small marker — without
         # this, a short turn finalizes silently and looks like reflect is

@@ -16,6 +16,86 @@ def _old_timestamp():
 
 
 # ---------------------------------------------------------------------------
+# _refine_one_session (Activity 13)
+# ---------------------------------------------------------------------------
+
+
+async def test_refine_one_session_stamps_watermark_on_no_candidate(monkeypatch):
+    """No eligible session → returns False, does not touch any state."""
+    monkeypatch.setattr("config.settings.background_model", "fake-bg-model")
+    runner = SnoozeRunner()
+    runner._cycle_generation = runner._cancel_generation  # not cancelled
+    used = await runner._refine_one_session()
+    assert used is False
+
+
+async def test_refine_one_session_stamps_watermark_after_run(monkeypatch):
+    """After processing a session, refined:{sid} must be set so the same
+    session is never picked up again — mark-on-success and mark-on-failure
+    both stamp."""
+    from db import models as db
+
+    monkeypatch.setattr("config.settings.background_model", "fake-bg-model")
+
+    sid = db.create_session(title="Refine candidate")
+    db.add_message(sid, "user", "hi")
+    db.add_message(sid, "assistant", "hi back")
+    past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    from db.database import connect_sessions
+
+    with connect_sessions() as conn:
+        conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (past, sid))
+
+    async def _fake_run_for_session(session_id):
+        return {
+            "proposals_saved": 0,
+            "lessons_saved": 0,
+            "nothing_actionable": True,
+            "skipped_reason": None,
+        }
+
+    monkeypatch.setattr("core.refine.run_for_session", _fake_run_for_session)
+
+    runner = SnoozeRunner()
+    runner._cycle_generation = runner._cancel_generation  # not cancelled
+    used = await runner._refine_one_session()
+    assert used is True
+    assert db.get_snooze_state(f"refined:{sid}") is not None
+
+    # Second pass should find no candidate now.
+    used2 = await runner._refine_one_session()
+    assert used2 is False
+
+
+async def test_refine_one_session_stamps_watermark_on_exception(monkeypatch):
+    """If refine.run_for_session raises, the session is still watermarked
+    so a broken session never retry-storms."""
+    from db import models as db
+
+    monkeypatch.setattr("config.settings.background_model", "fake-bg-model")
+
+    sid = db.create_session(title="Refine boom")
+    db.add_message(sid, "user", "hi")
+    db.add_message(sid, "assistant", "hi back")
+    past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    from db.database import connect_sessions
+
+    with connect_sessions() as conn:
+        conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (past, sid))
+
+    async def _boom(session_id):
+        raise RuntimeError("explode")
+
+    monkeypatch.setattr("core.refine.run_for_session", _boom)
+
+    runner = SnoozeRunner()
+    runner._cycle_generation = runner._cancel_generation  # not cancelled
+    used = await runner._refine_one_session()
+    assert used is False
+    assert db.get_snooze_state(f"refined:{sid}") is not None
+
+
+# ---------------------------------------------------------------------------
 # _consolidate_files: rate limit bypass
 # ---------------------------------------------------------------------------
 

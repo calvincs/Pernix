@@ -19,6 +19,7 @@ class MemoryEntry:
     weight: str = "normal"  # high | normal
     score: float = 0.0
     source: str = ""  # user | distill | snooze | "" (legacy)
+    updated: int = 0  # set when the entry was corrected via update_entry
 
     def __post_init__(self):
         if self.tags is None:
@@ -37,23 +38,15 @@ class MemoryFile:
     updated_at: int = 0
 
 
-def parse_metadata(content: str) -> tuple[dict[str, str], str]:
-    """Extract @key: value metadata lines from entry start.
+def sanitize_entry_content(content: str) -> str:
+    """Neutralize bare ``---`` lines in entry content.
 
-    Returns (metadata_dict, remaining_content).
+    Entries are separated by ``\\n---\\n`` in the markdown files; a bare
+    horizontal rule inside an entry body splits it into an epoch-less
+    fragment that silently drops on the next reindex. Rendered as
+    ``- - -`` (still a markdown rule) so the visual intent survives.
     """
-    metadata = {}
-    lines = content.split("\n")
-    body_start = 0
-    for i, line in enumerate(lines):
-        match = re.match(r"^@(\w+):\s*(.*)", line.strip())
-        if match:
-            metadata[match.group(1)] = match.group(2).strip()
-            body_start = i + 1
-        else:
-            break
-    body = "\n".join(lines[body_start:]).strip()
-    return metadata, body
+    return re.sub(r"(?m)^---$", "- - -", content)
 
 
 def format_entry(
@@ -68,6 +61,7 @@ def format_entry(
 ) -> str:
     """Format an entry for markdown file storage."""
     epoch = epoch or int(time.time())
+    content = sanitize_entry_content(content)
     lines = [
         "",
         "---",
@@ -102,8 +96,28 @@ def format_file_header(name: str, description: str, keywords: list[str]) -> str:
 """
 
 
+def is_file_archived(text: str) -> bool:
+    """True if the file-level header carries the archived marker.
+
+    archive_file() inserts ``<!-- @archived: true -->`` directly after the
+    ``<!-- @file: ... -->`` line in the header — i.e. before the first
+    ``\\n---\\n`` entry separator. Per-entry archived markers (snooze dedup)
+    appear only inside entry sections and do not archive the file.
+    """
+    header = text.split("\n---\n", 1)[0]
+    return "<!-- @file:" in header and "<!-- @archived: true -->" in header
+
+
 def parse_entries_from_markdown(file_name: str, text: str) -> list[MemoryEntry]:
-    """Parse all entries from a markdown memory file."""
+    """Parse all entries from a markdown memory file.
+
+    An archived file (file-level header marker) has no live entries —
+    without this check, reindex()/health_check would resurrect archived
+    files into the FTS5 index.
+    """
+    if is_file_archived(text):
+        return []
+
     entries = []
     # Split by --- separator
     sections = re.split(r"\n---\n", text)
@@ -145,6 +159,11 @@ def parse_entries_from_markdown(file_name: str, text: str) -> list[MemoryEntry]:
         if source_match:
             source = source_match.group(1)
 
+        updated = 0
+        updated_match = re.search(r"<!-- @updated:\s*(\d+)\s*-->", section)
+        if updated_match:
+            updated = int(updated_match.group(1))
+
         # Extract content (remove HTML comment lines)
         content_lines = []
         for line in section.split("\n"):
@@ -162,6 +181,7 @@ def parse_entries_from_markdown(file_name: str, text: str) -> list[MemoryEntry]:
                     tags=tags,
                     weight=weight,
                     source=source,
+                    updated=updated,
                 )
             )
 

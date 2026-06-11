@@ -2,13 +2,18 @@
 //
 // Two tabs:
 //   * Graph    — Mermaid stateDiagram-v2 of visited states, edge counts, current
-//                state highlighted, invariant-violation edges flagged.
+//                state highlighted, invariant-violation edges flagged, per-state
+//                dwell-time breakdown, per-turn tool tally. Clicking a state
+//                node filters the Timeline tab to that state.
 //   * Timeline — state-log rows merged with tool-call rows by timestamp,
-//                grouped by turn.
+//                grouped into collapsible turns, with wall-clock times, idle-gap
+//                dividers, a filter bar (all/states/tools/errors + text), and
+//                backward pagination ("load older").
 //
 // Data sources:
-//   GET /api/sessions/{sid}/state-log?limit=500
-//   GET /api/sessions/{sid}                    (for messages → tool calls)
+//   GET /api/sessions/{sid}/state-log?limit=500&tail=true   (newest window)
+//   GET /api/sessions/{sid}/state-log?before_id=N           (older pages)
+//   GET /api/sessions/{sid}                                 (messages → tool calls)
 // Merge key: state row `timestamp_ms` vs message `created_at` (ISO) → ms.
 //
 // Mermaid is lazy-loaded from CDN on first open.
@@ -20,41 +25,55 @@ import { state } from '../../store.js';
 // Mermaid 10 only ships an ESM build — use dynamic import, not a UMD <script>.
 const MERMAID_SRC = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
 
+const PAGE_LIMIT = 500;
+const GAP_MS = 30_000; // idle gap worth flagging between adjacent rows
+
 let _overlay = null;
 let _mermaid = null;
 let _mermaidPromise = null;
-let _data = { stateLog: [], messages: [] };
+let _data = { stateLog: [], messages: [], liveTools: [], hasOlder: false };
+let _filter = { mode: 'all', q: '' };
+let _scroller = null;   // .modal-body — the actual scroll container
+let _bodyEl = null;     // #timeline-modal-body — rebuilt by _renderTimeline
+let _filterInput = null;
+let _filterBtns = [];
+let _tabBtns = [];
+let _panes = [];
+let _lastRowTs = 0;     // last rendered row timestamp, for live gap dividers
 
 export async function openTimeline() {
     if (_overlay) return;
     if (!state.sid) return;
 
+    _filter = { mode: 'all', q: '' };
+    _lastRowTs = 0;
+
     const graphPane = el('div', { class: 'tab-content active', 'data-tab': 'graph' }, [
-        el('div', { class: 'timeline-graph-status' }, [text('Loading\u2026')]),
+        el('div', { class: 'timeline-graph-status' }, [text('Loading…')]),
         el('div', { class: 'timeline-graph-container', id: 'timeline-graph' }),
         el('div', { class: 'timeline-graph-caption', id: 'timeline-graph-caption' }),
     ]);
-    const listPane = el('div', {
-        class: 'tab-content',
-        'data-tab': 'timeline',
-        id: 'timeline-modal-body',
-    });
+    _bodyEl = el('div', { id: 'timeline-modal-body' });
+    const listPane = el('div', { class: 'tab-content', 'data-tab': 'timeline' }, [
+        _buildFilterBar(),
+        _bodyEl,
+    ]);
 
-    const tabBtns = [
+    _tabBtns = [
         el('button', { class: 'tab-btn active', 'data-tab': 'graph' }, [text('Graph')]),
         el('button', { class: 'tab-btn', 'data-tab': 'timeline' }, [text('Timeline')]),
     ];
-    tabBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-            const target = btn.getAttribute('data-tab');
-            tabBtns.forEach(b => b.classList.toggle('active', b === btn));
-            [graphPane, listPane].forEach(p => {
-                p.classList.toggle('active', p.getAttribute('data-tab') === target);
-            });
-            if (target === 'graph') _renderGraph(graphPane);
-        });
+    _panes = [graphPane, listPane];
+    _tabBtns.forEach(btn => {
+        btn.addEventListener('click', () => _switchTab(btn.getAttribute('data-tab')));
     });
-    const tabBar = el('div', { class: 'tab-bar' }, tabBtns);
+    const tabBar = el('div', { class: 'tab-bar' }, _tabBtns);
+
+    const copyBtn = el('button', { class: 'tl-copy-btn', title: 'Copy state log + tool calls as JSON' }, [text('Copy JSON')]);
+    copyBtn.addEventListener('click', () => _copyExport(copyBtn));
+
+    const modalBody = el('div', { class: 'modal-body timeline-modal-content' }, [graphPane, listPane]);
+    _scroller = modalBody;
 
     const card = el('div', {
         id: 'timeline-modal',
@@ -62,10 +81,11 @@ export async function openTimeline() {
     }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text('State timeline')]),
-            el('button', { class: 'modal-close', onClick: closeTimeline }, [text('\u00d7')]),
+            copyBtn,
+            el('button', { class: 'modal-close', onClick: closeTimeline }, [text('×')]),
         ]),
         tabBar,
-        el('div', { class: 'modal-body timeline-modal-content' }, [graphPane, listPane]),
+        modalBody,
     ]);
 
     _overlay = el('div', { class: 'modal-overlay' }, [card]);
@@ -76,7 +96,7 @@ export async function openTimeline() {
     document.addEventListener('keydown', _onEsc);
 
     await _load();
-    _renderTimeline(listPane);
+    _renderTimeline();
     _renderGraph(graphPane);
 }
 
@@ -85,6 +105,12 @@ export function closeTimeline() {
         _overlay.remove();
         _overlay = null;
     }
+    _scroller = null;
+    _bodyEl = null;
+    _filterInput = null;
+    _filterBtns = [];
+    _tabBtns = [];
+    _panes = [];
     document.removeEventListener('keydown', _onEsc);
 }
 
@@ -92,10 +118,31 @@ export function isTimelineOpen() {
     return _overlay !== null;
 }
 
+function _switchTab(target) {
+    _tabBtns.forEach(b => b.classList.toggle('active', b.getAttribute('data-tab') === target));
+    _panes.forEach(p => p.classList.toggle('active', p.getAttribute('data-tab') === target));
+    if (target === 'graph') {
+        const pane = _panes.find(p => p.getAttribute('data-tab') === 'graph');
+        if (pane) _renderGraph(pane);
+    } else if (target === 'timeline' && _scroller) {
+        // The .modal-body scroller is shared between tabs — land on the
+        // newest rows when entering the timeline.
+        _scroller.scrollTop = _scroller.scrollHeight;
+    }
+}
+
+// True when the Timeline tab is the visible one — scrolling the shared
+// .modal-body scroller only makes sense then.
+function _timelineActive() {
+    const pane = _panes.find(p => p.getAttribute('data-tab') === 'timeline');
+    return !!pane && pane.classList.contains('active');
+}
+
 // Live-append from _renderStateBadge. Appends a state row to the Timeline
 // tab (if currently rendered) and invalidates the graph.
 export function appendTimelineRow(row) {
-    _data.stateLog.push({
+    const ts = Date.now();
+    const data = {
         id: null,
         session_id: state.sid,
         turn_id: row.turn_id || 0,
@@ -105,32 +152,263 @@ export function appendTimelineRow(row) {
         reason: row.reason,
         termination_reason: row.termination_reason,
         elapsed_ms: row.elapsed_ms,
-        timestamp_ms: Date.now(),
-    });
-    const body = document.getElementById('timeline-modal-body');
-    if (body) {
-        body.appendChild(_buildStateRow(row));
-        body.scrollTop = body.scrollHeight;
-    }
-    // Re-render the graph if the graph tab is currently visible.
-    const graphPane = document.querySelector('.tab-content[data-tab="graph"]');
+        timestamp_ms: ts,
+    };
+    _data.stateLog.push(data);
+    _appendLiveEntry({ kind: 'state', ts, turn: data.turn_id, data });
+    _refreshGraphIfVisible();
+}
+
+// Live-append from the tool.call SSE handler in app.js. Mirrors what the
+// reopen path reconstructs from session messages.
+export function appendTimelineToolRow(tool) {
+    const entry = {
+        name: tool.name || 'tool',
+        args: tool.args || null,
+        content: tool.content || '',
+        latency_ms: tool.latency_ms || null,
+        was_error: !!tool.was_error,
+        ts: Date.now(),
+    };
+    _data.liveTools.push(entry);
+    _appendLiveEntry({ kind: 'tool', ts: entry.ts, turn: null, data: entry });
+    _refreshGraphIfVisible();
+}
+
+function _refreshGraphIfVisible() {
+    const graphPane = document.querySelector('#timeline-modal .tab-content[data-tab="graph"]');
     if (graphPane && graphPane.classList.contains('active')) {
         _renderGraph(graphPane);
     }
 }
 
+function _appendLiveEntry(entry) {
+    if (!_bodyEl) return;
+    if (!_entryMatches(entry)) return;
+
+    const placeholder = _bodyEl.querySelector('.timeline-empty');
+    if (placeholder) placeholder.remove();
+
+    // A state row that starts a new turn gets a fresh group; everything else
+    // lands in the last group on screen.
+    let group = _bodyEl.querySelector('.tl-turn-group:last-child');
+    if (entry.kind === 'state' && entry.turn != null &&
+        (!group || group.dataset.turn !== String(entry.turn))) {
+        group = null;
+    }
+    if (!group) {
+        group = _buildTurnGroup(entry.turn, {});
+        _bodyEl.appendChild(group);
+    }
+    const groupBody = group.querySelector('.tl-turn-body');
+    if (_lastRowTs && entry.ts - _lastRowTs > GAP_MS) {
+        groupBody.appendChild(_buildGapRow(entry.ts - _lastRowTs));
+    }
+    _lastRowTs = entry.ts;
+    groupBody.appendChild(entry.kind === 'state'
+        ? _buildStateRow(entry.data, entry.ts)
+        : _buildToolRow(entry.data, entry.ts));
+    group.classList.remove('collapsed');
+    if (_scroller && _timelineActive()) _scroller.scrollTop = _scroller.scrollHeight;
+}
+
 async function _load() {
     try {
         const [logRes, sessRes] = await Promise.all([
-            get(`/api/sessions/${state.sid}/state-log?limit=500`),
+            get(`/api/sessions/${state.sid}/state-log?limit=${PAGE_LIMIT}&tail=true`),
             get(`/api/sessions/${state.sid}`),
         ]);
-        _data.stateLog = logRes.entries || [];
-        _data.messages = sessRes.messages || [];
+        const entries = logRes.entries || [];
+        _data = {
+            stateLog: entries,
+            messages: sessRes.messages || [],
+            liveTools: [],
+            hasOlder: entries.length === PAGE_LIMIT,
+        };
     } catch (e) {
         console.error('Failed to load timeline data:', e);
-        _data = { stateLog: [], messages: [] };
+        _data = { stateLog: [], messages: [], liveTools: [], hasOlder: false };
     }
+}
+
+async function _loadOlder(btn) {
+    const oldest = _data.stateLog.find(r => r.id != null);
+    if (!oldest) return;
+    btn.disabled = true;
+    btn.textContent = 'Loading…';
+    try {
+        const res = await get(`/api/sessions/${state.sid}/state-log?before_id=${oldest.id}&limit=${PAGE_LIMIT}`);
+        const older = res.entries || [];
+        _data.stateLog = older.concat(_data.stateLog);
+        _data.hasOlder = older.length === PAGE_LIMIT;
+        const prevHeight = _scroller ? _scroller.scrollHeight : 0;
+        const prevTop = _scroller ? _scroller.scrollTop : 0;
+        _renderTimeline({ scroll: 'none' });
+        if (_scroller) _scroller.scrollTop = _scroller.scrollHeight - prevHeight + prevTop;
+    } catch (e) {
+        console.error('Failed to load older state log:', e);
+        btn.disabled = false;
+        btn.textContent = 'Load older';
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unified entry list — single merge used by the timeline, the tool tally,
+// and the JSON export.
+// ---------------------------------------------------------------------------
+
+// Build a map of tool_call_id → {name, args} from assistant tool_calls.
+// Stored format (core/agent.py:482): [{id, name, arguments}] where
+// arguments is a JSON-encoded string.
+function _toolCallMetaMap(messages) {
+    const meta = new Map();
+    for (const m of messages) {
+        if (m.role !== 'assistant' || !m.tool_calls) continue;
+        let parsed;
+        try { parsed = JSON.parse(m.tool_calls); } catch { continue; }
+        for (const tc of parsed || []) {
+            let args = null;
+            if (tc.arguments) {
+                try { args = JSON.parse(tc.arguments); } catch { args = null; }
+            }
+            meta.set(tc.id, { name: tc.name || 'tool', args });
+        }
+    }
+    return meta;
+}
+
+function _allEntries() {
+    const entries = [];
+    for (const s of _data.stateLog) {
+        entries.push({ kind: 'state', ts: s.timestamp_ms || 0, turn: s.turn_id, data: s });
+    }
+    const tcMeta = _toolCallMetaMap(_data.messages);
+    for (const m of _data.messages) {
+        if (m.role !== 'tool') continue;
+        const meta = tcMeta.get(m.tool_call_id) || { name: 'tool', args: null };
+        entries.push({
+            kind: 'tool',
+            ts: _isoToMs(m.created_at),
+            turn: null,
+            data: {
+                name: meta.name,
+                args: meta.args,
+                content: m.content || '',
+                latency_ms: m.latency_ms || null,
+                was_error: _isErrorContent(m.content),
+            },
+        });
+    }
+    for (const t of _data.liveTools) {
+        entries.push({ kind: 'tool', ts: t.ts, turn: null, data: t });
+    }
+    entries.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+
+    // Assign turn hints to tool rows based on the state row they follow.
+    let currentTurn = null;
+    for (const e of entries) {
+        if (e.kind === 'state' && e.data.turn_id != null) currentTurn = e.data.turn_id;
+        else if (e.kind === 'tool') e.turn = currentTurn;
+    }
+    return entries;
+}
+
+// ---------------------------------------------------------------------------
+// Filtering
+// ---------------------------------------------------------------------------
+
+function _isErrorEntry(e) {
+    if (e.kind === 'tool') return !!e.data.was_error;
+    const reason = e.data.reason || '';
+    const term = e.data.termination_reason || '';
+    return reason.startsWith('invariant-violation') || term.includes('error');
+}
+
+function _entrySearchText(e) {
+    if (e.kind === 'state') {
+        const d = e.data;
+        return `${d.from_state || ''} ${d.to_state || ''} ${d.reason || ''} ${d.termination_reason || ''}`.toLowerCase();
+    }
+    const d = e.data;
+    let argsStr = '';
+    if (d.args && typeof d.args === 'object') {
+        try { argsStr = JSON.stringify(d.args).slice(0, 500); } catch { argsStr = ''; }
+    }
+    return `${d.name || ''} ${argsStr}`.toLowerCase();
+}
+
+function _entryMatches(e) {
+    if (_filter.mode === 'state' && e.kind !== 'state') return false;
+    if (_filter.mode === 'tool' && e.kind !== 'tool') return false;
+    if (_filter.mode === 'error' && !_isErrorEntry(e)) return false;
+    const q = _filter.q.trim().toLowerCase();
+    if (q && !_entrySearchText(e).includes(q)) return false;
+    return true;
+}
+
+function _filterActive() {
+    return _filter.mode !== 'all' || _filter.q.trim() !== '';
+}
+
+function _buildFilterBar() {
+    const modes = [['all', 'All'], ['state', 'States'], ['tool', 'Tools'], ['error', 'Errors']];
+    _filterBtns = modes.map(([mode, label]) => {
+        const btn = el('button', { class: `tl-filter-btn${mode === _filter.mode ? ' active' : ''}`, 'data-mode': mode }, [text(label)]);
+        btn.addEventListener('click', () => {
+            _filter.mode = mode;
+            _syncFilterBar();
+            _renderTimeline();
+        });
+        return btn;
+    });
+
+    _filterInput = el('input', { class: 'tl-filter-input', type: 'text', placeholder: 'filter…' });
+    let debounce = null;
+    _filterInput.addEventListener('input', () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+            _filter.q = _filterInput.value;
+            _renderTimeline();
+        }, 150);
+    });
+
+    const nextErrBtn = el('button', { class: 'tl-next-error', title: 'Jump to next error' }, [text('⚠ next')]);
+    nextErrBtn.addEventListener('click', _jumpToNextError);
+
+    return el('div', { class: 'tl-filter-bar' }, [..._filterBtns, _filterInput, nextErrBtn]);
+}
+
+function _syncFilterBar() {
+    _filterBtns.forEach(b => b.classList.toggle('active', b.getAttribute('data-mode') === _filter.mode));
+    if (_filterInput) _filterInput.value = _filter.q;
+}
+
+// Filter the Timeline tab to a single state — entry point for graph node clicks.
+function _filterTimelineByState(name) {
+    _filter.mode = 'state';
+    _filter.q = name;
+    _syncFilterBar();
+    _switchTab('timeline');
+    _renderTimeline();
+}
+
+function _jumpToNextError() {
+    if (!_bodyEl || !_scroller) return;
+    const errs = [..._bodyEl.querySelectorAll('.timeline-row.tl-error, .timeline-tool-row.error')];
+    if (!errs.length) return;
+    const scrollerTop = _scroller.getBoundingClientRect().top;
+    // First error strictly below the current viewport top, else wrap to the first.
+    let target = errs.find(e => {
+        const group = e.closest('.tl-turn-group');
+        const top = (group && group.classList.contains('collapsed') ? group : e).getBoundingClientRect().top;
+        return top - scrollerTop > 40;
+    }) || errs[0];
+    const group = target.closest('.tl-turn-group');
+    if (group) group.classList.remove('collapsed');
+    const top = target.getBoundingClientRect().top - scrollerTop + _scroller.scrollTop;
+    _scroller.scrollTo({ top: Math.max(0, top - 60), behavior: 'smooth' });
+    target.classList.add('tl-flash');
+    setTimeout(() => target.classList.remove('tl-flash'), 1200);
 }
 
 // ---------------------------------------------------------------------------
@@ -144,9 +422,8 @@ async function _renderGraph(pane) {
     container.innerHTML = '';
     caption.innerHTML = '';
 
-    // Remove any stale tally from a previous render.
-    const stale = pane.querySelector('.tl-tool-tally');
-    if (stale) stale.remove();
+    // Remove any stale sections from a previous render.
+    pane.querySelectorAll('.tl-tool-tally, .tl-dwell').forEach(n => n.remove());
 
     if (!_data.stateLog.length) {
         statusEl.textContent = 'No state transitions yet.';
@@ -162,7 +439,7 @@ async function _renderGraph(pane) {
         return;
     }
 
-    const { source, current, termination, invariantViolations } = _buildMermaidSource(_data.stateLog);
+    const { source, current, termination, invariantViolations, nodeNames } = _buildMermaidSource(_data.stateLog);
 
     try {
         // Unique id per render so Mermaid doesn't collide on re-entry.
@@ -175,8 +452,23 @@ async function _renderGraph(pane) {
         return;
     }
 
-    // Tool call tally — inserted between the diagram and the caption.
-    const tallyEl = _buildToolTallyEl(_data.stateLog, _data.messages);
+    // Cross-tab linking: clicking a state node filters the Timeline tab.
+    container.querySelectorAll('g.node').forEach(node => {
+        const label = (node.textContent || '').trim();
+        if (!nodeNames.has(label)) return;
+        node.style.cursor = 'pointer';
+        node.addEventListener('click', () => _filterTimelineByState(label));
+        const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+        title.textContent = 'Filter timeline to this state';
+        node.appendChild(title);
+    });
+
+    const entries = _allEntries();
+
+    // Dwell-time breakdown + tool tally — inserted between diagram and caption.
+    const dwellEl = _buildDwellEl(_data.stateLog);
+    if (dwellEl) pane.insertBefore(dwellEl, caption);
+    const tallyEl = _buildToolTallyEl(entries);
     if (tallyEl) pane.insertBefore(tallyEl, caption);
 
     const captionParts = [];
@@ -194,10 +486,8 @@ async function _renderGraph(pane) {
 
     // Summary stat chips: turns, tool calls, compactions, retries, total elapsed.
     const stateLog = _data.stateLog;
-    const messages = _data.messages;
     const distinctTurns = new Set(stateLog.map(r => r.turn_id).filter(t => t != null)).size;
-    const toolMsgs = messages.filter(m => m.role === 'tool');
-    const totalToolCalls = toolMsgs.length;
+    const totalToolCalls = entries.filter(e => e.kind === 'tool').length;
     const compactions = stateLog.filter(r =>
         r.reason === 'compact-proactive' || r.reason === 'compact-critical' || r.reason === 'compact-overflow'
     ).length;
@@ -287,57 +577,72 @@ function _buildMermaidSource(rows) {
         current,
         termination,
         invariantViolations,
+        nodeNames: nodes,
     };
 }
 
 function _edgeLabel(edge) {
     if (edge.count > 1) {
-        return `${edge.count}\u00d7`;
+        return `${edge.count}×`;
     }
     const r = edge.reason || '';
-    const short = r.length > 24 ? r.slice(0, 22) + '\u2026' : r;
+    const short = r.length > 24 ? r.slice(0, 22) + '…' : r;
     // Mermaid edge labels choke on : ; " \n — replace with safe chars.
     return short.replace(/[:;"\n]/g, ' ').trim();
 }
 
-// Build a DOM element showing per-turn tool call counts, or null if no tools.
-function _buildToolTallyEl(stateLog, messages) {
-    // Assign each tool-result message a turn using the same timestamp-order
-    // logic as _mergeRows.
-    const tcMeta = new Map(); // tool_call_id -> {name}
-    for (const m of messages) {
-        if (m.role === 'assistant' && m.tool_calls) {
-            let parsed;
-            try { parsed = JSON.parse(m.tool_calls); } catch { continue; }
-            for (const tc of parsed || []) {
-                tcMeta.set(tc.id, { name: tc.name || 'tool' });
-            }
-        }
-    }
+// Per-state dwell-time breakdown — elapsed_ms on a transition row is the time
+// spent in from_state, so summing by from_state answers "where did the time go".
+const _DWELL_COLORS = {
+    processing: '#4a7a4a',
+    compacting: '#6a9a6a',
+    scouting: '#5b9bd5',
+    finalizing: '#6a3838',
+    cancelling: '#8a4838',
+    awaiting_user: '#7a6a30',
+    awaiting_workers: '#9a8540',
+    paused: '#7058a0',
+    pause_requested: '#584888',
+    idle_ready: '#555555',
+};
 
-    // Build sorted [{ts, kind, data}] list from state log + tool messages.
-    const entries = stateLog.map(s => ({ kind: 'state', ts: s.timestamp_ms || 0, turn: s.turn_id, data: s }));
-    for (const m of messages) {
-        if (m.role !== 'tool') continue;
-        const meta = tcMeta.get(m.tool_call_id) || { name: 'tool' };
-        entries.push({
-            kind: 'tool',
-            ts: _isoToMs(m.created_at),
-            turn: null,
-            name: meta.name,
-            was_error: _isErrorContent(m.content),
-            latency_ms: m.latency_ms || null,
+function _buildDwellEl(stateLog) {
+    const byState = new Map();
+    for (const r of stateLog) {
+        if (!r.from_state || r.elapsed_ms == null) continue;
+        byState.set(r.from_state, (byState.get(r.from_state) || 0) + r.elapsed_ms);
+    }
+    const total = [...byState.values()].reduce((a, b) => a + b, 0);
+    if (!total) return null;
+
+    const sorted = [...byState.entries()].sort((a, b) => b[1] - a[1]);
+
+    const segments = sorted.map(([name, ms]) => {
+        const pct = (ms / total) * 100;
+        return el('div', {
+            class: 'tl-dwell-seg',
+            style: `width:${Math.max(pct, 1.5)}%;background:${_DWELL_COLORS[name] || '#666'}`,
+            title: `${name}: ${_fmtMs(ms)} (${pct.toFixed(0)}%)`,
         });
-    }
-    entries.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    });
 
-    // Propagate turn labels to tool entries.
-    let currentTurn = null;
-    for (const e of entries) {
-        if (e.kind === 'state' && e.turn != null) currentTurn = e.turn;
-        else if (e.kind === 'tool') e.turn = currentTurn;
-    }
+    const chips = sorted.map(([name, ms]) => {
+        const pct = ((ms / total) * 100).toFixed(0);
+        return el('span', { class: 'tl-dwell-chip' }, [
+            el('span', { class: 'tl-dwell-dot', style: `background:${_DWELL_COLORS[name] || '#666'}` }),
+            text(`${name} ${_fmtMs(ms)} (${pct}%)`),
+        ]);
+    });
 
+    return el('div', { class: 'tl-dwell' }, [
+        el('div', { class: 'tl-dwell-header' }, [text(`Time in state (${_fmtMs(total)})`)]),
+        el('div', { class: 'tl-dwell-bar' }, segments),
+        el('div', { class: 'tl-dwell-chips' }, chips),
+    ]);
+}
+
+// Build a DOM element showing per-turn tool call counts, or null if no tools.
+function _buildToolTallyEl(entries) {
     // Aggregate: Map<turn, Map<name, count>>, plus per-name error tracking.
     const byTurn = new Map();
     const nameErrors = new Map(); // tool name -> error count
@@ -348,12 +653,12 @@ function _buildToolTallyEl(stateLog, messages) {
         const t = e.turn ?? 0;
         if (!byTurn.has(t)) byTurn.set(t, new Map());
         const m = byTurn.get(t);
-        m.set(e.name, (m.get(e.name) || 0) + 1);
-        if (e.was_error) {
-            nameErrors.set(e.name, (nameErrors.get(e.name) || 0) + 1);
+        m.set(e.data.name, (m.get(e.data.name) || 0) + 1);
+        if (e.data.was_error) {
+            nameErrors.set(e.data.name, (nameErrors.get(e.data.name) || 0) + 1);
             totalErrors++;
         }
-        if (e.latency_ms >= 2000) totalSlow++;
+        if (e.data.latency_ms >= 2000) totalSlow++;
     }
     if (!byTurn.size) return null;
 
@@ -404,101 +709,69 @@ async function _ensureMermaid() {
 }
 
 // ---------------------------------------------------------------------------
-// Timeline tab — state rows + tool call rows merged by timestamp
+// Timeline tab — state rows + tool call rows merged by timestamp, grouped
+// into collapsible turns
 // ---------------------------------------------------------------------------
 
-function _renderTimeline(body) {
-    body.innerHTML = '';
-    const rows = _mergeRows(_data.stateLog, _data.messages);
-    if (!rows.length) {
-        body.appendChild(el('div', { class: 'timeline-empty' }, [text('No transitions or tool calls yet.')]));
+function _renderTimeline(opts = {}) {
+    if (!_bodyEl) return;
+    _bodyEl.innerHTML = '';
+    _lastRowTs = 0;
+
+    if (_data.hasOlder) {
+        const btn = el('button', {}, [text('Load older')]);
+        btn.addEventListener('click', () => _loadOlder(btn));
+        _bodyEl.appendChild(el('div', { class: 'tl-load-older' }, [
+            el('span', {}, [text(`Showing last ${_data.stateLog.length} transitions`)]),
+            btn,
+        ]));
+    }
+
+    const all = _allEntries();
+    const entries = all.filter(_entryMatches);
+    if (!entries.length) {
+        _bodyEl.appendChild(el('div', { class: 'timeline-empty' }, [
+            text(all.length ? 'Nothing matches the current filter.' : 'No transitions or tool calls yet.'),
+        ]));
         return;
     }
 
-    const turnMeta = _computeTurnMeta(rows);
-    let lastTurn = null;
-    for (const row of rows) {
-        const turn = row.kind === 'state' ? row.data.turn_id : row.turnHint;
-        if (turn != null && turn !== lastTurn) {
-            body.appendChild(_buildTurnHeader(turn, turnMeta.get(turn) || {}));
+    const turnMeta = _computeTurnMeta(all); // meta over ALL entries so counts stay truthful under filters
+    const groups = [];
+    let lastTurn;
+    let group = null;
+    let groupBody = null;
+    for (const entry of entries) {
+        const turn = entry.turn;
+        if (group === null || turn !== lastTurn) {
+            group = _buildTurnGroup(turn, turnMeta.get(turn) || {});
+            groupBody = group.querySelector('.tl-turn-body');
+            groups.push(group);
+            _bodyEl.appendChild(group);
             lastTurn = turn;
         }
-        if (row.kind === 'state') {
-            body.appendChild(_buildStateRow({
-                turn_id: row.data.turn_id,
-                retry_index: row.data.retry_index,
-                from_state: row.data.from_state,
-                to_state: row.data.to_state,
-                reason: row.data.reason,
-                elapsed_ms: row.data.elapsed_ms,
-            }));
-        } else if (row.kind === 'tool') {
-            body.appendChild(_buildToolRow(row.data));
+        if (_lastRowTs && entry.ts && entry.ts - _lastRowTs > GAP_MS) {
+            groupBody.appendChild(_buildGapRow(entry.ts - _lastRowTs));
         }
+        if (entry.ts) _lastRowTs = entry.ts;
+        groupBody.appendChild(entry.kind === 'state'
+            ? _buildStateRow(entry.data, entry.ts)
+            : _buildToolRow(entry.data, entry.ts));
     }
-    body.scrollTop = body.scrollHeight;
+
+    // Collapse everything but the latest turn — unless a filter is active,
+    // in which case all matches stay visible.
+    if (!_filterActive()) {
+        groups.slice(0, -1).forEach(g => g.classList.add('collapsed'));
+    }
+
+    if (opts.scroll !== 'none' && _scroller && _timelineActive()) {
+        _scroller.scrollTop = _scroller.scrollHeight;
+    }
 }
 
-function _mergeRows(stateLog, messages) {
-    const entries = [];
-
-    for (const s of stateLog) {
-        entries.push({
-            kind: 'state',
-            ts: s.timestamp_ms || 0,
-            turnHint: s.turn_id,
-            data: s,
-        });
-    }
-
-    // Build a map of tool_call_id → {name, args} from assistant tool_calls.
-    // Stored format (core/agent.py:482): [{id, name, arguments}] where
-    // arguments is a JSON-encoded string.
-    const toolCallMeta = new Map();
-    for (const m of messages) {
-        if (m.role === 'assistant' && m.tool_calls) {
-            let parsed;
-            try { parsed = JSON.parse(m.tool_calls); } catch { continue; }
-            for (const tc of parsed || []) {
-                let args = null;
-                if (tc.arguments) {
-                    try { args = JSON.parse(tc.arguments); } catch { args = null; }
-                }
-                toolCallMeta.set(tc.id, { name: tc.name || 'tool', args });
-            }
-        }
-    }
-
-    for (const m of messages) {
-        if (m.role !== 'tool') continue;
-        const meta = toolCallMeta.get(m.tool_call_id) || { name: 'tool', args: null };
-        entries.push({
-            kind: 'tool',
-            ts: _isoToMs(m.created_at),
-            turnHint: null,
-            data: {
-                id: m.id,
-                name: meta.name,
-                args: meta.args,
-                content: m.content || '',
-                latency_ms: m.latency_ms,
-                was_error: _isErrorContent(m.content),
-            },
-        });
-    }
-
-    entries.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-
-    // Assign turn hints to tool rows based on the state row they follow.
-    let currentTurn = null;
-    for (const e of entries) {
-        if (e.kind === 'state' && e.data.turn_id != null) {
-            currentTurn = e.data.turn_id;
-        } else if (e.kind === 'tool') {
-            e.turnHint = currentTurn;
-        }
-    }
-    return entries;
+function _buildGapRow(deltaMs) {
+    return el('div', { class: 'tl-gap' }, [text(`· · · ${_fmtMs(deltaMs)} gap · · ·`)]);
 }
 
 function _isoToMs(iso) {
@@ -509,7 +782,21 @@ function _isoToMs(iso) {
 
 function _fmtMs(ms) {
     if (!ms) return '';
-    return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+    if (ms < 1000) return `${ms}ms`;
+    if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+    const m = Math.floor(ms / 60_000);
+    const s = Math.round((ms % 60_000) / 1000);
+    if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    return rm ? `${h}h ${rm}m` : `${h}h`;
+}
+
+function _fmtClock(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    const p = n => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 function _isErrorContent(content) {
@@ -518,28 +805,54 @@ function _isErrorContent(content) {
     return head.startsWith('error:') || head.includes('traceback');
 }
 
-function _computeTurnMeta(rows) {
+function _computeTurnMeta(entries) {
     const meta = new Map();
-    for (const row of rows) {
-        const turn = row.kind === 'state' ? row.data.turn_id : row.turnHint;
+    for (const entry of entries) {
+        const turn = entry.turn;
         if (turn == null) continue;
-        if (!meta.has(turn)) meta.set(turn, { elapsedMs: 0, toolCount: 0, termination: null, parentTurnId: null });
+        if (!meta.has(turn)) {
+            meta.set(turn, {
+                elapsedMs: 0, toolCount: 0, termination: null, parentTurnId: null,
+                compactions: 0, reflectRetries: 0, evalRetries: 0, errors: 0,
+            });
+        }
         const m = meta.get(turn);
-        if (row.kind === 'state') {
-            if (row.data.elapsed_ms != null) m.elapsedMs += row.data.elapsed_ms;
-            if (row.data.termination_reason) m.termination = row.data.termination_reason;
-            if (row.data.parent_turn_id != null && m.parentTurnId == null) m.parentTurnId = row.data.parent_turn_id;
-        } else if (row.kind === 'tool') {
+        if (_isErrorEntry(entry)) m.errors++;
+        if (entry.kind === 'state') {
+            const d = entry.data;
+            if (d.elapsed_ms != null) m.elapsedMs += d.elapsed_ms;
+            if (d.termination_reason) m.termination = d.termination_reason;
+            if (d.parent_turn_id != null && m.parentTurnId == null) m.parentTurnId = d.parent_turn_id;
+            const reason = d.reason || '';
+            if (reason === 'compact-proactive' || reason === 'compact-critical' || reason === 'compact-overflow') m.compactions++;
+            if (reason === 'reflect-retry') m.reflectRetries++;
+            if (reason === 'eval-retry') m.evalRetries++;
+        } else {
             m.toolCount++;
         }
     }
     return meta;
 }
 
+function _buildTurnGroup(turn, meta) {
+    const header = _buildTurnHeader(turn, meta);
+    const body = el('div', { class: 'tl-turn-body' });
+    const group = el('div', { class: 'tl-turn-group', 'data-turn': String(turn ?? '') }, [header, body]);
+    header.addEventListener('click', () => group.classList.toggle('collapsed'));
+    return group;
+}
+
 function _buildTurnHeader(turn, meta = {}) {
-    const parts = [el('span', {}, [text(`Turn ${turn}`)])];
+    const parts = [
+        el('span', { class: 'tl-turn-chevron' }, [text('▾')]),
+        el('span', {}, [text(`Turn ${turn ?? '—'}`)]),
+    ];
     if (meta.elapsedMs) parts.push(el('span', { class: 'tl-turn-meta' }, [text(_fmtMs(meta.elapsedMs))]));
     if (meta.toolCount) parts.push(el('span', { class: 'tl-turn-meta' }, [text(`${meta.toolCount} tool${meta.toolCount === 1 ? '' : 's'}`)]));
+    if (meta.compactions) parts.push(el('span', { class: 'tl-turn-meta' }, [text(`${meta.compactions} compaction${meta.compactions === 1 ? '' : 's'}`)]));
+    if (meta.reflectRetries) parts.push(el('span', { class: 'tl-turn-meta' }, [text(`↻ ${meta.reflectRetries} reflect`)]));
+    if (meta.evalRetries) parts.push(el('span', { class: 'tl-turn-meta' }, [text(`↻ ${meta.evalRetries} eval`)]));
+    if (meta.errors) parts.push(el('span', { class: 'tl-turn-meta tl-turn-errors' }, [text(`${meta.errors} error${meta.errors === 1 ? '' : 's'}`)]));
     if (meta.termination) {
         const slug = meta.termination.replace(/_/g, '-');
         parts.push(el('span', { class: `tl-turn-term tl-turn-term-${slug}` }, [text(meta.termination)]));
@@ -548,26 +861,33 @@ function _buildTurnHeader(turn, meta = {}) {
     return el('div', { class: 'timeline-turn-header' }, parts);
 }
 
-function _buildStateRow(row) {
+function _buildStateRow(row, ts) {
     const div = document.createElement('div');
     div.className = 'timeline-row';
     if ((row.reason || '').startsWith('invariant-violation')) {
         div.classList.add('invariant-violation');
     }
+    if (_isErrorEntry({ kind: 'state', data: row })) {
+        div.classList.add('tl-error');
+    }
+    const time = document.createElement('span');
+    time.className = 'tl-time';
+    time.textContent = _fmtClock(ts != null ? ts : row.timestamp_ms);
     const turn = document.createElement('span');
     turn.className = 'tl-turn';
     turn.textContent = `T${row.turn_id || 0}.${row.retry_index || 0}`;
     const states = document.createElement('span');
     states.className = 'tl-states';
-    const from = row.from_state || '\u2205';
+    const from = row.from_state || '∅';
     const to = row.to_state || '?';
-    states.textContent = `${from} \u2192 ${to}`;
+    states.textContent = `${from} → ${to}`;
     const reasonEl = document.createElement('span');
     reasonEl.className = 'tl-reason';
     reasonEl.textContent = row.reason || '';
     const elapsed = document.createElement('span');
     elapsed.className = 'tl-elapsed';
     elapsed.textContent = row.elapsed_ms != null ? _fmtMs(row.elapsed_ms) : '';
+    div.appendChild(time);
     div.appendChild(turn);
     const combined = document.createElement('span');
     combined.appendChild(states);
@@ -600,8 +920,9 @@ function _buildStateRow(row) {
     return div;
 }
 
-function _buildToolRow(tool) {
-    const chevron = el('span', { class: 'tool-item-chevron' }, [text('\u25B6')]);
+function _buildToolRow(tool, ts) {
+    const timeEl = el('span', { class: 'tl-time' }, [text(_fmtClock(ts))]);
+    const chevron = el('span', { class: 'tool-item-chevron' }, [text('▶')]);
 
     const nameChildren = [text(tool.name || 'tool')];
     if (tool.latency_ms) {
@@ -629,7 +950,7 @@ function _buildToolRow(tool) {
     }
     const summaryEl = el('span', { class: 'tool-item-summary' }, [text(summary)]);
 
-    const headerEl = el('div', { class: 'tool-item-header' }, [chevron, nameEl, summaryEl]);
+    const headerEl = el('div', { class: 'tool-item-header' }, [timeEl, chevron, nameEl, summaryEl]);
 
     const bodyChildren = [];
     if (tool.args && Object.keys(tool.args || {}).length) {
@@ -648,6 +969,51 @@ function _buildToolRow(tool) {
     return itemEl;
 }
 
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+async function _copyExport(btn) {
+    const toolCalls = _allEntries()
+        .filter(e => e.kind === 'tool')
+        .map(e => ({
+            ts: e.ts,
+            turn: e.turn,
+            name: e.data.name,
+            args: e.data.args,
+            latency_ms: e.data.latency_ms,
+            was_error: e.data.was_error,
+            content: (e.data.content || '').slice(0, 4000),
+        }));
+    const payload = {
+        session_id: state.sid,
+        exported_at: new Date().toISOString(),
+        state_log: _data.stateLog,
+        tool_calls: toolCalls,
+    };
+    try {
+        await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+        const prev = btn.textContent;
+        btn.textContent = 'Copied ✓';
+        setTimeout(() => { btn.textContent = prev; }, 1500);
+    } catch (e) {
+        console.error('Clipboard write failed:', e);
+        btn.textContent = 'Copy failed';
+        setTimeout(() => { btn.textContent = 'Copy JSON'; }, 1500);
+    }
+}
+
 function _onEsc(e) {
-    if (e.key === 'Escape') closeTimeline();
+    if (e.key !== 'Escape') return;
+    // Esc inside the filter input clears it instead of closing the modal.
+    if (_filterInput && document.activeElement === _filterInput) {
+        if (_filterInput.value) {
+            _filterInput.value = '';
+            _filter.q = '';
+            _renderTimeline();
+        }
+        _filterInput.blur();
+        return;
+    }
+    closeTimeline();
 }

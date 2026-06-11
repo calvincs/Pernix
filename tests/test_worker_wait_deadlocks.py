@@ -701,6 +701,46 @@ async def test_reconcile_processing_handles_legacy_only_rows(mgr):
     assert sv2._current_state(session) is sv2.SessionStateV2.IDLE_READY
 
 
+async def test_reconcile_interrupted_sweeps_all_phantom_states(mgr):
+    """A crash during scout/compaction/cancel/finalize/pause persists those
+    states; the boot sweep must reset every one to IDLE_READY since no
+    asyncio task survives a restart."""
+    from db import models as db
+
+    states = ["scouting", "compacting", "pause_requested", "paused", "cancelling", "finalizing"]
+    sids = {}
+    for st in states:
+        sid = db.create_session(title=f"Stuck {st}")
+        db.update_session(sid, state="processing", state_v2=st)
+        sids[st] = sid
+
+    reset = await mgr.reconcile_interrupted_sessions()
+
+    assert reset == len(states), f"Expected {len(states)} resets, got {reset}"
+    for st, sid in sids.items():
+        session = mgr.get(sid)
+        assert session is not None, f"{st} session not hydrated"
+        assert (
+            sv2._current_state(session) is sv2.SessionStateV2.IDLE_READY
+        ), f"{st} session should be IDLE_READY after boot sweep"
+
+
+async def test_reconcile_interrupted_leaves_awaiting_user_alone(mgr):
+    """AWAITING_USER survives restarts by design — a pending question is
+    answered via the API, which transitions the session out."""
+    from db import models as db
+
+    sid = db.create_session(title="Pending question")
+    db.update_session(sid, state="idle", state_v2="awaiting_user")
+
+    reset = await mgr.reconcile_interrupted_sessions()
+
+    assert reset == 0
+    session = mgr.get(sid)
+    if session is not None:
+        assert sv2._current_state(session) is sv2.SessionStateV2.AWAITING_USER
+
+
 # ---------------------------------------------------------------------------
 # Bug D — _run_post_hooks must use v2 state, not legacy enum
 # ---------------------------------------------------------------------------

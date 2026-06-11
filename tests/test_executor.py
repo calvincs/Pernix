@@ -113,6 +113,96 @@ async def test_execute_single_dangerous_blocked(monkeypatch):
     assert "dangerous" in result.content.lower()
 
 
+def _make_approved_session(monkeypatch, tool_name, scope, persistent=False):
+    """Fake a session whose _approved_dangerous_tools holds one approval."""
+
+    class _FakeSession:
+        session_type = "normal"
+        parent_session_id = None
+        _approved_dangerous_tools = {tool_name: {"scope": scope, "persistent": persistent}}
+
+    fake = _FakeSession()
+    monkeypatch.setattr("sessions.manager.get_manager", lambda: type("M", (), {"get": lambda self, s: fake})())
+    return fake
+
+
+async def test_dangerous_approval_scope_mismatch_blocks(monkeypatch):
+    """A single-use approval whose scope doesn't mention the call's argument
+    values must not unlock the call (approve 'delete skill foo' must not
+    allow delete_skill(name='bar'))."""
+
+    def dangerous_fn(name=""):
+        return f"deleted {name}"
+
+    reg = ToolRegistry()
+    reg.register(
+        name="risky_scoped",
+        func=dangerous_fn,
+        description="Dangerous",
+        parameters={"type": "object", "properties": {"name": {"type": "string"}}},
+        safety_level="dangerous",
+        timeout=5,
+    )
+    monkeypatch.setattr("config.settings.auto_approve_dangerous", False)
+    fake = _make_approved_session(monkeypatch, "risky_scoped", "delete skill foofoo")
+
+    result = await _execute_single("risky_scoped", {"name": "barbar"}, {"session_id": "s1"}, reg)
+    assert result.was_error
+    assert "scope" in result.content.lower()
+    # The approval is left intact for the call the user actually confirmed.
+    assert "risky_scoped" in fake._approved_dangerous_tools
+
+
+async def test_dangerous_approval_scope_match_consumes(monkeypatch):
+    """A single-use approval covering the call's argument values unlocks
+    exactly one call and is consumed."""
+
+    def dangerous_fn(name=""):
+        return f"deleted {name}"
+
+    reg = ToolRegistry()
+    reg.register(
+        name="risky_scoped2",
+        func=dangerous_fn,
+        description="Dangerous",
+        parameters={"type": "object", "properties": {"name": {"type": "string"}}},
+        safety_level="dangerous",
+        timeout=5,
+    )
+    monkeypatch.setattr("config.settings.auto_approve_dangerous", False)
+    fake = _make_approved_session(monkeypatch, "risky_scoped2", "delete skill foofoo")
+
+    result = await _execute_single("risky_scoped2", {"name": "foofoo"}, {"session_id": "s1"}, reg)
+    assert not result.was_error
+    assert result.content == "deleted foofoo"
+    assert "risky_scoped2" not in fake._approved_dangerous_tools
+
+
+async def test_dangerous_approval_persistent_stays_broad(monkeypatch):
+    """Persistent approvals keep their documented broad-scope behavior."""
+
+    def dangerous_fn(url=""):
+        return f"fetched {url}"
+
+    reg = ToolRegistry()
+    reg.register(
+        name="risky_persist",
+        func=dangerous_fn,
+        description="Dangerous",
+        parameters={"type": "object", "properties": {"url": {"type": "string"}}},
+        safety_level="dangerous",
+        timeout=5,
+    )
+    monkeypatch.setattr("config.settings.auto_approve_dangerous", False)
+    fake = _make_approved_session(
+        monkeypatch, "risky_persist", "browse several pages while researching", persistent=True
+    )
+
+    result = await _execute_single("risky_persist", {"url": "https://example.com/x"}, {"session_id": "s1"}, reg)
+    assert not result.was_error
+    assert "risky_persist" in fake._approved_dangerous_tools
+
+
 async def test_execute_single_dangerous_allowed(monkeypatch):
     """Dangerous tools execute when auto_approve_dangerous=True."""
 

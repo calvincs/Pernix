@@ -105,6 +105,11 @@ class ToolDef:
     worker_allowed: bool = True
     source: str = "builtin"  # builtin | extension | custom
     safety_level: str = "safe"  # safe | caution | dangerous
+    # Long-poll tools (await_workers, run_workflow) block their thread for up
+    # to 30-60 minutes waiting on OTHER work. They run on a dedicated executor
+    # so they can never starve the shared to_thread pool that the very workers
+    # they're waiting on need for their own tool calls.
+    long_poll: bool = False
 
     def to_openai_schema(self) -> dict:
         """Convert to OpenAI function-calling tool format."""
@@ -314,12 +319,15 @@ class ToolRegistry:
         worker_allowed: bool = True,
         source: str = "builtin",
         safety_level: str | None = None,
+        long_poll: bool = False,
     ) -> None:
         """Register a tool.
 
         safety_level: "safe" (read-only), "caution" (write/network/spawn),
                       "dangerous" (arbitrary execution). Defaults to "caution"
                       for custom tools, "safe" for builtins.
+        long_poll:    True for tools that block their thread waiting on other
+                      sessions' work — they run on a dedicated executor.
         """
         if safety_level is None:
             safety_level = "caution" if source == "custom" else "safe"
@@ -335,13 +343,10 @@ class ToolRegistry:
             worker_allowed=worker_allowed,
             source=source,
             safety_level=safety_level,
+            long_poll=long_poll,
         )
         self.metrics.setdefault(name, ToolHealthMetrics())
         logger.debug("Registered tool: %s [%s]", name, source)
-
-    def unregister(self, name: str) -> None:
-        self._tools.pop(name, None)
-        self.metrics.pop(name, None)
 
     def get(self, name: str) -> ToolDef | None:
         return self._tools.get(name)

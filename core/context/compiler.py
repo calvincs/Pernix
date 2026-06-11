@@ -45,6 +45,11 @@ _ATTACHED_RE = re.compile(r"\[attached:\s*([^\]\s]+(?:\s+[^\]]*)?)\]")
 # Bumped to 32MB to accommodate audio (a 19MB WAV → ~25MB base64).
 MAX_INLINE_ATTACH_BYTES = 32 * 1024 * 1024
 
+# Memoized base64 blocks keyed by (path, mtime_ns, size) — kept small since
+# entries are multi-MB strings. See _expand_user_message_with_attachments.
+_attach_block_cache: dict[tuple, dict] = {}
+_ATTACH_CACHE_MAX = 8
+
 
 def _extract_attached_filenames(text: str) -> list[str]:
     """Return the filenames referenced by [attached: ...] markers in text."""
@@ -93,32 +98,55 @@ def _expand_user_message_with_attachments(text: str, budget: int) -> tuple[list[
         if not src.exists() or not src.is_file():
             continue
         try:
-            data = src.read_bytes()
+            st = src.stat()
         except OSError as e:
-            logger.warning("attachment read failed for %s: %s", src, e)
+            logger.warning("attachment stat failed for %s: %s", src, e)
             continue
-        # ~33% overhead for base64. Check against remaining budget.
-        projected = int(len(data) * 1.34)
-        if spent + projected > budget:
-            logger.info(
-                "attachment %s (%d bytes) exceeds inline budget (%d/%d used); " "leaving as text marker",
-                fname,
-                len(data),
-                spent,
-                budget,
-            )
-            continue
-        b64 = base64.b64encode(data).decode()
-        mime = _MIME_MAP.get(ext, "image/jpeg")
-        blocks.append(
-            {
+        # compile_context expands the latest user message on EVERY tool round
+        # — without memoization a 19MB WAV is re-read and re-base64'd (~25MB
+        # of string churn on the event loop) once per round for the whole
+        # turn. Key on (path, mtime, size) so an edited file re-encodes.
+        cache_key = (str(src), st.st_mtime_ns, st.st_size)
+        block = _attach_block_cache.get(cache_key)
+        if block is None:
+            # ~33% overhead for base64. Check against remaining budget.
+            projected = int(st.st_size * 1.34)
+            if spent + projected > budget:
+                logger.info(
+                    "attachment %s (%d bytes) exceeds inline budget (%d/%d used); " "leaving as text marker",
+                    fname,
+                    st.st_size,
+                    spent,
+                    budget,
+                )
+                continue
+            try:
+                data = src.read_bytes()
+            except OSError as e:
+                logger.warning("attachment read failed for %s: %s", src, e)
+                continue
+            b64 = base64.b64encode(data).decode()
+            mime = _MIME_MAP.get(ext, "image/jpeg")
+            block = {
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{b64}"},
                 "_filename": fname,
                 "_kind": "audio" if ext in _AUDIO_EXTENSIONS else "image",
+                "_b64_len": len(b64),
             }
-        )
-        spent += len(b64)
+            if len(_attach_block_cache) >= _ATTACH_CACHE_MAX:
+                _attach_block_cache.clear()
+            _attach_block_cache[cache_key] = block
+        elif spent + block["_b64_len"] > budget:
+            logger.info(
+                "attachment %s exceeds inline budget (%d/%d used); leaving as text marker",
+                fname,
+                spent,
+                budget,
+            )
+            continue
+        blocks.append(block)
+        spent += block["_b64_len"]
     return blocks, spent
 
 
@@ -393,13 +421,14 @@ def _build_available_skills_block(max_skills: int = 24, desc_chars: int = 180) -
 
 
 def _build_temporal_context() -> str:
-    """Build temporal context section with current time (UTC + local) and birthdate."""
-    import re as _re
+    """Build the STATIC temporal guidance section (birthdate + how to use time).
 
-    now_utc = datetime.now(timezone.utc)
-    utc_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-    local_now = now_utc.astimezone()
-    local_str = local_now.strftime("%Y-%m-%d %H:%M:%S %Z")
+    The actual current time deliberately lives in the volatile tail message
+    (see _build_volatile_tail) — putting a to-the-second timestamp in the
+    system prompt head invalidated the provider's prompt-prefix cache on
+    every single LLM call, forcing a full re-prefill of the entire context.
+    """
+    import re as _re
 
     birthdate = ""
     try:
@@ -414,15 +443,14 @@ def _build_temporal_context() -> str:
 
     lines = [
         "[TEMPORAL CONTEXT]",
-        f"Current time (UTC):   {utc_str}",
-        f"Current time (local): {local_str}",
+        "The current time (UTC + local) is provided in the [CURRENT STATE] message at the end of the conversation.",
     ]
     if birthdate:
         lines.append(f"Agent birthdate: {birthdate}")
     lines += [
         "",
         "All harness timestamps (sessions, messages, cron runs) are stored in UTC (+00:00).",
-        "When the user says 'today' or 'yesterday', interpret relative to LOCAL time above.",
+        "When the user says 'today' or 'yesterday', interpret relative to LOCAL time.",
         'For a fresh timestamp: bash("date") → local,  bash("date -u") → UTC.',
         "",
         "FINDING SESSION HISTORY:",
@@ -434,6 +462,78 @@ def _build_temporal_context() -> str:
         "  Do NOT use search_sessions to find sessions by date — it searches text, not timestamps.",
     ]
     return "\n".join(lines)
+
+
+def _build_volatile_tail(resource_status: str) -> str:
+    """Per-call state that goes in a trailing system message, NOT the head.
+
+    Everything here changes between LLM calls (clock, tool rounds remaining).
+    Appending it as the final message keeps the volatile content in the
+    suffix: the provider's prompt-prefix cache stays valid for the system
+    prompt and all prior history, and each round only re-prefills from where
+    the previous round's tail sat.
+    """
+    now_utc = datetime.now(timezone.utc)
+    utc_str = now_utc.strftime("%Y-%m-%d %H:%M UTC")
+    local_str = now_utc.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    lines = [
+        "[CURRENT STATE]",
+        f"Current time (UTC):   {utc_str}",
+        f"Current time (local): {local_str}",
+    ]
+    if resource_status:
+        lines.append(resource_status)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Token-count caches
+# ---------------------------------------------------------------------------
+# The message store is append-only (rows are never modified), so a token
+# count keyed by DB message id can never go stale. Without this, every
+# tool round re-encoded the entire history with tiktoken from scratch —
+# a 200-message session × 30 rounds = 6,000 full encodes per turn, all on
+# the event loop. Entries whose content is transformed per-call (latest
+# user message with attachments expanded to multimodal blocks) are
+# excluded via the isinstance(content, str) check.
+_msg_token_cache: dict[tuple, int] = {}
+_MSG_TOKEN_CACHE_MAX = 65536
+# hash(text) → tokens for the system prompt and tool-schema JSON, which are
+# stable across the rounds of a turn but were also re-encoded every round.
+_text_token_cache: dict[int, int] = {}
+_TEXT_TOKEN_CACHE_MAX = 64
+
+
+def _count_message_cached(msg: dict, estimator) -> int:
+    db_id = msg.get("_db_id")
+    content = msg.get("content")
+    if db_id is None or not isinstance(content, str):
+        return estimator.count_message(msg)
+    # Include content/tool-call hashes in the key: message ids restart when
+    # the DB is rebuilt (and across test databases), so id alone could alias
+    # two different rows. str hashing is ~100x cheaper than a tiktoken encode.
+    tc = msg.get("tool_calls")
+    key = (db_id, hash(content), hash(str(tc)) if tc else 0)
+    cached = _msg_token_cache.get(key)
+    if cached is None:
+        cached = estimator.count_message(msg)
+        if len(_msg_token_cache) >= _MSG_TOKEN_CACHE_MAX:
+            _msg_token_cache.clear()
+        _msg_token_cache[key] = cached
+    return cached
+
+
+def _count_text_cached(text: str, estimator) -> int:
+    if not text:
+        return 0
+    key = hash(text)
+    cached = _text_token_cache.get(key)
+    if cached is None:
+        cached = estimator.count(text)
+        if len(_text_token_cache) >= _TEXT_TOKEN_CACHE_MAX:
+            _text_token_cache.clear()
+        _text_token_cache[key] = cached
+    return cached
 
 
 @dataclass
@@ -502,13 +602,18 @@ def compile_context(
 
     if scout_report_text:
         system_parts.append(scout_report_text)
-    if resource_status:
-        system_parts.append(resource_status)
     system_prompt = "\n\n".join(system_parts)
-    system_tokens = estimator.count(system_prompt)
+    # The volatile per-call state (clock, resource status) is appended as a
+    # trailing system message after trim — keeping it out of the head
+    # preserves the provider's prompt-prefix cache. Its tokens still count
+    # against the system share of the budget.
+    volatile_tail = _build_volatile_tail(resource_status)
+    # Head is stable across the rounds of a turn — cached count. The tail is
+    # tiny and changes per call, so it's counted raw.
+    system_tokens = _count_text_cached(system_prompt, estimator) + estimator.count(volatile_tail)
 
     # --- Tool schema tokens ---
-    tool_tokens = estimator.count_tool_schemas(tool_schemas) if tool_schemas else 0
+    tool_tokens = _count_text_cached(json.dumps(tool_schemas), estimator) if tool_schemas else 0
 
     # --- Calculate history budget ---
     budget = context_budget if context_budget is not None else settings.context_budget
@@ -695,14 +800,12 @@ def compile_context(
         messages.append(entry)
 
     # --- Trim to budget ---
-    history_tokens = sum(
-        (msg.get("token_count") or estimator.count_message(msg)) for msg in messages[1:]  # skip system
-    )
+    history_tokens = sum(_count_message_cached(msg, estimator) for msg in messages[1:])  # skip system
     messages_trimmed = 0
     dropped_groups: list[dict] = []
     if history_tokens > history_budget:
         messages, messages_trimmed, dropped_groups = _trim_history(messages, history_budget, estimator)
-        history_tokens = sum(estimator.count_message(m) for m in messages[1:])
+        history_tokens = sum(_count_message_cached(m, estimator) for m in messages[1:])
 
     # --- Insert trim notice (pinned) if anything was dropped ---
     if dropped_groups:
@@ -720,6 +823,11 @@ def compile_context(
             insert_at = 2 if has_compaction and len(messages) >= 2 else 1
             messages.insert(insert_at, notice_entry)
             history_tokens += estimator.count_message(notice_entry)
+
+    # --- Append the volatile tail (clock + resource status) ---
+    # After trim so it can never be dropped; last position keeps the
+    # cache-busting content in the prompt suffix.
+    messages.append({"role": "system", "content": volatile_tail, "_pinned": True})
 
     # --- Check if compaction needed ---
     total_tokens = system_tokens + history_tokens + tool_tokens
@@ -788,7 +896,7 @@ def _trim_history(
     dropped_groups: list[dict] = []
 
     def _total():
-        return sum(estimator.count_message(m) for m in messages[1:])
+        return sum(_count_message_cached(m, estimator) for m in messages[1:])
 
     def _snapshot(msg: dict, preview_limit: int = 80) -> dict:
         content = msg.get("content") or ""
@@ -949,7 +1057,13 @@ def _strip_private_fields(messages: list[dict]) -> list[dict]:
 def normalize_for_openrouter(messages: list[dict]) -> list[dict]:
     """Normalize messages for strict OpenAI/OpenRouter format.
 
-    - Remove mid-conversation system messages (except first)
+    - Convert mid-conversation system messages (compaction summary, trim
+      notice, volatile state tail) to user-role carriers. Some OpenRouter
+      backends only accept system-first; dropping them (the old behavior)
+      meant the compaction summary and trim notices never reached the
+      model at all on the OpenRouter path. Their content already carries
+      bracketed markers ("[Previous conversation summary]", "[CURRENT
+      STATE]"), so the model reads them as harness context, not user speech.
     - Ensure tool_calls have id, type, function fields
     - Drop orphaned tool messages
     - Ensure no None content
@@ -972,11 +1086,13 @@ def normalize_for_openrouter(messages: list[dict]) -> list[dict]:
         if content is None:
             msg = {**msg, "content": ""}
 
-        # Remove mid-conversation system messages
+        # Mid-conversation system messages become user-role carriers
         if role == "system":
             if seen_system:
-                continue
-            seen_system = True
+                msg = {**msg, "role": "user"}
+                role = "user"
+            else:
+                seen_system = True
 
         # Normalize tool_calls
         if role == "assistant" and msg.get("tool_calls"):

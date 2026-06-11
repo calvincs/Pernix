@@ -238,6 +238,20 @@ function _showRestartButton() {
     if (!footer || document.getElementById('restart-server-btn')) return;
 
     const statusEl = footer.querySelector('.save-status');
+
+    // The restart endpoint is loopback-only (403 otherwise). A phone or
+    // LAN-IP browser used to get the button anyway and a dead-end error —
+    // show instructions instead.
+    const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname);
+    if (!isLoopback) {
+        if (statusEl) {
+            statusEl.style.color = 'var(--warning, #fa3)';
+            statusEl.textContent =
+                'Restart required to apply network changes — restart from the server console (or from a localhost browser).';
+        }
+        return;
+    }
+
     if (statusEl) {
         statusEl.style.color = 'var(--warning, #fa3)';
         statusEl.textContent = 'Restart required to apply network changes';

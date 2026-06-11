@@ -98,8 +98,6 @@ def validate_content(content: str, check_skills: bool = True) -> ValidationResul
     check_skills: if True, verify referenced skills exist in the skill registry.
     Set to False for offline/test contexts where the registry isn't loaded.
     """
-    from io import StringIO
-
     import yaml
 
     issues: list[ValidationIssue] = []

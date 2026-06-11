@@ -218,7 +218,13 @@ async def _execute_cron_job(meta: dict):
 
     try:
         if not session_id:
-            session_id = manager.create_session(title=f"Cron: {name}")
+            # session_type="cron" is what _is_unattended_session() keys off —
+            # without it scheduled jobs hit the dangerous-tool approval gate,
+            # call ask_user into the void, and wedge in AWAITING_USER forever.
+            # Jobs reusing an explicit session_id keep that session's type:
+            # a user-attended session shouldn't lose its gate just because a
+            # job also runs in it.
+            session_id = manager.create_session(title=f"Cron: {name}", session_type="cron")
 
         # Set model override if specified
         session = manager.get(session_id)

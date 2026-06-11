@@ -530,6 +530,12 @@ def test_approve_dangerous_tool_finds_ask_user_in_tool_calls_col(tmp_path, monke
             "INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
             (sid, tc_json),
         )
+        # The user's answer arrives as a new user message after the ask_user
+        # turn — approval requires it (an unanswered question must not unlock).
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
+            (sid, "[User answered your question]\nQ: ok?\nA: yes, go ahead"),
+        )
 
     class _FakeSession:
         _approved_dangerous_tools: dict = {}
@@ -566,6 +572,10 @@ def test_approve_dangerous_tool_finds_ask_user_in_content_fallback(tmp_path, mon
             "INSERT INTO messages (session_id, role, content) VALUES (?, 'assistant', ?)",
             (sid, content_json),
         )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
+            (sid, "[User answered your question]\nQ: ok?\nA: yes"),
+        )
 
     class _FakeSession:
         _approved_dangerous_tools: dict = {}
@@ -584,6 +594,68 @@ def test_approve_dangerous_tool_finds_ask_user_in_content_fallback(tmp_path, mon
     )
     assert "approved" in result.lower(), f"Expected approval, got: {result}"
     assert "Error" not in result
+
+
+def test_approve_dangerous_tool_rejects_unanswered_question(tmp_path, monkeypatch):
+    """An ask_user that the user has not answered must NOT unlock approval."""
+    import json
+
+    import db.models as _db
+    from db.database import connect_sessions
+
+    sid = _db.create_session(title="test")
+
+    tc_json = json.dumps([{"id": "call_abc", "name": "ask_user", "arguments": '{"question": "ok?"}'}])
+    with connect_sessions() as conn:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
+            (sid, tc_json),
+        )
+        # No "[User answered your question]" message follows.
+
+    monkeypatch.setattr("core.tools.builtin.dialog_tools._approvals_path", lambda: tmp_path / "approvals.json")
+
+    from core.tools.builtin.dialog_tools import approve_dangerous_tool
+
+    result = approve_dangerous_tool(
+        tool_name="search_web",
+        scope="search for Rockford IL news",
+        _context={"session_id": sid},
+    )
+    assert result.startswith("Error"), f"Expected rejection, got: {result}"
+    assert "not answered" in result
+
+
+def test_approve_dangerous_tool_rejects_answer_before_ask(tmp_path, monkeypatch):
+    """An old answer that predates the latest ask_user must not count."""
+    import json
+
+    import db.models as _db
+    from db.database import connect_sessions
+
+    sid = _db.create_session(title="test")
+
+    tc_json = json.dumps([{"id": "call_abc", "name": "ask_user", "arguments": '{"question": "ok?"}'}])
+    with connect_sessions() as conn:
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
+            (sid, "[User answered your question]\nQ: earlier thing\nA: yes"),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
+            (sid, tc_json),
+        )
+
+    monkeypatch.setattr("core.tools.builtin.dialog_tools._approvals_path", lambda: tmp_path / "approvals.json")
+
+    from core.tools.builtin.dialog_tools import approve_dangerous_tool
+
+    result = approve_dangerous_tool(
+        tool_name="search_web",
+        scope="search for Rockford IL news",
+        _context={"session_id": sid},
+    )
+    assert result.startswith("Error"), f"Expected rejection, got: {result}"
 
 
 def test_approve_dangerous_tool_fails_without_ask_user(tmp_path, monkeypatch):

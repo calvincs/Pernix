@@ -26,23 +26,13 @@ from core.memory.format import (
     format_file_header,
     parse_entries_from_markdown,
 )
+from core.memory.routing import NAMESPACE_KEYWORDS, name_tokens, normalize_file_name
 from core.memory.search import SearchResult, search_bm25, search_hybrid, search_recent
 from db.database import connect_memory
 
 logger = logging.getLogger("pernix.memory")
 
-# Namespace auto-routing keywords
-NAMESPACE_KEYWORDS = {
-    "user.profile": ["user", "profile", "age", "location", "name", "preference", "likes", "dislikes"],
-    "pernix.decisions": ["decided", "decision", "chose", "rationale", "why we"],
-    "pernix.preferences": ["prefer", "preference", "style", "convention", "always", "never"],
-    "pernix.research": ["found", "research", "discovered", "learned", "source"],
-    "pernix.debugging": ["debug", "fix", "bug", "error", "workaround", "solved"],
-    "pernix.config": ["config", "setting", "environment", "variable", "parameter"],
-    "pernix.tools": ["tool", "function", "utility", "command", "usage pattern"],
-    "pernix.tasks": ["task", "todo", "milestone", "goal", "objective"],
-    "pernix.notes": [],  # default fallback
-}
+__all__ = ["MemoryStore", "NAMESPACE_KEYWORDS", "get_memory_store"]
 
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
@@ -99,10 +89,25 @@ class MemoryStore:
         if not content.strip():
             return "Error: Empty content"
 
+        # Sanitize before dedup/indexing so FTS rows match the stored markdown.
+        from core.memory.format import sanitize_entry_content
+
+        content = sanitize_entry_content(content)
+
         # Only dedup substantive entries — short strings (< 60 chars) have
         # unreliable similarity scores and are allowed through unconditionally.
-        if len(content) >= 60 and self.is_duplicate(content):
-            return "Memory already contains similar content — entry skipped (duplicate)"
+        if len(content) >= 60:
+            dup = self.find_duplicate(content)
+            if dup is not None:
+                # Don't let a newer/corrected fact silently lose to a stale
+                # one — point at the match so the caller can supersede it.
+                preview = dup.entry.content[:160].replace("\n", " ")
+                return (
+                    f"Memory already contains similar content — entry skipped (duplicate of "
+                    f'{dup.entry.file_name}@{dup.entry.epoch}: "{preview}"). If your version is '
+                    f"newer or more accurate, supersede it with "
+                    f"update_memory(file='{dup.entry.file_name}', epoch={dup.entry.epoch}, content=...)."
+                )
 
         epoch = epoch or int(time.time())
 
@@ -114,32 +119,59 @@ class MemoryStore:
         # Ensure file exists
         self._ensure_file(file_name, content)
 
-        # Format and append to markdown (with file lock)
         md_path = self._dir / f"{file_name}.md"
-        formatted = format_entry(content, entry_type, tags, weight, source=source, epoch=epoch)
 
         with self._lock:
+            # Explicit append to an archived file revives it: drop the header
+            # marker so the file (and its prior entries) is live again.
+            # Without this, the new entry would be indexed while reindex/
+            # health_check still treat the whole file as archived.
+            from core.memory.format import is_file_archived
+
+            revived = False
+            raw = md_path.read_text(encoding="utf-8")
+            if is_file_archived(raw):
+                raw = raw.replace("\n<!-- @archived: true -->", "", 1)
+                md_path.write_text(raw, encoding="utf-8")
+                revived = True
+                logger.info("Revived archived memory file on append: %s", file_name)
+
             # File lock + DB commit must be atomic to prevent index/markdown drift.
             # Keep fcntl lock held until DB commit completes.
             with open(md_path, "a") as f:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 try:
-                    f.write(formatted)
-                    f.flush()
-
-                    # Index in FTS5 while file lock is held
                     tag_list = tags if tags else ",".join(self._infer_tags(content, file_name))
                     conn = self._connect()
                     try:
-                        conn.execute(
-                            "INSERT INTO memory_fts (file_name, content, tags, entry_type, weight, epoch) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (file_name, content, tag_list, entry_type, weight, str(epoch)),
-                        )
-                        conn.execute(
-                            "UPDATE memory_files SET entry_count = entry_count + 1, updated_at = ? WHERE name = ?",
-                            (epoch, file_name),
-                        )
+                        # Epochs double as entry identity within a file — bump
+                        # until unique so update/delete can't hit two entries
+                        # (same strategy move_entries uses across files).
+                        while conn.execute(
+                            "SELECT 1 FROM memory_fts WHERE file_name = ? AND epoch = ?",
+                            (file_name, str(epoch)),
+                        ).fetchone():
+                            epoch += 1
+
+                        formatted = format_entry(content, entry_type, tags, weight, source=source, epoch=epoch)
+                        f.write(formatted)
+                        f.flush()
+
+                        if revived:
+                            # Restore the revived file's prior entries alongside
+                            # the new one.
+                            self._reindex_file(conn, file_name, raw + formatted)
+                        else:
+                            conn.execute(
+                                "INSERT INTO memory_fts "
+                                "(file_name, content, tags, entry_type, weight, epoch, source, updated) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                (file_name, content, tag_list, entry_type, weight, str(epoch), source, "0"),
+                            )
+                            conn.execute(
+                                "UPDATE memory_files SET entry_count = entry_count + 1, updated_at = ? WHERE name = ?",
+                                (epoch, file_name),
+                            )
                         conn.commit()
                     finally:
                         conn.close()
@@ -148,43 +180,10 @@ class MemoryStore:
 
         return f"Saved to {file_name} (epoch={epoch})"
 
-    @staticmethod
-    def _normalize_name(name: str) -> str:
-        """Canonicalize a file name for comparison.
-
-        Strips extensions, noise suffixes, normalizes separators to underscore.
-        """
-        name = name.lower()
-        # Strip common format-like suffixes (files ending in _txt, _json, etc.)
-        for suffix in ("_txt", "_json", "_py", "_html", "_log", "_csv"):
-            if name.endswith(suffix):
-                name = name[: -len(suffix)]
-        # Normalize separators to underscore
-        name = re.sub(r"[-.]", "_", name)
-        # Collapse double underscores
-        while "__" in name:
-            name = name.replace("__", "_")
-        # Strip noise suffixes that don't add topical value
-        for noise in (
-            "_notes",
-            "_log",
-            "_summary",
-            "_overview",
-            "_report",
-            "_analysis",
-            "_strategy",
-            "_guide",
-            "_spec",
-            "_template",
-        ):
-            if name.endswith(noise):
-                name = name[: -len(noise)]
-        return name.strip("_")
-
-    @staticmethod
-    def _name_tokens(name: str) -> set[str]:
-        """Split a file name into word tokens."""
-        return {t for t in re.split(r"[._-]", name.lower()) if len(t) > 2}
+    # Canonical implementations live in core.memory.routing (shared with
+    # consolidation clustering); kept as static methods for callers/tests.
+    _normalize_name = staticmethod(normalize_file_name)
+    _name_tokens = staticmethod(name_tokens)
 
     def _resolve_file_name(self, suggested: str | None, content: str) -> str:
         """Map a suggested file name to an existing file when possible.
@@ -364,8 +363,8 @@ class MemoryStore:
     # Deduplication
     # ------------------------------------------------------------------
 
-    def is_duplicate(self, content: str, threshold: float = 0.70) -> bool:
-        """Multi-signal dedup check. Returns True if content is a duplicate.
+    def find_duplicate(self, content: str, threshold: float = 0.70) -> SearchResult | None:
+        """Multi-signal dedup check. Returns the matched existing entry, or None.
 
         Checks top-3 BM25 results with both SequenceMatcher and bag-of-words
         Jaccard similarity. Catches semantic duplicates that single-result
@@ -373,7 +372,7 @@ class MemoryStore:
         """
         candidates = self.search(content, limit=3, _track_hits=False)
         if not candidates:
-            return False
+            return None
 
         content_words = set(content.lower().split())
 
@@ -381,28 +380,32 @@ class MemoryStore:
             # Signal 1: SequenceMatcher
             sim = SequenceMatcher(None, content, r.entry.content).ratio()
             if sim > threshold:
-                return True
+                return r
 
             # Signal 2: bag-of-words Jaccard
             existing_words = set(r.entry.content.lower().split())
             if len(content_words) > 3 and len(existing_words) > 3:
                 jaccard = len(content_words & existing_words) / len(content_words | existing_words)
                 if jaccard > 0.55:
-                    return True
+                    return r
 
-        return False
+        return None
+
+    def is_duplicate(self, content: str, threshold: float = 0.70) -> bool:
+        """True if content duplicates an existing entry (see find_duplicate)."""
+        return self.find_duplicate(content, threshold) is not None
 
     # ------------------------------------------------------------------
     # Entry-level mutations (update / delete)
     # ------------------------------------------------------------------
 
-    def _reindex_file(self, conn, file_name: str, new_raw: str, delta_count: int = 0) -> None:
+    def _reindex_file(self, conn, file_name: str, new_raw: str) -> None:
         """Rebuild FTS5 index for a file from updated raw markdown content.
 
         Deletes all existing rows for the file and re-inserts from parsed entries.
         Uses a file-level delete because FTS5 compound WHERE on UNINDEXED columns
         is unreliable — only equality on FTS-indexed columns or rowid is safe.
-        delta_count is added to the stored entry_count (use -1 for a deleted entry).
+        entry_count is set to the parsed entry count (absolute, not relative).
         """
         from core.memory.format import parse_entries_from_markdown
 
@@ -411,14 +414,15 @@ class MemoryStore:
         for e in entries:
             tag_str = ",".join(e.tags) if e.tags else ""
             conn.execute(
-                "INSERT INTO memory_fts (file_name, content, tags, entry_type, weight, epoch) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (file_name, e.content, tag_str, e.entry_type, e.weight, str(e.epoch)),
+                "INSERT INTO memory_fts "
+                "(file_name, content, tags, entry_type, weight, epoch, source, updated) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (file_name, e.content, tag_str, e.entry_type, e.weight, str(e.epoch), e.source, str(e.updated)),
             )
         now = int(time.time())
         conn.execute(
-            "UPDATE memory_files SET entry_count = MAX(0, entry_count + ?), updated_at = ? WHERE name = ?",
-            (delta_count, now, file_name),
+            "UPDATE memory_files SET entry_count = ?, updated_at = ? WHERE name = ?",
+            (len(entries), now, file_name),
         )
 
     def update_entry(self, file_name: str, epoch: int, new_content: str) -> str:
@@ -434,11 +438,22 @@ class MemoryStore:
         if not new_content.strip():
             return "Error: new content must not be empty"
 
+        from core.memory.format import sanitize_entry_content
+
+        new_content = sanitize_entry_content(new_content)
+
         epoch_marker = f"<!-- @epoch: {epoch} -->"
 
         with self._lock:
             raw = md_path.read_text(encoding="utf-8")
             sections = raw.split("\n---\n")
+
+            matches = sum(1 for s in sections if epoch_marker in s)
+            if matches > 1:
+                return (
+                    f"Error: {matches} entries in '{file_name}' share epoch={epoch} "
+                    "(legacy collision); run memory maintenance to repair, then retry"
+                )
 
             found = False
             new_sections = []
@@ -446,8 +461,13 @@ class MemoryStore:
                 if epoch_marker in section:
                     found = True
                     # Preserve all HTML comment metadata lines exactly as-is,
-                    # replace only the content (non-comment) lines.
-                    meta_lines = [ln for ln in section.split("\n") if ln.strip().startswith("<!--")]
+                    # replace only the content (non-comment) lines. Stamp
+                    # @updated so recall can present the correction date
+                    # instead of making the refreshed fact look old.
+                    meta_lines = [
+                        ln for ln in section.split("\n") if ln.strip().startswith("<!--") and "@updated:" not in ln
+                    ]
+                    meta_lines.append(f"<!-- @updated: {int(time.time())} -->")
                     new_sections.append("\n".join(meta_lines) + "\n" + new_content + "\n")
                 else:
                     new_sections.append(section)
@@ -464,7 +484,7 @@ class MemoryStore:
                     f.flush()
                     conn = self._connect()
                     try:
-                        self._reindex_file(conn, file_name, new_raw, delta_count=0)
+                        self._reindex_file(conn, file_name, new_raw)
                         conn.commit()
                     finally:
                         conn.close()
@@ -490,6 +510,13 @@ class MemoryStore:
             raw = md_path.read_text(encoding="utf-8")
             sections = raw.split("\n---\n")
 
+            matches = sum(1 for s in sections if epoch_marker in s)
+            if matches > 1:
+                return (
+                    f"Error: {matches} entries in '{file_name}' share epoch={epoch} "
+                    "(legacy collision); run memory maintenance to repair, then retry"
+                )
+
             found = False
             new_sections = []
             for section in sections:
@@ -510,7 +537,7 @@ class MemoryStore:
                     f.flush()
                     conn = self._connect()
                     try:
-                        self._reindex_file(conn, file_name, new_raw, delta_count=-1)
+                        self._reindex_file(conn, file_name, new_raw)
                         conn.commit()
                     finally:
                         conn.close()
@@ -619,9 +646,19 @@ class MemoryStore:
                 # Index in FTS5
                 tag_list = ",".join(entry.tags)
                 conn.execute(
-                    "INSERT INTO memory_fts (file_name, content, tags, entry_type, weight, epoch) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (target_file, entry.content, tag_list, entry.entry_type, entry.weight, str(actual_epoch)),
+                    "INSERT INTO memory_fts "
+                    "(file_name, content, tags, entry_type, weight, epoch, source, updated) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        target_file,
+                        entry.content,
+                        tag_list,
+                        entry.entry_type,
+                        entry.weight,
+                        str(actual_epoch),
+                        entry.source,
+                        str(entry.updated),
+                    ),
                 )
 
                 # Migrate hit counts
@@ -717,7 +754,7 @@ class MemoryStore:
         except Exception as e:
             logger.debug("Failed to record memory hits: %s", e)
 
-    def search_lessons(self, query: str, limit: int = 5) -> list[SearchResult]:
+    def search_lessons(self, query: str, limit: int = 5, _track_hits: bool = True) -> list[SearchResult]:
         """Search lesson-type memory entries with age-based decay.
 
         Lessons are operational workarounds extracted by snooze_reflect from
@@ -756,7 +793,7 @@ class MemoryStore:
         # Re-sort by decayed score so old lessons sink behind fresher peers.
         decayed.sort(key=lambda r: r.score, reverse=True)
         out = decayed[:limit]
-        if out:
+        if out and _track_hits:
             self._record_hits(out)
         return out
 
@@ -770,48 +807,6 @@ class MemoryStore:
         lines = []
         for r in results:
             lines.append(f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:400]}")
-        return "\n\n".join(lines)
-
-    def recall_enhanced(self, user_message: str, min_score: float = 2.0) -> str:
-        """Multi-signal recall for system prompt / scout injection.
-
-        Signal 1: BM25 keyword search (top 5)
-        Signal 2: Today's entries (top 3)
-        Dedup, filter by min_score, budget to 2500 chars.
-        """
-        results: list[SearchResult] = []
-
-        conn = self._connect()
-        try:
-            # Signal 1: keyword search
-            results.extend(search_bm25(conn, user_message, limit=5))
-            # Signal 2: today's entries
-            midnight = int(time.time()) - (int(time.time()) % 86400)
-            results.extend(search_recent(conn, limit=3, hours=24))
-        finally:
-            conn.close()
-
-        # Dedup by (file_name, epoch)
-        seen: dict[tuple, SearchResult] = {}
-        for r in results:
-            key = (r.entry.file_name, r.entry.epoch)
-            if key not in seen or r.score > seen[key].score:
-                seen[key] = r
-
-        # Filter and sort
-        filtered = [r for r in seen.values() if r.score >= min_score]
-        filtered.sort(key=lambda r: r.score, reverse=True)
-
-        # Budget to 2500 chars
-        lines = []
-        total = 0
-        for r in filtered:
-            line = f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:400]}"
-            if total + len(line) > 2500:
-                break
-            lines.append(line)
-            total += len(line)
-
         return "\n\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -883,9 +878,19 @@ class MemoryStore:
                 for entry in entries:
                     tags = ",".join(entry.tags)
                     conn.execute(
-                        "INSERT INTO memory_fts (file_name, content, tags, entry_type, weight, epoch) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (entry.file_name, entry.content, tags, entry.entry_type, entry.weight, str(entry.epoch)),
+                        "INSERT INTO memory_fts "
+                        "(file_name, content, tags, entry_type, weight, epoch, source, updated) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            entry.file_name,
+                            entry.content,
+                            tags,
+                            entry.entry_type,
+                            entry.weight,
+                            str(entry.epoch),
+                            entry.source,
+                            str(entry.updated),
+                        ),
                     )
                     total += 1
 
@@ -895,27 +900,105 @@ class MemoryStore:
         finally:
             conn.close()
 
+    def repair_epoch_collisions(self) -> int:
+        """Re-epoch duplicate (file, epoch) entries so identity is unique.
+
+        Epochs double as entry identity for update/delete; legacy writes
+        could land several entries in the same epoch second within one file,
+        making those entries impossible to address individually. The first
+        occurrence keeps its epoch; later duplicates are bumped to the next
+        free value (the same strategy move_entries uses for cross-file
+        collisions). Affected files are reindexed. Returns the number of
+        entries re-epoched.
+        """
+        from core.memory.format import is_file_archived
+
+        epoch_re = re.compile(r"<!-- @epoch:\s*(\d+)\s*-->")
+        repaired = 0
+
+        for md_path in sorted(self._dir.glob("*.md")):
+            file_name = md_path.stem
+            with self._lock:
+                raw = md_path.read_text(encoding="utf-8")
+                if is_file_archived(raw):
+                    continue
+
+                all_epochs = {int(m) for m in epoch_re.findall(raw)}
+                sections = raw.split("\n---\n")
+                seen: set[int] = set()
+                new_sections = []
+                changed = 0
+
+                for section in sections:
+                    m = epoch_re.search(section)
+                    if not m:
+                        new_sections.append(section)
+                        continue
+                    epoch = int(m.group(1))
+                    if epoch in seen:
+                        new_epoch = epoch
+                        while new_epoch in seen or new_epoch in all_epochs:
+                            new_epoch += 1
+                        section = section.replace(m.group(0), f"<!-- @epoch: {new_epoch} -->", 1)
+                        all_epochs.add(new_epoch)
+                        epoch = new_epoch
+                        changed += 1
+                    seen.add(epoch)
+                    new_sections.append(section)
+
+                if not changed:
+                    continue
+
+                new_raw = "\n---\n".join(new_sections)
+                with open(md_path, "w", encoding="utf-8") as f:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    try:
+                        f.write(new_raw)
+                        f.flush()
+                        conn = self._connect()
+                        try:
+                            self._reindex_file(conn, file_name, new_raw)
+                            conn.commit()
+                        finally:
+                            conn.close()
+                    finally:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+                repaired += changed
+                logger.info("Repaired %d epoch collision(s) in '%s'", changed, file_name)
+
+        return repaired
+
     def health_check(self, fix: bool = False) -> dict:
-        """Check index health. Optionally auto-fix by reindexing."""
+        """Check index health. Optionally auto-fix by reindexing and
+        repairing epoch collisions."""
         conn = self._connect()
         try:
             # Count indexed entries
             row = conn.execute("SELECT COUNT(*) as cnt FROM memory_fts").fetchone()
             indexed = row["cnt"] if row else 0
 
-            # Count markdown entries
+            # Count markdown entries and per-file duplicate epochs
             md_count = 0
+            collisions = 0
             for md_path in self._dir.glob("*.md"):
                 entries = parse_entries_from_markdown(md_path.stem, md_path.read_text())
                 md_count += len(entries)
+                epochs = [e.epoch for e in entries]
+                collisions += len(epochs) - len(set(epochs))
 
             in_sync = indexed == md_count
             result = {
                 "indexed_entries": indexed,
                 "markdown_entries": md_count,
                 "in_sync": in_sync,
+                "epoch_collisions": collisions,
                 "files": len(list(self._dir.glob("*.md"))),
             }
+
+            if collisions and fix:
+                result["repaired_epoch_collisions"] = self.repair_epoch_collisions()
+                result["epoch_collisions"] = 0
 
             if not in_sync and fix:
                 self.reindex()

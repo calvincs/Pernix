@@ -145,47 +145,6 @@ class OllamaProvider:
             finish_reason="tool_calls" if tool_calls else "stop",
         )
 
-    def _parse_chat_response(self, data: dict, model: str) -> ChatResponse:
-        choices = data.get("choices", [])
-        if not choices:
-            raise ValueError(f"No choices in response: {str(data)[:500]}")
-
-        msg = choices[0].get("message", {})
-        content = msg.get("content") or ""
-        # Qwen3 puts actual response in 'reasoning' field when content is empty
-        if not content and msg.get("reasoning"):
-            content = msg["reasoning"]
-        finish = choices[0].get("finish_reason", "stop")
-
-        tool_calls = None
-        raw_tcs = msg.get("tool_calls")
-        if raw_tcs:
-            tool_calls = [
-                ToolCall(
-                    id=tc.get("id", f"call_{i}"),
-                    name=tc.get("function", {}).get("name", ""),
-                    arguments=tc.get("function", {}).get("arguments", "{}"),
-                )
-                for i, tc in enumerate(raw_tcs)
-            ]
-            finish = "tool_calls"
-
-        usage_data = data.get("usage", {})
-        usage = TokenUsage(
-            prompt_tokens=usage_data.get("prompt_tokens", 0),
-            completion_tokens=usage_data.get("completion_tokens", 0),
-            total_tokens=usage_data.get("total_tokens", 0),
-        )
-
-        return ChatResponse(
-            content=content,
-            tool_calls=tool_calls,
-            usage=usage,
-            model=model,
-            provider=self.name,
-            finish_reason=finish,
-        )
-
     # ------------------------------------------------------------------
     # Chat (streaming)
     # ------------------------------------------------------------------

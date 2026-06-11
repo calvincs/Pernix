@@ -31,10 +31,8 @@ ACTIONABLE_FAILURE_CAUSES: frozenset = frozenset({"skill", "agent", "task", "env
 # Subset where a skill-edit proposal is meaningful (vs lesson-only).
 PROPOSAL_FAILURE_CAUSES: frozenset = frozenset({"skill", "agent"})
 
-# Confidence floors. Mirror workflow_reflect's 0.6 floor for proposals; lessons
-# use a lower bar since they're advisory and scout already gates on hits.
+# Confidence floor. Mirrors workflow_reflect's 0.6 floor for proposals.
 PROPOSAL_CONFIDENCE_FLOOR: float = 0.6
-LESSON_CONFIDENCE_FLOOR: float = 0.5
 
 
 SESSION_REFLECT_PROMPT = """You are a Session Reflect-Improvement Agent. A regular agent session

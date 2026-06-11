@@ -7,7 +7,6 @@ import pytest
 
 from api.streaming import (
     event_stream,
-    event_stream_from_queue,
     get_shutdown_event,
     signal_shutdown,
     sse_event,
@@ -142,32 +141,3 @@ async def test_event_stream_heartbeat():
 
     # Either got a heartbeat or timed out — both are valid
     assert True  # Just verify no exception
-
-
-async def test_event_stream_from_queue_breaks_on_done():
-    """event_stream_from_queue stops on stream.done event."""
-    queue = asyncio.Queue()
-    queue.put_nowait({"type": "stream.token", "content": "hello"})
-    queue.put_nowait({"type": "stream.done"})
-    queue.put_nowait({"type": "stream.token", "content": "after done"})
-
-    chunks = []
-    async for chunk in event_stream_from_queue(queue):
-        chunks.append(chunk)
-
-    combined = "".join(chunks)
-    assert "hello" in combined
-    assert "after done" not in combined
-
-
-async def test_event_stream_from_queue_breaks_on_error():
-    """event_stream_from_queue stops on stream.error event."""
-    queue = asyncio.Queue()
-    queue.put_nowait({"type": "stream.error", "error": "something failed"})
-
-    chunks = []
-    async for chunk in event_stream_from_queue(queue):
-        chunks.append(chunk)
-
-    combined = "".join(chunks)
-    assert "stream.error" in combined or "error" in combined

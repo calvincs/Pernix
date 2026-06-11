@@ -36,19 +36,6 @@ class SessionState(str, Enum):
     ERROR = "error"  # deprecated — no production writes; DB-load only
     DELETED = "deleted"  # deprecated — was never set in v1 either
 
-    @staticmethod
-    def valid_transitions() -> dict[str, set[str]]:
-        return {
-            "idle": {"scouting", "deleted"},
-            "scouting": {"processing", "error"},
-            "processing": {"idle", "error"},
-            "error": {"idle", "deleted"},
-        }
-
-    def can_transition_to(self, target: SessionState) -> bool:
-        valid = self.valid_transitions().get(self.value, set())
-        return target.value in valid
-
 
 @dataclass
 class AgentSession:
@@ -211,7 +198,15 @@ class AgentSession:
         self.state = new_state
 
     def emit_event(self, event: dict) -> None:
-        """Broadcast event to all subscribers and buffer it."""
+        """Broadcast event to all subscribers and buffer it.
+
+        Safe from any thread: the buffer append is lock-guarded, and the
+        subscriber-queue delivery is marshaled onto the main event loop —
+        asyncio.Queue.put_nowait from a tool thread wakes getters without
+        waking the selector, so events could arrive late or corrupt loop
+        internals (the question modal appearing seconds after ask_user was
+        exactly this shape).
+        """
         with self._event_lock:
             self.event_seq += 1
             event["_seq"] = self.event_seq
@@ -220,7 +215,12 @@ class AgentSession:
                 event["timestamp"] = time.time()
             self.events.append(event)
 
-        # Subscriber broadcast outside lock (snapshot-based, non-critical)
+        from core.events import run_on_loop
+
+        run_on_loop(self._deliver_to_subscribers, event)
+
+    def _deliver_to_subscribers(self, event: dict) -> None:
+        """Push an event to subscriber queues. Must run on the event loop."""
         dead = []
         subscriber_snapshot = list(self.subscribers)
         for q in subscriber_snapshot:

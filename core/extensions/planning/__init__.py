@@ -11,7 +11,6 @@ from pathlib import Path
 logger = logging.getLogger("pernix.ext.planning")
 
 REGISTRY_PATH = Path("data/registry.json")
-ARCHIVE_PATH = Path("data/registry_archive.json")
 
 
 def _load_registry() -> list[dict]:

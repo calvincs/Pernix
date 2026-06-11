@@ -133,6 +133,361 @@ def test_recall_no_matches(store):
 
 
 # ---------------------------------------------------------------------------
+# Archive (file-level) — archived files must stay out of the index
+# ---------------------------------------------------------------------------
+
+
+def test_archived_file_parses_as_empty(store):
+    from core.memory.format import is_file_archived, parse_entries_from_markdown
+
+    store.add_entry("Chromecast pairing steps", file_name="pernix.casting")
+    store.archive_file("pernix.casting")
+    raw = store.read_file("pernix.casting")
+    assert is_file_archived(raw)
+    assert parse_entries_from_markdown("pernix.casting", raw) == []
+
+
+def test_per_entry_archive_does_not_archive_file(store):
+    """Snooze dedup marks individual entries archived — file stays live."""
+    from core.memory.format import is_file_archived, parse_entries_from_markdown
+
+    store.add_entry("Keep this entry", file_name="pernix.notes")
+    store.add_entry("Archive this one", file_name="pernix.notes")
+    raw = store.read_file("pernix.notes")
+    raw = raw.replace(
+        "Archive this one",
+        "<!-- @archived: true -->\nArchive this one",
+    )
+    assert not is_file_archived(raw)
+    entries = parse_entries_from_markdown("pernix.notes", raw)
+    assert [e.content for e in entries] == ["Keep this entry"]
+
+
+def test_health_check_in_sync_after_archive(store):
+    """Archiving must not leave the index permanently 'out of sync' —
+    that mismatch made every startup health check reindex and resurrect."""
+    store.add_entry("Entry one", file_name="pernix.notes")
+    store.add_entry("Old workflow doc", file_name="pernix.old_stuff")
+    store.archive_file("pernix.old_stuff")
+    health = store.health_check()
+    assert health["in_sync"] is True
+
+
+def test_reindex_does_not_resurrect_archived_file(store):
+    store.add_entry("Live entry about sqlite tuning", file_name="pernix.notes")
+    store.add_entry("Dead entry about zorbofloop quux", file_name="pernix.old_stuff")
+    store.archive_file("pernix.old_stuff")
+
+    store.reindex()
+
+    results = store.search("zorbofloop quux")
+    assert all(r.entry.file_name != "pernix.old_stuff" for r in results)
+    counts = {f.name: f.entry_count for f in store.list_files()}
+    assert counts.get("pernix.old_stuff", 0) == 0
+    assert counts["pernix.notes"] == 1
+
+
+def test_add_entry_revives_archived_file(store):
+    from core.memory.format import is_file_archived
+
+    store.add_entry("Original casting note", file_name="pernix.casting")
+    store.archive_file("pernix.casting")
+
+    result = store.add_entry("New casting note", file_name="pernix.casting")
+    assert "Error" not in result
+
+    raw = store.read_file("pernix.casting")
+    assert not is_file_archived(raw)
+    # Both the prior entry and the new one are live and indexed again.
+    counts = {f.name: f.entry_count for f in store.list_files()}
+    assert counts["pernix.casting"] == 2
+    assert store.health_check()["in_sync"] is True
+
+
+# ---------------------------------------------------------------------------
+# Epoch identity — (file, epoch) must be unique
+# ---------------------------------------------------------------------------
+
+
+def test_add_entry_same_second_gets_unique_epochs(store):
+    """Two writes in the same epoch second must not share identity."""
+    fixed = 1700000000
+    store.add_entry("First fact", file_name="pernix.notes", epoch=fixed)
+    store.add_entry("Second fact", file_name="pernix.notes", epoch=fixed)
+
+    from core.memory.format import parse_entries_from_markdown
+
+    entries = parse_entries_from_markdown("pernix.notes", store.read_file("pernix.notes"))
+    epochs = [e.epoch for e in entries]
+    assert len(epochs) == len(set(epochs)) == 2
+    assert fixed in epochs and fixed + 1 in epochs
+
+
+def test_update_entry_refuses_ambiguous_epoch(store):
+    """Legacy files can hold colliding epochs — update must not rewrite both."""
+    store.add_entry("Entry A", file_name="pernix.notes", epoch=1700000000)
+    # Forge a legacy collision directly in the markdown (bypassing add_entry).
+    md = store._dir / "pernix.notes.md"
+    md.write_text(md.read_text() + "\n---\n<!-- @epoch: 1700000000 -->\n<!-- @type: note -->\nEntry B (collided)\n")
+
+    result = store.update_entry("pernix.notes", 1700000000, "Replacement")
+    assert "Error" in result and "share epoch" in result
+
+    result = store.delete_entry("pernix.notes", 1700000000)
+    assert "Error" in result and "share epoch" in result
+
+
+def test_health_check_repairs_epoch_collisions(store):
+    store.add_entry("Entry A", file_name="pernix.notes", epoch=1700000000)
+    md = store._dir / "pernix.notes.md"
+    md.write_text(md.read_text() + "\n---\n<!-- @epoch: 1700000000 -->\n<!-- @type: note -->\nEntry B (collided)\n")
+
+    health = store.health_check()
+    assert health["epoch_collisions"] == 1
+
+    health = store.health_check(fix=True)
+    assert health["repaired_epoch_collisions"] == 1
+    assert health["epoch_collisions"] == 0
+
+    from core.memory.format import parse_entries_from_markdown
+
+    entries = parse_entries_from_markdown("pernix.notes", store.read_file("pernix.notes"))
+    epochs = sorted(e.epoch for e in entries)
+    assert epochs == [1700000000, 1700000001]
+    # Each entry is individually addressable again.
+    assert "Error" not in store.update_entry("pernix.notes", 1700000001, "Entry B repaired")
+
+
+# ---------------------------------------------------------------------------
+# Separator sanitization — bare `---` lines must not split entries
+# ---------------------------------------------------------------------------
+
+
+def test_add_entry_with_horizontal_rule_survives_reindex(store):
+    from core.memory.format import parse_entries_from_markdown
+
+    store.add_entry("Steps:\n1. do one\n---\n2. do two after the rule", file_name="pernix.notes")
+    store.add_entry("Plain second entry", file_name="pernix.notes")
+
+    entries = parse_entries_from_markdown("pernix.notes", store.read_file("pernix.notes"))
+    assert len(entries) == 2
+    assert "do two after the rule" in entries[0].content
+
+    # Without sanitization the fragment after `---` was epoch-less and
+    # silently dropped here.
+    assert store.reindex() == 2
+    assert store.health_check()["in_sync"] is True
+
+
+def test_update_entry_with_horizontal_rule(store):
+    from core.memory.format import parse_entries_from_markdown
+
+    store.add_entry("Original entry", file_name="pernix.notes", epoch=1700000000)
+    result = store.update_entry("pernix.notes", 1700000000, "New intro\n---\nnew outro")
+    assert "Error" not in result
+
+    entries = parse_entries_from_markdown("pernix.notes", store.read_file("pernix.notes"))
+    assert len(entries) == 1
+    assert "new outro" in entries[0].content
+
+
+# ---------------------------------------------------------------------------
+# Dedup supersede hint
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_skip_points_at_existing_entry(store):
+    """A skipped duplicate must reference the matched entry so a newer or
+    corrected fact can supersede the stale one via update_memory instead of
+    being silently discarded (first-writer-wins)."""
+    original = "The staging server runs on port 8090 with TLS enabled and auto-restart configured."
+    store.add_entry(original, file_name="pernix.config", epoch=1700000000)
+
+    updated = "The staging server runs on port 8091 with TLS enabled and auto-restart configured."
+    result = store.add_entry(updated, file_name="pernix.config")
+
+    assert "skipped" in result
+    assert "pernix.config@1700000000" in result
+    assert "update_memory" in result
+    assert "port 8090" in result  # preview of the existing entry
+
+
+def test_find_duplicate_returns_none_for_novel_content(store):
+    store.add_entry(
+        "The staging server runs on port 8090 with TLS enabled and auto-restart configured.",
+        file_name="pernix.config",
+    )
+    assert store.find_duplicate("Completely unrelated fact about chromecast pairing on the LAN.") is None
+
+
+# ---------------------------------------------------------------------------
+# Hit tracking — automated paths must not inflate usage counts
+# ---------------------------------------------------------------------------
+
+
+def _hit_count(store, file_name: str) -> int:
+    conn = store._connect()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(hit_count), 0) AS total FROM memory_hits WHERE file_name = ?",
+            (file_name,),
+        ).fetchone()
+        return row["total"]
+    finally:
+        conn.close()
+
+
+def test_search_with_track_hits_false_records_nothing(store):
+    store.add_entry("Chromecast pairing uses mDNS discovery", file_name="pernix.casting")
+
+    store.search("chromecast pairing", _track_hits=False)
+    assert _hit_count(store, "pernix.casting") == 0
+
+    store.search("chromecast pairing")
+    assert _hit_count(store, "pernix.casting") > 0
+
+
+def test_search_lessons_with_track_hits_false_records_nothing(store):
+    store.add_entry(
+        "Lesson: yt-dlp needs cookies for age-gated videos",
+        file_name="pernix.lessons",
+        entry_type="lesson",
+    )
+
+    store.search_lessons("yt-dlp cookies", _track_hits=False)
+    assert _hit_count(store, "pernix.lessons") == 0
+
+    store.search_lessons("yt-dlp cookies")
+    assert _hit_count(store, "pernix.lessons") > 0
+
+
+# ---------------------------------------------------------------------------
+# Age + provenance in recall output
+# ---------------------------------------------------------------------------
+
+
+def test_search_results_carry_source_and_format_shows_provenance(store):
+    from core.memory.search import format_result_line
+
+    store.add_entry(
+        "The user prefers terse weekly summaries",
+        file_name="user.profile",
+        epoch=1700000000,
+        source="distill",
+    )
+    results = store.search("terse weekly summaries", _track_hits=False)
+    r = next(res for res in results if res.entry.file_name == "user.profile")
+    assert r.entry.source == "distill"
+
+    line = format_result_line(r)
+    assert "source=distill" in line
+    assert "date=2023-11-1" in line  # epoch 1700000000 → 2023-11-14/15 (tz-dependent)
+    assert "epoch=1700000000" in line
+
+
+def test_update_entry_stamps_updated_and_recall_shows_it(store):
+    from core.memory.format import parse_entries_from_markdown
+    from core.memory.search import format_result_line
+
+    store.add_entry("Server port is 8090", file_name="pernix.config", epoch=1700000000)
+    result = store.update_entry("pernix.config", 1700000000, "Server port is 8091 since June 2026")
+    assert "Error" not in result
+
+    entries = parse_entries_from_markdown("pernix.config", store.read_file("pernix.config"))
+    assert len(entries) == 1
+    assert entries[0].updated > 0
+    assert entries[0].epoch == 1700000000  # identity unchanged
+
+    results = store.search("server port", _track_hits=False)
+    r = next(res for res in results if res.entry.file_name == "pernix.config")
+    assert r.entry.updated > 0
+    line = format_result_line(r)
+    # The correction date is shown instead of the (old) epoch date.
+    assert "updated=" in line and "date=" not in line
+
+
+def test_update_entry_twice_keeps_single_updated_stamp(store):
+    from core.memory.format import parse_entries_from_markdown
+
+    store.add_entry("Fact v1", file_name="pernix.notes", epoch=1700000000)
+    store.update_entry("pernix.notes", 1700000000, "Fact v2")
+    store.update_entry("pernix.notes", 1700000000, "Fact v3")
+
+    raw = store.read_file("pernix.notes")
+    assert raw.count("@updated:") == 1
+    entries = parse_entries_from_markdown("pernix.notes", raw)
+    assert entries[0].content == "Fact v3"
+
+
+# ---------------------------------------------------------------------------
+# Hybrid search — temporal entries pad, never displace
+# ---------------------------------------------------------------------------
+
+
+def test_temporal_entries_do_not_displace_keyword_matches(store):
+    """When BM25 fills the requested top-k, today's unrelated entries must
+    not push relevant matches out (they used to enter at flat score 1.0)."""
+    import time as _time
+
+    old = int(_time.time()) - 7 * 86400  # outside the 24h temporal window
+    for i in range(6):
+        store.add_entry(f"kumquat protocol step {i}", file_name="pernix.notes", epoch=old + i)
+    store.add_entry("fresh unrelated chromecast note", file_name="pernix.casting")
+    store.add_entry("fresh unrelated linkedin note", file_name="pernix.social")
+
+    results = store.search("kumquat protocol", limit=5, _track_hits=False)
+    assert len(results) == 5
+    assert all("kumquat" in r.entry.content for r in results)
+
+
+def test_temporal_entries_pad_when_few_keyword_matches(store):
+    import time as _time
+
+    old = int(_time.time()) - 7 * 86400
+    store.add_entry("kumquat protocol overview", file_name="pernix.notes", epoch=old)
+    store.add_entry("fresh chromecast pairing note", file_name="pernix.casting")
+
+    results = store.search("kumquat protocol", limit=5, _track_hits=False)
+    # Keyword match ranks first; recent entry pads the remaining slots.
+    assert results[0].entry.content == "kumquat protocol overview"
+    assert any(r.source == "temporal" for r in results[1:])
+
+
+# ---------------------------------------------------------------------------
+# BM25 length normalization
+# ---------------------------------------------------------------------------
+
+
+def test_bm25_scores_are_length_normalized(store):
+    """Padding a query with filler tokens must not inflate the score —
+    the raw OR-sum grew with query length, making the documented absolute
+    thresholds (3.0 strong / 1.0 noise) meaningless for long queries."""
+    store.add_entry("zorblax calibration uses kumquat brine at 40 degrees", file_name="pernix.notes")
+
+    short = store.search("zorblax calibration", mode="bm25", _track_hits=False)
+    long = store.search(
+        "how would someone possibly configure the zorblax calibration procedure for the brine again today",
+        mode="bm25",
+        _track_hits=False,
+    )
+
+    assert short and long
+    assert short[0].entry.content == long[0].entry.content
+    assert long[0].score < short[0].score
+
+
+def test_prepare_fts_query_returns_token_count():
+    from core.memory.search import prepare_fts_query
+
+    fts, n = prepare_fts_query("web scraping challenges")
+    assert n == 3
+    assert fts == '"web" OR "scraping" OR "challenges"'
+
+    fts, n = prepare_fts_query("!!!")
+    assert n == 1  # degenerate fallback quotes the raw query
+
+
+# ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
 

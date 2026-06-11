@@ -18,9 +18,6 @@ from core.tools.paths import (
     allowed_read_roots as _allowed_roots,
 )
 from core.tools.paths import (
-    check_protected as _check_protected,
-)
-from core.tools.paths import (
     safe_read_path as _safe_path,
 )
 from core.tools.paths import (

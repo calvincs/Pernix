@@ -12,7 +12,6 @@ from core.reflect import (
     _result_from_data,
     _sanitize_turn_digest,
     _try_repair_json,
-    build_lessons_context,
     build_retry_context,
     reflect_on_session,
 )
@@ -31,11 +30,11 @@ def test_reflect_result_defaults():
 
 
 # ---------------------------------------------------------------------------
-# build_lessons_context
+# build_retry_context
 # ---------------------------------------------------------------------------
 
 
-def test_build_lessons_context():
+def test_build_retry_context():
     result = ReflectResult(
         verdict="retry",
         reasoning="Task was not completed",
@@ -44,7 +43,7 @@ def test_build_lessons_context():
         what_failed="bash returned error",
         strategy="Try using file_write directly",
     )
-    lessons = build_lessons_context(result, attempt=1, max_attempts=2)
+    lessons = build_retry_context(result, attempt=1, max_attempts=2)
     assert "Retry #1 of 2" in lessons
     assert "Task was not completed" in lessons
     assert "Missing file permissions" in lessons
@@ -53,9 +52,9 @@ def test_build_lessons_context():
     assert "file_write" in lessons
 
 
-def test_build_lessons_context_empty_fields():
+def test_build_retry_context_empty_fields():
     result = ReflectResult(verdict="retry", reasoning="failed")
-    lessons = build_lessons_context(result, attempt=2, max_attempts=3)
+    lessons = build_retry_context(result, attempt=2, max_attempts=3)
     assert "Retry #2 of 3" in lessons
     assert "failed" in lessons
 
@@ -650,12 +649,31 @@ def test_build_retry_context_no_digest_still_works():
     assert "try X next" in out
 
 
-def test_build_lessons_context_alias_is_back_compat():
-    """The renamed function preserves the old import name as an alias."""
-    result = ReflectResult(verdict="retry", reasoning="x")
-    a = build_lessons_context(result, attempt=1, max_attempts=2)
-    b = build_retry_context(result, attempt=1, max_attempts=2)
-    assert a == b
+def test_build_retry_context_flags_executed_side_effect_tools():
+    """Successful one-shot external actions (notify_user, schedule_job, …)
+    must surface as a hard DO-NOT-REPEAT block — reflect is biased toward
+    retry on unverifiable side effects, and without this the retry attempt
+    double-fires the action."""
+    result = ReflectResult(verdict="retry", reasoning="could not verify the notification arrived")
+    summary = {
+        "notify_user": {"calls": 1, "failures": 0, "errors": [], "total_latency_ms": 5},
+        "search_web": {"calls": 2, "failures": 0, "errors": [], "total_latency_ms": 900},
+    }
+    out = build_retry_context(result, attempt=1, max_attempts=2, tool_summary=summary)
+    assert "ALREADY EXECUTED" in out
+    assert "notify_user" in out.split("ALREADY EXECUTED")[1]
+    # Read-only tools must not be flagged as side effects.
+    assert "search_web" not in out.split("ALREADY EXECUTED")[1]
+
+
+def test_build_retry_context_no_side_effect_block_when_all_failed():
+    """A side-effecting tool that only FAILED is safe to retry — no guard."""
+    result = ReflectResult(verdict="retry", reasoning="notify failed")
+    summary = {
+        "notify_user": {"calls": 1, "failures": 1, "errors": ["boom"], "total_latency_ms": 5},
+    }
+    out = build_retry_context(result, attempt=1, max_attempts=2, tool_summary=summary)
+    assert "ALREADY EXECUTED" not in out
 
 
 # ---------------------------------------------------------------------------

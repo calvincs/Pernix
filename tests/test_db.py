@@ -45,6 +45,26 @@ def test_cascade_delete():
     assert len(db.get_messages(sid)) == 0
 
 
+def test_delete_session_cleans_messages_fts():
+    """delete_session must remove FTS rows — ON DELETE CASCADE never touches
+    the FTS table, so without the explicit delete the index leaks forever."""
+    from db.database import connect_sessions
+
+    sid = db.create_session()
+    db.add_message(sid, "user", "searchable zanzibar content")
+    db.add_message(sid, "assistant", "more zanzibar text here")
+
+    with connect_sessions() as conn:
+        before = conn.execute("SELECT COUNT(*) c FROM messages_fts WHERE session_id = ?", (sid,)).fetchone()["c"]
+    assert before == 2
+
+    db.delete_session(sid)
+
+    with connect_sessions() as conn:
+        after = conn.execute("SELECT COUNT(*) c FROM messages_fts WHERE session_id = ?", (sid,)).fetchone()["c"]
+    assert after == 0, "messages_fts rows must be deleted with the session"
+
+
 def test_worker_session_delete():
     parent = db.create_session(session_type="normal")
     worker = db.create_session(session_type="worker", parent_session_id=parent)
@@ -90,6 +110,41 @@ def test_compaction():
     compactions = [m for m in msgs if m["role"] == "compaction"]
     assert len(compactions) == 1
     assert "Summary text" in compactions[0]["content"]
+
+
+def test_failed_migration_rolls_back_atomically(monkeypatch):
+    """A migration that dies mid-way must leave no partial DDL behind and
+    must not bump the schema version — otherwise the re-run on next boot
+    hits 'duplicate column name' and the server refuses to start."""
+    import db.database as dbase
+    from db.database import connect_sessions
+
+    conn = connect_sessions()
+    try:
+        before_version = dbase._get_schema_version(conn)
+        fake = [
+            (
+                before_version + 1,
+                "test migration that fails after DDL",
+                [
+                    "ALTER TABLE sessions ADD COLUMN _mig_test_col TEXT",
+                    "THIS IS NOT VALID SQL",
+                ],
+            ),
+        ]
+        monkeypatch.setattr(dbase, "MIGRATIONS", fake)
+
+        try:
+            dbase._run_migrations(conn)
+            raise AssertionError("migration should have raised")
+        except Exception:
+            pass
+
+        assert dbase._get_schema_version(conn) == before_version
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()]
+        assert "_mig_test_col" not in cols, "partial DDL must be rolled back"
+    finally:
+        conn.close()
 
 
 def test_schema_version():

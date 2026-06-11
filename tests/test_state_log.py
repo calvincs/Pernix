@@ -235,6 +235,31 @@ def test_get_state_log_since_id_filters(session):
     assert later[0]["reason"] == "scout-done"
 
 
+def test_get_state_log_tail_returns_newest_window(session):
+    sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
+    sv2.transition(session, sv2.SessionStateV2.FINALIZING, "loop-complete")
+    sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "turn-complete")
+
+    tail = db.get_state_log(session.session_id, limit=2, tail=True)
+    assert [r["reason"] for r in tail] == ["loop-complete", "turn-complete"]
+    # Still oldest-first within the window.
+    assert tail[0]["id"] < tail[1]["id"]
+
+
+def test_get_state_log_before_id_pages_backward(session):
+    sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
+    sv2.transition(session, sv2.SessionStateV2.FINALIZING, "loop-complete")
+    sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "turn-complete")
+
+    tail = db.get_state_log(session.session_id, limit=2, tail=True)
+    older = db.get_state_log(session.session_id, before_id=tail[0]["id"], limit=2)
+    assert [r["reason"] for r in older] == ["prompt-arrived", "scout-done"]
+    # Paging past the start yields nothing.
+    assert db.get_state_log(session.session_id, before_id=older[0]["id"], limit=2) == []
+
+
 def test_compat_status_maps_correctly():
     assert sv2.compat_status(sv2.SessionStateV2.IDLE_READY) == "idle"
     assert sv2.compat_status(sv2.SessionStateV2.AWAITING_USER) == "idle"

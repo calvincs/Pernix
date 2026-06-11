@@ -14,6 +14,7 @@ from difflib import SequenceMatcher
 
 from config import settings
 from core.memory.format import MemoryEntry
+from core.memory.routing import name_tokens, normalize_file_name
 
 logger = logging.getLogger("pernix.memory.consolidate")
 
@@ -53,47 +54,12 @@ class MergeDecision:
 
 
 # ---------------------------------------------------------------------------
-# Filename normalization (shared with store.py)
+# Filename normalization — canonical implementations in core.memory.routing,
+# aliased here for existing callers/tests.
 # ---------------------------------------------------------------------------
 
-
-def normalize_filename(name: str) -> str:
-    """Canonicalize a file name for comparison.
-
-    Strips extensions, noise suffixes, normalizes separators to underscore.
-    Matches MemoryStore._normalize_name() logic.
-    """
-    import re
-
-    name = name.lower()
-    for suffix in ("_txt", "_json", "_py", "_html", "_log", "_csv"):
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
-    name = re.sub(r"[-.]", "_", name)
-    while "__" in name:
-        name = name.replace("__", "_")
-    for noise in (
-        "_notes",
-        "_log",
-        "_summary",
-        "_overview",
-        "_report",
-        "_analysis",
-        "_strategy",
-        "_guide",
-        "_spec",
-        "_template",
-    ):
-        if name.endswith(noise):
-            name = name[: -len(noise)]
-    return name.strip("_")
-
-
-def _name_tokens(name: str) -> set[str]:
-    """Split a file name into word tokens (length > 2)."""
-    import re
-
-    return {t for t in re.split(r"[._-]", name.lower()) if len(t) > 2}
+normalize_filename = normalize_file_name
+_name_tokens = name_tokens
 
 
 # ---------------------------------------------------------------------------

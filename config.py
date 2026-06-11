@@ -257,11 +257,6 @@ class Settings:
     workflows_dir: str = "data/workflows"
 
     @property
-    def workspace_venv_path(self) -> str:
-        """Path to the workspace virtual environment."""
-        return str(Path(self.workspace_dir).resolve() / ".venv")
-
-    @property
     def workspace_venv_python(self) -> str:
         """Path to the workspace venv Python executable."""
         return str(Path(self.workspace_dir).resolve() / ".venv" / "bin" / "python")

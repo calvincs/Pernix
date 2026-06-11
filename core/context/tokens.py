@@ -102,12 +102,6 @@ class TokenEstimator:
         """Count total tokens across all messages."""
         return sum(self.count_message(m) for m in messages)
 
-    def count_tool_schemas(self, tools: list[dict]) -> int:
-        """Count tokens for tool schema definitions."""
-        if not tools:
-            return 0
-        return self.count(json.dumps(tools))
-
 
 # Module-level singleton
 _estimator: TokenEstimator | None = None
@@ -119,8 +113,3 @@ def get_estimator() -> TokenEstimator:
     if _estimator is None:
         _estimator = TokenEstimator()
     return _estimator
-
-
-def estimate_tokens(text: str) -> int:
-    """Convenience: estimate tokens for a string."""
-    return get_estimator().count(text)

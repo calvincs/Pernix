@@ -41,13 +41,6 @@ def _combine_rapid_fire(existing: str, addition: str) -> str:
     return f"{_COMBINED_PREFIX}\n\n1. {existing}\n\n2. {addition}"
 
 
-def _persist_legacy_state(session: AgentSession) -> None:
-    """Write the session's current legacy state enum to the sessions table.
-    Called after every state_v2.transition() so the DB row stays coherent
-    with in-memory state for external readers (list_sessions, etc.)."""
-    db.set_session_state(session.session_id, session.state.value)
-
-
 def _check_session_budget_or_raise(session_id: str) -> None:
     """Raise LLMSessionTimeoutError if the session's LLM time budget is gone.
 
@@ -160,7 +153,15 @@ def _map_termination_to_v2_reason(tr: str | None) -> tuple[str, sv2.TerminationR
         # out of LLM time mid-turn" from a genuine "complete" outcome.
         "budget_exhausted": ("loop-complete", sv2.TerminationReason.BUDGET_EXHAUSTED),
     }
-    return mapping.get(tr or "complete", ("loop-complete", sv2.TerminationReason.COMPLETE))
+    key = tr or "complete"
+    if key not in mapping:
+        # A termination reason added in agent.py but not mapped here would
+        # silently log the turn as a clean "complete" — make the drift loud.
+        logger.warning(
+            "Unknown termination_reason %r — defaulting to loop-complete/complete; update _map_termination_to_v2_reason",
+            tr,
+        )
+    return mapping.get(key, ("loop-complete", sv2.TerminationReason.COMPLETE))
 
 
 class SessionManager:
@@ -267,7 +268,6 @@ class SessionManager:
                 )
                 try:
                     sv2.transition(parent, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
-                    _persist_legacy_state(parent)
                 except Exception as _e:
                     logger.error("reconcile force-resume failed: %s", _e)
                 continue
@@ -344,7 +344,6 @@ class SessionManager:
                 logger.warning("Boot reconcile: resetting stuck PROCESSING session %s", sid[:12])
                 try:
                     sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
-                    _persist_legacy_state(session)
                 except Exception as _e:
                     logger.error("reconcile_processing reset failed for %s: %s", sid, _e)
                     continue
@@ -359,7 +358,6 @@ class SessionManager:
                 )
                 try:
                     db.set_session_state_v2(sid, sv2.SessionStateV2.IDLE_READY.value)
-                    _persist_legacy_state(session)
                 except Exception as _e:
                     logger.error("reconcile_processing legacy fix failed for %s: %s", sid, _e)
                     continue
@@ -376,6 +374,80 @@ class SessionManager:
                 }
             )
             reset += 1
+        return reset
+
+    async def reconcile_interrupted_sessions(self) -> int:
+        """Boot-time sweep for the remaining non-terminal v2 states.
+
+        reconcile_processing_sessions/reconcile_awaiting_workers cover
+        PROCESSING and AWAITING_WORKERS, but a crash during scout,
+        compaction, cancel, pause, or finalize persists those states too.
+        No asyncio task survives a restart, so resetting to IDLE_READY is
+        always safe — without this, a new prompt queues behind a phantom
+        turn (or is rejected for CANCELLING) until the reaper's 5-minute
+        cadence catches up, 5-15 minutes of silent unresponsiveness.
+
+        AWAITING_USER is deliberately NOT swept: a pending question
+        legitimately survives restarts and the /answer endpoint
+        transitions it out.
+        """
+        # Per-state reason that the transition table accepts toward IDLE_READY.
+        sweep: list[tuple[sv2.SessionStateV2, str]] = [
+            (sv2.SessionStateV2.SCOUTING, "reaper-unstick"),
+            (sv2.SessionStateV2.PAUSE_REQUESTED, "reaper-unstick"),
+            (sv2.SessionStateV2.PAUSED, "reaper-unstick"),
+            (sv2.SessionStateV2.CANCELLING, "cancel-timeout"),
+            (sv2.SessionStateV2.FINALIZING, "finalize-error"),
+            (sv2.SessionStateV2.COMPACTING, "compaction-failed"),  # routes via FINALIZING
+        ]
+        reset = 0
+        for target_state, reason in sweep:
+            try:
+                rows = db.get_sessions_in_state_v2(target_state.value)
+            except Exception as e:
+                logger.error("reconcile_interrupted: DB sweep failed for %s: %s", target_state.value, e)
+                continue
+            for row in rows:
+                sid = row["id"]
+                try:
+                    session = self.get_or_create(sid)
+                except ValueError:
+                    continue
+                if sv2._current_state(session) is not target_state:
+                    continue  # already recovered
+                logger.warning(
+                    "Boot reconcile: resetting stuck %s session %s",
+                    target_state.value,
+                    sid[:12],
+                )
+                try:
+                    session.cancel_requested = False
+                    session.pause_event.set()  # IDLE_READY invariant; no task exists to wake
+                    if reason == "compaction-failed":
+                        sv2.transition(
+                            session,
+                            sv2.SessionStateV2.FINALIZING,
+                            reason,
+                            termination_reason=sv2.TerminationReason.COMPACTION_FAILED,
+                        )
+                    else:
+                        sv2.transition(session, sv2.TRANSITIONS[(target_state, reason)], reason)
+                    # COMPACTING lands in FINALIZING; finish the route home.
+                    if sv2._current_state(session) is sv2.SessionStateV2.FINALIZING:
+                        sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "finalize-error")
+                except Exception as _e:
+                    logger.error("reconcile_interrupted reset failed for %s: %s", sid, _e)
+                    continue
+                session.emit_event(
+                    {
+                        "type": "system",
+                        "content": (
+                            "Session was interrupted by a server restart and has been reset. "
+                            "You can send a new message."
+                        ),
+                    }
+                )
+                reset += 1
         return reset
 
     def _persist_watched(self, session: AgentSession) -> None:
@@ -562,7 +634,8 @@ class SessionManager:
                 # while waiting, then queue for later processing.
                 msg_id = None
                 if message:
-                    msg_id = db.add_message(
+                    msg_id = await asyncio.to_thread(
+                        db.add_message,
                         session_id,
                         "user",
                         message,
@@ -575,6 +648,9 @@ class SessionManager:
                     {
                         "type": "session.queued",
                         "queue_depth": len(session.pending_messages),
+                        # Lets the UI tag the queued bubble so it can offer
+                        # removal via DELETE /pending/{message_id}.
+                        "message_id": msg_id,
                     }
                 )
                 logger.debug("Message queued for busy session %s (depth=%d)", session_id, len(session.pending_messages))
@@ -658,7 +734,8 @@ class SessionManager:
                             _oid,
                         )
                 if message:
-                    _new_id = db.add_message(
+                    _new_id = await asyncio.to_thread(
+                        db.add_message,
                         session.session_id,
                         "user",
                         message,
@@ -676,7 +753,8 @@ class SessionManager:
             # short-circuits to "duplicate". Without inline persistence, the
             # second call's SELECT runs before _run_agent_safe writes the row.
             if message:
-                _new_id = db.add_message(
+                _new_id = await asyncio.to_thread(
+                    db.add_message,
                     session.session_id,
                     "user",
                     message,
@@ -744,7 +822,7 @@ class SessionManager:
             # Only for fresh IDLE_READY turns not already persisted by the caller.
             _pre_saved = pre_saved
             if start_state is sv2.SessionStateV2.IDLE_READY and message and not pre_saved:
-                _new_id = db.add_message(session.session_id, "user", message)
+                _new_id = await asyncio.to_thread(db.add_message, session.session_id, "user", message)
                 # Track for the rapid-fire combiner — if more messages arrive
                 # within RAPID_FIRE_WINDOW_SECONDS of this turn starting, they
                 # fold into this row rather than queue as a new turn.
@@ -757,9 +835,15 @@ class SessionManager:
                 _pre_saved = True
 
             sv2.transition(session, sv2.SessionStateV2.SCOUTING, start_reason)
-            _persist_legacy_state(session)
 
-            await self._run_scout_and_process(session, message, pre_saved=_pre_saved)
+            await self._run_scout_and_process(
+                session,
+                message,
+                pre_saved=_pre_saved,
+                # Answer-resumed turns continue the same task — reuse the
+                # suspended turn's scout report instead of re-scouting.
+                reuse_scout=start_reason == "answer-received",
+            )
 
         except asyncio.CancelledError:
             _was_cancelled = True
@@ -781,7 +865,6 @@ class SessionManager:
                         _cancel_reason,
                         termination_reason=sv2.TerminationReason.CANCELLED,
                     )
-                    _persist_legacy_state(session)
                 except Exception as _e:
                     logger.error("Cancel transition failed for %s: %s", session.session_id, _e)
             # Cascade cancel to any workers this session is watching. They
@@ -815,7 +898,6 @@ class SessionManager:
                         "scout-error",
                         termination_reason=sv2.TerminationReason.SCOUT_ERROR,
                     )
-                    _persist_legacy_state(session)
                 except Exception as _e:
                     logger.error("Scout-error transition failed: %s", _e)
             else:
@@ -827,7 +909,6 @@ class SessionManager:
                         "agent-error",
                         termination_reason=sv2.TerminationReason.ERROR,
                     )
-                    _persist_legacy_state(session)
                 except Exception as _e:
                     logger.error("Agent-error transition failed: %s", _e)
             session.emit_event({"type": "stream.error", "error": str(e)})
@@ -847,281 +928,77 @@ class SessionManager:
             if is_budget_exhausted and session.session_type != "worker":
                 _broadcast_session_timeout_notification(session)
         finally:
-            session.touch()
+            await self._finalize_turn(session, message, system_prompt, _was_cancelled)
 
-            # If cancelled, close out via CANCELLING → IDLE_READY, skip post-hooks.
-            if _was_cancelled or session.cancel_requested:
-                current = sv2._current_state(session)
-                cancel_reason = "cancel-complete"
-                # Clear the cancel flag before every IDLE_READY transition —
-                # the invariant check fires if cancel_requested is True on entry.
-                session.cancel_requested = False
-                if current == sv2.SessionStateV2.CANCELLING:
-                    try:
-                        sv2.transition(
-                            session,
-                            sv2.SessionStateV2.IDLE_READY,
-                            "cancel-complete",
-                        )
-                        _persist_legacy_state(session)
-                    except Exception as _e:
-                        logger.error("Cancel-complete transition failed: %s", _e)
-                elif current != sv2.SessionStateV2.IDLE_READY:
-                    # Race: cancel flag set but we never reached CANCELLING.
-                    # Use an explicit cancel-timeout edge to IDLE_READY.
-                    cancel_reason = "cancel-timeout"
-                    try:
-                        sv2.transition(
-                            session,
-                            sv2.SessionStateV2.IDLE_READY,
-                            "cancel-timeout",
-                        )
-                        _persist_legacy_state(session)
-                    except Exception as _e:
-                        logger.error("Cancel-timeout fallback failed: %s", _e)
-                # Record a transcript-visible marker so readers see the turn
-                # ended in cancellation (not silently dropped). The "notice"
-                # role is filtered from LLM context by core/context/compiler.py
-                # so it doesn't leak into the next turn's prompt.
-                try:
-                    db.add_message(
-                        session.session_id,
-                        "notice",
-                        f"[turn cancelled — {cancel_reason}]",
-                    )
-                except Exception as _e:
-                    logger.debug("Cancel notice insert skipped: %s", _e)
-                # The /cancel API endpoint already drains pending_messages and
-                # writes a "[N queued message(s) dropped]" notice when the
-                # queue had entries. We don't redo that here — by the time the
-                # agent task's CancelledError reaches this finally, the queue
-                # has already been cleared.
-                # Clear the turn-scoped user-msg id on cancel.
-                session.current_turn_user_msg_id = None
-                session.emit_event({"type": "turn.complete"})
-                # Even on cancel, if this is a worker, the parent may be
-                # watching us via _watched_worker_ids. Without firing the
-                # callback here, a parent waiting on a single cancelled
-                # worker deadlocks — _on_watched_worker_done is the only
-                # path that empties the watch-set and resumes the parent.
-                if session.session_type == "worker" and session.parent_session_id:
-                    self.emit(
-                        session.parent_session_id,
-                        {
-                            "type": "worker.done",
-                            "worker_id": session.session_id,
-                            "termination_reason": session.termination_reason,
-                            "error": session.error,
-                        },
-                    )
-                    try:
-                        await self._on_watched_worker_done(session)
-                    except Exception as _e:
-                        logger.error("Cancel-path watcher notify failed: %s", _e)
-                return
+    async def _finalize_turn(
+        self,
+        session: AgentSession,
+        message: str,
+        system_prompt: str,
+        was_cancelled: bool,
+    ) -> None:
+        """Terminal phase of every agent turn — extracted verbatim from
+        _run_agent_safe's finally block. Routes the session from its
+        post-loop state through CANCELLING/FINALIZING to IDLE_READY, runs
+        post-hooks plus the reflect/eval retry loop, restores model
+        overrides, stamps worker summaries, and drains the pending queue.
+        Always invoked from the finally of _run_agent_safe."""
+        session.touch()
 
-            # Normal path: if the agent loop returned cleanly we're still in
-            # PROCESSING. Transition to FINALIZING with a termination reason
-            # derived from what agent.py left in session.termination_reason.
-            # If we ended inside COMPACTING (unexpected — compact paths always
-            # transition back), route via compaction-failed so reflect
-            # classifies honestly.
+        # If cancelled, close out via CANCELLING → IDLE_READY, skip post-hooks.
+        if was_cancelled or session.cancel_requested:
             current = sv2._current_state(session)
-            if current == sv2.SessionStateV2.PROCESSING:
-                v2_reason, v2_term = _map_termination_to_v2_reason(session.termination_reason)
-                try:
-                    sv2.transition(
-                        session,
-                        sv2.SessionStateV2.FINALIZING,
-                        v2_reason,
-                        termination_reason=v2_term,
-                    )
-                    _persist_legacy_state(session)
-                except Exception as _e:
-                    logger.error("Loop-complete transition failed: %s", _e)
-            elif current == sv2.SessionStateV2.COMPACTING:
-                try:
-                    sv2.transition(
-                        session,
-                        sv2.SessionStateV2.FINALIZING,
-                        "compaction-failed",
-                        termination_reason=sv2.TerminationReason.COMPACTION_FAILED,
-                    )
-                    _persist_legacy_state(session)
-                except Exception as _e:
-                    logger.error("COMPACTING→FINALIZING fallback failed: %s", _e)
-
-            # Post-hooks + Reflect retry loop (same control flow as before)
-            reflect_retry_cap = (
-                settings.reflect_max_retries_worker
-                if session.session_type == "worker"
-                else settings.reflect_max_retries
-            )
-            try:
-                while True:
-                    await self._run_post_hooks(session)
-
-                    in_finalizing = sv2._current_state(session) == sv2.SessionStateV2.FINALIZING
-                    if (
-                        session.reflect_retry_requested
-                        and session.reflect_count < reflect_retry_cap
-                        and not session.pending_messages
-                        and in_finalizing
-                    ):
-                        session.reflect_retry_requested = False
-                        logger.info("Reflect retry #%d for session %s", session.reflect_count, session.session_id)
-                        await self._run_agent_retry(session, message, system_prompt, retry_kind="reflect-retry")
-                        continue
-
-                    # Eval retry (only if reflect didn't retry)
-                    in_finalizing = sv2._current_state(session) == sv2.SessionStateV2.FINALIZING
-                    if (
-                        session.eval_retry_requested
-                        and session.eval_count < settings.eval_max_retries
-                        and not session.pending_messages
-                        and in_finalizing
-                    ):
-                        session.eval_retry_requested = False
-                        logger.info("Eval retry #%d for session %s", session.eval_count, session.session_id)
-                        await self._run_agent_retry(session, message, system_prompt, retry_kind="eval-retry")
-                        continue
-                    break
-            except asyncio.CancelledError:
-                # A cancel arrived during a reflect/eval retry (_run_agent_retry
-                # already transitioned the session to CANCELLING and re-raised).
-                # Complete the CANCELLING → IDLE_READY arc here so the session
-                # doesn't linger in CANCELLING waiting for the 30s reaper timeout.
-                _cur = sv2._current_state(session)
-                if _cur == sv2.SessionStateV2.CANCELLING:
-                    try:
-                        session.cancel_requested = False  # satisfy IDLE_READY invariant
-                        sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "cancel-complete")
-                        _persist_legacy_state(session)
-                    except Exception as _e:
-                        logger.error("Cancel-complete (retry cancel) failed for %s: %s", session.session_id, _e)
-                elif _cur != sv2.SessionStateV2.IDLE_READY:
-                    try:
-                        session.cancel_requested = False  # satisfy IDLE_READY invariant
-                        sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "cancel-timeout")
-                        _persist_legacy_state(session)
-                    except Exception as _e:
-                        logger.error("Cancel-timeout (retry cancel) failed for %s: %s", session.session_id, _e)
-                session.emit_event({"type": "turn.complete"})
-                # Mirror the primary cancel branch: notify any watching parent
-                # so it doesn't deadlock waiting on this cancelled worker.
-                if session.session_type == "worker" and session.parent_session_id:
-                    self.emit(
-                        session.parent_session_id,
-                        {
-                            "type": "worker.done",
-                            "worker_id": session.session_id,
-                            "termination_reason": session.termination_reason,
-                            "error": session.error,
-                        },
-                    )
-                    try:
-                        await self._on_watched_worker_done(session)
-                    except Exception as _e:
-                        logger.error("Retry-cancel watcher notify failed: %s", _e)
-                return
-
-            # Restore per-session model override AFTER all retries complete.
-            if session._model_before_agent_switch is not None:
-                before = session._model_before_agent_switch
-                session._model_before_agent_switch = None
-                # Capture the model that was active during this turn BEFORE restoring
-                active_during_turn = session.model_override or settings.llm_model
-                session.model_override = before if before != "" else None
-                before_budget = session._budget_before_agent_switch
-                session._budget_before_agent_switch = None
-                session.context_budget_override = before_budget if before_budget not in (None, -1) else None
-                restored_to = session.model_override or settings.llm_model
-                logger.info(
-                    "Restored per-session model override after agent turn and retries (was: %s)", before or "none"
-                )
-                session.emit_event(
-                    {
-                        "type": "model.override",
-                        "from": active_during_turn,
-                        "to": session.model_override,
-                        "active": session.model_override is not None,
-                    }
-                )
-                # Persist a model_divider so the switch-back is visible after reload.
-                # Only write it if the model actually changed (skip no-op restores).
-                if active_during_turn != restored_to:
-                    import json as _json
-
-                    try:
-                        db.add_message(
-                            session.session_id,
-                            "model_divider",
-                            "",
-                            metadata=_json.dumps(
-                                {
-                                    "from": active_during_turn,
-                                    "to": restored_to,
-                                    "active": False,
-                                    "baseline": settings.llm_model,
-                                }
-                            ),
-                        )
-                    except Exception as _e:
-                        logger.debug("model_divider restore persist failed: %s", _e)
-
-            # Stamp the worker's terminal summary file AFTER all reflect retries.
-            # Skip when the worker is paused on ask_user — stamping now would
-            # write the "I've asked you a question" placeholder as the
-            # terminal summary, and the second pass (after the user answers)
-            # short-circuits because the file already exists. The real final
-            # answer would never make it into the summary file.
-            if session.session_type == "worker" and sv2._current_state(session) is not sv2.SessionStateV2.AWAITING_USER:
-                try:
-                    await self._finalize_worker(session)
-                except Exception as _fin_err:
-                    logger.error("Worker finalize failed for %s: %s", session.session_id, _fin_err)
-
-            # FINALIZING → IDLE_READY — turn fully done.
-            if sv2._current_state(session) == sv2.SessionStateV2.FINALIZING:
+            cancel_reason = "cancel-complete"
+            # Clear the cancel flag before every IDLE_READY transition —
+            # the invariant check fires if cancel_requested is True on entry.
+            session.cancel_requested = False
+            if current == sv2.SessionStateV2.CANCELLING:
                 try:
                     sv2.transition(
                         session,
                         sv2.SessionStateV2.IDLE_READY,
-                        "turn-complete",
+                        "cancel-complete",
                     )
-                    _persist_legacy_state(session)
                 except Exception as _e:
-                    logger.error("Turn-complete transition failed: %s", _e)
-
-            # Clear the turn-scoped user-msg id; the next turn will set its own.
-            # Capture it first — the sweep uses it to exclude the just-completed
-            # turn's user message from the orphan list (agents that don't write
-            # assistant messages, e.g. stubs, would otherwise look like orphans).
-            _completed_turn_msg_id = session.current_turn_user_msg_id
+                    logger.error("Cancel-complete transition failed: %s", _e)
+            elif current != sv2.SessionStateV2.IDLE_READY:
+                # Race: cancel flag set but we never reached CANCELLING.
+                # Use an explicit cancel-timeout edge to IDLE_READY.
+                cancel_reason = "cancel-timeout"
+                try:
+                    sv2.transition(
+                        session,
+                        sv2.SessionStateV2.IDLE_READY,
+                        "cancel-timeout",
+                    )
+                except Exception as _e:
+                    logger.error("Cancel-timeout fallback failed: %s", _e)
+            # Record a transcript-visible marker so readers see the turn
+            # ended in cancellation (not silently dropped). The "notice"
+            # role is filtered from LLM context by core/context/compiler.py
+            # so it doesn't leak into the next turn's prompt.
+            try:
+                db.add_message(
+                    session.session_id,
+                    "notice",
+                    f"[turn cancelled — {cancel_reason}]",
+                )
+            except Exception as _e:
+                logger.debug("Cancel notice insert skipped: %s", _e)
+            # The /cancel API endpoint already drains pending_messages and
+            # writes a "[N queued message(s) dropped]" notice when the
+            # queue had entries. We don't redo that here — by the time the
+            # agent task's CancelledError reaches this finally, the queue
+            # has already been cleared.
+            # Clear the turn-scoped user-msg id on cancel.
             session.current_turn_user_msg_id = None
             session.emit_event({"type": "turn.complete"})
-
-            # Window A recovery: if pending_messages is empty, check the DB for
-            # any user message that arrived during post-hooks but was lost from
-            # the in-memory queue (e.g., server restarted between the
-            # FINALIZING→IDLE_READY write and _process_pending running).
-            if not session.pending_messages:
-                await self._sweep_db_pending(session, exclude_msg_id=_completed_turn_msg_id)
-
-            # Worker-specific: notify the parent session that this worker
-            # turn has fully settled. Frontend listens for `worker.done`
-            # to close progress indicators on the parent's worker panel.
-            # Skip for AWAITING_USER — the worker is paused on ask_user, not
-            # done. Without this guard, the parent's _on_watched_worker_done
-            # auto-resumes it prematurely, then get_worker_result returns the
-            # worker's "I've asked you a question" suspension placeholder
-            # instead of the real final answer once the user replies.
-            cur_v2 = sv2._current_state(session)
-            if (
-                session.session_type == "worker"
-                and session.parent_session_id
-                and cur_v2 is not sv2.SessionStateV2.AWAITING_USER
-            ):
+            # Even on cancel, if this is a worker, the parent may be
+            # watching us via _watched_worker_ids. Without firing the
+            # callback here, a parent waiting on a single cancelled
+            # worker deadlocks — _on_watched_worker_done is the only
+            # path that empties the watch-set and resumes the parent.
+            if session.session_type == "worker" and session.parent_session_id:
                 self.emit(
                     session.parent_session_id,
                     {
@@ -1131,11 +1008,244 @@ class SessionManager:
                         "error": session.error,
                     },
                 )
-                # Gap 1+2: wake parent if it's watching this worker.
-                await self._on_watched_worker_done(session)
+                try:
+                    await self._on_watched_worker_done(session)
+                except Exception as _e:
+                    logger.error("Cancel-path watcher notify failed: %s", _e)
+            return
 
-            # Process pending messages.
-            await self._process_pending(session)
+        # Normal path: if the agent loop returned cleanly we're still in
+        # PROCESSING. Transition to FINALIZING with a termination reason
+        # derived from what agent.py left in session.termination_reason.
+        # If we ended inside COMPACTING (unexpected — compact paths always
+        # transition back), route via compaction-failed so reflect
+        # classifies honestly.
+        current = sv2._current_state(session)
+        if current == sv2.SessionStateV2.PROCESSING:
+            v2_reason, v2_term = _map_termination_to_v2_reason(session.termination_reason)
+            try:
+                sv2.transition(
+                    session,
+                    sv2.SessionStateV2.FINALIZING,
+                    v2_reason,
+                    termination_reason=v2_term,
+                )
+            except Exception as _e:
+                logger.error("Loop-complete transition failed: %s", _e)
+        elif current == sv2.SessionStateV2.COMPACTING:
+            try:
+                sv2.transition(
+                    session,
+                    sv2.SessionStateV2.FINALIZING,
+                    "compaction-failed",
+                    termination_reason=sv2.TerminationReason.COMPACTION_FAILED,
+                )
+            except Exception as _e:
+                logger.error("COMPACTING→FINALIZING fallback failed: %s", _e)
+
+        # Post-hooks + Reflect retry loop (same control flow as before)
+        reflect_retry_cap = (
+            settings.reflect_max_retries_worker if session.session_type == "worker" else settings.reflect_max_retries
+        )
+        try:
+            while True:
+                await self._run_post_hooks(session)
+
+                # A user message queued mid-reflect pre-empts any retry (user
+                # work takes priority) and the next turn deliberately clears
+                # reflect_lessons. Don't let the failed-verification signal
+                # vanish silently: drop the retry here with a transcript-
+                # visible notice ("notice" rows are filtered from LLM context
+                # by the compiler, so nothing leaks into the next turn).
+                if (session.reflect_retry_requested or session.eval_retry_requested) and session.pending_messages:
+                    dropped_kind = "reflect" if session.reflect_retry_requested else "eval"
+                    session.reflect_retry_requested = False
+                    session.eval_retry_requested = False
+                    try:
+                        db.add_message(
+                            session.session_id,
+                            "notice",
+                            f"[{dropped_kind} verdict was 'retry', but a queued message pre-empted the retry "
+                            "— this turn's outcome is unverified; see the reflect entry above for details]",
+                        )
+                    except Exception as _e:
+                        logger.debug("Dropped-retry notice insert skipped: %s", _e)
+                    logger.info(
+                        "%s retry for session %s dropped — queued message takes priority",
+                        dropped_kind,
+                        session.session_id,
+                    )
+
+                in_finalizing = sv2._current_state(session) == sv2.SessionStateV2.FINALIZING
+                if (
+                    session.reflect_retry_requested
+                    and session.reflect_count < reflect_retry_cap
+                    and not session.pending_messages
+                    and in_finalizing
+                ):
+                    session.reflect_retry_requested = False
+                    logger.info("Reflect retry #%d for session %s", session.reflect_count, session.session_id)
+                    await self._run_agent_retry(session, message, system_prompt, retry_kind="reflect-retry")
+                    continue
+
+                # Eval retry (only if reflect didn't retry)
+                in_finalizing = sv2._current_state(session) == sv2.SessionStateV2.FINALIZING
+                if (
+                    session.eval_retry_requested
+                    and session.eval_count < settings.eval_max_retries
+                    and not session.pending_messages
+                    and in_finalizing
+                ):
+                    session.eval_retry_requested = False
+                    logger.info("Eval retry #%d for session %s", session.eval_count, session.session_id)
+                    await self._run_agent_retry(session, message, system_prompt, retry_kind="eval-retry")
+                    continue
+                break
+        except asyncio.CancelledError:
+            # A cancel arrived during a reflect/eval retry (_run_agent_retry
+            # already transitioned the session to CANCELLING and re-raised).
+            # Complete the CANCELLING → IDLE_READY arc here so the session
+            # doesn't linger in CANCELLING waiting for the 30s reaper timeout.
+            _cur = sv2._current_state(session)
+            if _cur == sv2.SessionStateV2.CANCELLING:
+                try:
+                    session.cancel_requested = False  # satisfy IDLE_READY invariant
+                    sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "cancel-complete")
+                except Exception as _e:
+                    logger.error("Cancel-complete (retry cancel) failed for %s: %s", session.session_id, _e)
+            elif _cur != sv2.SessionStateV2.IDLE_READY:
+                try:
+                    session.cancel_requested = False  # satisfy IDLE_READY invariant
+                    sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "cancel-timeout")
+                except Exception as _e:
+                    logger.error("Cancel-timeout (retry cancel) failed for %s: %s", session.session_id, _e)
+            session.emit_event({"type": "turn.complete"})
+            # Mirror the primary cancel branch: notify any watching parent
+            # so it doesn't deadlock waiting on this cancelled worker.
+            if session.session_type == "worker" and session.parent_session_id:
+                self.emit(
+                    session.parent_session_id,
+                    {
+                        "type": "worker.done",
+                        "worker_id": session.session_id,
+                        "termination_reason": session.termination_reason,
+                        "error": session.error,
+                    },
+                )
+                try:
+                    await self._on_watched_worker_done(session)
+                except Exception as _e:
+                    logger.error("Retry-cancel watcher notify failed: %s", _e)
+            return
+
+        # Restore per-session model override AFTER all retries complete.
+        if session._model_before_agent_switch is not None:
+            before = session._model_before_agent_switch
+            session._model_before_agent_switch = None
+            # Capture the model that was active during this turn BEFORE restoring
+            active_during_turn = session.model_override or settings.llm_model
+            session.model_override = before if before != "" else None
+            before_budget = session._budget_before_agent_switch
+            session._budget_before_agent_switch = None
+            session.context_budget_override = before_budget if before_budget not in (None, -1) else None
+            restored_to = session.model_override or settings.llm_model
+            logger.info("Restored per-session model override after agent turn and retries (was: %s)", before or "none")
+            session.emit_event(
+                {
+                    "type": "model.override",
+                    "from": active_during_turn,
+                    "to": session.model_override,
+                    "active": session.model_override is not None,
+                }
+            )
+            # Persist a model_divider so the switch-back is visible after reload.
+            # Only write it if the model actually changed (skip no-op restores).
+            if active_during_turn != restored_to:
+                import json as _json
+
+                try:
+                    db.add_message(
+                        session.session_id,
+                        "model_divider",
+                        "",
+                        metadata=_json.dumps(
+                            {
+                                "from": active_during_turn,
+                                "to": restored_to,
+                                "active": False,
+                                "baseline": settings.llm_model,
+                            }
+                        ),
+                    )
+                except Exception as _e:
+                    logger.debug("model_divider restore persist failed: %s", _e)
+
+        # Stamp the worker's terminal summary file AFTER all reflect retries.
+        # Skip when the worker is paused on ask_user — stamping now would
+        # write the "I've asked you a question" placeholder as the
+        # terminal summary, and the second pass (after the user answers)
+        # short-circuits because the file already exists. The real final
+        # answer would never make it into the summary file.
+        if session.session_type == "worker" and sv2._current_state(session) is not sv2.SessionStateV2.AWAITING_USER:
+            try:
+                await self._finalize_worker(session)
+            except Exception as _fin_err:
+                logger.error("Worker finalize failed for %s: %s", session.session_id, _fin_err)
+
+        # FINALIZING → IDLE_READY — turn fully done.
+        if sv2._current_state(session) == sv2.SessionStateV2.FINALIZING:
+            try:
+                sv2.transition(
+                    session,
+                    sv2.SessionStateV2.IDLE_READY,
+                    "turn-complete",
+                )
+            except Exception as _e:
+                logger.error("Turn-complete transition failed: %s", _e)
+
+        # Clear the turn-scoped user-msg id; the next turn will set its own.
+        # Capture it first — the sweep uses it to exclude the just-completed
+        # turn's user message from the orphan list (agents that don't write
+        # assistant messages, e.g. stubs, would otherwise look like orphans).
+        _completed_turn_msg_id = session.current_turn_user_msg_id
+        session.current_turn_user_msg_id = None
+        session.emit_event({"type": "turn.complete"})
+
+        # Window A recovery: if pending_messages is empty, check the DB for
+        # any user message that arrived during post-hooks but was lost from
+        # the in-memory queue (e.g., server restarted between the
+        # FINALIZING→IDLE_READY write and _process_pending running).
+        if not session.pending_messages:
+            await self._sweep_db_pending(session, exclude_msg_id=_completed_turn_msg_id)
+
+        # Worker-specific: notify the parent session that this worker
+        # turn has fully settled. Frontend listens for `worker.done`
+        # to close progress indicators on the parent's worker panel.
+        # Skip for AWAITING_USER — the worker is paused on ask_user, not
+        # done. Without this guard, the parent's _on_watched_worker_done
+        # auto-resumes it prematurely, then get_worker_result returns the
+        # worker's "I've asked you a question" suspension placeholder
+        # instead of the real final answer once the user replies.
+        cur_v2 = sv2._current_state(session)
+        if (
+            session.session_type == "worker"
+            and session.parent_session_id
+            and cur_v2 is not sv2.SessionStateV2.AWAITING_USER
+        ):
+            self.emit(
+                session.parent_session_id,
+                {
+                    "type": "worker.done",
+                    "worker_id": session.session_id,
+                    "termination_reason": session.termination_reason,
+                    "error": session.error,
+                },
+            )
+            # Gap 1+2: wake parent if it's watching this worker.
+            await self._on_watched_worker_done(session)
+
+        # Process pending messages.
+        await self._process_pending(session)
 
     # Cap on the last-assistant-message slice we persist in an auto-stamp.
     # Set to 2–3× `get_worker_result`'s 3000-char read cap so a future reader-side
@@ -1160,7 +1270,7 @@ class SessionManager:
         # Grab the last assistant message as the best-available content.
         last_text = ""
         try:
-            messages = db.get_messages(session.session_id)
+            messages = db.get_messages(session.session_id, last=100)
             for m in reversed(messages):
                 if m["role"] == "assistant" and m.get("content"):
                     last_text = m["content"]
@@ -1180,7 +1290,7 @@ class SessionManager:
         reflect_verdict: str | None = None
         reflect_reason: str = ""
         try:
-            msgs = db.get_messages(session.session_id)
+            msgs = db.get_messages(session.session_id, last=100)
             for _m in reversed(msgs):
                 if _m.get("role") == "reflect":
                     import json as _json
@@ -1247,38 +1357,52 @@ class SessionManager:
         *,
         pre_saved: bool = False,
         is_retry: bool = False,
+        reuse_scout: bool = False,
     ) -> None:
         """Shared scout → PROCESSING → agent runner pipeline.
 
-        Caller must have already transitioned the session to SCOUTING and called
-        _persist_legacy_state(). This coroutine handles everything from emitting
-        scout.start through calling _agent_runner. Exceptions propagate to the
-        caller's except/finally block unchanged.
+        Caller must have already transitioned the session to SCOUTING. This
+        coroutine handles everything from emitting scout.start through calling
+        _agent_runner. Exceptions propagate to the caller's except/finally
+        block unchanged.
+
+        reuse_scout: skip the scout run and reuse session.last_scout_report
+        (answer-resumed turns — same task, same tool surface; a full re-scout
+        only adds latency to the most interactive path). Falls back to a
+        normal scout when no prior report exists (e.g. server restarted while
+        the question was pending).
         """
         session.emit_event({"type": "scout.start"})
         _check_session_budget_or_raise(session.session_id)
 
         from core.scout.runner import build_session_brief, run_scout
 
-        effective_budget = session.context_budget_override or settings.context_budget
-        brief = build_session_brief(session.session_id, context_budget=effective_budget)
+        reused_prior = False
+        if reuse_scout and session.last_scout_report is not None:
+            scout_report = session.last_scout_report
+            reused_prior = True
+        else:
+            effective_budget = session.context_budget_override or settings.context_budget
+            # Off-loop: the brief loads and tokenizes the full message history.
+            brief = await asyncio.to_thread(build_session_brief, session.session_id, context_budget=effective_budget)
 
-        scout_message = message
-        if session.reflect_lessons:
-            scout_message = f"{message}\n\n{session.reflect_lessons}"
+            scout_message = message
+            if session.reflect_lessons:
+                scout_message = f"{message}\n\n{session.reflect_lessons}"
 
-        scout_report = await run_scout(
-            session.session_id,
-            scout_message,
-            brief,
-            emit=session.emit_event,
-        )
-        session.last_scout_report = scout_report
+            scout_report = await run_scout(
+                session.session_id,
+                scout_message,
+                brief,
+                emit=session.emit_event,
+            )
+            session.last_scout_report = scout_report
 
         import json
 
         scout_event = {
             "type": "scout.done",
+            "reused_prior": reused_prior,
             "tools": scout_report.recommended_tools,
             "tool_rationale": scout_report.tool_rationale,
             "approach": scout_report.approach_guidance,
@@ -1298,7 +1422,6 @@ class SessionManager:
         db.add_message(session.session_id, "scout", json.dumps(scout_event))
 
         sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
-        _persist_legacy_state(session)
 
         await self._agent_runner(
             session_id=session.session_id,
@@ -1323,7 +1446,6 @@ class SessionManager:
         try:
             # FINALIZING → SCOUTING (new retry_index for the state log)
             sv2.transition(session, sv2.SessionStateV2.SCOUTING, retry_kind)
-            _persist_legacy_state(session)
 
             await self._run_scout_and_process(session, message, is_retry=True)
 
@@ -1348,7 +1470,6 @@ class SessionManager:
                         "cancel-requested",
                         termination_reason=sv2.TerminationReason.CANCELLED,
                     )
-                    _persist_legacy_state(session)
                 except Exception as _e:
                     logger.error("Retry cancel transition failed: %s", _e)
             elif current in (sv2.SessionStateV2.PAUSED, sv2.SessionStateV2.PAUSE_REQUESTED):
@@ -1359,7 +1480,6 @@ class SessionManager:
                         "cancel-during-pause",
                         termination_reason=sv2.TerminationReason.CANCELLED,
                     )
-                    _persist_legacy_state(session)
                 except Exception as _e:
                     logger.error("Retry cancel (pause) transition failed: %s", _e)
             raise  # outer finally handles the terminal IDLE_READY transition
@@ -1384,7 +1504,6 @@ class SessionManager:
                         "agent-error",
                         termination_reason=sv2.TerminationReason.ERROR,
                     )
-                _persist_legacy_state(session)
             except Exception as _e:
                 logger.error("Retry error transition failed: %s", _e)
             session.emit_event({"type": "stream.error", "error": str(e)})
@@ -1400,7 +1519,6 @@ class SessionManager:
                         v2_reason,
                         termination_reason=v2_term,
                     )
-                    _persist_legacy_state(session)
                 except Exception as _e:
                     logger.error("Retry→FINALIZING transition failed: %s", _e)
 
@@ -1468,7 +1586,7 @@ class SessionManager:
             try:
                 import json as _json
 
-                for m in reversed(db.get_messages(wid)):
+                for m in reversed(db.get_messages(wid, last=100)):
                     if m.get("role") == "reflect":
                         try:
                             verdict = _json.loads(m.get("content") or "{}").get("verdict")
@@ -1547,7 +1665,6 @@ class SessionManager:
                             sv2.SessionStateV2.IDLE_READY,
                             "cancel-complete",
                         )
-                        _persist_legacy_state(parent)
                     except Exception as _e:
                         logger.error(
                             "Cancel-after-workers transition failed for %s: %s",
@@ -1741,28 +1858,36 @@ class SessionManager:
 
         Returns the number of clients reached.
         """
-        import time as _time
+        from core.events import run_on_loop
 
         reached = 0
 
-        # Global notification subscribers (connected regardless of session)
-        dead = []
-        for q in self._global_subscribers:
-            try:
-                q.put_nowait(dict(event, _global=True))
-                reached += 1
-            except asyncio.QueueFull:
-                dead.append(q)
-        for q in dead:
-            if q in self._global_subscribers:
-                self._global_subscribers.remove(q)
+        # Global notification subscribers (connected regardless of session).
+        # Delivery is marshaled to the event loop — broadcast() is called
+        # from tool threads (ask_user, notify_user) and asyncio.Queue is not
+        # thread-safe. The reached count is computed from the snapshot since
+        # delivery may complete after we return.
+        reached += len(self._global_subscribers)
+        run_on_loop(self._deliver_global, dict(event, _global=True))
 
-        # Session-specific subscribers
+        # Session-specific subscribers (emit_event marshals internally)
         for session in self._sessions.values():
             if session.subscribers:
                 session.emit_event(dict(event))
                 reached += 1
         return reached
+
+    def _deliver_global(self, event: dict) -> None:
+        """Push an event to global subscriber queues. Must run on the loop."""
+        dead = []
+        for q in self._global_subscribers:
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                dead.append(q)
+        for q in dead:
+            if q in self._global_subscribers:
+                self._global_subscribers.remove(q)
 
     def subscribe(self, session_id: str) -> asyncio.Queue:
         """Subscribe to a session's events."""
@@ -1817,6 +1942,7 @@ class SessionManager:
             "waiting_for_input": session.waiting_for_input,
             "post_hooks_complete": session.post_hooks_complete,
             "event_seq": session.event_seq,
+            "model_override": session.model_override,
         }
 
     def active_session_ids(self) -> list[str]:
@@ -1858,8 +1984,8 @@ class SessionManager:
           - IDLE_READY:        reap if idle > max_idle, no subscribers, no background refs
           - SCOUTING:          reap if idle > 2*max_idle, no subscribers
           - PROCESSING:        unstick if idle > 300s and no background refs (agent died)
-          - COMPACTING:        unstick (to FINALIZING via compaction-failed) at 120s
-          - PAUSE_REQUESTED:   unstick at 60s (agent should hit pre-round gate fast)
+          - COMPACTING:        unstick (to FINALIZING via compaction-failed) at 120s, only if task dead
+          - PAUSE_REQUESTED:   unstick at 60s, only if task dead (live loop pauses at next round gate)
           - PAUSED:            safety net at 24h OR parent deleted (orphan pause)
           - CANCELLING:        force unstick (cancel-timeout) at 30s
           - FINALIZING:        force unstick (finalize-error) at 120s
@@ -1877,11 +2003,20 @@ class SessionManager:
             idle = session.idle_seconds
 
             if v2 is sv2.SessionStateV2.PROCESSING:
+                # Only unstick if the agent task is actually gone. A single
+                # round (LLM stream + tool execution) can legitimately exceed
+                # processing_timeout without touching the session — slow local
+                # models and 300s tool timeouts both cross the reaper tick.
+                # Force-idling a live turn lets a second prompt spawn a
+                # concurrent turn that interleaves writes into the same
+                # transcript (same guard the SCOUTING branch uses below).
+                task_alive = session.task is not None and not session.task.done()
+                if task_alive:
+                    continue
                 if idle >= processing_timeout and not session.has_background_tasks:
                     logger.warning("Unsticking stuck PROCESSING session %s (idle=%ds)", sid, int(idle))
                     try:
                         sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
-                        _persist_legacy_state(session)
                     except Exception as _e:
                         logger.error("reaper-unstick failed for %s: %s", sid, _e)
                     session.touch()
@@ -1895,6 +2030,16 @@ class SessionManager:
                 continue
 
             if v2 is sv2.SessionStateV2.COMPACTING:
+                # Same live-task guard as PROCESSING: compact_with_llm summarizes
+                # a large transcript and only touch()es afterward, so on a slow
+                # model the session can sit "idle" >120s while compaction is
+                # genuinely in flight. Unsticking a live task here races its
+                # eventual compact-done transition (FINALIZING → PROCESSING
+                # invariant violation) and can let a second prompt start a
+                # concurrent turn on the same transcript.
+                task_alive = session.task is not None and not session.task.done()
+                if task_alive:
+                    continue
                 if idle >= 120:
                     logger.warning("Unsticking stuck COMPACTING session %s (idle=%ds)", sid, int(idle))
                     # Route through FINALIZING(compaction-failed) — matches what
@@ -1907,7 +2052,6 @@ class SessionManager:
                             "compaction-failed",
                             termination_reason=sv2.TerminationReason.COMPACTION_FAILED,
                         )
-                        _persist_legacy_state(session)
                     except Exception as _e:
                         logger.error("compaction-failed unstick failed for %s: %s", sid, _e)
                     session.touch()
@@ -1915,6 +2059,17 @@ class SessionManager:
                 continue
 
             if v2 is sv2.SessionStateV2.PAUSE_REQUESTED:
+                # Live-task guard: the pause checkpoint only exists at the top
+                # of a tool round, so a slow round (LLM stream on a local
+                # model, or a tool call running up to its 300s timeout) can
+                # legitimately keep the loop away from the checkpoint for
+                # minutes. The user asked to PAUSE — cancelling their live
+                # turn here destroys exactly the work they wanted to keep.
+                # While the task is alive, the loop WILL observe the pause at
+                # its next pre-round gate; only a dead task needs unsticking.
+                task_alive = session.task is not None and not session.task.done()
+                if task_alive:
+                    continue
                 if idle >= 60:
                     logger.warning("Unsticking stuck PAUSE_REQUESTED session %s (idle=%ds)", sid, int(idle))
                     # Mirror the PAUSED unstick pattern: set cancel_requested so the
@@ -1928,7 +2083,6 @@ class SessionManager:
                         session.task.cancel()
                     try:
                         sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
-                        _persist_legacy_state(session)
                     except Exception as _e:
                         logger.error("pause-requested unstick failed for %s: %s", sid, _e)
                     session.touch()
@@ -1945,7 +2099,6 @@ class SessionManager:
                             "cancel-timeout",
                             termination_reason=sv2.TerminationReason.CANCELLED,
                         )
-                        _persist_legacy_state(session)
                     except Exception as _e:
                         logger.error("cancel-timeout unstick failed for %s: %s", sid, _e)
                     session.touch()
@@ -1963,7 +2116,6 @@ class SessionManager:
                     logger.warning("Force-unsticking stuck FINALIZING session %s (idle=%ds)", sid, int(idle))
                     try:
                         sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "finalize-error")
-                        _persist_legacy_state(session)
                     except Exception as _e:
                         logger.error("finalize-error unstick failed for %s: %s", sid, _e)
                     session.touch()
@@ -1987,7 +2139,6 @@ class SessionManager:
                     session.pause_event.set()
                     try:
                         sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
-                        _persist_legacy_state(session)
                     except Exception as _e:
                         logger.error("paused unstick failed for %s: %s", sid, _e)
                     # Also cancel the asyncio task so it terminates even if the
@@ -2010,7 +2161,6 @@ class SessionManager:
                     )
                     try:
                         sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
-                        _persist_legacy_state(session)
                     except Exception as _e:
                         logger.error("awaiting-user unstick failed for %s: %s", sid, _e)
                     session.touch()
@@ -2069,7 +2219,6 @@ class SessionManager:
                     )
                     try:
                         sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
-                        _persist_legacy_state(session)
                     except Exception as _e:
                         logger.error("awaiting-workers unstick failed for %s: %s", sid, _e)
                     session.touch()
@@ -2091,7 +2240,6 @@ class SessionManager:
                     )
                     try:
                         sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "worker-timeout")
-                        _persist_legacy_state(session)
                     except Exception as _e:
                         logger.error("worker-timeout transition failed for %s: %s", sid, _e)
                     # Without a synthetic prompt, the parent silently resumes
@@ -2129,7 +2277,6 @@ class SessionManager:
                     )
                     try:
                         sv2.transition(session, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
-                        _persist_legacy_state(session)
                     except Exception as _e:
                         logger.error("scouting unstick failed for %s: %s", sid, _e)
                     session.touch()

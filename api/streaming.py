@@ -1,8 +1,6 @@
 """Pernix — SSE streaming utilities.
 
-Two stream functions:
-1. event_stream — persistent listener (GET /sessions/{id}/events), survives across turns
-2. event_stream_from_queue — request-scoped (POST /chat), breaks on done/error
+event_stream — persistent listener (GET /sessions/{id}/events), survives across turns.
 """
 
 from __future__ import annotations
@@ -121,49 +119,6 @@ async def event_stream(session: AgentSession, last_event_id: int = 0):
         pass
     finally:
         session.unsubscribe(queue)
-
-
-async def event_stream_from_queue(
-    queue: asyncio.Queue,
-    session: AgentSession | None = None,
-):
-    """Request-scoped event stream for POST /chat and POST /retry.
-
-    Breaks on 'stream.done' or 'stream.error' events.
-    Unsubscribes the queue from the session on completion.
-    Exits cleanly on server shutdown.
-    """
-    shutdown = get_shutdown_event()
-    try:
-        # See event_stream_for_session for why asyncio.timeout() over wait_for().
-        while not shutdown.is_set():
-            try:
-                async with asyncio.timeout(HEARTBEAT_INTERVAL):
-                    event = await queue.get()
-            except asyncio.TimeoutError:
-                if shutdown.is_set():
-                    return
-                yield ": heartbeat\n\n"
-                continue
-
-            event_type = event.get("type", "message")
-            if event_type == "_heartbeat":
-                continue
-            if event_type == "_shutdown":
-                return
-
-            seq = event.get("_seq")
-            yield sse_event(event_type, _clean_event(event), event_id=seq)
-
-            # Break on terminal events
-            if event_type in ("stream.done", "stream.error"):
-                return
-
-    except (asyncio.CancelledError, GeneratorExit):
-        pass
-    finally:
-        if session:
-            session.unsubscribe(queue)
 
 
 def _clean_event(event: dict) -> dict:

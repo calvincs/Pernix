@@ -45,6 +45,20 @@ def test_bypass_logic():
     assert should_bypass_scout("Search the web for Python docs", turn_count=0) is False
 
 
+def test_bypass_conversational_followups():
+    """Conversational confirmations in active sessions skip scout — the
+    prior turn's scout already mapped the task."""
+    assert should_bypass_scout("yes please go ahead and do that", turn_count=3) is True
+    assert should_bypass_scout("ok sounds good, continue", turn_count=2) is True
+    assert should_bypass_scout("thanks, that looks perfect", turn_count=4) is True
+    # First turn never gets the conversational bypass
+    assert should_bypass_scout("yes please go ahead and do that", turn_count=0) is False
+    # A URL means new work even with a conversational opener
+    assert should_bypass_scout("ok now fetch https://example.com/data", turn_count=3) is False
+    # Non-conversational short tasks still scout
+    assert should_bypass_scout("delete all my cron jobs now", turn_count=3) is False
+
+
 def test_parse_valid_json():
     report = _parse_scout_response('{"recommended_tools": ["bash"], "approach_guidance": "test"}')
     assert "bash" in report.recommended_tools

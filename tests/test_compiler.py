@@ -21,10 +21,21 @@ from core.context.tokens import get_estimator
 # ---------------------------------------------------------------------------
 
 
-def test_temporal_context_has_time():
+def test_temporal_context_is_static_guidance():
+    """The head section must stay cache-stable — no live clock in it.
+    The current time lives in the volatile tail instead."""
     text = _build_temporal_context()
-    assert "Current time (UTC):" in text
     assert "TEMPORAL CONTEXT" in text
+    assert "Current time (UTC):" not in text
+
+
+def test_volatile_tail_has_time_and_status():
+    from core.context.compiler import _build_volatile_tail
+
+    text = _build_volatile_tail("[RESOURCE STATUS] Tool rounds remaining: 5/10")
+    assert "CURRENT STATE" in text
+    assert "Current time (UTC):" in text
+    assert "Tool rounds remaining" in text
 
 
 # ---------------------------------------------------------------------------
@@ -162,8 +173,12 @@ def test_compile_context_empty_session():
 
     sid = db.create_session(title="Empty")
     payload = compile_context(sid)
-    assert len(payload.messages) == 1  # Just system
+    # System head + volatile state tail (clock/resource status lives at the
+    # end so the head stays prompt-cache stable).
+    assert len(payload.messages) == 2
     assert payload.messages[0]["role"] == "system"
+    assert payload.messages[-1]["role"] == "system"
+    assert "[CURRENT STATE]" in payload.messages[-1]["content"]
 
 
 def test_compile_context_with_tools():
