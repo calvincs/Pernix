@@ -32,13 +32,73 @@ async def list_sessions(limit: int = 50, offset: int = 0):
     return {"items": sessions, "count": len(sessions)}
 
 
+@router.get("/api/sessions/search")
+async def search_sessions(q: str = "", limit: int = 20):
+    """Full-text search across all session messages (FTS5). Groups hits by
+    session for the sidebar search box. The index has existed all along —
+    this endpoint finally exposes it to the user."""
+    if len(q.strip()) < 2:
+        return {"results": []}
+    import asyncio as _asyncio
+
+    hits = await _asyncio.to_thread(db.search_messages_fts, q, limit)
+    # Group by session, keep the best-ranked snippet per session.
+    grouped: dict[str, dict] = {}
+    for h in hits:
+        sid = h["session_id"]
+        if sid not in grouped:
+            grouped[sid] = {
+                "session_id": sid,
+                "title": h["session_title"],
+                "session_type": h["session_type"],
+                "updated_at": h["session_updated_at"],
+                "snippet": h["content"],
+                "matches": 1,
+            }
+        else:
+            grouped[sid]["matches"] += 1
+    return {"results": list(grouped.values())}
+
+
+@router.get("/api/sessions/{session_id}/workers")
+async def list_workers(session_id: str):
+    """Workers spawned by this session, with live state — feeds the worker
+    activity strip so a fan-out isn't an opaque 'awaiting workers' wait."""
+    import asyncio as _asyncio
+
+    from sessions import state_v2 as sv2
+
+    rows = await _asyncio.to_thread(db.get_worker_sessions, session_id)
+    manager = get_manager()
+    out = []
+    for r in rows:
+        w = manager.get(r["id"])
+        state = sv2._current_state(w).value if w is not None else (r.get("state_v2") or r.get("state") or "unknown")
+        out.append(
+            {
+                "id": r["id"],
+                "title": r.get("title") or "worker",
+                "state": state,
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+            }
+        )
+    return {"workers": out}
+
+
 @router.get("/api/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: str, limit: int | None = None):
+    """Session metadata + messages. With `limit`, only the newest N messages
+    (oldest-first) plus a total count — the UI uses this so opening a long
+    session doesn't load (and render) the entire unbounded transcript."""
     session = db.get_session(session_id)
     if not session:
         raise HTTPException(404, detail=f"Session {session_id} not found")
-    messages = db.get_messages(session_id)
-    return {**session, "messages": messages}
+    import asyncio as _asyncio
+
+    messages = await _asyncio.to_thread(db.get_messages, session_id, limit)
+    total = db.count_messages(session_id) if limit is not None else len(messages)
+    return {**session, "messages": messages, "total_messages": total, "has_more": total > len(messages)}
 
 
 @router.get("/api/sessions/{session_id}/status")
@@ -152,7 +212,6 @@ async def cancel_session(session_id: str):
                     sv2.SessionStateV2.IDLE_READY,
                     "cancel-complete",
                 )
-                db.set_session_state(session_id, session.state.value)
             except Exception:
                 pass
 
@@ -190,20 +249,147 @@ async def delete_session(session_id: str):
     return {"status": "deleted"}
 
 
+@router.get("/api/sessions/{session_id}/pending")
+async def list_pending_messages(session_id: str):
+    """List messages queued behind the running turn (in-memory deque).
+
+    Entries are (message, system_prompt, pre, ts, msg_id) tuples on
+    session.pending_messages; only entries with a persisted msg_id are
+    listed — those are the ones rendered in the transcript and removable."""
+    if not db.get_session(session_id):
+        raise HTTPException(404, detail=f"Session {session_id} not found")
+    session = get_manager().get(session_id)
+    pending = []
+    if session:
+        for entry in session.pending_messages:
+            if len(entry) >= 5 and entry[4] is not None:
+                pending.append({"message_id": entry[4], "preview": (entry[0] or "")[:200]})
+    return {"session_id": session_id, "pending": pending}
+
+
+@router.delete("/api/sessions/{session_id}/pending/{message_id}")
+async def remove_pending_message(session_id: str, message_id: int):
+    """Remove a queued message before the agent picks it up.
+
+    Deletes both the in-memory deque entry and the persisted DB row — the
+    row must go too, or the orphan-recovery sweep would re-queue it on the
+    next prompt/restart. Runs on the event loop, so removal can't interleave
+    with _process_pending's popleft."""
+    session = get_manager().get(session_id)
+    if not session:
+        raise HTTPException(404, detail=f"Session {session_id} not found in memory")
+    for entry in list(session.pending_messages):
+        if len(entry) >= 5 and entry[4] == message_id:
+            session.pending_messages.remove(entry)
+            db.delete_message(message_id)
+            if session.last_user_msg_id == message_id:
+                session.last_user_msg_id = None
+            session.emit_event(
+                {
+                    "type": "session.queue_removed",
+                    "message_id": message_id,
+                    "queue_depth": len(session.pending_messages),
+                }
+            )
+            return {"status": "removed", "message_id": message_id, "queue_depth": len(session.pending_messages)}
+    raise HTTPException(404, detail=f"Message {message_id} is not queued (already picked up?)")
+
+
+@router.patch("/api/sessions/{session_id}")
+async def patch_session(session_id: str, body: dict = {}):
+    """Update user-facing session attributes.
+
+    Accepted keys (absent keys are left unchanged):
+      * title          — rename; must be a non-empty string.
+      * pinned         — bool; pinned sessions sort to the top of the sidebar.
+      * model_override — model id string sets a persistent per-session
+                         override; "" or null clears it. Lives on the
+                         in-memory session (not persisted across restart),
+                         and unlike agent-initiated switch_model it is NOT
+                         reverted at turn end.
+    """
+    if not db.get_session(session_id):
+        raise HTTPException(404, detail=f"Session {session_id} not found")
+
+    result: dict = {"session_id": session_id}
+
+    if "title" in body:
+        title = body["title"]
+        if not isinstance(title, str) or not title.strip():
+            raise HTTPException(400, detail="title must be a non-empty string")
+        title = title.strip()[:300]
+        db.set_session_meta(session_id, title=title)
+        result["title"] = title
+        get_manager().emit(session_id, {"type": "session.title", "title": title})
+
+    if "pinned" in body:
+        pinned = bool(body["pinned"])
+        db.set_session_meta(session_id, pinned=pinned)
+        result["pinned"] = pinned
+
+    if "model_override" in body:
+        override = body["model_override"]
+        if override is not None and not isinstance(override, str):
+            raise HTTPException(400, detail="model_override must be a string or null")
+        override = (override or "").strip() or None
+        session = get_manager().get_or_create(session_id)
+        session.model_override = override
+        if override is None:
+            session.context_budget_override = None
+        result["model_override"] = override
+
+    return result
+
+
 @router.get("/api/sessions/{session_id}/state-log")
-async def get_session_state_log(session_id: str, since_id: int = 0, limit: int = 500):
+async def get_session_state_log(
+    session_id: str,
+    since_id: int = 0,
+    before_id: int = 0,
+    limit: int = 500,
+    tail: bool = False,
+):
     """Return the persisted state-machine transition log for this session.
 
     Backing store: `session_state_log` (migration v13). Rows are append-only
     and written inside sessions.state_v2.transition(). In Stage 0 of the
     state-machine migration this endpoint may return an empty list until
-    the mutator starts being called (Stage 1+)."""
+    the mutator starts being called (Stage 1+).
+
+    `tail=true` returns the newest `limit` rows; `before_id` pages backward
+    from a tail window. Rows are always oldest-first within the window."""
     session = db.get_session(session_id)
     if not session:
         raise HTTPException(404, detail=f"Session {session_id} not found")
     limit = max(1, min(limit, 5000))
-    entries = db.get_state_log(session_id, since_id=since_id, limit=limit)
+    entries = db.get_state_log(session_id, since_id=since_id, before_id=before_id, limit=limit, tail=tail)
     return {"session_id": session_id, "count": len(entries), "entries": entries}
+
+
+@router.post("/api/sessions/{session_id}/pause")
+async def http_pause_session(session_id: str):
+    """Pause ANY session (not just workers) at its next pre-round checkpoint.
+    The agent loop's pause gate is type-agnostic; for minutes-long turns
+    'pause and let me redirect' is gentler than cancel."""
+    manager = get_manager()
+    if not manager.get(session_id):
+        raise HTTPException(404, detail=f"Session {session_id} not found in memory")
+    from core.extensions.orchestration import pause_worker as _pause
+
+    msg = _pause(session_id)
+    return {"status": "pause_requested", "session_id": session_id, "detail": msg}
+
+
+@router.post("/api/sessions/{session_id}/resume")
+async def http_resume_session(session_id: str):
+    """Resume a paused session. Mirror of pause above."""
+    manager = get_manager()
+    if not manager.get(session_id):
+        raise HTTPException(404, detail=f"Session {session_id} not found in memory")
+    from core.extensions.orchestration import resume_worker as _resume
+
+    msg = _resume(session_id)
+    return {"status": "resumed", "session_id": session_id, "detail": msg}
 
 
 @router.post("/api/sessions/{session_id}/workers/{worker_id}/pause")

@@ -88,13 +88,17 @@ def call_model(model: str, prompt: str, system: str = "", image_path: str = "", 
         return f"Error calling {model}: {e}"
 
 
-def switch_model(model: str, reason: str = "", _context: dict | None = None) -> str:
+def switch_model(model: str, reason: str = "", scope: str = "turn", _context: dict | None = None) -> str:
     """Switch the active LLM model.
 
-    Agent-initiated switches are temporary: the model is restored to the
-    default after the current agent turn completes.  User-initiated switches
-    (via the API) are permanent.
+    scope="turn" (default): temporary — the previous model is restored after
+    the current agent turn completes.  scope="session": persists as the
+    session's model override until the session ends or the model is switched
+    again.  User-initiated switches (via the API) are permanent.
     """
+    scope = (scope or "turn").strip().lower()
+    if scope not in ("turn", "session"):
+        return f"Invalid scope '{scope}': must be 'turn' or 'session'."
     # Resolve the session to apply per-session override instead of mutating global state.
     session_id = (_context or {}).get("session_id", "")
     session = None
@@ -144,9 +148,14 @@ def switch_model(model: str, reason: str = "", _context: dict | None = None) -> 
 
     if session is not None:
         # Per-session switch — no global mutation.
-        # Save previous override on first switch; "" is a sentinel for "no override was set".
         old_override = session.model_override
-        if session._model_before_agent_switch is None:
+        if scope == "session":
+            # Persistent switch: cancel any pending turn-end restore so the
+            # manager doesn't revert this override when the turn completes.
+            session._model_before_agent_switch = None
+            session._budget_before_agent_switch = None
+        elif session._model_before_agent_switch is None:
+            # Save previous override on first switch; "" is a sentinel for "no override was set".
             session._model_before_agent_switch = old_override if old_override is not None else ""
             session._budget_before_agent_switch = (
                 session.context_budget_override if session.context_budget_override is not None else -1
@@ -178,7 +187,11 @@ def switch_model(model: str, reason: str = "", _context: dict | None = None) -> 
     else:
         settings.context_budget = new_budget
 
-    return f"Switched from {old_display} to {model} (temporary for this turn, budget: {new_budget:,} tokens)"
+    if session is not None and scope == "session":
+        durability = "persists for the rest of this session"
+    else:
+        durability = "temporary for this turn"
+    return f"Switched from {old_display} to {model} ({durability}, budget: {new_budget:,} tokens)"
 
 
 def register(reg) -> None:
@@ -218,12 +231,23 @@ def register(reg) -> None:
     reg.register(
         name="switch_model",
         func=switch_model,
-        description="Switch the active LLM model. Adjusts context budget to new model's capacity.",
+        description=(
+            "Switch the active LLM model. By default the switch is temporary and reverts when the "
+            "current turn ends; pass scope='session' to keep it for the rest of the session (e.g. when "
+            "the user asks to switch models for the session/conversation). Adjusts context budget to "
+            "the new model's capacity."
+        ),
         parameters={
             "type": "object",
             "properties": {
                 "model": {"type": "string", "description": "Model ID to switch to"},
                 "reason": {"type": "string", "description": "Why switching"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["turn", "session"],
+                    "description": "'turn' (default): revert to the previous model when this turn ends. "
+                    "'session': keep the new model for the rest of the session.",
+                },
             },
             "required": ["model"],
         },

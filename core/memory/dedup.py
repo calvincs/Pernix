@@ -6,9 +6,9 @@ results — ~8KB of duplicate content per turn in the wild. This module
 collapses repeats to a short reference line so the model still knows the
 entry exists and can re-pull it explicitly via `include_seen=True`.
 
-Identity is `(file_name, epoch)` — the same composite key MemoryStore uses
-internally for cross-result dedup in `recall_enhanced()`. We render it as
-`file_name@epoch` for human readability in tool output.
+Identity is `(file_name, epoch)` — the same composite key the search layer
+uses for cross-result dedup. We render it as `file_name@epoch` for human
+readability in tool output.
 
 The ledger lives on `AgentSession._seen_memory_keys` (in-memory, reset on
 session reload). `_seen_memory_lock` makes check-and-record atomic so

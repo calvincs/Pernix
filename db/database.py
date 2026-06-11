@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 
 from config import settings
@@ -12,10 +13,38 @@ logger = logging.getLogger("pernix.db")
 # Connection helpers
 # ---------------------------------------------------------------------------
 
+# Per-thread connection cache. Every db.models helper used to open a fresh
+# connection (+ replay 5 PRAGMAs) per call — hundreds of times per turn.
+# Connections are reused per (thread, path); `with conn:` blocks commit but
+# never close, so reuse is transparent. Verified: no code path nests
+# connection contexts to the same DB in one thread, so a shared connection
+# cannot commit another block's in-flight transaction.
+_conn_local = threading.local()
+_CONN_CACHE_MAX = 4  # sessions + memory + headroom for test tmp paths
+
 
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
-    """Open a SQLite connection with standard PRAGMA settings."""
+    """Return this thread's cached SQLite connection for the path (opening
+    and configuring it on first use)."""
     path = db_path or settings.db_path
+    cache: dict = getattr(_conn_local, "conns", None) or {}
+    if not hasattr(_conn_local, "conns"):
+        _conn_local.conns = cache
+    conn = cache.get(path)
+    if conn is not None:
+        try:
+            conn.total_changes  # cheap liveness probe — raises if closed
+            return conn
+        except sqlite3.ProgrammingError:
+            del cache[path]
+    if len(cache) >= _CONN_CACHE_MAX:
+        # Evict everything (tests rotate tmp DB paths; prod uses 2 paths).
+        for stale in cache.values():
+            try:
+                stale.close()
+            except Exception:
+                pass
+        cache.clear()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
@@ -24,6 +53,7 @@ def _connect(db_path: str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA wal_autocheckpoint=1000")  # checkpoint every ~4MB of writes
+    cache[path] = conn
     return conn
 
 
@@ -190,6 +220,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     entry_type,
     weight,
     epoch UNINDEXED,
+    source UNINDEXED,
+    updated UNINDEXED,
     tokenize='porter unicode61'
 );
 
@@ -536,6 +568,13 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
            ON sessions(state_v2) WHERE state_v2 IS NOT NULL""",
         ],
     ),
+    (
+        17,
+        "add pinned flag on sessions for sidebar pinning",
+        [
+            "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+        ],
+    ),
 ]
 
 
@@ -557,19 +596,39 @@ def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
 
 
 def _run_migrations(conn: sqlite3.Connection) -> None:
-    """Apply pending versioned migrations."""
+    """Apply pending versioned migrations.
+
+    Each migration runs in its own explicit transaction with the version
+    bump included — DDL is transactional in SQLite, but on a default-mode
+    connection it autocommits immediately while the version bump waits for
+    the final commit. A crash between two statements (e.g. v16's pair of
+    ALTER TABLEs) then left half-applied DDL that re-ran on next boot and
+    died with "duplicate column name", bricking startup until manual SQL
+    surgery. BEGIN..COMMIT per migration makes a crash roll back wholesale.
+    """
     current = _get_schema_version(conn)
     applied = 0
-    for version, description, statements in MIGRATIONS:
-        if version <= current:
-            continue
-        logger.info("Applying migration v%d: %s", version, description)
-        for sql in statements:
-            conn.execute(sql)
-        _set_schema_version(conn, version)
-        applied += 1
+    prev_isolation = conn.isolation_level
+    conn.commit()  # flush any pending implicit transaction before switching modes
+    conn.isolation_level = None  # explicit transaction control
+    try:
+        for version, description, statements in MIGRATIONS:
+            if version <= current:
+                continue
+            logger.info("Applying migration v%d: %s", version, description)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for sql in statements:
+                    conn.execute(sql)
+                _set_schema_version(conn, version)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            applied += 1
+    finally:
+        conn.isolation_level = prev_isolation
     if applied:
-        conn.commit()
         logger.info("Applied %d migration(s), now at v%d", applied, _get_schema_version(conn))
 
 
@@ -599,6 +658,16 @@ def init_sessions_db() -> None:
             _set_schema_version(conn, 1)
             conn.commit()
         _run_migrations(conn)
+        # Reclaim messages_fts rows orphaned by the pre-fix delete_session
+        # (it relied on ON DELETE CASCADE, which never touches the FTS table).
+        # Indexed anti-join — cheap once the backlog is cleared.
+        try:
+            cur = conn.execute("DELETE FROM messages_fts WHERE rowid NOT IN (SELECT id FROM messages)")
+            if cur.rowcount:
+                logger.info("Reclaimed %d orphaned messages_fts rows", cur.rowcount)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # FTS table may not exist yet on a partially-initialized DB
         _check_integrity(conn, "sessions")
     finally:
         conn.close()
@@ -608,6 +677,17 @@ def init_memory_db() -> None:
     """Initialize the memory FTS5 database."""
     conn = connect_memory()
     try:
+        # Schema upgrade: memory_fts gained source/updated UNINDEXED columns.
+        # The index is rebuildable from markdown, so upgrading is drop +
+        # recreate; the startup health check (fix=True) repopulates it.
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(memory_fts)")}
+        except sqlite3.OperationalError:
+            cols = set()
+        if cols and "source" not in cols:
+            conn.execute("DROP TABLE memory_fts")
+            conn.commit()
+            logger.info("memory_fts schema upgraded (+source/updated); index rebuilds from markdown")
         conn.executescript(_MEMORY_SCHEMA)
         _check_integrity(conn, "memory")
     finally:

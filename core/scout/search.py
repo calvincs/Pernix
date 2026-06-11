@@ -238,13 +238,13 @@ def gather_deep_memory(message: str, char_cap: int = 400) -> str:
         return ""
 
     # Main search with broad limit
-    all_results = store.search(message, limit=12)
+    all_results = store.search(message, limit=12, _track_hits=False)
 
     # Keyword decomposition sub-queries
     keywords = _extract_keywords(message, max_keywords=5)
     for kw in keywords[:3]:
         try:
-            sub = store.search(kw, mode="bm25", limit=5)
+            sub = store.search(kw, mode="bm25", limit=5, _track_hits=False)
             all_results.extend(sub)
         except Exception:
             continue

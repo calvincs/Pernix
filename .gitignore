@@ -44,6 +44,7 @@ data/registry.json
 data/registry_archive.json
 data/cron_jobs.json
 data/tools.json
+data/tool_approvals.json
 data/model_pref.txt
 data/pernix.log*
 data/logs/

@@ -38,6 +38,11 @@ async def list_skills():
     perf_rows = db.get_signals_by_subjects([("skill", n) for n in skill_names])
     perf_map = {r["subject"]: from_row(r).to_display() for r in perf_rows}
 
+    # Batch-load pending-proposal counts so the UI can flag rows without
+    # an N+1 query. Skills with no pending proposals are simply absent
+    # from the map (treated as 0 below).
+    pending_counts = db.get_pending_proposal_counts_by_skill()
+
     result = []
     for s in sorted(skills, key=lambda x: x.name):
         # include_disabled=True so disabled skills still expose their resource
@@ -55,6 +60,7 @@ async def list_skills():
                 "has_assets": "assets" in resources,
                 "resources": resources,
                 "performance": perf_map.get(s.name),  # None if no observations yet
+                "pending_proposals_count": pending_counts.get(s.name, 0),
             }
         )
 

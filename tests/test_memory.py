@@ -97,3 +97,24 @@ def test_memory_health_check(tmp_path, monkeypatch):
     health = store.health_check()
     assert health["in_sync"] is True
     assert health["indexed_entries"] >= 1
+
+
+def test_memory_fts_schema_upgrade_adds_source_updated():
+    """A legacy memory_fts (pre source/updated columns) is dropped and
+    recreated; the index rebuilds from markdown via the health check."""
+    from db.database import connect_memory, init_memory_db
+
+    conn = connect_memory()
+    conn.execute("DROP TABLE memory_fts")
+    conn.execute(
+        "CREATE VIRTUAL TABLE memory_fts USING fts5("
+        "file_name, content, tags, entry_type, weight, epoch UNINDEXED, "
+        "tokenize='porter unicode61')"
+    )
+    conn.commit()
+
+    init_memory_db()
+
+    conn = connect_memory()
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(memory_fts)")}
+    assert {"source", "updated"} <= cols

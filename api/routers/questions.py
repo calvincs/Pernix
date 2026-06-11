@@ -110,7 +110,6 @@ async def dismiss_question(question_id: str):
                 # with no question row in AWAITING_USER.
                 try:
                     sv2.transition(session_obj, sv2.SessionStateV2.IDLE_READY, "question-dismissed")
-                    db.set_session_state(session_id, session_obj.state.value)
                 except Exception:
                     pass
 

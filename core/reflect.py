@@ -8,6 +8,7 @@ Lifecycle: Scout → Agent → Post-hooks → Reflect → (retry if needed)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -55,6 +56,7 @@ RULES:
 - Be concise: the retry strategy must be actionable, not vague.
 - Verdict "pass" should be the default for conversational exchanges, questions answered, simple requests fulfilled.
 - Do NOT retry for partial success — only for clear failures to meet the user's core request.
+- TURN SCOPE OVERRIDES THE PLAN: If the evidence includes a TURN SCOPE block (e.g. "ask_user answer"), that block defines the deliverable for this turn. It supersedes the SCOUT DELIVERABLES PLAN, PLANNED APPROACH, and any session-wide goal. An ask_user answer turn passes when the agent honors the answer (applies the approved change, declines cleanly, uses the value provided) — even if scout's plan listed wider work, that work is out of scope for this verdict.
 - TRUST THE PLAN: If the evidence includes ACTIVE SKILL / PLANNED APPROACH / TOOL RATIONALE, treat those as the contract the agent was given. If the agent followed the planned approach using the planned tools, do NOT call hallucination just because the tools look "generic" (e.g. browse_web). Skills routinely mandate generic tools — that's expected, not a failure. Only flag hallucination when the agent invented data with no supporting tool calls AND the plan called for a tool that wasn't run.
 - Use the TOOL EXECUTION SUMMARY to identify failure patterns. If a tool failed 2+ times with the same error, the retry strategy MUST suggest a different tool or approach.
 - TOOL CALL FACTS ARE NOT NEGOTIABLE. The TOOL EXECUTION SUMMARY is observed truth, not interpretation. Before claiming the agent did NOT use a tool, verify: if the tool name appears in the summary with calls > 0, the agent DID call it. Do NOT write "agent did not call X" or "agent failed to use X" or "X was skipped" if X.calls > 0 in the summary. If you believe the call was *ineffective* (tool ran but didn't produce the expected result), say that — but do not deny the call happened. Hallucinating absence of a call that the summary records as present is a verifier-side correctness failure.
@@ -135,6 +137,25 @@ class ReflectResult:
     turn_digest: dict = field(default_factory=dict)
 
 
+# Tools whose successful execution has one-shot, externally visible effects —
+# re-running them on a reflect retry duplicates the action (a second push
+# notification, a duplicate cron job, an extra worker fleet). Read tools,
+# searches, and file ops are excluded: re-running those is wasteful but safe.
+SIDE_EFFECT_TOOLS: frozenset[str] = frozenset(
+    {
+        "notify_user",
+        "schedule_job",
+        "schedule_workflow",
+        "update_scheduled_job",
+        "remove_scheduled_job",
+        "spawn_worker",
+        "run_workflow",
+        "notify_parent",
+        "message_worker",
+    }
+)
+
+
 def build_retry_context(
     result: ReflectResult, attempt: int, max_attempts: int, tool_summary: dict | None = None
 ) -> str:
@@ -189,13 +210,25 @@ def build_retry_context(
         if used:
             parts.append(f"Tools already used in prior turn: {', '.join(used)}")
 
+        # HARD guard for one-shot externally-visible actions. Reflect is
+        # deliberately biased toward retry when a side effect can't be
+        # verified — without this, the retry attempt re-sends the
+        # notification / re-schedules the job / spawns more workers,
+        # double-firing the very action that already succeeded.
+        fired = sorted(
+            name
+            for name, stats in tool_summary.items()
+            if name in SIDE_EFFECT_TOOLS and stats.get("calls", 0) > stats.get("failures", 0)
+        )
+        if fired:
+            parts.append(
+                "ALREADY EXECUTED — DO NOT REPEAT: the prior attempt successfully ran "
+                f"{', '.join(fired)}. These have observable external effects (messages sent, "
+                "jobs scheduled, workers spawned). Repeating them would duplicate the action. "
+                "Treat them as DONE; this retry is only for the parts that did not complete."
+            )
+
     return "\n".join(parts)
-
-
-# Back-compat alias — older callers (and external tests) still import the
-# pre-rename name. The function moved from "lessons" framing to "retry context"
-# but the contract is identical.
-build_lessons_context = build_retry_context
 
 
 def _format_digest_for_scout(digest: dict) -> str:
@@ -406,6 +439,24 @@ def _build_compact_evidence(
     parts: list[str] = []
     if attempt > 1:
         parts.append(f"REFLECT CONTEXT: attempt #{attempt}. If same issues persist, " "prefer 'escalate' over 'retry'.")
+
+    # Turn-scope marker — when the user's message is an ask_user answer, the
+    # deliverable for THIS turn is to honor that answer. Scout's plan and any
+    # broader session goals are out of scope. Without this, reflect grades
+    # the narrow approval turn against the session's wider narrative and
+    # falsely flags the agent for "not producing the deliverable" the user
+    # never asked for on this turn.
+    if user_request.startswith("[User answered your question]"):
+        parts.append(
+            "TURN SCOPE: ask_user answer.\n"
+            "The user's message is a reply to an `ask_user` prompt the agent issued. "
+            "The deliverable for THIS turn is to honor that answer "
+            "(apply the change they approved, decline cleanly if they refused, "
+            "or use the value they provided). "
+            "Broader session goals and any SCOUT DELIVERABLES PLAN below are stale "
+            "carry-overs from prior turns — do NOT grade against them on this turn. "
+            "Verdict = pass iff the agent took the action implied by the user's answer."
+        )
 
     # Workspace files (top 20 by mtime)
     workspace = Path(settings.workspace_dir)
@@ -933,7 +984,9 @@ async def reflect_on_session(
     Returns:
         ReflectResult with verdict and optional lessons
     """
-    user_request, evidence = _build_evidence(
+    # Off-loop: evidence assembly loads the full transcript from the DB.
+    user_request, evidence = await asyncio.to_thread(
+        _build_evidence,
         session_id,
         attempt=attempt,
         tool_summary=tool_summary,

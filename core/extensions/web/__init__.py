@@ -13,7 +13,7 @@ import signal as _signal
 import threading
 import time
 from html.parser import HTMLParser
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from config import settings
 
@@ -337,20 +337,34 @@ class _TavilyLimitError(Exception):
 
 def http_get(url: str, _context: dict | None = None) -> str:
     """Fetch content from a URL. Returns plain text, max 100KB."""
+    allow_loopback = _loopback_allowed()
     try:
-        url = _validate_url(url, allow_loopback=_loopback_allowed())
+        url = _validate_url(url, allow_loopback=allow_loopback)
     except ValueError as e:
         return f"Error: {e}"
     import httpx
 
     try:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            content = resp.text
-            if len(content) > settings.max_fetch_size:
-                content = content[: settings.max_fetch_size] + f"\n[truncated at {settings.max_fetch_size} bytes]"
-            return content
+        # Follow redirects manually so every hop goes through _validate_url —
+        # httpx's automatic following would happily land on a private/metadata
+        # address after the initial URL passed the SSRF check.
+        with httpx.Client(timeout=15.0, follow_redirects=False) as client:
+            for _ in range(10):
+                resp = client.get(url)
+                if resp.is_redirect:
+                    location = resp.headers.get("location")
+                    if not location:
+                        break
+                    url = _validate_url(urljoin(url, location), allow_loopback=allow_loopback)
+                    continue
+                resp.raise_for_status()
+                content = resp.text
+                if len(content) > settings.max_fetch_size:
+                    content = content[: settings.max_fetch_size] + f"\n[truncated at {settings.max_fetch_size} bytes]"
+                return content
+            return f"Error fetching {url}: too many redirects"
+    except ValueError as e:
+        return f"Error: redirect blocked: {e}"
     except Exception as e:
         return f"Error fetching {url}: {e}"
 

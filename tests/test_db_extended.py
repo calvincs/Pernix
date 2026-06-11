@@ -71,18 +71,6 @@ def test_set_session_state():
 # ---------------------------------------------------------------------------
 
 
-def test_get_last_message_id():
-    sid = db.create_session()
-    id1 = db.add_message(sid, "user", "first")
-    id2 = db.add_message(sid, "assistant", "second")
-    assert db.get_last_message_id(sid) == id2
-
-
-def test_get_last_message_id_empty():
-    sid = db.create_session()
-    assert db.get_last_message_id(sid) is None
-
-
 def test_delete_message():
     sid = db.create_session()
     mid = db.add_message(sid, "user", "to delete")
@@ -99,14 +87,6 @@ def test_delete_messages_from():
     msgs = db.get_messages(sid)
     assert len(msgs) == 1
     assert msgs[0]["id"] == id1
-
-
-def test_mark_message_partial():
-    sid = db.create_session()
-    mid = db.add_message(sid, "assistant", "partial content")
-    db.mark_message_partial(mid, 1)
-    msg = db.get_message(mid)
-    assert msg["partial"] == 1
 
 
 def test_get_last_partial():

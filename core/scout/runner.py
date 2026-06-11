@@ -388,7 +388,7 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
             mode = args.get("mode", "hybrid")
             limit = min(args.get("limit", 10), 20)
             file_filter = args.get("file", "")
-            results = store.search(query, mode=mode, limit=limit * 2 if file_filter else limit)
+            results = store.search(query, mode=mode, limit=limit * 2 if file_filter else limit, _track_hits=False)
             if file_filter:
                 results = [r for r in results if r.entry.file_name.lower() == file_filter.lower()][:limit]
             if not results:
@@ -882,7 +882,7 @@ def _build_lessons_section(message: str) -> str:
         store = get_memory_store()
         if not store:
             return ""
-        lessons = store.search_lessons(message, limit=5)
+        lessons = store.search_lessons(message, limit=5, _track_hits=False)
     except Exception as e:
         logger.debug("Scout lessons lookup failed: %s", e)
         return ""
@@ -917,12 +917,31 @@ def _build_lessons_section(message: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Conversational openers that signal a follow-up/acknowledgement rather than
+# a new task. Anchored at the start; combined with a word cap and a no-URL
+# check below so genuine short tasks ("delete all my cron jobs") still scout.
+_CONVERSATIONAL_RE = re.compile(
+    r"^(yes|yeah|yep|no|nope|ok(ay)?|sure|thanks?|thank you|got it|sounds good|"
+    r"go ahead|continue|proceed|do it|please do|why|how come|what about|and then|"
+    r"nice|great|cool|perfect)\b[,.!\s]*",
+    re.IGNORECASE,
+)
+
+
 def should_bypass_scout(message: str, turn_count: int) -> bool:
     """Determine if scout should be skipped for trivial interactions."""
     if not settings.scout_enabled:
         return True
+    words = len(message.split())
     # Short follow-ups in active sessions
-    if len(message.split()) <= 3 and turn_count > 1:
+    if words <= 3 and turn_count > 1:
+        return True
+    # Conversational confirmations/follow-ups ("yes please go ahead and do
+    # that", "ok sounds good, continue") — the prior turn's scout already
+    # mapped the task, and these paid the full multi-second scout for no new
+    # information. Gated on an opener match, a word cap, and no URLs so a
+    # short NEW task ("ok now fetch https://...") still gets scouted.
+    if turn_count > 1 and words <= 12 and "://" not in message and _CONVERSATIONAL_RE.match(message.strip()):
         return True
     # Slash commands
     if message.startswith("/"):
@@ -942,7 +961,15 @@ def should_bypass_scout(message: str, turn_count: int) -> bool:
 
 
 def _cache_key(message: str, brief: SessionBrief) -> str:
-    raw = f"{message}:{brief.turn_count}:{brief.phase}:{','.join(brief.tools_used_recently)}:{brief.context_utilization:.1f}"
+    # Deliberately coarse. The old key included turn_count, the exact
+    # recently-used-tools list, and utilization at 0.1 granularity — all of
+    # which change between consecutive turns, so the cache could only hit
+    # when the same message was re-sent in the same turn state (essentially
+    # never; the cache was dead weight). Within the 5-minute TTL a report
+    # for the same message in the same session/phase at a similar context
+    # fill is still valid guidance.
+    util_bucket = int(brief.context_utilization * 4)  # 25% buckets
+    raw = f"{message}:{brief.session_id}:{brief.phase}:{util_bucket}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -1229,15 +1256,25 @@ async def _run_scout_llm(
             "run_workflow(name, inputs) — NOT to replay the workflow's steps inline."
         )
 
-    # Search memory (baseline — always included so scout has context even without tools)
-    _step("memory", "Searching memory")
+    # --- Baseline gathering -------------------------------------------------
+    # Six independent searches (memory, deep memory, cross-session FTS, tool
+    # discovery, skill discovery, lessons) plus the provider model listing.
+    # These used to run sequentially on the event loop — together they were
+    # the bulk of scout's pre-LLM latency and a large share of every prompt's
+    # time-to-first-token. They are independent reads, so run them
+    # concurrently on threads (emit_event is thread-safe) and append results
+    # in a fixed order to keep the prompt deterministic.
     _mem_cap = int(getattr(settings, "scout_preload_memory_char_limit", 300) or 300)
-    try:
-        from core.memory.store import get_memory_store
 
-        store = get_memory_store()
-        if store:
-            results = store.search(message, limit=10)
+    def _gather_memory_baseline() -> str | None:
+        _step("memory", "Searching memory")
+        try:
+            from core.memory.store import get_memory_store
+
+            store = get_memory_store()
+            if not store:
+                return None
+            results = store.search(message, limit=10, _track_hits=False)
             if results:
                 _step("memory", f"Found {len(results)} relevant memories")
                 mem_lines = ["", "MEMORY SEARCH RESULTS (use search_memory tool for deeper/different queries):"]
@@ -1249,109 +1286,126 @@ async def _run_scout_llm(
                         f"[{r.entry.file_name} score={r.score:.1f} type={r.entry.entry_type}] "
                         f"{r.entry.content[:_mem_cap]}"
                     )
-                user_content_parts.append("\n".join(mem_lines))
-            else:
-                # Explicit 0-result signal — tells the scout LLM to call search_memory
-                # with keyword variants rather than assuming memory is empty.
-                user_content_parts.append(
-                    "\nMEMORY BASELINE: 0 results for this query. "
-                    "Call search_memory with decomposed keywords or @tags: queries before "
-                    "concluding memory is empty — FTS5 requires matching terms."
-                )
-    except Exception as e:
-        logger.debug("Scout memory search failed: %s", e)
+                return "\n".join(mem_lines)
+            # Explicit 0-result signal — tells the scout LLM to call search_memory
+            # with keyword variants rather than assuming memory is empty.
+            return (
+                "\nMEMORY BASELINE: 0 results for this query. "
+                "Call search_memory with decomposed keywords or @tags: queries before "
+                "concluding memory is empty — FTS5 requires matching terms."
+            )
+        except Exception as e:
+            logger.debug("Scout memory search failed: %s", e)
+            return None
 
-    # Deep memory search (multi-query decomposition — baseline)
-    _step("memory", "Deep memory search")
-    try:
-        from core.scout.search import gather_deep_memory
+    def _gather_deep_memory() -> str | None:
+        try:
+            from core.scout.search import gather_deep_memory
 
-        deep_mem = gather_deep_memory(message, char_cap=_mem_cap)
-        if deep_mem:
-            _step("memory", "Deep search found additional results")
-            user_content_parts.append(f"\nDEEP MEMORY SEARCH:\n{deep_mem}")
-    except Exception as e:
-        logger.debug("Scout deep memory search failed: %s", e)
+            deep_mem = gather_deep_memory(message, char_cap=_mem_cap)
+            if deep_mem:
+                _step("memory", "Deep search found additional results")
+                return f"\nDEEP MEMORY SEARCH:\n{deep_mem}"
+        except Exception as e:
+            logger.debug("Scout deep memory search failed: %s", e)
+        return None
 
-    # Cross-session search (baseline)
-    _step("sessions", "Searching other sessions")
-    try:
-        from core.scout.search import gather_cross_session_data
+    def _gather_cross_session() -> str | None:
+        _step("sessions", "Searching other sessions")
+        try:
+            from core.scout.search import gather_cross_session_data
 
-        cross = gather_cross_session_data(message, brief.session_id)
-        if cross:
-            _step("sessions", "Found relevant data in other sessions")
-            user_content_parts.append(f"\n{cross}")
-    except Exception as e:
-        logger.debug("Scout cross-session search failed: %s", e)
+            cross = gather_cross_session_data(message, brief.session_id)
+            if cross:
+                _step("sessions", "Found relevant data in other sessions")
+                return f"\n{cross}"
+        except Exception as e:
+            logger.debug("Scout cross-session search failed: %s", e)
+        return None
 
-    # Search tool registry (baseline)
-    _step("tools", "Discovering relevant tools")
-    try:
-        from core.tools.registry import get_registry
+    def _gather_tool_discovery() -> str | None:
+        _step("tools", "Discovering relevant tools")
+        try:
+            from core.tools.registry import get_registry
 
-        registry = get_registry()
-        discovered = registry.discover(message, limit=15)
-        if discovered:
-            _step("tools", f"Found {len(discovered)} candidate tools")
-            tool_lines = ["", "AVAILABLE TOOLS (from discovery search):"]
-            for t in discovered:
-                tool_lines.append(f"- {t.name} [{t.category}]: {t.description}")
-            user_content_parts.append("\n".join(tool_lines))
-    except Exception as e:
-        logger.debug("Scout tool discovery failed: %s", e)
+            registry = get_registry()
+            discovered = registry.discover(message, limit=15)
+            if discovered:
+                _step("tools", f"Found {len(discovered)} candidate tools")
+                tool_lines = ["", "AVAILABLE TOOLS (from discovery search):"]
+                for t in discovered:
+                    tool_lines.append(f"- {t.name} [{t.category}]: {t.description}")
+                return "\n".join(tool_lines)
+        except Exception as e:
+            logger.debug("Scout tool discovery failed: %s", e)
+        return None
 
-    # Search skill registry (baseline)
-    _step("skills", "Discovering relevant skills")
-    try:
-        from core.skills.registry import get_skill_registry
+    def _gather_skill_discovery() -> str | None:
+        _step("skills", "Discovering relevant skills")
+        try:
+            from core.skills.registry import get_skill_registry
 
-        skill_reg = get_skill_registry()
-        discovered_skills = skill_reg.discover(message, limit=5)
-        if discovered_skills:
-            _step("skills", f"Found {len(discovered_skills)} candidate skills")
-            skill_lines = ["", "AVAILABLE SKILLS (domain expertise packages — recommend when task matches):"]
-            for s in discovered_skills:
-                tags_str = f" [{', '.join(s.tags[:3])}]" if s.tags else ""
-                extras = []
-                if s.has_scripts:
-                    extras.append("has scripts")
-                if s.has_references:
-                    extras.append("has references")
-                extra_str = f" ({', '.join(extras)})" if extras else ""
-                skill_lines.append(f"- {s.name}{tags_str}: {s.description}{extra_str}")
-            user_content_parts.append("\n".join(skill_lines))
-    except Exception as e:
-        logger.debug("Scout skill discovery failed: %s", e)
+            skill_reg = get_skill_registry()
+            discovered_skills = skill_reg.discover(message, limit=5)
+            if discovered_skills:
+                _step("skills", f"Found {len(discovered_skills)} candidate skills")
+                skill_lines = ["", "AVAILABLE SKILLS (domain expertise packages — recommend when task matches):"]
+                for s in discovered_skills:
+                    tags_str = f" [{', '.join(s.tags[:3])}]" if s.tags else ""
+                    extras = []
+                    if s.has_scripts:
+                        extras.append("has scripts")
+                    if s.has_references:
+                        extras.append("has references")
+                    extra_str = f" ({', '.join(extras)})" if extras else ""
+                    skill_lines.append(f"- {s.name}{tags_str}: {s.description}{extra_str}")
+                return "\n".join(skill_lines)
+        except Exception as e:
+            logger.debug("Scout skill discovery failed: %s", e)
+        return None
 
-    # Inject relevant past lessons (entry_type='lesson') — workarounds extracted
-    # by snooze_reflect from prior failed sessions, retrievable by hybrid search.
-    try:
-        lessons_section = _build_lessons_section(message)
-        if lessons_section:
-            _step("lessons", "Injecting relevant past lessons")
-            user_content_parts.append(lessons_section)
-    except Exception as e:
-        logger.debug("Scout lessons injection failed: %s", e)
+    def _gather_lessons() -> str | None:
+        # Relevant past lessons (entry_type='lesson') — workarounds extracted
+        # by snooze_reflect from prior failed sessions, via hybrid search.
+        try:
+            lessons_section = _build_lessons_section(message)
+            if lessons_section:
+                _step("lessons", "Injecting relevant past lessons")
+                return lessons_section
+        except Exception as e:
+            logger.debug("Scout lessons injection failed: %s", e)
+        return None
 
-    # List available models
-    _step("models", "Listing available models")
-    global _known_model_ids
-    try:
-        llm_client = get_llm_client()
-        models = await asyncio.wait_for(llm_client.list_models(), timeout=8)
-        if models:
-            _known_model_ids = {m.id for m in models}
-            model_lines = ["", f"AVAILABLE MODELS (current: {settings.llm_model}):"]
-            for m in models:
-                caps = []
-                if m.supports_vision:
-                    caps.append("vision")
-                cap_str = f" [{', '.join(caps)}]" if caps else ""
-                model_lines.append(f"- {m.id} ({m.provider}, ctx={m.context_length:,}{cap_str})")
-            user_content_parts.append("\n".join(model_lines))
-    except Exception as e:
-        logger.debug("Scout model listing failed: %s", e)
+    async def _gather_models() -> str | None:
+        _step("models", "Listing available models")
+        global _known_model_ids
+        try:
+            llm_client = get_llm_client()
+            models = await asyncio.wait_for(llm_client.list_models(), timeout=8)
+            if models:
+                _known_model_ids = {m.id for m in models}
+                model_lines = ["", f"AVAILABLE MODELS (current: {settings.llm_model}):"]
+                for m in models:
+                    caps = []
+                    if m.supports_vision:
+                        caps.append("vision")
+                    cap_str = f" [{', '.join(caps)}]" if caps else ""
+                    model_lines.append(f"- {m.id} ({m.provider}, ctx={m.context_length:,}{cap_str})")
+                return "\n".join(model_lines)
+        except Exception as e:
+            logger.debug("Scout model listing failed: %s", e)
+        return None
+
+    gathered = await asyncio.gather(
+        asyncio.to_thread(_gather_memory_baseline),
+        asyncio.to_thread(_gather_deep_memory),
+        asyncio.to_thread(_gather_cross_session),
+        asyncio.to_thread(_gather_tool_discovery),
+        asyncio.to_thread(_gather_skill_discovery),
+        asyncio.to_thread(_gather_lessons),
+        _gather_models(),
+    )
+    user_content_parts.extend(part for part in gathered if part)
 
     user_content = "\n".join(user_content_parts)
 

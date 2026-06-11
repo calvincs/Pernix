@@ -11,6 +11,15 @@ window.addEventListener('pernix:offline', () => {
 window.addEventListener('pernix:online', () => {
     if (_wantsGlobalConnection && !_globalSource) connectGlobalNotifications();
 });
+// The global stream's server heartbeats are SSE comments — invisible to JS —
+// so unlike sse.js there is no event-time signal to detect a half-dead
+// connection after mobile sleep. Reconnecting on visibility return is the
+// reliable fix: cheap, and EventSource teardown/re-setup is idempotent.
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && _wantsGlobalConnection) {
+        connectGlobalNotifications();
+    }
+});
 
 export function getPermission() {
     if (!('Notification' in window)) return 'unsupported';

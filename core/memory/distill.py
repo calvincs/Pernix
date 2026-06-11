@@ -6,7 +6,6 @@ and saves them to persistent memory with dedup.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -15,6 +14,8 @@ from config import settings
 
 logger = logging.getLogger("pernix.memory.distill")
 
+# The FILE ROUTING RULES below name canonical memory files — keep in sync
+# with the routing vocabulary in core/memory/routing.py.
 DISTILL_PROMPT = """You are a session memory distiller. Extract the most important findings,
 decisions, and skills from this conversation.
 
@@ -134,6 +135,7 @@ async def distill_session(
         if session_type == "worker":
             tags += ",worker"
 
+        # add_entry enforces unique (file, epoch) identity at write time.
         store.add_entry(
             content=content,
             file_name=entry.get("file") or None,
@@ -143,7 +145,6 @@ async def distill_session(
             source="distill",
         )
         saved += 1
-        await asyncio.sleep(0.1)  # unique epochs
 
     logger.info("Distilled session %s: %d saved, %d deduped", session_id, saved, skipped_dup)
 

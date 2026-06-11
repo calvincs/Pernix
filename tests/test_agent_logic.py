@@ -834,3 +834,26 @@ def test_cross_round_dedup_excluded_set():
     assert "file_read" in _CROSS_ROUND_DEDUP_EXCLUDED
     assert "glob" in _CROSS_ROUND_DEDUP_EXCLUDED
     assert "bash" not in _CROSS_ROUND_DEDUP_EXCLUDED
+
+
+def test_invalidate_bash_dedup_clears_only_bash():
+    """A workspace file mutation must drop cached bash results — so an
+    edited-then-rerun command re-executes instead of returning the stale
+    pre-edit output — while leaving non-bash cached tools untouched.
+    """
+    from core.agent import _STATE_MUTATING_TOOLS, _invalidate_bash_dedup
+
+    cache = {
+        "bash:abc": (1, "stale traceback"),
+        "bash:def": (2, "other stale output"),
+        "http_get:xyz": (1, "page body"),
+    }
+    removed = _invalidate_bash_dedup(cache)
+    assert removed == 2
+    assert "bash:abc" not in cache
+    assert "bash:def" not in cache
+    assert "http_get:xyz" in cache  # non-bash entries survive a file edit
+    # No bash entries cached → nothing to purge, returns 0 (no KeyError).
+    assert _invalidate_bash_dedup({"http_get:1": (1, "x")}) == 0
+    # The mutating-tool set covers the agent's workspace file editors.
+    assert {"file_write", "file_edit", "multiedit"} <= _STATE_MUTATING_TOOLS

@@ -1,6 +1,7 @@
 // Pernix — Sidebar component: session list with grouping, dots, tooltips, legend
 import { el, text, clear } from '../render.js';
 import { isMobile } from '../mobile.js';
+import { get, patch } from '../api.js';
 
 // ---------------------------------------------------------------------------
 // Session type definitions
@@ -34,6 +35,73 @@ export function initSidebar(onSelect, onDelete) {
     _onDelete = onDelete;
     _createTooltip();
     _createLegend();
+    _createSearchBox();
+}
+
+// ---------------------------------------------------------------------------
+// Session search — FTS5 over all message content. The index has powered
+// scout's cross-session lookups all along; this finally exposes it to the
+// user ("find the session where we discussed X").
+// ---------------------------------------------------------------------------
+
+let _searchActive = false;
+let _searchTimer = null;
+
+function _createSearchBox() {
+    const sidebar = document.getElementById('sidebar');
+    const list = document.getElementById('session-list');
+    if (!sidebar || !list || document.getElementById('session-search')) return;
+    const input = el('input', {
+        id: 'session-search',
+        type: 'search',
+        placeholder: 'Search sessions…',
+        autocomplete: 'off',
+    });
+    sidebar.insertBefore(input, list);
+    input.addEventListener('input', () => {
+        clearTimeout(_searchTimer);
+        const q = input.value.trim();
+        if (q.length < 2) {
+            if (_searchActive) {
+                _searchActive = false;
+                _lastJson = '';  // force the normal list to re-render
+                window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
+            }
+            return;
+        }
+        _searchTimer = setTimeout(() => _runSearch(q), 300);
+    });
+}
+
+async function _runSearch(q) {
+    _searchActive = true;
+    const list = document.getElementById('session-list');
+    if (!list) return;
+    try {
+        const data = await get(`/api/sessions/search?q=${encodeURIComponent(q)}`);
+        if (!_searchActive) return;  // user cleared the box while we fetched
+        clear(list);
+        const results = data.results || [];
+        if (results.length === 0) {
+            list.appendChild(el('div', { class: 'search-empty' }, [text('No matching sessions')]));
+            return;
+        }
+        for (const r of results) {
+            list.appendChild(el('div', {
+                class: 'session-item search-hit',
+                onClick: () => { if (_onSelect) _onSelect(r.session_id); },
+            }, [
+                el('div', { class: 'session-title' }, [text(r.title || 'untitled')]),
+                el('div', { class: 'search-snippet' }, [text(r.snippet || '')]),
+                el('div', { class: 'search-meta' }, [
+                    text(`${r.matches} match${r.matches === 1 ? '' : 'es'}${r.updated_at ? ' · ' + r.updated_at : ''}`),
+                ]),
+            ]));
+        }
+    } catch {
+        clear(list);
+        list.appendChild(el('div', { class: 'search-empty' }, [text('Search failed')]));
+    }
 }
 
 export function updateSessionActivity(sessionId, activityText) {
@@ -62,6 +130,7 @@ export function updateSessionActivity(sessionId, activityText) {
 }
 
 export function renderSessionList(sessions, activeSid) {
+    if (_searchActive) return;  // search results own the list until cleared
     const json = JSON.stringify(sessions) + '|' + activeSid;
     if (json === _lastJson) return;
     _lastJson = json;
@@ -99,12 +168,17 @@ export function renderSessionList(sessions, activeSid) {
         workersByParent[pid].push(w);
     }
 
-    // Bucket by time group
-    const GROUP_ORDER = ['Today', 'Yesterday', 'This Week', 'This Month', 'Older'];
-    const DEFAULT_COLLAPSED = { Today: false, Yesterday: false, 'This Week': true, 'This Month': true, Older: true };
+    // Bucket by time group — pinned sessions get their own group on top.
+    const GROUP_ORDER = ['Pinned', 'Today', 'Yesterday', 'This Week', 'This Month', 'Older'];
+    const DEFAULT_COLLAPSED = { Pinned: false, Today: false, Yesterday: false, 'This Week': true, 'This Month': true, Older: true };
     const buckets = {};
     for (const g of GROUP_ORDER) buckets[g] = [];
-    for (const s of topLevel) buckets[_timeGroup(s.updated_at)].push(s);
+    for (const s of topLevel) buckets[s.pinned ? 'Pinned' : _timeGroup(s.updated_at)].push(s);
+    // Within each group: real conversations first, auto-created cron
+    // sessions after — a busy schedule otherwise crowds chats out of view.
+    for (const g of GROUP_ORDER) {
+        buckets[g].sort((a, b) => (_getTypeKey(a) === 'cron' ? 1 : 0) - (_getTypeKey(b) === 'cron' ? 1 : 0));
+    }
 
     for (const label of GROUP_ORDER) {
         const group = buckets[label];
@@ -224,12 +298,53 @@ function _renderSessionItem(session, container, activeSid, isWorker) {
         },
     }, [text('#')]));
 
-    // Delete button
+    // Pin toggle — pinned sessions live in their own group at the top.
+    if (!isWorker) {
+        meta.push(el('button', {
+            class: `session-pin${session.pinned ? ' pinned' : ''}`,
+            title: session.pinned ? 'Unpin session' : 'Pin session to top',
+            onClick: async (e) => {
+                e.stopPropagation();
+                const next = !session.pinned;
+                try {
+                    await patch(`/api/sessions/${session.id}`, { pinned: next });
+                    session.pinned = next ? 1 : 0;
+                    _lastJson = '';  // force re-render with new grouping
+                    window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
+                } catch { /* leave as-is on failure */ }
+            },
+        }, [text('⚲')]));
+
+        // Rename — swaps the title for an inline editor.
+        meta.push(el('button', {
+            class: 'session-rename',
+            title: 'Rename session',
+            onClick: (e) => {
+                e.stopPropagation();
+                _startRename(session);
+            },
+        }, [text('✎')]));
+    }
+
+    // Delete button \u2014 two-tap confirm: the \u00d7 is always visible on touch
+    // devices and sits next to the copy-id button, so a single stray tap
+    // must not permanently destroy a conversation (there is no undo).
     meta.push(el('button', {
         class: 'session-delete',
         title: 'Delete session',
         onClick: (e) => {
             e.stopPropagation();
+            const btn = e.currentTarget;
+            if (!btn.classList.contains('confirm')) {
+                btn.classList.add('confirm');
+                btn.textContent = 'sure?';
+                btn._disarmTimer = setTimeout(() => {
+                    btn.classList.remove('confirm');
+                    btn.textContent = '\u00d7';
+                }, 3000);
+                return;
+            }
+            clearTimeout(btn._disarmTimer);
             if (_onDelete) _onDelete(session.id);
         },
     }, [text('\u00d7')]));
@@ -248,6 +363,7 @@ function _renderSessionItem(session, container, activeSid, isWorker) {
     const classes = ['session-item'];
     if (session.id === activeSid) classes.push('active');
     if (isWorker) classes.push('worker');
+    if (typeKey === 'cron') classes.push('cron-session');
 
     // Title with colored dot prefix
     const titleChildren = [];
@@ -257,7 +373,21 @@ function _renderSessionItem(session, container, activeSid, isWorker) {
     const isActive = session.state && session.state !== 'idle';
     const dotCls = `session-dot ${typeDef.cls}${isActive ? ' active-pulse' : ''}`;
     titleChildren.push(el('span', { class: dotCls }));
-    titleChildren.push(text(titleText));
+    titleChildren.push(el('span', { class: 'session-title-text' }, [text(titleText)]));
+
+    // Needs-attention badges: "?" = blocked waiting for your input,
+    // "✓" = a background turn finished since you last looked.
+    if (session._attention === 'input') {
+        titleChildren.push(el('span', {
+            class: 'session-attn attn-input',
+            title: 'Waiting for your input',
+        }, [text('?')]));
+    } else if (session._attention === 'done') {
+        titleChildren.push(el('span', {
+            class: 'session-attn attn-done',
+            title: 'Finished while you were away',
+        }, [text('✓')]));
+    }
 
     // Activity ticker line: live activity when processing, subtitle/preview when idle
     let liveActivity = _activity.get(session.id);
@@ -303,6 +433,50 @@ function _renderSessionItem(session, container, activeSid, isWorker) {
             }
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Inline rename — replaces the title span with an input; Enter/blur saves,
+// Esc cancels. Rename does not bump recency (server contract).
+// ---------------------------------------------------------------------------
+
+function _startRename(session) {
+    const item = document.querySelector(`.session-item[data-sid="${session.id}"]`);
+    const titleSpan = item?.querySelector('.session-title-text');
+    if (!titleSpan || item.querySelector('.session-rename-input')) return;
+
+    const input = el('input', {
+        class: 'session-rename-input',
+        type: 'text',
+        value: session.title || '',
+    });
+    input.addEventListener('click', (e) => e.stopPropagation());
+
+    let finished = false;
+    const finish = async (save) => {
+        if (finished) return;
+        finished = true;
+        const newTitle = input.value.trim();
+        if (save && newTitle && newTitle !== session.title) {
+            try {
+                const res = await patch(`/api/sessions/${session.id}`, { title: newTitle });
+                session.title = res.title || newTitle;
+            } catch { /* keep old title */ }
+        }
+        _lastJson = '';
+        window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
+    };
+
+    input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+        else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+
+    titleSpan.replaceWith(input);
+    input.focus();
+    input.select();
 }
 
 function _cleanPreview(msg) {
@@ -433,6 +607,11 @@ function _showTooltip(event, session, typeDef) {
         }
         if (session.total_tokens) {
             stats.push(el('span', {}, [text(`${_formatTokens(session.total_tokens)} tokens`)]));
+        }
+        // Money builds trust for an agent that burns tokens autonomously —
+        // cron jobs run while the user sleeps; they should see the bill.
+        if (session.total_cost && session.total_cost >= 0.005) {
+            stats.push(el('span', {}, [text(`$${session.total_cost.toFixed(2)}`)]));
         }
         if (stats.length) {
             tt.appendChild(el('div', { class: 'tt-stats' }, stats));

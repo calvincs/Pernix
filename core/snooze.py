@@ -360,6 +360,24 @@ class SnoozeRunner:
             )
             await self._cleanup_workflow_runs()
 
+        # Activity 13: Refine pass — broader-gate sibling of Activity 2b.
+        # Runs independent of did_llm: refine has its own budget, bounded to
+        # one session per cycle. Coexists with 2b — a session with an
+        # actionable reflect verdict may produce both a narrow proposal (2b)
+        # and a broader refine pass (13). Watermark differs (refined:{sid}
+        # vs proposal_reviewed:{sid}) so the two passes don't collide.
+        if not self._is_cancelled():
+            can_llm = self._llm_available() and bool(settings.background_model or settings.llm_model)
+            if can_llm:
+                bus.emit(
+                    {
+                        "type": "snooze.activity",
+                        "activity": "refine",
+                        "detail": "Crystallizing skill/memory updates from an idle session",
+                    }
+                )
+                await self._refine_one_session()
+
     # ------------------------------------------------------------------
     # Activity 1: Catch-up distillation
     # ------------------------------------------------------------------
@@ -685,6 +703,67 @@ Output valid JSON only. No markdown fences. /no_think"""
             return False
 
     # ------------------------------------------------------------------
+    # Activity 13: Whole-session refine (tail-end of snooze cycle)
+    # ------------------------------------------------------------------
+
+    async def _refine_one_session(self) -> bool:
+        """Run a broader-gate refine pass on one idle session.
+
+        Selects via :func:`db.get_unrefined_sessions` (10-min idle floor,
+        watermark ``refined:{sid}``). Stamps the watermark unconditionally
+        after the call so a session that produced nothing actionable, or
+        one whose LLM call failed, is never retried — matches the
+        mark-on-failure pattern used by ``_catchup_distill`` and
+        ``_propose_skill_improvements``.
+
+        Returns True if the LLM was invoked (so stats reflect cycle work),
+        False otherwise. Snooze does not gate any subsequent activity on
+        this return, but the bool keeps the call site uniform.
+        """
+        from db import models as db
+
+        # 2× snooze_cooldown_minutes mirrors the floor used by
+        # _propose_skill_improvements (Activity 2b) — keeps both passes
+        # operating on the same notion of "idle long enough."
+        sessions = db.get_unrefined_sessions(
+            min_idle_minutes=settings.snooze_cooldown_minutes * 2,
+            limit=1,
+        )
+        if not sessions:
+            return False
+
+        session = sessions[0]
+        sid = session["id"]
+
+        if self._is_cancelled():
+            return False
+
+        try:
+            from core.refine import run_for_session
+
+            stats = await run_for_session(sid)
+            self._stats.setdefault("refine_proposals_saved", 0)
+            self._stats.setdefault("refine_lessons_saved", 0)
+            self._stats.setdefault("refine_nothing_actionable", 0)
+            self._stats["refine_proposals_saved"] += stats.get("proposals_saved", 0)
+            self._stats["refine_lessons_saved"] += stats.get("lessons_saved", 0)
+            if stats.get("nothing_actionable"):
+                self._stats["refine_nothing_actionable"] += 1
+            llm_used = stats.get("skipped_reason") not in (
+                "session_not_found",
+                "worker_session",
+                "no_messages",
+                "insufficient_exchange",
+                "no_model_configured",
+            )
+            db.set_snooze_state(f"refined:{sid}", datetime.now(timezone.utc).isoformat())
+            return bool(llm_used)
+        except Exception as e:
+            logger.warning("Snooze: refine pass failed for %s: %s", sid, e)
+            db.set_snooze_state(f"refined:{sid}", datetime.now(timezone.utc).isoformat())
+            return False
+
+    # ------------------------------------------------------------------
     # Activity 3: Memory deduplication sweep
     # ------------------------------------------------------------------
 
@@ -742,6 +821,11 @@ Output valid JSON only. No markdown fences. /no_think"""
         # O(N+M) quick_ratio() as upper-bound prescreens — pairs that can't
         # reach 0.82 are skipped without ever computing the full O(N·M) ratio.
         def _pairwise_dedup() -> set[int]:
+            import re as _re
+
+            def _tokens(s: str) -> set[str]:
+                return set(_re.findall(r"\w+", s.lower()))
+
             archived: set[int] = set()
             for i in range(len(entries)):
                 if self._is_cancelled():
@@ -757,6 +841,17 @@ Output valid JSON only. No markdown fences. /no_think"""
                     sim = sm.ratio()
                     if sim > 0.82:
                         to_archive = entries[j] if len(entries[j].content) <= len(entries[i].content) else entries[i]
+                        to_keep = entries[i] if to_archive is entries[j] else entries[j]
+                        # Ratio alone is not enough: structured facts that
+                        # differ only in a key value ("prod key X / :8090" vs
+                        # "dev key Y / :8091") score ~0.9 and one would be
+                        # silently lost forever. Only archive when the dropped
+                        # entry carries NO token absent from the kept one —
+                        # i.e. archiving loses no unique information. Pure
+                        # rephrasings with novel words stay (false negatives
+                        # are wasteful; false positives destroy facts).
+                        if not _tokens(to_archive.content) <= _tokens(to_keep.content):
+                            continue
                         archived.add(to_archive.epoch)
                         logger.debug("Snooze: archiving duplicate (epoch=%d, sim=%.2f)", to_archive.epoch, sim)
             return archived
@@ -1267,8 +1362,9 @@ Output valid JSON only. No markdown fences. /no_think"""
                         (entry.file_name, str(entry.epoch)),
                     )
                     conn.execute(
-                        "INSERT INTO memory_fts (file_name, content, tags, entry_type, weight, epoch) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO memory_fts "
+                        "(file_name, content, tags, entry_type, weight, epoch, source, updated) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             entry.file_name,
                             entry.content,
@@ -1276,6 +1372,8 @@ Output valid JSON only. No markdown fences. /no_think"""
                             entry.entry_type,
                             entry.weight,
                             str(entry.epoch),
+                            entry.source,
+                            str(entry.updated),
                         ),
                     )
                     conn.commit()

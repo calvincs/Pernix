@@ -12,6 +12,19 @@ from core.tools.registry import ToolRegistry
 
 logger = logging.getLogger("pernix.tools.executor")
 
+# Dedicated executor for long-poll tools — see ToolDef.long_poll. Sized for
+# concurrent orchestrations, not throughput: each occupant is 99% blocked.
+_long_poll_executor = None
+
+
+def _get_long_poll_executor():
+    global _long_poll_executor
+    if _long_poll_executor is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _long_poll_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="pernix-longpoll")
+    return _long_poll_executor
+
 
 @dataclass
 class ToolExecutionResult:
@@ -110,8 +123,43 @@ async def _execute_single(
                     _approvals: dict = getattr(_s, "_approved_dangerous_tools", {})
                     if name in _approvals:
                         entry = _approvals[name]
-                        _session_approved = True
-                        if not entry.get("persistent", False):
+                        if entry.get("persistent", False):
+                            # Persistent approvals are deliberately broad — the
+                            # user consented to the stated scope covering
+                            # repeated calls (e.g. "browse several pages").
+                            _session_approved = True
+                        else:
+                            # Single-use approvals must actually cover this
+                            # call: every significant string argument has to
+                            # appear in the scope the user was shown. Without
+                            # this, approving "delete skill foo" unlocks
+                            # delete_skill(name="bar") — the gate would match
+                            # on tool name alone.
+                            _scope_text = " ".join(str(entry.get("scope", "")).lower().split())
+                            _uncovered = [
+                                k
+                                for k, v in (arguments or {}).items()
+                                if isinstance(v, str)
+                                and len(v.strip()) >= 4
+                                and " ".join(v.lower().split()) not in _scope_text
+                            ]
+                            if _uncovered:
+                                # Leave the approval in place — it may match the
+                                # call the user actually confirmed.
+                                return ToolExecutionResult(
+                                    tool_name=name,
+                                    content=(
+                                        f"Error: The approved scope ({entry.get('scope', '')!r}) does not "
+                                        f"mention the value(s) of argument(s) {', '.join(sorted(_uncovered))} "
+                                        f"in this call. Approval covers only the exact action the user "
+                                        f"confirmed. Either call the tool with the approved values, or run "
+                                        f"ask_user + approve_dangerous_tool again with a scope quoting the "
+                                        f"exact command/URL/name you intend to use."
+                                    ),
+                                    was_error=True,
+                                    latency_ms=0,
+                                )
+                            _session_approved = True
                             # Consume: this approval covers only this one call.
                             del _approvals[name]
 
@@ -149,10 +197,28 @@ async def _execute_single(
         loop = asyncio.get_running_loop()
         ctx = dict(context) if context else {}
         ctx["_loop"] = loop
-        raw = await asyncio.wait_for(
-            asyncio.to_thread(registry.execute_sync, name, arguments, ctx),
-            timeout=timeout,
-        )
+        if tool.long_poll:
+            # Long-poll tools (await_workers, run_workflow) hold their thread
+            # for up to 30-60 minutes while the workers they wait on need
+            # threads from the SHARED to_thread pool for their own tools.
+            # Enough concurrent orchestrations could occupy every shared slot:
+            # workers' tools then queue, "time out" without executing, the
+            # workers stall, and the blockers keep holding their threads —
+            # starvation deadlock. A dedicated executor caps the blast radius.
+            import functools
+
+            raw = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _get_long_poll_executor(),
+                    functools.partial(registry.execute_sync, name, arguments, ctx),
+                ),
+                timeout=timeout,
+            )
+        else:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(registry.execute_sync, name, arguments, ctx),
+                timeout=timeout,
+            )
         latency = int((time.monotonic() - start) * 1000)
 
         # execute_sync may return (str, dict) for structured metadata

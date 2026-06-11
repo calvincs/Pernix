@@ -144,16 +144,6 @@ def test_memory_store_recall_with_entries(tmp_path, monkeypatch):
     assert isinstance(result, str)
 
 
-def test_memory_store_recall_enhanced(tmp_path, monkeypatch):
-    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
-    from core.memory.store import MemoryStore
-
-    store = MemoryStore(str(tmp_path / "memories"))
-    store.add_entry("Database uses SQLite WAL mode for concurrent reads", file_name="pernix.config")
-    result = store.recall_enhanced("database sqlite", min_score=0.1)
-    assert isinstance(result, str)
-
-
 # ===========================================================================
 # More agent: tool round tracking
 # ===========================================================================

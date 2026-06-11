@@ -2,6 +2,7 @@
 
 import { el, text } from '../render.js';
 import { get, post } from '../api.js';
+import { getPermission, requestPermission } from '../notifications.js';
 
 let _overlay = null;
 let _pollTimer = null;
@@ -73,12 +74,13 @@ export function openBellPanel() {
     _poll();  // refresh before opening
 
     const itemsContainer = el('div', { class: 'bell-items', id: 'bell-items' });
+    const banner = _permissionBanner();
     const card = el('div', { class: 'modal-card bell-panel' }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text('Notifications')]),
             el('button', { class: 'modal-close', onClick: closeBellPanel }, [text('\u00d7')]),
         ]),
-        el('div', { class: 'modal-body' }, [itemsContainer]),
+        el('div', { class: 'modal-body' }, banner ? [banner, itemsContainer] : [itemsContainer]),
     ]);
 
     _overlay = el('div', { class: 'modal-overlay', onClick: (e) => {
@@ -99,6 +101,42 @@ export function closeBellPanel() {
 }
 
 function _onEsc(e) { if (e.key === 'Escape') closeBellPanel(); }
+
+/**
+ * Permission banner — browsers suppress permission prompts that aren't
+ * triggered by a user gesture, so the bell panel (a gesture) is the right
+ * place to offer enabling push alerts. Without this there was no UI
+ * anywhere to (re-)enable notifications once the silent on-load prompt
+ * was suppressed — "agent finished / agent has a question" alerts never
+ * fired for most users.
+ */
+function _permissionBanner() {
+    const perm = getPermission();
+    if (perm === 'granted' || perm === 'unsupported') return null;
+
+    const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+    if (isIOS && !isStandalone) {
+        return el('div', { class: 'bell-perm-banner' }, [
+            text('To get notifications on iOS, add Pernix to your Home Screen first (Share → Add to Home Screen), then enable them here.'),
+        ]);
+    }
+    if (perm === 'denied') {
+        return el('div', { class: 'bell-perm-banner' }, [
+            text('Notifications are blocked for this site. Re-enable them in your browser’s site settings to get alerts when the agent finishes or asks a question.'),
+        ]);
+    }
+    const banner = el('div', { class: 'bell-perm-banner' });
+    const btn = el('button', { class: 'btn btn-primary', onClick: async () => {
+        const ok = await requestPermission();
+        banner.textContent = ok
+            ? 'Notifications enabled — you’ll be alerted when the agent finishes or has a question.'
+            : 'Permission was not granted.';
+    }}, [text('Enable notifications')]);
+    banner.appendChild(text('Get alerted when the agent finishes a long task or asks a question. '));
+    banner.appendChild(btn);
+    return banner;
+}
 
 // ---------------------------------------------------------------------------
 // Render items

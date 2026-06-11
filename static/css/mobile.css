@@ -85,6 +85,35 @@
         height: 0;
     }
 
+    /* ------------------------------------------------------------------
+       Chat content overflow — code blocks and tables scroll horizontally;
+       keep a slim visible scrollbar as the affordance (the global hiding
+       above would otherwise leave no hint that they scroll).
+       ------------------------------------------------------------------ */
+    .message.assistant .content pre {
+        -webkit-overflow-scrolling: touch;
+    }
+    .message.assistant .content pre::-webkit-scrollbar {
+        height: 4px;
+    }
+    .message.assistant .content pre::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 2px;
+    }
+    .message.assistant .content table {
+        display: block;
+        max-width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+    .message.assistant .content table::-webkit-scrollbar {
+        height: 4px;
+    }
+    .message.assistant .content table::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 2px;
+    }
+
     #messages,
     .fp-tree,
     .fp-viewer,
@@ -117,8 +146,29 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    #status-bar .info {
+    /* Status text — instead of hiding it (mobile is exactly where
+       minutes-long turns feel longest), float it as a transient strip
+       above the input bar whenever there is something to say. */
+    #status-bar .info:empty {
         display: none;
+    }
+    #status-bar .info:not(:empty) {
+        display: block;
+        position: fixed;
+        left: var(--sp-3);
+        right: var(--sp-3);
+        bottom: calc(76px + var(--safe-bottom));
+        background: var(--bg-raised);
+        border: 1px solid var(--border-subtle);
+        border-radius: var(--radius);
+        padding: var(--sp-1) var(--sp-2);
+        font-size: var(--text-xxs);
+        color: var(--text-dim);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        z-index: 45;
+        pointer-events: none;
     }
     #status-bar .ctx {
         display: none;
@@ -366,8 +416,8 @@
     }
     #input-bar {
         border-radius: 1.25rem;
-        padding: 6px 6px 6px var(--sp-3);
-        gap: var(--sp-2);
+        padding: 6px;
+        gap: var(--sp-1);
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
     }
     #input-bar textarea {
@@ -377,9 +427,14 @@
         line-height: 1.4;
         max-height: 120px;
     }
-    #send-btn {
-        width: 34px;
-        height: 34px;
+    #send-btn,
+    #attach-btn {
+        width: 36px;  /* keep ≥36px touch target */
+        height: 36px;
+    }
+    #attach-btn svg {
+        width: 20px;
+        height: 20px;
     }
 
     /* ------------------------------------------------------------------
@@ -478,7 +533,7 @@
         top: 100% !important;
         right: auto !important;
         bottom: auto !important;
-        width: min(280px, 80vw);
+        width: min(280px, calc(100vw - 48px));
         margin-top: 4px;
     }
     .section-help-wrap {
@@ -539,6 +594,26 @@
     }
 
     /* ------------------------------------------------------------------
+       Palette (Ctrl+K) and model menu — reclaim vertical space on phones
+       ------------------------------------------------------------------ */
+    .palette-overlay {
+        padding-top: max(var(--sp-4), var(--safe-top));
+    }
+    #model-menu {
+        max-width: calc(100vw - 16px);
+    }
+    .model-menu-list {
+        max-height: 60dvh;
+    }
+
+    /* ------------------------------------------------------------------
+       Offline banner — clear the notch / Dynamic Island
+       ------------------------------------------------------------------ */
+    .offline-banner {
+        padding-top: max(var(--sp-2), var(--safe-top));
+    }
+
+    /* ------------------------------------------------------------------
        Jobs UI
        ------------------------------------------------------------------ */
     .jobs-btn {
@@ -547,6 +622,7 @@
     }
     .jobs-item {
         padding: var(--sp-3);
+        min-height: 44px;
     }
     .jobs-add-form input,
     .jobs-add-form textarea,
@@ -624,6 +700,10 @@
 @media (max-width: 480px) {
     #copy-transcript-btn {
         display: none !important;
+    }
+    #session-tooltip {
+        min-width: 0;
+        max-width: calc(100vw - 16px);
     }
     .messages-inner {
         padding: 0 var(--sp-2);

@@ -9,17 +9,17 @@ from core.events import JobEventBus, get_event_bus
 
 def test_emit_adds_seq_and_timestamp():
     bus = JobEventBus()
-    bus.emit({"type": "test"})
-    events = bus.recent_events
-    assert len(events) == 1
-    assert events[0]["_seq"] == 1
-    assert "timestamp" in events[0]
+    event = {"type": "test"}
+    bus.emit(event)
+    assert event["_seq"] == 1
+    assert "timestamp" in event
 
 
 def test_emit_preserves_existing_timestamp():
     bus = JobEventBus()
-    bus.emit({"type": "test", "timestamp": 12345})
-    assert bus.recent_events[0]["timestamp"] == 12345
+    event = {"type": "test", "timestamp": 12345}
+    bus.emit(event)
+    assert event["timestamp"] == 12345
 
 
 def test_subscribe_receives_events():
@@ -66,25 +66,12 @@ def test_multiple_subscribers():
     assert not q2.empty()
 
 
-def test_recent_events():
-    bus = JobEventBus()
-    bus.emit({"type": "a"})
-    bus.emit({"type": "b"})
-    events = bus.recent_events
-    assert len(events) == 2
-    assert events[0]["type"] == "a"
-    assert events[1]["type"] == "b"
-
-
 def test_seq_increments():
     bus = JobEventBus()
-    bus.emit({"type": "1"})
-    bus.emit({"type": "2"})
-    bus.emit({"type": "3"})
-    events = bus.recent_events
-    assert events[0]["_seq"] == 1
-    assert events[1]["_seq"] == 2
-    assert events[2]["_seq"] == 3
+    events = [{"type": "1"}, {"type": "2"}, {"type": "3"}]
+    for e in events:
+        bus.emit(e)
+    assert [e["_seq"] for e in events] == [1, 2, 3]
 
 
 def test_get_event_bus_singleton(monkeypatch):

@@ -231,8 +231,9 @@ def _check_invariants(session: "AgentSession", to: S) -> list[str]:
         if task_done:
             violations.append("PROCESSING expects a running task")
     elif to is S.PAUSE_REQUESTED:
-        if session.session_type != "worker":
-            violations.append("PAUSE_REQUESTED is worker-only")
+        # Historically worker-only; the user-facing pause endpoint now uses
+        # the same transition for main sessions — the agent loop's pause
+        # checkpoint is type-agnostic.
         if pause_set:
             violations.append("PAUSE_REQUESTED expects pause_event.is_set()==False")
     elif to is S.PAUSED:
@@ -458,6 +459,11 @@ def _set_state(session: "AgentSession", to: S) -> None:
     Persists `state_v2` to the sessions table so a restart can restore the
     true v2 state (the legacy column collapses AWAITING_WORKERS / FINALIZING
     / CANCELLING / AWAITING_USER all to "idle", which loses crucial info).
+
+    Also persists the legacy `state` column. This used to be the caller's
+    job (manager._persist_legacy_state after every transition); doing it
+    here closes the "forgot a call site → stale DB row" bug class that
+    reconcile_processing_sessions carries recovery code for.
     """
     from sessions.state import SessionState  # local import to avoid cycles
 
@@ -475,6 +481,10 @@ def _set_state(session: "AgentSession", to: S) -> None:
         db.set_session_state_v2(session.session_id, to.value)
     except Exception as e:
         logger.error("state_v2 persist failed for %s (%s): %s", session.session_id, to.value, e)
+    try:
+        db.set_session_state(session.session_id, session.state.value)
+    except Exception as e:
+        logger.error("legacy state persist failed for %s (%s): %s", session.session_id, to.value, e)
 
 
 def compat_status(to: S | str) -> str:

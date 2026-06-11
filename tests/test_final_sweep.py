@@ -538,16 +538,16 @@ def test_push_module_generate_keys(tmp_path, monkeypatch):
 
 def test_db_session_messages():
     from db import models as db
+    from db.database import connect_sessions
 
     sid1 = db.create_session(title="Sender")
     sid2 = db.create_session(title="Receiver")
     db.send_session_message(sid1, sid2, "result", '{"data": "output"}')
-    msgs = db.recv_session_messages(sid2)
-    assert len(msgs) == 1
-    assert msgs[0]["payload"] == '{"data": "output"}'
-    # Second call should return nothing (messages marked read)
-    msgs2 = db.recv_session_messages(sid2)
-    assert len(msgs2) == 0
+    # Production reads this table directly (cross_pollinate dedup ledger).
+    with connect_sessions() as conn:
+        rows = conn.execute("SELECT payload FROM session_messages WHERE recipient_id = ?", (sid2,)).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["payload"] == '{"data": "output"}'
 
 
 def test_db_push_subscriptions():

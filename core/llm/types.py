@@ -69,7 +69,6 @@ class ModelInfo:
     supports_vision: bool = False
     supports_audio: bool = False
     supports_tools: bool = True
-    supports_streaming: bool = True
     max_output_tokens: int | None = None
 
 
@@ -85,7 +84,6 @@ class ProviderConfig:
     connect_timeout: float = 30.0
     max_connections: int = 10
     max_keepalive: int = 5
-    retry_delays: list[float] = field(default_factory=lambda: [2.0, 5.0, 10.0])
 
 
 @dataclass

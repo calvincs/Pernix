@@ -89,6 +89,8 @@ def _execute_deep_recall_tool(name: str, args: dict, memory_dir: str) -> str:
             results = store.search(query, limit=top)
             if not results:
                 return "No results found."
+            from core.memory.search import format_result_line
+
             lines = []
             for r in results:
                 content = r.entry.content
@@ -99,7 +101,7 @@ def _execute_deep_recall_tool(name: str, args: dict, memory_dir: str) -> str:
                         len(content),
                         len(content) // 3,
                     )
-                lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
+                lines.append(format_result_line(r))
             return "\n\n".join(lines)
         except Exception as e:
             return f"search_memory error: {e}"
@@ -312,6 +314,8 @@ def recall(
                 return footer
             results = new_results
 
+        from core.memory.search import format_result_line
+
         lines = []
         for r in results:
             content = r.entry.content
@@ -322,7 +326,7 @@ def recall(
                     len(content),
                     len(content) // 3,
                 )
-            lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
+            lines.append(format_result_line(r))
         body = "\n\n".join(lines)
         if footer:
             return f"{body}\n\n{footer}"
@@ -378,6 +382,8 @@ def deep_recall(
                     return footer
                 results = new_results
 
+            from core.memory.search import format_result_line
+
             lines = []
             for r in results:
                 content = r.entry.content
@@ -388,7 +394,7 @@ def deep_recall(
                         len(content),
                         len(content) // 3,
                     )
-                lines.append(f"[{r.entry.file_name} epoch={r.entry.epoch} score={r.score:.1f}] {content}")
+                lines.append(format_result_line(r))
             body = "\n\n".join(lines)
             if footer:
                 return f"{body}\n\n{footer}"

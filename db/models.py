@@ -69,6 +69,7 @@ def list_sessions_enriched(limit: int = 50, offset: int = 0) -> list[dict]:
                 s.*,
                 COALESCE(mc.message_count, 0) AS message_count,
                 COALESCE(tu.total_tokens, 0) AS total_tokens,
+                COALESCE(tu.total_cost, 0) AS total_cost,
                 fm.first_message
             FROM sessions s
             LEFT JOIN (
@@ -78,7 +79,8 @@ def list_sessions_enriched(limit: int = 50, offset: int = 0) -> list[dict]:
                 GROUP BY session_id
             ) mc ON mc.session_id = s.id
             LEFT JOIN (
-                SELECT session_id, SUM(total_tokens) AS total_tokens
+                SELECT session_id, SUM(total_tokens) AS total_tokens,
+                       SUM(COALESCE(cost_estimate, 0)) AS total_cost
                 FROM token_usage
                 GROUP BY session_id
             ) tu ON tu.session_id = s.id
@@ -115,6 +117,22 @@ def update_session(session_id: str, **kwargs) -> None:
     if not updates:
         return
     updates["updated_at"] = _now()
+    cols = ", ".join(f"{k} = ?" for k in updates)
+    vals = list(updates.values()) + [session_id]
+    with connect_sessions() as conn:
+        conn.execute(f"UPDATE sessions SET {cols} WHERE id = ?", vals)
+
+
+def set_session_meta(session_id: str, *, title: str | None = None, pinned: bool | None = None) -> None:
+    """Set user-facing session metadata WITHOUT bumping updated_at —
+    renaming or pinning a session must not change its recency ordering."""
+    updates: dict = {}
+    if title is not None:
+        updates["title"] = title
+    if pinned is not None:
+        updates["pinned"] = 1 if pinned else 0
+    if not updates:
+        return
     cols = ", ".join(f"{k} = ?" for k in updates)
     vals = list(updates.values()) + [session_id]
     with connect_sessions() as conn:
@@ -170,7 +188,14 @@ def delete_session(session_id: str) -> None:
     for wid in worker_ids:
         delete_session(wid)
     with connect_sessions() as conn:
-        # Single transaction: delete related rows then session
+        # Single transaction: delete related rows then session.
+        # messages_fts is a contentless-sync FTS table with no FK to messages —
+        # without the explicit delete its rows leak forever (every weekly
+        # cron-session prune grows the index and pollutes search results).
+        conn.execute(
+            "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id = ?)",
+            (session_id,),
+        )
         conn.execute("DELETE FROM session_messages WHERE sender_id = ? OR recipient_id = ?", (session_id, session_id))
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
@@ -242,10 +267,38 @@ def get_state_log(
     session_id: str,
     *,
     since_id: int = 0,
+    before_id: int = 0,
     limit: int = 500,
+    tail: bool = False,
 ) -> list[dict]:
-    """Return state transitions for a session, oldest-first, after since_id."""
+    """Return state transitions for a session, oldest-first.
+
+    Three windowing modes (rows are always returned oldest-first):
+      * default      — the oldest `limit` rows with id > since_id.
+      * tail=True    — the NEWEST `limit` rows (live views want the recent
+                       end of a long log, not the start).
+      * before_id>0  — the `limit` rows immediately preceding `before_id`
+                       (backward pagination: "load older" from a tail view).
+    """
     with connect_sessions() as conn:
+        if before_id > 0:
+            rows = conn.execute(
+                """SELECT * FROM session_state_log
+                   WHERE session_id = ? AND id < ?
+                   ORDER BY id DESC
+                   LIMIT ?""",
+                (session_id, before_id, limit),
+            ).fetchall()
+            return [dict(r) for r in reversed(rows)]
+        if tail:
+            rows = conn.execute(
+                """SELECT * FROM session_state_log
+                   WHERE session_id = ? AND id > ?
+                   ORDER BY id DESC
+                   LIMIT ?""",
+                (session_id, since_id, limit),
+            ).fetchall()
+            return [dict(r) for r in reversed(rows)]
         rows = conn.execute(
             """SELECT * FROM session_state_log
                WHERE session_id = ? AND id > ?
@@ -357,28 +410,61 @@ def add_message(
         return msg_id
 
 
-def get_messages(session_id: str) -> list[dict]:
+def get_messages(session_id: str, last: int | None = None, before_id: int | None = None) -> list[dict]:
+    """Return messages oldest-first. With `last`, only the newest N rows
+    (still oldest-first) — tail consumers (reflect, post-hooks, approval
+    checks) should pass it instead of loading the whole transcript: this
+    runs synchronously on the event loop and tool results can be 100s of
+    KB each. `before_id` (with `last`) pages further back: the newest N
+    rows whose id is < before_id."""
     with connect_sessions() as conn:
-        rows = conn.execute(
-            "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at, id",
-            (session_id,),
-        ).fetchall()
+        if last is not None:
+            if before_id is not None:
+                rows = conn.execute(
+                    """SELECT * FROM (
+                           SELECT * FROM messages WHERE session_id = ? AND id < ?
+                           ORDER BY created_at DESC, id DESC LIMIT ?
+                       ) ORDER BY created_at, id""",
+                    (session_id, before_id, last),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM (
+                           SELECT * FROM messages WHERE session_id = ?
+                           ORDER BY created_at DESC, id DESC LIMIT ?
+                       ) ORDER BY created_at, id""",
+                    (session_id, last),
+                ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at, id",
+                (session_id,),
+            ).fetchall()
         return [dict(r) for r in rows]
+
+
+def count_messages(session_id: str) -> int:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM messages WHERE session_id = ?", (session_id,)).fetchone()
+        return int(row["c"]) if row else 0
+
+
+def get_last_message_at(session_id: str, role: str) -> str | None:
+    """Return the created_at of the newest message with the given role
+    (None if there are none). Cheap indexed lookup — avoids loading the
+    whole transcript just to find one timestamp."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT MAX(created_at) AS ts FROM messages WHERE session_id = ? AND role = ?",
+            (session_id, role),
+        ).fetchone()
+        return row["ts"] if row and row["ts"] else None
 
 
 def get_message(message_id: int) -> dict | None:
     with connect_sessions() as conn:
         row = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
         return dict(row) if row else None
-
-
-def get_last_message_id(session_id: str) -> int | None:
-    with connect_sessions() as conn:
-        row = conn.execute(
-            "SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1",
-            (session_id,),
-        ).fetchone()
-        return row["id"] if row else None
 
 
 def get_orphaned_user_messages(session_id: str) -> list[dict]:
@@ -446,11 +532,6 @@ def delete_messages_from(session_id: str, from_id: int) -> None:
             "DELETE FROM messages WHERE session_id = ? AND id >= ?",
             (session_id, from_id),
         )
-
-
-def mark_message_partial(message_id: int, partial: int = 1) -> None:
-    with connect_sessions() as conn:
-        conn.execute("UPDATE messages SET partial = ? WHERE id = ?", (partial, message_id))
 
 
 def update_message_content(message_id: int, content: str) -> None:
@@ -838,28 +919,6 @@ def send_session_message(
         )
 
 
-def recv_session_messages(recipient_id: str) -> list[dict]:
-    """Fetch unread messages and mark them read atomically."""
-    with connect_sessions() as conn:
-        rows = conn.execute(
-            "SELECT * FROM session_messages WHERE recipient_id = ? AND read_at IS NULL ORDER BY id",
-            (recipient_id,),
-        ).fetchall()
-        if rows:
-            ids = [r["id"] for r in rows]
-            placeholders = ",".join("?" * len(ids))
-            conn.execute(
-                f"UPDATE session_messages SET read_at = ? WHERE id IN ({placeholders})",
-                [_now()] + ids,
-            )
-        return [dict(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Cron Runs
-# ---------------------------------------------------------------------------
-
-
 def add_cron_run(job_name: str, session_id: str | None = None) -> int:
     with connect_sessions() as conn:
         cur = conn.execute(
@@ -1116,6 +1175,47 @@ def get_unproposed_sessions(min_age_minutes: int = 10, limit: int = 5) -> list[d
                  AND EXISTS (
                      SELECT 1 FROM messages m
                      WHERE m.session_id = s.id AND m.role = 'reflect'
+                 )
+               ORDER BY s.updated_at ASC
+               LIMIT ?""",
+            (cutoff, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_unrefined_sessions(min_idle_minutes: int = 10, limit: int = 1) -> list[dict]:
+    """Sessions eligible for the snooze tail-end refine pass.
+
+    Broader gate than :func:`get_unproposed_sessions`: no reflect verdict
+    required. Refine looks at the whole transcript, so a smooth-running
+    session (no reflect) or a 'pass with no deviation' session still
+    qualifies. Watermark lives in ``snooze_state`` under
+    ``refined:{session_id}``.
+    """
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=min_idle_minutes)).isoformat()
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT s.* FROM sessions s
+               WHERE s.state = 'idle'
+                 AND s.updated_at < ?
+                 AND s.session_type != 'worker'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM snooze_state ss
+                     WHERE ss.key = 'refined:' || s.id
+                 )
+                 AND EXISTS (
+                     SELECT 1 FROM messages m
+                     WHERE m.session_id = s.id
+                       AND m.role = 'user'
+                       AND m.content != ''
+                 )
+                 AND EXISTS (
+                     SELECT 1 FROM messages m
+                     WHERE m.session_id = s.id
+                       AND m.role = 'assistant'
+                       AND m.content != ''
                  )
                ORDER BY s.updated_at ASC
                LIMIT ?""",
@@ -1572,6 +1672,20 @@ def list_skill_proposals(
             params,
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_pending_proposal_counts_by_skill() -> dict[str, int]:
+    """Return a mapping ``{skill_name: pending_proposal_count}``.
+
+    Single batched ``GROUP BY`` so the Skills API can flag every skill in
+    one round trip. Empty dict when there are no pending proposals.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT skill_name, COUNT(*) AS n FROM skill_improvement_proposals "
+            "WHERE status = 'pending' GROUP BY skill_name"
+        ).fetchall()
+        return {r["skill_name"]: int(r["n"]) for r in rows}
 
 
 def get_pending_proposals_for_skill(

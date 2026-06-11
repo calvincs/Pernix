@@ -25,7 +25,35 @@ class SearchResult:
     source: str  # "bm25" | "temporal" | "ripgrep"
 
 
-def prepare_fts_query(query: str) -> str:
+def format_result_line(result: SearchResult, char_cap: int = 0) -> str:
+    """Standard model-facing line for a memory search result.
+
+    Shows the entry date (the correction date when the entry has been
+    updated) and write provenance (@source: user / distill / ingest /
+    snooze / consolidate) so the model can judge staleness and trust —
+    e.g. weigh auto-distilled web content differently from a fact the
+    user asked to remember — without extra lookups.
+    """
+    e = result.entry
+    parts = [e.file_name, f"epoch={e.epoch}"]
+    # getattr-tolerant: ripgrep-fallback and test-shim entries may lack fields.
+    updated = int(getattr(e, "updated", 0) or 0)
+    ts = updated or int(e.epoch or 0)
+    if ts:
+        label = "updated" if updated else "date"
+        parts.append(f"{label}={time.strftime('%Y-%m-%d', time.localtime(ts))}")
+    parts.append(f"score={result.score:.1f}")
+    parts.append(f"type={e.entry_type}")
+    src = getattr(e, "source", "")
+    if src:
+        parts.append(f"source={src}")
+    content = e.content or ""
+    if char_cap and len(content) > char_cap:
+        content = content[:char_cap]
+    return f"[{' '.join(parts)}] {content}"
+
+
+def prepare_fts_query(query: str) -> tuple[str, int]:
     """Convert natural language query to FTS5 query syntax.
 
     Strips all punctuation except hyphens, leaving the FTS5 unicode61
@@ -33,6 +61,9 @@ def prepare_fts_query(query: str) -> str:
     huggingface-cache flow through; internal dots/colons/slashes/tildes are
     stripped because FTS5 treats word:foo as a column filter (yielding
     "no such column: word") and ~ ? / . as syntax operators.
+
+    Returns (fts_query, token_count); token_count is used to length-
+    normalize BM25 scores.
     """
     # Strip everything that isn't a word char, whitespace, or hyphen.
     # This avoids FTS5 column-filter (foo:bar) and operator (~ ? / .) parsing.
@@ -42,11 +73,11 @@ def prepare_fts_query(query: str) -> str:
     words = [w.strip("-") for w in clean.split()]
     words = [w for w in words if len(w) >= 2]
     if not words:
-        return f'"{query}"'
+        return f'"{query}"', 1
     # Quote every token: neutralizes FTS5 operators (NOT/AND/OR/NEAR), reserved
     # keywords, and bare hyphens (e.g. "foo-bar" parses as column-filter syntax).
     # The unicode61 tokenizer still splits inner words for matching.
-    return " OR ".join(f'"{w}"' for w in words)
+    return " OR ".join(f'"{w}"' for w in words), len(words)
 
 
 def _ripgrep_fallback(query: str, memory_dir: str, limit: int) -> list[SearchResult]:
@@ -161,13 +192,23 @@ def rg_memory_text(pattern: str, memory_dir: str, max_matches: int = 10) -> str:
 
 
 def search_bm25(conn, query: str, limit: int = 5, after_epoch: int | None = None) -> list[SearchResult]:
-    """BM25 keyword search via FTS5."""
-    fts_query = prepare_fts_query(query)
+    """BM25 keyword search via FTS5. Scores are length-normalized.
+
+    Query tokens are OR'd, so the raw bm25() sum grows with query length:
+    on the live store a 15-token query with no genuinely relevant entries
+    summed to ~12 while a relevant 2-token query reached ~7 — raw values
+    are incomparable and absolute thresholds meaningless. Dividing by the
+    token count makes the documented scale (> 3.0 strong · 1.0–3.0 weak ·
+    < 1.0 noise) hold across query lengths. Known limit: a short query
+    where one rare token matches still scores high — lexical search can't
+    see intent.
+    """
+    fts_query, n_tokens = prepare_fts_query(query)
     if not fts_query.strip():
         return []
 
     sql = """
-        SELECT file_name, content, tags, entry_type, weight, epoch,
+        SELECT file_name, content, tags, entry_type, weight, epoch, source, updated,
                bm25(memory_fts, 1.0, 2.0, 1.5, 0.5, 0.0) as score
         FROM memory_fts
         WHERE memory_fts MATCH ?
@@ -191,12 +232,15 @@ def search_bm25(conn, query: str, limit: int = 5, after_epoch: int | None = None
                 entry_type=row["entry_type"],
                 tags=[t.strip() for t in (row["tags"] or "").split(",") if t.strip()],
                 weight=row["weight"],
+                source=row["source"] or "",
+                updated=int(row["updated"] or 0),
             )
-            # BM25 returns negative scores (more negative = more relevant)
-            raw_score = abs(row["score"])
+            # BM25 returns negative scores (more negative = more relevant);
+            # normalize by query length so scores compare across queries.
+            score = abs(row["score"]) / max(1, n_tokens)
             if entry.weight == "high":
-                raw_score *= 1.5
-            results.append(SearchResult(entry=entry, score=raw_score, source="bm25"))
+                score *= 1.5
+            results.append(SearchResult(entry=entry, score=score, source="bm25"))
     except Exception as e:
         logger.warning("BM25 search failed: %s", e)
 
@@ -210,7 +254,7 @@ def search_recent(conn, limit: int = 3, hours: int = 24) -> list[SearchResult]:
     results = []
     try:
         rows = conn.execute(
-            """SELECT file_name, content, tags, entry_type, weight, epoch
+            """SELECT file_name, content, tags, entry_type, weight, epoch, source, updated
                FROM memory_fts
                WHERE CAST(epoch AS INTEGER) > ?
                ORDER BY CAST(epoch AS INTEGER) DESC
@@ -226,6 +270,8 @@ def search_recent(conn, limit: int = 3, hours: int = 24) -> list[SearchResult]:
                 entry_type=row["entry_type"],
                 tags=[t.strip() for t in (row["tags"] or "").split(",") if t.strip()],
                 weight=row["weight"],
+                source=row["source"] or "",
+                updated=int(row["updated"] or 0),
             )
             results.append(SearchResult(entry=entry, score=1.0, source="temporal"))
     except Exception as e:
@@ -235,24 +281,29 @@ def search_recent(conn, limit: int = 3, hours: int = 24) -> list[SearchResult]:
 
 
 def search_hybrid(conn, query: str, limit: int = 5, after_epoch: int | None = None) -> list[SearchResult]:
-    """Multi-signal search: BM25 + temporal + ripgrep fallback. Deduped by (file, epoch)."""
-    results = []
-
-    # Signal 1: BM25 keyword search
-    results.extend(search_bm25(conn, query, limit=limit, after_epoch=after_epoch))
-
-    # Signal 2: Recent entries (last 24h)
-    results.extend(search_recent(conn, limit=min(limit, 3)))
-
-    # Deduplicate by (file_name, epoch), keeping highest score
+    """Multi-signal search: BM25 ranked first, recent entries pad remaining
+    slots, ripgrep fallback when both come back empty. Deduped by (file, epoch).
+    """
+    # Signal 1: BM25 keyword search — dedupe keeping highest score
     seen: dict[tuple, SearchResult] = {}
-    for r in results:
+    for r in search_bm25(conn, query, limit=limit, after_epoch=after_epoch):
         key = (r.entry.file_name, r.entry.epoch)
         if key not in seen or r.score > seen[key].score:
             seen[key] = r
-
-    # Sort by score descending, return top N
     final = sorted(seen.values(), key=lambda r: r.score, reverse=True)[:limit]
+
+    # Signal 2: Recent entries (last 24h) fill remaining slots only — their
+    # flat score is relevance-blind, so they must not displace a weak-but-
+    # relevant keyword match from top-k.
+    if len(final) < limit:
+        included = {(r.entry.file_name, r.entry.epoch) for r in final}
+        for r in search_recent(conn, limit=min(limit, 3)):
+            if len(final) >= limit:
+                break
+            key = (r.entry.file_name, r.entry.epoch)
+            if key not in included:
+                included.add(key)
+                final.append(r)
 
     # Signal 3: ripgrep fallback — only when FTS5 + temporal both returned nothing.
     # Handles stale/out-of-sync index without waiting for snooze reconciliation.

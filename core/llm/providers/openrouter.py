@@ -24,8 +24,6 @@ from core.llm.types import (
 
 logger = logging.getLogger("pernix.llm.openrouter")
 
-RATE_LIMIT_CODES = {402, 403, 429}
-
 
 class OpenRouterProvider:
     """OpenRouter adapter implementing ProviderProtocol."""
@@ -64,8 +62,8 @@ class OpenRouterProvider:
     def _headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self._config.api_key}",
-            "HTTP-Referer": "https://pernix.local",
-            "X-OpenRouter-Title": "pernix agent",
+            "HTTP-Referer": "https://pernix.cc",
+            "X-OpenRouter-Title": "Pernix.cc",
             "Content-Type": "application/json",
         }
 

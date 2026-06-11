@@ -1,13 +1,13 @@
 // Pernix — Main application entry point
 
 import { state, subscribe } from './store.js';
-import { get, post, del, getAuthToken, setAuthToken } from './api.js';
+import { get, post, del, patch, getAuthToken, setAuthToken } from './api.js';
 import { connectSSE, disconnectSSE } from './sse.js';
 import { getPermission, requestPermission, connectGlobalNotifications, registerServiceWorker, subscribePush } from './notifications.js';
 import { el, text, clear, initMarked, renderMarkdown } from './render.js';
 import { initSigil } from './sigil.js';
 import { openSettings } from './components/modals/settings.js';
-import { openTimeline, appendTimelineRow, isTimelineOpen } from './components/modals/timeline.js';
+import { openTimeline, appendTimelineRow, appendTimelineToolRow, isTimelineOpen } from './components/modals/timeline.js';
 import { initBell, openBellPanel, closeBellPanel, refreshBell } from './components/notification-bell.js';
 import { initJobsIndicator } from './components/jobs-indicator.js';
 import { initSidebar, renderSessionList as renderSidebar, updateSessionActivity } from './components/sidebar.js';
@@ -31,6 +31,33 @@ function _messagesInner() {
 
 function _messagesScroll() {
     return document.getElementById('messages');
+}
+
+// ---------------------------------------------------------------------------
+// Pinned scrolling — only autoscroll while the user is at (near) the bottom.
+// Force-jumping on every append yanked the user down mid-read during long
+// multi-minute turns; meanwhile the streaming re-render never scrolled, so a
+// growing answer ran below the fold. Both route through here now.
+// ---------------------------------------------------------------------------
+let _scrollPinned = true;          // user is at/near the bottom
+const _PIN_THRESHOLD = 100;        // px from bottom that still counts as pinned
+
+function _updateScrollPin() {
+    const scroll = _messagesScroll();
+    if (!scroll) return;
+    _scrollPinned = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < _PIN_THRESHOLD;
+    const jump = document.getElementById('jump-to-bottom');
+    if (jump) jump.classList.toggle('visible', !_scrollPinned);
+}
+
+function scrollToBottom(force = false) {
+    const scroll = _messagesScroll();
+    if (!scroll) return;
+    if (force) _scrollPinned = true;
+    if (!_scrollPinned) return;
+    scroll.scrollTop = scroll.scrollHeight;
+    const jump = document.getElementById('jump-to-bottom');
+    if (jump) jump.classList.remove('visible');
 }
 
 // ---------------------------------------------------------------------------
@@ -79,20 +106,66 @@ document.addEventListener('DOMContentLoaded', async () => {
         localStorage.setItem('pernix:sidebar-hidden', sidebar.classList.contains('collapsed') ? '1' : '0');
     });
 
+    // Restore the normal session list when the sidebar search box clears
+    window.addEventListener('pernix:sidebar-refresh', () => renderSidebar(state.sessions, state.sid));
+
+    // Pinned-scroll tracking + jump-to-bottom affordance
+    const _msgScroll = _messagesScroll();
+    if (_msgScroll) _msgScroll.addEventListener('scroll', _updateScrollPin, { passive: true });
+    document.getElementById('jump-to-bottom')?.addEventListener('click', () => scrollToBottom(true));
+
+    // Pause/resume the active session (gentler than cancel for long turns)
+    document.getElementById('pause-btn')?.addEventListener('click', async () => {
+        if (!state.sid) return;
+        const btn = document.getElementById('pause-btn');
+        const action = btn._paused ? 'resume' : 'pause';
+        btn.disabled = true;
+        try {
+            await post(`/api/sessions/${state.sid}/${action}`, {});
+        } catch (e) {
+            appendMessage('system', `${action} failed: ${e.message}`);
+        } finally {
+            btn.disabled = false;
+        }
+    });
+
     // Settings + bell + jobs + files + transcript buttons
     document.getElementById('settings-btn').addEventListener('click', openSettings);
     document.getElementById('state-badge')?.addEventListener('click', openTimeline);
     document.getElementById('files-btn').addEventListener('click', toggleFilePanel);
     document.getElementById('copy-transcript-btn').addEventListener('click', copyTranscript);
+    document.getElementById('export-transcript-btn')?.addEventListener('click', exportTranscript);
+    document.getElementById('status-model')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _openModelMenu();
+    });
     initFilePanel({ selectSession });
     initBell();
+
+    // Keyboard shortcuts: Ctrl/Cmd+F → transcript search (with a session
+    // open), Ctrl/Cmd+K → session switcher palette.
+    document.addEventListener('keydown', (e) => {
+        const mod = e.ctrlKey || e.metaKey;
+        if (!mod) return;
+        if (e.key === 'f' && state.sid) {
+            e.preventDefault();
+            openTranscriptSearch();
+        } else if (e.key === 'k') {
+            e.preventDefault();
+            openSessionPalette();
+        }
+    });
+
+    // Questions/notifications can arrive for non-active sessions via the
+    // global stream — refresh the list so attention badges appear promptly.
+    window.addEventListener('pernix:bell-update', () => loadSessions());
 
     // Global notification SSE — connects immediately, no session required.
     // Handles browser notifications for dialog.notification and dialog.question events.
     connectGlobalNotifications();
 
-    // Ask for notification permission on first load if not yet decided
-    if (getPermission() === 'default') requestPermission();
+    // Permission is requested from the bell panel (a user gesture) —
+    // browsers suppress non-gesture prompts, so asking on load did nothing.
     // Re-subscribe on every load — idempotent upsert on the server
     if (getPermission() === 'granted') subscribePush();
 
@@ -121,9 +194,19 @@ document.addEventListener('DOMContentLoaded', async () => {
         renderSidebar(state.sessions, state.sid);
     });
 
-    // Poll — guarded by isOnline() inside the functions / api layer
-    setInterval(loadSessions, 10000);
-    setInterval(loadHealth, 30000);
+    // Poll — guarded by isOnline() inside the functions / api layer.
+    // Skipped while the tab is hidden: the enriched session list runs
+    // full-table aggregates server-side, and a backgrounded phone tab was
+    // burning battery/data polling a list nobody could see. A fresh load
+    // fires on the visibilitychange→visible handler below.
+    setInterval(() => { if (document.visibilityState === 'visible') loadSessions(); }, 10000);
+    setInterval(() => { if (document.visibilityState === 'visible') loadHealth(); }, 30000);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            loadSessions();
+            loadHealth();
+        }
+    });
 
     // Connectivity overlay
     window.addEventListener('pernix:offline', _showOfflineOverlay);
@@ -135,22 +218,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 function _showOfflineOverlay() {
-    if (document.getElementById('offline-overlay')) return;
-    const overlay = document.createElement('div');
-    overlay.id = 'offline-overlay';
-    overlay.className = 'offline-overlay';
-    overlay.innerHTML = `
-        <div class="offline-card">
-            <div class="offline-spinner"></div>
-            <div class="offline-title">Disconnected from server</div>
-            <div class="offline-subtitle">Trying to reconnect every 10 seconds&hellip;</div>
-        </div>
+    // A banner, not a modal — the old full-screen overlay blocked reading
+    // (and copying from) the transcript during server downtime, which is
+    // exactly when you want to re-read what the agent said.
+    if (document.getElementById('offline-banner')) return;
+    const banner = document.createElement('div');
+    banner.id = 'offline-banner';
+    banner.className = 'offline-banner';
+    banner.innerHTML = `
+        <span class="offline-spinner"></span>
+        <span>Disconnected from server — reconnecting&hellip; The transcript below is still readable.</span>
     `;
-    document.body.appendChild(overlay);
+    document.body.appendChild(banner);
 }
 
 function _hideOfflineOverlay() {
-    const o = document.getElementById('offline-overlay');
+    const o = document.getElementById('offline-banner');
     if (o) o.remove();
 }
 
@@ -158,10 +241,31 @@ function _hideOfflineOverlay() {
 // Sessions
 // ---------------------------------------------------------------------------
 
+// Needs-attention tracking: sessions whose background turn finished while the
+// user was elsewhere keep a "done" tick until visited; sessions blocked in
+// awaiting_user get a "?" badge. Both derive from the polled session list
+// (state_v2 is persisted on every transition).
+const _BUSY_STATES = new Set([
+    'scouting', 'processing', 'compacting', 'awaiting_workers',
+    'finalizing', 'pause_requested', 'cancelling',
+]);
+const _prevBusy = new Map();        // session id → was busy at last poll
+const _recentlyFinished = new Set(); // session ids with an unvisited finished turn
+
 async function loadSessions() {
     try {
         const data = await get('/api/sessions?limit=500');
         state.sessions = data.items || [];
+        for (const s of state.sessions) {
+            const busy = _BUSY_STATES.has(s.state_v2);
+            if (_prevBusy.get(s.id) && !busy && s.id !== state.sid) {
+                _recentlyFinished.add(s.id);
+            }
+            _prevBusy.set(s.id, busy);
+            s._attention = s.state_v2 === 'awaiting_user' ? 'input'
+                : (_recentlyFinished.has(s.id) && s.id !== state.sid) ? 'done'
+                : null;
+        }
         renderSidebar(state.sessions, state.sid);
     } catch (e) {
         if (!e.offline) console.warn('Failed to load sessions:', e);
@@ -185,6 +289,9 @@ async function deleteSession(sid) {
 async function selectSession(sid) {
     if (isMobile()) closeSidebar();
     state.sid = sid;
+    _historyLimit = HISTORY_PAGE;  // fresh window per session
+    _recentlyFinished.delete(sid);  // visiting clears the "done" attention tick
+    _restoreDraft();
     // Reset streaming state to prevent cross-session leakage
     _streamingEl = null;
     _collected = '';
@@ -194,6 +301,7 @@ async function selectSession(sid) {
     renderSidebar(state.sessions, state.sid);
     await loadMessages(sid);
     await loadContextInfo(sid);
+    _seedWorkerStrip(sid);
 
     // Fetch session status to get event_seq and streaming state BEFORE connecting SSE
     state.streaming = false;
@@ -201,14 +309,16 @@ async function selectSession(sid) {
     updateStatus('');
     _clearToolStatus();
     _applyStateBadge('idle_ready', '');  // reset badge before fetching real state
-    const _mEl = document.getElementById('status-model');
-    if (_mEl) _mEl.textContent = state.model;
+    _sessionModelOverride = null;
+    _renderModelBadge();
     try {
         const status = await get(`/api/sessions/${sid}/status`);
         // Set _lastSeq to server's current event_seq so SSE dedup skips
         // events already rendered from DB — prevents the load+replay race
         _lastSeq = status.event_seq || 0;
         _applyStateBadge(status.state || 'idle_ready', '');
+        _sessionModelOverride = status.model_override || null;
+        _renderModelBadge();
 
         if (status.status === 'processing' || status.status === 'scouting') {
             state.streaming = true;
@@ -225,17 +335,34 @@ async function selectSession(sid) {
 
 }
 
-async function loadMessages(sid) {
+const HISTORY_PAGE = 200;   // messages rendered initially; grows on demand
+let _historyLimit = HISTORY_PAGE;
+
+async function loadMessages(sid, { keepScroll = false } = {}) {
     const inner = _messagesInner();
     const scroll = _messagesScroll();
+    // Anchor to distance-from-bottom so "load earlier" re-renders keep the
+    // reader's place instead of dumping them at the end of the transcript.
+    const prevBottomDist = keepScroll ? (scroll.scrollHeight - scroll.scrollTop) : null;
     clear(inner);
     _questionBubbles.clear();
+    _lastMsgTs = 0;  // gap dividers restart per render
     try {
-        const data = await get(`/api/sessions/${sid}`);
+        const data = await get(`/api/sessions/${sid}?limit=${_historyLimit}`);
         const messages = data.messages || [];
         if (messages.length === 0) {
             showEmptyState();
             return;
+        }
+        if (data.has_more) {
+            const remaining = (data.total_messages || 0) - messages.length;
+            const loadBtn = el('button', { class: 'load-earlier-btn', onClick: async () => {
+                loadBtn.disabled = true;
+                loadBtn.textContent = 'Loading…';
+                _historyLimit += HISTORY_PAGE;
+                await loadMessages(sid, { keepScroll: true });
+            }}, [text(`Load earlier messages (${remaining} more)`)]);
+            inner.appendChild(loadBtn);
         }
         // Build tool_call_id → tool_name map from assistant messages
         const toolNameMap = {};
@@ -305,14 +432,20 @@ async function loadMessages(sid) {
                 // render with system-message styling so they're visible but unobtrusive,
                 // matching how the live SSE handlers display the same events.
                 closeToolGroup();
-                appendMessage('system', m.content || '');
+                appendMessage('system', m.content || '', { createdAt: m.created_at });
             } else {
                 closeToolGroup();
-                appendMessage(m.role, m.content);
+                appendMessage(m.role, m.content, { createdAt: m.created_at, messageId: m.id });
             }
         }
         closeToolGroup();
-        scroll.scrollTop = scroll.scrollHeight;
+        _markPendingQueued(sid);
+        if (prevBottomDist !== null) {
+            scroll.scrollTop = scroll.scrollHeight - prevBottomDist;
+            _updateScrollPin();
+        } else {
+            scrollToBottom(true);
+        }
     } catch (e) {
         appendMessage('system', `Error loading messages: ${e.message}`);
     }
@@ -333,9 +466,17 @@ async function loadContextInfo(sid) {
         const thresholds = data.thresholds || {};
         const softPct = Math.round((thresholds.compaction || 0.75) * 100);
         const critPct = Math.round((thresholds.critical || 0.85) * 100);
-        el.title = `history: ${data.history_pct ?? 0}% of ${data.history_budget ?? 0} ` +
-                   `(compacts at ${softPct}%, critical at ${critPct}%). ` +
-                   `Compactions this session: ${compactions}.`;
+        let title = `history: ${data.history_pct ?? 0}% of ${data.history_budget ?? 0} ` +
+                    `(compacts at ${softPct}%, critical at ${critPct}%). ` +
+                    `Compactions this session: ${compactions}.`;
+        // Session spend, from the enriched list already in memory.
+        const sess = (state.sessions || []).find(s => s.id === sid);
+        if (sess && (sess.total_tokens || sess.total_cost)) {
+            title += ` Usage: ${(sess.total_tokens || 0).toLocaleString()} tokens`;
+            if (sess.total_cost >= 0.005) title += ` (~$${sess.total_cost.toFixed(2)})`;
+            title += '.';
+        }
+        el.title = title;
     } catch {}
 }
 
@@ -378,12 +519,27 @@ function showEmptyState() {
     const help = el('p', { class: 'empty-state-help' }, [
         text('Start a conversation or drop a file to begin. '),
         el('br'),
+        text('Research questions, scheduled jobs, file work, reminders — '),
+        el('br'),
+        text('it remembers across sessions and can work while you’re away.'),
+        el('br'),
         el('br'),
         text('Type '),
         el('kbd', {}, [text('/help')]),
-        text(' for available commands.'),
+        text(' for commands and capabilities.'),
     ]);
     const welcome = el('div', { class: 'empty-state' }, [figure, kicker, help]);
+    // First-run guidance: with no model configured, a sent message dies in
+    // scout → LLM with a cryptic provider error. Point at Settings instead.
+    if (!state.model || state.model === '(not set)') {
+        welcome.appendChild(el('div', { class: 'empty-state-setup' }, [
+            el('p', {}, [text('No model is configured yet — Pernix needs one before it can respond.')]),
+            el('button', { class: 'btn btn-primary', onClick: openSettings }, [text('Open Settings')]),
+            el('p', { class: 'setup-hint' }, [
+                text('Set a model (and an API key for OpenRouter, or a local Ollama URL) under Settings → Models.'),
+            ]),
+        ]));
+    }
     inner.appendChild(welcome);
     // Init after attach so getBoundingClientRect() reflects laid-out size.
     _sigilStop = initSigil(sigil);
@@ -397,6 +553,8 @@ const SLASH_COMMANDS = {
     '/new': () => document.getElementById('new-session-btn').click(),
     '/clear': async () => {
         if (!state.sid) return appendMessage('system', 'No active session');
+        // Destructive and un-undoable — require an explicit second step.
+        if (!window.confirm('Clear all messages in this session? This cannot be undone.')) return;
         await post(`/api/sessions/${state.sid}/clear`);
         loadMessages(state.sid);
     },
@@ -462,9 +620,113 @@ const SLASH_COMMANDS = {
                 el('span', { class: 'cmd-desc' }, [text(desc)]),
             ]));
         }
-        appendCommandCard('Commands', null, list);
+        // Capabilities section — these all exist but were invisible: /help
+        // only listed session commands, so new users never found scheduling,
+        // skills, memory, or attachments.
+        const caps = [
+            ['Attach files', 'paperclip button, or drag & drop — images and audio go to the model'],
+            ['Schedule jobs', 'ask in chat ("every morning at 9, …") or Explorer 📁 → Jobs'],
+            ['Skills', 'domain expertise packages the agent loads on demand — Explorer 📁 → Skills'],
+            ['Memory', 'the agent remembers across sessions; just ask it to remember/recall things'],
+            ['Workers', 'the agent can fan work out to parallel sub-agents for big tasks'],
+            ['Search sessions', 'search box at the top of the sidebar finds any past conversation'],
+            ['Ctrl+F', 'search within this transcript'],
+            ['Ctrl+K', 'jump to another session'],
+            ['↑ in empty input', 'recall previous prompts'],
+            ['Model badge', 'click the model name in the status bar to override the model for this session'],
+        ];
+        const capList = el('ul', { class: 'cmd-help-list' });
+        for (const [name, desc] of caps) {
+            capList.appendChild(el('li', {}, [
+                el('kbd', {}, [text(name)]),
+                el('span', { class: 'cmd-desc' }, [text(desc)]),
+            ]));
+        }
+        const wrapper = el('div', {}, [
+            list,
+            el('div', { class: 'cmd-help-subhead' }, [text('What Pernix can do')]),
+            capList,
+        ]);
+        appendCommandCard('Commands', null, wrapper);
     },
 };
+
+// ---------------------------------------------------------------------------
+// Input drafts (per-session, localStorage) + prompt history (ArrowUp recall)
+// ---------------------------------------------------------------------------
+
+const _DRAFT_PREFIX = 'pernix:draft:';
+const _PROMPT_HISTORY_KEY = 'pernix:prompt-history';
+const _PROMPT_HISTORY_MAX = 50;
+let _draftTimer = null;
+let _histIdx = -1;        // -1 = not navigating history
+let _histStash = '';      // text that was in the input when navigation started
+
+function _draftKey() { return _DRAFT_PREFIX + (state.sid || 'new'); }
+
+function _saveDraft(value) {
+    clearTimeout(_draftTimer);
+    _draftTimer = setTimeout(() => {
+        try {
+            if (value.trim()) localStorage.setItem(_draftKey(), value);
+            else localStorage.removeItem(_draftKey());
+        } catch { /* storage full/unavailable */ }
+    }, 300);
+}
+
+function _restoreDraft() {
+    const textarea = document.getElementById('msg-input');
+    if (!textarea) return;
+    let draft = '';
+    try { draft = localStorage.getItem(_draftKey()) || ''; } catch { /* unavailable */ }
+    textarea.value = draft;
+    textarea.dispatchEvent(new Event('input'));
+}
+
+function _clearDraft() {
+    clearTimeout(_draftTimer);
+    try { localStorage.removeItem(_draftKey()); } catch { /* unavailable */ }
+}
+
+function _loadPromptHistory() {
+    try { return JSON.parse(localStorage.getItem(_PROMPT_HISTORY_KEY) || '[]'); }
+    catch { return []; }
+}
+
+function _pushPromptHistory(message) {
+    if (!message || !message.trim()) return;
+    const hist = _loadPromptHistory();
+    if (hist[hist.length - 1] === message) return;  // skip immediate dupes
+    hist.push(message);
+    try {
+        localStorage.setItem(_PROMPT_HISTORY_KEY, JSON.stringify(hist.slice(-_PROMPT_HISTORY_MAX)));
+    } catch { /* storage full/unavailable */ }
+}
+
+function _navigateHistory(textarea, dir) {
+    const hist = _loadPromptHistory();
+    if (!hist.length) return false;
+    if (_histIdx === -1) {
+        if (dir > 0) return false;          // ArrowDown with no navigation active
+        _histStash = textarea.value;
+        _histIdx = hist.length - 1;
+    } else {
+        const next = _histIdx + dir;
+        if (next >= hist.length) {           // walked past the newest → restore stash
+            _histIdx = -1;
+            textarea.value = _histStash;
+            textarea.dispatchEvent(new Event('input'));
+            return true;
+        }
+        if (next < 0) return true;           // already at the oldest
+        _histIdx = next;
+    }
+    textarea.value = hist[_histIdx];
+    textarea.dispatchEvent(new Event('input'));
+    // Cursor to end
+    textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
+    return true;
+}
 
 function setupInput() {
     const textarea = document.getElementById('msg-input');
@@ -478,16 +740,36 @@ function setupInput() {
         }
     });
     textarea.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
+        // On mobile, Enter inserts a newline — soft keyboards have no
+        // Shift+Enter, so send-on-Enter made multi-line prompts impossible.
+        // The send button is the submit action there.
+        if (e.key === 'Enter' && !e.shiftKey && !isMobile()) {
             e.preventDefault();
             send();
+            return;
+        }
+        // Prompt history: ArrowUp recalls previous prompts when the input is
+        // empty or already navigating; ArrowDown walks back toward newest.
+        // Multi-line drafts keep normal arrow behavior unless navigating.
+        if (e.key === 'ArrowUp' && (_histIdx !== -1 || textarea.value === '')) {
+            if (_navigateHistory(textarea, -1)) e.preventDefault();
+        } else if (e.key === 'ArrowDown' && _histIdx !== -1) {
+            if (_navigateHistory(textarea, +1)) e.preventDefault();
         }
     });
 
-    textarea.addEventListener('input', () => {
+    textarea.addEventListener('input', (e) => {
         textarea.style.height = 'auto';
         textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+        // Typing (a real input event, not our synthetic ones from history
+        // navigation) ends history navigation and updates the draft.
+        if (e.isTrusted) {
+            _histIdx = -1;
+            _saveDraft(textarea.value);
+        }
     });
+
+    _restoreDraft();
 }
 
 async function send() {
@@ -500,6 +782,7 @@ async function send() {
     if (cmd) {
         textarea.value = '';
         textarea.style.height = 'auto';
+        _clearDraft();
         try {
             await SLASH_COMMANDS[cmd]();
         } catch (e) {
@@ -512,12 +795,18 @@ async function send() {
         // Inject message into running session — agent picks it up next cycle
         textarea.value = '';
         textarea.style.height = 'auto';
+        _clearDraft();
+        _pushPromptHistory(message);
+        _histIdx = -1;
         await _injectMessage(message);
         return;
     }
 
     textarea.value = '';
     textarea.style.height = 'auto';
+    _clearDraft();
+    _pushPromptHistory(message);
+    _histIdx = -1;
 
     if (!state.sid) {
         try {
@@ -531,30 +820,41 @@ async function send() {
         }
     }
 
-    // Upload pending files first
+    // Upload pending files first (XHR for per-chip progress — a 100MB file
+    // on phone Wi-Fi used to look like a hang).
     const uploadedFiles = [];
     if (_pendingFiles.length > 0) {
+        let failed = 0;
         for (const pf of _pendingFiles) {
             if (pf.uploaded && pf.serverName) {
                 uploadedFiles.push(pf.serverName);
                 continue;
             }
             try {
-                const formData = new FormData();
-                formData.append('file', pf.file);
-                const uploadHeaders = {};
-                const _t = getAuthToken();
-                if (_t) uploadHeaders['Authorization'] = `Bearer ${_t}`;
-                const resp = await fetch('/api/upload', { method: 'POST', body: formData, headers: uploadHeaders });
-                if (!resp.ok) {
-                    const err = await resp.json().catch(() => ({}));
-                    throw new Error(err.detail || resp.statusText);
-                }
-                const result = await resp.json();
+                pf.uploading = true;
+                const result = await _uploadWithProgress(pf);
+                pf.uploading = false;
+                pf.uploaded = true;
+                pf.serverName = result.filename;
                 uploadedFiles.push(result.filename);
             } catch (e) {
+                failed++;
+                pf.uploading = false;
                 appendMessage('system', `Upload failed: ${pf.name} — ${e.message}`);
             }
+        }
+        if (failed > 0) {
+            // Don't silently send a message missing its attachments — keep
+            // the chips (successful ones stay marked uploaded) and restore
+            // the text so the user can remove the failed file or retry.
+            appendMessage('system', `${failed} upload(s) failed — message not sent. Remove the failed file(s) or try again.`);
+            if (!textarea.value) {
+                textarea.value = message;
+                textarea.dispatchEvent(new Event('input'));
+                _saveDraft(message);
+            }
+            renderFileChips();
+            return;
         }
         clearPendingFiles();
     }
@@ -570,7 +870,7 @@ async function send() {
     const emptyEl = document.querySelector('.empty-state');
     if (emptyEl) emptyEl.remove();
 
-    appendMessage('user', finalMessage);
+    const userBubble = appendMessage('user', finalMessage);
     state.streaming = true;
     _showStopButton();
     _streamingEl = appendMessage('assistant', '');
@@ -594,6 +894,16 @@ async function send() {
         }
     } catch (e) {
         appendMessage('system', `Error: ${e.message}`);
+        // The optimistic bubble was never persisted — mark it so it doesn't
+        // read as sent (it vanishes on reload), restore the text so the user
+        // can retry without retyping, and drop the empty assistant ghost.
+        if (userBubble) userBubble.classList.add('rejected');
+        if (!textarea.value) {
+            textarea.value = message;
+            textarea.dispatchEvent(new Event('input'));
+            _saveDraft(message);
+        }
+        if (_streamingEl) _streamingEl.remove();
         state.streaming = false;
         _showSendButton();
         _streamingEl = null;
@@ -615,6 +925,47 @@ async function _injectMessage(message) {
         msgEl.classList.remove('queued');
         appendMessage('system', `Inject failed: ${e.message}`);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Queued-message management — queued (not yet picked up) user messages get a
+// remove button wired to DELETE /api/sessions/{sid}/pending/{message_id}.
+// ---------------------------------------------------------------------------
+
+function _addQueueRemoveButton(msgEl, messageId) {
+    if (!msgEl || msgEl.querySelector('.queued-remove')) return;
+    msgEl.dataset.messageId = String(messageId);
+    const btn = el('button', {
+        class: 'queued-remove',
+        title: 'Remove from queue (not yet seen by the agent)',
+    }, [text('×')]);
+    btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        btn.disabled = true;
+        try {
+            await del(`/api/sessions/${state.sid}/pending/${messageId}`);
+            // Bubble removal happens on the session.queue_removed event so
+            // other open tabs stay in sync too.
+        } catch (err) {
+            btn.disabled = false;
+            appendMessage('system', `Could not remove queued message: ${err.message}`);
+        }
+    });
+    msgEl.appendChild(btn);
+}
+
+/** After a transcript render, mark messages still waiting in the queue. */
+async function _markPendingQueued(sid) {
+    try {
+        const data = await get(`/api/sessions/${sid}/pending`);
+        for (const p of (data.pending || [])) {
+            const msgEl = _messagesInner()?.querySelector(`.message[data-message-id="${p.message_id}"]`);
+            if (msgEl) {
+                msgEl.classList.add('queued');
+                _addQueueRemoveButton(msgEl, p.message_id);
+            }
+        }
+    } catch { /* queue view is best-effort */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -650,22 +1001,30 @@ function setupFileDrop() {
         }
     });
 
-    // Also support input click-to-upload via hidden file input
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.multiple = true;
-    fileInput.style.display = 'none';
-    document.body.appendChild(fileInput);
-    fileInput.addEventListener('change', () => {
-        if (fileInput.files.length > 0) {
-            addPendingFiles(fileInput.files);
-        }
-        fileInput.value = '';
-    });
+    // Paperclip button → trigger the static hidden file input
+    const fileInput = document.getElementById('attach-input');
+    const attachBtn = document.getElementById('attach-btn');
+    if (fileInput && attachBtn) {
+        attachBtn.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                addPendingFiles(fileInput.files);
+            }
+            fileInput.value = '';
+        });
+    }
 }
+
+// Mirror of the server-side cap (api/routers/workspace.py) — reject before
+// the whole body is uploaded only to be bounced.
+const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
 
 function addPendingFiles(fileList) {
     for (const file of fileList) {
+        if (file.size > MAX_UPLOAD_BYTES) {
+            appendMessage('system', `${file.name} is ${formatSize(file.size)} — over the 250MB upload limit.`);
+            continue;
+        }
         _pendingFiles.push({
             file,
             name: file.name,
@@ -678,6 +1037,48 @@ function addPendingFiles(fileList) {
     renderFileChips();
     // Focus the textarea
     document.getElementById('msg-input').focus();
+}
+
+/** Upload one pending file via XHR so we get upload progress events. */
+function _uploadWithProgress(pf) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload');
+        const t = getAuthToken();
+        if (t) xhr.setRequestHeader('Authorization', `Bearer ${t}`);
+        xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) _setChipProgress(pf, e.loaded / e.total);
+        };
+        xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                _setChipProgress(pf, 1);
+                try { resolve(JSON.parse(xhr.responseText)); }
+                catch { reject(new Error('bad server response')); }
+            } else {
+                let detail = xhr.statusText;
+                try { detail = JSON.parse(xhr.responseText).detail || detail; } catch { /* keep statusText */ }
+                reject(new Error(detail));
+            }
+        };
+        xhr.onerror = () => reject(new Error('network error'));
+        const fd = new FormData();
+        fd.append('file', pf.file);
+        xhr.send(fd);
+    });
+}
+
+function _setChipProgress(pf, frac) {
+    const idx = _pendingFiles.indexOf(pf);
+    const container = document.getElementById('file-chips');
+    const chip = container && container.children[idx];
+    if (!chip) return;
+    let bar = chip.querySelector('.file-chip-bar');
+    if (!bar) {
+        bar = el('div', { class: 'file-chip-bar' });
+        chip.appendChild(bar);
+    }
+    bar.style.width = `${Math.round(frac * 100)}%`;
+    chip.classList.toggle('uploading', frac < 1);
 }
 
 function removePendingFile(index) {
@@ -706,6 +1107,8 @@ function renderFileChips() {
         ]);
         container.appendChild(chip);
     });
+    const attachBtn = document.getElementById('attach-btn');
+    if (attachBtn) attachBtn.classList.toggle('has-files', _pendingFiles.length > 0);
 }
 
 function formatSize(bytes) {
@@ -748,22 +1151,252 @@ const _TOOL_ICONS = {
     recall:        ['◎', () => 'recall'],
 };
 
-function _showToolStatus(name, args) {
+/**
+ * Incremental render of the streaming response. The old path re-parsed the
+ * ENTIRE accumulated buffer with marked on every 100ms tick and rebuilt the
+ * whole DOM subtree — O(response length) per tick, quadratic over a long
+ * answer, with visible jank past ~10k chars. Instead: blocks behind the last
+ * blank-line boundary are parsed ONCE into a stable container (boundary only
+ * advances outside an open ``` fence), and only the small active tail is
+ * re-parsed per tick. Cross-chunk artifacts (split lists etc.) are cosmetic
+ * and transient — the finalize paths (stream.done / tool.call) still do one
+ * full clean re-parse of the complete text.
+ */
+function _renderStreamIncremental(contentEl) {
+    let stable = contentEl.querySelector(':scope > .stream-stable');
+    let tail = contentEl.querySelector(':scope > .stream-tail');
+    if (!stable || !tail) {
+        clear(contentEl);
+        stable = el('div', { class: 'stream-stable' });
+        tail = el('div', { class: 'stream-tail' });
+        contentEl.appendChild(stable);
+        contentEl.appendChild(tail);
+        contentEl._stableLen = 0;
+    }
+    const done = contentEl._stableLen || 0;
+    const boundary = _collected.lastIndexOf('\n\n');
+    if (boundary > done) {
+        const prefix = _collected.slice(0, boundary);
+        const fenceCount = (prefix.match(/```/g) || []).length;
+        if (fenceCount % 2 === 0) {  // never freeze the middle of a code block
+            const chunk = _collected.slice(done, boundary);
+            if (chunk.trim()) {
+                stable.appendChild(renderMarkdown(chunk));
+                addCopyButtons(stable);
+            }
+            contentEl._stableLen = boundary;
+        }
+    }
+    clear(tail);
+    const tailText = _collected.slice(contentEl._stableLen || 0);
+    if (tailText.trim()) tail.appendChild(renderMarkdown(tailText));
+}
+
+// ---------------------------------------------------------------------------
+// Worker activity strip — live view of the fleet during a fan-out, instead
+// of an opaque "awaiting workers" wait. Click a worker to open its session.
+// ---------------------------------------------------------------------------
+const _activeWorkers = new Map();  // worker_id → { title, startedAt }
+let _workerTicker = null;
+
+function _renderWorkerStrip() {
+    const strip = document.getElementById('worker-strip');
+    if (!strip) return;
+    if (_activeWorkers.size === 0) {
+        strip.hidden = true;
+        strip.innerHTML = '';
+        if (_workerTicker) { clearInterval(_workerTicker); _workerTicker = null; }
+        return;
+    }
+    strip.hidden = false;
+    strip.innerHTML = '';
+    strip.appendChild(el('span', { class: 'worker-strip-label' }, [
+        text(`${_activeWorkers.size} worker${_activeWorkers.size === 1 ? '' : 's'}`),
+    ]));
+    for (const [wid, w] of _activeWorkers) {
+        const elapsed = Math.max(0, Math.round((Date.now() - w.startedAt) / 1000));
+        const mins = Math.floor(elapsed / 60);
+        const elapsedStr = mins > 0 ? `${mins}m${elapsed % 60}s` : `${elapsed}s`;
+        const chip = el('button', {
+            class: `worker-chip${w.paused ? ' paused' : ''}`,
+            title: `${w.title} — click to open transcript`,
+            onClick: () => selectSession(wid),
+        }, [
+            el('span', { class: 'worker-chip-dot' }),
+            text(` ${w.title.slice(0, 30)} · ${w.paused ? 'paused' : elapsedStr}`),
+        ]);
+        // Pause/resume the worker without leaving the parent session — the
+        // endpoints exist per-worker; this is their first UI affordance.
+        const ctlBtn = el('button', {
+            class: 'worker-chip-ctl',
+            title: w.paused ? 'Resume this worker' : 'Pause this worker after its current step',
+        }, [text(w.paused ? '▶' : '❚❚')]);
+        ctlBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            ctlBtn.disabled = true;
+            const action = w.paused ? 'resume' : 'pause';
+            try {
+                await post(`/api/sessions/${state.sid}/workers/${wid}/${action}`, {});
+                w.paused = !w.paused;
+            } catch (err) {
+                appendMessage('system', `Worker ${action} failed: ${err.message}`);
+            }
+            _renderWorkerStrip();
+        });
+        strip.appendChild(el('span', { class: 'worker-chip-wrap' }, [chip, ctlBtn]));
+    }
+    if (!_workerTicker) _workerTicker = setInterval(_renderWorkerStrip, 5000);
+}
+
+async function _seedWorkerStrip(sid) {
+    _activeWorkers.clear();
+    try {
+        const data = await get(`/api/sessions/${sid}/workers`);
+        const now = Date.now();
+        for (const w of (data.workers || [])) {
+            if (w.state === 'idle_ready') continue;  // finished
+            const started = w.created_at ? Date.parse(w.created_at + 'Z') || now : now;
+            _activeWorkers.set(w.id, {
+                title: w.title,
+                startedAt: started,
+                paused: w.state === 'paused' || w.state === 'pause_requested',
+            });
+        }
+    } catch { /* strip stays empty */ }
+    _renderWorkerStrip();
+}
+
+// ---------------------------------------------------------------------------
+// Per-session model override — clicking the model badge opens a picker.
+// Persistent for the session (unlike agent-initiated switch_model, which the
+// manager reverts at turn end). Backed by PATCH /api/sessions/{sid}.
+// ---------------------------------------------------------------------------
+
+let _sessionModelOverride = null;
+let _modelMenuEl = null;
+
+function _renderModelBadge() {
+    const mEl = document.getElementById('status-model');
+    if (!mEl) return;
+    mEl.classList.remove('has-override');
+    mEl.textContent = '';
+    if (_sessionModelOverride) {
+        mEl.appendChild(text(_sessionModelOverride));
+        const pin = document.createElement('span');
+        pin.className = 'model-session-override';
+        pin.textContent = ' ●';
+        pin.title = `Session override (default: ${state.model})`;
+        mEl.appendChild(pin);
+        mEl.title = `This session runs on ${_sessionModelOverride} (default: ${state.model}). Click to change.`;
+    } else {
+        mEl.appendChild(text(state.model || '...'));
+        mEl.title = 'Model for this session — click to override';
+    }
+}
+
+function _closeModelMenu() {
+    if (_modelMenuEl) {
+        _modelMenuEl.remove();
+        _modelMenuEl = null;
+        document.removeEventListener('click', _closeModelMenu);
+    }
+}
+
+async function _openModelMenu() {
+    if (_modelMenuEl) { _closeModelMenu(); return; }
+    if (!state.sid) return;
+
+    const menu = el('div', { id: 'model-menu' }, [
+        el('div', { class: 'model-menu-header' }, [text('Model for this session')]),
+        el('div', { class: 'model-menu-loading' }, [text('Loading models…')]),
+    ]);
+    _modelMenuEl = menu;
+    document.body.appendChild(menu);
+
+    // Position above the status bar, anchored to the badge.
+    const badge = document.getElementById('status-model');
+    const rect = badge.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, rect.left)}px`;
+    menu.style.bottom = `${window.innerHeight - rect.top + 6}px`;
+
+    // Defer the outside-click closer so the opening click doesn't trigger it.
+    setTimeout(() => document.addEventListener('click', _closeModelMenu), 0);
+    menu.addEventListener('click', (e) => e.stopPropagation());
+
+    let models = [];
+    try {
+        const data = await get('/api/models');
+        models = data.models || [];
+    } catch { /* render with just the default option */ }
+    if (!_modelMenuEl) return;  // closed while loading
+
+    menu.querySelector('.model-menu-loading')?.remove();
+    const list = el('div', { class: 'model-menu-list' });
+
+    const mkItem = (label, value, current) => {
+        const item = el('button', { class: `model-menu-item${current ? ' current' : ''}` }, [text(label)]);
+        item.addEventListener('click', async () => {
+            try {
+                await patch(`/api/sessions/${state.sid}`, { model_override: value });
+                _sessionModelOverride = value || null;
+                _renderModelBadge();
+            } catch (e) {
+                appendMessage('system', `Model override failed: ${e.message}`);
+            }
+            _closeModelMenu();
+        });
+        return item;
+    };
+
+    const providerLabels = { ollama: 'Ollama', openrouter: 'OpenRouter' };
+    const labelFor = (p) => providerLabels[p] || p;
+
+    const defaultProvider = models.find((m) => m.id === state.model)?.provider;
+    const defaultLabel = `default (${state.model}${defaultProvider ? ` · ${labelFor(defaultProvider)}` : ''})`;
+    list.appendChild(mkItem(defaultLabel, '', !_sessionModelOverride));
+
+    // Group by provider, Ollama first (same ordering as the settings modal).
+    const byProvider = {};
+    for (const m of models) {
+        const p = m.provider || 'unknown';
+        (byProvider[p] ||= []).push(m);
+    }
+    const providerOrder = ['ollama', 'openrouter', ...Object.keys(byProvider).filter(p => p !== 'ollama' && p !== 'openrouter')];
+    for (const provider of providerOrder) {
+        const group = byProvider[provider];
+        if (!group?.length) continue;
+        list.appendChild(el('div', { class: 'model-menu-group' }, [text(labelFor(provider))]));
+        for (const m of group) {
+            list.appendChild(mkItem(m.id, m.id, _sessionModelOverride === m.id));
+        }
+    }
+    if (!models.length) {
+        list.appendChild(el('div', { class: 'model-menu-empty' }, [text('No models listed — check provider settings.')]));
+    }
+    menu.appendChild(list);
+}
+
+const _runningTools = new Map();  // name → summarized args, for tools currently executing
+
+function _showToolStatus(name, args, opts = {}) {
     if (name === 'browse_web') return; // handled by #browser-status
     const statusEl = document.getElementById('tool-status');
     if (!statusEl) return;
     const [icon, labelFn] = _TOOL_ICONS[name] || ['⚙', () => name];
-    const label = labelFn(args || {});
+    const label = (opts.running ? 'running ' : '') + labelFn(args || {});
     statusEl.innerHTML = '';
     statusEl.appendChild(el('span', { class: 'tool-icon' }, [text(icon)]));
     statusEl.appendChild(text('\u00a0' + label));
     statusEl.classList.add('active');
-    if (_toolStatusTimer) clearTimeout(_toolStatusTimer);
-    _toolStatusTimer = setTimeout(_clearToolStatus, 2500);
+    if (_toolStatusTimer) { clearTimeout(_toolStatusTimer); _toolStatusTimer = null; }
+    // A running tool keeps the indicator up until its tool.call arrives;
+    // completed-tool flashes still auto-clear.
+    if (!opts.running) _toolStatusTimer = setTimeout(_clearToolStatus, 2500);
 }
 
 function _clearToolStatus() {
     if (_toolStatusTimer) { clearTimeout(_toolStatusTimer); _toolStatusTimer = null; }
+    _runningTools.clear();
     const statusEl = document.getElementById('tool-status');
     if (statusEl) statusEl.classList.remove('active');
 }
@@ -818,9 +1451,10 @@ function handleEvent(event) {
             if (_streamingEl) {
                 const contentEl = _streamingEl.querySelector('.content');
                 if (contentEl) {
-                    clear(contentEl);
-                    contentEl.appendChild(renderMarkdown(_collected));
-                    addCopyButtons(contentEl);
+                    _renderStreamIncremental(contentEl);
+                    // Follow the growing answer while the user is pinned to
+                    // the bottom (a reader scrolled up is left alone).
+                    scrollToBottom();
                 }
             }
         }, 100);
@@ -833,6 +1467,7 @@ function handleEvent(event) {
         if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
         // Final render
         if (_streamingEl && _collected) {
+            _streamingEl._rawContent = _collected;  // copy-message reads the raw markdown
             const contentEl = _streamingEl.querySelector('.content');
             if (contentEl) {
                 clear(contentEl);
@@ -874,6 +1509,7 @@ function handleEvent(event) {
         if (_streamingEl && _collected) {
             if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
             if (_activityTimer) { clearTimeout(_activityTimer); _activityTimer = null; }
+            _streamingEl._rawContent = _collected;
             const contentEl = _streamingEl.querySelector('.content');
             if (contentEl) {
                 clear(contentEl);
@@ -896,8 +1532,37 @@ function handleEvent(event) {
         const full = event.full_result || event.result || '';
         const isTruncated = event.truncated || full.length > 300;
         appendToolToGroup(event.name, preview, full, isTruncated, event.was_error, event.latency_ms, event.arguments);
+        if (isTimelineOpen()) {
+            appendTimelineToolRow({
+                name: event.name,
+                args: event.arguments || null,
+                content: full,
+                latency_ms: event.latency_ms,
+                was_error: event.was_error,
+            });
+        }
         if (state.sid) updateSessionActivity(state.sid, event.name);
-        _showToolStatus(event.name, event.arguments || {});
+        _runningTools.delete(event.name);
+        if (_runningTools.size > 0) {
+            // Other tools from this round are still executing — keep showing
+            // a live "running" indicator instead of the completed flash.
+            const [nextName, nextArgs] = _runningTools.entries().next().value;
+            _showToolStatus(nextName, nextArgs, { running: true });
+        } else {
+            _showToolStatus(event.name, event.arguments || {});
+        }
+    }
+
+    else if (type === 'tool.start') {
+        // Emitted BEFORE execution — without it the user gets no feedback
+        // for the entire runtime of a slow bash/search call.
+        if (!state.streaming) {
+            state.streaming = true;
+            _showStopButton();
+        }
+        _runningTools.set(event.name, event.arguments || {});
+        _showToolStatus(event.name, event.arguments || {}, { running: true });
+        if (state.sid) updateSessionActivity(state.sid, event.name);
     }
 
     else if (type === 'scout.start') {
@@ -962,12 +1627,30 @@ function handleEvent(event) {
 
     else if (type === 'session.queued') {
         appendMessage('system', 'Message queued (agent is busy)');
+        // Tag the optimistic bubble with its persisted id so it can be removed
+        // from the queue before pickup.
+        if (event.message_id != null) {
+            const bubble = [..._injectedMessages].reverse().find(b => !b.dataset.messageId);
+            if (bubble) _addQueueRemoveButton(bubble, event.message_id);
+        }
+    }
+
+    else if (type === 'session.queue_removed') {
+        const bubble = _messagesInner()?.querySelector(`.message[data-message-id="${event.message_id}"]`);
+        if (bubble) {
+            const idx = _injectedMessages.indexOf(bubble);
+            if (idx !== -1) _injectedMessages.splice(idx, 1);
+            bubble.remove();
+        }
     }
 
     else if (type === 'message.injected') {
         // Agent will see this message at the next tool round — clear queued indicator
         const msgEl = _injectedMessages.shift();
-        if (msgEl) msgEl.classList.remove('queued');
+        if (msgEl) {
+            msgEl.classList.remove('queued');
+            msgEl.querySelector('.queued-remove')?.remove();
+        }
     }
 
     else if (type === 'dialog.question' || type === 'user_question') {
@@ -994,12 +1677,16 @@ function handleEvent(event) {
     else if (type === 'worker.started') {
         const workerModel = event.model ? ` [${event.model}]` : '';
         appendMessage('system', `Worker started: ${event.title || event.worker_id}${workerModel}`);
+        _activeWorkers.set(event.worker_id, { title: event.title || event.worker_id, startedAt: Date.now() });
+        _renderWorkerStrip();
     }
 
     else if (type === 'worker.done') {
         const reason = event.termination_reason ? ` (${event.termination_reason})` : '';
         const err = event.error ? ` error: ${event.error}` : '';
         appendMessage('system', `Worker done: ${event.worker_id}${reason}${err}`);
+        _activeWorkers.delete(event.worker_id);
+        _renderWorkerStrip();
     }
 
     else if (type === 'worker.failed') {
@@ -1010,6 +1697,8 @@ function handleEvent(event) {
         const wid = event.worker_id || 'unknown';
         const err = event.error || '(no error message)';
         appendMessage('system', `⚠ Worker failed to start: ${wid} — ${err}`);
+        _activeWorkers.delete(wid);
+        _renderWorkerStrip();
     }
 
     else if (type === 'session.state_changed') {
@@ -1126,8 +1815,7 @@ function handleEvent(event) {
                 mEl.appendChild(temp);
                 mEl.classList.add('has-override');
             } else {
-                mEl.classList.remove('has-override');
-                mEl.textContent = state.model;
+                _renderModelBadge();
             }
         }
     }
@@ -1258,15 +1946,14 @@ function handleEvent(event) {
             _showSendButton();
         }
         // Clear any remaining queued indicators — turn is over
-        for (const el of _injectedMessages) el.classList.remove('queued');
+        for (const el of _injectedMessages) {
+            el.classList.remove('queued');
+            el.querySelector('.queued-remove')?.remove();
+        }
         _injectedMessages = [];
         _clearToolStatus();
         // Restore model name in case scout routed to a different model this turn
-        const mEl = document.getElementById('status-model');
-        if (mEl) {
-            mEl.classList.remove('has-override');
-            mEl.textContent = state.model;
-        }
+        _renderModelBadge();
         if (state.sid) {
             updateSessionActivity(state.sid, '');
             loadContextInfo(state.sid);
@@ -1286,6 +1973,15 @@ function handleEvent(event) {
         // SSE reconnected after drop — sync button state with server
         _syncStreamingState();
     }
+
+    else if (type === 'sse.session_gone') {
+        // The session was deleted (possibly from another device) while this
+        // tab had it open. Stop pretending it might come back.
+        appendMessage('system', 'This session no longer exists on the server (deleted elsewhere). Pick another session or start a new one.');
+        state.streaming = false;
+        _showSendButton();
+        loadSessions();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,6 +1992,18 @@ async function _syncStreamingState() {
     if (!state.sid) return;
     try {
         const status = await get(`/api/sessions/${state.sid}/status`);
+        // Server restart detection: the event_seq counter is in-memory and
+        // restarts near 0. If the server's seq is *behind* ours, every future
+        // event would be silently dropped by the `seq <= _lastSeq` dedup and
+        // gap detection would never fire (seqs went down, not up). Reset and
+        // reload so the UI doesn't go permanently dead.
+        const serverSeq = status.event_seq || 0;
+        if (serverSeq < _lastSeq) {
+            console.warn(`SSE: server seq went backwards (server=${serverSeq}, client=${_lastSeq}) — server restarted, resyncing`);
+            _lastSeq = serverSeq;
+            await _softReload();
+            return;
+        }
         _applyStateBadge(status.state || 'idle_ready', '');
         const serverActive = status.status === 'processing' || status.status === 'scouting';
         if (serverActive && !state.streaming) {
@@ -1326,7 +2034,9 @@ async function _softReload() {
     // Re-fetch server state to re-wire streaming controls and badge.
     try {
         const status = await get(`/api/sessions/${state.sid}/status`);
-        _lastSeq = status.event_seq || _lastSeq;
+        // Take the server's value even when it's 0/absent — after a server
+        // restart keeping the old high _lastSeq would drop all future events.
+        _lastSeq = status.event_seq || 0;
         _applyStateBadge(status.state || 'idle_ready', '');
         if (status.status === 'processing' || status.status === 'scouting') {
             state.streaming = true;
@@ -1353,12 +2063,25 @@ async function _reconcile() {
         } else if (serverSeq > _lastSeq) {
             // Small gap — just update seq to prevent future false alarms
             _lastSeq = serverSeq;
+        } else if (serverSeq < _lastSeq) {
+            // Server seq went backwards — in-memory counter reset after a
+            // server restart. Without this branch the dedup guard drops every
+            // future event and the UI silently freezes.
+            console.warn(`SSE: server seq went backwards (server=${serverSeq}, client=${_lastSeq}) — server restarted, resyncing`);
+            _lastSeq = serverSeq;
+            await _softReload();
         }
     } catch {}
 }
 
 // Periodic reconciliation every 45 seconds (safety net)
 setInterval(() => { if (state.sid && !state.streaming) _reconcile(); }, 45000);
+
+// Intervals are throttled while the tab is backgrounded — reconcile
+// immediately on return (phone unlock) instead of waiting up to a minute.
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && state.sid && !state.streaming) _reconcile();
+});
 
 // ---------------------------------------------------------------------------
 // Stop / Send button toggle
@@ -1395,9 +2118,21 @@ async function _cancelSession() {
         const cancelHeaders = {};
         const _tc = getAuthToken();
         if (_tc) cancelHeaders['Authorization'] = `Bearer ${_tc}`;
-        await fetch(`/api/sessions/${state.sid}/cancel`, { method: 'POST', headers: cancelHeaders });
+        const resp = await fetch(`/api/sessions/${state.sid}/cancel`, { method: 'POST', headers: cancelHeaders });
+        if (!resp.ok) {
+            // 404 = session not in memory (nothing running) — silently fall
+            // through to a state sync. Other failures get surfaced; either
+            // way, don't leave the button stuck in stop-mode for up to 45s
+            // until the reconcile loop notices.
+            if (resp.status !== 404) {
+                const err = await resp.json().catch(() => ({}));
+                appendMessage('system', `Cancel failed: ${err.detail || resp.statusText}`);
+            }
+            await _syncStreamingState();
+        }
     } catch (e) {
         appendMessage('system', `Cancel failed: ${e.message}`);
+        await _syncStreamingState();
     }
 }
 
@@ -1405,7 +2140,71 @@ async function _cancelSession() {
 // Rendering
 // ---------------------------------------------------------------------------
 
-function appendMessage(role, content) {
+// Timestamp of the previously appended message — drives "resumed Nh later"
+// gap dividers. Reset per session load.
+let _lastMsgTs = 0;
+const _MSG_GAP_MS = 10 * 60 * 1000;  // gaps over 10 minutes get a divider
+
+function _msgTimestamp(ts) {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return null;
+    const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    const full = d.toLocaleString(undefined, {
+        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit',
+    });
+    return el('span', { class: 'msg-time', title: full }, [text(time)]);
+}
+
+function _fmtGap(ms) {
+    const mins = Math.round(ms / 60000);
+    if (mins < 60) return `${mins}m`;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    if (h < 24) return m ? `${h}h ${m}m` : `${h}h`;
+    const days = Math.floor(h / 24);
+    return `${days}d ${h % 24}h`;
+}
+
+function _parseMsgTs(createdAt) {
+    if (createdAt == null) return 0;
+    if (typeof createdAt === 'number') return createdAt;
+    let s = String(createdAt);
+    if (!/[Z+-]\d{2}/.test(s) && !s.endsWith('Z')) s += 'Z';  // DB times are UTC, no suffix
+    const t = Date.parse(s);
+    return isNaN(t) ? 0 : t;
+}
+
+/** Hover action toolbar: copy on every message, edit-&-resend on user messages. */
+function _attachMessageActions(msgEl, role) {
+    const actions = el('div', { class: 'msg-actions' });
+    const copyBtn = el('button', { class: 'msg-action-btn', title: 'Copy message' }, [text('⧉')]);
+    copyBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const raw = msgEl._rawContent ?? msgEl.querySelector('.content')?.innerText ?? '';
+        try {
+            await navigator.clipboard.writeText(raw);
+            copyBtn.textContent = '✓';
+            setTimeout(() => { copyBtn.textContent = '⧉'; }, 1200);
+        } catch { /* clipboard unavailable (non-secure context) */ }
+    });
+    actions.appendChild(copyBtn);
+
+    if (role === 'user') {
+        const editBtn = el('button', { class: 'msg-action-btn', title: 'Edit & resend — copies this message into the input' }, [text('✎')]);
+        editBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const textarea = document.getElementById('msg-input');
+            if (!textarea) return;
+            textarea.value = msgEl._rawContent ?? msgEl.querySelector('.content')?.innerText ?? '';
+            textarea.dispatchEvent(new Event('input'));
+            textarea.focus();
+        });
+        actions.appendChild(editBtn);
+    }
+    msgEl.appendChild(actions);
+}
+
+function appendMessage(role, content, meta = {}) {
     const inner = _messagesInner();
     const scroll = _messagesScroll();
 
@@ -1413,10 +2212,26 @@ function appendMessage(role, content) {
     const emptyEl = inner.querySelector('.empty-state');
     if (emptyEl) emptyEl.remove();
 
+    const ts = _parseMsgTs(meta.createdAt ?? Date.now());
+
+    // Idle-gap divider — only between consecutive timestamped messages.
+    if (ts && _lastMsgTs && ts - _lastMsgTs > _MSG_GAP_MS) {
+        inner.appendChild(el('div', { class: 'msg-gap-divider' }, [
+            text(`—— resumed ${_fmtGap(ts - _lastMsgTs)} later ——`),
+        ]));
+    }
+    if (ts) _lastMsgTs = ts;
+
+    const roleLabel = el('div', { class: 'role-label' }, [text(role)]);
+    const timeEl = ts ? _msgTimestamp(ts) : null;
+    if (timeEl) roleLabel.appendChild(timeEl);
+
     const msgEl = el('div', { class: `message ${role}` }, [
-        el('div', { class: 'role-label' }, [text(role)]),
+        roleLabel,
         el('div', { class: 'content' }),
     ]);
+    msgEl._rawContent = content || '';
+    if (meta.messageId != null) msgEl.dataset.messageId = String(meta.messageId);
 
     const contentEl = msgEl.querySelector('.content');
     if (role === 'assistant' && content) {
@@ -1429,8 +2244,10 @@ function appendMessage(role, content) {
         contentEl.appendChild(text(content || ''));
     }
 
+    if (role === 'user' || role === 'assistant') _attachMessageActions(msgEl, role);
+
     inner.appendChild(msgEl);
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom(role === 'user');
     return msgEl;
 }
 
@@ -1482,7 +2299,7 @@ function appendQuestionBubble(questionId, questionText, context) {
 
     _questionBubbles.set(questionId, msgEl);
     inner.appendChild(msgEl);
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom();
     return msgEl;
 }
 
@@ -1539,7 +2356,7 @@ function renderAnsweredQuestion(content) {
     ]);
 
     inner.appendChild(msgEl);
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom();
 }
 
 /**
@@ -1565,7 +2382,7 @@ function renderDismissedQuestion(content) {
     ]);
 
     inner.appendChild(msgEl);
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom();
 }
 
 /**
@@ -1610,7 +2427,7 @@ function appendCommandCard(title, rows, customBody) {
 
     const card = el('div', { class: 'cmd-card' }, [header, body]);
     inner.appendChild(card);
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom();
 }
 
 // ---------------------------------------------------------------------------
@@ -1638,7 +2455,7 @@ function ensureToolGroup() {
         el('div', { class: 'tool-group-items' }),
     ]);
     inner.appendChild(_toolGroup);
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom();
     return _toolGroup;
 }
 
@@ -1783,7 +2600,7 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
     items.appendChild(itemEl);
 
     const scroll = _messagesScroll();
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom();
 }
 
 // ---------------------------------------------------------------------------
@@ -1944,7 +2761,7 @@ function renderScoutReport(event) {
     });
 
     inner.appendChild(container);
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom();
 }
 
 // ---------------------------------------------------------------------------
@@ -1982,7 +2799,7 @@ function renderModelDivider(info) {
     ]);
 
     inner.appendChild(row);
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom();
 }
 
 // ---------------------------------------------------------------------------
@@ -2045,7 +2862,7 @@ function renderReflectCard(event) {
     });
 
     inner.appendChild(container);
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom();
 }
 
 function renderEvalCard(event) {
@@ -2105,11 +2922,263 @@ function renderEvalCard(event) {
     });
 
     inner.appendChild(container);
-    scroll.scrollTop = scroll.scrollHeight;
+    scrollToBottom();
 }
 
 function _extractHostname(url) {
     try { return new URL(url).hostname; } catch { return url.slice(0, 40); }
+}
+
+// ---------------------------------------------------------------------------
+// In-session transcript search (Ctrl+F) — walks text nodes in the loaded
+// transcript, wraps matches in <mark>, navigates with Enter / Shift+Enter.
+// ---------------------------------------------------------------------------
+
+let _searchBarEl = null;
+let _searchMarks = [];
+let _searchCurrent = -1;
+let _searchDebounce = null;
+
+function _clearSearchMarks() {
+    for (const mark of _searchMarks) {
+        const parent = mark.parentNode;
+        if (!parent) continue;
+        parent.replaceChild(document.createTextNode(mark.textContent), mark);
+        parent.normalize();
+    }
+    _searchMarks = [];
+    _searchCurrent = -1;
+}
+
+function _runTranscriptSearch(query) {
+    _clearSearchMarks();
+    const counter = _searchBarEl?.querySelector('.ts-counter');
+    if (!query || query.length < 2) {
+        if (counter) counter.textContent = '';
+        return;
+    }
+    const inner = _messagesInner();
+    if (!inner) return;
+
+    const q = query.toLowerCase();
+    // Collect first: mutating while walking breaks the TreeWalker.
+    const textNodes = [];
+    const walker = document.createTreeWalker(inner, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+            if (!node.nodeValue || !node.nodeValue.toLowerCase().includes(q)) return NodeFilter.FILTER_REJECT;
+            // Don't match inside collapsed tool bodies' hidden copy buttons etc.
+            if (node.parentElement?.closest('.code-copy-btn, .msg-actions')) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+        },
+    });
+    let n;
+    while ((n = walker.nextNode())) textNodes.push(n);
+
+    for (const node of textNodes) {
+        let remaining = node;
+        // A text node can hold several matches; split-and-wrap left to right.
+        for (;;) {
+            const idx = remaining.nodeValue.toLowerCase().indexOf(q);
+            if (idx === -1) break;
+            const matchNode = remaining.splitText(idx);
+            remaining = matchNode.splitText(query.length);
+            const mark = document.createElement('mark');
+            mark.className = 'ts-mark';
+            matchNode.parentNode.replaceChild(mark, matchNode);
+            mark.appendChild(matchNode);
+            _searchMarks.push(mark);
+        }
+    }
+
+    if (counter) counter.textContent = _searchMarks.length ? `1/${_searchMarks.length}` : 'no matches';
+    if (_searchMarks.length) _gotoSearchMatch(0);
+}
+
+function _gotoSearchMatch(idx) {
+    if (!_searchMarks.length) return;
+    if (_searchCurrent >= 0) _searchMarks[_searchCurrent]?.classList.remove('current');
+    _searchCurrent = ((idx % _searchMarks.length) + _searchMarks.length) % _searchMarks.length;
+    const mark = _searchMarks[_searchCurrent];
+    mark.classList.add('current');
+    // Expand a collapsed tool group / body so the hit is actually visible.
+    const group = mark.closest('.tool-group.collapsed');
+    if (group) group.classList.remove('collapsed');
+    const toolItem = mark.closest('.tool-item');
+    if (toolItem && !toolItem.classList.contains('expanded')) toolItem.classList.add('expanded');
+    mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const counter = _searchBarEl?.querySelector('.ts-counter');
+    if (counter) counter.textContent = `${_searchCurrent + 1}/${_searchMarks.length}`;
+}
+
+function openTranscriptSearch() {
+    if (!state.sid) return;
+    if (_searchBarEl) {
+        _searchBarEl.querySelector('input')?.focus();
+        return;
+    }
+    const input = el('input', { type: 'text', placeholder: 'Search transcript…' });
+    const counter = el('span', { class: 'ts-counter' });
+    const prevBtn = el('button', { class: 'ts-nav', title: 'Previous match (Shift+Enter)' }, [text('↑')]);
+    const nextBtn = el('button', { class: 'ts-nav', title: 'Next match (Enter)' }, [text('↓')]);
+    const closeBtn = el('button', { class: 'ts-close', title: 'Close (Esc)' }, [text('×')]);
+
+    input.addEventListener('input', () => {
+        clearTimeout(_searchDebounce);
+        _searchDebounce = setTimeout(() => _runTranscriptSearch(input.value.trim()), 200);
+    });
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            _gotoSearchMatch(_searchCurrent + (e.shiftKey ? -1 : 1));
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            closeTranscriptSearch();
+        }
+    });
+    prevBtn.addEventListener('click', () => _gotoSearchMatch(_searchCurrent - 1));
+    nextBtn.addEventListener('click', () => _gotoSearchMatch(_searchCurrent + 1));
+    closeBtn.addEventListener('click', closeTranscriptSearch);
+
+    _searchBarEl = el('div', { id: 'transcript-search' }, [input, counter, prevBtn, nextBtn, closeBtn]);
+    document.getElementById('main').appendChild(_searchBarEl);
+    input.focus();
+}
+
+function closeTranscriptSearch() {
+    _clearSearchMarks();
+    if (_searchBarEl) {
+        _searchBarEl.remove();
+        _searchBarEl = null;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ctrl+K session switcher — fuzzy-find palette over the loaded session list.
+// ---------------------------------------------------------------------------
+
+let _paletteEl = null;
+
+function openSessionPalette() {
+    if (_paletteEl) { closeSessionPalette(); return; }
+
+    const input = el('input', { type: 'text', placeholder: 'Jump to session…' });
+    const list = el('div', { class: 'palette-list' });
+    const card = el('div', { class: 'palette-card' }, [input, list]);
+    _paletteEl = el('div', { class: 'palette-overlay' }, [card]);
+    _paletteEl.addEventListener('click', (e) => { if (e.target === _paletteEl) closeSessionPalette(); });
+    document.body.appendChild(_paletteEl);
+
+    let items = [];
+    let selected = 0;
+
+    const render = (q) => {
+        clear(list);
+        const query = (q || '').toLowerCase();
+        const matches = (state.sessions || [])
+            .filter(s => s.session_type !== 'worker')
+            .filter(s => {
+                if (!query) return true;
+                return (s.title || '').toLowerCase().includes(query)
+                    || (s.first_message || '').toLowerCase().includes(query);
+            })
+            .slice(0, 15);
+        items = matches;
+        selected = 0;
+        matches.forEach((s, i) => {
+            const row = el('div', { class: `palette-item${i === 0 ? ' selected' : ''}` }, [
+                el('span', { class: 'palette-title' }, [text(s.title || 'New session')]),
+                el('span', { class: 'palette-meta' }, [text(_paletteTime(s.updated_at))]),
+            ]);
+            row.addEventListener('click', () => { closeSessionPalette(); selectSession(s.id); });
+            row.addEventListener('mousemove', () => {
+                selected = i;
+                list.querySelectorAll('.palette-item').forEach((r, j) => r.classList.toggle('selected', j === i));
+            });
+            list.appendChild(row);
+        });
+        if (!matches.length) list.appendChild(el('div', { class: 'palette-empty' }, [text('No matching sessions')]));
+    };
+
+    input.addEventListener('input', () => render(input.value));
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); closeSessionPalette(); return; }
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            const s = items[selected];
+            if (s) { closeSessionPalette(); selectSession(s.id); }
+            return;
+        }
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (!items.length) return;
+            selected = (selected + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+            list.querySelectorAll('.palette-item').forEach((r, j) => r.classList.toggle('selected', j === selected));
+            list.children[selected]?.scrollIntoView({ block: 'nearest' });
+        }
+    });
+
+    render('');
+    input.focus();
+}
+
+function closeSessionPalette() {
+    if (_paletteEl) {
+        _paletteEl.remove();
+        _paletteEl = null;
+    }
+}
+
+function _paletteTime(isoStr) {
+    if (!isoStr) return '';
+    let s = isoStr.replace(/\+00:00$/, 'Z');
+    if (!/[Z+-]\d{2}/.test(s)) s += 'Z';
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return '';
+    const diffSec = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (diffSec < 3600) return `${Math.max(1, Math.floor(diffSec / 60))}m ago`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+// ---------------------------------------------------------------------------
+// Export transcript as a Markdown download
+// ---------------------------------------------------------------------------
+
+async function exportTranscript() {
+    if (!state.sid) return;
+    try {
+        const data = await get(`/api/sessions/${state.sid}?limit=100000`);
+        const messages = data.messages || [];
+        const sess = (state.sessions || []).find(s => s.id === state.sid);
+        const title = (sess?.title || 'Pernix session').trim();
+
+        const lines = [`# ${title}`, ''];
+        lines.push(`> Exported ${new Date().toLocaleString()} · session ${state.sid}`, '');
+        for (const m of messages) {
+            if (m.role === 'user') {
+                lines.push('## User', '', m.content || '', '');
+            } else if (m.role === 'assistant') {
+                if (m.content) lines.push('## Pernix', '', m.content, '');
+            } else if (m.role === 'tool') {
+                const head = (m.content || '').slice(0, 400);
+                lines.push('<details><summary>tool output</summary>', '', '```', head, '```', '', '</details>', '');
+            } else if (m.role === 'system' || m.role === 'notice') {
+                lines.push(`*${(m.content || '').trim()}*`, '');
+            }
+            // scout/reflect/eval/compaction internals are noise in an export
+        }
+
+        const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const safeName = title.replace(/[^\w\d-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'session';
+        const a = el('a', { href: url, download: `${safeName}.md` });
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        appendMessage('system', `Export failed: ${e.message}`);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2120,7 +3189,7 @@ async function loadHealth() {
     try {
         const data = await get('/api/health');
         state.model = data.model;
-        document.getElementById('status-model').textContent = data.model;
+        _renderModelBadge();
     } catch {
         document.getElementById('status-model').textContent = 'offline';
     }
@@ -2153,6 +3222,18 @@ function _applyStateBadge(to, reason) {
     el.className = 'state-badge ' + to;
     el.textContent = _STATE_LABELS[to] || to;
     el.title = reason ? `state: ${to} (${reason})` : `state: ${to}`;
+    _updatePauseButton(to);
+}
+
+function _updatePauseButton(stateStr) {
+    const btn = document.getElementById('pause-btn');
+    if (!btn) return;
+    const paused = stateStr === 'paused' || stateStr === 'pause_requested';
+    const active = stateStr === 'processing' || stateStr === 'scouting' || stateStr === 'compacting';
+    btn.hidden = !(active || paused);
+    btn._paused = paused;
+    btn.innerHTML = paused ? '&#9654;' : '&#10074;&#10074;';
+    btn.title = paused ? 'Resume the session' : 'Pause after the current step';
 }
 
 function _renderStateBadge(event) {
@@ -2226,7 +3307,9 @@ function _showLoginScreen() {
             <input class="auth-input" type="text" placeholder="Paste token here"
                    autocomplete="off" spellcheck="false" autofocus />
             <button class="auth-btn">Connect</button>
-            <div class="auth-hint">Find this token in the server console output</div>
+            <div class="auth-hint">Find this token in the server console output —
+                or on a logged-in desktop browser, open Settings &rarr; Network and
+                scan the QR code to sign this device in automatically.</div>
             <div class="auth-error" style="display:none"></div>
         </div>
     `;
@@ -2253,7 +3336,7 @@ function _showLoginScreen() {
                 headers: { 'Authorization': `Bearer ${token}` },
             });
             if (resp.status === 401) {
-                errorEl.textContent = 'Invalid token. Check the server console and try again.';
+                errorEl.textContent = 'Invalid token. Check the server console (or re-scan the QR from Settings → Network) and try again.';
                 errorEl.style.display = 'block';
                 btn.disabled = false;
                 btn.textContent = 'Connect';

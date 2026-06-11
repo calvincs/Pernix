@@ -156,10 +156,12 @@ class MaintenanceRunner:
             except Exception as e:
                 logger.error("Snooze cycle error: %s", e, exc_info=True)
 
-        # Every 60 ticks (1 hour): WAL checkpoint
+        # Every 60 ticks (1 hour): WAL checkpoint. Off-loop — a checkpoint
+        # can hold the DB busy for seconds on a large WAL, which froze every
+        # session's SSE when run on the loop.
         if tick % 60 == 0:
             try:
-                db.checkpoint()
+                await asyncio.to_thread(db.checkpoint)
                 logger.debug("WAL checkpoint complete")
             except Exception as e:
                 logger.warning("WAL checkpoint failed: %s", e)

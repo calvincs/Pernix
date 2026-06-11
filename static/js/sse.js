@@ -28,7 +28,7 @@ const EVENT_TYPES = [
     'stream.fallback', 'stream.retry', 'stream.length_continuation',
     'stream.budget_exhausted',
     // Tools / context / scout
-    'tool.call',
+    'tool.start', 'tool.call',
     'context.compacting', 'context.compacted', 'context.reset',
     'scout.start', 'scout.step', 'scout.done',
     // Session lifecycle
@@ -36,6 +36,7 @@ const EVENT_TYPES = [
     'session.state_changed', 'session.prompt_rejected',
     'session.waiting_llm', 'session.message_combined',
     'session.queue_dropped', 'session.queue_full',
+    'session.queue_removed',
     // Injected mid-turn messages
     'message.injected',
     // Workers
@@ -103,17 +104,21 @@ function _attachListeners(source, handler) {
     });
 }
 
+let _consecutiveErrors = 0;
+
 export function connectSSE(sessionId, onEvent) {
     disconnectSSE();
     _onEvent = onEvent;
     _sessionId = sessionId;
     if (!isOnline()) return;
     _lastEventTime = Date.now();
+    _consecutiveErrors = 0;
     _source = new EventSource(`/api/sessions/${sessionId}/events`);
 
     _source.onopen = () => {
         _connectionState = 'connected';
         _lastEventTime = Date.now();
+        _consecutiveErrors = 0;
         _updateHealthIndicator('connected');
         console.debug('SSE connected');
     };
@@ -122,12 +127,32 @@ export function connectSSE(sessionId, onEvent) {
         _connectionState = 'reconnecting';
         _updateHealthIndicator('reconnecting');
         console.warn('SSE error, reconnecting...');
+        // EventSource hides the HTTP status, so a 404 (session deleted on
+        // another device) looked identical to a flaky network — the dot spun
+        // on "reconnecting" forever. After a few consecutive failures, probe
+        // the status endpoint and stop for good if the session is gone.
+        _consecutiveErrors++;
+        if (_consecutiveErrors === 3) _probeSessionExists();
     };
 
     _attachListeners(_source, onEvent);
 
     // Start health monitoring
     _startHealthCheck();
+}
+
+async function _probeSessionExists() {
+    const sid = _sessionId;
+    const handler = _onEvent;
+    if (!sid) return;
+    try {
+        const resp = await fetch(`/api/sessions/${sid}/status`);
+        if (resp.status === 404) {
+            console.warn(`SSE: session ${sid} no longer exists — stopping reconnect attempts`);
+            disconnectSSE();
+            if (handler) handler({ type: 'sse.session_gone', session_id: sid });
+        }
+    } catch { /* network issue — keep retrying as before */ }
 }
 
 export function disconnectSSE() {
@@ -149,43 +174,52 @@ export function getSSEState() {
     return _connectionState;
 }
 
+// Browsers throttle timers in background tabs, so after a phone unlock the
+// 15s health interval may not have run for minutes — check immediately on
+// becoming visible instead of staring at stale state for up to a minute.
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') _checkStale();
+});
+
 function _startHealthCheck() {
     if (_healthTimer) clearInterval(_healthTimer);
-    _healthTimer = setInterval(() => {
-        if (!_source) return;
+    _healthTimer = setInterval(_checkStale, HEALTH_CHECK_INTERVAL);
+}
 
-        const elapsed = Date.now() - _lastEventTime;
-        if (elapsed > STALE_THRESHOLD) {
-            // Connection appears dead — force reconnect
-            console.warn(`SSE: no events for ${Math.round(elapsed / 1000)}s, forcing reconnect`);
+function _checkStale() {
+    if (!_source) return;
+
+    const elapsed = Date.now() - _lastEventTime;
+    if (elapsed > STALE_THRESHOLD) {
+        // Connection appears dead — force reconnect
+        console.warn(`SSE: no events for ${Math.round(elapsed / 1000)}s, forcing reconnect`);
+        _connectionState = 'reconnecting';
+        _updateHealthIndicator('reconnecting');
+        // Close and reopen. Pass last seen seq as a query param so the
+        // server replays anything we missed — EventSource won't let us
+        // set the Last-Event-ID header on a JS-instantiated reconnect.
+        const sid = _sessionId;
+        const handler = _onEvent;
+        _source.close();
+        const replayQuery = _lastSeq > 0 ? `?last_event_id=${_lastSeq}` : '';
+        _source = new EventSource(`/api/sessions/${sid}/events${replayQuery}`);
+        _lastEventTime = Date.now();
+
+        _source.onopen = () => {
+            _connectionState = 'connected';
+            _lastEventTime = Date.now();
+            _updateHealthIndicator('connected');
+            console.debug('SSE reconnected');
+            // Notify app to check session status (button state recovery)
+            handler({ type: 'sse.reconnected' });
+        };
+        _source.onerror = () => {
             _connectionState = 'reconnecting';
             _updateHealthIndicator('reconnecting');
-            // Close and reopen. Pass last seen seq as a query param so the
-            // server replays anything we missed — EventSource won't let us
-            // set the Last-Event-ID header on a JS-instantiated reconnect.
-            const sid = _sessionId;
-            const handler = _onEvent;
-            _source.close();
-            const replayQuery = _lastSeq > 0 ? `?last_event_id=${_lastSeq}` : '';
-            _source = new EventSource(`/api/sessions/${sid}/events${replayQuery}`);
-            _lastEventTime = Date.now();
+        };
 
-            _source.onopen = () => {
-                _connectionState = 'connected';
-                _lastEventTime = Date.now();
-                _updateHealthIndicator('connected');
-                console.debug('SSE reconnected');
-                // Notify app to check session status (button state recovery)
-                handler({ type: 'sse.reconnected' });
-            };
-            _source.onerror = () => {
-                _connectionState = 'reconnecting';
-                _updateHealthIndicator('reconnecting');
-            };
-
-            _attachListeners(_source, handler);
-        }
-    }, HEALTH_CHECK_INTERVAL);
+        _attachListeners(_source, handler);
+    }
 }
 
 function _updateHealthIndicator(state) {

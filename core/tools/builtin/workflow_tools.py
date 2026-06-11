@@ -281,18 +281,6 @@ def delete_workflow(name: str, _context: dict | None = None) -> str:
     return f"Workflow '{name}' deleted (data/workflows/{name}/ removed)."
 
 
-def validate_workflow_content(content: str, _context: dict | None = None) -> str:
-    """Validate raw WORKFLOW.md content without writing to disk.
-
-    Use this to pre-check a workflow definition before calling create_workflow().
-    Call get_workflow_schema() to see the required YAML format.
-    """
-    from core.workflows.validator import validate_content
-
-    result = validate_content(content, check_skills=True)
-    return result.to_agent_text()
-
-
 def register(reg) -> None:
     wf_tags = ["workflow", "pipeline", "chain", "automate", "multi-step", "orchestrate"]
 

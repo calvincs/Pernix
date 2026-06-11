@@ -946,6 +946,17 @@ body.fp-resizing #main { pointer-events: none; }
     color: var(--text-faint);
     font-weight: 400;
 }
+.fp-skill-pending-badge {
+    font-size: var(--text-xxs);
+    color: var(--warning, #e8a020);
+    background: rgba(232, 160, 32, 0.12);
+    border: 1px solid rgba(232, 160, 32, 0.35);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;
+}
 .fp-skill-actions {
     display: flex;
     align-items: center;

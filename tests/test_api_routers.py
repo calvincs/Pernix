@@ -169,6 +169,97 @@ async def test_delete_session_idempotent():
     assert resp.status_code == 200
 
 
+async def test_patch_session_rename_and_pin():
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Old title")
+    before = db.get_session(sid)["updated_at"]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch(f"/api/sessions/{sid}", json={"title": "  New title  ", "pinned": True})
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "New title"
+    assert resp.json()["pinned"] is True
+    row = db.get_session(sid)
+    assert row["title"] == "New title"
+    assert row["pinned"] == 1
+    # Rename/pin must not bump recency ordering.
+    assert row["updated_at"] == before
+
+
+async def test_patch_session_rejects_empty_title():
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Keep me")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch(f"/api/sessions/{sid}", json={"title": "   "})
+    assert resp.status_code == 400
+    assert db.get_session(sid)["title"] == "Keep me"
+
+
+async def test_patch_session_not_found():
+    from api.routers import sessions
+
+    app = _make_app(sessions.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch("/api/sessions/nonexistent", json={"title": "x"})
+    assert resp.status_code == 404
+
+
+async def test_pending_queue_list_and_remove():
+    from api.routers import sessions
+    from db import models as db
+    from sessions.manager import get_manager
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Queue test")
+    session = get_manager().get_or_create(sid)
+    mid = db.add_message(sid, "user", "queued message")
+    session.pending_messages.append(("queued message", "", True, 0.0, mid))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/sessions/{sid}/pending")
+        assert resp.status_code == 200
+        assert resp.json()["pending"] == [{"message_id": mid, "preview": "queued message"}]
+
+        resp = await client.delete(f"/api/sessions/{sid}/pending/{mid}")
+        assert resp.status_code == 200
+        assert resp.json()["queue_depth"] == 0
+
+        # Deque entry, DB row both gone; second delete 404s.
+        assert len(session.pending_messages) == 0
+        assert db.get_message(mid) is None
+        resp = await client.delete(f"/api/sessions/{sid}/pending/{mid}")
+        assert resp.status_code == 404
+
+
+async def test_patch_session_model_override_set_and_clear():
+    from api.routers import sessions
+    from db import models as db
+    from sessions.manager import get_manager
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Override me")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.patch(f"/api/sessions/{sid}", json={"model_override": "some/model"})
+        assert resp.status_code == 200
+        assert resp.json()["model_override"] == "some/model"
+        session = get_manager().get(sid)
+        assert session is not None
+        assert session.model_override == "some/model"
+        # A user-set override must NOT register as an agent switch (which
+        # would be reverted at turn end).
+        assert session._model_before_agent_switch is None
+
+        resp = await client.patch(f"/api/sessions/{sid}", json={"model_override": ""})
+        assert resp.status_code == 200
+        assert resp.json()["model_override"] is None
+        assert get_manager().get(sid).model_override is None
+
+
 # ---------------------------------------------------------------------------
 # Chat router
 # ---------------------------------------------------------------------------
@@ -439,6 +530,48 @@ async def test_skills_list_surfaces_disabled_with_enabled_false_flag(tmp_path, m
     assert "beta" in by_name
     assert by_name["alpha"]["enabled"] is False
     assert by_name["beta"]["enabled"] is True
+
+
+async def test_skills_list_surfaces_pending_proposal_count(tmp_path, monkeypatch):
+    """The Skills UI needs ``pending_proposals_count`` per row so it can
+    render the inline 'N pending' badge without an extra API round trip."""
+    from api.routers import skills as skills_router
+    from core.skills.registry import SkillRegistry
+    from db import models as db
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    for name in ("alpha", "beta"):
+        d = skills_dir / name
+        d.mkdir()
+        (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name}\n---\n# {name}\n")
+
+    monkeypatch.setattr("config.settings.skills_dir", str(skills_dir))
+    fresh = SkillRegistry()
+    fresh.scan(skills_dir)
+    monkeypatch.setattr("core.skills.registry._skill_registry", fresh)
+
+    sid = db.create_session(title="Refine source")
+    for _ in range(2):
+        db.add_skill_proposal(
+            workflow_name=None,
+            run_id=None,
+            skill_name="alpha",
+            section="Usage",
+            problem="p",
+            proposed_change="c",
+            confidence=0.8,
+            source_origin="refine",
+            session_id=sid,
+        )
+
+    app = _make_app(skills_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/skills")
+    assert resp.status_code == 200
+    by_name = {s["name"]: s for s in resp.json()["skills"]}
+    assert by_name["alpha"]["pending_proposals_count"] == 2
+    assert by_name["beta"]["pending_proposals_count"] == 0
 
 
 async def test_skills_get_surfaces_disabled_skill_body_and_resources(tmp_path, monkeypatch):

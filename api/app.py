@@ -41,6 +41,12 @@ async def lifespan(app: FastAPI):
         root.addHandler(file_h)
     logger.info("Pernix starting on %s:%d", settings.host, settings.port)
 
+    # 0. Capture the main event loop so tool threads can marshal event
+    # delivery back onto it (core.events.run_on_loop).
+    from core.events import set_main_loop
+
+    set_main_loop()
+
     # 1. Database
     init_db()
 
@@ -135,6 +141,17 @@ async def lifespan(app: FastAPI):
             logger.info("Reconciled %d stuck PROCESSING session(s) at startup", reset)
     except Exception as e:
         logger.warning("PROCESSING reconcile failed (continuing): %s", e)
+
+    # 3.3 Reconcile sessions left in any other non-terminal state (scouting,
+    # compacting, cancelling, finalizing, pause). No asyncio task survives a
+    # restart, so these are always phantom turns — without the sweep a new
+    # prompt queues behind them for 5-15 minutes until the reaper fires.
+    try:
+        reset = await manager.reconcile_interrupted_sessions()
+        if reset:
+            logger.info("Reconciled %d interrupted session(s) at startup", reset)
+    except Exception as e:
+        logger.warning("Interrupted-session reconcile failed (continuing): %s", e)
 
     # 1.5 VAPID key generation (idempotent — skipped if keys already present)
     if not settings.vapid_private_key or not settings.vapid_public_key:

@@ -48,6 +48,9 @@ export function renderMarkdown(mdText) {
     doc.querySelectorAll('*').forEach(node => {
         for (const attr of [...node.attributes]) {
             if (attr.name.startsWith('on')) node.removeAttribute(attr.name);
+            // Inline styles survive markdown via raw HTML — cosmetic spoofing
+            // vector with no legitimate use in model output.
+            if (attr.name === 'style') node.removeAttribute(attr.name);
             if (URI_ATTRS.has(attr.name)) {
                 const val = attr.value.replace(/[\x00-\x1f\s]+/g, '').toLowerCase();
                 if (BLOCKED_SCHEMES.some(s => val.startsWith(s))) {
@@ -55,6 +58,12 @@ export function renderMarkdown(mdText) {
                 }
             }
         }
+    });
+    // Links open in a new tab — navigating the SPA away mid-turn loses the
+    // live stream view. noopener blocks reverse-tabnabbing.
+    doc.querySelectorAll('a[href]').forEach(a => {
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener noreferrer');
     });
     // Use appendChild instead of innerHTML to avoid re-parsing
     const container = document.createElement('div');
