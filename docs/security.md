@@ -136,7 +136,7 @@ The following settings cannot be changed via the Settings UI or API while `netwo
 
 Server-Side Request Forgery (SSRF) is a class of attack where a server is tricked into making requests to internal resources. Pernix includes:
 
-- **`http_get` IP filtering**: In network mode, requests to RFC-1918 private IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x) and loopback addresses are blocked
+- **`http_get` IP filtering**: Requests to RFC-1918 private IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x) are always blocked. Loopback is additionally blocked in network mode (in localhost mode the agent may fetch loopback, e.g. its own workspace file server)
 - **Locked LLM base URLs**: Cannot be redirected to internal addresses remotely
 - **Playwright SSRF intercept**: `browse_web` also filters internal address requests at the page-load level
 
@@ -157,7 +157,7 @@ These endpoints are only accessible from `127.0.0.1` or `::1`, regardless of aut
 
 ## Dangerous Tool Gate
 
-Tools classified as `dangerous` (primarily `bash`, file writes, unrestricted network access) require explicit per-invocation user confirmation before executing, unless the server was started with the `--dangerous` flag.
+Tools classified as `dangerous` (by default: `search_web`, `browse_web`, `delete_skill`, `delete_workflow`) require explicit per-invocation user confirmation before executing, unless the server was started with the `--dangerous` flag. The `bash` and file-write tools default to the `caution` level, which does not prompt — you can promote any tool to `dangerous` via `POST /api/tools/set-safety` or the Explorer → Tools panel.
 
 ### Normal mode (default — `auto_approve_dangerous = false`)
 
@@ -168,7 +168,7 @@ The agent must go through a two-step handshake for every distinct dangerous acti
 
 Approved scopes are persisted to `data/tool_approvals.json`. If you've confirmed an action before (e.g. "run ps aux to list processes"), the `ask_user` step is skipped automatically on future occurrences. View and clear remembered approvals in **Settings → Security**.
 
-Workers and cron jobs face the same gate — they cannot escalate privilege by spawning sub-agents.
+Workers spawned from interactive sessions face the same gate — the agent cannot escalate privilege by spawning sub-agents. The exception is unattended runs: cron-scheduled sessions (and workers spawned from them) skip the gate, because no user is present to answer `ask_user` prompts.
 
 ### Run Dangerously mode (`--dangerous` startup flag)
 

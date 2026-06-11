@@ -43,7 +43,7 @@ Several control tools are always available to the parent:
 | `check_workers` | List all workers and their current state |
 | `get_worker_result` | Fetch a finished worker's final response |
 | `message_worker` | Send a follow-up message into a running worker (mid-turn injection) |
-| `pause_worker` / `resume_worker` | Park or unpause a worker at the next round boundary |
+| `set_worker_state` | Pause (`paused=true`) or resume (`paused=false`) a worker at the next round boundary |
 | `await_workers` | Block the parent until specified workers complete |
 
 The parent can dispatch fan-out work, do other things while workers run, and collect results when ready. The orchestration extension lives in `core/extensions/orchestration/`.
@@ -73,10 +73,10 @@ If a worker errors out, the parent receives `worker.error`. Errors don't crash t
 Useful when you want the agent to "wait, don't keep going, let me think":
 
 ```
-pause_worker(worker_id)
+set_worker_state(worker_id, paused=true)
 ```
 
-The worker observes the pause at its next round boundary and parks in the `PAUSED` state. It stops consuming LLM time. Resume later with `resume_worker(worker_id)`.
+The worker observes the pause at its next round boundary and parks in the `PAUSED` state. It stops consuming LLM time. Resume later with `set_worker_state(worker_id, paused=false)`, or use the REST endpoints `POST /api/sessions/{id}/workers/{worker_id}/pause` and `.../resume`.
 
 Paused workers are not reaped for inactivity. The only safety net is a 24-hour timeout if the parent session is deleted.
 

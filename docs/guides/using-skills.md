@@ -2,22 +2,19 @@
 
 A **skill** is a capability pack — a markdown file plus optional scripts that teaches the agent a specific workflow. Skills live in `data/skills/` and load on-demand: the agent discovers what skills exist on every turn, but only loads the full instructions for the ones it needs.
 
-This page is about **using** skills (the ones that ship with Pernix or that you've installed). To author your own, see [../authoring/writing-skills.md](../authoring/writing-skills.md).
+This page is about **using** skills you've installed or authored. To author your own, see [../authoring/writing-skills.md](../authoring/writing-skills.md).
 
 ---
 
-## What ships out of the box
+## What goes in `data/skills/`
 
-Look in `data/skills/`. The current set covers things like:
+Pernix does not ship with skills preinstalled — `data/skills/` is user-owned content. Typical skills people build or install cover things like:
 
-- Drafting LinkedIn posts
+- Drafting posts in a specific voice or format
 - Transcribing YouTube videos via Whisper
-- Spec-driven development workflow
-- Cleaning up a workspace
-- Casting media to a TV
-- Reviewing code quality
-- Security hardening review
-- Crawling a site with crawl4ai
+- Cleaning up and organizing the workspace
+- Reviewing code quality or doing a security-hardening pass
+- Crawling a site with a specific scraping tool
 
 Each one is a directory containing a `SKILL.md` file and optional `scripts/`, `resources/`, and `references/` subfolders.
 
@@ -45,7 +42,7 @@ Skills load in three layers, all controlled by Pernix:
 - **L2 — instructions** are loaded only when the skill is selected. The body of `SKILL.md`, including step-by-step procedure, examples, and references.
 - **L3 — scripts** run on demand. The agent calls `bash` to execute a script from the skill's `scripts/` directory. The script can be anything — Python, shell, even a curl call.
 
-This is the "pull model" in action: 14 skills loaded as L1 metadata costs almost nothing in tokens. Only the 1–2 skills relevant to the current turn pay the L2 cost.
+This is the "pull model" in action: a dozen installed skills loaded as L1 metadata costs almost nothing in tokens. Only the 1–2 skills relevant to the current turn pay the L2 cost.
 
 ---
 
@@ -86,7 +83,7 @@ To uninstall: delete the directory, or use the agent's `delete_skill` tool (it's
 
 You can disable a particular skill from being auto-injected for a session by including a hint:
 
-> *"Don't use the workspace-organizer skill this session."*
+> *"Don't use the <skill-name> skill this session."*
 
 This isn't a hard switch — there's no `disabled_skills` setting yet — but the scout respects in-conversation guidance.
 

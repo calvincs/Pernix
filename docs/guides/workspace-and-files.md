@@ -17,11 +17,11 @@ data/workspace/
 │   ├── research-x/
 │   │   └── ...
 │   └── ...
-├── scratch/                  # ad-hoc files; cleaned by workspace-organizer skill
+├── scratch/                  # ad-hoc files
 └── .venv/                    # auto-managed venv for custom tools (not for dev use)
 ```
 
-The agent organizes outputs into subdirectories by project where it can. Loose files at the workspace root tend to get tidied by the `workspace-organizer` skill on idle.
+The agent organizes outputs into subdirectories by project where it can.
 
 > **Don't confuse the workspace venv with the project venv.** `data/workspace/.venv/` is created on demand by the `toolmaker` extension when a custom tool installs Python packages. The dev venv is `.venv/` at the repo root.
 
@@ -62,8 +62,9 @@ Three paths:
   ```bash
   GET  /api/workspace                  # list tree (JSON)
   GET  /workspace/{path}               # download a file
-  POST /api/workspace                  # upload a file
-  DELETE /api/workspace?path=<path>    # delete a file
+  PUT  /workspace/{path}               # write a file
+  POST /api/upload                     # upload a file (multipart)
+  DELETE /workspace/{path}             # delete a file
   ```
 
   See [../api.md](../api.md) for full details.
@@ -77,7 +78,7 @@ Two ways to give the agent a file:
 1. **Drag-drop into the UI** — uploads to the active session's workspace and adds a reference to the next message you send.
 2. **Manually drop into `data/workspace/`** — the agent can read it once you mention the path.
 
-The agent will use `file_read` and (for binary types like PDF or PNG) `summarize_webpage` or its equivalents to inspect what's there.
+The agent will use `file_read` (or, for images/PDFs attached in chat, the model's own multimodal input) to inspect what's there.
 
 ---
 
@@ -85,7 +86,7 @@ The agent will use `file_read` and (for binary types like PDF or PNG) `summarize
 
 Pernix does not garbage-collect the workspace automatically. Two options keep it tidy:
 
-- **The `workspace-organizer` skill** — invoke it explicitly ("organize my workspace") and it'll move files into project subdirectories, archive old work, and flag stale data.
+- **Ask the agent** — "organize my workspace" works as a plain request; it'll move files into project subdirectories and archive old work. If you do this often, capture the procedure as a skill.
 - **`python run.py --rebuild`** — wipes the workspace entirely (along with sessions, memory, and logs). Settings, API keys, skills, and certs are preserved.
 
 For per-project cleanup, just `rm -r data/workspace/projects/old-project/`.

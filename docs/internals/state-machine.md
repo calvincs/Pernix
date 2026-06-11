@@ -4,13 +4,13 @@ Complete walkthrough of how requests flow through the harness: session lifecycle
 
 > **2026-04-20 AMENDMENT — True state machine (v2)**
 >
-> The "five states + orthogonal flags" model previously documented below has been replaced with a nine-state true state machine. The authoritative enum is now `sessions.state_v2.SessionStateV2`, the mutator is `sessions.state_v2.transition()`, and every transition is persisted to the `session_state_log` table (migration v13) and emitted as a `session.state_changed` SSE event. See [§0 State Machine v2 (current)](#0-state-machine-v2-current) below for the current architecture. Sections 1.2–1.13 describe the legacy model and are kept as historical reference.
+> The "five states + orthogonal flags" model previously documented below has been replaced with a ten-state true state machine. The authoritative enum is now `sessions.state_v2.SessionStateV2`, the mutator is `sessions.state_v2.transition()`, and every transition is persisted to the `session_state_log` table (migration v13) and emitted as a `session.state_changed` SSE event. See [§0 State Machine v2 (current)](#0-state-machine-v2-current) below for the current architecture. Sections 1.2–1.13 describe the legacy model and are kept as historical reference.
 
 ---
 
 ## 0. State Machine v2 (current)
 
-### 0.1 States (9)
+### 0.1 States (10)
 
 | State | Purpose | Accepts new prompt? |
 |---|---|---|
@@ -23,6 +23,7 @@ Complete walkthrough of how requests flow through the harness: session lifecycle
 | `CANCELLING` | `cancel_requested` observed; post-hooks skipped, transient | **Rejected** |
 | `FINALIZING` | Post-hooks running (title, distill, reflect, eval, worker finalize) | Queued |
 | `AWAITING_USER` | `ask_user` posted a question; turn terminated cleanly | Rejected (answer via `/api/questions/{id}/answer`) |
+| `AWAITING_WORKERS` | Parent session parked while watched workers run; auto-resumes when they settle | Queued |
 
 Deleted from the legacy enum: `ERROR` (folded into `FINALIZING` with `termination_reason="error"`), `DELETED` (was never set).
 
@@ -50,6 +51,10 @@ FINALIZING       → IDLE_READY        reason=turn-complete|finalize-error
 AWAITING_USER    → SCOUTING          reason=answer-received    (new turn_id, parent_turn_id=prev)
 AWAITING_USER    → CANCELLING        reason=cancel-requested
 AWAITING_USER    → IDLE_READY        reason=question-dismissed
+PROCESSING       → AWAITING_WORKERS  reason=workers-dispatched
+AWAITING_WORKERS → SCOUTING          reason=workers-complete
+AWAITING_WORKERS → IDLE_READY        reason=worker-timeout
+AWAITING_WORKERS → CANCELLING        reason=cancel-requested
 (any)            → IDLE_READY        reason=reaper-unstick     (explicit escape hatch, logged)
 ```
 
@@ -346,7 +351,7 @@ Not part of a normal turn, but part of the lifecycle:
 
 ### 2.1 The loop (`core/agent.py:256-514`)
 
-Iterates while `tool_round < settings.max_tool_rounds` (default 20):
+Iterates while `tool_round < settings.max_tool_rounds` (default 10):
 
 1. **Pre-round gates** (`agent.py:333-341`) — check `session.cancel_requested`, await `session.pause_event` (for worker pause/resume)
 2. **Compile context** (`agent.py:347-355`) — `compile_context()` in `core/context/compiler.py` returns compacted messages + active tool schemas + scout-report section + resource header (rounds left, token budget). Compaction runs as a view transform; stored messages are never mutated.
@@ -374,7 +379,7 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 20):
 - **Model** — `settings.scout_model` (fast, cheap), **fresh context** (no main convo history — session brief only)
 - **Tools** — read-only discovery: `search_memory`, `search_skills`, `search_tools`, `read_skill_instructions`, `submit_report`
 - **Budget** — 5 rounds max; must call `submit_report` by round 4 (`runner.py:104`)
-- **Output** — `ScoutReport` with `recommended_tools`, `recommended_skills` (0-3), `approach_guidance`, `deliverables_plan` (used by Reflect), optional `recommended_model`, plus `identity`/`rules`/`instructions` from SOUL.md/RULES.md/AGENTS.md
+- **Output** — `ScoutReport` with `recommended_tools`, `recommended_skills` (0-3), `approach_guidance`, `deliverables_plan` (used by Reflect), optional `recommended_model`, plus `identity`/`rules`/`instructions` from SOUL.md/RULES.md/SESSIONS.md
 - **Caching** — report cached on `session.last_scout_report`; retries (reflect/eval) re-run scout with `reflect_lessons` prepended
 
 ### 2.3 Tool routing (`core/tools/registry.py`, `core/extensions/`)

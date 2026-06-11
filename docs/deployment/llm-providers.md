@@ -93,7 +93,7 @@ Pernix uses **four model roles**. You can assign a different model to each, or u
 | Fallback | `fallback_model` | Used when OpenRouter rate-limits or errors out. Should be a locally-available Ollama model | Any decent Ollama model — `qwen3:8b` works |
 | Background | `background_model` | Auto-titling sessions, message distillation, reflect re-analysis (fire-and-forget) | A small fast model — `qwen3:8b`, `anthropic/claude-haiku-4.5` |
 
-You don't have to fill all four. If `background_model` is empty, Pernix uses the scout model for background tasks. If `fallback_model` is empty, rate-limit failover is disabled.
+You don't have to fill all four. If `background_model` is empty, Pernix falls back to the primary `llm_model` for background tasks. If `fallback_model` is empty, rate-limit failover is disabled.
 
 ### Why a separate scout model?
 
@@ -108,7 +108,7 @@ Running scout on the same heavy model as the main agent is wasteful — you'd pa
 The four roles above are global. To change just the primary model for one session:
 
 ```bash
-curl -X POST http://localhost:8090/api/sessions/{id} \
+curl -X PATCH http://localhost:8090/api/sessions/{id} \
   -H "Content-Type: application/json" \
   -d '{"model_override": "anthropic/claude-haiku-4.5"}'
 ```
@@ -164,7 +164,7 @@ When `vision_model_overrides` includes a model, Pernix treats it as multimodal r
 If a model you set isn't being used the way you expect:
 
 1. **Check the active model.** `GET /api/models` shows which models Pernix knows about and which provider they're routed through.
-2. **Check the logs.** `data/logs/agent.log` records the provider and model name for every LLM call.
+2. **Check the logs.** `data/logs/pernix.log` records the provider and model name for every LLM call.
 3. **Check the conflict.** If both providers have the same name and you wanted OpenRouter to win, you need it in `OPENROUTER_MODELS`.
 4. **Check the slot.** If concurrency is maxed, requests queue silently — bump `llm_max_concurrent` or `openrouter_max_concurrent`.
 

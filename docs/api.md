@@ -92,9 +92,9 @@ Deletes the session and cascades to any worker sessions it spawned.
 POST /api/sessions/purge
 ```
 ```json
-{ "keep_minimum": 10 }
+{ "keep_days": 7, "keep_min": 5 }
 ```
-Bulk-deletes sessions older than the threshold, keeping at least `keep_minimum` recent sessions.
+Bulk-deletes sessions whose last activity is older than `keep_days`, always keeping at least `keep_min` of the stale candidates.
 
 ---
 
@@ -223,7 +223,7 @@ Every event includes `_seq` (sequence number), `session_id`, and `timestamp`.
 #### User Interaction
 | Event | Description |
 |---|---|
-| `ask_user` | The agent is pausing to ask the user a question. Fields: `question_id`, `question`, `choices` (optional list). Answer via `POST /api/sessions/{id}/questions/{qid}/answer`. |
+| `ask_user` | The agent is pausing to ask the user a question. Fields: `question_id`, `question`, `choices` (optional list). Answer via `POST /api/questions/{question_id}/answer`. |
 
 #### Context Management
 | Event | Description |
@@ -267,10 +267,7 @@ BM25 full-text search across all memory entries. Returns entries with relevance 
 ```
 POST /api/memory/maintenance
 ```
-```json
-{ "reindex": false }
-```
-Runs a health check on the memory index. Set `reindex: true` to rebuild the FTS5 index from scratch (useful if search results seem stale or wrong).
+Runs a health check on the memory index (no request body) and auto-fixes it — if the FTS5 index is out of sync with the markdown files, it is reindexed. Useful if search results seem stale or wrong.
 
 ---
 
@@ -311,7 +308,7 @@ Content-Type: multipart/form-data
 
 file=@localfile.pdf
 ```
-Max 10MB. Filenames are sanitized. Blocked extensions: `.exe`, `.sh`, `.php`, `.bat`, `.dll`, `.msi`, `.scr`, `.cmd`, `.com`. Returns the saved path.
+Max 250MB. Filenames are sanitized. Blocked extensions: `.exe`, `.sh`, `.php`, `.bat`, `.dll`, `.msi`, `.scr`, `.cmd`, `.com`. Returns the saved path.
 
 ### List Data Files
 ```
@@ -635,7 +632,7 @@ curl -s -X POST http://localhost:8090/api/chat \
 
 # 3. Poll status until turn completes
 while true; do
-  STATE=$(curl -s "http://localhost:8090/api/sessions/$SESSION/status" | jq -r '.state')
+  STATE=$(curl -s "http://localhost:8090/api/sessions/$SESSION/status" | jq -r '.status')
   echo "State: $STATE"
   [ "$STATE" = "idle" ] && break
   sleep 1

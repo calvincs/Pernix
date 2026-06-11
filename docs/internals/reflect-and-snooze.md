@@ -40,7 +40,7 @@ Reflect-N never sees attempt-(N-1)'s transcript directly. The chain is: each cyc
 
 Each `retry` increments `retry_index` on the same `turn_id`. When `retry_index` reaches `reflect_max_retries` (default 2), retries stop — total of 3 attempts. The next reflect verdict at that point can only be `pass` or `escalate`.
 
-For worker sessions, `reflect_max_retries_worker` is a separate cap (default inherits from `reflect_max_retries`). Workers run on tighter budgets so you might want fewer retries there.
+For worker sessions, `reflect_max_retries_worker` is a separate cap (default 2). Workers run on tighter budgets so you might want fewer retries there.
 
 ### When reflect skips
 
@@ -67,7 +67,7 @@ The cause feeds into Snooze for offline analysis. Repeated `agent`-class failure
 |---|---|---|
 | `reflect_enabled` | `true` | Set `false` for raw debugging; the gate adds latency |
 | `reflect_max_retries` | `2` | Tighten if your provider is expensive, loosen if you tolerate slower turns for higher quality |
-| `reflect_max_retries_worker` | inherits | Set lower for workers if they're cheap to fail-fast |
+| `reflect_max_retries_worker` | `2` | Set lower for workers if they're cheap to fail-fast |
 | `reflect_min_messages` | `3` | Lower if even short turns deserve verification |
 | `reflect_emit_digest_on_pass` | `false` | Have reflect emit a turn digest even on `pass` verdicts (audit/debug). Default off — pass turns omit the digest to save output tokens. |
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Defensive trim at parse time regardless of what the model emits. |
@@ -109,13 +109,13 @@ If you find your memory store getting cluttered with similar-but-not-quite-dupli
 
 ### Disabling Snooze
 
-`snooze_enabled = false` shuts it off. You can always run maintenance manually:
+`snooze_enabled = false` shuts it off. The memory-index health check (one of the things Snooze keeps fresh) can be run manually:
 
 ```bash
 curl -X POST http://localhost:8090/api/memory/maintenance
 ```
 
-This runs the same set of tasks immediately.
+This checks the FTS5 index against the markdown files and reindexes if stale. The LLM-backed tasks (dedup, consolidation, profile extraction) only run inside Snooze cycles.
 
 ---
 
@@ -131,8 +131,8 @@ This is the slow feedback loop. You won't see it move the needle on a single tur
 
 ## Observability
 
-- **Reflect verdicts** are emitted as `reflect.verdict` SSE events. The UI's timeline drawer shows them inline with the turn.
-- **Snooze cycle output** is logged to `data/logs/snooze.log` (or wherever your log config points). Each cycle records what it ran and how long it took.
-- **`POST /api/memory/maintenance`** triggers a Snooze cycle and returns the result inline — useful for testing tuning changes.
+- **Reflect activity** is emitted as `reflect.start` / `reflect.done` SSE events (the verdict rides on `reflect.done`), plus `reflect.skipped` / `reflect.exhausted` markers. The UI's timeline drawer shows them inline with the turn.
+- **Snooze cycle output** is logged to `data/logs/pernix.log`. Each cycle records what it ran and how long it took.
+- **`POST /api/memory/maintenance`** runs the memory-index health check and returns the result inline.
 
 If reflect or snooze is misbehaving, those are the first places to look.

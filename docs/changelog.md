@@ -24,7 +24,7 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 **Custom tools register into the active schema immediately after `create_tool`.** Previously needed a session restart to be visible. Now the agent can author a tool and call it in the same turn. (commit `82f9e50`)
 
-**Custom tools are excluded from formatters and git** — they live as user data in `data/tools/`, not source. Authoring a tool no longer pollutes the project's lint or git status. (commit `c198cff`)
+**Custom tools are excluded from formatters and git** — the `core/tools/builtin/custom_*.py` files are gitignored and treated as user data, not source. Authoring a tool no longer pollutes the project's lint or git status. (commit `c198cff`)
 
 **Memory search overhaul** — `prepare_fts_query()` no longer strips hyphens or short tokens (so `2026-04-27` queries work). Hybrid search adds a ripgrep fallback when FTS5 returns nothing. New `deep_recall()` tool runs LLM-backed multi-query search and returns a synthesized answer instead of raw search noise. Snooze now health-checks the index on startup so manual file edits are visible without a 6-hour delay. (commit `db95006`)
 

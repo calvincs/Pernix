@@ -127,7 +127,7 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 | `shell_address_space_limit_bytes` | `8589934592` | Virtual address space cap (8GB) applied per shell process via `RLIMIT_AS`. Set to `0` to disable. |
 | `shell_env_mode` | `"passthrough"` | How environment variables are passed to the shell: `passthrough` (inherit all), `denylist` (all except listed), `allowlist` (only listed). |
 | `shell_env_denylist` | *(empty)* | Variables to exclude when `shell_env_mode = "denylist"`. |
-| `shell_env_allowlist` | *(empty)* | Variables to include when `shell_env_mode = "allowlist"`. |
+| `shell_env_allowlist` | `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, plus audio/display vars | Variables to include when `shell_env_mode = "allowlist"`. |
 
 ### Dangerous Tool Approval Flow
 
@@ -204,7 +204,7 @@ silently degrading. `web_search_enabled` can be used to disable the tool entirel
 |---|---|---|
 | `max_pending_messages` | `10` | Maximum messages that can queue for a busy session. If a session is processing and more than this many messages arrive, further messages are rejected with a `session.queue_full` event. |
 | `max_concurrent_workers` | `5` | Maximum simultaneously-running worker sub-agents per parent session. |
-| `stall_threshold` | `120` | Seconds of inactivity before a session is considered stalled. |
+| `stall_threshold` | `120` | Seconds of inactivity before a worker is flagged as stalled (surfaced in the UI and by `await_workers`). |
 
 ---
 
@@ -221,7 +221,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `eval_threshold` | `0.7` | Minimum eval score to consider a turn successful. |
 | `eval_max_retries` | `2` | Max evaluation-driven retries per turn. |
 | `eval_browser_verify` | `false` | Use browser-based verification when evaluating frontend changes. |
-| `reflect_max_retries_worker` | inherits `reflect_max_retries` | Separate retry cap for worker sub-agents. |
+| `reflect_max_retries_worker` | `2` | Separate retry cap for worker sub-agents (bounds fan-out cost). |
 | `reflect_emit_digest_on_pass` | `false` | Have reflect emit a turn digest even on `pass` verdicts. Default off; the digest is always emitted on `retry`/`escalate` so the next scout can plan around real evidence. |
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Enforced at parse time. |
 | `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op kept for back-compat. |
@@ -232,6 +232,12 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `snooze_cooldown_minutes` | `5` | Minimum idle time before Snooze starts running. |
 | `snooze_dedup_interval_days` | `7` | Days between memory-dedup sweeps per file. |
 | `snooze_consolidation_interval_hours` | `24` | Hours between memory-consolidation scans. |
+| `snooze_consolidation_cluster_threshold` | `0.55` | Minimum pair-similarity score for two memory entries to be clustered during consolidation. |
+| `reflect_retry_budget_cap_s` | `600` | Ceiling on the computed minimum-budget-for-retry threshold (seconds); prevents high `scout_timeout` values from blocking retries. |
+| `shell_fsize_limit_bytes` | `2147483648` | Per-shell-process file-size write cap (2 GB) via `RLIMIT_FSIZE`. `0` disables. |
+| `max_file_write_size` | `104857600` | Max bytes per `file_write` / `file_edit` / `multiedit` call (100 MB). `0` disables. |
+| `max_edit_read_size` | `5242880` | Max file size for `file_edit`'s whole-file fuzzy-match path (5 MB). `0` disables. |
+| `audio_model_overrides` | *(empty list)* | Force `supports_audio = true` for models where auto-detection misses audio capability. |
 
 ---
 

@@ -89,7 +89,7 @@ You can give a single session a different primary model than your global setting
 - Running a research session on Claude Sonnet but a quick-script session on Qwen 3.
 - Comparing two models on the same prompt — open two sessions with different `model_override`.
 
-The override lives in `session.model_override` (not in global Settings). Set it via the UI session menu or via `POST /api/sessions/{id}` with `{"model_override": "..."}`.
+The override lives in `session.model_override` (not in global Settings). Set it via the UI session menu or via `PATCH /api/sessions/{id}` with `{"model_override": "..."}`.
 
 The other model roles (scout, fallback, background) follow the global setting; only the primary is overridable per session.
 
@@ -107,4 +107,4 @@ If the queue fills, further submissions get rejected immediately with a `session
 
 Some tools require human input. The most common is `ask_user`: the agent describes a question or a proposed dangerous action; the session enters `AWAITING_USER` and stops consuming LLM time. As soon as you answer (in the UI or via `POST /api/questions/{id}/answer`), a new turn begins from Scout.
 
-The `ask_user` flow is what gates dangerous tools — see [../faq.md#why-does-the-agent-ask-me-to-confirm-things](../faq.md#why-does-the-agent-ask-me-to-confirm-things-like-running-shell-commands-or-visiting-urls).
+The `ask_user` flow is what gates dangerous tools — see [../faq.md](../faq.md#why-does-the-agent-ask-me-to-confirm-things-like-web-searches-or-deleting-a-skill).

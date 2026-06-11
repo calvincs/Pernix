@@ -2,7 +2,7 @@
 
 The **scheduling extension** runs sessions on a cron schedule. Useful for: morning news briefs, daily activity summaries, weekly housekeeping passes, watchdog scripts that check for changes and alert.
 
-Jobs are stored in `data/workflows/jobs.json` and persisted across restarts. Each job has a name, a cron expression, and the prompt that should fire when it runs.
+Jobs are stored in `data/cron_jobs.json` and persisted across restarts. Each job has a name, a cron expression, and the prompt that should fire when it runs.
 
 ---
 
@@ -70,7 +70,8 @@ Or via tools the agent can use:
 
 - `list_scheduled_jobs`
 - `update_scheduled_job` (change schedule or instructions)
-- `pause_job` / `resume_job`
+- `set_job_state` (pause/resume)
+- `remove_scheduled_job`
 
 The UI's jobs panel shows the list with next-run times and status.
 
@@ -85,7 +86,7 @@ Practical patterns:
 - **Daily research brief** — `search_web` + summarization + write to workspace.
 - **Watchdog with alert** — `http_get` a status page or RSS feed; if a value crosses a threshold, fire `notify_webhook_url` (set in Settings).
 - **Weekly memory consolidation report** — read your memory store, summarize what's been learned this week, save to workspace.
-- **Workspace tidy-up** — invoke the `workspace-organizer` skill on a schedule.
+- **Workspace tidy-up** — schedule a recurring "organize the workspace" session (or a skill you've written for it).
 
 For end-to-end recipes, see [recipes.md](recipes.md).
 
@@ -113,4 +114,4 @@ If you want to know when a cron job did something:
 
 ## Disabling all cron
 
-Either pause each job (`/pause`) or delete `data/workflows/jobs.json`. Or set the schedule extension's gate off if one exists — see [../internals/extensions.md](../internals/extensions.md).
+Either pause each job (`/pause`) or delete `data/cron_jobs.json`. See [../internals/extensions.md](../internals/extensions.md) for how the scheduling extension registers.

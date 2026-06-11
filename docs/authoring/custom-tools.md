@@ -1,6 +1,6 @@
 # Authoring custom tools
 
-Pernix's **toolmaker** extension lets the agent author new Python tools at runtime — no Pernix source changes, no server restart. Tools live as Python files in `data/tools/`. Each tool gets a name, a JSON-schema parameter spec, and an implementation function. They register into the same registry as builtin tools.
+Pernix's **toolmaker** extension lets the agent author new Python tools at runtime — no Pernix source changes, no server restart. Tools live as Python files at `core/tools/builtin/custom_<name>.py` (gitignored — treated as user data, not source). Each tool file defines an implementation function plus a `register(reg)` function that adds it to the same registry as builtin tools.
 
 This is the lowest-friction way to add capability when a skill alone isn't enough — typically because you need real Python (network calls with retries, state management, structured parsing) or a third-party Python library.
 
@@ -28,8 +28,8 @@ The agent can do this end-to-end via the `toolmaker` extension's tools:
 
 | Tool | What it does |
 |---|---|
-| `create_tool` | Author a new tool: name, parameter schema, Python implementation |
-| `update_tool` | Modify an existing custom tool's schema or implementation |
+| `create_tool` | Author a new tool: name, description, Python code (and optional pip requirements) |
+| `update_tool` | Modify an existing custom tool's implementation |
 | `list_custom_tools` | List tools the agent has authored (vs builtin) |
 | `install_package` | Install a pip package into `data/workspace/.venv/` for tool use |
 | `restore_tool_packages` | Reinstall packages after a venv wipe |
@@ -40,20 +40,21 @@ In a chat:
 
 The agent calls `create_tool` with the right schema and Python body. After the call, the tool is registered immediately into the active session's schema. No restart.
 
-You can also create tools by hand — drop a Python file into `data/tools/` matching the pattern other custom tools use.
+You can also create tools by hand — drop a `custom_<name>.py` file into `core/tools/builtin/` matching the pattern other custom tools use (it must define a `register(reg)` function).
 
 ---
 
 ## Where custom tools live
 
 ```
-data/tools/
-├── weather_today.py
-├── parse_invoice.py
+core/tools/builtin/
+├── custom_weather_today.py
+├── custom_weather_today.requirements.txt
+├── custom_parse_invoice.py
 └── ...
 ```
 
-Each file defines one tool. Pernix discovers them on startup and on every `create_tool` call.
+Each file defines one tool. Pernix discovers them on startup and registers them immediately on every `create_tool` call.
 
 Custom tools are **excluded from formatters and git** (per the project's `.gitignore` rules) — they're treated as user data rather than source. If you want to share a tool, copy the `.py` file out manually or check it into a separate repo.
 
@@ -67,7 +68,7 @@ Tools that need pip packages install into `data/workspace/.venv/` (a separate ve
 install_package(name="openweathermap-py")
 ```
 
-Packages installed here persist across server restarts. After a `--rebuild` (which wipes the workspace, including this venv), use `restore_tool_packages` to reinstall everything your custom tools depend on — the package list is tracked in `data/tools/_packages.json`.
+Packages installed here persist across server restarts. After a `--rebuild` (which wipes the workspace, including this venv), use `restore_tool_packages(name)` to reinstall what a custom tool depends on — each tool's package list is tracked in a `custom_<name>.requirements.txt` file next to the tool.
 
 > **Don't install custom-tool packages into the project venv.** The project venv at `.venv/` is for Pernix itself; mixing in third-party libraries the tools need would clutter dependency management and risk version conflicts.
 
@@ -98,20 +99,18 @@ The agent will respect the gate even on tools you wrote yourself.
 ```python
 update_tool(
     name="weather_today",
-    new_implementation=...,  # full Python source
-    new_schema=...,          # JSON schema for parameters
+    code=...,          # full Python source (must define register(reg))
+    requirements=...,  # optional; replaces the tool's pip requirements
 )
 ```
 
-Updates take effect on the next tool call. The previous version is overwritten on disk; if you want history, version-control `data/tools/` separately.
+Updates take effect on the next tool call. The previous version is kept on disk as a `custom_<name>.v<N>.bak` file alongside the tool.
 
 ---
 
 ## Removing a custom tool
 
-Delete the Python file, or use `delete_tool` if it exists in your version, or — simplest — overwrite it with an empty `def implementation(...): pass` and leave it alone (no calls will route to it).
-
-`delete_tool` may or may not be `dangerous` depending on the version; the agent will follow the gate appropriately.
+Delete the `core/tools/builtin/custom_<name>.py` file (and its `.requirements.txt` sidecar, if any) and restart the server. There is no `delete_tool` agent tool.
 
 ---
 
@@ -120,6 +119,6 @@ Delete the Python file, or use `delete_tool` if it exists in your version, or �
 - Custom tool errors are logged the same way builtin tool errors are: `data/logs/`.
 - Use `list_custom_tools` to confirm the tool is registered.
 - The Tools panel in the UI shows every registered tool's schema and any recent calls.
-- For a Python traceback, open `data/logs/agent.log` (or wherever your log destination is) and search for the tool name.
+- For a Python traceback, open `data/logs/pernix.log` and search for the tool name.
 
 If a tool repeatedly fails, prefer fixing it via `update_tool` rather than asking the agent to monkey-patch it inline — the file on disk is the source of truth.

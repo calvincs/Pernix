@@ -23,7 +23,7 @@ data/memories/
 
 Each `.md` file groups related entries by topic. Entries are short blocks (typically 2–5 sentences) prefixed with metadata — when they were learned, optional weight, optional tags. The agent reads and writes these files using its memory tools.
 
-These are **just markdown files**. Open `user.profile.md` in any text editor and you can read what your agent has learned about you. You can edit, delete, or rearrange entries directly — the FTS5 index regenerates on save.
+These are **just markdown files**. Open `user.profile.md` in any text editor and you can read what your agent has learned about you. You can edit, delete, or rearrange entries directly — an index health check reconciles the FTS5 index with the files (at startup, during Snooze, or on demand via `POST /api/memory/maintenance`).
 
 ---
 
@@ -70,7 +70,7 @@ Look at `data/memories/user.profile.md`. Typical entries include:
 - Recurring projects and tools you use
 - Tasks you've delegated repeatedly
 
-You can edit this file directly. If you want the agent to forget something, just delete the entry. The change is picked up on the next turn (FTS5 regenerates the index).
+You can edit this file directly. If you want the agent to forget something, just delete the entry. The change is picked up when the index health check next runs — at startup, during Snooze, or immediately via `POST /api/memory/maintenance` with `{"reindex": true}`.
 
 The agent will not store sensitive data unless you give it to it. If you don't want a piece of information stored, tell the agent so or delete the entry afterward — there's no automated PII redaction.
 
@@ -87,7 +87,7 @@ When no sessions are actively processing, **Snooze** runs background maintenance
 
 Snooze yields immediately when you start a new session — your work always takes priority.
 
-If you want to trigger maintenance manually:
+If you want to run the index health check manually (it reindexes if the FTS5 index is stale; the LLM-backed dedup/consolidation tasks only run inside Snooze):
 
 ```bash
 curl -X POST http://localhost:8090/api/memory/maintenance
@@ -106,7 +106,7 @@ Two ways:
      http://localhost:8090/api/memory/search
    ```
 
-2. **Ask the agent.** "What do you know about X from prior sessions?" — the agent uses `memory_search` and reports back.
+2. **Ask the agent.** "What do you know about X from prior sessions?" — the agent uses `search_memory` and reports back.
 
 For full search syntax (phrase, AND/OR, exclude), see [../api.md](../api.md#memory).
 

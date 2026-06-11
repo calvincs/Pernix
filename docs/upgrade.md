@@ -96,7 +96,7 @@ After any upgrade, a couple of things are worth checking:
 - **Did the server start cleanly?** Watch the startup logs — migration failures or schema mismatches show up there.
 - **Is your model still accessible?** `GET /api/health/detailed` (localhost-only) shows provider connectivity.
 - **Did your skills survive?** `data/skills/` is preserved across `--rebuild` and across normal upgrades, so they should be fine. If a skill stops loading, check the YAML frontmatter — syntax errors silently skip the skill (the error is logged).
-- **Are your custom tools still present?** `data/tools/` is preserved. If a tool depended on a Python package that's no longer pinned in your `data/workspace/.venv/`, run the agent's `restore_tool_packages` to reinstall.
+- **Are your custom tools still present?** Custom tool files (`core/tools/builtin/custom_*.py`) are preserved. If a tool depended on a Python package that's no longer in `data/workspace/.venv/` (e.g. after `--rebuild` wiped the workspace venv), run the agent's `restore_tool_packages` to reinstall.
 
 ---
 
