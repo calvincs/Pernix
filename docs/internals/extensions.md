@@ -25,8 +25,7 @@ If a setting that gates an extension changes (e.g., turning `browser_enabled` on
 | Tool | Safety | Gated on |
 |---|---|---|
 | `search_web` | dangerous | `web_search_enabled` (default `true`) AND `TAVILY_API_KEY` set — skips registration entirely when flag is off |
-| `browse_web` | dangerous | `browser_enabled` (default `false`) AND Playwright/Chromium installed — skips registration entirely when flag is off |
-| `summarize_webpage` | safe | always (uses trafilatura) |
+| `browse_web` | dangerous | `browser_enabled` (default `true`) AND Playwright/Chromium installed — skips registration entirely when flag is off |
 | `http_get` | safe | always; max bytes capped by `max_fetch_size` (default 100 KB) |
 
 In network mode, `http_get` and `browse_web` block RFC-1918 private IPs and loopback to mitigate SSRF.
@@ -41,10 +40,13 @@ Always enabled. The worker model lives here.
 |---|---|---|
 | `spawn_worker` | safe | Create a parallel sub-agent on a chosen model |
 | `check_workers` | safe | List workers and their states |
-| `get_worker_result` | safe | Fetch a finished worker's final response |
+| `get_worker_result` / `get_worker_transcript` | safe | Fetch a finished worker's final response / full transcript |
 | `message_worker` | safe | Inject a message into a running worker mid-turn |
-| `pause_worker` / `resume_worker` | safe | Park/unpause at next round boundary |
+| `set_worker_state` | safe | Pause/unpause a worker at the next round boundary |
+| `cancel_worker` / `retry_worker` | safe | Stop a worker / respawn it with revised instructions |
 | `await_workers` | safe | Block parent until specified workers settle |
+| `notify_parent` | safe | Worker-side: push a status note up to the parent session |
+| `run_workflow` / `cancel_workflow` | safe | Execute a `data/workflows/` workflow (steps run as workers) / cancel a run |
 
 See [../guides/workers.md](../guides/workers.md).
 
@@ -72,8 +74,10 @@ Always enabled. Cron job lifecycle.
 |---|---|---|
 | `schedule_job` | safe | Create a recurring session |
 | `update_scheduled_job` | safe | Modify schedule or instructions |
-| `pause_job` / `resume_job` | safe | Toggle |
+| `set_job_state` | safe | Pause/resume a job |
+| `remove_scheduled_job` | safe | Delete a job |
 | `list_scheduled_jobs` | safe | List all jobs |
+| `schedule_workflow` | safe | Put a workflow on a cron schedule |
 
 Cron-spawned sessions are flagged unattended in `_is_unattended_session()` (`core/tools/executor.py`) and skip the dangerous-tool gate. Workers spawned from such sessions inherit that. See [../guides/scheduling-cron.md](../guides/scheduling-cron.md).
 
@@ -102,7 +106,7 @@ Always enabled. Skill authoring without leaving the chat.
 | `update_skill` | safe | Modify an existing skill |
 | `add_skill_script` | safe | Drop a script into a skill's `scripts/` |
 | `add_skill_reference` | safe | Drop a doc into `references/` |
-| `remove_skill_script` | safe | Delete a script |
+| `remove_skill_script` / `remove_skill_reference` | safe | Delete a script / reference |
 
 `delete_skill` lives in builtin tools (`core/tools/builtin/skill_tools.py`) and is **dangerous**.
 
@@ -116,7 +120,7 @@ Always enabled. Custom Python tool authoring.
 
 | Tool | Safety | What |
 |---|---|---|
-| `create_tool` | safe | Author a new tool: name, JSON schema, Python body |
+| `create_tool` | safe | Author a new tool: name, description, Python body (with a `register(reg)` function) |
 | `update_tool` | safe | Modify an existing custom tool |
 | `list_custom_tools` | safe | List user-authored vs builtin tools |
 | `install_package` | caution | pip install into `data/workspace/.venv/` |
@@ -150,8 +154,8 @@ Internal. Provides tools the agent uses to introspect and switch models. Not use
 | Extension | Default state | Settings that gate it |
 |---|---|---|
 | web — `search_web` | available only with key | `web_search_enabled`, `TAVILY_API_KEY` |
-| web — `browse_web` | off | `browser_enabled`, Playwright/Chromium |
-| web — `http_get`, `summarize_webpage` | on | none |
+| web — `browse_web` | on (needs browser binary) | `browser_enabled`, Playwright/Chromium |
+| web — `http_get` | on | none |
 | orchestration | on | none |
 | planning | on | none |
 | scheduling | on | none |
@@ -161,7 +165,7 @@ Internal. Provides tools the agent uses to introspect and switch models. Not use
 | evaluation | mostly off | `eval_auto` |
 | model_mgmt | on | none |
 
-The total number of registered tools varies by configuration. With a default install (no Tavily, no browser), the web extension contributes only `http_get` and `summarize_webpage`; with a fully-loaded install, it adds `search_web` and `browse_web`.
+The total number of registered tools varies by configuration. With a minimal install (no Tavily key, no Chromium binary), the web extension contributes only `http_get`; with a fully-loaded install, it adds `search_web` and `browse_web`.
 
 ---
 

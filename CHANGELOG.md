@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.9.0 — 2026-06-11
+
+- docs: accuracy audit pass — correct tool names, defaults, routes, and safety claims
+
 ## v2.8.0 — 2026-06-11
 
 - chore: gitignore data/tool_approvals.json (runtime state)

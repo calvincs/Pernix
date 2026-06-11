@@ -28,7 +28,7 @@ When both providers offer a model with the same name, **Ollama wins** (local, fr
 
 There used to be a DuckDuckGo fallback; it was removed because it produced unreliable results. The Tavily key is now the gate.
 
-### Why does the agent ask me to confirm things like running shell commands or visiting URLs?
+### Why does the agent ask me to confirm things like web searches or deleting a skill?
 
 That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `delete_skill`, `delete_workflow`) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
 

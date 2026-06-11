@@ -45,13 +45,15 @@ The agent calls `create_workflow` with the name, description, and step list. Onc
 
 | Tool | What |
 |---|---|
-| `list_workflows` | List all workflows |
-| `read_workflow` | Read a workflow's definition |
+| `discover_workflows` | List available workflows with metadata |
+| `get_workflow_schema` | Get the WORKFLOW.md format reference |
 | `create_workflow` | Author a new workflow |
-| `update_workflow` | Modify an existing workflow's steps or description |
+| `validate_workflow` | Check a WORKFLOW.md's frontmatter and step DAG without saving |
+| `run_workflow` | Execute a workflow (steps run as workers, in dependency order) |
+| `schedule_workflow` / `cancel_workflow` | Put a workflow on a cron schedule / cancel a run |
 | `delete_workflow` | Delete a workflow (dangerous — gated) |
 
-The corresponding REST endpoints under `/api/workflows` mirror these.
+The corresponding REST endpoints under `/api/workflows` cover list/read/create/update/delete and run history.
 
 ---
 
@@ -59,15 +61,16 @@ The corresponding REST endpoints under `/api/workflows` mirror these.
 
 ```
 data/workflows/
-├── research-and-publish.json
-├── morning-routine.json
-├── jobs.json                         # cron schedule (separate from workflow defs)
+├── research-and-publish/
+│   └── WORKFLOW.md
+├── morning-routine/
+│   └── WORKFLOW.md
 └── ...
 ```
 
-Each workflow is a single JSON file with a name, description, and ordered list of steps. Steps can include tool calls, skill invocations, sub-prompts, and conditionals.
+Each workflow is a directory containing a `WORKFLOW.md` file: YAML frontmatter (`name`, `description`, `tags`, `version`, and a `steps` list) followed by a freeform markdown body of usage notes. Each step has an `id`, a `type` (`skill` or `instruction`), `instructions`, an `output_file`, an optional per-step `model` override, and a `depends_on` list — steps form a DAG, and independent steps execute in parallel waves.
 
-The `jobs.json` file in the same directory is the cron scheduler's persistence — see [../guides/scheduling-cron.md](../guides/scheduling-cron.md). Don't conflate them.
+Cron jobs are persisted separately in `data/cron_jobs.json` — see [../guides/scheduling-cron.md](../guides/scheduling-cron.md). Don't conflate them.
 
 ---
 
@@ -86,17 +89,9 @@ Reach for a workflow when:
 
 ## Updating a workflow
 
-```python
-update_workflow(
-    name="research-and-publish",
-    new_steps=[ ... ],
-    description="...",
-)
-```
+Edit the `data/workflows/<name>/WORKFLOW.md` file directly (or via `PUT /api/workflows/{name}`), then ask the agent to `validate_workflow` if you want a sanity check. Updates take effect on the next invocation.
 
-Updates take effect immediately. The next invocation uses the new definition.
-
-If you want a history of what the workflow was, version-control `data/workflows/` (it's just JSON files).
+If you want a history of what the workflow was, version-control `data/workflows/` (it's just markdown files).
 
 ---
 
@@ -104,12 +99,12 @@ If you want a history of what the workflow was, version-control `data/workflows/
 
 `delete_workflow` is **dangerous** — the agent has to call `ask_user` and `approve_dangerous_tool` before it can delete one, except in unattended cron sessions which bypass the gate.
 
-You can also just delete the JSON file directly.
+You can also just delete the workflow's directory under `data/workflows/`.
 
 ---
 
 ## Limits
 
 - No formal limit on number of workflows.
-- A workflow can call other workflows, but be careful — circular references are possible. The system doesn't currently detect them.
-- A workflow runs inside the same session that invoked it. It can spawn workers like any other turn.
+- Step dependencies must form a valid DAG — cycles are rejected at parse/validate time.
+- Workflow steps execute as worker sub-agents coordinated by the invoking session; independent steps run in parallel waves, subject to `max_concurrent_workers`.

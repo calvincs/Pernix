@@ -24,7 +24,7 @@ This means having dozens of skills installed does not bloat the context window �
 
 ## The Agent Identity Files
 
-Two special markdown files live in `data/agent/` and shape how Pernix behaves at a fundamental level. They are not skills — they are always loaded into every session's system prompt.
+Three special markdown files live in `data/agent/` and shape how Pernix behaves at a fundamental level. They are not skills — they are always loaded into every session's system prompt.
 
 ### `data/agent/SOUL.md` — Who Pernix Is
 

@@ -115,7 +115,7 @@ In network mode, several SSRF mitigations engage automatically:
 - **`browse_web` blocks the same ranges** at the page-load level via Playwright's request interception.
 - **`llm_base_url` and `openrouter_base_url` are locked** so a remote API client can't redirect LLM traffic to an attacker-controlled endpoint.
 
-If you specifically need the agent to access an internal service in your LAN, add the URL to the allowlist (see `data/settings.json` and the SSRF-related settings) — but understand the risk surface first.
+There is no per-URL exemption list — private-range blocking applies to all agent-originated fetches (in localhost mode loopback is allowed, and the server's own port is always reachable so the agent can preview workspace files). If the agent must talk to an internal LAN service, wrap that access in a custom tool or skill that you control, rather than weakening the fetch tools.
 
 ---
 
@@ -123,8 +123,8 @@ If you specifically need the agent to access an internal service in your LAN, ad
 
 `cors_origins` is a list of allowed origins for cross-origin requests. By default it's empty.
 
-- **Empty in localhost mode:** wildcard `*` is implied, since there's no auth concern.
-- **Empty in network mode:** Pernix permits the wildcard but disables credential cookies — so cross-origin browser requests with cookies won't work.
+- **Empty in localhost mode:** only `http://localhost:<port>` and `http://127.0.0.1:<port>` are allowed (with credentials).
+- **Empty in network mode:** Pernix permits the wildcard `*` but disables credential cookies (the browser spec forbids `*` with credentials) — so cross-origin browser requests with cookies won't work.
 - **Set explicitly:** lists the origins your client uses (e.g., your iPhone's user-script or your custom integration host). Cookies work normally.
 
 `cors_origins` requires restart to take effect.

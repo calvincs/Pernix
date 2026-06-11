@@ -72,7 +72,7 @@ Once scout finishes, the **main agent** takes over. This is where the user-facin
 
 The loop:
 
-1. Compile the request payload: system prompt + identity files (SOUL/RULES/AGENTS) + memory recall results + scout report + conversation history + selected tool schemas
+1. Compile the request payload: system prompt + identity files (SOUL/RULES/SESSIONS) + memory recall results + scout report + conversation history + selected tool schemas
 2. Stream a response from the LLM
 3. If the response includes tool calls, execute them, append results to the conversation, and loop back to step 1
 4. If the response is a final text answer (no tool calls), the loop exits
@@ -227,7 +227,7 @@ Use cases:
 
 Workers are flat — a worker can't spawn its own workers. The parent session waits for workers to complete (or explicitly checks on them via `check_workers`), then folds their deliverables back into its own context.
 
-Workers can be paused at round boundaries via `pause_worker` and resumed later. Useful for "wait, don't keep going, let me think."
+Workers can be paused at round boundaries (via the `set_worker_state` tool or the worker pause/resume REST endpoints) and resumed later. Useful for "wait, don't keep going, let me think."
 
 Workers are defined in `core/extensions/orchestration/__init__.py`.
 
@@ -299,7 +299,7 @@ Concurrency is controlled per-provider via semaphores: `llm_max_concurrent` for 
 | Settings | `data/settings.json` | JSON |
 | API keys | `.env` | dotenv |
 | Skills | `data/skills/` | Markdown + scripts |
-| Agent identity | `data/agent/SOUL.md`, `RULES.md`, `AGENTS.md` | Markdown |
+| Agent identity | `data/agent/SOUL.md`, `RULES.md`, `SESSIONS.md` | Markdown |
 
 Everything except `.env` and `settings.json` can be wiped with `python run.py --rebuild`.
 

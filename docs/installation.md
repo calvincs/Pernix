@@ -90,7 +90,7 @@ python run.py
 You should see output like:
 
 ```
-Pernix starting on http://127.0.0.1:8090
+Pernix → http://127.0.0.1:8090
 ```
 
 ### 7. Open the UI
@@ -200,7 +200,7 @@ Wipes all sessions, memory, and workspace data. The server will prompt you to ty
 - `.env` — your API keys
 - `data/skills/` — your installed skills
 - `data/certs/` — your TLS certificates
-- `data/agent/` — agent identity files (SOUL.md, RULES.md, AGENTS.md). The birthdate header in SOUL.md is reset; user-authored content below it is preserved. To restore defaults, run `git checkout data/agent/`.
+- `data/agent/` — agent identity files (SOUL.md, RULES.md, SESSIONS.md). The birthdate header in SOUL.md is reset; user-authored content below it is preserved. To restore defaults, run `git checkout data/agent/`.
 
 Use `--rebuild` when you want a completely fresh start or are troubleshooting state corruption.
 
