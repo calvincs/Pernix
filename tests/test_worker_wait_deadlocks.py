@@ -242,8 +242,10 @@ async def test_reaper_fires_worker_timeout_when_watch_set_persists(mgr, monkeypa
     assert sv2._current_state(parent) is sv2.SessionStateV2.IDLE_READY
     # And a synthetic timeout prompt should have been queued so the LLM
     # learns about the timeout on resume.
-    queued = [m for m, _, _ in parent.pending_messages]
+    queued = [e.message for e in parent.pending_messages]
     assert any("timed out" in m.lower() for m in queued), f"Expected timeout-context message in queue; got {queued}"
+    # Synthetic timeout prompts carry no DB row.
+    assert all(e.msg_id is None for e in parent.pending_messages)
     # Watch-set is cleared so future ticks don't re-fire timeout.
     assert not parent._watched_worker_ids
 

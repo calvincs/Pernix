@@ -311,3 +311,46 @@ async def test_compact_with_llm_resumes_from_prior_marker(mock_llm_client, monke
     assert len(markers) == 2
     second_ptr = _json.loads(markers[-1]["metadata"])["compacted_up_to"]
     assert second_ptr > first_ptr
+
+
+# ---------------------------------------------------------------------------
+# Event-loop hygiene
+# ---------------------------------------------------------------------------
+
+
+def test_hot_path_db_calls_run_off_the_event_loop():
+    """Post-hooks, compaction and the agent loop must not touch the DB inline.
+
+    These run while other sessions are mid-stream, and several load the full
+    transcript — with 100KB tool results an inline read freezes every
+    session's SSE for its duration. Anything genuinely cheap and indexed
+    (single-row lookups, MAX(created_at), question rows) is exempt.
+    """
+    import ast
+    import pathlib
+
+    HEAVY = {"get_messages", "add_message", "add_token_usage", "add_compaction"}
+    EXEMPT_FUNCTIONS = {
+        # Sync helpers — no event loop to block; callers already thread them.
+        "_prior_turn_tool_names",
+    }
+
+    offenders: list[str] = []
+    for path in ("sessions/hooks.py", "core/context/compaction.py", "core/agent.py"):
+        tree = ast.parse(pathlib.Path(path).read_text())
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.AsyncFunctionDef) or fn.name in EXEMPT_FUNCTIONS:
+                continue
+            for node in ast.walk(fn):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                    continue
+                if node.func.attr not in HEAVY:
+                    continue
+                # db.<heavy>(...) called directly is inline; passing the
+                # function object to to_thread shows up as ast.Attribute,
+                # not ast.Call, so it never reaches here.
+                base = node.func.value
+                if isinstance(base, ast.Name) and base.id in ("db", "_db", "db_models"):
+                    offenders.append(f"{path}:{node.lineno} {fn.name}() calls db.{node.func.attr} inline")
+
+    assert not offenders, "blocking DB calls on the event loop:\n  " + "\n  ".join(offenders)

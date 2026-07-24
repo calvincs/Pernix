@@ -1,7 +1,14 @@
-"""Pernix — Post-task hooks: auto-title, memory distillation, reflect, evaluation."""
+"""Pernix — Post-task hooks: auto-title, memory distillation, reflect, evaluation.
+
+Every DB read here runs off the event loop. Post-hooks fire at the tail of
+each turn while other sessions are mid-stream, and several of these load the
+full transcript — with 100KB tool results that is enough to freeze every
+session's SSE for the duration if done inline.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -9,6 +16,12 @@ from config import settings
 from db import models as db
 
 logger = logging.getLogger("pernix.sessions.hooks")
+
+# How much of the transcript tail _maybe_reflect loads. A single turn —
+# scout row, assistant rounds, tool results, reflect row — is far smaller
+# than this even for a long tool loop, so the window comfortably covers the
+# turn while keeping the read bounded on a long-lived session.
+REFLECT_TAIL_MESSAGES = 400
 
 
 def _strip_thinking(text: str) -> str:
@@ -33,7 +46,7 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
         emit: Optional callback(event_dict) to emit SSE events.
         session_obj: Optional AgentSession for Reflect state tracking.
     """
-    session = db.get_session(session_id)
+    session = await asyncio.to_thread(db.get_session, session_id)
     if not session:
         return
 
@@ -98,7 +111,9 @@ async def _cleanup_stale_questions(session_id: str, session_obj=None) -> None:
 
 async def _auto_title(session_id: str, emit=None) -> None:
     """Generate a session title and subtitle from the first user+assistant exchange."""
-    messages = db.get_messages(session_id)
+    # Full read: the title comes from the FIRST exchange, so `last=` can't
+    # bound it. Off-loop instead.
+    messages = await asyncio.to_thread(db.get_messages, session_id)
     user_msgs = [m for m in messages if m["role"] == "user"]
     if not user_msgs:
         return
@@ -170,7 +185,8 @@ async def _maybe_distill(session_id: str, session: dict) -> None:
     if not settings.memory_recall:
         return
 
-    messages = db.get_messages(session_id)
+    # Full read: distill_session summarizes the whole session. Off-loop.
+    messages = await asyncio.to_thread(db.get_messages, session_id)
     substantive = [m for m in messages if m["role"] in ("user", "assistant")]
 
     # Quality gate: need enough substance to distill
@@ -262,7 +278,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             last_reflect = None
             try:
                 # Reflect rows land at the end of a turn — tail read suffices.
-                messages = db.get_messages(session_id, last=100)
+                messages = await asyncio.to_thread(db.get_messages, session_id, last=100)
                 for msg in reversed(messages):
                     if msg["role"] == "reflect":
                         last_reflect = msg.get("content", "")
@@ -293,7 +309,13 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
     # turn-scoped via turn_user_msg_id; the gate now matches. Turn membership
     # comes from the parent_user_msg_id tag that _save_turn_msg stamps on
     # every assistant/tool row.
-    messages = db.get_messages(session_id)
+    #
+    # Tail-bounded: everything read from `messages` below is turn-local (the
+    # gate pool, the last user message for lesson recall, the active-skill
+    # probe), and a turn lives at the end of the transcript. The bound also
+    # caps the no-turn-id fallback's session-wide count, which is harmless —
+    # the gate only compares against reflect_min_messages.
+    messages = await asyncio.to_thread(db.get_messages, session_id, last=REFLECT_TAIL_MESSAGES)
     turn_msg_id = getattr(session_obj, "current_turn_user_msg_id", None)
     if turn_msg_id is not None:
         import json as _gate_json
@@ -327,7 +349,8 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
         # page reloads (the live SSE event below only updates an open tab).
         # "notice" role is filtered from LLM context by the compiler.
         try:
-            db.add_message(
+            await asyncio.to_thread(
+                db.add_message,
                 session_id,
                 "notice",
                 f"[reflect skipped — {len(substantive)}/{settings.reflect_min_messages} messages, too short to verify]",
@@ -461,7 +484,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             "latency_ms": result.reflect_latency_ms,
             "reflect_model": result.reflect_model,
         }
-        db.add_message(session_id, "reflect", json.dumps(reflect_event))
+        await asyncio.to_thread(db.add_message, session_id, "reflect", json.dumps(reflect_event))
 
         if result.verdict == "retry":
             session_obj.reflect_count += 1
@@ -623,7 +646,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                 "latency_ms": 0,
                 "_sentinel": True,
             }
-            db.add_message(session_id, "reflect", _json.dumps(sentinel))
+            await asyncio.to_thread(db.add_message, session_id, "reflect", _json.dumps(sentinel))
         except Exception as persist_err:
             logger.error(
                 "Could not persist reflect-failure sentinel for %s: %s",
@@ -703,7 +726,7 @@ async def _maybe_evaluate(session_id: str, session: dict, emit=None, session_obj
 
         # Persist as eval message
         eval_event = {"results": results, "all_passed": not any_failed}
-        db.add_message(session_id, "eval", json.dumps(eval_event))
+        await asyncio.to_thread(db.add_message, session_id, "eval", json.dumps(eval_event))
 
         # Emit a typed event so the UI can render the same card live that it
         # builds from the persisted eval row on history reload. Without this

@@ -7,6 +7,7 @@ Phase 3: LLM summarization (append-only, writes new compaction marker)
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -143,7 +144,10 @@ async def compact_with_llm(
     # the DB, which carry real `id`s. `messages` is retained only for signature
     # back-compat and is intentionally unused for boundary/id resolution.
     _ = messages
-    raw = db.get_messages(session_id)
+    # Off-loop: the full transcript, tool results and all. compact_with_llm is
+    # awaited directly by the agent loop, so an inline read here stalls every
+    # other session's SSE for as long as the query takes.
+    raw = await asyncio.to_thread(db.get_messages, session_id)
 
     # Resume from the most recent compaction marker: only summarize messages
     # added since it, carry its summary forward for merging, and never rewind
@@ -229,7 +233,8 @@ async def compact_with_llm(
     last_summarized_id = to_summarize[-1]["id"]
 
     # Append compaction marker (NEVER delete original messages)
-    db.add_compaction(
+    await asyncio.to_thread(
+        db.add_compaction,
         session_id=session_id,
         summary=summary,
         compacted_up_to=last_summarized_id,

@@ -253,17 +253,21 @@ async def delete_session(session_id: str):
 async def list_pending_messages(session_id: str):
     """List messages queued behind the running turn (in-memory deque).
 
-    Entries are (message, system_prompt, pre, ts, msg_id) tuples on
-    session.pending_messages; only entries with a persisted msg_id are
-    listed — those are the ones rendered in the transcript and removable."""
+    Entries are PendingMessage records on session.pending_messages; only
+    those with a persisted msg_id are listed — those are the ones rendered
+    in the transcript and removable. Synthetic entries (worker resume,
+    worker timeout) carry no DB row and are skipped."""
+    from sessions.state import PendingMessage
+
     if not db.get_session(session_id):
         raise HTTPException(404, detail=f"Session {session_id} not found")
     session = get_manager().get(session_id)
     pending = []
     if session:
-        for entry in session.pending_messages:
-            if len(entry) >= 5 and entry[4] is not None:
-                pending.append({"message_id": entry[4], "preview": (entry[0] or "")[:200]})
+        for raw in session.pending_messages:
+            entry = PendingMessage.coerce(raw)
+            if entry.msg_id is not None:
+                pending.append({"message_id": entry.msg_id, "preview": (entry.message or "")[:200]})
     return {"session_id": session_id, "pending": pending}
 
 
@@ -278,8 +282,10 @@ async def remove_pending_message(session_id: str, message_id: int):
     session = get_manager().get(session_id)
     if not session:
         raise HTTPException(404, detail=f"Session {session_id} not found in memory")
+    from sessions.state import PendingMessage
+
     for entry in list(session.pending_messages):
-        if len(entry) >= 5 and entry[4] == message_id:
+        if PendingMessage.coerce(entry).msg_id == message_id:
             session.pending_messages.remove(entry)
             db.delete_message(message_id)
             if session.last_user_msg_id == message_id:

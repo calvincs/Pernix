@@ -16,7 +16,7 @@ import pytest
 from core.llm.semaphore import FairLLMSemaphore, LLMConcurrencyError, LLMSessionTimeoutError
 from core.llm.types import ChatResponse, StreamEvent, StreamEventType, TokenUsage
 from sessions import state_v2 as sv2
-from sessions.state import AgentSession, SessionState
+from sessions.state import AgentSession, PendingMessage, SessionState
 
 # ---------------------------------------------------------------------------
 # Semaphore timeout tests
@@ -496,3 +496,171 @@ class TestConcurrentSessions:
 
         assert results == ["A", "B"], f"Expected A then B, got {results}"
         assert sem.available == 1
+
+
+# ---------------------------------------------------------------------------
+# Rapid-fire combining — must never silently drop a follow-up
+# ---------------------------------------------------------------------------
+
+
+class TestRapidFireCombining:
+    """A follow-up sent within RAPID_FIRE_WINDOW_SECONDS of the previous
+    message is folded into that message's DB row instead of opening a new
+    turn. That is only safe while something will still read the row."""
+
+    @staticmethod
+    def _busy_session(manager, sid: str) -> AgentSession:
+        """A session parked mid-turn in PROCESSING, as prompt() would see it."""
+        session = manager.get_or_create(sid)
+        session._state_v2 = sv2.SessionStateV2.PROCESSING
+        session.state = SessionState.PROCESSING
+        return session
+
+    @pytest.mark.asyncio
+    async def test_combines_into_a_queued_message(self):
+        """A queued entry has not been consumed yet — combining stays safe."""
+        from db import models as db
+        from sessions.manager import SessionManager
+
+        manager = SessionManager()
+        sid = db.create_session(title="t")
+        session = self._busy_session(manager, sid)
+
+        queued_id = db.add_message(sid, "user", "first")
+        session.last_user_msg_id = queued_id
+        session.last_user_msg_at = asyncio.get_running_loop().time()
+        session.pending_messages.append(PendingMessage("first", "", True, 0.0, queued_id))
+        # Not the running turn's message.
+        session.current_turn_user_msg_id = None
+
+        with patch("time.monotonic", return_value=session.last_user_msg_at):
+            await manager.prompt(sid, "second")
+
+        assert len(session.pending_messages) == 1, "must not open a second turn"
+        row = db.get_message(queued_id)
+        assert "first" in row["content"] and "second" in row["content"]
+        # The in-memory queue entry is updated to match the DB row.
+        assert "second" in session.pending_messages[0].message
+
+    @pytest.mark.asyncio
+    async def test_combines_into_a_running_turn_still_in_its_tool_loop(self):
+        """No final answer yet — compile_context will re-read the row."""
+        import time as _time
+
+        from db import models as db
+        from sessions.manager import SessionManager
+
+        manager = SessionManager()
+        sid = db.create_session(title="t")
+        session = self._busy_session(manager, sid)
+
+        running_id = db.add_message(sid, "user", "first")
+        # Mid-loop: an assistant row exists but it carries tool_calls, so the
+        # loop has not produced its text answer yet.
+        db.add_message(
+            sid,
+            "assistant",
+            "thinking",
+            tool_calls='[{"id": "1", "name": "bash", "arguments": "{}"}]',
+            metadata=f'{{"parent_user_msg_id": {running_id}}}',
+        )
+        session.last_user_msg_id = running_id
+        session.current_turn_user_msg_id = running_id
+        session.last_user_msg_at = _time.monotonic()
+
+        await manager.prompt(sid, "second")
+
+        assert not session.pending_messages, "should combine, not queue"
+        row = db.get_message(running_id)
+        assert "first" in row["content"] and "second" in row["content"]
+
+    @pytest.mark.asyncio
+    async def test_requeues_when_the_running_turn_already_answered(self):
+        """Regression: the follow-up used to be written into a row nothing
+        would re-read, and vanished — get_orphaned_user_messages could not
+        recover it because the row had an assistant message after it."""
+        import time as _time
+
+        from db import models as db
+        from sessions.manager import SessionManager
+
+        manager = SessionManager()
+        sid = db.create_session(title="t")
+        session = self._busy_session(manager, sid)
+
+        running_id = db.add_message(sid, "user", "first")
+        # Final text answer for this turn: content, no tool_calls.
+        db.add_message(
+            sid,
+            "assistant",
+            "here is your answer",
+            metadata=f'{{"parent_user_msg_id": {running_id}}}',
+        )
+        session.last_user_msg_id = running_id
+        session.current_turn_user_msg_id = running_id
+        session.last_user_msg_at = _time.monotonic()
+
+        events: list = []
+        session.emit_event = events.append
+
+        await manager.prompt(sid, "second")
+
+        # The answered row is left alone...
+        assert db.get_message(running_id)["content"] == "first"
+        # ...and the follow-up became its own queued turn with its own row.
+        assert len(session.pending_messages) == 1
+        queued = session.pending_messages[0]
+        assert queued.message == "second"
+        assert db.get_message(queued.msg_id)["content"] == "second"
+        # The skip is surfaced rather than being silent.
+        assert any(e.get("type") == "session.message_combine_skipped" for e in events)
+
+    @pytest.mark.asyncio
+    async def test_requeues_when_the_absorb_check_errors(self):
+        """Errors resolve toward an extra turn, never a dropped message."""
+        import time as _time
+
+        from db import models as db
+        from sessions.manager import SessionManager
+
+        manager = SessionManager()
+        sid = db.create_session(title="t")
+        session = self._busy_session(manager, sid)
+
+        running_id = db.add_message(sid, "user", "first")
+        session.last_user_msg_id = running_id
+        session.current_turn_user_msg_id = running_id
+        session.last_user_msg_at = _time.monotonic()
+
+        with patch("db.models.turn_has_final_answer", side_effect=RuntimeError("db down")):
+            await manager.prompt(sid, "second")
+
+        assert db.get_message(running_id)["content"] == "first"
+        assert len(session.pending_messages) == 1
+        assert session.pending_messages[0].message == "second"
+
+    @pytest.mark.asyncio
+    async def test_combine_event_flags_a_stale_scout(self):
+        """Folding into the running turn leaves scout's plan out of date;
+        the UI needs to be able to say so."""
+        import time as _time
+
+        from db import models as db
+        from sessions.manager import SessionManager
+
+        manager = SessionManager()
+        sid = db.create_session(title="t")
+        session = self._busy_session(manager, sid)
+
+        running_id = db.add_message(sid, "user", "first")
+        session.last_user_msg_id = running_id
+        session.current_turn_user_msg_id = running_id
+        session.last_user_msg_at = _time.monotonic()
+
+        events: list = []
+        session.emit_event = events.append
+
+        await manager.prompt(sid, "second")
+
+        combined = [e for e in events if e.get("type") == "session.message_combined"]
+        assert combined and combined[0]["scout_stale"] is True

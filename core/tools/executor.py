@@ -38,6 +38,80 @@ class ToolExecutionResult:
     metadata: dict = field(default_factory=dict)
 
 
+# Grace added on top of a resolved dispatch timeout. The tool's own internal
+# timeout (e.g. bash's process.communicate) must fire FIRST so the model gets
+# the tool's own diagnostic instead of the executor's generic timeout error,
+# and so the worker thread unwinds on its own.
+_DISPATCH_TIMEOUT_GRACE_S = 5
+
+
+def _resolve_timeout(tool, arguments: dict | None) -> int:
+    """Resolve the dispatch timeout for one call.
+
+    A tool whose schema exposes a `timeout` parameter must also declare
+    `max_timeout` at registration; otherwise asyncio.wait_for below caps the
+    call at the tool's default and the caller's override does nothing at all.
+    """
+    base = tool.timeout
+    ceiling = tool.max_timeout
+    if ceiling <= 0:
+        return base
+    try:
+        requested = int((arguments or {}).get("timeout") or 0)
+    except (TypeError, ValueError):
+        requested = 0
+    if requested <= 0:
+        return base
+    return min(max(requested, base), ceiling) + _DISPATCH_TIMEOUT_GRACE_S
+
+
+def _kill_tool_subprocess(context: dict | None) -> None:
+    """Kill the session's tracked subprocess after a dispatch timeout.
+
+    asyncio.to_thread cannot be cancelled: when wait_for gives up, the worker
+    thread stays blocked in the tool until the tool itself returns. For bash
+    that means holding a shared-executor thread AND a live process tree for the
+    remainder of the child's runtime. Killing the process group lets the thread
+    unwind promptly. Best-effort — the tool clears _active_process in its own
+    finally, so a None here just means the call already finished.
+    """
+    sid = (context or {}).get("session_id", "")
+    if not sid:
+        return
+    try:
+        from sessions.manager import get_manager
+
+        session = get_manager().get(sid)
+        proc = getattr(session, "_active_process", None) if session else None
+        if proc is None or proc.poll() is not None:
+            return
+        from core.tools.builtin.core_tools import _kill_process_tree
+
+        _kill_process_tree(proc)
+        logger.warning("Killed subprocess %s after tool dispatch timeout", proc.pid)
+    except Exception as e:
+        logger.debug("Post-timeout subprocess kill skipped: %s", e)
+
+
+def _batch_timeout(indices: list[int], tool_calls: list[dict], registry: ToolRegistry) -> int:
+    """Backstop timeout for the parallel gather.
+
+    Every _execute_single already enforces its own per-call timeout and
+    degrades to a per-tool error result, so this outer bound exists only to
+    catch a gather that wedges outside those waits. Size it to the slowest
+    tool actually in the batch so it can never fire first — if it does, the
+    TimeoutError escapes execute_tool_round and destroys the whole round,
+    including the results of calls that already completed.
+    """
+    slowest = 0
+    for i in indices:
+        tool = registry.get(tool_calls[i].get("name", ""))
+        if tool is None:
+            continue
+        slowest = max(slowest, _resolve_timeout(tool, tool_calls[i].get("arguments", {})))
+    return max(settings.tool_timeout, slowest) + _DISPATCH_TIMEOUT_GRACE_S
+
+
 def _is_unattended_session(sid: str) -> bool:
     """Return True for cron sessions and workers spawned from cron sessions.
 
@@ -189,7 +263,7 @@ async def _execute_single(
 
         ensure_workspace_venv_on_path()
 
-    timeout = tool.timeout
+    timeout = _resolve_timeout(tool, arguments)
     start = time.monotonic()
     try:
         # Capture the running event loop so tools on worker threads can
@@ -244,6 +318,10 @@ async def _execute_single(
     except asyncio.TimeoutError:
         latency = int((time.monotonic() - start) * 1000)
         registry.metrics[name].record_timeout(latency)
+        # The to_thread worker is still blocked in the tool and cannot be
+        # cancelled. Kill any subprocess it spawned so it unwinds instead of
+        # holding a shared-executor thread for the child's full runtime.
+        _kill_tool_subprocess(context)
         return ToolExecutionResult(
             tool_name=name,
             content=f"Error: Tool '{name}' timed out after {timeout}s",
@@ -279,45 +357,64 @@ async def execute_tool_round(
 
     tool_calls format: [{"name": str, "arguments": dict}, ...]
     Parallel-safe tools run concurrently. Mutating tools run sequentially.
-    """
-    parallel = []
-    sequential = []
 
-    for tc in tool_calls:
+    ORDERING CONTRACT: `results[i]` is always the result of `tool_calls[i]`.
+    Callers (core/agent.py) pair the two lists positionally to attach each
+    result to its originating call's tool_call_id, so the returned order
+    must mirror the input order — NOT the execution order. Parallel-safe
+    calls are dispatched first for latency, but their results are written
+    back into their original slots.
+    """
+    parallel_idx: list[int] = []
+    sequential_idx: list[int] = []
+
+    for i, tc in enumerate(tool_calls):
         name = tc.get("name", "")
         tool = registry.get(name)
         if tool and tool.parallel_safe:
-            parallel.append(tc)
+            parallel_idx.append(i)
         else:
-            sequential.append(tc)
+            sequential_idx.append(i)
 
-    results: list[ToolExecutionResult] = []
+    results: list[ToolExecutionResult | None] = [None] * len(tool_calls)
 
     # Run parallel-safe tools concurrently
-    if parallel:
-        tasks = [_execute_single(tc["name"], tc.get("arguments", {}), context, registry) for tc in parallel]
+    if parallel_idx:
+        tasks = [
+            _execute_single(
+                tool_calls[i]["name"],
+                tool_calls[i].get("arguments", {}),
+                context,
+                registry,
+            )
+            for i in parallel_idx
+        ]
         parallel_results = await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True),
-            timeout=settings.tool_timeout,
+            timeout=_batch_timeout(parallel_idx, tool_calls, registry),
         )
-        for tc, result in zip(parallel, parallel_results):
+        for i, result in zip(parallel_idx, parallel_results):
             if isinstance(result, asyncio.CancelledError):
                 raise result  # Propagate cancellation, don't swallow
             if isinstance(result, BaseException):
-                results.append(
-                    ToolExecutionResult(
-                        tool_name=tc["name"],
-                        content=f"Error: {result}",
-                        was_error=True,
-                        latency_ms=0,
-                    )
+                results[i] = ToolExecutionResult(
+                    tool_name=tool_calls[i]["name"],
+                    content=f"Error: {result}",
+                    was_error=True,
+                    latency_ms=0,
                 )
             else:
-                results.append(result)
+                results[i] = result
 
     # Run sequential tools in order
-    for tc in sequential:
-        result = await _execute_single(tc["name"], tc.get("arguments", {}), context, registry)
-        results.append(result)
+    for i in sequential_idx:
+        results[i] = await _execute_single(
+            tool_calls[i]["name"],
+            tool_calls[i].get("arguments", {}),
+            context,
+            registry,
+        )
 
-    return results
+    # Every slot is filled by construction: each index lands in exactly one
+    # of the two buckets, and both loops assign unconditionally.
+    return [r for r in results if r is not None]

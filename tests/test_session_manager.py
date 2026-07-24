@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from sessions.manager import SessionManager
-from sessions.state import AgentSession, SessionState
+from sessions.state import AgentSession, PendingMessage, SessionState
 
 
 def _make_manager() -> SessionManager:
@@ -172,8 +172,8 @@ async def test_prompt_rejects_full_queue(monkeypatch):
     session = mgr.get(sid)
 
     # Manually fill the queue
-    session.pending_messages.append(("msg1", ""))
-    session.pending_messages.append(("msg2", ""))
+    session.pending_messages.append(PendingMessage("msg1", ""))
+    session.pending_messages.append(PendingMessage("msg2", ""))
     # Force PROCESSING state
     session._force_state_for_tests(SessionState.PROCESSING)
 
@@ -858,7 +858,7 @@ async def test_process_pending_does_not_drain_while_awaiting_user():
     sv2.transition(session, sv2.SessionStateV2.AWAITING_USER, "ask-user")
 
     # Simulate a queued message (arrived while session was PROCESSING).
-    session.pending_messages.append(("follow-up", ""))
+    session.pending_messages.append(PendingMessage("follow-up", ""))
 
     # _process_pending must NOT dispatch this message — session is AWAITING_USER.
     await mgr._process_pending(session)
@@ -946,3 +946,260 @@ def test_finalizing_reaper_fires_when_no_background_refs():
         "A genuinely stuck FINALIZING session (no background tasks, idle > 120s) "
         "must be force-unstuck to IDLE_READY by the reaper."
     )
+
+
+# ---------------------------------------------------------------------------
+# Concurrent mutation of the session map
+# ---------------------------------------------------------------------------
+
+
+def test_broadcast_survives_concurrent_session_insert():
+    """broadcast() runs on tool threads (ask_user/notify_user) while
+    spawn_worker — also on a tool thread — inserts via create_session.
+    Iterating the live dict raised "dictionary changed size during
+    iteration" and surfaced as a bogus error from ask_user."""
+    import threading
+
+    from sessions.state import AgentSession
+
+    mgr = _make_manager()
+    # Subscribers make the loop body do real work, widening the window in
+    # which a concurrent insert can be observed mid-iteration.
+    for i in range(200):
+        s = AgentSession(session_id=f"seed{i}")
+        s.subscribe()
+        mgr._sessions[f"seed{i}"] = s
+
+    errors: list = []
+    stop = threading.Event()
+
+    def inserter():
+        i = 0
+        while not stop.is_set():
+            mgr._sessions[f"new{i}"] = AgentSession(session_id=f"new{i}")
+            mgr._sessions.pop(f"new{max(0, i - 50)}", None)
+            i += 1
+
+    def broadcaster():
+        try:
+            for _ in range(300):
+                mgr.broadcast({"type": "test"})
+                mgr.has_active_work()
+        except RuntimeError as e:  # pragma: no cover - the bug being fixed
+            errors.append(e)
+
+    t = threading.Thread(target=inserter, daemon=True)
+    t.start()
+    try:
+        broadcaster()
+    finally:
+        stop.set()
+        t.join(timeout=5)
+
+    assert not errors, f"session map iteration raced a concurrent insert: {errors}"
+
+
+def test_snooze_idle_check_survives_concurrent_session_insert(monkeypatch):
+    """Same race, reached through SnoozeRunner._is_idle."""
+    import threading
+
+    import sessions.manager as manager_mod
+    from core.snooze import SnoozeRunner
+    from sessions.state import AgentSession
+
+    # _is_idle reads the module singleton, so install ours as the singleton.
+    mgr = _make_manager()
+    monkeypatch.setattr(manager_mod, "_manager", mgr)
+    for i in range(200):
+        mgr._sessions[f"seed{i}"] = AgentSession(session_id=f"seed{i}")
+
+    runner = SnoozeRunner()
+    errors: list = []
+    stop = threading.Event()
+
+    def inserter():
+        i = 0
+        while not stop.is_set():
+            mgr._sessions[f"new{i}"] = AgentSession(session_id=f"new{i}")
+            mgr._sessions.pop(f"new{max(0, i - 50)}", None)
+            i += 1
+
+    t = threading.Thread(target=inserter, daemon=True)
+    t.start()
+    try:
+        for _ in range(300):
+            try:
+                runner._is_idle()
+            except RuntimeError as e:  # pragma: no cover - the bug being fixed
+                errors.append(e)
+                break
+    finally:
+        stop.set()
+        t.join(timeout=5)
+
+    assert not errors, f"_is_idle raced a concurrent insert: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# Detached recovery tasks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_detached_retains_a_strong_reference():
+    """asyncio only weakly references running tasks; a discarded handle can
+    be collected mid-flight."""
+    mgr = _make_manager()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def work():
+        started.set()
+        await release.wait()
+
+    task = mgr._spawn_detached(work(), "unit")
+    await started.wait()
+    assert task in mgr._detached_tasks, "task must be strongly referenced while running"
+
+    release.set()
+    await task
+    await asyncio.sleep(0)  # let the done-callback run
+    assert task not in mgr._detached_tasks, "reference must be released on completion"
+
+
+@pytest.mark.asyncio
+async def test_spawn_detached_logs_failures(caplog):
+    """A failing recovery task used to vanish with no log line — the session
+    just sat idle on queued work until the next reaper tick."""
+    import logging
+
+    mgr = _make_manager()
+
+    async def boom():
+        raise RuntimeError("kaboom")
+
+    with caplog.at_level(logging.ERROR, logger="pernix.sessions"):
+        task = mgr._spawn_detached(boom(), "resume-from-workers")
+        with pytest.raises(RuntimeError):
+            await task
+        await asyncio.sleep(0)
+
+    assert any(
+        "resume-from-workers" in r.message
+        and "kaboom" in str(r.exc_info or r.message)
+        or ("resume-from-workers" in r.getMessage() and "kaboom" in r.getMessage())
+        for r in caplog.records
+    ), caplog.text
+    assert task not in mgr._detached_tasks
+
+
+@pytest.mark.asyncio
+async def test_spawn_detached_ignores_cancellation():
+    """Cancellation is routine at shutdown and must not log as a failure."""
+    mgr = _make_manager()
+
+    async def forever():
+        await asyncio.Event().wait()
+
+    task = mgr._spawn_detached(forever(), "unit")
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+    assert task not in mgr._detached_tasks
+
+
+def test_no_bare_create_task_in_manager():
+    """Regression guard: every detached task must go through _spawn_detached.
+
+    Two call shapes are legitimate and excluded:
+      * `session.task = asyncio.create_task(...)` — an owned turn handle;
+        the session itself holds the strong reference.
+      * the single call inside _spawn_detached, which is the wrapper.
+    """
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path("sessions/manager.py").read_text())
+
+    offenders: list[int] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) or fn.name == "_spawn_detached":
+            continue
+        # Assignment targets of the form <something>.task = ... are owned.
+        owned_calls = {
+            id(node.value)
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Attribute) and t.attr == "task" for t in node.targets)
+        }
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "create_task"
+                and id(node) not in owned_calls
+            ):
+                offenders.append(node.lineno)
+
+    assert not offenders, f"bare create_task must use _spawn_detached (sessions/manager.py lines {offenders})"
+
+
+# ---------------------------------------------------------------------------
+# PendingMessage shape
+# ---------------------------------------------------------------------------
+
+
+def test_pending_message_defaults_cover_synthetic_entries():
+    """Worker resume / worker timeout push messages with no DB row."""
+    entry = PendingMessage("resume", None, False)
+    assert entry.message == "resume"
+    assert entry.system_prompt is None
+    assert entry.pre_saved is False
+    assert entry.queued_at == 0.0
+    assert entry.msg_id is None
+
+
+def test_pending_message_coerce_accepts_legacy_tuples():
+    """Older producers and test fixtures append bare tuples; consumers must
+    still be able to read .msg_id unconditionally."""
+    assert PendingMessage.coerce(("m", "", True, 1.0, 7)).msg_id == 7
+    assert PendingMessage.coerce(("m", None, False)).msg_id is None
+    assert PendingMessage.coerce(("m", "")).msg_id is None
+    already = PendingMessage("m")
+    assert PendingMessage.coerce(already) is already
+
+
+def test_all_manager_producers_use_pending_message():
+    """Regression guard: the two shapes are what let short entries be
+    silently skipped by the `len(e) >= 5` guards."""
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path("sessions/manager.py").read_text())
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr != "append":
+            continue
+        target = node.func.value
+        if not (isinstance(target, ast.Attribute) and target.attr == "pending_messages"):
+            continue
+        arg = node.args[0] if node.args else None
+        ok = isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name) and arg.func.id == "PendingMessage"
+        if not ok:
+            offenders.append(f"line {node.lineno}: {ast.unparse(node)}")
+
+    assert not offenders, "pending_messages producers must append PendingMessage:\n  " + "\n  ".join(offenders)
+
+
+def test_no_positional_indexing_of_queue_entries():
+    """Consumers should read fields by name, not by position."""
+    import pathlib
+    import re
+
+    src = pathlib.Path("sessions/manager.py").read_text()
+    bad = [ln.strip() for ln in src.splitlines() if re.search(r"\bentry\[\d\]|\b_e\[\d\]|\be\[\d\]", ln)]
+    assert not bad, f"positional access to queue entries remains: {bad}"

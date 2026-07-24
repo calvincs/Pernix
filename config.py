@@ -246,6 +246,11 @@ class Settings:
     ssl_cert_path: str = ""  # Custom cert PEM path (redacted in API)
     ssl_key_path: str = ""  # Custom key PEM path (redacted in API)
     auth_token: str = ""  # Bearer token for network mode (auto-generated)
+    # Skip auth for requests originating from 127.0.0.1/::1. Correct for the
+    # default single-host deployment. Set false when a reverse proxy fronts
+    # Pernix: proxied requests arrive from loopback and would otherwise
+    # bypass the token entirely.
+    trust_local_requests: bool = True
 
     # --- Server (not persisted) ---
     db_path: str = "data/sessions.db"

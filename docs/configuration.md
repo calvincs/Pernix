@@ -162,6 +162,7 @@ Approvals are **per-invocation by default** — approving `bash` for `ps aux` do
 | `ssl_cert_path` | *(empty)* | **Yes** | Path to PEM certificate file (custom SSL mode only). |
 | `ssl_key_path` | *(empty)* | **Yes** | Path to PEM private key file (custom SSL mode only). |
 | `auth_token` | *(auto-generated)* | No | The Bearer token for network mode. Auto-generated on first network-mode start. Rotate via `POST /api/settings/auth-token/regenerate`. |
+| `trust_local_requests` | `true` | No | Skip auth for requests from `127.0.0.1`/`::1`. Set `false` behind a reverse proxy — proxied requests arrive from loopback and would otherwise bypass the token entirely. Read per-request; no restart needed. |
 | `cors_origins` | *(empty list)* | **Yes** | Allowed CORS origins in network mode. If empty, the wildcard `*` is used (no credentials). Recommended: set explicitly to your client origins. |
 
 ---
