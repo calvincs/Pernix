@@ -16,6 +16,11 @@ from db import models as db
 
 logger = logging.getLogger("pernix.context.compaction")
 
+# Roles that are context-assembly markers rather than real conversation turns.
+# Mirror compile_context's active-window filter so the boundary id we record
+# lines up with the messages the compiler will keep after compaction.
+_MARKER_ROLES = frozenset({"compaction", "scout", "notice", "reflect", "model_divider", "eval"})
+
 COMPACTION_PROMPT = """Summarize this conversation. Output structured JSON followed by a prose paragraph:
 
 ```json
@@ -130,18 +135,46 @@ async def compact_with_llm(
 
     estimator = get_estimator()
 
+    # The compiled `messages` handed in by the agent have been stripped of their
+    # DB ids (_strip_private_fields in compile_context), so we CANNOT derive the
+    # compaction boundary from them — doing so recorded compacted_up_to=0 on
+    # every run, which never advances the compiler's active-window pointer and
+    # drives an unbounded re-compaction loop. Read the authoritative rows from
+    # the DB, which carry real `id`s. `messages` is retained only for signature
+    # back-compat and is intentionally unused for boundary/id resolution.
+    _ = messages
+    raw = db.get_messages(session_id)
+
+    # Resume from the most recent compaction marker: only summarize messages
+    # added since it, carry its summary forward for merging, and never rewind
+    # the pointer (which would re-summarize already-folded history).
+    prev_compacted_up_to = 0
+    if existing_summary is None:
+        for m in reversed(raw):
+            if m["role"] == "compaction":
+                existing_summary = m["content"]
+                try:
+                    raw_meta = m.get("metadata") or m.get("tool_calls") or "{}"
+                    prev_compacted_up_to = int(json.loads(raw_meta).get("compacted_up_to", 0))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    prev_compacted_up_to = 0
+                break
+
+    # Conversational messages not yet folded into a summary, oldest -> newest.
+    convo = [m for m in raw if m["role"] not in _MARKER_ROLES and m["id"] > prev_compacted_up_to]
+
     # Find compaction boundary: keep recent messages totaling compaction_keep_tokens
     keep_tokens = settings.compaction_keep_tokens
     total = 0
-    boundary_idx = len(messages)
-    for i in range(len(messages) - 1, -1, -1):
-        tokens = estimator.count_message(messages[i])
+    boundary_idx = len(convo)
+    for i in range(len(convo) - 1, -1, -1):
+        tokens = estimator.count_message(convo[i])
         if total + tokens > keep_tokens:
             boundary_idx = i + 1
             break
         total += tokens
 
-    to_summarize = messages[:boundary_idx]
+    to_summarize = convo[:boundary_idx]
     if len(to_summarize) < 4:
         logger.debug("Too few messages to summarize (%d)", len(to_summarize))
         return False
@@ -191,8 +224,9 @@ async def compact_with_llm(
             )
             return False
 
-    # Get the last message ID being summarized
-    last_summarized_id = to_summarize[-1].get("id", 0) if to_summarize else 0
+    # Real DB id of the newest message folded into this summary. `to_summarize`
+    # rows come straight from db.get_messages, so `id` is always present.
+    last_summarized_id = to_summarize[-1]["id"]
 
     # Append compaction marker (NEVER delete original messages)
     db.add_compaction(

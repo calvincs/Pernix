@@ -730,7 +730,15 @@ async def run_agent(
                 _sv2.transition(session, _sv2.SessionStateV2.COMPACTING, "compact-proactive")
             except Exception as _e:
                 logger.error("compact-proactive transition failed: %s", _e)
+            # Count this against the per-turn attempt budget and record the
+            # pre-compaction size. Without this, a compactor that fails to
+            # shrink the context (e.g. the historical compacted_up_to=0 bug)
+            # re-fires every tool round for the whole turn. Incrementing hands
+            # any further attempts to the critical path above, which enforces
+            # the _no_progress guard and the attempt limit.
+            _tokens_before_last_compaction = payload.token_count
             await compact_with_llm(session_id, payload.messages)
+            _compaction_attempts += 1
             session.touch()
             try:
                 _sv2.transition(session, _sv2.SessionStateV2.PROCESSING, "compact-done")

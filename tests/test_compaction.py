@@ -228,3 +228,86 @@ async def test_compact_with_llm_failure(mock_llm_client):
     msg_dicts = [{"role": m["role"], "content": m["content"], "id": m["id"]} for m in messages]
     result = await compact_with_llm(sid, msg_dicts)
     assert result is False
+
+
+def _summary_response():
+    from core.llm.types import ChatResponse, TokenUsage
+
+    return ChatResponse(
+        content='```json\n{"goal": "t", "progress": ["p"]}\n```\nSummary prose.',
+        tool_calls=None,
+        usage=TokenUsage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
+        model="test",
+        provider="fake",
+        finish_reason="stop",
+    )
+
+
+async def test_compact_with_llm_ignores_missing_payload_ids(mock_llm_client, monkeypatch):
+    """Regression (compaction loop): the real caller passes compiled messages
+    that have been stripped of their DB ids (_strip_private_fields). Compaction
+    must derive compacted_up_to from the DB, never from the payload. The old
+    `to_summarize[-1].get("id", 0)` returned 0 on every real call, pinning the
+    pointer at 0 so the active window never shrank and compaction re-fired
+    forever (observed: 8 markers in ~7 min, all compacted_up_to=0)."""
+    import json as _json
+
+    from db import models as db
+
+    monkeypatch.setattr("config.settings.compaction_keep_tokens", 120)
+
+    sid = db.create_session(title="Strip Test")
+    for i in range(12):
+        db.add_message(sid, "user", f"User message number {i} " * 8)
+        db.add_message(sid, "assistant", f"Assistant reply number {i} " * 8)
+
+    mock_llm_client.responses = [_summary_response()]
+
+    # Simulate the stripped payload: role + content only, NO id / _db_id.
+    stripped = [{"role": m["role"], "content": m["content"]} for m in db.get_messages(sid)]
+    assert await compact_with_llm(sid, stripped) is True
+
+    all_msgs = db.get_messages(sid)
+    markers = [m for m in all_msgs if m["role"] == "compaction"]
+    assert len(markers) == 1
+    ptr = _json.loads(markers[0]["metadata"])["compacted_up_to"]
+    real_ids = [m["id"] for m in all_msgs if m["role"] in ("user", "assistant")]
+    # The pointer must ADVANCE to a real message id — never the historical 0.
+    assert ptr > 0
+    assert ptr in real_ids
+
+
+async def test_compact_with_llm_resumes_from_prior_marker(mock_llm_client, monkeypatch):
+    """A second compaction summarizes only messages added since the prior
+    marker and advances compacted_up_to (never rewinds/re-summarizes)."""
+    import json as _json
+
+    from db import models as db
+
+    monkeypatch.setattr("config.settings.compaction_keep_tokens", 50)
+
+    sid = db.create_session(title="Resume Test")
+    for i in range(8):
+        db.add_message(sid, "user", f"first batch {i} " * 8)
+        db.add_message(sid, "assistant", f"first reply {i} " * 8)
+
+    mock_llm_client.responses = [_summary_response()]
+    stripped = [{"role": m["role"], "content": m["content"]} for m in db.get_messages(sid)]
+    assert await compact_with_llm(sid, stripped) is True
+    first_marker = [m for m in db.get_messages(sid) if m["role"] == "compaction"][-1]
+    first_ptr = _json.loads(first_marker["metadata"])["compacted_up_to"]
+    assert first_ptr > 0
+
+    # New activity after the first compaction.
+    for i in range(8):
+        db.add_message(sid, "user", f"second batch {i} " * 8)
+        db.add_message(sid, "assistant", f"second reply {i} " * 8)
+
+    mock_llm_client.responses = [_summary_response()]
+    stripped2 = [{"role": m["role"], "content": m["content"]} for m in db.get_messages(sid)]
+    assert await compact_with_llm(sid, stripped2) is True
+
+    markers = [m for m in db.get_messages(sid) if m["role"] == "compaction"]
+    assert len(markers) == 2
+    second_ptr = _json.loads(markers[-1]["metadata"])["compacted_up_to"]
+    assert second_ptr > first_ptr
