@@ -605,7 +605,7 @@ class SessionManager:
                 ):
                     target_id = session.last_user_msg_id
                     existing = db.get_message(target_id)
-                    if existing is not None:
+                    if existing is not None and self._can_absorb_rapid_fire(session, target_id):
                         combined = _combine_rapid_fire(existing.get("content", "") or "", message)
                         db.update_message_content(target_id, combined)
                         session.last_user_msg_at = now
@@ -621,6 +621,10 @@ class SessionManager:
                             {
                                 "type": "session.message_combined",
                                 "message_id": target_id,
+                                # The running turn's scout planned against the
+                                # pre-combine text; only the agent loop re-reads
+                                # the row. Surfaced so the UI can say so.
+                                "scout_stale": target_id == session.current_turn_user_msg_id,
                             }
                         )
                         logger.debug(
@@ -629,6 +633,9 @@ class SessionManager:
                             session_id,
                         )
                         return
+                    # Fall through: the running turn can no longer pick this up.
+                    # Queue it as its own turn below rather than writing into a
+                    # row nothing will re-read.
 
                 # Persist the message immediately so it's visible in the UI
                 # while waiting, then queue for later processing.
@@ -766,6 +773,52 @@ class SessionManager:
             session.task = asyncio.create_task(
                 self._run_agent_safe(session, message, system_prompt, pre_saved=bool(message))
             )
+
+    def _can_absorb_rapid_fire(self, session: AgentSession, target_id: int) -> bool:
+        """Can a follow-up still be folded into message `target_id`?
+
+        Combining rewrites an existing user row in place and returns without
+        queueing anything. That is only safe while something will still READ
+        that row:
+
+          * a queued entry — read when it eventually pops. Always safe.
+          * the running turn's row — read by compile_context at the top of
+            each tool round, so safe only while the agent loop has rounds
+            left. Once it has emitted its final text answer, nothing re-reads
+            the row and the appended text is lost silently: the combined row
+            has an assistant message after it, so get_orphaned_user_messages
+            never flags it either.
+
+        Returns False for that last case so the caller queues a fresh turn
+        instead. Errors resolve to False — an extra turn is recoverable, a
+        dropped message is not.
+        """
+        if target_id != session.current_turn_user_msg_id:
+            return True  # a queued entry; it has not been consumed yet
+        try:
+            if db.turn_has_final_answer(session.session_id, target_id):
+                logger.info(
+                    "Session %s: rapid-fire follow-up arrived after turn %d answered "
+                    "— queueing a new turn instead of combining",
+                    session.session_id[:12],
+                    target_id,
+                )
+                session.emit_event(
+                    {
+                        "type": "session.message_combine_skipped",
+                        "message_id": target_id,
+                        "reason": "turn_already_answered",
+                    }
+                )
+                return False
+        except Exception as e:
+            logger.warning(
+                "Session %s: rapid-fire absorb check failed (%s) — queueing a new turn",
+                session.session_id[:12],
+                e,
+            )
+            return False
+        return True
 
     async def _run_agent_safe(
         self,
