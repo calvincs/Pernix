@@ -72,3 +72,78 @@ def test_view_pruning_preserves_originals():
     assert len(original["content"]) == 500
     # Pruned view should have stub
     assert "[pruned" in pruned[0]["content"]
+
+
+# ===========================================================================
+# Known facts must not be discounted by unfilled config
+# ===========================================================================
+
+
+def test_instructions_block_is_framed_as_config_not_knowledge():
+    """Regression: SESSIONS.md ships with placeholder lines ("Timezone: not
+    set"). Injected bare as [INSTRUCTIONS] — directly above [RELEVANT MEMORY]
+    — the model read them as ground truth and refused a weather request while
+    the user's city sat in the very next block. Production session
+    becce7a77bcb, 2026-07-24."""
+    from core.scout.report import ScoutReport
+
+    r = ScoutReport()
+    r.instructions = "- Timezone: not set\n- Key facts: not set"
+    r.memory_context = "User Calvin Schultz is located in Rockford, Illinois (ZIP 61108)."
+    out = r.to_system_prompt_section()
+
+    assert "[INSTRUCTIONS]" in out and "\n[RELEVANT MEMORY]\n" in out
+    lowered = out.lower()
+    assert "not pinned in config" in lowered, "unset config must not read as unknown fact"
+    assert "defer to [relevant memory]" in lowered, "framing must point at memory as the fallback"
+    # Framing must sit inside the INSTRUCTIONS block, above the memory block.
+    assert out.index("not pinned in config") > out.index("[INSTRUCTIONS]")
+    assert out.index("not pinned in config") < out.index("\n[RELEVANT MEMORY]\n")
+    # The user's actual fact still survives intact.
+    assert "Rockford, Illinois (ZIP 61108)" in out
+
+
+def test_instructions_framing_absent_when_no_instructions():
+    """No SESSIONS.md content → no [INSTRUCTIONS] block and no stray framing."""
+    from core.scout.report import ScoutReport
+
+    r = ScoutReport()
+    r.memory_context = "Something recalled."
+    out = r.to_system_prompt_section()
+    assert "[INSTRUCTIONS]" not in out
+    assert "not pinned in config" not in out
+
+
+def test_base_prompt_states_memory_beats_empty_config():
+    from core.context.compiler import BASE_SYSTEM_PROMPT
+
+    p = BASE_SYSTEM_PROMPT.lower()
+    assert "use what you know" in p
+    assert "never overrides a recalled fact" in p
+
+
+def test_scout_prompt_forbids_reporting_absence_as_memory():
+    """Scout authored the actual refusal: it wrote 'no location is configured
+    for this session — SESSIONS.md shows timezone: not set' INTO memory_context,
+    in the same paragraph where it had just quoted Rockford."""
+    from core.scout.runner import SCOUT_SYSTEM_PROMPT
+
+    p = SCOUT_SYSTEM_PROMPT.lower()
+    assert "never conclusions about what is missing" in p
+    assert "known facts beat empty config" in p
+
+
+def test_shipped_sessions_template_asserts_no_negative_facts():
+    """The stock template must not claim facts are unset — that phrasing is
+    what the model quoted back as justification for refusing."""
+    from pathlib import Path
+
+    tpl = Path("data/agent/SESSIONS.md")
+    if not tpl.exists():
+        import pytest
+
+        pytest.skip("no shipped template in this checkout")
+    text = tpl.read_text()
+    user_ctx = text.split("## User Context")[1].split("##")[0]
+    assert "not set" not in user_ctx.lower(), "User Context must use blank placeholders, not 'not set'"
+    assert "does NOT" in text or "not pinned in config" in text.lower(), "template must state the precedence rule"

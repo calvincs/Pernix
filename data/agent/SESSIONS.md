@@ -3,10 +3,20 @@
 Deployment-specific context injected as `[INSTRUCTIONS]` every turn.
 Tool protocols are already built into the system — do not duplicate them here.
 
+**This file is deployment configuration, not a record of what is known about
+the user.** An unfilled field here means "not pinned in config" — it does NOT
+mean the fact is unknown. Facts in `[RELEVANT MEMORY]` are authoritative for
+anything left blank below. Never tell the user something is unknown because a
+field here is empty; check recalled memory first, and only ask them if neither
+source has it.
+
 ## User Context
 
-- Timezone: not set
-- Key facts: not set (e.g. name, location, primary language, connected sources)
+Optional pins. Filling these in short-circuits a memory lookup; leaving them
+blank simply defers to memory.
+
+- Timezone:
+- Key facts: (e.g. name, location, primary language, connected sources)
 
 ## Enabled Domains
 
@@ -29,5 +39,5 @@ Long-running goals the agent is tracking on the user's behalf. Add, update, or c
 
 ## Conventions
 
-- Naming: not set (e.g. "prefix cron workflow names with `daily-`")
-- Outputs: not set (e.g. "save reports to `reports/` in the workspace")
+- Naming: (e.g. "prefix cron workflow names with `daily-`")
+- Outputs: (e.g. "save reports to `reports/` in the workspace")

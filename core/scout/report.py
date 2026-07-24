@@ -133,7 +133,19 @@ class ScoutReport:
         if self.rules:
             parts.append(f"[RULES]\n{self.rules}")
         if self.instructions:
-            parts.append(f"[INSTRUCTIONS]\n{self.instructions}")
+            # Framing matters: SESSIONS.md is deployment config, and an unset
+            # field there is NOT evidence that a fact is unknown. Without this
+            # note the model reads placeholder lines ("Timezone: not set") as
+            # ground truth and refuses tasks whose answer is sitting in
+            # [RELEVANT MEMORY] directly below. Applied here rather than in the
+            # file so it holds for every deployment's SESSIONS.md.
+            parts.append(
+                f"[INSTRUCTIONS]\n"
+                f"(Deployment configuration. A blank or unset field below means "
+                f"'not pinned in config' — never that the fact is unknown. "
+                f"Defer to [RELEVANT MEMORY] for anything not pinned here.)\n"
+                f"{self.instructions}"
+            )
         if self.memory_context:
             parts.append(f"[RELEVANT MEMORY]\n{self.memory_context}")
         if self.cross_session_context:
