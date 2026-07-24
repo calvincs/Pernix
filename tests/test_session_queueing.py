@@ -16,7 +16,7 @@ import pytest
 from core.llm.semaphore import FairLLMSemaphore, LLMConcurrencyError, LLMSessionTimeoutError
 from core.llm.types import ChatResponse, StreamEvent, StreamEventType, TokenUsage
 from sessions import state_v2 as sv2
-from sessions.state import AgentSession, SessionState
+from sessions.state import AgentSession, PendingMessage, SessionState
 
 # ---------------------------------------------------------------------------
 # Semaphore timeout tests
@@ -529,7 +529,7 @@ class TestRapidFireCombining:
         queued_id = db.add_message(sid, "user", "first")
         session.last_user_msg_id = queued_id
         session.last_user_msg_at = asyncio.get_running_loop().time()
-        session.pending_messages.append(("first", "", True, 0.0, queued_id))
+        session.pending_messages.append(PendingMessage("first", "", True, 0.0, queued_id))
         # Not the running turn's message.
         session.current_turn_user_msg_id = None
 
@@ -540,7 +540,7 @@ class TestRapidFireCombining:
         row = db.get_message(queued_id)
         assert "first" in row["content"] and "second" in row["content"]
         # The in-memory queue entry is updated to match the DB row.
-        assert "second" in session.pending_messages[0][0]
+        assert "second" in session.pending_messages[0].message
 
     @pytest.mark.asyncio
     async def test_combines_into_a_running_turn_still_in_its_tool_loop(self):
@@ -610,8 +610,8 @@ class TestRapidFireCombining:
         # ...and the follow-up became its own queued turn with its own row.
         assert len(session.pending_messages) == 1
         queued = session.pending_messages[0]
-        assert queued[0] == "second"
-        assert db.get_message(queued[4])["content"] == "second"
+        assert queued.message == "second"
+        assert db.get_message(queued.msg_id)["content"] == "second"
         # The skip is surfaced rather than being silent.
         assert any(e.get("type") == "session.message_combine_skipped" for e in events)
 
@@ -637,7 +637,7 @@ class TestRapidFireCombining:
 
         assert db.get_message(running_id)["content"] == "first"
         assert len(session.pending_messages) == 1
-        assert session.pending_messages[0][0] == "second"
+        assert session.pending_messages[0].message == "second"
 
     @pytest.mark.asyncio
     async def test_combine_event_flags_a_stale_scout(self):

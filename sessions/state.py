@@ -8,7 +8,47 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, NamedTuple
+
+
+class PendingMessage(NamedTuple):
+    """One entry on AgentSession.pending_messages.
+
+    Producers used to append two different tuple shapes — a 5-tuple from the
+    normal queue and orphan-sweep paths, and a bare 3-tuple from the worker
+    resume and worker-timeout paths. _process_pending coped via
+    `entry[4] if len(entry) >= 5`, but the rapid-fire combiner and the orphan
+    sweep guarded with `len(e) >= 5 and e[4] == ...` and therefore skipped
+    short entries silently. That was only harmless because synthetic resume
+    messages have no DB row to match against — a shape waiting to be tripped
+    over by the next producer.
+
+    Fields:
+        message:       the user-visible text handed to the agent
+        system_prompt: per-turn system prompt override (None for synthetic)
+        pre_saved:     True when the DB row already exists, so run_agent
+                       must not insert a second one
+        queued_at:     time.monotonic() at enqueue; feeds the rapid-fire window
+        msg_id:        DB row id, or None for synthetic messages that were
+                       never persisted (worker resume, worker timeout)
+    """
+
+    message: str
+    system_prompt: str | None = ""
+    pre_saved: bool = False
+    queued_at: float = 0.0
+    msg_id: int | None = None
+
+    @classmethod
+    def coerce(cls, entry) -> "PendingMessage":
+        """Accept a legacy plain tuple and normalize it.
+
+        Defensive: keeps older callers and test fixtures that append raw
+        tuples working, so consumers can use attribute access unconditionally.
+        """
+        if isinstance(entry, cls):
+            return entry
+        return cls(*entry)
 
 
 class SessionState(str, Enum):
