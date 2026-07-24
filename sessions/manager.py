@@ -554,6 +554,12 @@ class SessionManager:
         worker_summary.unlink(missing_ok=True)
 
         self._sessions.pop(session_id, None)
+        # Same scheduler cleanup remove() does. Without it the per-provider
+        # wall-clock budget maps keep an entry for a session that no longer
+        # exists, for the life of the process.
+        from core.llm.client import get_llm_client as _get_client
+
+        _get_client().purge_session(session_id)
         db.delete_session(session_id)
         logger.info("Deleted session %s", session_id)
 
