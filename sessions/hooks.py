@@ -693,7 +693,19 @@ async def _maybe_evaluate(session_id: str, session: dict, emit=None, session_obj
     except (json.JSONDecodeError, OSError):
         return
 
-    pending = [f for f in features if not f.get("passes")]
+    # Scope to features THIS session registered. data/registry.json is a
+    # single global file, so without this filter every session's post-hooks
+    # evaluated every other session's pending features — against its own
+    # unrelated transcript, which fails by construction. A failing feature
+    # then re-evaluated forever, in every session, burning an eval LLM call
+    # and writing an `eval` row per turn, and could drive spurious eval
+    # retries. (Observed: a "Neo Flappy Bird" feature registered by session
+    # 505639e37185 evaluating inside an unrelated weather session.)
+    #
+    # Features written before this filter existed have no session_id; treat
+    # those as belonging to whoever is running so they still get a chance to
+    # pass and retire, rather than being stranded pending forever.
+    pending = [f for f in features if not f.get("passes") and f.get("session_id") in (session_id, None, "")]
     if not pending:
         return
 
