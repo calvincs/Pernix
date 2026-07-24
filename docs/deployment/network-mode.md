@@ -81,7 +81,11 @@ Three ways to send the token:
 | `pernix_auth` cookie | Browser sessions (set automatically after token-from-URL login) |
 | `?token=<token>` query parameter | QR-code login links, one-time URL sharing |
 
-Localhost connections (`127.0.0.1`, `::1`) **always** bypass authentication, even in network mode. This prevents you from locking yourself out and lets `POST /api/admin/restart`, `POST /api/settings/auth-token/regenerate`, and similar admin endpoints stay accessible.
+Localhost connections (`127.0.0.1`, `::1`) bypass authentication by default, even in network mode. This prevents you from locking yourself out and lets `POST /api/admin/restart`, `POST /api/settings/auth-token/regenerate`, and similar admin endpoints stay accessible.
+
+**Behind a reverse proxy, set `trust_local_requests: false`.** A proxy terminating TLS on the same host reaches Pernix over loopback, so every proxied request — wherever it actually came from — looks like `127.0.0.1` and skips the token. With the setting off, the proxy must forward `Authorization: Bearer <token>` like any other client. The change is read per-request, so it applies immediately without a restart.
+
+Token comparison is constant-time. Note that `?token=` lands in access logs and browser history — rotate after using it for onboarding.
 
 ---
 
