@@ -1038,3 +1038,109 @@ def test_snooze_idle_check_survives_concurrent_session_insert(monkeypatch):
         t.join(timeout=5)
 
     assert not errors, f"_is_idle raced a concurrent insert: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# Detached recovery tasks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_detached_retains_a_strong_reference():
+    """asyncio only weakly references running tasks; a discarded handle can
+    be collected mid-flight."""
+    mgr = _make_manager()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def work():
+        started.set()
+        await release.wait()
+
+    task = mgr._spawn_detached(work(), "unit")
+    await started.wait()
+    assert task in mgr._detached_tasks, "task must be strongly referenced while running"
+
+    release.set()
+    await task
+    await asyncio.sleep(0)  # let the done-callback run
+    assert task not in mgr._detached_tasks, "reference must be released on completion"
+
+
+@pytest.mark.asyncio
+async def test_spawn_detached_logs_failures(caplog):
+    """A failing recovery task used to vanish with no log line — the session
+    just sat idle on queued work until the next reaper tick."""
+    import logging
+
+    mgr = _make_manager()
+
+    async def boom():
+        raise RuntimeError("kaboom")
+
+    with caplog.at_level(logging.ERROR, logger="pernix.sessions"):
+        task = mgr._spawn_detached(boom(), "resume-from-workers")
+        with pytest.raises(RuntimeError):
+            await task
+        await asyncio.sleep(0)
+
+    assert any(
+        "resume-from-workers" in r.message
+        and "kaboom" in str(r.exc_info or r.message)
+        or ("resume-from-workers" in r.getMessage() and "kaboom" in r.getMessage())
+        for r in caplog.records
+    ), caplog.text
+    assert task not in mgr._detached_tasks
+
+
+@pytest.mark.asyncio
+async def test_spawn_detached_ignores_cancellation():
+    """Cancellation is routine at shutdown and must not log as a failure."""
+    mgr = _make_manager()
+
+    async def forever():
+        await asyncio.Event().wait()
+
+    task = mgr._spawn_detached(forever(), "unit")
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+    assert task not in mgr._detached_tasks
+
+
+def test_no_bare_create_task_in_manager():
+    """Regression guard: every detached task must go through _spawn_detached.
+
+    Two call shapes are legitimate and excluded:
+      * `session.task = asyncio.create_task(...)` — an owned turn handle;
+        the session itself holds the strong reference.
+      * the single call inside _spawn_detached, which is the wrapper.
+    """
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path("sessions/manager.py").read_text())
+
+    offenders: list[int] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) or fn.name == "_spawn_detached":
+            continue
+        # Assignment targets of the form <something>.task = ... are owned.
+        owned_calls = {
+            id(node.value)
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Attribute) and t.attr == "task" for t in node.targets)
+        }
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "create_task"
+                and id(node) not in owned_calls
+            ):
+                offenders.append(node.lineno)
+
+    assert not offenders, f"bare create_task must use _spawn_detached (sessions/manager.py lines {offenders})"
