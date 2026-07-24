@@ -127,6 +127,10 @@ class SessionAwareLLMScheduler:
             # the slot was granted to us — pass it straight to the next waiter.
             if not fut.cancelled() and fut.done():
                 self._wake_next_or_free()
+            # Our own item is still in the heap, dead. Reap here too: without
+            # a release() to drive _wake_next_or_free, a run of timeouts
+            # against a saturated provider would never prune.
+            self._drop_dead_waiters()
             raise LLMConcurrencyError(
                 f"Timed out after {effective_timeout:.0f}s waiting for LLM slot "
                 f"({self._waiting} still waiting, "
@@ -139,6 +143,7 @@ class SessionAwareLLMScheduler:
             elif not fut.cancelled():
                 # Slot was granted just before cancellation — pass it on.
                 self._wake_next_or_free()
+            self._drop_dead_waiters()
             raise
         else:
             self._waiting -= 1
@@ -158,6 +163,22 @@ class SessionAwareLLMScheduler:
                 return
             # Future already done (cancelled by timeout or CancelledError) — skip.
         self._available += 1
+        self._drop_dead_waiters()
+
+    def _drop_dead_waiters(self) -> None:
+        """Clear the heap when nothing is actually waiting on it.
+
+        acquire() decrements _waiting on every exit path, so _waiting == 0
+        means every remaining heap entry belongs to a caller that timed out
+        or was cancelled. _wake_next_or_free already skips those, so this is
+        not a correctness fix — but without it, repeated cancels against a
+        saturated provider grow the heap without bound and each wake has to
+        pop through the accumulated corpses first.
+        """
+        if self._waiting == 0 and self._heap:
+            dropped = len(self._heap)
+            self._heap.clear()
+            logger.debug("Dropped %d dead waiter(s) from the scheduler heap", dropped)
 
     def purge_session(self, session_id: str) -> None:
         """Remove a session from timeout tracking once it is fully reaped."""
