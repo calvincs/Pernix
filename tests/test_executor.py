@@ -309,6 +309,97 @@ async def test_execute_tool_round_mixed():
     assert contents["seq_tool"] == "seq"
 
 
+async def test_execute_tool_round_mixed_preserves_call_order():
+    """results[i] must be the result of tool_calls[i], whatever the mix.
+
+    core/agent.py zips parsed_calls against these results to attach each
+    result to its originating call's tool_call_id. Bucketing parallel-safe
+    calls ahead of sequential ones used to reorder the returned list, so a
+    round like [sequential, parallel] handed every result to the wrong call.
+    Sequential-first ordering is the case that regressed.
+    """
+    reg = ToolRegistry()
+    reg.register(
+        "par_tool",
+        func=lambda: "PAR",
+        description="p",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+    reg.register(
+        "seq_tool",
+        func=lambda: "SEQ",
+        description="s",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=False,
+        timeout=5,
+    )
+
+    # Sequential first — the ordering that used to come back reversed.
+    calls = [
+        {"name": "seq_tool", "arguments": {}},
+        {"name": "par_tool", "arguments": {}},
+    ]
+    results = await execute_tool_round(calls, None, reg)
+    assert [r.tool_name for r in results] == ["seq_tool", "par_tool"]
+    assert [r.content for r in results] == ["SEQ", "PAR"]
+
+    # Interleaved, with repeats, to catch index-mapping slips.
+    calls = [
+        {"name": "seq_tool", "arguments": {}},
+        {"name": "par_tool", "arguments": {}},
+        {"name": "seq_tool", "arguments": {}},
+        {"name": "par_tool", "arguments": {}},
+    ]
+    results = await execute_tool_round(calls, None, reg)
+    assert [r.tool_name for r in results] == [c["name"] for c in calls]
+
+
+async def test_execute_tool_round_order_holds_when_a_parallel_call_raises():
+    """A raising parallel call keeps its own slot; peers are not shifted."""
+
+    def boom():
+        raise RuntimeError("kaboom")
+
+    reg = ToolRegistry()
+    reg.register(
+        "seq_tool",
+        func=lambda: "SEQ",
+        description="s",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=False,
+        timeout=5,
+    )
+    reg.register(
+        "bad_par",
+        func=boom,
+        description="b",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+    reg.register(
+        "good_par",
+        func=lambda: "GOOD",
+        description="g",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+
+    calls = [
+        {"name": "seq_tool", "arguments": {}},
+        {"name": "bad_par", "arguments": {}},
+        {"name": "good_par", "arguments": {}},
+    ]
+    results = await execute_tool_round(calls, None, reg)
+    assert [r.tool_name for r in results] == ["seq_tool", "bad_par", "good_par"]
+    assert results[0].content == "SEQ"
+    assert results[1].was_error
+    assert results[2].content == "GOOD"
+
+
 async def test_execute_tool_round_empty():
     reg = _make_registry()
     results = await execute_tool_round([], None, reg)

@@ -279,45 +279,64 @@ async def execute_tool_round(
 
     tool_calls format: [{"name": str, "arguments": dict}, ...]
     Parallel-safe tools run concurrently. Mutating tools run sequentially.
-    """
-    parallel = []
-    sequential = []
 
-    for tc in tool_calls:
+    ORDERING CONTRACT: `results[i]` is always the result of `tool_calls[i]`.
+    Callers (core/agent.py) pair the two lists positionally to attach each
+    result to its originating call's tool_call_id, so the returned order
+    must mirror the input order — NOT the execution order. Parallel-safe
+    calls are dispatched first for latency, but their results are written
+    back into their original slots.
+    """
+    parallel_idx: list[int] = []
+    sequential_idx: list[int] = []
+
+    for i, tc in enumerate(tool_calls):
         name = tc.get("name", "")
         tool = registry.get(name)
         if tool and tool.parallel_safe:
-            parallel.append(tc)
+            parallel_idx.append(i)
         else:
-            sequential.append(tc)
+            sequential_idx.append(i)
 
-    results: list[ToolExecutionResult] = []
+    results: list[ToolExecutionResult | None] = [None] * len(tool_calls)
 
     # Run parallel-safe tools concurrently
-    if parallel:
-        tasks = [_execute_single(tc["name"], tc.get("arguments", {}), context, registry) for tc in parallel]
+    if parallel_idx:
+        tasks = [
+            _execute_single(
+                tool_calls[i]["name"],
+                tool_calls[i].get("arguments", {}),
+                context,
+                registry,
+            )
+            for i in parallel_idx
+        ]
         parallel_results = await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True),
             timeout=settings.tool_timeout,
         )
-        for tc, result in zip(parallel, parallel_results):
+        for i, result in zip(parallel_idx, parallel_results):
             if isinstance(result, asyncio.CancelledError):
                 raise result  # Propagate cancellation, don't swallow
             if isinstance(result, BaseException):
-                results.append(
-                    ToolExecutionResult(
-                        tool_name=tc["name"],
-                        content=f"Error: {result}",
-                        was_error=True,
-                        latency_ms=0,
-                    )
+                results[i] = ToolExecutionResult(
+                    tool_name=tool_calls[i]["name"],
+                    content=f"Error: {result}",
+                    was_error=True,
+                    latency_ms=0,
                 )
             else:
-                results.append(result)
+                results[i] = result
 
     # Run sequential tools in order
-    for tc in sequential:
-        result = await _execute_single(tc["name"], tc.get("arguments", {}), context, registry)
-        results.append(result)
+    for i in sequential_idx:
+        results[i] = await _execute_single(
+            tool_calls[i]["name"],
+            tool_calls[i].get("arguments", {}),
+            context,
+            registry,
+        )
 
-    return results
+    # Every slot is filled by construction: each index lands in exactly one
+    # of the two buckets, and both loops assign unconditionally.
+    return [r for r in results if r is not None]
