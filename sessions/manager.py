@@ -1923,8 +1923,13 @@ class SessionManager:
         reached += len(self._global_subscribers)
         run_on_loop(self._deliver_global, dict(event, _global=True))
 
-        # Session-specific subscribers (emit_event marshals internally)
-        for session in self._sessions.values():
+        # Session-specific subscribers (emit_event marshals internally).
+        # Snapshot: broadcast() is called from tool threads (ask_user,
+        # notify_user) while spawn_worker — also on a tool thread — inserts
+        # into _sessions via create_session. Iterating the live dict raced
+        # that insert and raised "dictionary changed size during iteration",
+        # which surfaced to the user as a bogus error from ask_user.
+        for session in list(self._sessions.values()):
             if session.subscribers:
                 session.emit_event(dict(event))
                 reached += 1
@@ -2017,7 +2022,9 @@ class SessionManager:
             sv2.SessionStateV2.AWAITING_USER,
             sv2.SessionStateV2.AWAITING_WORKERS,
         )
-        for session in self._sessions.values():
+        # Snapshot — a tool thread can insert into _sessions (spawn_worker ->
+        # create_session) while this runs on the event loop.
+        for session in list(self._sessions.values()):
             if sv2._current_state(session) not in _idle_v2:
                 return True
             if session.has_background_tasks:

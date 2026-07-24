@@ -81,12 +81,18 @@ class SnoozeRunner:
             _sv2.SessionStateV2.AWAITING_USER,
             _sv2.SessionStateV2.AWAITING_WORKERS,
         )
-        for session in manager._sessions.values():
+        # Snapshot once and reuse: a tool thread can insert into _sessions
+        # (spawn_worker -> create_session) while this runs on the event loop,
+        # and iterating the live dict raises "dictionary changed size during
+        # iteration" — which would kill the snooze cycle outright.
+        sessions = list(manager._sessions.values())
+
+        for session in sessions:
             if _sv2._current_state(session) not in _idle_v2:
                 return False
 
         # 2. No background tasks
-        for session in manager._sessions.values():
+        for session in sessions:
             if session.has_background_tasks:
                 return False
 
@@ -103,7 +109,7 @@ class SnoozeRunner:
         # 4. Cooldown elapsed (5 min since last user activity)
         cooldown = settings.snooze_cooldown_minutes * 60
         now = time.time()
-        for session in manager._sessions.values():
+        for session in sessions:
             if (now - session.last_activity_time) < cooldown:
                 return False
 
