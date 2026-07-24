@@ -38,6 +38,61 @@ class ToolExecutionResult:
     metadata: dict = field(default_factory=dict)
 
 
+# Grace added on top of a resolved dispatch timeout. The tool's own internal
+# timeout (e.g. bash's process.communicate) must fire FIRST so the model gets
+# the tool's own diagnostic instead of the executor's generic timeout error,
+# and so the worker thread unwinds on its own.
+_DISPATCH_TIMEOUT_GRACE_S = 5
+
+
+def _resolve_timeout(tool, arguments: dict | None) -> int:
+    """Resolve the dispatch timeout for one call.
+
+    A tool whose schema exposes a `timeout` parameter must also declare
+    `max_timeout` at registration; otherwise asyncio.wait_for below caps the
+    call at the tool's default and the caller's override does nothing at all.
+    """
+    base = tool.timeout
+    ceiling = tool.max_timeout
+    if ceiling <= 0:
+        return base
+    try:
+        requested = int((arguments or {}).get("timeout") or 0)
+    except (TypeError, ValueError):
+        requested = 0
+    if requested <= 0:
+        return base
+    return min(max(requested, base), ceiling) + _DISPATCH_TIMEOUT_GRACE_S
+
+
+def _kill_tool_subprocess(context: dict | None) -> None:
+    """Kill the session's tracked subprocess after a dispatch timeout.
+
+    asyncio.to_thread cannot be cancelled: when wait_for gives up, the worker
+    thread stays blocked in the tool until the tool itself returns. For bash
+    that means holding a shared-executor thread AND a live process tree for the
+    remainder of the child's runtime. Killing the process group lets the thread
+    unwind promptly. Best-effort — the tool clears _active_process in its own
+    finally, so a None here just means the call already finished.
+    """
+    sid = (context or {}).get("session_id", "")
+    if not sid:
+        return
+    try:
+        from sessions.manager import get_manager
+
+        session = get_manager().get(sid)
+        proc = getattr(session, "_active_process", None) if session else None
+        if proc is None or proc.poll() is not None:
+            return
+        from core.tools.builtin.core_tools import _kill_process_tree
+
+        _kill_process_tree(proc)
+        logger.warning("Killed subprocess %s after tool dispatch timeout", proc.pid)
+    except Exception as e:
+        logger.debug("Post-timeout subprocess kill skipped: %s", e)
+
+
 def _is_unattended_session(sid: str) -> bool:
     """Return True for cron sessions and workers spawned from cron sessions.
 
@@ -189,7 +244,7 @@ async def _execute_single(
 
         ensure_workspace_venv_on_path()
 
-    timeout = tool.timeout
+    timeout = _resolve_timeout(tool, arguments)
     start = time.monotonic()
     try:
         # Capture the running event loop so tools on worker threads can
@@ -244,6 +299,10 @@ async def _execute_single(
     except asyncio.TimeoutError:
         latency = int((time.monotonic() - start) * 1000)
         registry.metrics[name].record_timeout(latency)
+        # The to_thread worker is still blocked in the tool and cannot be
+        # cancelled. Kill any subprocess it spawned so it unwinds instead of
+        # holding a shared-executor thread for the child's full runtime.
+        _kill_tool_subprocess(context)
         return ToolExecutionResult(
             tool_name=name,
             content=f"Error: Tool '{name}' timed out after {timeout}s",
