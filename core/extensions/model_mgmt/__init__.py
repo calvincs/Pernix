@@ -9,6 +9,27 @@ from config import settings
 
 logger = logging.getLogger("pernix.ext.model")
 
+# Error substrings that mean "the requested model id is wrong / unavailable"
+# rather than a transient failure. When call_model hits one of these, we append
+# the real model list so the agent stops guessing ids (observed loop: 6
+# consecutive call_model 404s on hallucinated Qwen ids).
+_BAD_MODEL_ERR = ("404", "400", "not found", "no endpoints", "no allowed providers", "not a valid model")
+
+
+def _available_model_ids(client, loop, cap: int = 30) -> str:
+    """Best-effort one-line hint of callable model ids for error messages."""
+    if loop is None:
+        return "Call list_available_models to see valid ids."
+    try:
+        future = asyncio.run_coroutine_threadsafe(client.list_models(), loop)
+        models = future.result(timeout=15)
+    except Exception:
+        return "Call list_available_models to see valid ids."
+    ids = [m.id for m in (models or [])][:cap]
+    if not ids:
+        return "Call list_available_models to see valid ids."
+    return "Available models: " + ", ".join(ids) + " — pass one of these ids exactly, or use list_available_models."
+
 
 def list_available_models(_context: dict | None = None) -> str:
     """List all available models across providers."""
@@ -39,6 +60,29 @@ def call_model(model: str, prompt: str, system: str = "", image_path: str = "", 
     from core.llm.client import get_llm_client
 
     client = get_llm_client()
+    ctx = _context or {}
+    try:
+        loop = ctx.get("_loop") or asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None  # no running loop (e.g. sync unit test) — chat call below handles it
+
+    # Validate/canonicalize the model up front so a bad id returns an actionable
+    # list instead of an opaque provider error. Mirrors switch_model: an id with
+    # no "/" that the registry doesn't know can't be OpenRouter and Ollama
+    # doesn't have it either — reject early with the valid options. Ids that
+    # look like OpenRouter ("vendor/model") are allowed through and validated by
+    # the provider (handled in the except below).
+    try:
+        resolved = client.router.registry.resolve_model_id(model)
+        info = client.router.registry.get_model_info(resolved)
+        if info is not None:
+            model = resolved
+        elif client.router.registry.resolve_provider(resolved) != "openrouter":
+            # "Error:" prefix so the executor flags this was_error (stuck
+            # detection keys on it); a bare "Model not found" reads as success.
+            return f"Error: model '{model}' not found. {_available_model_ids(client, loop)}"
+    except Exception:
+        pass  # best-effort — fall through and let the provider decide
 
     messages = []
     if system:
@@ -78,14 +122,19 @@ def call_model(model: str, prompt: str, system: str = "", image_path: str = "", 
         messages.append({"role": "user", "content": prompt})
 
     try:
-        ctx = _context or {}
-        loop = ctx.get("_loop") or asyncio.get_running_loop()
         future = asyncio.run_coroutine_threadsafe(client.chat(messages, model=model, max_tokens=4096), loop)
         resp = future.result(timeout=120)
 
         return f"[{resp.model} via {resp.provider}]\n{resp.content}"
     except Exception as e:
-        return f"Error calling {model}: {e}"
+        msg = str(e)
+        # "Error:" prefix so the executor records was_error (feeds stuck
+        # detection). A model-not-found/invalid error is unrecoverable by
+        # retrying with a different guess — surface the real options so the
+        # agent self-corrects instead of looping on hallucinated ids.
+        if any(tok in msg.lower() for tok in _BAD_MODEL_ERR):
+            return f"Error: calling {model} failed — {msg}\n{_available_model_ids(client, loop)}"
+        return f"Error: calling {model} failed — {msg}"
 
 
 def switch_model(model: str, reason: str = "", scope: str = "turn", _context: dict | None = None) -> str:

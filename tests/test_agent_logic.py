@@ -328,6 +328,53 @@ class TestStuckDetector:
         score, _ = sd.evaluate("", None, {}, reg)
         assert "file_edit_loop" not in sd.behavioral_flags
 
+    def test_signal11_tool_failure_loop(self):
+        """3+ failures of the same NON-file tool (varied args) trips the signal.
+
+        Mirrors the observed call_model loop: each call 404s with a different
+        guessed model id, so args hashes are unique (evading Signal 3) and the
+        tool is real (evading Signal 5)."""
+        sd = StuckDetector()
+        reg = _make_registry(["call_model"])
+        for i in range(3):
+            sd.mark_failure(tool_name="call_model", args={"model": f"qwen/guess-{i}"})
+        score, _ = sd.evaluate("", None, {}, reg)
+        assert score >= 0.4
+        assert "tool_failure_loop" in sd.behavioral_flags
+
+    def test_signal11_excludes_file_tools(self):
+        """File tools are covered by Signal 7; Signal 11 must not double-count."""
+        sd = StuckDetector()
+        reg = _make_registry()
+        for _ in range(3):
+            sd.mark_failure(tool_name="file_edit", args={"path": "foo.py"})
+        sd.evaluate("", None, {}, reg)
+        assert "tool_failure_loop" not in sd.behavioral_flags
+
+    def test_signal11_success_resets_streak(self):
+        """A success of the SAME tool clears its failure streak."""
+        sd = StuckDetector()
+        reg = _make_registry(["call_model"])
+        sd.mark_failure(tool_name="call_model", args={"model": "a"})
+        sd.mark_failure(tool_name="call_model", args={"model": "b"})
+        sd.mark_success(tool_name="call_model", args={"model": "c"})
+        sd.mark_failure(tool_name="call_model", args={"model": "d"})
+        sd.evaluate("", None, {}, reg)
+        assert "tool_failure_loop" not in sd.behavioral_flags
+
+    def test_signal11_interleaved_unrelated_success_still_trips(self):
+        """Failures interleaved with a DIFFERENT tool's success still accumulate
+        — the real loop ran call_model 404s between successful bash calls."""
+        sd = StuckDetector()
+        reg = _make_registry(["call_model", "bash"])
+        sd.mark_failure(tool_name="call_model", args={"model": "a"})
+        sd.mark_success(tool_name="bash", args={"command": "ls"})
+        sd.mark_failure(tool_name="call_model", args={"model": "b"})
+        sd.mark_success(tool_name="bash", args={"command": "pwd"})
+        sd.mark_failure(tool_name="call_model", args={"model": "c"})
+        sd.evaluate("", None, {}, reg)
+        assert "tool_failure_loop" in sd.behavioral_flags
+
     def test_mark_failure_no_args_backwards_compat(self):
         """mark_failure() with no args still works (backwards compat)."""
         sd = StuckDetector()
