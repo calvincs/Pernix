@@ -157,6 +157,48 @@ async def test_run_cycle_full_with_empty_store(monkeypatch, tmp_path):
     assert runner._activity_since_last_cycle is False
 
 
+async def test_run_cycle_propagates_cancellation(monkeypatch):
+    """A cancel must escape run_cycle, not be logged and dropped.
+
+    Snooze mutates data/memories/*.md and the FTS index in separate steps.
+    Absorbing a cancel let the caller believe the cycle finished normally and
+    carry on, and at shutdown left the maintenance tick running past the
+    cancel into the checkpoint/vacuum branches.
+    """
+    monkeypatch.setattr("config.settings.snooze_enabled", True)
+    runner = SnoozeRunner()
+    runner._is_idle = lambda: True
+
+    async def _cancelled():
+        raise asyncio.CancelledError()
+
+    runner._do_cycle = _cancelled
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner.run_cycle()
+
+    # The finally block still settles cycle bookkeeping on the way out.
+    assert runner._running is False
+    assert runner._stats["cycles"] == 1
+
+
+async def test_run_cycle_still_absorbs_timeouts(monkeypatch):
+    """Hitting the cycle's own budget is normal completion, not an error."""
+    monkeypatch.setattr("config.settings.snooze_enabled", True)
+    monkeypatch.setattr("config.settings.snooze_max_cycle_seconds", 1)
+    runner = SnoozeRunner()
+    runner._is_idle = lambda: True
+
+    async def _slow():
+        await asyncio.sleep(5)
+
+    runner._do_cycle = _slow
+
+    await runner.run_cycle()  # must not raise
+    assert runner._running is False
+    assert runner._stats["cycles"] == 1
+
+
 # ---------------------------------------------------------------------------
 # _parse_insight_entries (static method, pure logic)
 # ---------------------------------------------------------------------------

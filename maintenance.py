@@ -12,6 +12,16 @@ logger = logging.getLogger("pernix.maintenance")
 
 TICK_INTERVAL = 60  # seconds
 
+# Bound on the fast duties only (subscriber reaping, session reaping, partial
+# cleanup, checkpoint, hygiene). Snooze is deliberately NOT covered by this —
+# it has its own, larger budget and runs outside the tick. See _run_snooze.
+TICK_TIMEOUT = 30  # seconds
+
+# Headroom over settings.snooze_max_cycle_seconds. run_cycle already bounds
+# itself; this outer wait only catches a cycle wedged outside its own wait_for,
+# so it must never be the one that fires first.
+SNOOZE_TIMEOUT_GRACE = 15  # seconds
+
 
 class MaintenanceRunner:
     """Background heartbeat that runs periodic maintenance tasks."""
@@ -93,16 +103,48 @@ class MaintenanceRunner:
                 self._last_tick_time = time.time()
 
                 try:
-                    await asyncio.wait_for(self._tick(), timeout=30)
+                    await asyncio.wait_for(self._tick(), timeout=TICK_TIMEOUT)
                 except asyncio.TimeoutError:
-                    logger.warning("Maintenance tick exceeded 30s timeout, skipping")
+                    logger.warning("Maintenance tick exceeded %ds timeout, skipping", TICK_TIMEOUT)
+
+                # Snooze runs OUTSIDE the tick bound. It is budgeted by
+                # settings.snooze_max_cycle_seconds, which can legitimately
+                # exceed TICK_TIMEOUT; running it inside meant the tick's
+                # wait_for force-cancelled every cycle partway through.
+                if self._tick_count % settings.snooze_interval_ticks == 0:
+                    await self._run_snooze()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Maintenance tick error: %s", e, exc_info=True)
 
+    async def _run_snooze(self) -> None:
+        """Run one Snooze cycle under its own budget.
+
+        Kept out of _tick() because _tick is bounded by TICK_TIMEOUT while
+        Snooze is budgeted by settings.snooze_max_cycle_seconds. When the
+        cycle ran inside the tick, the tick's wait_for cancelled it at
+        TICK_TIMEOUT regardless of the configured budget — cutting memory
+        maintenance mid-write. The bound here is strictly larger than the
+        cycle's own so run_cycle's internal wait_for is what actually fires.
+        """
+        from core.snooze import get_snooze
+
+        budget = max(settings.snooze_max_cycle_seconds, 1) + SNOOZE_TIMEOUT_GRACE
+        try:
+            await asyncio.wait_for(get_snooze().run_cycle(), timeout=budget)
+        except asyncio.TimeoutError:
+            logger.warning("Snooze cycle exceeded its outer %ds bound", budget)
+        except asyncio.CancelledError:
+            raise  # shutdown — let the heartbeat's handler stop the loop
+        except Exception as e:
+            logger.error("Snooze cycle error: %s", e, exc_info=True)
+
     async def _tick(self) -> None:
-        """Execute stratified maintenance duties."""
+        """Execute stratified maintenance duties.
+
+        Snooze is NOT run here — see _run_snooze and TICK_TIMEOUT.
+        """
         from db import models as db
         from sessions.manager import get_manager
 
@@ -146,15 +188,6 @@ class MaintenanceRunner:
             cleaned = db.cleanup_old_partials(max_age_hours=1)
             if cleaned:
                 self._stats["partials_cleaned"] += cleaned
-
-        # Every N ticks: Snooze cycle (idle-time memory consolidation)
-        if tick % settings.snooze_interval_ticks == 0:
-            try:
-                from core.snooze import get_snooze
-
-                await get_snooze().run_cycle()
-            except Exception as e:
-                logger.error("Snooze cycle error: %s", e, exc_info=True)
 
         # Every 60 ticks (1 hour): WAL checkpoint. Off-loop — a checkpoint
         # can hold the DB busy for seconds on a large WAL, which froze every

@@ -181,7 +181,13 @@ class SnoozeRunner:
         except asyncio.TimeoutError:
             logger.info("Snooze cycle hit time limit (%ds)", settings.snooze_max_cycle_seconds)
         except asyncio.CancelledError:
+            # Re-raise. Swallowing a cancel here meant that at shutdown,
+            # maint.stop() -> task.cancel() landed inside the cycle, was
+            # absorbed, and the maintenance tick carried on into the WAL
+            # checkpoint and vacuum branches while shutdown waited on it.
+            # The finally below still runs, so cycle bookkeeping is intact.
             logger.debug("Snooze cycle cancelled")
+            raise
         except Exception as e:
             logger.error("Snooze cycle error: %s", e, exc_info=True)
         finally:
