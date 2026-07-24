@@ -467,3 +467,78 @@ def test_purge_session_survives_a_failing_scheduler():
     client = LLMClient.__new__(LLMClient)
     client.router = _Router()
     client.purge_session("whatever")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Scheduler heap hygiene
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_timed_out_waiters_are_reaped_from_the_heap():
+    """A cancelled/timed-out acquire leaves its _WaitItem behind.
+    _wake_next_or_free skips dead futures, so this was never a correctness
+    bug — but under repeated timeouts against a saturated provider the heap
+    grew without bound and every wake paid to pop through the corpses."""
+    from core.llm.semaphore import LLMConcurrencyError, SessionAwareLLMScheduler
+
+    sem = SessionAwareLLMScheduler(max_concurrent=1)
+    await sem.acquire(session_id="holder")  # saturate
+    assert sem.available == 0
+
+    for i in range(20):
+        with pytest.raises(LLMConcurrencyError):
+            await sem.acquire(session_id=f"waiter{i}", timeout=0.01)
+
+    assert sem.waiting == 0
+    assert len(sem._heap) == 0, f"dead waiters accumulated: {len(sem._heap)}"
+
+    sem.release()
+    assert sem.available == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiters_are_reaped_from_the_heap():
+    from core.llm.semaphore import SessionAwareLLMScheduler
+
+    sem = SessionAwareLLMScheduler(max_concurrent=1)
+    await sem.acquire(session_id="holder")
+
+    tasks = [asyncio.create_task(sem.acquire(session_id=f"w{i}", timeout=30)) for i in range(10)]
+    await asyncio.sleep(0.05)
+    assert sem.waiting == 10
+
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert sem.waiting == 0
+    assert len(sem._heap) == 0
+
+    sem.release()
+    assert sem.available == 1
+
+
+@pytest.mark.asyncio
+async def test_live_waiters_are_never_dropped():
+    """The reaper must only fire when nothing is genuinely waiting."""
+    from core.llm.semaphore import SessionAwareLLMScheduler
+
+    sem = SessionAwareLLMScheduler(max_concurrent=1)
+    await sem.acquire(session_id="holder")
+
+    live = asyncio.create_task(sem.acquire(session_id="live", timeout=30))
+    await asyncio.sleep(0.05)
+
+    # A second waiter times out while `live` is still queued.
+    from core.llm.semaphore import LLMConcurrencyError
+
+    with pytest.raises(LLMConcurrencyError):
+        await sem.acquire(session_id="doomed", timeout=0.01)
+
+    assert sem.waiting == 1, "the live waiter must still be counted"
+    assert len(sem._heap) >= 1, "the live waiter must not be dropped"
+
+    sem.release()
+    await asyncio.wait_for(live, timeout=2)
+    sem.release()
