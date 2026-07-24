@@ -188,9 +188,21 @@ class LLMClient:
         await self.router.refresh_registry()
 
     def purge_session(self, session_id: str) -> None:
-        """Remove session from LLM timeout tracking once it is fully reaped."""
-        self.router._ollama_semaphore.purge_session(session_id)
-        self.router._openrouter_semaphore.purge_session(session_id)
+        """Remove session from LLM timeout tracking once it is fully reaped.
+
+        Best-effort by design: this is teardown, called from remove() and
+        delete_session(). A router without the expected schedulers (a stubbed
+        one, or a partially constructed router after a failed reset) must not
+        turn "delete this session" into an AttributeError.
+        """
+        for attr in ("_ollama_semaphore", "_openrouter_semaphore"):
+            sem = getattr(self.router, attr, None)
+            if sem is None:
+                continue
+            try:
+                sem.purge_session(session_id)
+            except Exception as e:
+                logger.debug("purge_session on %s failed for %s: %s", attr, session_id, e)
 
     async def close(self) -> None:
         await self.router.close()

@@ -409,3 +409,61 @@ class TestSemaphoreStatsAPI:
         assert "capacity" in stats
         assert "ollama" in stats
         assert "openrouter" in stats
+
+
+# ---------------------------------------------------------------------------
+# Scheduler budget cleanup on session teardown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_session_purges_scheduler_budget():
+    """remove() purged the scheduler; delete_session() did not, so the
+    per-provider budget maps grew for the life of the process — and a
+    recycled session id would inherit a stale wall-clock clock."""
+    from core.llm.client import get_llm_client
+    from sessions.manager import SessionManager
+
+    mgr = SessionManager()
+    sid = mgr.create_session(title="Budget Purge")
+
+    router = get_llm_client().router
+    for sem in (router._ollama_semaphore, router._openrouter_semaphore):
+        await sem.acquire(session_id=sid)
+        assert sid in sem._session_first_active
+        sem.extend_session_budget(sid, 60)
+        assert sid in sem._session_timeout_override
+
+    mgr.delete_session(sid)
+
+    for sem in (router._ollama_semaphore, router._openrouter_semaphore):
+        assert sid not in sem._session_first_active
+        assert sid not in sem._session_timeout_override
+        sem.release()
+
+
+def test_purge_session_tolerates_a_stubbed_router():
+    """Teardown must never raise. A stubbed or partially built router (test
+    doubles, or a router mid-reset_router) previously produced an
+    AttributeError out of delete_session/remove."""
+    from core.llm.client import LLMClient
+
+    client = LLMClient.__new__(LLMClient)
+    client.router = object()  # no _ollama_semaphore / _openrouter_semaphore
+    client.purge_session("whatever")  # must not raise
+
+
+def test_purge_session_survives_a_failing_scheduler():
+    from core.llm.client import LLMClient
+
+    class _Boom:
+        def purge_session(self, sid):
+            raise RuntimeError("scheduler exploded")
+
+    class _Router:
+        _ollama_semaphore = _Boom()
+        _openrouter_semaphore = _Boom()
+
+    client = LLMClient.__new__(LLMClient)
+    client.router = _Router()
+    client.purge_session("whatever")  # must not raise
