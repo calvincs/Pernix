@@ -645,7 +645,8 @@ async def run_agent(
                 override_active,
             )
             try:
-                db.add_message(
+                await asyncio.to_thread(
+                    db.add_message,
                     session_id,
                     "model_divider",
                     "",
@@ -976,7 +977,8 @@ async def run_agent(
                 # reflect evidence shows it AND the user-visible transcript
                 # explains the truncation point. We do NOT set session.error
                 # here — that's reserved for genuine failures.
-                db.add_message(
+                await asyncio.to_thread(
+                    db.add_message,
                     session_id,
                     "system",
                     "Turn ended early: per-session LLM time budget exhausted. "
@@ -1032,7 +1034,8 @@ async def run_agent(
             # Inject a system message instructing the model to continue. The
             # next round will see its own truncated assistant message in the
             # transcript and pick up from where it stopped.
-            db.add_message(
+            await asyncio.to_thread(
+                db.add_message,
                 session_id,
                 "system",
                 "Your previous response was cut off because it hit the "
@@ -1182,7 +1185,7 @@ async def run_agent(
                     "what you need from the user to proceed. After ask_user returns, "
                     "use the answer to pick a new strategy."
                 )
-                db.add_message(session_id, "system", hint)
+                await asyncio.to_thread(db.add_message, session_id, "system", hint)
                 # Don't break — let one more round run so the agent can ask.
                 collected_content = ""
                 collected_tool_calls = []
@@ -1195,7 +1198,8 @@ async def run_agent(
                     session_id,
                     _stuck_ask_user_continues,
                 )
-                db.add_message(
+                await asyncio.to_thread(
+                    db.add_message,
                     session_id,
                     "system",
                     f"Stuck-detection nudged you {_stuck_ask_user_continues} "
@@ -1203,8 +1207,11 @@ async def run_agent(
                     "you have so far and stop.",
                 )
             else:
-                db.add_message(
-                    session_id, "system", "You appear to be stuck in a loop. Summarize your progress and stop."
+                await asyncio.to_thread(
+                    db.add_message,
+                    session_id,
+                    "system",
+                    "You appear to be stuck in a loop. Summarize your progress and stop.",
                 )
             session.termination_reason = "round_ceiling"
             break
@@ -1215,7 +1222,8 @@ async def run_agent(
             if repeats >= 1 and score > 0.3:
                 _nudge_tool_names = sorted({tc.get("name", "") for tc in (collected_tool_calls or [])})
                 _nudge_tool_str = ", ".join(_nudge_tool_names) if _nudge_tool_names else "unknown"
-                db.add_message(
+                await asyncio.to_thread(
+                    db.add_message,
                     session_id,
                     "system",
                     f"You are repeating tool calls ({_nudge_tool_str}). "
@@ -1643,7 +1651,8 @@ async def run_agent(
                         session.emit_event({"type": "stream.token", "content": event.content})
                     elif event.type == StreamEventType.USAGE and event.usage:
                         _last_usage = event.usage
-                        db.add_token_usage(
+                        await asyncio.to_thread(
+                            db.add_token_usage,
                             session_id=session_id,
                             model=_final_model,
                             prompt_tokens=event.usage.prompt_tokens,
