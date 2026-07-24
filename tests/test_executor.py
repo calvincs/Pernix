@@ -4,8 +4,13 @@ import asyncio
 
 import pytest
 
-from core.tools.executor import ToolExecutionResult, _execute_single, execute_tool_round
-from core.tools.registry import ToolRegistry
+from core.tools.executor import (
+    ToolExecutionResult,
+    _execute_single,
+    _resolve_timeout,
+    execute_tool_round,
+)
+from core.tools.registry import ToolDef, ToolRegistry
 
 
 def _make_registry(tools: dict | None = None) -> ToolRegistry:
@@ -22,6 +27,82 @@ def _make_registry(tools: dict | None = None) -> ToolRegistry:
                 timeout=5,
             )
     return reg
+
+
+# ---------------------------------------------------------------------------
+# _resolve_timeout
+# ---------------------------------------------------------------------------
+
+
+def _tool(timeout: int, max_timeout: int = 0) -> ToolDef:
+    return ToolDef(
+        name="t",
+        description="d",
+        parameters={"type": "object", "properties": {}},
+        function=lambda: "ok",
+        timeout=timeout,
+        max_timeout=max_timeout,
+    )
+
+
+def test_resolve_timeout_without_ceiling_ignores_caller_override():
+    """A tool that never declared max_timeout is not overridable."""
+    assert _resolve_timeout(_tool(30), {"timeout": 1800}) == 30
+    assert _resolve_timeout(_tool(30), None) == 30
+
+
+def test_resolve_timeout_honors_override_up_to_ceiling():
+    """bash's documented 1800s override must actually reach the dispatcher."""
+    t = _tool(30, max_timeout=1800)
+    # Grace is added so the tool's own internal timeout fires first.
+    assert _resolve_timeout(t, {"timeout": 600}) > 600
+    assert _resolve_timeout(t, {"timeout": 600}) == 605
+
+
+def test_resolve_timeout_clamps_to_ceiling():
+    t = _tool(30, max_timeout=1800)
+    assert _resolve_timeout(t, {"timeout": 99999}) == 1805
+
+
+def test_resolve_timeout_ignores_junk_and_below_default_values():
+    t = _tool(30, max_timeout=1800)
+    assert _resolve_timeout(t, {"timeout": 0}) == 30
+    assert _resolve_timeout(t, {"timeout": -5}) == 30
+    assert _resolve_timeout(t, {"timeout": "nonsense"}) == 30
+    assert _resolve_timeout(t, {}) == 30
+    # Below the tool default: never shrink under it, but still grant grace.
+    assert _resolve_timeout(t, {"timeout": 5}) == 35
+
+
+def test_bash_registers_a_timeout_ceiling():
+    """Regression: bash advertises `timeout` in its schema, so it must declare
+    max_timeout or the executor caps every call at shell_timeout."""
+    from core.tools.builtin.core_tools import BASH_MAX_TIMEOUT, register
+
+    reg = ToolRegistry()
+    register(reg)
+    bash_def = reg.get("bash")
+    assert "timeout" in bash_def.parameters["properties"]
+    assert bash_def.max_timeout == BASH_MAX_TIMEOUT
+
+
+def test_every_tool_exposing_timeout_declares_a_ceiling():
+    """Guard the whole builtin+extension surface against the same trap."""
+    from core.extensions import load_extensions
+    from core.tools.builtin import load_builtin_tools
+
+    reg = ToolRegistry()
+    load_builtin_tools(reg)
+    try:
+        load_extensions(reg)
+    except Exception:
+        pass  # extensions are optional here; builtins are the contract
+    offenders = [
+        t.name
+        for t in reg.all_tools()
+        if "timeout" in (t.parameters or {}).get("properties", {}) and t.max_timeout <= 0
+    ]
+    assert not offenders, f"tools expose a `timeout` arg but declare no max_timeout: {offenders}"
 
 
 # ---------------------------------------------------------------------------
