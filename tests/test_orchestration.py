@@ -633,3 +633,59 @@ def test_spawn_worker_budget_extension_capped_at_24h(mgr, monkeypatch):
     assert extend_calls, "spawn_worker must call extend_session_budget"
     _sid, secs = extend_calls[0]
     assert secs == 24 * 3600.0, f"extension must cap at 24h, got {secs}"
+
+
+# ---------------------------------------------------------------------------
+# Active-worker accounting
+# ---------------------------------------------------------------------------
+
+
+def test_reaped_workers_do_not_count_as_active():
+    """A worker reaped from memory reports status "unknown". Counting it as
+    active meant a long-lived parent whose finished workers had been reaped
+    eventually could never spawn again — the LLM-capacity gate refused every
+    call on behalf of workers that completed hours earlier."""
+    from core.extensions.orchestration import _count_active_workers
+    from sessions.manager import SessionManager
+    from sessions.state import AgentSession
+
+    mgr = SessionManager()
+    parent = AgentSession(session_id="parent")
+    # Three workers that ran and were subsequently reaped from memory.
+    parent.worker_ids.extend(["gone1", "gone2", "gone3"])
+
+    assert mgr.get_status("gone1")["status"] == "unknown"
+    assert _count_active_workers(mgr, parent) == 0
+
+
+def test_live_workers_still_count_as_active():
+    from core.extensions.orchestration import _count_active_workers
+    from sessions import state_v2 as sv2
+    from sessions.manager import SessionManager
+    from sessions.state import AgentSession
+
+    mgr = SessionManager()
+    parent = AgentSession(session_id="parent")
+
+    running = AgentSession(session_id="running", session_type="worker")
+    running._state_v2 = sv2.SessionStateV2.PROCESSING
+    mgr._sessions["running"] = running
+
+    settled = AgentSession(session_id="settled", session_type="worker")
+    settled._state_v2 = sv2.SessionStateV2.IDLE_READY
+    mgr._sessions["settled"] = settled
+
+    parent.worker_ids.extend(["running", "settled", "reaped"])
+    assert _count_active_workers(mgr, parent) == 1
+
+
+def test_both_spawn_gates_share_one_definition():
+    """The capacity warning and the max_concurrent_workers limit used to
+    carry separate inline status tuples that disagreed about "unknown"."""
+    import inspect
+
+    from core.extensions import orchestration
+
+    src = inspect.getsource(orchestration.spawn_worker)
+    assert src.count("_count_active_workers(manager, parent)") == 2
+    assert '"deleted"' not in src, "status tuples must not be re-inlined in spawn_worker"

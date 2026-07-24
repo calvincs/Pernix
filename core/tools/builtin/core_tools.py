@@ -548,6 +548,13 @@ def _detect_duplicate_workspace_prefix(command: str, workspace: Path) -> str | N
     return None
 
 
+# Hard ceiling for bash's per-call `timeout` override. Mirrored into the tool
+# registration as max_timeout so the executor's dispatch wait_for agrees with
+# the clamp applied below — otherwise the outer wait fires first and the
+# override is silently inert.
+BASH_MAX_TIMEOUT = 30 * 60  # 30 minutes
+
+
 def bash(command: str, timeout: int | None = None, _context: dict | None = None) -> str:
     """Execute a shell command in the workspace.
 
@@ -637,7 +644,7 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
         # Resolve effective timeout: caller override (capped at 30 min)
         # falls back to global setting. Negative/zero treated as "use default".
         if timeout is not None and int(timeout) > 0:
-            effective_timeout = min(int(timeout), 30 * 60)
+            effective_timeout = min(int(timeout), BASH_MAX_TIMEOUT)
         else:
             effective_timeout = settings.shell_timeout
 
@@ -802,6 +809,10 @@ def register(reg) -> None:
         category="core",
         tags=["shell", "execute", "run", "command", "terminal", "bash", "git", "curl", "pip", "python", "node", "npm"],
         timeout=settings.shell_timeout,
+        # bash's schema exposes a per-call `timeout` override; without a
+        # matching max_timeout the executor's wait_for would cap every call at
+        # shell_timeout and the override would be inert.
+        max_timeout=BASH_MAX_TIMEOUT,
         parallel_safe=False,
         safety_level="caution",
     )

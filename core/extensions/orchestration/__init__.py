@@ -25,6 +25,26 @@ logger = logging.getLogger("pernix.ext.orchestration")
 # either has committed a new session to the DB.
 _spawn_lock = threading.Lock()
 
+# Statuses that mean a worker is no longer occupying a slot.
+#
+# "unknown" is load-bearing: SessionManager.get_status returns it for any
+# session no longer resident in memory, and workers are reaped after
+# ~1800s idle. Omitting it makes every completed-then-reaped worker count
+# as active forever, so a long-lived parent eventually cannot spawn at all.
+_WORKER_INACTIVE_STATUSES = frozenset({"idle", "error", "deleted", "unknown"})
+
+
+def _count_active_workers(manager, parent) -> int:
+    """Workers of `parent` still occupying a slot.
+
+    Single definition shared by both spawn gates below. They used to carry
+    separate inline tuples that disagreed about "unknown", so the capacity
+    warning and the max_concurrent_workers limit counted different things.
+    """
+    return sum(
+        1 for wid in list(parent.worker_ids) if manager.get_status(wid).get("status") not in _WORKER_INACTIVE_STATUSES
+    )
+
 
 def spawn_worker(
     task_description: str,
@@ -73,13 +93,7 @@ def spawn_worker(
             from core.llm.client import _get_semaphore_stats
 
             stats = _get_semaphore_stats()
-            active_workers = len(
-                [
-                    wid
-                    for wid in parent.worker_ids
-                    if manager.get_status(wid).get("status") not in ("idle", "error", "deleted")
-                ]
-            )
+            active_workers = _count_active_workers(manager, parent)
             if active_workers >= stats["capacity"]:
                 return (
                     f"Warning: {active_workers} worker(s) already active but only "
@@ -120,13 +134,7 @@ def spawn_worker(
     with _spawn_lock:
         parent = manager.get(parent_id)
         if parent:
-            active_count = len(
-                [
-                    wid
-                    for wid in parent.worker_ids
-                    if manager.get_status(wid).get("status") not in ("idle", "error", "deleted", "unknown")
-                ]
-            )
+            active_count = _count_active_workers(manager, parent)
             if active_count >= settings.max_concurrent_workers:
                 return f"Error: Max active workers ({settings.max_concurrent_workers}) reached. Wait for running workers to complete."
 

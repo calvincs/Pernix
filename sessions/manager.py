@@ -11,7 +11,7 @@ from typing import Awaitable, Callable
 from config import settings
 from db import models as db
 from sessions import state_v2 as sv2
-from sessions.state import AgentSession
+from sessions.state import AgentSession, PendingMessage
 
 logger = logging.getLogger("pernix.sessions")
 
@@ -171,6 +171,38 @@ class SessionManager:
         self._sessions: dict[str, AgentSession] = {}
         self._agent_runner: Callable | None = None  # set by agent module on init
         self._global_subscribers: list[asyncio.Queue] = []  # global notification listeners
+        # Strong refs for detached recovery tasks — see _spawn_detached.
+        self._detached_tasks: set[asyncio.Task] = set()
+
+    def _spawn_detached(self, coro, label: str) -> asyncio.Task:
+        """Schedule a fire-and-forget task, retaining a reference to it.
+
+        asyncio holds only a WEAK reference to a running task, so a bare
+        create_task() whose result is discarded can be garbage-collected
+        mid-flight. An exception inside one is also never retrieved: it
+        surfaces at most as an "exception was never retrieved" warning at
+        interpreter exit, long after the fact.
+
+        Every caller here is a recovery path — draining the queue after a
+        reaper unstick, resuming a parent whose watch-set just emptied — so
+        a silent failure leaves a session idle on queued work until the next
+        5-minute reaper tick happens to notice, with nothing in the log to
+        explain the pause. Mirrors MaintenanceRunner.track_task.
+        """
+        task = asyncio.create_task(coro)
+        self._detached_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            self._detached_tasks.discard(t)
+            if t.cancelled():
+                logger.debug("Detached task %s cancelled", label)
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("Detached task %s failed: %s", label, exc, exc_info=exc)
+
+        task.add_done_callback(_done)
+        return task
 
     def set_agent_runner(self, runner: Callable[..., Awaitable]) -> None:
         """Register the agent loop function. Called once at startup."""
@@ -522,6 +554,12 @@ class SessionManager:
         worker_summary.unlink(missing_ok=True)
 
         self._sessions.pop(session_id, None)
+        # Same scheduler cleanup remove() does. Without it the per-provider
+        # wall-clock budget maps keep an entry for a session that no longer
+        # exists, for the life of the process.
+        from core.llm.client import get_llm_client as _get_client
+
+        _get_client().purge_session(session_id)
         db.delete_session(session_id)
         logger.info("Deleted session %s", session_id)
 
@@ -605,7 +643,7 @@ class SessionManager:
                 ):
                     target_id = session.last_user_msg_id
                     existing = db.get_message(target_id)
-                    if existing is not None:
+                    if existing is not None and self._can_absorb_rapid_fire(session, target_id):
                         combined = _combine_rapid_fire(existing.get("content", "") or "", message)
                         db.update_message_content(target_id, combined)
                         session.last_user_msg_at = now
@@ -613,14 +651,18 @@ class SessionManager:
                         # update its in-memory tuple too so the agent runs with
                         # the combined content if it ever pops.
                         for i, entry in enumerate(session.pending_messages):
-                            if len(entry) >= 5 and entry[4] == target_id:
-                                _msg, _sp, _pre, _ts, _mid = entry
-                                session.pending_messages[i] = (combined, _sp, _pre, now, _mid)
+                            entry = PendingMessage.coerce(entry)
+                            if entry.msg_id == target_id:
+                                session.pending_messages[i] = entry._replace(message=combined, queued_at=now)
                                 break
                         session.emit_event(
                             {
                                 "type": "session.message_combined",
                                 "message_id": target_id,
+                                # The running turn's scout planned against the
+                                # pre-combine text; only the agent loop re-reads
+                                # the row. Surfaced so the UI can say so.
+                                "scout_stale": target_id == session.current_turn_user_msg_id,
                             }
                         )
                         logger.debug(
@@ -629,6 +671,9 @@ class SessionManager:
                             session_id,
                         )
                         return
+                    # Fall through: the running turn can no longer pick this up.
+                    # Queue it as its own turn below rather than writing into a
+                    # row nothing will re-read.
 
                 # Persist the message immediately so it's visible in the UI
                 # while waiting, then queue for later processing.
@@ -643,7 +688,7 @@ class SessionManager:
                     )
                     session.last_user_msg_id = msg_id
                     session.last_user_msg_at = now
-                session.pending_messages.append((message, system_prompt, True, now, msg_id))
+                session.pending_messages.append(PendingMessage(message, system_prompt, True, now, msg_id))
                 session.emit_event(
                     {
                         "type": "session.queued",
@@ -726,8 +771,8 @@ class SessionManager:
                 for _o in _orphans:
                     _oid = _o["id"]
                     session.swept_orphan_ids.add(_oid)
-                    if not any(len(_e) >= 5 and _e[4] == _oid for _e in session.pending_messages):
-                        session.pending_messages.append((_o.get("content", ""), "", True, _now_m, _oid))
+                    if not any(PendingMessage.coerce(_e).msg_id == _oid for _e in session.pending_messages):
+                        session.pending_messages.append(PendingMessage(_o.get("content", ""), "", True, _now_m, _oid))
                         logger.warning(
                             "Session %s: Window B recovered orphaned message %d",
                             session_id[:12],
@@ -743,9 +788,11 @@ class SessionManager:
                     )
                     session.last_user_msg_id = _new_id
                     session.last_user_msg_at = _time.monotonic()
-                    session.pending_messages.append((message, system_prompt, True, _time.monotonic(), _new_id))
+                    session.pending_messages.append(
+                        PendingMessage(message, system_prompt, True, _time.monotonic(), _new_id)
+                    )
                 # Dispatch via _process_pending (pops oldest entry — the orphan)
-                asyncio.create_task(self._process_pending(session))
+                self._spawn_detached(self._process_pending(session), "process-pending")
                 return
 
             # Pre-save the user message inline so a concurrent re-submission
@@ -766,6 +813,52 @@ class SessionManager:
             session.task = asyncio.create_task(
                 self._run_agent_safe(session, message, system_prompt, pre_saved=bool(message))
             )
+
+    def _can_absorb_rapid_fire(self, session: AgentSession, target_id: int) -> bool:
+        """Can a follow-up still be folded into message `target_id`?
+
+        Combining rewrites an existing user row in place and returns without
+        queueing anything. That is only safe while something will still READ
+        that row:
+
+          * a queued entry — read when it eventually pops. Always safe.
+          * the running turn's row — read by compile_context at the top of
+            each tool round, so safe only while the agent loop has rounds
+            left. Once it has emitted its final text answer, nothing re-reads
+            the row and the appended text is lost silently: the combined row
+            has an assistant message after it, so get_orphaned_user_messages
+            never flags it either.
+
+        Returns False for that last case so the caller queues a fresh turn
+        instead. Errors resolve to False — an extra turn is recoverable, a
+        dropped message is not.
+        """
+        if target_id != session.current_turn_user_msg_id:
+            return True  # a queued entry; it has not been consumed yet
+        try:
+            if db.turn_has_final_answer(session.session_id, target_id):
+                logger.info(
+                    "Session %s: rapid-fire follow-up arrived after turn %d answered "
+                    "— queueing a new turn instead of combining",
+                    session.session_id[:12],
+                    target_id,
+                )
+                session.emit_event(
+                    {
+                        "type": "session.message_combine_skipped",
+                        "message_id": target_id,
+                        "reason": "turn_already_answered",
+                    }
+                )
+                return False
+        except Exception as e:
+            logger.warning(
+                "Session %s: rapid-fire absorb check failed (%s) — queueing a new turn",
+                session.session_id[:12],
+                e,
+            )
+            return False
+        return True
 
     async def _run_agent_safe(
         self,
@@ -1713,7 +1806,7 @@ class SessionManager:
             elif current_v2 is sv2.SessionStateV2.IDLE_READY:
                 # Parent already returned to idle; push as a pending message so
                 # it's processed on the next available slot (Gap 1 auto-resume).
-                parent.pending_messages.append((resume_msg, None, False))
+                parent.pending_messages.append(PendingMessage(resume_msg, None, False))
                 # _process_pending acquires lock itself, so release first.
 
         # Outside the lock: drain pending for the IDLE_READY case.
@@ -1735,21 +1828,23 @@ class SessionManager:
                 return
             if session.session_id not in self._sessions:
                 return
-            entry = session.pending_messages.popleft()
-            # Tuple shape: (message, system_prompt, pre_saved, ts?, msg_id?).
-            # Older producers (e.g. worker resume push) use the 3-tuple form.
-            message, system_prompt, _pre_saved = entry[0], entry[1], entry[2]
-            _entry_msg_id = entry[4] if len(entry) >= 5 else None
+            entry = PendingMessage.coerce(session.pending_messages.popleft())
 
             # Lock in this turn's user msg id from the queue entry (the
             # manager pre-saved it at queue-add time and stored its id on
-            # the tuple). compile_context and reflect scope to this id.
-            if _entry_msg_id is not None:
-                session.current_turn_user_msg_id = _entry_msg_id
+            # the entry). compile_context and reflect scope to this id.
+            # Synthetic entries (worker resume, worker timeout) have none.
+            if entry.msg_id is not None:
+                session.current_turn_user_msg_id = entry.msg_id
 
             # Start a new agent task for the pending message while lock is held
             session.task = asyncio.create_task(
-                self._run_agent_safe(session, message, system_prompt, pre_saved=_pre_saved)
+                self._run_agent_safe(
+                    session,
+                    entry.message,
+                    entry.system_prompt,
+                    pre_saved=entry.pre_saved,
+                )
             )
 
     def _find_db_orphans(self, session: AgentSession) -> list[dict]:
@@ -1803,9 +1898,9 @@ class SessionManager:
         for o in orphans:
             msg_id = o["id"]
             session.swept_orphan_ids.add(msg_id)
-            if any(len(e) >= 5 and e[4] == msg_id for e in session.pending_messages):
+            if any(PendingMessage.coerce(e).msg_id == msg_id for e in session.pending_messages):
                 continue
-            session.pending_messages.append((o.get("content", ""), "", True, now, msg_id))
+            session.pending_messages.append(PendingMessage(o.get("content", ""), "", True, now, msg_id))
         # Only advance the watermark — never regress it. A concurrent prompt()
         # running without the lock may have already set last_user_msg_id to a
         # higher value (a freshly-queued normal message). Overwriting it with a
@@ -1870,8 +1965,13 @@ class SessionManager:
         reached += len(self._global_subscribers)
         run_on_loop(self._deliver_global, dict(event, _global=True))
 
-        # Session-specific subscribers (emit_event marshals internally)
-        for session in self._sessions.values():
+        # Session-specific subscribers (emit_event marshals internally).
+        # Snapshot: broadcast() is called from tool threads (ask_user,
+        # notify_user) while spawn_worker — also on a tool thread — inserts
+        # into _sessions via create_session. Iterating the live dict raced
+        # that insert and raised "dictionary changed size during iteration",
+        # which surfaced to the user as a bogus error from ask_user.
+        for session in list(self._sessions.values()):
             if session.subscribers:
                 session.emit_event(dict(event))
                 reached += 1
@@ -1964,7 +2064,9 @@ class SessionManager:
             sv2.SessionStateV2.AWAITING_USER,
             sv2.SessionStateV2.AWAITING_WORKERS,
         )
-        for session in self._sessions.values():
+        # Snapshot — a tool thread can insert into _sessions (spawn_worker ->
+        # create_session) while this runs on the event loop.
+        for session in list(self._sessions.values()):
             if sv2._current_state(session) not in _idle_v2:
                 return True
             if session.has_background_tasks:
@@ -2205,7 +2307,7 @@ class SessionManager:
                         # rather than waiting for the timeout. Mirrors
                         # _on_watched_worker_done's resume path.
                         if not watched:
-                            asyncio.create_task(self._resume_from_workers(session))
+                            self._spawn_detached(self._resume_from_workers(session), "resume-from-workers")
                             session.touch()
                             unstuck += 1
                             continue
@@ -2253,10 +2355,10 @@ class SessionManager:
                         "get_worker_result(worker_id) for any that did finish. "
                         "Decide whether to retry, cancel, or proceed without them."
                     )
-                    session.pending_messages.append((timeout_msg, None, False))
+                    session.pending_messages.append(PendingMessage(timeout_msg, None, False))
                     session._watched_worker_ids.clear()
                     self._persist_watched(session)
-                    asyncio.create_task(self._process_pending(session))
+                    self._spawn_detached(self._process_pending(session), "process-pending")
                     session.touch()
                     unstuck += 1
                 continue
@@ -2289,7 +2391,7 @@ class SessionManager:
                     unstuck += 1
                     # Drain any queued prompts that piled up behind the phantom turn.
                     if session.pending_messages:
-                        asyncio.create_task(self._process_pending(session))
+                        self._spawn_detached(self._process_pending(session), "process-pending")
                     continue
                 # Long-stuck scouts with no subscribers fall through to the
                 # original reap path so we don't keep dead sessions forever.

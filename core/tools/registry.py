@@ -101,6 +101,12 @@ class ToolDef:
     category: str = "core"
     tags: list[str] = field(default_factory=list)
     timeout: int = 300
+    # Ceiling for a caller-supplied `timeout` argument. 0 = no override
+    # allowed (the dispatch timeout is always `timeout`). Set this when a
+    # tool's own schema exposes a `timeout` parameter, otherwise the
+    # executor's wait_for fires at `timeout` and the documented override
+    # silently does nothing — see core/tools/executor.py:_resolve_timeout.
+    max_timeout: int = 0
     parallel_safe: bool = False
     worker_allowed: bool = True
     source: str = "builtin"  # builtin | extension | custom
@@ -315,6 +321,7 @@ class ToolRegistry:
         category: str = "core",
         tags: list[str] | None = None,
         timeout: int = 300,
+        max_timeout: int = 0,
         parallel_safe: bool = False,
         worker_allowed: bool = True,
         source: str = "builtin",
@@ -328,6 +335,9 @@ class ToolRegistry:
                       for custom tools, "safe" for builtins.
         long_poll:    True for tools that block their thread waiting on other
                       sessions' work — they run on a dedicated executor.
+        max_timeout:  Ceiling for a caller-supplied `timeout` argument. Required
+                      for any tool whose schema exposes `timeout`, otherwise the
+                      executor caps the call at `timeout` regardless.
         """
         if safety_level is None:
             safety_level = "caution" if source == "custom" else "safe"
@@ -339,6 +349,7 @@ class ToolRegistry:
             category=category,
             tags=tags or [],
             timeout=timeout,
+            max_timeout=max_timeout,
             parallel_safe=parallel_safe,
             worker_allowed=worker_allowed,
             source=source,

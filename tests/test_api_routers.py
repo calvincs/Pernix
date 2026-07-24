@@ -218,7 +218,9 @@ async def test_pending_queue_list_and_remove():
     sid = db.create_session(title="Queue test")
     session = get_manager().get_or_create(sid)
     mid = db.add_message(sid, "user", "queued message")
-    session.pending_messages.append(("queued message", "", True, 0.0, mid))
+    from sessions.state import PendingMessage
+
+    session.pending_messages.append(PendingMessage("queued message", "", True, 0.0, mid))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get(f"/api/sessions/{sid}/pending")

@@ -4,8 +4,13 @@ import asyncio
 
 import pytest
 
-from core.tools.executor import ToolExecutionResult, _execute_single, execute_tool_round
-from core.tools.registry import ToolRegistry
+from core.tools.executor import (
+    ToolExecutionResult,
+    _execute_single,
+    _resolve_timeout,
+    execute_tool_round,
+)
+from core.tools.registry import ToolDef, ToolRegistry
 
 
 def _make_registry(tools: dict | None = None) -> ToolRegistry:
@@ -22,6 +27,149 @@ def _make_registry(tools: dict | None = None) -> ToolRegistry:
                 timeout=5,
             )
     return reg
+
+
+# ---------------------------------------------------------------------------
+# _resolve_timeout
+# ---------------------------------------------------------------------------
+
+
+def _tool(timeout: int, max_timeout: int = 0) -> ToolDef:
+    return ToolDef(
+        name="t",
+        description="d",
+        parameters={"type": "object", "properties": {}},
+        function=lambda: "ok",
+        timeout=timeout,
+        max_timeout=max_timeout,
+    )
+
+
+def test_resolve_timeout_without_ceiling_ignores_caller_override():
+    """A tool that never declared max_timeout is not overridable."""
+    assert _resolve_timeout(_tool(30), {"timeout": 1800}) == 30
+    assert _resolve_timeout(_tool(30), None) == 30
+
+
+def test_resolve_timeout_honors_override_up_to_ceiling():
+    """bash's documented 1800s override must actually reach the dispatcher."""
+    t = _tool(30, max_timeout=1800)
+    # Grace is added so the tool's own internal timeout fires first.
+    assert _resolve_timeout(t, {"timeout": 600}) > 600
+    assert _resolve_timeout(t, {"timeout": 600}) == 605
+
+
+def test_resolve_timeout_clamps_to_ceiling():
+    t = _tool(30, max_timeout=1800)
+    assert _resolve_timeout(t, {"timeout": 99999}) == 1805
+
+
+def test_resolve_timeout_ignores_junk_and_below_default_values():
+    t = _tool(30, max_timeout=1800)
+    assert _resolve_timeout(t, {"timeout": 0}) == 30
+    assert _resolve_timeout(t, {"timeout": -5}) == 30
+    assert _resolve_timeout(t, {"timeout": "nonsense"}) == 30
+    assert _resolve_timeout(t, {}) == 30
+    # Below the tool default: never shrink under it, but still grant grace.
+    assert _resolve_timeout(t, {"timeout": 5}) == 35
+
+
+def test_bash_registers_a_timeout_ceiling():
+    """Regression: bash advertises `timeout` in its schema, so it must declare
+    max_timeout or the executor caps every call at shell_timeout."""
+    from core.tools.builtin.core_tools import BASH_MAX_TIMEOUT, register
+
+    reg = ToolRegistry()
+    register(reg)
+    bash_def = reg.get("bash")
+    assert "timeout" in bash_def.parameters["properties"]
+    assert bash_def.max_timeout == BASH_MAX_TIMEOUT
+
+
+def test_every_tool_exposing_timeout_declares_a_ceiling():
+    """Guard the whole builtin+extension surface against the same trap."""
+    from core.extensions import load_extensions
+    from core.tools.builtin import load_builtin_tools
+
+    reg = ToolRegistry()
+    load_builtin_tools(reg)
+    try:
+        load_extensions(reg)
+    except Exception:
+        pass  # extensions are optional here; builtins are the contract
+    offenders = [
+        t.name
+        for t in reg.all_tools()
+        if "timeout" in (t.parameters or {}).get("properties", {}) and t.max_timeout <= 0
+    ]
+    assert not offenders, f"tools expose a `timeout` arg but declare no max_timeout: {offenders}"
+
+
+def test_batch_timeout_covers_the_slowest_tool_in_the_batch():
+    """The gather backstop must never fire before a per-call timeout.
+
+    A parallel_safe tool registered above settings.tool_timeout would
+    otherwise blow up the whole round instead of failing one call.
+    """
+    from config import settings
+    from core.tools.executor import _batch_timeout
+
+    reg = ToolRegistry()
+    reg.register(
+        "slow_par",
+        func=lambda: "ok",
+        description="s",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=settings.tool_timeout + 600,
+    )
+    reg.register(
+        "fast_par",
+        func=lambda: "ok",
+        description="f",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+
+    calls = [{"name": "fast_par", "arguments": {}}, {"name": "slow_par", "arguments": {}}]
+    assert _batch_timeout([0, 1], calls, reg) > settings.tool_timeout + 600
+    # An all-fast batch still gets at least the configured floor.
+    assert _batch_timeout([0], calls, reg) > settings.tool_timeout
+
+
+async def test_slow_parallel_tool_does_not_destroy_the_round():
+    """Regression: one slow parallel call must not take its peers down.
+
+    Pre-fix the gather was bounded by a fixed settings.tool_timeout, so a
+    tool registered above it raised TimeoutError out of execute_tool_round
+    and discarded every sibling result along with it.
+    """
+    import time as _time
+
+    from config import settings
+
+    reg = ToolRegistry()
+    reg.register(
+        "slow_par",
+        func=lambda: (_time.sleep(0.2), "SLOW")[1],
+        description="s",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=settings.tool_timeout + 600,
+    )
+    reg.register(
+        "quick_par",
+        func=lambda: "QUICK",
+        description="q",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+
+    calls = [{"name": "quick_par", "arguments": {}}, {"name": "slow_par", "arguments": {}}]
+    results = await execute_tool_round(calls, None, reg)
+    assert [r.content for r in results] == ["QUICK", "SLOW"]
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +455,97 @@ async def test_execute_tool_round_mixed():
     contents = {r.tool_name: r.content for r in results}
     assert contents["par_tool"] == "par"
     assert contents["seq_tool"] == "seq"
+
+
+async def test_execute_tool_round_mixed_preserves_call_order():
+    """results[i] must be the result of tool_calls[i], whatever the mix.
+
+    core/agent.py zips parsed_calls against these results to attach each
+    result to its originating call's tool_call_id. Bucketing parallel-safe
+    calls ahead of sequential ones used to reorder the returned list, so a
+    round like [sequential, parallel] handed every result to the wrong call.
+    Sequential-first ordering is the case that regressed.
+    """
+    reg = ToolRegistry()
+    reg.register(
+        "par_tool",
+        func=lambda: "PAR",
+        description="p",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+    reg.register(
+        "seq_tool",
+        func=lambda: "SEQ",
+        description="s",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=False,
+        timeout=5,
+    )
+
+    # Sequential first — the ordering that used to come back reversed.
+    calls = [
+        {"name": "seq_tool", "arguments": {}},
+        {"name": "par_tool", "arguments": {}},
+    ]
+    results = await execute_tool_round(calls, None, reg)
+    assert [r.tool_name for r in results] == ["seq_tool", "par_tool"]
+    assert [r.content for r in results] == ["SEQ", "PAR"]
+
+    # Interleaved, with repeats, to catch index-mapping slips.
+    calls = [
+        {"name": "seq_tool", "arguments": {}},
+        {"name": "par_tool", "arguments": {}},
+        {"name": "seq_tool", "arguments": {}},
+        {"name": "par_tool", "arguments": {}},
+    ]
+    results = await execute_tool_round(calls, None, reg)
+    assert [r.tool_name for r in results] == [c["name"] for c in calls]
+
+
+async def test_execute_tool_round_order_holds_when_a_parallel_call_raises():
+    """A raising parallel call keeps its own slot; peers are not shifted."""
+
+    def boom():
+        raise RuntimeError("kaboom")
+
+    reg = ToolRegistry()
+    reg.register(
+        "seq_tool",
+        func=lambda: "SEQ",
+        description="s",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=False,
+        timeout=5,
+    )
+    reg.register(
+        "bad_par",
+        func=boom,
+        description="b",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+    reg.register(
+        "good_par",
+        func=lambda: "GOOD",
+        description="g",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+
+    calls = [
+        {"name": "seq_tool", "arguments": {}},
+        {"name": "bad_par", "arguments": {}},
+        {"name": "good_par", "arguments": {}},
+    ]
+    results = await execute_tool_round(calls, None, reg)
+    assert [r.tool_name for r in results] == ["seq_tool", "bad_par", "good_par"]
+    assert results[0].content == "SEQ"
+    assert results[1].was_error
+    assert results[2].content == "GOOD"
 
 
 async def test_execute_tool_round_empty():
