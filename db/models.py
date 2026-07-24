@@ -467,6 +467,35 @@ def get_message(message_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def turn_has_final_answer(session_id: str, user_msg_id: int) -> bool:
+    """True if the turn rooted at `user_msg_id` already wrote a text answer.
+
+    A "final answer" is an assistant row carrying content but no tool_calls,
+    tagged (via metadata.parent_user_msg_id, stamped by run_agent's
+    _save_turn_msg) as belonging to this turn. Used by the rapid-fire
+    combiner to decide whether folding a follow-up into this turn's user
+    row can still be seen by the running agent loop.
+
+    Deliberately conservative: the max_tokens length-continuation path also
+    writes a no-tool_calls assistant row mid-turn, so this can read True
+    slightly early. The caller treats True as "do not combine, queue a new
+    turn instead", which is the safe direction — an extra turn rather than a
+    silently dropped message.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT 1 FROM messages
+               WHERE session_id = ?
+                 AND role = 'assistant'
+                 AND (tool_calls IS NULL OR tool_calls = '')
+                 AND length(COALESCE(content, '')) > 0
+                 AND json_extract(metadata, '$.parent_user_msg_id') = ?
+               LIMIT 1""",
+            (session_id, user_msg_id),
+        ).fetchone()
+        return row is not None
+
+
 def get_orphaned_user_messages(session_id: str) -> list[dict]:
     """Return user messages that have no subsequent assistant response.
 
