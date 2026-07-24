@@ -160,6 +160,7 @@ class StuckDetector:
     has_unresolved_failure: bool = False
     unresolved_failure_rounds: int = 0
     file_failure_counts: dict = field(default_factory=dict)  # (tool_name, file_path) → int
+    tool_failure_counts: dict = field(default_factory=dict)  # tool_name → consecutive-failure count
 
     def evaluate(self, content: str, tool_calls: list[dict] | None, tool_failures: dict, registry) -> tuple[float, int]:
         """Evaluate stuck signals. Returns (score 0-1, repeat_count)."""
@@ -215,6 +216,17 @@ class StuckDetector:
             if count >= 3:
                 score += 0.4
                 self.behavioral_flags.add("file_edit_loop")
+                break
+
+        # Signal 11: Same NON-file tool failing repeatedly with varied args.
+        # Generalises Signal 7 beyond file tools — catches loops like call_model
+        # 404-ing on a series of guessed model ids, where each call has a unique
+        # args hash (evading Signal 3), the tool is real (evading Signal 5), and
+        # a fresh failure each round keeps resetting Signal 6's drift counter.
+        for tool_name, count in self.tool_failure_counts.items():
+            if tool_name not in _FILE_TOOLS and count >= 3:
+                score += 0.4
+                self.behavioral_flags.add("tool_failure_loop")
                 break
 
         # Signal 8: Empty-result streak. ≥3 consecutive web/search results that
@@ -292,6 +304,11 @@ class StuckDetector:
         """
         self.has_unresolved_failure = True
         self.unresolved_failure_rounds = 0
+        if tool_name:
+            # Per-tool consecutive-failure counter (Signal 11). Reset by a
+            # success of the SAME tool in mark_success, so failures interleaved
+            # with unrelated successful calls still accumulate.
+            self.tool_failure_counts[tool_name] = self.tool_failure_counts.get(tool_name, 0) + 1
         if tool_name in _FILE_TOOLS and args:
             file_path = args.get("path") or args.get("file_path") or args.get("file", "")
             if file_path:
@@ -305,6 +322,8 @@ class StuckDetector:
         """
         self.has_unresolved_failure = False
         self.unresolved_failure_rounds = 0
+        if tool_name:
+            self.tool_failure_counts.pop(tool_name, None)
         if tool_name in _FILE_TOOLS and args:
             file_path = args.get("path") or args.get("file_path") or args.get("file", "")
             if file_path:

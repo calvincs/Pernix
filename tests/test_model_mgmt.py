@@ -1,6 +1,8 @@
 """Pernix — Tests for the model_mgmt extension (switch_model scope semantics)."""
 
-from core.extensions.model_mgmt import switch_model
+from unittest.mock import MagicMock
+
+from core.extensions.model_mgmt import call_model, switch_model
 from db import models as db
 from sessions.manager import get_manager
 
@@ -65,3 +67,43 @@ def test_switch_model_invalid_scope_rejected_without_mutation():
     assert "Invalid scope" in result
     assert session.model_override is None
     assert session._model_before_agent_switch is None
+
+
+# ---------------------------------------------------------------------------
+# call_model — model-id validation + actionable errors (anti-loop). Run
+# synchronously (no event loop); the registry checks are sync and the "not
+# found" path returns before any chat dispatch.
+# ---------------------------------------------------------------------------
+
+
+def _fake_client(provider: str):
+    """A client whose registry treats every id as unknown, with resolve_provider
+    fixed to `provider`."""
+    fake = MagicMock()
+    fake.router.registry.resolve_model_id = lambda m: m
+    fake.router.registry.get_model_info = lambda m: None
+    fake.router.registry.resolve_provider = lambda m: provider
+    return fake
+
+
+def test_call_model_rejects_unknown_non_openrouter_with_error_prefix(monkeypatch):
+    """An id with no '/' that the registry doesn't know is rejected up front,
+    with an 'Error:' prefix so the executor records was_error (feeds stuck
+    detection) — not the opaque provider 404 that drove the guessing loop."""
+    import core.llm.client as llm_client
+
+    monkeypatch.setattr(llm_client, "get_llm_client", lambda: _fake_client("ollama"))
+    out = call_model("qwen-27b", "review this")
+    assert out.startswith("Error:")
+    assert "not found" in out.lower()
+
+
+def test_call_model_openrouter_shaped_id_is_attempted_not_prevalidated(monkeypatch):
+    """A 'vendor/model' id is allowed through validation (OpenRouter may know it)
+    and any dispatch failure still comes back 'Error:'-prefixed."""
+    import core.llm.client as llm_client
+
+    monkeypatch.setattr(llm_client, "get_llm_client", lambda: _fake_client("openrouter"))
+    # No running loop here → the chat dispatch fails and is reported as Error:.
+    out = call_model("qwen/qwen3-coder-next", "review this")
+    assert out.startswith("Error:")
