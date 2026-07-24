@@ -946,3 +946,95 @@ def test_finalizing_reaper_fires_when_no_background_refs():
         "A genuinely stuck FINALIZING session (no background tasks, idle > 120s) "
         "must be force-unstuck to IDLE_READY by the reaper."
     )
+
+
+# ---------------------------------------------------------------------------
+# Concurrent mutation of the session map
+# ---------------------------------------------------------------------------
+
+
+def test_broadcast_survives_concurrent_session_insert():
+    """broadcast() runs on tool threads (ask_user/notify_user) while
+    spawn_worker — also on a tool thread — inserts via create_session.
+    Iterating the live dict raised "dictionary changed size during
+    iteration" and surfaced as a bogus error from ask_user."""
+    import threading
+
+    from sessions.state import AgentSession
+
+    mgr = _make_manager()
+    # Subscribers make the loop body do real work, widening the window in
+    # which a concurrent insert can be observed mid-iteration.
+    for i in range(200):
+        s = AgentSession(session_id=f"seed{i}")
+        s.subscribe()
+        mgr._sessions[f"seed{i}"] = s
+
+    errors: list = []
+    stop = threading.Event()
+
+    def inserter():
+        i = 0
+        while not stop.is_set():
+            mgr._sessions[f"new{i}"] = AgentSession(session_id=f"new{i}")
+            mgr._sessions.pop(f"new{max(0, i - 50)}", None)
+            i += 1
+
+    def broadcaster():
+        try:
+            for _ in range(300):
+                mgr.broadcast({"type": "test"})
+                mgr.has_active_work()
+        except RuntimeError as e:  # pragma: no cover - the bug being fixed
+            errors.append(e)
+
+    t = threading.Thread(target=inserter, daemon=True)
+    t.start()
+    try:
+        broadcaster()
+    finally:
+        stop.set()
+        t.join(timeout=5)
+
+    assert not errors, f"session map iteration raced a concurrent insert: {errors}"
+
+
+def test_snooze_idle_check_survives_concurrent_session_insert(monkeypatch):
+    """Same race, reached through SnoozeRunner._is_idle."""
+    import threading
+
+    import sessions.manager as manager_mod
+    from core.snooze import SnoozeRunner
+    from sessions.state import AgentSession
+
+    # _is_idle reads the module singleton, so install ours as the singleton.
+    mgr = _make_manager()
+    monkeypatch.setattr(manager_mod, "_manager", mgr)
+    for i in range(200):
+        mgr._sessions[f"seed{i}"] = AgentSession(session_id=f"seed{i}")
+
+    runner = SnoozeRunner()
+    errors: list = []
+    stop = threading.Event()
+
+    def inserter():
+        i = 0
+        while not stop.is_set():
+            mgr._sessions[f"new{i}"] = AgentSession(session_id=f"new{i}")
+            mgr._sessions.pop(f"new{max(0, i - 50)}", None)
+            i += 1
+
+    t = threading.Thread(target=inserter, daemon=True)
+    t.start()
+    try:
+        for _ in range(300):
+            try:
+                runner._is_idle()
+            except RuntimeError as e:  # pragma: no cover - the bug being fixed
+                errors.append(e)
+                break
+    finally:
+        stop.set()
+        t.join(timeout=5)
+
+    assert not errors, f"_is_idle raced a concurrent insert: {errors}"
