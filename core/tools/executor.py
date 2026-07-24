@@ -93,6 +93,25 @@ def _kill_tool_subprocess(context: dict | None) -> None:
         logger.debug("Post-timeout subprocess kill skipped: %s", e)
 
 
+def _batch_timeout(indices: list[int], tool_calls: list[dict], registry: ToolRegistry) -> int:
+    """Backstop timeout for the parallel gather.
+
+    Every _execute_single already enforces its own per-call timeout and
+    degrades to a per-tool error result, so this outer bound exists only to
+    catch a gather that wedges outside those waits. Size it to the slowest
+    tool actually in the batch so it can never fire first — if it does, the
+    TimeoutError escapes execute_tool_round and destroys the whole round,
+    including the results of calls that already completed.
+    """
+    slowest = 0
+    for i in indices:
+        tool = registry.get(tool_calls[i].get("name", ""))
+        if tool is None:
+            continue
+        slowest = max(slowest, _resolve_timeout(tool, tool_calls[i].get("arguments", {})))
+    return max(settings.tool_timeout, slowest) + _DISPATCH_TIMEOUT_GRACE_S
+
+
 def _is_unattended_session(sid: str) -> bool:
     """Return True for cron sessions and workers spawned from cron sessions.
 
@@ -372,7 +391,7 @@ async def execute_tool_round(
         ]
         parallel_results = await asyncio.wait_for(
             asyncio.gather(*tasks, return_exceptions=True),
-            timeout=settings.tool_timeout,
+            timeout=_batch_timeout(parallel_idx, tool_calls, registry),
         )
         for i, result in zip(parallel_idx, parallel_results):
             if isinstance(result, asyncio.CancelledError):

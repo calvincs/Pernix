@@ -105,6 +105,73 @@ def test_every_tool_exposing_timeout_declares_a_ceiling():
     assert not offenders, f"tools expose a `timeout` arg but declare no max_timeout: {offenders}"
 
 
+def test_batch_timeout_covers_the_slowest_tool_in_the_batch():
+    """The gather backstop must never fire before a per-call timeout.
+
+    A parallel_safe tool registered above settings.tool_timeout would
+    otherwise blow up the whole round instead of failing one call.
+    """
+    from config import settings
+    from core.tools.executor import _batch_timeout
+
+    reg = ToolRegistry()
+    reg.register(
+        "slow_par",
+        func=lambda: "ok",
+        description="s",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=settings.tool_timeout + 600,
+    )
+    reg.register(
+        "fast_par",
+        func=lambda: "ok",
+        description="f",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+
+    calls = [{"name": "fast_par", "arguments": {}}, {"name": "slow_par", "arguments": {}}]
+    assert _batch_timeout([0, 1], calls, reg) > settings.tool_timeout + 600
+    # An all-fast batch still gets at least the configured floor.
+    assert _batch_timeout([0], calls, reg) > settings.tool_timeout
+
+
+async def test_slow_parallel_tool_does_not_destroy_the_round():
+    """Regression: one slow parallel call must not take its peers down.
+
+    Pre-fix the gather was bounded by a fixed settings.tool_timeout, so a
+    tool registered above it raised TimeoutError out of execute_tool_round
+    and discarded every sibling result along with it.
+    """
+    import time as _time
+
+    from config import settings
+
+    reg = ToolRegistry()
+    reg.register(
+        "slow_par",
+        func=lambda: (_time.sleep(0.2), "SLOW")[1],
+        description="s",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=settings.tool_timeout + 600,
+    )
+    reg.register(
+        "quick_par",
+        func=lambda: "QUICK",
+        description="q",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=5,
+    )
+
+    calls = [{"name": "quick_par", "arguments": {}}, {"name": "slow_par", "arguments": {}}]
+    results = await execute_tool_round(calls, None, reg)
+    assert [r.content for r in results] == ["QUICK", "SLOW"]
+
+
 # ---------------------------------------------------------------------------
 # _execute_single
 # ---------------------------------------------------------------------------
