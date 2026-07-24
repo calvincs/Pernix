@@ -96,9 +96,21 @@ The token can be passed three ways:
 | `pernix_auth` cookie | Browser sessions (set automatically on first login) |
 | `?token=<token>` query parameter | QR-code login links, one-time URL sharing |
 
-### Localhost Always Bypasses Auth
+The token comparison is constant-time, so a wrong token reveals nothing about the right one through response timing.
 
-Requests originating from `127.0.0.1` or `::1` are never challenged, even in network mode. This prevents you from locking yourself out.
+> **The `?token=` parameter ends up in logs.** Query strings are recorded by access logs, proxies, and browser history. It exists because `EventSource` cannot set request headers and because QR onboarding needs a single scannable URL — but treat any token you have shared that way as disclosed, and rotate it when you are done onboarding.
+
+### Localhost Bypasses Auth (by default)
+
+Requests originating from `127.0.0.1` or `::1` are not challenged, even in network mode. This prevents you from locking yourself out and keeps localhost-only admin endpoints reachable.
+
+**If you put Pernix behind a reverse proxy, turn this off.** A proxy terminating TLS on the same host connects to Pernix over loopback, so *every* proxied request — including ones from the internet — arrives as `127.0.0.1` and skips the token entirely. Set:
+
+```json
+{ "trust_local_requests": false }
+```
+
+in `data/settings.json` (or from Settings in the UI). It takes effect immediately; no restart needed. With it off, the proxy must forward a valid `Authorization: Bearer` header, and you should reach admin endpoints through the proxy with the token rather than relying on the bypass.
 
 ### Token-from-URL Login Flow (Mobile / LAN Access)
 

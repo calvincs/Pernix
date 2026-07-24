@@ -309,6 +309,7 @@ app.add_middleware(
 # Uses pure ASGI (not BaseHTTPMiddleware) to avoid task-group wrapping on SSE
 # streaming responses, which caused CancelledError tracebacks during shutdown.
 import json as _json
+import secrets
 from urllib.parse import parse_qs as _parse_qs
 
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -382,8 +383,13 @@ class _AuthMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Loopback bypass. Correct for the default single-host deployment,
+        # where the UI and the server share the machine. Wrong the moment a
+        # reverse proxy terminates TLS locally: every proxied request then
+        # arrives from 127.0.0.1 and skips auth entirely. Operators in that
+        # topology set trust_local_requests = false.
         client = scope.get("client")
-        if client and client[0] in ("127.0.0.1", "::1"):
+        if settings.trust_local_requests and client and client[0] in ("127.0.0.1", "::1"):
             await self.app(scope, receive, send)
             return
 
@@ -392,7 +398,10 @@ class _AuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if _extract_token(scope) != settings.auth_token:
+        # Constant-time: a plain != leaks the shared secret's prefix through
+        # comparison timing.
+        presented = _extract_token(scope)
+        if presented is None or not secrets.compare_digest(presented, settings.auth_token):
             await _send_401(send)
             return
 
