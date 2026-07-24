@@ -412,6 +412,96 @@ async def test_maybe_evaluate_no_registry(monkeypatch):
 
 
 # ===========================================================================
+# _maybe_evaluate: registry is global, evaluation must be session-scoped
+# ===========================================================================
+
+
+def _write_registry(tmp_path, monkeypatch, features):
+    """Point _maybe_evaluate's registry lookup at a temp file."""
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    (tmp_path / "data" / "registry.json").write_text(json.dumps(features))
+    return os.path.join(str(tmp_path), "data", "registry.json")
+
+
+async def test_maybe_evaluate_ignores_other_sessions_features(monkeypatch, tmp_path):
+    """Regression: data/registry.json is one global file, so an unfiltered
+    read made every session evaluate every other session's pending features
+    against its own unrelated transcript — failing by construction and
+    re-running forever. (Observed: a 'Neo Flappy Bird' feature registered by
+    session 505639e37185 evaluating inside an unrelated weather session.)"""
+    from db import models as db
+    from sessions.hooks import _maybe_evaluate
+    from sessions.state import AgentSession
+
+    monkeypatch.setattr("config.settings.eval_auto", True)
+    monkeypatch.setattr("config.settings.eval_max_retries", 1)
+
+    sid = db.create_session(title="Weather Session")
+    session = db.get_session(sid)
+    session_obj = AgentSession(session_id=sid)
+
+    _write_registry(
+        tmp_path,
+        monkeypatch,
+        [{"id": "0de63fc0", "title": "Neo Flappy Bird", "passes": False, "session_id": "505639e37185"}],
+    )
+
+    called = []
+
+    async def _spy(feat, session_id):
+        called.append(feat["id"])
+        return {"passed": False, "feedback": "nope"}
+
+    monkeypatch.setattr("core.extensions.evaluation.evaluate_single_async", _spy)
+
+    await _maybe_evaluate(sid, session, session_obj=session_obj)
+
+    assert called == [], "must not evaluate another session's feature"
+    assert not session_obj.eval_retry_requested
+
+
+async def test_maybe_evaluate_runs_own_and_legacy_features(monkeypatch, tmp_path):
+    """Own features still evaluate; pre-filter rows with no session_id are
+    adopted rather than stranded pending forever."""
+    from db import models as db
+    from sessions.hooks import _maybe_evaluate
+    from sessions.state import AgentSession
+
+    monkeypatch.setattr("config.settings.eval_auto", True)
+    monkeypatch.setattr("config.settings.eval_max_retries", 2)
+
+    sid = db.create_session(title="Owner Session")
+    session = db.get_session(sid)
+    session_obj = AgentSession(session_id=sid)
+
+    _write_registry(
+        tmp_path,
+        monkeypatch,
+        [
+            {"id": "mine", "title": "Mine", "passes": False, "session_id": sid},
+            {"id": "legacy", "title": "Legacy", "passes": False},
+            {"id": "theirs", "title": "Theirs", "passes": False, "session_id": "someone-else"},
+            {"id": "done", "title": "Done", "passes": True, "session_id": sid},
+        ],
+    )
+
+    called = []
+
+    async def _spy(feat, session_id):
+        called.append(feat["id"])
+        return {"passed": True, "feedback": ""}
+
+    monkeypatch.setattr("core.extensions.evaluation.evaluate_single_async", _spy)
+
+    await _maybe_evaluate(sid, session, session_obj=session_obj)
+
+    assert sorted(called) == ["legacy", "mine"], f"unexpected evaluation set: {called}"
+
+
+# ===========================================================================
 # More session state machine coverage
 # ===========================================================================
 
