@@ -369,6 +369,7 @@ async def list_env_vars():
 # ---------------------------------------------------------------------------
 
 _restart_pending = False
+_restart_task = None  # strong ref for the delayed-shutdown task
 
 
 @router.post("/api/admin/restart")
@@ -397,5 +398,9 @@ async def restart_server(request: Request):
         await asyncio.sleep(1)
         os.kill(os.getpid(), signal.SIGTERM)
 
-    asyncio.create_task(_delayed_shutdown())
+    # Module-level strong ref: asyncio only weakly references a running task,
+    # so a discarded handle can be collected before the SIGTERM ever fires and
+    # the restart silently never happens.
+    global _restart_task
+    _restart_task = asyncio.create_task(_delayed_shutdown())
     return {"status": "restarting", "url": f"{scheme}://localhost:{port}"}

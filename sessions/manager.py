@@ -171,6 +171,38 @@ class SessionManager:
         self._sessions: dict[str, AgentSession] = {}
         self._agent_runner: Callable | None = None  # set by agent module on init
         self._global_subscribers: list[asyncio.Queue] = []  # global notification listeners
+        # Strong refs for detached recovery tasks — see _spawn_detached.
+        self._detached_tasks: set[asyncio.Task] = set()
+
+    def _spawn_detached(self, coro, label: str) -> asyncio.Task:
+        """Schedule a fire-and-forget task, retaining a reference to it.
+
+        asyncio holds only a WEAK reference to a running task, so a bare
+        create_task() whose result is discarded can be garbage-collected
+        mid-flight. An exception inside one is also never retrieved: it
+        surfaces at most as an "exception was never retrieved" warning at
+        interpreter exit, long after the fact.
+
+        Every caller here is a recovery path — draining the queue after a
+        reaper unstick, resuming a parent whose watch-set just emptied — so
+        a silent failure leaves a session idle on queued work until the next
+        5-minute reaper tick happens to notice, with nothing in the log to
+        explain the pause. Mirrors MaintenanceRunner.track_task.
+        """
+        task = asyncio.create_task(coro)
+        self._detached_tasks.add(task)
+
+        def _done(t: asyncio.Task) -> None:
+            self._detached_tasks.discard(t)
+            if t.cancelled():
+                logger.debug("Detached task %s cancelled", label)
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.error("Detached task %s failed: %s", label, exc, exc_info=exc)
+
+        task.add_done_callback(_done)
+        return task
 
     def set_agent_runner(self, runner: Callable[..., Awaitable]) -> None:
         """Register the agent loop function. Called once at startup."""
@@ -752,7 +784,7 @@ class SessionManager:
                     session.last_user_msg_at = _time.monotonic()
                     session.pending_messages.append((message, system_prompt, True, _time.monotonic(), _new_id))
                 # Dispatch via _process_pending (pops oldest entry — the orphan)
-                asyncio.create_task(self._process_pending(session))
+                self._spawn_detached(self._process_pending(session), "process-pending")
                 return
 
             # Pre-save the user message inline so a concurrent re-submission
@@ -2265,7 +2297,7 @@ class SessionManager:
                         # rather than waiting for the timeout. Mirrors
                         # _on_watched_worker_done's resume path.
                         if not watched:
-                            asyncio.create_task(self._resume_from_workers(session))
+                            self._spawn_detached(self._resume_from_workers(session), "resume-from-workers")
                             session.touch()
                             unstuck += 1
                             continue
@@ -2316,7 +2348,7 @@ class SessionManager:
                     session.pending_messages.append((timeout_msg, None, False))
                     session._watched_worker_ids.clear()
                     self._persist_watched(session)
-                    asyncio.create_task(self._process_pending(session))
+                    self._spawn_detached(self._process_pending(session), "process-pending")
                     session.touch()
                     unstuck += 1
                 continue
@@ -2349,7 +2381,7 @@ class SessionManager:
                     unstuck += 1
                     # Drain any queued prompts that piled up behind the phantom turn.
                     if session.pending_messages:
-                        asyncio.create_task(self._process_pending(session))
+                        self._spawn_detached(self._process_pending(session), "process-pending")
                     continue
                 # Long-stuck scouts with no subscribers fall through to the
                 # original reap path so we don't keep dead sessions forever.
