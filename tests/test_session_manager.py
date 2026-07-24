@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from sessions.manager import SessionManager
-from sessions.state import AgentSession, SessionState
+from sessions.state import AgentSession, PendingMessage, SessionState
 
 
 def _make_manager() -> SessionManager:
@@ -172,8 +172,8 @@ async def test_prompt_rejects_full_queue(monkeypatch):
     session = mgr.get(sid)
 
     # Manually fill the queue
-    session.pending_messages.append(("msg1", ""))
-    session.pending_messages.append(("msg2", ""))
+    session.pending_messages.append(PendingMessage("msg1", ""))
+    session.pending_messages.append(PendingMessage("msg2", ""))
     # Force PROCESSING state
     session._force_state_for_tests(SessionState.PROCESSING)
 
@@ -858,7 +858,7 @@ async def test_process_pending_does_not_drain_while_awaiting_user():
     sv2.transition(session, sv2.SessionStateV2.AWAITING_USER, "ask-user")
 
     # Simulate a queued message (arrived while session was PROCESSING).
-    session.pending_messages.append(("follow-up", ""))
+    session.pending_messages.append(PendingMessage("follow-up", ""))
 
     # _process_pending must NOT dispatch this message — session is AWAITING_USER.
     await mgr._process_pending(session)
@@ -1144,3 +1144,62 @@ def test_no_bare_create_task_in_manager():
                 offenders.append(node.lineno)
 
     assert not offenders, f"bare create_task must use _spawn_detached (sessions/manager.py lines {offenders})"
+
+
+# ---------------------------------------------------------------------------
+# PendingMessage shape
+# ---------------------------------------------------------------------------
+
+
+def test_pending_message_defaults_cover_synthetic_entries():
+    """Worker resume / worker timeout push messages with no DB row."""
+    entry = PendingMessage("resume", None, False)
+    assert entry.message == "resume"
+    assert entry.system_prompt is None
+    assert entry.pre_saved is False
+    assert entry.queued_at == 0.0
+    assert entry.msg_id is None
+
+
+def test_pending_message_coerce_accepts_legacy_tuples():
+    """Older producers and test fixtures append bare tuples; consumers must
+    still be able to read .msg_id unconditionally."""
+    assert PendingMessage.coerce(("m", "", True, 1.0, 7)).msg_id == 7
+    assert PendingMessage.coerce(("m", None, False)).msg_id is None
+    assert PendingMessage.coerce(("m", "")).msg_id is None
+    already = PendingMessage("m")
+    assert PendingMessage.coerce(already) is already
+
+
+def test_all_manager_producers_use_pending_message():
+    """Regression guard: the two shapes are what let short entries be
+    silently skipped by the `len(e) >= 5` guards."""
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path("sessions/manager.py").read_text())
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr != "append":
+            continue
+        target = node.func.value
+        if not (isinstance(target, ast.Attribute) and target.attr == "pending_messages"):
+            continue
+        arg = node.args[0] if node.args else None
+        ok = isinstance(arg, ast.Call) and isinstance(arg.func, ast.Name) and arg.func.id == "PendingMessage"
+        if not ok:
+            offenders.append(f"line {node.lineno}: {ast.unparse(node)}")
+
+    assert not offenders, "pending_messages producers must append PendingMessage:\n  " + "\n  ".join(offenders)
+
+
+def test_no_positional_indexing_of_queue_entries():
+    """Consumers should read fields by name, not by position."""
+    import pathlib
+    import re
+
+    src = pathlib.Path("sessions/manager.py").read_text()
+    bad = [ln.strip() for ln in src.splitlines() if re.search(r"\bentry\[\d\]|\b_e\[\d\]|\be\[\d\]", ln)]
+    assert not bad, f"positional access to queue entries remains: {bad}"

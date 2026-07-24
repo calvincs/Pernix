@@ -11,7 +11,7 @@ from typing import Awaitable, Callable
 from config import settings
 from db import models as db
 from sessions import state_v2 as sv2
-from sessions.state import AgentSession
+from sessions.state import AgentSession, PendingMessage
 
 logger = logging.getLogger("pernix.sessions")
 
@@ -651,9 +651,9 @@ class SessionManager:
                         # update its in-memory tuple too so the agent runs with
                         # the combined content if it ever pops.
                         for i, entry in enumerate(session.pending_messages):
-                            if len(entry) >= 5 and entry[4] == target_id:
-                                _msg, _sp, _pre, _ts, _mid = entry
-                                session.pending_messages[i] = (combined, _sp, _pre, now, _mid)
+                            entry = PendingMessage.coerce(entry)
+                            if entry.msg_id == target_id:
+                                session.pending_messages[i] = entry._replace(message=combined, queued_at=now)
                                 break
                         session.emit_event(
                             {
@@ -688,7 +688,7 @@ class SessionManager:
                     )
                     session.last_user_msg_id = msg_id
                     session.last_user_msg_at = now
-                session.pending_messages.append((message, system_prompt, True, now, msg_id))
+                session.pending_messages.append(PendingMessage(message, system_prompt, True, now, msg_id))
                 session.emit_event(
                     {
                         "type": "session.queued",
@@ -771,8 +771,8 @@ class SessionManager:
                 for _o in _orphans:
                     _oid = _o["id"]
                     session.swept_orphan_ids.add(_oid)
-                    if not any(len(_e) >= 5 and _e[4] == _oid for _e in session.pending_messages):
-                        session.pending_messages.append((_o.get("content", ""), "", True, _now_m, _oid))
+                    if not any(PendingMessage.coerce(_e).msg_id == _oid for _e in session.pending_messages):
+                        session.pending_messages.append(PendingMessage(_o.get("content", ""), "", True, _now_m, _oid))
                         logger.warning(
                             "Session %s: Window B recovered orphaned message %d",
                             session_id[:12],
@@ -788,7 +788,9 @@ class SessionManager:
                     )
                     session.last_user_msg_id = _new_id
                     session.last_user_msg_at = _time.monotonic()
-                    session.pending_messages.append((message, system_prompt, True, _time.monotonic(), _new_id))
+                    session.pending_messages.append(
+                        PendingMessage(message, system_prompt, True, _time.monotonic(), _new_id)
+                    )
                 # Dispatch via _process_pending (pops oldest entry — the orphan)
                 self._spawn_detached(self._process_pending(session), "process-pending")
                 return
@@ -1804,7 +1806,7 @@ class SessionManager:
             elif current_v2 is sv2.SessionStateV2.IDLE_READY:
                 # Parent already returned to idle; push as a pending message so
                 # it's processed on the next available slot (Gap 1 auto-resume).
-                parent.pending_messages.append((resume_msg, None, False))
+                parent.pending_messages.append(PendingMessage(resume_msg, None, False))
                 # _process_pending acquires lock itself, so release first.
 
         # Outside the lock: drain pending for the IDLE_READY case.
@@ -1826,21 +1828,23 @@ class SessionManager:
                 return
             if session.session_id not in self._sessions:
                 return
-            entry = session.pending_messages.popleft()
-            # Tuple shape: (message, system_prompt, pre_saved, ts?, msg_id?).
-            # Older producers (e.g. worker resume push) use the 3-tuple form.
-            message, system_prompt, _pre_saved = entry[0], entry[1], entry[2]
-            _entry_msg_id = entry[4] if len(entry) >= 5 else None
+            entry = PendingMessage.coerce(session.pending_messages.popleft())
 
             # Lock in this turn's user msg id from the queue entry (the
             # manager pre-saved it at queue-add time and stored its id on
-            # the tuple). compile_context and reflect scope to this id.
-            if _entry_msg_id is not None:
-                session.current_turn_user_msg_id = _entry_msg_id
+            # the entry). compile_context and reflect scope to this id.
+            # Synthetic entries (worker resume, worker timeout) have none.
+            if entry.msg_id is not None:
+                session.current_turn_user_msg_id = entry.msg_id
 
             # Start a new agent task for the pending message while lock is held
             session.task = asyncio.create_task(
-                self._run_agent_safe(session, message, system_prompt, pre_saved=_pre_saved)
+                self._run_agent_safe(
+                    session,
+                    entry.message,
+                    entry.system_prompt,
+                    pre_saved=entry.pre_saved,
+                )
             )
 
     def _find_db_orphans(self, session: AgentSession) -> list[dict]:
@@ -1894,9 +1898,9 @@ class SessionManager:
         for o in orphans:
             msg_id = o["id"]
             session.swept_orphan_ids.add(msg_id)
-            if any(len(e) >= 5 and e[4] == msg_id for e in session.pending_messages):
+            if any(PendingMessage.coerce(e).msg_id == msg_id for e in session.pending_messages):
                 continue
-            session.pending_messages.append((o.get("content", ""), "", True, now, msg_id))
+            session.pending_messages.append(PendingMessage(o.get("content", ""), "", True, now, msg_id))
         # Only advance the watermark — never regress it. A concurrent prompt()
         # running without the lock may have already set last_user_msg_id to a
         # higher value (a freshly-queued normal message). Overwriting it with a
@@ -2351,7 +2355,7 @@ class SessionManager:
                         "get_worker_result(worker_id) for any that did finish. "
                         "Decide whether to retry, cancel, or proceed without them."
                     )
-                    session.pending_messages.append((timeout_msg, None, False))
+                    session.pending_messages.append(PendingMessage(timeout_msg, None, False))
                     session._watched_worker_ids.clear()
                     self._persist_watched(session)
                     self._spawn_detached(self._process_pending(session), "process-pending")
