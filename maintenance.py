@@ -206,7 +206,7 @@ class MaintenanceRunner:
 
                 store = get_memory_store()
                 if store:
-                    health = store.health_check(fix=True)
+                    health = await asyncio.to_thread(store.health_check, fix=True)
                     logger.info("Memory maintenance: %s", health)
             except Exception as e:
                 logger.warning("Memory maintenance failed: %s", e)

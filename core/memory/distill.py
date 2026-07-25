@@ -6,6 +6,7 @@ and saves them to persistent memory with dedup.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -136,7 +137,8 @@ async def distill_session(
             tags += ",worker"
 
         # add_entry enforces unique (file, epoch) identity at write time.
-        store.add_entry(
+        await asyncio.to_thread(
+            store.add_entry,
             content=content,
             file_name=entry.get("file") or None,
             entry_type=entry.get("type", "note"),

@@ -321,7 +321,8 @@ async def ingest_document(
         if len(entry_content) > 2000:
             entry_content = entry_content[:2000] + "... [truncated]"
 
-        store.add_entry(
+        await asyncio.to_thread(
+            store.add_entry,
             content=entry_content,
             file_name=file_name,
             entry_type="finding",

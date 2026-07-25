@@ -593,7 +593,8 @@ Output valid JSON only. No markdown fences. /no_think"""
                 tags = f"user,profile,{tags}" if tags else "user,profile"
                 tags += f",{time.strftime('%Y-%m-%d')}"
 
-                store.add_entry(
+                await asyncio.to_thread(
+                    store.add_entry,
                     content=content,
                     file_name="user.profile",
                     entry_type="profile",
@@ -791,7 +792,7 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         # Find a file due for dedup
         interval_seconds = settings.snooze_dedup_interval_days * 86400
-        files = store.list_files()
+        files = await asyncio.to_thread(store.list_files)
 
         target_file = None
         for f in files:
@@ -818,7 +819,7 @@ Output valid JSON only. No markdown fences. /no_think"""
         logger.info("Snooze: dedup sweep on %s (%d entries)", target_file.name, target_file.entry_count)
 
         # Parse entries from markdown
-        md_content = store.read_file(target_file.name)
+        md_content = await asyncio.to_thread(store.read_file, target_file.name)
         if not md_content:
             return
 
@@ -871,17 +872,38 @@ Output valid JSON only. No markdown fences. /no_think"""
         archived_epochs = await asyncio.to_thread(_pairwise_dedup)
 
         if archived_epochs:
-            # Mark entries as archived in markdown
-            self._archive_entries_in_file(store, target_file.name, archived_epochs)
-            # Remove from FTS5 index
-            self._remove_from_index(store, target_file.name, archived_epochs)
+            # Markdown archive-tag + FTS removal as one uncancellable unit.
+            await asyncio.to_thread(self._archive_entries, store, target_file.name, archived_epochs)
             self._stats["entries_deduped"] += len(archived_epochs)
             logger.info("Snooze: archived %d duplicates in %s", len(archived_epochs), target_file.name)
 
         db.set_snooze_state(f"dedup_{target_file.name}", datetime.now(timezone.utc).isoformat())
 
+    def _archive_entries(self, store, file_name: str, epochs: set[int]) -> None:
+        """Archive entries in markdown AND drop them from the FTS index.
+
+        These two halves were always invoked back-to-back but as separate
+        synchronous calls from async code. That ran them on the event loop
+        (blocking every session's SSE) and left a window between them: a
+        cancel or crash landing in the middle archived the markdown while the
+        index still served the entry, so recall returned rows whose bodies
+        were tagged archived. Snooze is the only writer that splits an entry
+        across both stores, so it is the only place that drift originates.
+
+        Callers dispatch this via asyncio.to_thread. to_thread cannot be
+        cancelled, so once started both halves run to completion — the
+        pairing is atomic with respect to cancellation, which is what closes
+        the window rather than merely narrowing it.
+        """
+        self._archive_entries_in_file(store, file_name, epochs)
+        self._remove_from_index(store, file_name, epochs)
+
     def _archive_entries_in_file(self, store, file_name: str, epochs: set[int]) -> None:
-        """Add <!-- @archived: true --> tag to entries in markdown file."""
+        """Add <!-- @archived: true --> tag to entries in markdown file.
+
+        Prefer _archive_entries() — calling this without the index removal
+        leaves markdown and FTS disagreeing.
+        """
         import fcntl
 
         md_path = store._dir / f"{file_name}.md"
@@ -1076,7 +1098,7 @@ Output valid JSON only. No markdown fences. /no_think"""
         if self._is_cancelled():
             return False
 
-        files = store.list_files()
+        files = await asyncio.to_thread(store.list_files)
         if len(files) < 2:
             db.set_snooze_state("last_reroute_scan", datetime.now(timezone.utc).isoformat())
             return False
@@ -1191,8 +1213,7 @@ Output valid JSON only. No markdown fences. /no_think"""
             try:
                 moved = store.move_entries(src, dst, [entry.epoch])
                 if moved:
-                    self._archive_entries_in_file(store, src, {entry.epoch})
-                    self._remove_from_index(store, src, {entry.epoch})
+                    await asyncio.to_thread(self._archive_entries, store, src, {entry.epoch})
                     rerouted += 1
                     logger.info(
                         "Snooze: rerouted entry (type=%s epoch=%d) %s → %s",
@@ -1255,7 +1276,8 @@ Output valid JSON only. No markdown fences. /no_think"""
 
                     # Build lookups from candidate list
                     epoch_to_src: dict[int, str] = {item["entry"].epoch: item["src_file"] for item in medium_conf}
-                    known_files: set[str] = {f.name for f in store.list_files()}
+                    _known = await asyncio.to_thread(store.list_files)
+                    known_files: set[str] = {f.name for f in _known}
 
                     # Count how many entries the LLM wants to send to each proposed new file.
                     # A new file is only justified if ≥2 entries share it (cluster threshold).
@@ -1304,8 +1326,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                         try:
                             moved = store.move_entries(src, target, [epoch])
                             if moved:
-                                self._archive_entries_in_file(store, src, {epoch})
-                                self._remove_from_index(store, src, {epoch})
+                                await asyncio.to_thread(self._archive_entries, store, src, {epoch})
                                 rerouted += 1
                                 logger.info(
                                     "Snooze: LLM rerouted epoch=%d %s → %s (%s)",
@@ -1345,11 +1366,12 @@ Output valid JSON only. No markdown fences. /no_think"""
         enriched = 0
         one_hour_ago = int(time.time()) - 3600
 
-        for mem_file in store.list_files():
+        _mem_files = await asyncio.to_thread(store.list_files)
+        for mem_file in _mem_files:
             if self._is_cancelled() or enriched >= 10:
                 break
 
-            md_content = store.read_file(mem_file.name)
+            md_content = await asyncio.to_thread(store.read_file, mem_file.name)
             if not md_content:
                 continue
 
@@ -1511,7 +1533,7 @@ Output valid JSON only. No markdown fences. /no_think"""
         if self._is_cancelled():
             return
 
-        health = store.health_check(fix=True)
+        health = await asyncio.to_thread(store.health_check, fix=True)
         db.set_snooze_state("last_index_reconcile", datetime.now(timezone.utc).isoformat())
 
         if health.get("action") == "reindexed":
@@ -1539,7 +1561,8 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         # Find the most bloated file (>= 80 active entries)
         target = None
-        for f in sorted(store.list_files(), key=lambda x: x.entry_count, reverse=True):
+        _all_files = await asyncio.to_thread(store.list_files)
+        for f in sorted(_all_files, key=lambda x: x.entry_count, reverse=True):
             if f.entry_count >= 80:
                 target = f
                 break
@@ -1552,7 +1575,7 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         logger.info("Snooze: splitting bloated file %s (%d entries)", target.name, target.entry_count)
 
-        md_content = store.read_file(target.name)
+        md_content = await asyncio.to_thread(store.read_file, target.name)
         if not md_content:
             return False
 
@@ -1565,7 +1588,8 @@ Output valid JSON only. No markdown fences. /no_think"""
         sample = entries[:150]
         entry_summaries = [f"{i}: [{e.entry_type}] {e.content[:150]}" for i, e in enumerate(sample)]
 
-        existing_files = [f.name for f in store.list_files()]
+        _existing = await asyncio.to_thread(store.list_files)
+        existing_files = [f.name for f in _existing]
 
         from core.llm.client import get_llm_client
 
@@ -1651,8 +1675,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                 logger.debug("Snooze: split %d entries → %s", count, file_name)
 
         if moved and all_moved_epochs:
-            self._archive_entries_in_file(store, target.name, all_moved_epochs)
-            self._remove_from_index(store, target.name, all_moved_epochs)
+            await asyncio.to_thread(self._archive_entries, store, target.name, all_moved_epochs)
             self._stats.setdefault("entries_split", 0)
             self._stats["entries_split"] += moved
             logger.info(
@@ -1913,8 +1936,7 @@ Output valid JSON only. No markdown fences. /no_think"""
         for file_name, epochs in pruned_by_file.items():
             if self._is_cancelled():
                 break
-            self._archive_entries_in_file(store, file_name, epochs)
-            self._remove_from_index(store, file_name, epochs)
+            await asyncio.to_thread(self._archive_entries, store, file_name, epochs)
             total_pruned += len(epochs)
 
         if total_pruned:

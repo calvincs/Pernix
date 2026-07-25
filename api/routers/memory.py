@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 
 router = APIRouter(tags=["memory"])
@@ -14,7 +16,7 @@ async def list_memory_files():
     store = get_memory_store()
     if not store:
         return {"files": [], "error": "Memory unavailable"}
-    files = store.list_files()
+    files = await asyncio.to_thread(store.list_files)
     return {
         "files": [
             {"name": f.name, "description": f.description, "keywords": f.keywords, "entry_count": f.entry_count}
@@ -30,7 +32,7 @@ async def read_memory_file(name: str):
     store = get_memory_store()
     if not store:
         return {"error": "Memory unavailable"}
-    content = store.read_file(name)
+    content = await asyncio.to_thread(store.read_file, name)
     if content is None:
         return {"error": f"File '{name}' not found"}
     return {"name": name, "content": content}
@@ -45,7 +47,7 @@ async def search_memory(q: str = "", after: int = 0, limit: int = 5):
         return {"results": [], "error": "Memory unavailable"}
     if not q:
         return {"results": []}
-    results = store.search(q, limit=limit, after_epoch=after if after else None)
+    results = await asyncio.to_thread(store.search, q, limit=limit, after_epoch=after if after else None)
     return {
         "results": [
             {
@@ -68,5 +70,5 @@ async def memory_maintenance():
     store = get_memory_store()
     if not store:
         return {"error": "Memory unavailable"}
-    result = store.health_check(fix=True)
+    result = await asyncio.to_thread(store.health_check, fix=True)
     return result
