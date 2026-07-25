@@ -386,7 +386,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
 
             store = get_memory_store()
             if store:
-                lessons = store.search_lessons(last_user_msg, limit=3)
+                lessons = await asyncio.to_thread(store.search_lessons, last_user_msg, limit=3)
                 if lessons:
                     import time as _t
 

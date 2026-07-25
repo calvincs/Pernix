@@ -15,6 +15,7 @@ SKILL.md changes flow through the existing proposals UI for human approve/deny.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -363,7 +364,8 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
                 if weight not in ("high", "normal", "low"):
                     weight = "normal"
                 try:
-                    store.add_entry(
+                    await asyncio.to_thread(
+                        store.add_entry,
                         content=full_content,
                         entry_type="lesson",
                         tags=tags,

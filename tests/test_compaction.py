@@ -326,31 +326,173 @@ def test_hot_path_db_calls_run_off_the_event_loop():
     session's SSE for its duration. Anything genuinely cheap and indexed
     (single-row lookups, MAX(created_at), question rows) is exempt.
     """
+    offenders = [o for o in _find_on_loop_blocking_calls() if o.startswith(_DB_GUARDED_PATHS)]
+    assert not offenders, "blocking DB calls on the event loop:\n  " + "\n  ".join(offenders)
+
+
+# Modules whose db.* usage has been audited and moved off-loop. The repo-wide
+# ratchet below covers everything else without demanding a big-bang refactor.
+_DB_GUARDED_PATHS = ("sessions/hooks.py", "core/context/compaction.py", "core/agent.py")
+
+# Known on-loop db.* calls outside the audited modules, as of 2026-07-25.
+# These predate the memory-store work and are NOT fixed here — this is a
+# ratchet, not an amnesty: the count may drop, never grow. Concentrated in
+# sessions/manager.py (7, mostly notice/divider writes in _finalize_turn and
+# transcript reads in _finalize_worker) and api/routers/chat.py (3).
+_KNOWN_ON_LOOP_DB_CALLS = 16
+
+
+def test_no_new_on_loop_db_calls_are_introduced():
+    """Ratchet: the audited modules are clean (asserted above); everywhere
+    else must not get worse. Lower this number when you fix some."""
+    db_offenders = [
+        o for o in _find_on_loop_blocking_calls() if " calls db." in o and not o.startswith(_DB_GUARDED_PATHS)
+    ]
+    assert (
+        len(db_offenders) <= _KNOWN_ON_LOOP_DB_CALLS
+    ), f"new on-loop db call(s): {len(db_offenders)} > {_KNOWN_ON_LOOP_DB_CALLS}\n  " + "\n  ".join(db_offenders)
+    if len(db_offenders) < _KNOWN_ON_LOOP_DB_CALLS:
+        raise AssertionError(
+            f"on-loop db calls dropped to {len(db_offenders)} — lower "
+            f"_KNOWN_ON_LOOP_DB_CALLS to match so the ratchet keeps holding."
+        )
+
+
+# Heavy synchronous surfaces that must never run on the event loop.
+_HEAVY_DB = {"get_messages", "add_message", "add_token_usage", "add_compaction"}
+# MemoryStore: every one of these hits SQLite and/or the filesystem, and
+# add_entry/health_check additionally take a threading.Lock — acquiring that
+# from the loop stalls every other session until it is released.
+_HEAVY_STORE = {
+    "search",
+    "search_lessons",
+    "list_files",
+    "read_file",
+    "health_check",
+    "reindex",
+    "add_entry",
+    "update_entry",
+    "archive_entry",
+    "forget",
+}
+
+
+def _own_body(fn):
+    """Nodes belonging to `fn` itself, excluding nested function bodies.
+
+    ast.walk() descends into nested defs, so a SYNC helper defined inside an
+    async function looks like it lives in the async scope. Those helpers are
+    fine — the caller dispatches them via to_thread (scout's
+    _gather_memory_baseline is exactly this shape). Counting them produced
+    false positives that nearly led to "fixing" correct code.
+    """
+    import ast
+
+    out = []
+
+    def walk(node):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            out.append(child)
+            walk(child)
+
+    walk(fn)
+    return out
+
+
+def _find_on_loop_blocking_calls() -> list[str]:
+    """Repo-wide scan for heavy sync calls made directly from async code."""
     import ast
     import pathlib
 
-    HEAVY = {"get_messages", "add_message", "add_token_usage", "add_compaction"}
-    EXEMPT_FUNCTIONS = {
-        # Sync helpers — no event loop to block; callers already thread them.
-        "_prior_turn_tool_names",
-    }
-
+    root = pathlib.Path(__file__).resolve().parent.parent
     offenders: list[str] = []
-    for path in ("sessions/hooks.py", "core/context/compaction.py", "core/agent.py"):
-        tree = ast.parse(pathlib.Path(path).read_text())
+
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith((".venv/", "tests/", "build/", "data/")):
+            continue
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:
+            continue
         for fn in ast.walk(tree):
-            if not isinstance(fn, ast.AsyncFunctionDef) or fn.name in EXEMPT_FUNCTIONS:
+            if not isinstance(fn, ast.AsyncFunctionDef):
                 continue
-            for node in ast.walk(fn):
+            for node in _own_body(fn):
                 if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                     continue
-                if node.func.attr not in HEAVY:
-                    continue
-                # db.<heavy>(...) called directly is inline; passing the
-                # function object to to_thread shows up as ast.Attribute,
-                # not ast.Call, so it never reaches here.
+                attr = node.func.attr
                 base = node.func.value
-                if isinstance(base, ast.Name) and base.id in ("db", "_db", "db_models"):
-                    offenders.append(f"{path}:{node.lineno} {fn.name}() calls db.{node.func.attr} inline")
+                base_name = base.id if isinstance(base, ast.Name) else ""
+                # Passing the function OBJECT to to_thread is an ast.Attribute,
+                # not an ast.Call, so correct usage never reaches here.
+                if attr in _HEAVY_DB and base_name in ("db", "_db", "db_models"):
+                    offenders.append(f"{rel}:{node.lineno} {fn.name}() calls db.{attr} inline")
+                elif attr in _HEAVY_STORE and (base_name.endswith("store") or base_name in ("store", "_store")):
+                    offenders.append(f"{rel}:{node.lineno} {fn.name}() calls {base_name}.{attr} inline")
 
-    assert not offenders, "blocking DB calls on the event loop:\n  " + "\n  ".join(offenders)
+    return offenders
+
+
+def test_memory_store_is_never_called_from_the_event_loop():
+    """MemoryStore is fully synchronous — SQLite queries, markdown file I/O,
+    and a threading.Lock. Calling it from an async handler blocks the loop for
+    the whole operation; health_check(fix=True) walks every markdown file and
+    rebuilds the index, which on a real store (125 files / 3743 entries) is
+    seconds of frozen SSE for every other session.
+
+    Covers the whole repo, not a hand-listed set of files — the original
+    version of this guard listed three modules and so never saw the 15
+    MemoryStore call sites in snooze, the memory router, and maintenance.
+    """
+    offenders = [o for o in _find_on_loop_blocking_calls() if " calls db." not in o]
+    assert not offenders, "MemoryStore called on the event loop:\n  " + "\n  ".join(offenders)
+
+
+def test_guard_ignores_nested_sync_helpers():
+    """The guard must not flag a sync helper nested in an async function —
+    those are dispatched via to_thread by their caller."""
+    import ast
+
+    src = (
+        "import asyncio\n"
+        "async def outer():\n"
+        "    def _helper():\n"
+        "        return store.list_files()\n"
+        "    return await asyncio.to_thread(_helper)\n"
+    )
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef))
+    calls = [n for n in _own_body(fn) if isinstance(n, ast.Call)]
+    names = {n.func.attr for n in calls if isinstance(n.func, ast.Attribute)}
+    assert "list_files" not in names, "nested sync helper must not count as on-loop"
+
+
+def test_snooze_archives_markdown_and_index_atomically():
+    """The markdown archive-tag and the FTS removal were two separate sync
+    calls from async code. A cancel between them left the index serving
+    entries whose markdown said archived. They are now one helper dispatched
+    through to_thread, which cannot be cancelled mid-flight."""
+    import ast
+    import inspect
+    import pathlib
+
+    import core.snooze as snooze_mod
+
+    assert hasattr(snooze_mod.SnoozeRunner, "_archive_entries")
+    body = inspect.getsource(snooze_mod.SnoozeRunner._archive_entries)
+    assert "_archive_entries_in_file" in body and "_remove_from_index" in body
+
+    # No async caller may invoke either half on its own any more.
+    tree = ast.parse(pathlib.Path(snooze_mod.__file__).read_text())
+    halves = {"_archive_entries_in_file", "_remove_from_index"}
+    stray = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.AsyncFunctionDef):
+            continue
+        for node in _own_body(fn):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in halves:
+                stray.append(f"{fn.name}():{node.lineno} calls {node.func.attr} directly")
+    assert not stray, "archive halves must be paired via _archive_entries:\n  " + "\n  ".join(stray)
