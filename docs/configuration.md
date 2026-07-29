@@ -113,6 +113,20 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 
 ---
 
+## Candor (Operational Memory Add-on)
+
+Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Candor (Operational Memory). Design details: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `candor_enabled` | `false` | Master switch. Turn-end emission, snooze maintenance, and the scout brief toggle hot; the agent tools (`predict_reliability`, `why_reliability`, `reliability_questions`) register at startup only, so enabling them needs a restart. |
+| `candor_scout_brief` | `true` | Inject the `[OPERATIONAL INTEL]` exception report (degraded tools, discovered conditions, open questions) into scout's pre-load context. |
+| `candor_max_obs_per_turn` | `200` | Safety valve on how many observations one turn may emit. |
+
+The store lives at `data/candor/` (machine-local, not in `settings.json`).
+
+---
+
 ## Shell & Tool Safety
 
 > See also: [security.md](security.md)

@@ -1397,6 +1397,29 @@ async def _run_scout_llm(
             logger.debug("Scout model listing failed: %s", e)
         return None
 
+    async def _gather_candor_intel() -> str | None:
+        # Calibrated operational intel (Candor add-on): degraded tools,
+        # admitted conditions, open questions. The bridge serializes store
+        # access on its own thread — awaiting here never blocks the loop.
+        # First call after boot may hit the lazy ledger fold; the timeout
+        # falls back to the last cached brief instead of stalling scout.
+        if not (settings.candor_enabled and settings.candor_scout_brief):
+            return None
+        try:
+            from core.extensions.candor.bridge import get_candor_bridge
+
+            bridge = get_candor_bridge()
+            try:
+                brief = await asyncio.wait_for(bridge.intel_brief(), timeout=4)
+            except asyncio.TimeoutError:
+                brief = bridge.cached_brief()
+            if brief:
+                _step("candor", "Injecting operational reliability intel")
+            return brief
+        except Exception as e:
+            logger.debug("Scout candor intel failed: %s", e)
+            return None
+
     gathered = await asyncio.gather(
         asyncio.to_thread(_gather_memory_baseline),
         asyncio.to_thread(_gather_deep_memory),
@@ -1405,6 +1428,7 @@ async def _run_scout_llm(
         asyncio.to_thread(_gather_skill_discovery),
         asyncio.to_thread(_gather_lessons),
         _gather_models(),
+        _gather_candor_intel(),
     )
     user_content_parts.extend(part for part in gathered if part)
 

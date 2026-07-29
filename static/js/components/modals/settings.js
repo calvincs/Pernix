@@ -99,6 +99,15 @@ const SECTIONS = [
         ],
     },
     {
+        title: 'Candor (Operational Memory)',
+        description: 'Calibrated reliability tracking: tool outcomes and reflect verdicts feed an auditable evidence ledger, and scout receives an operational-intel brief flagging degraded tools, discovered conditions, and open questions. Observation capture, snooze maintenance, and the scout brief toggle immediately; the agent-facing tools (predict_reliability, why_reliability, reliability_questions) register at startup, so they appear/disappear after a restart.',
+        fields: [
+            { key: 'candor_enabled', label: 'Candor Enabled', type: 'bool' },
+            { key: 'candor_scout_brief', label: 'Scout Intel Brief', type: 'bool' },
+            { key: 'candor_max_obs_per_turn', label: 'Max Observations / Turn', type: 'number' },
+        ],
+    },
+    {
         title: 'Reflect',
         description: 'Post-task verification re-reads the agent\'s work and checks for mistakes or incomplete steps. If issues are found, the agent retries automatically. Min messages prevents reflect from firing on trivial exchanges.',
         fields: [

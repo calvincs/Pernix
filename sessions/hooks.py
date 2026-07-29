@@ -68,6 +68,11 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
     if settings.eval_auto and session_obj:
         await _maybe_evaluate(session_id, session, emit=emit, session_obj=session_obj)
 
+    # Candor: feed this turn's operational outcomes to the add-on store.
+    # Runs after reflect so the verdict is available. Mechanical, no LLM.
+    if settings.candor_enabled and session_obj:
+        await _maybe_candor(session_id, session, session_obj=session_obj)
+
 
 async def _cleanup_stale_questions(session_id: str, session_obj=None) -> None:
     """Delete questions that the user answered inline (bypassing the modal).
@@ -207,6 +212,59 @@ async def _maybe_distill(session_id: str, session: dict) -> None:
         )
     except Exception as e:
         logger.warning("Distillation failed for %s: %s", session_id, e)
+
+
+async def _maybe_candor(session_id: str, session: dict, session_obj=None) -> None:
+    """Emit this turn's operational outcomes to the Candor add-on store.
+
+    Delta-tracked against session_obj._candor_emitted (keyed by turn id) so a
+    reflect-retry re-entry — post-hooks run once per attempt — never
+    double-observes the earlier attempt's tool calls. Failure is never fatal:
+    a Candor problem logs a warning and the turn completes normally.
+    """
+    import time as _time
+
+    try:
+        from core.extensions.candor.bridge import get_candor_bridge
+        from core.extensions.candor.emit import build_turn_observations
+
+        turn_id = getattr(session_obj, "current_turn_user_msg_id", None)
+        prev = getattr(session_obj, "_candor_emitted", None)
+        if not isinstance(prev, dict) or prev.get("turn") != turn_id:
+            prev = {"turn": turn_id, "tools": {}}
+
+        verdict = failure_cause = None
+        stash = getattr(session_obj, "_candor_reflect", None)
+        if stash and stash[0] == turn_id:
+            _, verdict, failure_cause = stash
+
+        model = getattr(session_obj, "model_override", None) or settings.llm_model or "default"
+        observations, emitted = build_turn_observations(
+            tool_summary=session_obj.last_tool_summary or {},
+            already_emitted=prev["tools"],
+            termination_reason=getattr(session_obj, "termination_reason", None),
+            reflect_verdict=verdict,
+            failure_cause=failure_cause,
+            model=model,
+            session_kind=session.get("session_type") or "normal",
+            is_retry=bool(session_obj.reflect_count),
+            ts_ms=int(_time.time() * 1000),
+            max_obs=settings.candor_max_obs_per_turn,
+        )
+        session_obj._candor_emitted = {"turn": turn_id, "tools": emitted}
+        if len(observations) >= settings.candor_max_obs_per_turn:
+            logger.warning(
+                "Candor emission hit the per-turn cap (%d) — excess dropped", settings.candor_max_obs_per_turn
+            )
+        if observations:
+            # Bounded wait: post-hooks block turn completion. If the bridge
+            # executor is busy (e.g. a gate sweep is finishing), the job still
+            # runs to completion after we stop waiting — data is late, not lost.
+            await asyncio.wait_for(get_candor_bridge().record(observations), timeout=10)
+    except asyncio.TimeoutError:
+        logger.warning("Candor record still queued after 10s — continuing without waiting")
+    except Exception as e:
+        logger.warning("Candor emission failed for %s: %s", session_id, e)
 
 
 def _broadcast_reflect_notification(
@@ -456,6 +514,15 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             turn_user_msg_id=session_obj.current_turn_user_msg_id,
             termination_reason=current_reason,
             prior_termination_reasons=prior_reasons,
+        )
+
+        # Stash the verdict for _maybe_candor (which runs after reflect).
+        # Keyed by turn id so a turn where reflect is skipped can't inherit a
+        # stale verdict from an earlier turn.
+        session_obj._candor_reflect = (
+            session_obj.current_turn_user_msg_id,
+            result.verdict,
+            result.failure_cause,
         )
 
         # If trial hints were injected and reflect now reports pass, count

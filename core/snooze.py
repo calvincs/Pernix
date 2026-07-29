@@ -372,6 +372,21 @@ class SnoozeRunner:
             )
             await self._cleanup_workflow_runs()
 
+        # Activity 12b: Candor operational-memory maintenance (no LLM).
+        # Runs the admission gate (the expensive sweep — this is its only
+        # home), drains the pending observation buffer, and checkpoints. All
+        # store work happens on the bridge's dedicated executor thread;
+        # cancellation is polled between phases and drain chunks.
+        if not self._is_cancelled() and settings.candor_enabled:
+            bus.emit(
+                {
+                    "type": "snooze.activity",
+                    "activity": "candor_gate",
+                    "detail": "Sweeping Candor operational memory (gate + buffer drain)",
+                }
+            )
+            await self._candor_maintenance()
+
         # Activity 13: Refine pass — broader-gate sibling of Activity 2b.
         # Runs independent of did_llm: refine has its own budget, bounded to
         # one session per cycle. Coexists with 2b — a session with an
@@ -2189,6 +2204,25 @@ Output valid JSON only. No markdown fences. /no_think"""
                 )
         except Exception as e:
             logger.warning("Snooze synthesis failed: %s", e)
+
+    # ------------------------------------------------------------------
+    # Activity 12b: Candor operational-memory maintenance
+    # ------------------------------------------------------------------
+
+    async def _candor_maintenance(self) -> None:
+        """Gate sweep + pending-buffer drain for the Candor add-on.
+
+        No watermark needed: the bridge's drain cursor is the durable state,
+        and run_gate() is O(1) when no new observations exist.
+        """
+        try:
+            from core.extensions.candor.bridge import get_candor_bridge
+
+            stats = await get_candor_bridge().run_maintenance(self._is_cancelled)
+            if stats and (stats.get("seeded") or stats.get("drained") or stats.get("checkpointed")):
+                logger.info("Snooze candor maintenance: %s", stats)
+        except Exception as e:
+            logger.warning("Snooze candor maintenance failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
