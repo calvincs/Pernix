@@ -268,6 +268,14 @@ async def lifespan(app: FastAPI):
         await get_llm_client().close()
     except Exception:
         pass
+    try:
+        # Releases the Candor store's writer flock. No-op if the bridge was
+        # never created (candor_enabled=false or unused).
+        from core.extensions.candor.bridge import shutdown_candor_bridge
+
+        await shutdown_candor_bridge()
+    except Exception:
+        pass
     logger.info("Shutdown complete")
 
 

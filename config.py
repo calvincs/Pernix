@@ -13,7 +13,16 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ENV_PATH = Path(".env")
 
 # Fields that are machine-specific and should not be persisted
-_NO_PERSIST = {"db_path", "host", "port", "workspace_dir", "memory_dir", "skills_dir", "workflows_dir"}
+_NO_PERSIST = {
+    "db_path",
+    "host",
+    "port",
+    "workspace_dir",
+    "memory_dir",
+    "skills_dir",
+    "workflows_dir",
+    "candor_store_dir",
+}
 
 # Fields that are runtime-only — set via CLI flags, never read from settings.json
 # or .env, and never written back to disk. Their default in the dataclass is
@@ -170,6 +179,14 @@ class Settings:
     memory_recall: bool = True
     memory_recall_min_score: float = 2.0
 
+    # --- Candor (operational-memory add-on, off by default) ---
+    # Calibrated reliability tracking via the external `candor` package.
+    # All call sites gate on candor_enabled at runtime (hot toggle), except
+    # tool registration which follows the web-extension pattern (restart).
+    candor_enabled: bool = False
+    candor_scout_brief: bool = True  # inject [OPERATIONAL INTEL] into scout preload
+    candor_max_obs_per_turn: int = 200  # safety valve on turn-end emission volume
+
     # --- Evaluation (extension) ---
     eval_auto: bool = False
     eval_threshold: float = 0.7
@@ -260,6 +277,7 @@ class Settings:
     memory_dir: str = "data/memories"
     skills_dir: str = "data/skills"
     workflows_dir: str = "data/workflows"
+    candor_store_dir: str = "data/candor"
 
     @property
     def workspace_venv_python(self) -> str:

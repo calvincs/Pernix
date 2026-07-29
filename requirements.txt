@@ -12,6 +12,11 @@ pyyaml>=6.0
 pywebpush>=2.0           # Web Push (VAPID) — background push notifications
 pypdf>=4.0               # PDF text extraction for attached PDFs at ingest
 
+# Candor — operational-memory add-on (candor_enabled toggle; zero transitive deps).
+# Vendored wheel so installs work offline/in Docker. Rebuild after upstream changes:
+#   pip wheel --no-deps -w vendor/ /path/to/Candor
+./vendor/candor-0.2.0-py3-none-any.whl
+
 # Optional (graceful degradation if absent)
 qrcode==8.*              # terminal QR code for mobile onboarding (network mode)
 tiktoken==0.9.*        # accurate token estimation
