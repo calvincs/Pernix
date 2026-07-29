@@ -127,6 +127,12 @@ When SCOUT SIGNALS are present:
 - AVOID entries are subjects with a history of failures; find alternatives unless the user explicitly named one on this list (user intent overrides signals).
 - These are weighted observations, not hard rules. Your recommendations can contradict them when you have a specific reason — just make that reason explicit in your rationale fields.
 
+When [OPERATIONAL INTEL] is present (calibrated reliability from logged outcome history):
+- It is an EXCEPTION REPORT: it lists only degraded or conditional items. A tool or domain absent from the block has no known problem — never report its absence as a concern or a gap.
+- Fold relevant entries into approach_guidance: steer the plan away from targets with low success rates, and toward any stated working condition (e.g. "works when method=browse" means plan browse_web for those domains instead of http_get; a failure-mode line like "rate_limit 38%" means plan for backoff or an alternative source).
+- The percentages are calibrated from real observation counts. Weigh them by evidence: a wide credible interval or few obs is weak evidence; many obs is strong. An [unstable] or [under_specified] tag means the rate is context-dependent — flag that uncertainty in your plan rather than trusting the point estimate.
+- When reliability is central to the task, add predict_reliability / why_reliability / reliability_questions to recommended_tools so the main agent can query live calibrated numbers and their evidence chains.
+
 You also have tools to search deeper if the baseline is insufficient:
 - search_memory: Run additional memory queries with different keywords or modes. If a preloaded snippet is truncated and looks relevant, call search_memory with keywords from that entry and file=<file_name> to retrieve the complete content from that file.
 - search_sessions: Search other sessions with different queries
