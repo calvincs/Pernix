@@ -18,6 +18,7 @@ data/workspace/
 │   │   └── ...
 │   └── ...
 ├── scratch/                  # ad-hoc files
+├── rlm/{run_id}/             # RLM run residue (trace, staged context) — self-purges
 └── .venv/                    # auto-managed venv for custom tools (not for dev use)
 ```
 
@@ -90,6 +91,8 @@ Pernix does not garbage-collect the workspace automatically. Two options keep it
 - **`python run.py --rebuild`** — wipes the workspace entirely (along with sessions, memory, and logs). Settings, API keys, skills, and certs are preserved.
 
 For per-project cleanup, just `rm -r data/workspace/projects/old-project/`.
+
+One exception to "no garbage collection": `rlm/` run directories self-purge — snooze deletes them after `rlm_run_retention_days` (default 30).
 
 ---
 

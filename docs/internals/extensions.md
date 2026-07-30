@@ -12,11 +12,11 @@ For per-feature usage, see the relevant guide. For tool authoring, see [../autho
 
 Each extension exposes a `register()` function called at server startup. `register()` reads settings + environment + available imports and registers zero or more tools into the global tool registry. Tools registered here behave the same as builtin tools — same safety levels, same execution path, same approval gating.
 
-If a setting that gates an extension changes (e.g., turning `browser_enabled` on), Pernix needs a restart to pick up the change. The registry is built once per process.
+If a setting that gates an extension changes (e.g., turning `browser_enabled`, `candor_enabled`, or `rlm_enabled` on), Pernix needs a restart to pick up the change. The registry is built once per process.
 
 ---
 
-## The nine extensions
+## The eleven extensions
 
 ### `web`
 
@@ -147,6 +147,28 @@ Most users leave this off. Reflect (the always-on quality gate) covers most of t
 
 Internal. Provides tools the agent uses to introspect and switch models. Not user-facing in the typical sense, though `list_available_models` may surface in chats.
 
+### `candor`
+
+`core/extensions/candor/__init__.py`
+
+| Tool | Safety | Gated on |
+|---|---|---|
+| `predict_reliability` | safe | `candor_enabled` |
+| `why_reliability` | safe | `candor_enabled` |
+| `reliability_questions` | safe | `candor_enabled` |
+
+Operational-memory add-on (off by default): calibrated reliability tracking with an auditable evidence ledger. `register()` is a hard off-switch — with `candor_enabled=false` the tools don't exist, so toggling requires a restart; observation capture and the scout intel brief toggle hot. Store at `data/candor/`. Settings: [../configuration.md](../configuration.md#candor-operational-memory-add-on).
+
+### `rlm`
+
+`core/extensions/rlm/__init__.py`
+
+| Tool | Safety | Gated on |
+|---|---|---|
+| `rlm_process` | caution | `rlm_enabled` |
+
+Recursive long-input processing (off by default): analyzes inputs far beyond the context window in a sandboxed child REPL with brokered, budgeted sub-LLM calls. Same restart-gated registration pattern as candor; the `rlm_*` caps and model roles apply hot. Run residue at `data/workspace/rlm/<run_id>/` (purged by snooze retention); audit rows in the `rlm_runs` table (migration v18). Architecture and security posture: [rlm.md](rlm.md).
+
 ---
 
 ## Gating summary table
@@ -164,6 +186,8 @@ Internal. Provides tools the agent uses to introspect and switch models. Not use
 | toolmaker | on | none |
 | evaluation | mostly off | `eval_auto` |
 | model_mgmt | on | none |
+| candor | off | `candor_enabled` (tool registration restart-gated) |
+| rlm — `rlm_process` | off | `rlm_enabled` (tool registration restart-gated) |
 
 The total number of registered tools varies by configuration. With a minimal install (no Tavily key, no Chromium binary), the web extension contributes only `http_get`; with a fully-loaded install, it adds `search_web` and `browse_web`.
 
@@ -176,4 +200,4 @@ If the existing extensions don't cover what you need, two options:
 1. **Custom tool** via `toolmaker` — for one-off tools, no Pernix code change. See [../authoring/custom-tools.md](../authoring/custom-tools.md).
 2. **New extension module** — for a coherent group of related tools. Drop a directory under `core/extensions/yourmodule/` with an `__init__.py` exposing `register()`. Pernix discovers it on next start.
 
-The second path is appropriate for serious capability extensions you'd want to maintain or share. Use the existing extensions as patterns — `core/extensions/scheduling/` is a clean example of "tools + persistent state on disk + REST endpoints."
+The second path is appropriate for serious capability extensions you'd want to maintain or share. Use the existing extensions as patterns — `core/extensions/scheduling/` is a clean example of "tools + persistent state on disk + REST endpoints," and `core/extensions/rlm/` is the reference for a gated, off-by-default add-on with a DB table, workspace run dirs, and snooze retention.

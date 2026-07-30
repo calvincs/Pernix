@@ -92,6 +92,9 @@ Defined in `core/snooze.py`. Runs every `snooze_interval_ticks` (default 10 tick
 | Memory consolidation | Every `snooze_consolidation_interval_hours` (default 24) | Cluster semantically related entries into the same file using `snooze_consolidation_cluster_threshold` (default 0.55). |
 | User profile extraction | Periodic | Pull recurring preferences and facts into `user.profile.md`. |
 | Post-mortem cleanup | Past retention | Synthesize patterns from accumulated post-mortems; archive old ones. |
+| Workflow run cleanup | Per cycle | Delete workflow run dirs beyond keep-10-per-workflow or older than 30 days. |
+| RLM run cleanup | Per cycle, age-based | Delete `data/workspace/rlm/<run_id>/` dirs + `rlm_runs` rows older than `rlm_run_retention_days` (default 30). Running runs are never touched. |
+| Candor maintenance | Per cycle, when `candor_enabled` | Run the admission gate, drain the observation buffer, checkpoint the store. |
 
 Each task is bounded by `snooze_max_cycle_seconds` (default 60). If a task can't finish in that window, it yields and resumes on the next tick.
 

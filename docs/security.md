@@ -15,6 +15,7 @@ Understanding what an AI agent can actually do is the first step to deploying it
 - **Make outbound HTTP requests** — web searches, page fetches, and calls to LLM APIs
 - **Store persistent data** in SQLite databases and markdown memory files on disk
 - **Spawn sub-agents** (workers) that can do all of the above in parallel
+- **Execute model-written Python** in a child process, when the RLM add-on is enabled (`rlm_enabled`, off by default) — the child gets a scrubbed environment (no API keys), resource limits, and brokered/budgeted LLM access, but it is a same-UID subprocess without namespaces: defense-in-depth, not a security boundary, the same stance as the `bash` tool. `rlm_process` registers at the `caution` safety tier (no per-call prompt, like `bash`). Details: [internals/rlm.md](internals/rlm.md)
 
 None of this is hidden or unusual — it is the entire point of an agentic system. The implication is that Pernix should run in an environment **you are comfortable having an AI modify**.
 
@@ -25,7 +26,7 @@ None of this is hidden or unusual — it is the entire point of an agentic syste
 - **Run on a dedicated, non-production machine** — a spare box, a VM, or a container
 - **Do not expose to the public internet** without a hardened reverse proxy in front of it
 - **Start with `auto_approve_dangerous = false`** (the default) — the agent will ask before running destructive commands
-- **Review `shell_allowlist`** — restrict which shell commands are permitted if you want tighter control
+- **Review `shell_allowlist`** — restrict which shell commands are permitted if you want tighter control (note: the RLM child REPL is a Python interpreter, not the bash tool, so the shell allowlist does not apply to it — the container/VM is its containment layer)
 - **Back up `data/` periodically** — it contains your sessions, memory, and workspace
 
 ---

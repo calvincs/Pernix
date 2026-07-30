@@ -66,7 +66,7 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ## Database migrations (chronological)
 
-The DB schema is at v16. Each migration runs automatically on next start. Unless you've made manual changes to `data/sessions.db`, you don't need to do anything — Pernix migrates forward in place.
+The DB schema is at v18. Each migration runs automatically on next start. Unless you've made manual changes to `data/sessions.db`, you don't need to do anything — Pernix migrates forward in place.
 
 | Version | Description |
 |---|---|
@@ -86,6 +86,8 @@ The DB schema is at v16. Each migration runs automatically on next start. Unless
 | 14 | Add workflow_runs and skill_improvement_proposals tables |
 | 15 | Session-origin proposals + trial-use tracking |
 | 16 | Persist v2 state and watched_worker_ids on sessions for restart recovery |
+| 17 | Add pinned flag on sessions for sidebar pinning |
+| 18 | Add rlm_runs audit index for RLM (recursive processing) runs |
 
 ---
 

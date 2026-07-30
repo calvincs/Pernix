@@ -98,6 +98,7 @@ Everything is local:
 | Long-term memories | `data/memories/*.md` (plain markdown) |
 | Memory search index | `data/memories/_index.db` (FTS5) |
 | Workspace files | `data/workspace/` |
+| RLM run traces (when enabled) | `data/workspace/rlm/<run_id>/` — auto-purged after 30 days |
 | Settings | `data/settings.json` |
 | API keys | `.env` |
 | Skills | `data/skills/` |
@@ -182,9 +183,10 @@ Ollama inference, memory storage, and session DB all stay local. Settings and AP
 
 ### How do I cap my OpenRouter spending?
 
-Use the OpenRouter dashboard — Pernix doesn't have a built-in per-month limit. Two soft tools available locally:
+Use the OpenRouter dashboard — Pernix doesn't have a built-in per-month limit. Soft tools available locally:
 
 - `OPENROUTER_MODELS` whitelist — restrict which models the UI even shows.
 - `llm_session_timeout` — caps how long any single session can hold an LLM slot.
+- If RLM is enabled, it is the biggest single-call spend vector (one `rlm_process` run can fire up to `rlm_max_subcalls` sub-calls, default 50). Point the **RLM Sub-call Model** role at a local/Ollama model to keep runs free, and tune `rlm_max_subcalls`, `rlm_max_concurrent_subcalls`, and `rlm_timeout_seconds` in Settings → General → RLM.
 
 For hard limits, configure them on OpenRouter's side.
