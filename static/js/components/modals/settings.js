@@ -108,6 +108,19 @@ const SECTIONS = [
         ],
     },
     {
+        title: 'RLM (Recursive Processing)',
+        description: 'Recursive Language Models: the agent processes inputs far beyond the context window (huge files, corpora, transcripts) by writing code in a sandboxed REPL that holds the input as a variable and delegates chunks to sub-LLM calls. The caps guard against runaway runs: iterations bounds root turns, sub-calls bounds total LLM spend per run, depth 2+ allows recursive child RLMs. Caps and models apply immediately; the rlm_process tool registers at startup, so enabling/disabling takes a restart. Root and sub-call models are chosen under Models → Model Roles.',
+        fields: [
+            { key: 'rlm_enabled', label: 'RLM Enabled', type: 'bool' },
+            { key: 'rlm_max_iterations', label: 'Max Iterations', type: 'number' },
+            { key: 'rlm_max_subcalls', label: 'Max Sub-calls / Run', type: 'number' },
+            { key: 'rlm_max_concurrent_subcalls', label: 'Sub-call Concurrency', type: 'number' },
+            { key: 'rlm_max_depth', label: 'Max Recursion Depth', type: 'number' },
+            { key: 'rlm_timeout_seconds', label: 'Run Timeout (s)', type: 'number' },
+            { key: 'rlm_run_retention_days', label: 'Run Data Retention (days)', type: 'number' },
+        ],
+    },
+    {
         title: 'Reflect',
         description: 'Post-task verification re-reads the agent\'s work and checks for mistakes or incomplete steps. If issues are found, the agent retries automatically. Min messages prevents reflect from firing on trivial exchanges.',
         fields: [
@@ -144,6 +157,8 @@ const MODEL_SELECT_FIELDS = [
     { key: 'background_model', label: 'Background Model', type: 'model-select', allowEmpty: true },
     { key: 'reflect_model', label: 'Reflect Model', type: 'model-select', allowEmpty: true },
     { key: 'fallback_model', label: 'Fallback Model', type: 'model-select', allowEmpty: true },
+    { key: 'rlm_root_model', label: 'RLM Root Model', type: 'model-select', allowEmpty: true },
+    { key: 'rlm_sub_model', label: 'RLM Sub-call Model', type: 'model-select', allowEmpty: true },
 ];
 
 // Resolve the effective reflect model given the configured fallback chain:
@@ -606,7 +621,7 @@ function buildModelsTab() {
     }, []);
     const selectSection = el('div', { class: 'settings-section' }, [
         el('h3', {}, [text('Model Roles')]),
-        el('p', { class: 'or-hint' }, [text('Primary handles conversations; scout runs parallel research; background handles titles/memory; reflect diagnoses failures and plans retries; fallback activates during rate limits.')]),
+        el('p', { class: 'or-hint' }, [text('Primary handles conversations; scout runs parallel research; background handles titles/memory; reflect diagnoses failures and plans retries; fallback activates during rate limits. RLM root orchestrates recursive long-input runs (falls back to primary); RLM sub-call handles the chunk work those runs delegate (falls back to background, then primary).')]),
         ...selectFields,
         reflectWarning,
     ]);

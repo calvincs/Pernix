@@ -187,6 +187,22 @@ class Settings:
     candor_scout_brief: bool = True  # inject [OPERATIONAL INTEL] into scout preload
     candor_max_obs_per_turn: int = 200  # safety valve on turn-end emission volume
 
+    # --- RLM (recursive long-input processing add-on, off by default) ---
+    # Recursive Language Models engine (core/extensions/rlm): processes inputs
+    # beyond the context window in a sandboxed child REPL. All call sites gate
+    # on rlm_enabled at runtime (hot toggle), except tool registration which
+    # follows the Candor pattern (restart). The rlm_* caps exist to prevent
+    # runaway recursion/spend; model roles fall back per resolve_*_model().
+    rlm_enabled: bool = False
+    rlm_root_model: str = ""  # or llm_model
+    rlm_sub_model: str = ""  # or background_model or llm_model
+    rlm_max_iterations: int = 20  # root REPL turns per run
+    rlm_max_depth: int = 1  # 1 = llm_query only; 2+ enables rlm_query recursion
+    rlm_max_subcalls: int = 50  # sub-LLM call ledger, shared across depths
+    rlm_max_concurrent_subcalls: int = 3
+    rlm_timeout_seconds: int = 900  # wall clock per run
+    rlm_run_retention_days: int = 30  # workspace/rlm/<run_id> purge age
+
     # --- Evaluation (extension) ---
     eval_auto: bool = False
     eval_threshold: float = 0.7

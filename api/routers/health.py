@@ -139,6 +139,12 @@ _SETTING_BOUNDS = {
     "port": (1024, 65535),
     "post_mortem_retention_days": (7, 3650),
     "candor_max_obs_per_turn": (10, 10_000),
+    "rlm_max_iterations": (3, 100),
+    "rlm_max_depth": (1, 3),
+    "rlm_max_subcalls": (5, 500),
+    "rlm_max_concurrent_subcalls": (1, 8),
+    "rlm_timeout_seconds": (60, 3600),
+    "rlm_run_retention_days": (1, 365),
 }
 
 
