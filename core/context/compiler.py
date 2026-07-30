@@ -402,6 +402,77 @@ def _build_server_context() -> str:
     )
 
 
+# Agent directive files (SOUL.md / RULES.md / SESSIONS.md) — the single reader.
+#
+# These are session-invariant deployment config, so they belong in the fixed
+# prefix: byte-stable content up here extends the provider's prompt-prefix
+# cache across turns, whereas the old flow (scout re-wording them into its
+# per-turn report) both broke the cache at the scout-section boundary and
+# delivered them inconsistently (measured: identity present 66% of turns,
+# ~104 chars, vs the full files here). The scout still READS these files in
+# its preload to shape approach_guidance — it just no longer retypes them.
+#
+# The guard is an accident brake (a pasted log dump, a runaway generator),
+# not curation: at 32K chars/file the truncation is logged loudly. A
+# deployment that genuinely needs directives at that scale should compress
+# at write time — per-turn context is the wrong place to absorb it.
+_DIRECTIVE_FILE_GUARD_CHARS = 32_000
+_directive_guard_warned: set[str] = set()
+
+
+def _read_directive_file(path: Path) -> str:
+    """Read one directive file, applying the accident guard with a loud log."""
+    content = path.read_text()
+    if len(content) > _DIRECTIVE_FILE_GUARD_CHARS:
+        if path.name not in _directive_guard_warned:
+            _directive_guard_warned.add(path.name)
+            logger.warning(
+                "%s is %d chars — truncating to %d for the system prompt. "
+                "Trim the file (or compress it at write time); per-turn context "
+                "should not carry directives at this scale.",
+                path,
+                len(content),
+                _DIRECTIVE_FILE_GUARD_CHARS,
+            )
+        content = content[:_DIRECTIVE_FILE_GUARD_CHARS]
+    return content.strip()
+
+
+def _build_agent_directives_block() -> str:
+    """[IDENTITY] + [RULES] + [INSTRUCTIONS] from data/agent/, whole and verbatim."""
+    parts = []
+
+    for fname, label in (("SOUL.md", "IDENTITY"), ("RULES.md", "RULES")):
+        path = Path("data/agent") / fname
+        if path.exists():
+            content = _read_directive_file(path)
+            if content:
+                parts.append(f"[{label}]\n{content}")
+
+    # First of SESSIONS.md / INSTRUCTIONS.md wins (mirrors the old scout order).
+    for fname in ("SESSIONS.md", "INSTRUCTIONS.md"):
+        path = Path("data/agent") / fname
+        if path.exists():
+            content = _read_directive_file(path)
+            if content:
+                # Framing matters: SESSIONS.md is deployment config, and an
+                # unset field there is NOT evidence that a fact is unknown.
+                # Without this note the model reads placeholder lines
+                # ("Timezone: not set") as ground truth and refuses tasks whose
+                # answer is in memory. Applied here rather than in the file so
+                # it holds for every deployment's SESSIONS.md.
+                parts.append(
+                    f"[INSTRUCTIONS]\n"
+                    f"(Deployment configuration. A blank or unset field below means "
+                    f"'not pinned in config' — never that the fact is unknown. "
+                    f"Defer to [RELEVANT MEMORY] for anything not pinned here.)\n"
+                    f"{content}"
+                )
+            break
+
+    return "\n\n".join(parts)
+
+
 def _build_available_skills_block(max_skills: int = 24, desc_chars: int = 180) -> str:
     """List every ENABLED registered skill (name + 1-line description) so the agent
     sees its full skill catalog on every turn.
@@ -593,8 +664,8 @@ def compile_context(
     """Assemble Layer 1 (Working Context) from session history + scout report.
 
     Order (prompt cache preserving):
-    1. FIXED PREFIX: base system prompt (stable across turns)
-    2. SCOUT SECTION: curated identity/rules/memory/approach (varies per turn)
+    1. FIXED PREFIX: base system prompt + agent directives (stable across turns)
+    2. SCOUT SECTION: curated memory/approach/tools (varies per turn)
     3. VOLATILE TAIL: resource status (changes per call)
     Then: compaction summary (if exists) + message history + tool schemas.
     """
@@ -609,6 +680,14 @@ def compile_context(
 
     # Server URL — lets the agent open or examine workspace artifacts in a browser.
     system_parts.append(_build_server_context())
+
+    # Agent directives (SOUL/RULES/SESSIONS) — deterministic, byte-stable, and
+    # delivered whole. Lives in the fixed prefix, not the scout section, so the
+    # prompt-prefix cache covers it and every turn (including scout-fallback
+    # and worker turns) gets identical directives.
+    directives_block = _build_agent_directives_block()
+    if directives_block:
+        system_parts.append(directives_block)
 
     # Static skill catalog — cache-stable across turns; placed before the
     # per-turn scout report so prompt cache hits the same prefix every turn.

@@ -379,7 +379,7 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 10):
 - **Model** — `settings.scout_model` (fast, cheap), **fresh context** (no main convo history — session brief only)
 - **Tools** — read-only discovery: `search_memory`, `search_skills`, `search_tools`, `read_skill_instructions`, `submit_report`
 - **Budget** — 5 rounds max; must call `submit_report` by round 4 (`runner.py:104`)
-- **Output** — `ScoutReport` with `recommended_tools`, `recommended_skills` (0-3), `approach_guidance`, `deliverables_plan` (used by Reflect), optional `recommended_model`, plus `identity`/`rules`/`instructions` from SOUL.md/RULES.md/SESSIONS.md
+- **Output** — `ScoutReport` with `recommended_tools`, `recommended_skills` (0-3), `approach_guidance`, `deliverables_plan` (used by Reflect), optional `recommended_model`. SOUL.md/RULES.md/SESSIONS.md are NOT part of the report: the context compiler injects those files whole into the fixed prefix of every system prompt (`_build_agent_directives_block`) — scout reads them to shape its plan but never retypes them
 - **Caching** — report cached on `session.last_scout_report`; retries (reflect/eval) re-run scout with `reflect_lessons` prepended
 
 ### 2.3 Tool routing (`core/tools/registry.py`, `core/extensions/`)
