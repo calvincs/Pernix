@@ -32,9 +32,12 @@ def mint_run_dir(parent_run_dir: Path | None = None) -> tuple[str, Path, str]:
     """Create a fresh run dir. Returns (run_id, absolute dir, workspace-relative dir)."""
     run_id = secrets.token_hex(4)
     if parent_run_dir is not None:
-        run_dir = parent_run_dir / "sub" / run_id
+        run_dir = Path(parent_run_dir).resolve() / "sub" / run_id
     else:
-        run_dir = Path(settings.workspace_dir) / "rlm" / run_id
+        # Absolute, always: workspace_dir defaults to a relative path, and the
+        # child process (cwd = run dir) must see socket/context paths that
+        # don't re-resolve against itself.
+        run_dir = (Path(settings.workspace_dir) / "rlm" / run_id).resolve()
     run_dir.mkdir(parents=True, exist_ok=False)
     try:
         run_rel = str(run_dir.resolve().relative_to(Path(settings.workspace_dir).resolve()))

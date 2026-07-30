@@ -119,7 +119,11 @@ class ChildREPL:
         address_space_limit: int = _DEFAULT_AS_LIMIT,
         fsize_limit: int = _DEFAULT_FSIZE_LIMIT,
     ):
-        self.run_dir = Path(run_dir)
+        # Resolve to absolute: the child's cwd IS the run dir, so a relative
+        # workspace_dir (the default) would make the child resolve the socket
+        # paths against itself — <run_dir>/<run_dir>/exec.sock — and never
+        # connect (found the hard way on box, run ba1e005a).
+        self.run_dir = Path(run_dir).resolve()
         self.exec_sock_path = self.run_dir / "exec.sock"
         self.llm_sock_path = self.run_dir / "llm.sock"
         self._python_exe = python_exe or sys.executable

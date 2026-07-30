@@ -447,3 +447,19 @@ def test_engine_nested_failure_degrades_to_error_string(tmp_path):
     # broker converts the exception to an inline error; the root recovers
     assert result.status == "completed"
     assert "root survived: Error:" in result.answer and "nested exploded" in result.answer
+
+
+def test_child_works_with_relative_run_dir(tmp_path, monkeypatch):
+    """Regression: box run ba1e005a. workspace_dir defaults to a RELATIVE path,
+    and the child (cwd = run dir) must not re-resolve socket paths against
+    itself. ChildREPL must normalize to absolute."""
+    monkeypatch.chdir(tmp_path)
+    from pathlib import Path
+
+    c = ChildREPL(Path("rel") / "run")
+    assert c.run_dir.is_absolute()
+    c.start()
+    try:
+        assert "ok" in _cell(c, "print('ok')").stdout
+    finally:
+        c.cleanup()
