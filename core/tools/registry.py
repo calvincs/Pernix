@@ -50,6 +50,17 @@ SYNONYMS: dict[str, list[str]] = {
         "completion",
     ],
     "tool": ["capability", "function", "action", "utility"],
+    "rlm": [
+        "recursive",
+        "long context",
+        "huge",
+        "large",
+        "corpus",
+        "transcript",
+        "summarize",
+        "analyze",
+        "document",
+    ],
 }
 
 # Tool co-occurrence: discovering one should surface related tools
@@ -67,6 +78,10 @@ TOOL_COOCCURRENCE: dict[str, list[str]] = {
     "get_worker_result": ["spawn_worker", "check_workers", "await_workers", "get_worker_transcript"],
     "get_worker_transcript": ["spawn_worker", "check_workers", "get_worker_result"],
     "message_worker": ["spawn_worker", "check_workers", "get_worker_result"],
+    # One-directional on purpose: recommending rlm_process pulls in the file
+    # tools needed to stage sources, but everyday file_read use must not drag
+    # the (enabled-only) rlm_process schema into every session's active set.
+    "rlm_process": ["file_read", "file_write", "glob"],
     "add_feature": ["list_features", "mark_feature_passed"],
     "evaluate": ["list_features", "add_feature", "browse_web"],
     "create_tool": ["update_tool", "list_custom_tools"],

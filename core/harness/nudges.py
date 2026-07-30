@@ -21,6 +21,7 @@ message would be stripped (one-system rule + Ollama collapse).
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -32,6 +33,9 @@ class NudgeRule:
     pattern: re.Pattern[str]  # regex applied to the tool-result text
     suggestion: str  # appended to the tool result the agent sees
     applies_to: frozenset[str]  # tool names this rule scans (empty = any)
+    # Feature gate evaluated per call (None = always on). Lets a rule follow a
+    # hot settings toggle without the rule table itself becoming stateful.
+    enabled: Callable[[], bool] | None = None
 
 
 # Bot-detection / anti-bot wall signatures.
@@ -75,7 +79,36 @@ CRAWL4AI_HINT = (
 )
 
 
+# Truncated/oversized-read signatures emitted by core/tools/truncation.py,
+# core_tools.file_read's window mode, and the web fetch cap. Each one means
+# the agent is looking at PART of an input — precisely when rlm_process (which
+# analyzes the whole thing beyond the context window) beats pagination.
+_TRUNCATION_RE = re.compile(
+    r"⚠ TRUNCATED|⚠ \d+ lines remaining|⚠ Large file|\[truncated at \d+ bytes\]",
+)
+
+_RLM_HINT = (
+    "[harness hint] This output is truncated — you are seeing part of the input. If you "
+    "need the WHOLE content analyzed (not just this window), rlm_process can process it "
+    "beyond context limits: stage it as workspace file(s), then "
+    "rlm_process(task=..., source=path). For a targeted lookup, keep paginating instead."
+)
+
+
+def _rlm_enabled() -> bool:
+    from config import settings
+
+    return settings.rlm_enabled
+
+
 _RULES: tuple[NudgeRule, ...] = (
+    NudgeRule(
+        name="truncated_input_rlm",
+        pattern=_TRUNCATION_RE,
+        suggestion=_RLM_HINT,
+        applies_to=frozenset({"file_read", "http_get", "browse_web", "bash"}),
+        enabled=_rlm_enabled,
+    ),
     NudgeRule(
         name="bot_detection_wall",
         pattern=_BOT_DETECTION_RE,
@@ -112,6 +145,8 @@ def evaluate(tool_name: str, content: str, fired: set[str]) -> str | None:
         if rule.name in fired:
             continue
         if rule.applies_to and tool_name not in rule.applies_to:
+            continue
+        if rule.enabled is not None and not rule.enabled():
             continue
         if rule.pattern.search(text):
             fired.add(rule.name)

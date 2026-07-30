@@ -183,6 +183,29 @@ RULES:
 - TIME ZONES: The injected CURRENT DATE/TIME shows both UTC and local time. All harness timestamps (sessions, messages, cron runs) are stored in UTC (+00:00). "Today" and "yesterday" mean local time, not UTC — use the local time for date math. Never assume a date boundary from UTC alone.
 - Do NOT use <think> or reasoning tags. /no_think"""
 
+# Injected into the RULES block only when settings.rlm_enabled (the tool only
+# exists then). Kept out of the static prompt so disabled servers never bias
+# scout toward a tool the agent doesn't have.
+_SCOUT_RLM_RULE = (
+    "- RECURSIVE ANALYSIS: When the task means densely analyzing a very large input "
+    "(huge file, multi-document corpus, transcript, log dump, session history — anything "
+    "over ~100K chars needing whole-input understanding), recommend rlm_process and make "
+    "approach_guidance stage the content as workspace file(s) first, then call "
+    "rlm_process(task=..., source=paths). Do NOT plan paginated file_read loops over "
+    "inputs that size, and do NOT recommend it for inputs that fit in context."
+)
+
+
+def _scout_system_prompt() -> str:
+    """SCOUT_SYSTEM_PROMPT plus conditional rules, keeping /no_think last."""
+    if not settings.rlm_enabled:
+        return SCOUT_SYSTEM_PROMPT
+    head, _, tail = SCOUT_SYSTEM_PROMPT.rpartition("\n- Do NOT use <think>")
+    if not head:  # tail marker drifted — fail open with the static prompt
+        return SCOUT_SYSTEM_PROMPT + "\n" + _SCOUT_RLM_RULE
+    return f"{head}\n{_SCOUT_RLM_RULE}\n- Do NOT use <think>{tail}"
+
+
 # ---------------------------------------------------------------------------
 # Scout tool schemas (OpenAI function-calling format)
 # ---------------------------------------------------------------------------
@@ -1449,7 +1472,7 @@ async def _run_scout_llm(
         _step("waiting", "Waiting for LLM capacity")
 
     messages = [
-        {"role": "system", "content": SCOUT_SYSTEM_PROMPT},
+        {"role": "system", "content": _scout_system_prompt()},
         {"role": "user", "content": user_content},
     ]
 
