@@ -302,3 +302,49 @@ async def test_snooze_cleanup_rlm_runs_zero_case():
     from core.snooze import SnoozeRunner
 
     await SnoozeRunner()._cleanup_rlm_runs()  # no rows — must not raise
+
+
+# =============================================================================
+# API router (read-only run history)
+# =============================================================================
+
+
+async def test_rlm_runs_api_list_and_detail():
+    from fastapi import HTTPException
+
+    from api.routers.rlm import get_rlm_run
+    from api.routers.rlm import list_rlm_runs as api_list
+
+    run_id, run_dir, run_rel = runs.mint_run_dir()
+    runs.record_start(
+        run_id,
+        run_dir,
+        run_rel,
+        session_id="s1",
+        task="t",
+        source_desc="d",
+        root_model="rm",
+        sub_model="sm",
+        input_chars=9,
+    )
+    (run_dir / "trace.jsonl").write_text("{}\n")
+
+    listed = await api_list(session_id="s1", limit=5)
+    assert listed["runs"][0]["run_id"] == run_id
+    assert (await api_list(session_id="other", limit=5))["runs"] == []
+
+    detail = await get_rlm_run(run_id)
+    assert detail["manifest"]["root_model"] == "rm"
+    assert detail["has_trace"] and detail["trace_path"].endswith("trace.jsonl")
+    assert detail["answer_path"] is None  # no answer.txt yet
+
+    with pytest.raises(HTTPException) as exc:
+        await get_rlm_run("nope1234")
+    assert exc.value.status_code == 404
+
+
+async def test_rlm_runs_api_limit_clamped():
+    from api.routers.rlm import list_rlm_runs as api_list
+
+    out = await api_list(limit=99999)
+    assert isinstance(out["runs"], list)  # no explosion; clamp applied internally

@@ -72,7 +72,9 @@ function _render() {
     } else if (snoozing) {
         _iconEl.textContent = '\u25D0';  // circle half
         _countEl.textContent = 'snooze';
-        _el.title = 'Snooze cycle active';
+        _el.title = _status.snooze?.detail
+            ? `Snooze: ${_status.snooze.detail}`
+            : 'Snooze cycle active';
     } else {
         _iconEl.textContent = '\u23F1';
         _countEl.textContent = String(scheduled);
@@ -109,9 +111,19 @@ function _handleEvent(type, data) {
     } else if (type === 'job.completed' || type === 'job.error') {
         _status.running_jobs = Math.max(0, (_status.running_jobs || 0) - 1);
     } else if (type === 'snooze.start') {
-        _status.snooze = { ..._status.snooze, running: true };
+        _status.snooze = { ..._status.snooze, running: true, activity: null, detail: null };
+    } else if (type === 'snooze.activity') {
+        // Live per-activity detail ("Pruning old RLM run directories",
+        // "Sweeping Candor operational memory", …) — an activity always
+        // implies a running cycle, even if snooze.start was missed.
+        _status.snooze = {
+            ..._status.snooze,
+            running: true,
+            activity: data.activity || null,
+            detail: data.detail || null,
+        };
     } else if (type === 'snooze.done') {
-        _status.snooze = { ..._status.snooze, running: false };
+        _status.snooze = { ..._status.snooze, running: false, activity: null, detail: null };
     }
     _render();
 

@@ -527,6 +527,17 @@ POST   /api/workflows/proposals/{id}/apply
 
 ---
 
+## RLM Runs
+
+Read-only history of RLM (recursive processing) runs — see [internals/rlm.md](internals/rlm.md). Listing works even when `rlm_enabled` is off, so past runs stay inspectable.
+
+```
+GET /api/rlm/runs?session_id=&limit=20   List runs, newest first (limit clamped to 100)
+GET /api/rlm/runs/{run_id}               One run: DB row + on-disk manifest + trace/answer paths
+```
+
+---
+
 ## Jobs & Scheduling
 
 Cron-style scheduled agent runs.

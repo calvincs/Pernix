@@ -1417,3 +1417,31 @@ body.fp-resizing #main { pointer-events: none; }
     display: block;
 }
 
+
+/* --- RLM runs section (jobs tab) + live snooze activity banner --- */
+.fp-rlm-runs {
+    margin: var(--sp-3) var(--sp-4);
+    padding: var(--sp-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+.fp-rlm-run-row { cursor: pointer; }
+.fp-rlm-run-row:hover .fp-wf-run-meta { color: var(--text); }
+.fp-rlm-run-detail { padding: 2px 0 var(--sp-2) var(--sp-4); }
+.fp-rlm-run-pre {
+    font-family: var(--font-mono, monospace);
+    font-size: var(--text-xxs);
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+}
+.fp-snooze-activity {
+    margin: 0 var(--sp-4) var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--text-xxs);
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+    border-radius: var(--radius);
+}
+.fp-snooze-activity-icon { color: var(--accent); }
