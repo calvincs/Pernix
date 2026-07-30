@@ -587,6 +587,22 @@ def _extract_report(args: dict) -> ScoutReport:
 # ---------------------------------------------------------------------------
 
 
+def _is_degenerate_report(report: ScoutReport) -> bool:
+    """True when scout produced nothing usable — no plan, no tools, no context.
+
+    Distinct from a *thin* report (short approach, few tools), which is still a
+    real answer. This catches the two ways the scout loop can bottom out with a
+    blank ScoutReport: the model never called submit_report, or its final text
+    was unparseable. Callers replace these with `_build_fallback_report`.
+    """
+    return not (
+        (report.approach_guidance or "").strip()
+        or report.recommended_tools
+        or (report.identity or "").strip()
+        or (report.rules or "").strip()
+    )
+
+
 def _self_check_report(report: ScoutReport) -> list[str]:
     """Check a ScoutReport for correctable issues. Returns list of issue strings.
 
@@ -1061,7 +1077,7 @@ async def run_scout(
             logger.debug("Scout bypassed, using cached report for session %s", session_id)
             return cached
         logger.debug("Scout bypassed, using fallback for session %s", session_id)
-        return _build_fallback_report(message, brief)
+        return _build_fallback_report(message, brief, reason="bypass")
 
     # Check cache
     cached = _get_cached(message, brief)
@@ -1073,6 +1089,7 @@ async def run_scout(
     max_attempts = 3
     last_error: Exception | None = None
     empty_approach_retried = False  # one-shot guard for structural-empty retry
+    degraded_report: ScoutReport | None = None  # best fallback seen so far
 
     def _is_empty_approach(rep: ScoutReport) -> bool:
         """True when scout returned a structurally valid report with no
@@ -1112,23 +1129,38 @@ async def run_scout(
             report = _validate_report(report)
 
             # Empty-approach retry: the primary model returned a parseable but
-            # uselessly empty plan. Give it one more shot before falling through
-            # to the dedicated fallback model. Skipped on cached bypass turns
+            # uselessly empty plan, or bottomed out into the deterministic
+            # fallback. Give it one more shot before falling through to the
+            # dedicated fallback model. Skipped on cached bypass turns
             # (handled above) and when disabled by setting.
             if (
                 not empty_approach_retried
                 and getattr(settings, "scout_retry_on_empty_approach", True)
-                and _is_empty_approach(report)
+                and (_is_empty_approach(report) or report.from_fallback)
                 and attempt < max_attempts
             ):
                 empty_approach_retried = True
                 logger.info(
-                    "Scout returned empty approach_guidance for session %s — " "retrying primary model (attempt %d)",
+                    "Scout returned no usable plan for session %s — retrying primary model (attempt %d)",
                     session_id,
                     attempt + 1,
                 )
                 await asyncio.sleep(1)
                 continue
+
+            # A fallback report is a degraded artifact, not a scout result:
+            # keep it as the floor but let the dedicated fallback model try
+            # for a real plan first. Breaking out (rather than returning) also
+            # keeps it out of the cache, so the next turn re-scouts instead of
+            # inheriting a scout-less plan for the full CACHE_TTL.
+            if report.from_fallback:
+                logger.warning(
+                    "Scout produced only a fallback report for session %s after %d attempt(s)",
+                    session_id,
+                    attempt,
+                )
+                degraded_report = report
+                break
 
             _put_cache(message, brief, report)
             if attempt > 1:
@@ -1196,16 +1228,28 @@ async def run_scout(
             )
             report.scout_latency_ms = int((time.monotonic() - start) * 1000)
             report = _validate_report(report)
-            _put_cache(message, brief, report)
-            logger.info("Scout fallback model succeeded for session %s in %dms", session_id, report.scout_latency_ms)
-            return report
+            if report.from_fallback:
+                # Fallback model bottomed out too — keep its deterministic
+                # report and stop pretending scout ran.
+                logger.warning("Scout fallback model produced no usable plan for session %s", session_id)
+                degraded_report = report
+            else:
+                _put_cache(message, brief, report)
+                logger.info(
+                    "Scout fallback model succeeded for session %s in %dms", session_id, report.scout_latency_ms
+                )
+                return report
         except Exception as e:
             logger.warning("Scout fallback model also failed for session %s: %r", session_id, e)
 
     logger.warning(
-        "Scout exhausted all attempts for session %s, using fallback (last error: %s)", session_id, last_error
+        "Scout exhausted all attempts for session %s, using fallback (%s)",
+        session_id,
+        f"last error: {last_error}" if last_error else "no model produced a usable plan",
     )
-    return _build_fallback_report(message, brief)
+    # Reuse the fallback we already built (it carries scout_model/latency and
+    # any partial context) rather than rebuilding an identical one.
+    return degraded_report if degraded_report is not None else _build_fallback_report(message, brief)
 
 
 async def _run_scout_llm(
@@ -1633,11 +1677,20 @@ async def _run_scout_llm(
         if report is not None:
             break
 
-    # If no report was produced, build from whatever we have
+    # If no report was produced — or the model produced a structurally empty
+    # one — degrade to the deterministic fallback rather than an empty stub.
+    # An empty stub is worse than no scout at all: it strips identity, rules,
+    # instructions and memory from the system prompt, and narrows the tool
+    # list to CORE_MINIMUM, which silently removes every extension tool the
+    # agent needs (browse_web, search_web, orchestration, ...). The agent then
+    # reinvents capabilities it already has. The deterministic fallback keeps
+    # that context, so a degraded scout turn stays workable.
     if report is None:
-        logger.warning("Scout did not submit report after %d rounds, using fallback parse", SCOUT_MAX_ROUNDS)
-        report = ScoutReport()
-        report.from_fallback = True
+        logger.warning("Scout did not submit report after %d rounds, using deterministic fallback", SCOUT_MAX_ROUNDS)
+        report = _build_fallback_report(message, brief)
+    elif _is_degenerate_report(report):
+        logger.warning("Scout returned an empty report — replacing with deterministic fallback")
+        report = _build_fallback_report(message, brief)
 
     # Best-effort validation for reports that skipped the in-loop path
     # (last-round native tool-call, text fallback, or fabricated empty report).
@@ -1855,8 +1908,12 @@ def _validate_report(report: ScoutReport) -> ScoutReport:
 # ---------------------------------------------------------------------------
 
 
-def _build_fallback_report(message: str, brief: SessionBrief) -> ScoutReport:
+def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "degraded") -> ScoutReport:
     """Deterministic fallback when scout LLM fails or is bypassed.
+
+    reason: "bypass" when scout was skipped on purpose (cheap turn), "degraded"
+    when it ran and produced nothing usable. Only "degraded" warns the agent
+    that its tool list is an uncurated default.
 
     Skills are intentionally excluded — skill discovery requires NLP matching
     which is too expensive for a synchronous fallback. The agent can still
@@ -1898,10 +1955,26 @@ def _build_fallback_report(message: str, brief: SessionBrief) -> ScoutReport:
 
     registry = get_registry()
     tool_names = set(CORE_MINIMUM)
-    tool_names.update(brief.tools_used_recently)
-    # Add common tools
-    for name in ["remember", "recall", "glob", "grep", "ask_user", "call_model"]:
-        if registry.exists(name):
+    # Recently-used names come from message history and can outlive the tool
+    # (extension unloaded, tool renamed) — filter, or the self-check flags them
+    # as hallucinations and the agent gets a spurious "unverified plan" notice.
+    tool_names.update(t for t in brief.tools_used_recently if registry.exists(t) and not registry.is_disabled(t))
+    # Add common tools. The web trio matters most here: CORE_MINIMUM is
+    # builtins only, so without them a fallback turn has no way to reach a
+    # page — and the agent tends to reinvent one (pip install playwright,
+    # bootstrap a browser, crash) instead of using the browser Pernix ships.
+    for name in [
+        "remember",
+        "recall",
+        "glob",
+        "grep",
+        "ask_user",
+        "call_model",
+        "search_web",
+        "http_get",
+        "browse_web",
+    ]:
+        if registry.exists(name) and not registry.is_disabled(name):
             tool_names.add(name)
 
     # Workflow-execution bias: if the user clearly wants to run a workflow,
@@ -1937,4 +2010,5 @@ def _build_fallback_report(message: str, brief: SessionBrief) -> ScoutReport:
         session_state=brief.to_prompt_text()[:500] if not brief.is_fresh else "",
         approach_guidance=approach,
         from_fallback=True,
+        fallback_reason=reason,
     )

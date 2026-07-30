@@ -3,6 +3,7 @@
 from core.scout.report import ScoutReport, SessionBrief
 from core.scout.runner import (
     _build_fallback_report,
+    _is_degenerate_report,
     _parse_scout_response,
     _validate_report,
     should_bypass_scout,
@@ -125,3 +126,72 @@ def test_fallback_includes_grep():
     brief = SessionBrief(session_id="test")
     report = _build_fallback_report("Search files for config", brief)
     assert "grep" in report.recommended_tools
+
+
+def test_fallback_drops_stale_recent_tools():
+    """Recently-used names read back from history may no longer be registered."""
+    brief = SessionBrief(session_id="test", tools_used_recently=["bash", "tool_that_was_removed"])
+    report = _build_fallback_report("Do the thing", brief)
+    assert "tool_that_was_removed" not in report.recommended_tools
+    assert "bash" in report.recommended_tools
+
+
+def test_fallback_offers_registered_web_tools():
+    """A degraded turn must still be able to reach a page with the built-in
+    browser — otherwise the agent concludes it has none and bootstraps its own.
+    """
+    from core.tools.registry import get_registry
+
+    reg = get_registry()
+    reg.register(
+        name="browse_web",
+        func=lambda url: "",
+        description="stub",
+        parameters={"type": "object", "properties": {}},
+        category="web",
+        source="extension",
+    )
+    reg.rebuild_index()
+    try:
+        report = _build_fallback_report("Open the page and check it", SessionBrief(session_id="test"))
+        assert "browse_web" in report.recommended_tools
+    finally:
+        reg._tools.pop("browse_web", None)
+        reg.rebuild_index()
+
+
+def test_degenerate_report_detection():
+    assert _is_degenerate_report(ScoutReport()) is True
+    # from_fallback alone does not make a report degenerate — the deterministic
+    # fallback carries real context.
+    assert _is_degenerate_report(ScoutReport(approach_guidance="1. Read the file", from_fallback=True)) is False
+    # A thin-but-real report is not degenerate either.
+    assert _is_degenerate_report(ScoutReport(recommended_tools=["bash"])) is False
+    assert _is_degenerate_report(ScoutReport(identity="You are Pernix")) is False
+
+
+def test_fallback_report_carries_context_not_a_blank_stub():
+    """Regression: an empty ScoutReport strips identity/rules/approach and
+    narrows tools to CORE_MINIMUM. The fallback must be strictly richer.
+    """
+    report = _build_fallback_report("Play the game and debug it", SessionBrief(session_id="test"))
+    assert report.approach_guidance.strip()
+    assert len(report.recommended_tools) > 0
+    assert not _is_degenerate_report(report)
+
+
+def test_fallback_report_announces_degraded_scout():
+    """The agent must be told the tool list is a default, not a curated plan."""
+    report = _build_fallback_report("Build something", SessionBrief(session_id="test"))
+    report.identity = "You are Pernix"  # fallback loads SOUL.md when present
+    section = report.to_system_prompt_section()
+    assert "[SCOUT STATUS]" in section
+    assert "discover_tools" in section
+
+
+def test_bypass_fallback_stays_quiet():
+    """A deliberately bypassed turn is not a degradation — no warning."""
+    report = _build_fallback_report("thanks", SessionBrief(session_id="test"), reason="bypass")
+    report.identity = "You are Pernix"
+    assert report.from_fallback is True
+    assert "[SCOUT STATUS]" not in report.to_system_prompt_section()
