@@ -575,6 +575,43 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
         ],
     ),
+    (
+        18,
+        "add rlm_runs audit index for RLM (recursive processing) runs",
+        [
+            # Lightweight audit index for core/extensions/rlm runs. The heavy
+            # data (trace.jsonl, staged context, child.log, answer.txt) lives
+            # on disk at <workspace>/<run_dir>; run_dir is workspace-relative
+            # (workflow_runs precedent). Rows and dirs are purged together by
+            # snooze retention (rlm_run_retention_days). status='running' rows
+            # surviving a restart are orphans — swept to 'orphaned' at boot.
+            # parent_run_id/depth link nested rlm_query child runs to their
+            # parent (NULL/0 for root runs). finished_at NULL = still running.
+            """CREATE TABLE IF NOT EXISTS rlm_runs (
+                run_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL DEFAULT '',
+                parent_run_id TEXT,
+                depth INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'running',
+                task TEXT NOT NULL DEFAULT '',
+                source_desc TEXT NOT NULL DEFAULT '',
+                root_model TEXT NOT NULL DEFAULT '',
+                sub_model TEXT NOT NULL DEFAULT '',
+                iterations INTEGER NOT NULL DEFAULT 0,
+                subcalls INTEGER NOT NULL DEFAULT 0,
+                input_chars INTEGER NOT NULL DEFAULT 0,
+                answer_preview TEXT NOT NULL DEFAULT '',
+                error TEXT NOT NULL DEFAULT '',
+                run_dir TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                finished_at TEXT
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_rlm_runs_session
+           ON rlm_runs(session_id, created_at DESC)""",
+            "CREATE INDEX IF NOT EXISTS idx_rlm_runs_status ON rlm_runs(status)",
+            "CREATE INDEX IF NOT EXISTS idx_rlm_runs_created ON rlm_runs(created_at)",
+        ],
+    ),
 ]
 
 
