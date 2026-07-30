@@ -310,6 +310,15 @@ NEVER call add_feature after the work is done. The flow is for setting
 expectations up-front, not for self-grading what you already produced."""
 
 
+_RLM_BLOCK = """RECURSIVE PROCESSING (rlm_process is available on this server).
+For a file or corpus far too large to read inline — anything where you'd loop
+file_read pagination or where truncation keeps hiding data you need — prefer one
+rlm_process call over paginated reading. It analyzes the ENTIRE input (beyond your
+context window) and returns one answer. Stage the content as workspace file(s)
+first, then call rlm_process(task=..., source=path or [paths]). Works on any large
+input: documents, transcripts, logs, session dumps, codebase concatenations."""
+
+
 _BASE_SYSTEM_PROMPT_TAIL = """RESOURCE MANAGEMENT: The [RESOURCE STATUS] section shows your remaining tool rounds
 and token usage. If rounds are low, prioritize completing the core deliverable over
 gathering more context. You can delegate data-heavy subtasks (web browsing, bulk
@@ -326,6 +335,8 @@ def _build_base_system_prompt() -> str:
     parts = [BASE_SYSTEM_PROMPT]
     if settings.eval_auto:
         parts.append(_AUTO_EVAL_BLOCK)
+    if settings.rlm_enabled:
+        parts.append(_RLM_BLOCK)
     parts.append(_BASE_SYSTEM_PROMPT_TAIL)
     return "\n\n".join(parts)
 

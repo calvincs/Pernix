@@ -217,3 +217,52 @@ def test_rlm_process_size_gate(monkeypatch):
     monkeypatch.setattr("core.extensions.rlm.MAX_SOURCE_BYTES", 100)
     out = rlm_process("t", "y" * 200, _context={"_loop": object()})
     assert out.startswith("Error: source is") and "cap is 100" in out
+
+
+# =============================================================================
+# discoverability wiring (all gated on rlm_enabled)
+# =============================================================================
+
+
+def test_base_system_prompt_gates_rlm_block(monkeypatch):
+    from core.context.compiler import _build_base_system_prompt
+
+    monkeypatch.setattr(settings, "rlm_enabled", False)
+    assert "rlm_process" not in _build_base_system_prompt()
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    assert "RECURSIVE PROCESSING" in _build_base_system_prompt()
+
+
+def test_scout_prompt_injects_rule_keeping_no_think_last(monkeypatch):
+    from core.scout.runner import _scout_system_prompt
+
+    monkeypatch.setattr(settings, "rlm_enabled", False)
+    assert "RECURSIVE ANALYSIS" not in _scout_system_prompt()
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    prompt = _scout_system_prompt()
+    assert "RECURSIVE ANALYSIS" in prompt
+    assert prompt.rstrip().endswith("/no_think")
+    assert prompt.index("RECURSIVE ANALYSIS") < prompt.index("Do NOT use <think>")
+
+
+def test_truncation_nudge_gated_on_rlm_enabled(monkeypatch):
+    from core.harness import nudges
+
+    text = "⚠ TRUNCATED — showing 500 of 90000 lines. To read more, call file_read(...)"
+    monkeypatch.setattr(settings, "rlm_enabled", False)
+    assert nudges.evaluate("file_read", text, set()) is None
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    hint = nudges.evaluate("file_read", text, set())
+    assert hint and "rlm_process" in hint
+    # wrong tool -> no fire; second fire in same turn deduped
+    assert nudges.evaluate("grep", text, set()) is None
+    fired = {"truncated_input_rlm"}
+    assert nudges.evaluate("file_read", text, fired) is None
+
+
+def test_registry_cooccurrence_links_rlm():
+    from core.tools.registry import SYNONYMS, TOOL_COOCCURRENCE
+
+    assert "file_read" in TOOL_COOCCURRENCE["rlm_process"]
+    assert "rlm_process" not in TOOL_COOCCURRENCE.get("file_read", [])
+    assert "corpus" in SYNONYMS["rlm"]
