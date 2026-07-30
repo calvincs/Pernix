@@ -28,6 +28,7 @@ BUNDLED_EXTENSIONS = [
     "core.extensions.planning",
     "core.extensions.skillmaker",
     "core.extensions.candor",
+    "core.extensions.rlm",
 ]
 
 

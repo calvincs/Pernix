@@ -78,6 +78,7 @@ class RLMEngine:
         depth: int = 0,
         ledger: SubcallLedger | None = None,
         deadline: float | None = None,
+        on_child_spawn: Callable | None = None,
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -92,6 +93,9 @@ class RLMEngine:
         self.depth = depth
         self.ledger = ledger if ledger is not None else SubcallLedger(caps.max_subcalls)
         self._deadline = deadline
+        # Called with the child Popen right after spawn — the tool uses it to
+        # register session._active_process so cancel/dispatch-timeout kill paths work.
+        self._on_child_spawn = on_child_spawn
         self._trace_lock = threading.Lock()
         self._trace_fh = None
         self._best_partial: str | None = None
@@ -126,6 +130,8 @@ class RLMEngine:
         try:
             broker.start()
             child.start()
+            if self._on_child_spawn is not None and child.popen is not None:
+                self._on_child_spawn(child.popen)
             child.load_context(self.staged)
             result = self._loop(child, broker, deadline, start)
         except RLMTimeout as e:

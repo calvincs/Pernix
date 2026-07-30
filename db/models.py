@@ -1626,6 +1626,117 @@ def delete_workflow_run(run_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# RLM runs (migration v18)
+# ---------------------------------------------------------------------------
+
+
+def create_rlm_run(
+    run_id: str,
+    session_id: str,
+    task: str,
+    source_desc: str,
+    root_model: str,
+    sub_model: str,
+    input_chars: int,
+    run_dir: str,
+    parent_run_id: str | None = None,
+    depth: int = 0,
+) -> None:
+    """Insert an rlm_runs row with status='running'. run_dir is workspace-relative."""
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO rlm_runs
+               (run_id, session_id, parent_run_id, depth, status, task, source_desc,
+                root_model, sub_model, input_chars, run_dir, created_at)
+               VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id,
+                session_id,
+                parent_run_id,
+                depth,
+                task[:500],
+                source_desc[:500],
+                root_model,
+                sub_model,
+                int(input_chars),
+                run_dir,
+                _now(),
+            ),
+        )
+
+
+def finish_rlm_run(
+    run_id: str,
+    status: str,
+    iterations: int,
+    subcalls: int,
+    answer_preview: str,
+    error: str = "",
+) -> None:
+    """Record a run's terminal state (completed/iteration_cap/timeout/cancelled/
+    budget_exhausted/failed)."""
+    with connect_sessions() as conn:
+        conn.execute(
+            """UPDATE rlm_runs SET
+               status = ?, iterations = ?, subcalls = ?,
+               answer_preview = ?, error = ?, finished_at = ?
+               WHERE run_id = ?""",
+            (status, int(iterations), int(subcalls), answer_preview[:500], error[:1000], _now(), run_id),
+        )
+
+
+def fail_orphaned_rlm_runs() -> int:
+    """Mark rlm_runs rows stuck at status='running' as 'orphaned'.
+
+    Called once at startup (fail_orphaned_workflow_runs precedent): a running
+    row across a restart is by definition dead — the engine is synchronous and
+    its child self-reaps when the server process goes away. Returns rows updated.
+    """
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """UPDATE rlm_runs SET status = 'orphaned', finished_at = ?
+               WHERE status = 'running' AND finished_at IS NULL""",
+            (_now(),),
+        )
+        return cur.rowcount
+
+
+def list_rlm_runs(session_id: str | None = None, limit: int = 20) -> list[dict]:
+    """Return RLM runs, newest first. Optionally filter by owning session."""
+    with connect_sessions() as conn:
+        if session_id:
+            rows = conn.execute(
+                """SELECT * FROM rlm_runs WHERE session_id = ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (session_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM rlm_runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_rlm_runs_before(cutoff_iso: str) -> list[dict]:
+    """Runs created before the cutoff that are no longer running — retention
+    candidates (the caller deletes the run dir, then the row). Root runs only:
+    nested runs live inside their parent's dir and are removed with it."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT * FROM rlm_runs
+               WHERE created_at < ? AND status != 'running' AND parent_run_id IS NULL
+               ORDER BY created_at""",
+            (cutoff_iso,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_rlm_run(run_id: str) -> int:
+    """Delete a run row and any nested child rows. Returns rows deleted."""
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM rlm_runs WHERE run_id = ? OR parent_run_id = ?", (run_id, run_id))
+        return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
 # Skill improvement proposals (migration v14)
 # ---------------------------------------------------------------------------
 
