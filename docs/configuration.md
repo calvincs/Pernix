@@ -127,6 +127,24 @@ The store lives at `data/candor/` (machine-local, not in `settings.json`).
 
 ---
 
+## RLM (Recursive Processing Add-on)
+
+Recursive Language Models (arXiv 2512.24601): the agent processes inputs far beyond the context window — huge files, corpora, transcripts, log dumps — by writing code in a sandboxed child REPL that holds the input as a variable and delegates chunk work to budgeted sub-LLM calls. Adapted from the MIT-licensed reference implementation (no new dependency). Toggles live in Settings → General → RLM (Recursive Processing); model roles under Settings → Models. Architecture + security posture: [internals/rlm.md](internals/rlm.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `rlm_enabled` | `false` | Master switch. Caps and model roles apply hot; the `rlm_process` tool registers at startup only, so enabling/disabling needs a restart. |
+| `rlm_root_model` | *(empty)* | Root orchestrator model. Falls back to `llm_model`. |
+| `rlm_sub_model` | *(empty)* | Sub-call model for chunk work (the bulk of spend). Falls back to `background_model`, then `llm_model`. |
+| `rlm_max_iterations` | `20` | Root REPL turns per run before best-effort synthesis. |
+| `rlm_max_depth` | `1` | `1` = sub-calls only; `2`–`3` lets `rlm_query()` spawn nested RLM runs. |
+| `rlm_max_subcalls` | `50` | Total sub-LLM calls per run (one ledger shared across recursion depths). |
+| `rlm_max_concurrent_subcalls` | `3` | Parallel sub-calls (the global LLM scheduler still applies underneath). |
+| `rlm_timeout_seconds` | `900` | Wall clock per run; the child process group is killed at the deadline. |
+| `rlm_run_retention_days` | `30` | Age after which snooze purges `data/workspace/rlm/<run_id>/` dirs and their DB rows. |
+
+---
+
 ## Shell & Tool Safety
 
 > See also: [security.md](security.md)

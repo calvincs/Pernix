@@ -135,6 +135,7 @@ If you're new to the codebase, this is the rough mental map:
 | LLM routing | `core/llm/router.py`, `core/llm/registry.py` |
 | Builtin tools | `core/tools/builtin/` |
 | Extension tools (gated) | `core/extensions/*` |
+| RLM engine (recursive processing) | `core/extensions/rlm/` (`engine.py` loop, `child_runner.py` sandbox, `broker.py` sub-calls) |
 | Memory store | `core/memory/store.py` |
 | Snooze (idle housekeeping) | `core/snooze.py` |
 | REST + SSE | `api/app.py`, `api/routers/*.py` |

@@ -372,6 +372,19 @@ class SnoozeRunner:
             )
             await self._cleanup_workflow_runs()
 
+        # Activity 12a: RLM run directory cleanup (no LLM). Age-based only —
+        # runs are one-shot transient work products ("extract and discard"),
+        # so unlike workflows there is no keep-N-per-name window.
+        if not self._is_cancelled():
+            bus.emit(
+                {
+                    "type": "snooze.activity",
+                    "activity": "cleanup_rlm_runs",
+                    "detail": "Pruning old RLM run directories",
+                }
+            )
+            await self._cleanup_rlm_runs()
+
         # Activity 12b: Candor operational-memory maintenance (no LLM).
         # Runs the admission gate (the expensive sweep — this is its only
         # home), drains the pending observation buffer, and checkpoints. All
@@ -2183,6 +2196,50 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         if deleted:
             logger.info("Snooze workflow cleanup: deleted %d old run(s)", deleted)
+
+    async def _cleanup_rlm_runs(self) -> None:
+        """Delete RLM run directories + rows older than rlm_run_retention_days.
+
+        The durable output of a run is the tool result already in the session
+        transcript; the run dir (staged context copies, trace.jsonl, child.log)
+        is debugging residue. Root runs only — nested runs live inside their
+        parent's dir and their rows cascade via delete_rlm_run. Running runs
+        are never touched (list_rlm_runs_before excludes them).
+        """
+        import shutil
+        from datetime import timedelta, timezone
+        from pathlib import Path
+
+        from db import models as db
+
+        retention_days = max(int(settings.rlm_run_retention_days), 1)
+        cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        try:
+            stale = db.list_rlm_runs_before(cutoff_iso)
+        except Exception as e:
+            logger.warning("Snooze RLM cleanup: could not list runs: %s", e)
+            return
+        if not stale:
+            return
+
+        workspace_dir = Path(settings.workspace_dir)
+        deleted = 0
+        for run in stale:
+            run_id = run["run_id"]
+            run_dir = workspace_dir / run["run_dir"]
+            try:
+                # rmtree is blocking filesystem recursion; keep the loop responsive.
+                if run_dir.exists():
+                    await asyncio.to_thread(shutil.rmtree, run_dir)
+                db.delete_rlm_run(run_id)
+                deleted += 1
+            except Exception as e:
+                logger.warning("Snooze RLM cleanup: error deleting run %s: %s", run_id, e)
+
+        if deleted:
+            self._stats.setdefault("rlm_runs_pruned", 0)
+            self._stats["rlm_runs_pruned"] += deleted
+            logger.info("Snooze RLM cleanup: deleted %d old run(s)", deleted)
 
     async def _synthesize_signals(self) -> None:
         """Run one batch of post-mortem → tool/skill performance synthesis.

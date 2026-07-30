@@ -53,6 +53,7 @@ Beyond the localhost-only default. Read these before exposing Pernix to anything
 - [internals/state-machine.md](internals/state-machine.md) — formal session state machine with file:line citations
 - [internals/extensions.md](internals/extensions.md) — the nine extension modules and their gates
 - [internals/reflect-and-snooze.md](internals/reflect-and-snooze.md) — quality-gate retry and idle-time consolidation
+- [internals/rlm.md](internals/rlm.md) — recursive long-input processing (sandboxed REPL + sub-LLM broker)
 
 ## I want to contribute
 

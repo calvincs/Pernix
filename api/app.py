@@ -105,6 +105,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Workflow orphan sweep failed: %s", e)
 
+    # 2.8 Orphan rlm_runs sweep — same reasoning: the RLM engine is synchronous
+    # and its child self-reaps with the server, so a 'running' row across a
+    # restart is dead. Retention later purges the dir + row.
+    try:
+        from db import models as _db_models
+
+        rlm_orphans = _db_models.fail_orphaned_rlm_runs()
+        if rlm_orphans:
+            logger.warning("Marked %d orphaned rlm_runs at startup", rlm_orphans)
+    except Exception as e:
+        logger.warning("RLM orphan sweep failed: %s", e)
+
     # 2.5 Model registry — populate from provider APIs
     from core.llm.client import get_llm_client
 
