@@ -123,6 +123,10 @@ class ScoutReport:
     scout_tokens: TokenUsage = field(default_factory=TokenUsage)
     from_cache: bool = False
     from_fallback: bool = False
+    # Why the deterministic fallback was used: "bypass" (cheap turn, scout
+    # skipped on purpose) or "degraded" (scout ran and produced nothing usable).
+    # Only the latter is worth warning the agent about.
+    fallback_reason: str = ""
 
     def to_system_prompt_section(self) -> str:
         """Format as text for injection into the main agent's system prompt."""
@@ -199,11 +203,19 @@ class ScoutReport:
                 + "\nProceed with extra care and call discover_tools if recommendations look off."
             )
 
-        if self.from_fallback and not self.identity and not self.rules:
+        if self.from_fallback and self.fallback_reason != "bypass":
+            # Render whenever scout degraded, not only when identity/rules are
+            # also missing. The deterministic fallback fills those in from
+            # SOUL.md/RULES.md, so gating on them hid the notice exactly when
+            # the agent most needed it: the tool list is core-only, and without
+            # this the agent assumes the missing capabilities don't exist and
+            # starts building its own.
             parts.append(
                 "[SCOUT STATUS]\n"
-                "Scout context was unavailable for this turn. "
-                "Use discover_tools and recall to gather context yourself if needed."
+                "Scout planning was unavailable for this turn — the tool list "
+                "below is a conservative default, not a curated one. Before "
+                "concluding a capability is missing, call discover_tools "
+                "(and recall) to check what this deployment already provides."
             )
 
         return "\n\n".join(parts)
