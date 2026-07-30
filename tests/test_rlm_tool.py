@@ -266,3 +266,39 @@ def test_registry_cooccurrence_links_rlm():
     assert "file_read" in TOOL_COOCCURRENCE["rlm_process"]
     assert "rlm_process" not in TOOL_COOCCURRENCE.get("file_read", [])
     assert "corpus" in SYNONYMS["rlm"]
+
+
+# =============================================================================
+# ops: retention + orphan sweep integration
+# =============================================================================
+
+
+async def test_snooze_cleanup_rlm_runs(monkeypatch):
+    from core.snooze import SnoozeRunner
+
+    ws = Path(settings.workspace_dir)
+
+    def _seed_with_dir(run_id, status, created_at=None):
+        _seed_run(run_id, status=status, created_at=created_at)
+        d = ws / "rlm" / run_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "trace.jsonl").write_text("{}")
+        return d
+
+    old_done = _seed_with_dir("olddone1", "completed", "2020-01-01T00:00:00")
+    old_running = _seed_with_dir("oldrun01", None, "2020-01-01T00:00:00")
+    fresh = _seed_with_dir("freshfin", "completed")
+
+    await SnoozeRunner()._cleanup_rlm_runs()
+
+    assert not old_done.exists(), "old completed run dir should be purged"
+    assert old_running.exists(), "running runs are never touched"
+    assert fresh.exists(), "recent runs are kept"
+    remaining = {r["run_id"] for r in db.list_rlm_runs()}
+    assert remaining == {"oldrun01", "freshfin"}
+
+
+async def test_snooze_cleanup_rlm_runs_zero_case():
+    from core.snooze import SnoozeRunner
+
+    await SnoozeRunner()._cleanup_rlm_runs()  # no rows — must not raise

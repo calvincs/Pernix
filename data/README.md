@@ -8,6 +8,7 @@ data/
     {project}/         #   Project folders (e.g. "my-gallery/app.html")
     .venv/             #   Python venv for bash tool (auto-created)
     .cache/            #   pip cache and temp files
+    rlm/{run_id}/      #   RLM run residue (trace, staged context) — purged by snooze retention
   skills/              # Skill packages — NOT wiped on fresh start
     {skill-name}/      #   Each skill has SKILL.md + optional scripts/, references/
     .disabled.json     #   Disabled skill names

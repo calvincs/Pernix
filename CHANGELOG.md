@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- feat(rlm): recursive long-input processing add-on (arXiv 2512.24601) — sandboxed child REPL engine, sub-call broker, `rlm_process` tool, settings + model roles, migration v18 (`rlm_runs`), snooze retention, scout/nudge/prompt discoverability wiring; off by default
+
 ## v2.9.0 — 2026-06-11
 
 - docs: accuracy audit pass — correct tool names, defaults, routes, and safety claims

@@ -6,7 +6,11 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
-## 2026-05 (recent)
+## 2026-07 (recent)
+
+**The agent can now fully analyze inputs far larger than any model's context window.** A new RLM (Recursive Language Models) add-on — off by default, enabled in Settings → General → RLM (Recursive Processing) — gives the agent an `rlm_process` tool: instead of paginating a huge file and losing the whole-picture view, the input is held as a variable in a sandboxed Python REPL and a root model writes code to slice it, delegating chunks to budgeted sub-model calls until it has one answer. Works on documents, corpora, transcripts, logs, and codebase dumps. You pick the root and sub-call models under Settings → Models → Model Roles; iteration/sub-call/time caps prevent runaway runs; model-written code runs in a separate locked-down process that never sees your API keys. Run traces land in `workspace/rlm/<run_id>/` and are auto-purged after 30 days.
+
+## 2026-05
 
 **Scout context now includes UTC and local time.** The scout's input and the main agent's `[TEMPORAL CONTEXT]` block both now show two timestamps: `Current time (UTC)` and `Current time (local)` (the machine's system timezone, e.g. CDT). Previously only UTC was shown, causing the agent to report the wrong calendar date for users in non-UTC timezones. The temporal context block also gained a `FINDING SESSION HISTORY` guidance note explaining when to use `list_recent_sessions` (chronological, timestamp-ordered) vs `search_sessions` (FTS5 keyword search over message content — not date-based). (commit `69bab50`)
 
