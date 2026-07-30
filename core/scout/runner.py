@@ -398,6 +398,10 @@ _SCOUT_TOOLS = [
     },
 ]
 
+# Last-round tool surface: submit_report only. Scout has run out of rounds to
+# search, but must still be able to deliver what it already has.
+_SCOUT_SUBMIT_ONLY = [t for t in _SCOUT_TOOLS if t["function"]["name"] == "submit_report"]
+
 
 # ---------------------------------------------------------------------------
 # Scout tool execution
@@ -603,17 +607,18 @@ def _is_degenerate_report(report: ScoutReport) -> bool:
     )
 
 
-def _self_check_report(report: ScoutReport) -> list[str]:
-    """Check a ScoutReport for correctable issues. Returns list of issue strings.
+def _unfixable_issues(report: ScoutReport) -> list[str]:
+    """Issues only the scout itself can fix — `_validate_report` cannot.
 
-    Empty list = valid. Each issue string is suitable for injecting into the
-    scout's context as a revision request. Distinct from the sanitizing
-    `_validate_report` below, which mutates the report to enforce invariants
-    after scout completes. This runs during the scout loop for self-revision.
+    These are the only issues worth spending a scout round on. Everything in
+    `_sanitizable_issues` gets stripped downstream regardless of what the model
+    does, so demanding a revision for those trades a working report for a
+    round the scout may not survive.
     """
     issues: list[str] = []
 
-    # 1. approach_guidance must be non-trivial.
+    # approach_guidance must be non-trivial. Nothing downstream can write a
+    # plan the scout didn't.
     guidance = (report.approach_guidance or "").strip()
     if len(guidance) < 30:
         issues.append(
@@ -621,7 +626,27 @@ def _self_check_report(report: ScoutReport) -> list[str]:
             "naming tools/skills and flagging risks."
         )
 
-    # 2. Recommended tools must exist in the registry AND not be disabled.
+    # deliverables_plan: if present, entries must have descriptions.
+    if report.deliverables_plan:
+        blank = [i for i, d in enumerate(report.deliverables_plan, 1) if not (d.description or "").strip()]
+        if blank:
+            issues.append(
+                f"deliverables_plan has {len(blank)} entries with empty descriptions. "
+                "Each deliverable must name a concrete artifact or outcome."
+            )
+
+    return issues
+
+
+def _sanitizable_issues(report: ScoutReport) -> list[str]:
+    """Issues `_validate_report` strips automatically after scout finishes.
+
+    Worth surfacing as viability notes, never worth a revision round: the
+    hallucinated tool/skill/model is dropped either way.
+    """
+    issues: list[str] = []
+
+    # 1. Recommended tools must exist in the registry AND not be disabled.
     try:
         from core.tools.registry import get_registry
 
@@ -673,7 +698,7 @@ def _self_check_report(report: ScoutReport) -> list[str]:
     except Exception as e:
         logger.debug("Scout validator: skill registry check failed: %s", e)
 
-    # 4. Recommended model, if set, must be known.
+    # 3. Recommended model, if set, must be known.
     if report.recommended_model and _known_model_ids:
         if report.recommended_model not in _known_model_ids:
             issues.append(
@@ -681,16 +706,18 @@ def _self_check_report(report: ScoutReport) -> list[str]:
                 "Use an exact model id from the list, or leave empty to use the default."
             )
 
-    # 5. deliverables_plan: if present, entries must have descriptions.
-    if report.deliverables_plan:
-        blank = [i for i, d in enumerate(report.deliverables_plan, 1) if not (d.description or "").strip()]
-        if blank:
-            issues.append(
-                f"deliverables_plan has {len(blank)} entries with empty descriptions. "
-                "Each deliverable must name a concrete artifact or outcome."
-            )
-
     return issues
+
+
+def _self_check_report(report: ScoutReport) -> list[str]:
+    """Check a ScoutReport for correctable issues. Returns list of issue strings.
+
+    Empty list = valid. Each issue string is suitable for injecting into the
+    scout's context as a revision request. Distinct from the sanitizing
+    `_validate_report` below, which mutates the report to enforce invariants
+    after scout completes. This runs during the scout loop for self-revision.
+    """
+    return _unfixable_issues(report) + _sanitizable_issues(report)
 
 
 def _format_revision_request(issues: list[str]) -> str:
@@ -1529,8 +1556,13 @@ async def _run_scout_llm(
 
     for round_num in range(SCOUT_MAX_ROUNDS):
         is_last_round = round_num == SCOUT_MAX_ROUNDS - 1
-        # On last round, remove tools to encourage text output
-        tools = _SCOUT_TOOLS if not is_last_round else None
+        # On the last round, drop the search tools so scout can't keep digging —
+        # but keep submit_report. Removing every tool made the final round
+        # unwinnable: the round before it tells scout it MUST submit, and a
+        # revision request lands there by construction, so scout was ordered to
+        # call a tool that was no longer on offer. Text output is still parsed
+        # as a fallback below for models that answer in prose anyway.
+        tools = _SCOUT_TOOLS if not is_last_round else _SCOUT_SUBMIT_ONLY
 
         # On penultimate round, inject a reminder to submit next round
         if round_num == SCOUT_MAX_ROUNDS - 2 and report is None:
@@ -1642,17 +1674,21 @@ async def _run_scout_llm(
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": "Report submitted."})
                     break
 
-                # Issues found. If we still have a revision slot AND at least one
-                # more round remaining, ask scout to revise. Otherwise accept the
-                # flawed report with viability=unverified.
+                # Issues found. Only spend a round on the ones the scout alone
+                # can fix — `_validate_report` strips hallucinated tools, skills
+                # and models regardless, so revising for those trades a usable
+                # report for a round the scout may not survive. In the logged
+                # failures every revision was triggered by a name the sanitizer
+                # would have dropped, and none ever produced a second submit.
+                blocking = _unfixable_issues(candidate)
                 rounds_remaining = SCOUT_MAX_ROUNDS - round_num - 1
-                if revisions_used < _MAX_REVISIONS and rounds_remaining >= 1:
-                    _step("revising", f"Scout self-check flagged {len(issues)} issue(s)")
+                if blocking and revisions_used < _MAX_REVISIONS and rounds_remaining >= 1:
+                    _step("revising", f"Scout self-check flagged {len(blocking)} blocking issue(s)")
                     revisions_used += 1
                     messages.append(
-                        {"role": "tool", "tool_call_id": tc.id, "content": _format_revision_request(issues)}
+                        {"role": "tool", "tool_call_id": tc.id, "content": _format_revision_request(blocking)}
                     )
-                    logger.info("Scout revision requested: %s", issues)
+                    logger.info("Scout revision requested: %s", blocking)
                     # Don't break the outer loop — let the next round execute.
                 else:
                     _step("done", "Scout submitting report (unverified)")
@@ -1660,7 +1696,7 @@ async def _run_scout_llm(
                     candidate.viability_notes = issues
                     report = candidate
                     logger.warning(
-                        "Scout report accepted with unresolved issues after revision: %s",
+                        "Scout report accepted with unresolved issues: %s",
                         issues,
                     )
                     messages.append(
