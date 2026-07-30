@@ -79,6 +79,7 @@ class RLMEngine:
         ledger: SubcallLedger | None = None,
         deadline: float | None = None,
         on_child_spawn: Callable | None = None,
+        rlm_fn: Callable[[str, str | None], str] | None = None,
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -96,6 +97,13 @@ class RLMEngine:
         # Called with the child Popen right after spawn — the tool uses it to
         # register session._active_process so cancel/dispatch-timeout kill paths work.
         self._on_child_spawn = on_child_spawn
+        # Real rlm_query recursion: (prompt, model) -> answer, running a nested
+        # engine on the broker handler thread. None -> rlm_query degrades to
+        # llm_query (the broker's fallback). Settable after construction so the
+        # tool glue can close over this engine when building the callback.
+        self.rlm_fn = rlm_fn
+        # Set at run() start; nested runs share the remaining wall clock.
+        self.deadline: float | None = None
         self._trace_lock = threading.Lock()
         self._trace_fh = None
         self._best_partial: str | None = None
@@ -107,6 +115,7 @@ class RLMEngine:
         self._assert_off_loop()
         start = time.monotonic()
         deadline = self._deadline if self._deadline is not None else start + self.caps.timeout_seconds
+        self.deadline = deadline
 
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._trace_fh = open(self.run_dir / "trace.jsonl", "a", encoding="utf-8")
@@ -119,6 +128,7 @@ class RLMEngine:
             allowed_models=self._allowed_models,
             deadline=deadline,
             trace_fn=self._trace,
+            rlm_fn=self.rlm_fn,
         )
         child_kwargs = {"python_exe": self._python_exe}
         if self._as_limit is not None:

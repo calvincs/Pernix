@@ -389,3 +389,61 @@ def test_trim_messages_keeps_head():
     assert total <= 400_000 + 20_500
     assert messages[0]["content"] == "S" and messages[1]["content"] == "T"
     assert "elided" in messages[2]["content"]
+
+
+# =============================================================================
+# recursion (depth 1 nested engine through a real child + broker)
+# =============================================================================
+
+
+def test_engine_recursion_nested_run(tmp_path):
+    nested_root = ScriptedRoot(["```repl\nanswer['content'] = 'NESTED:' + context[:12]\nanswer['ready'] = True\n```"])
+    root = ScriptedRoot(
+        [
+            "```repl\nres = rlm_query('analyze this chunk please')\nprint(res)\n```",
+            "```repl\nanswer['content'] = 'ROOT got ' + res\nanswer['ready'] = True\n```",
+        ]
+    )
+    engine = _make_engine(tmp_path, root_chat=root)
+
+    def rlm_fn(prompt, model):
+        sub_dir = engine.run_dir / "sub" / "s1"
+        sub_dir.mkdir(parents=True)
+        nested = RLMEngine(
+            run_dir=sub_dir,
+            task="Answer the query contained in the context.",
+            staged=stage_context(sub_dir, text=prompt),
+            root_chat=nested_root,
+            sub_chat=_echo_sub_chat,
+            caps=engine.caps,
+            depth=1,
+            ledger=engine.ledger,
+            deadline=engine.deadline,
+        )
+        result = nested.run()
+        return result.answer
+
+    engine.rlm_fn = rlm_fn
+    result = engine.run()
+    assert result.status == "completed"
+    assert result.answer == "ROOT got NESTED:analyze this"
+    # the rlm_query itself debited the shared ledger exactly once
+    assert result.subcalls == 1
+    # nested run left its own artifacts under the parent run dir
+    assert (engine.run_dir / "sub" / "s1" / "trace.jsonl").exists()
+    assert (engine.run_dir / "sub" / "s1" / "answer.txt").read_text() == "NESTED:analyze this"
+
+
+def test_engine_nested_failure_degrades_to_error_string(tmp_path):
+    root = ScriptedRoot(
+        [
+            "```repl\nres = rlm_query('doomed')\nprint(res)\n```",
+            "```repl\nanswer['content'] = 'root survived: ' + res\nanswer['ready'] = True\n```",
+        ]
+    )
+    engine = _make_engine(tmp_path, root_chat=root)
+    engine.rlm_fn = lambda prompt, model: (_ for _ in ()).throw(RuntimeError("nested exploded"))
+    result = engine.run()
+    # broker converts the exception to an inline error; the root recovers
+    assert result.status == "completed"
+    assert "root survived: Error:" in result.answer and "nested exploded" in result.answer

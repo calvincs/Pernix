@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # (BASH_MAX_TIMEOUT/dispatch-grace precedent).
 _DISPATCH_GRACE = 60
 
+# Upstream rlm_query semantics: the prompt (often a chunk assembled in the
+# parent's REPL) IS the child's context; the task is generic.
+_NESTED_TASK = "Answer the query contained in the context."
+
 
 def _resolve_root_model() -> str:
     return settings.rlm_root_model or settings.llm_model
@@ -88,6 +92,73 @@ def _resolve_sources(source) -> tuple[str | None, list[Path], str]:
         else:
             raise ValueError(f"source file not found in workspace: {entry}")
     return None, files, ", ".join(f.name for f in files)
+
+
+def _make_rlm_fn(*, parent_engine, parent_run_id, depth, chat, sub_model, allowed, caps, cancel_check, session_id):
+    """Build the broker's rlm_query callback: run a nested engine (own child
+    process, nested run dir, shared ledger, remaining deadline) at depth+1.
+
+    Runs on a broker handler thread, which already holds one concurrency slot —
+    so nested fan-out stays bounded by the parent's semaphore. An engine at
+    depth d gets a callback only when d+1 < rlm_max_depth; past that, the
+    broker's built-in fallback degrades rlm_query to a plain llm_query.
+    """
+    child_depth = depth + 1
+
+    def rlm_fn(prompt: str, model: str | None) -> str:
+        nested_root = model or sub_model  # broker validated any override against the allowlist
+        sub_id, sub_dir, sub_rel = runs.mint_run_dir(parent_run_dir=parent_engine.run_dir)
+        staged = stage_context(sub_dir, text=prompt)
+        nested = RLMEngine(
+            run_dir=sub_dir,
+            task=_NESTED_TASK,
+            staged=staged,
+            root_chat=lambda msgs, t: chat(msgs, nested_root, t),
+            sub_chat=lambda p, m, t: chat([{"role": "user", "content": p}], m or sub_model, t),
+            caps=caps,
+            address_space_limit=settings.shell_address_space_limit_bytes,
+            allowed_models=allowed,
+            cancel_check=cancel_check,
+            depth=child_depth,
+            ledger=parent_engine.ledger,
+            deadline=parent_engine.deadline,
+        )
+        if child_depth + 1 < settings.rlm_max_depth:
+            nested.rlm_fn = _make_rlm_fn(
+                parent_engine=nested,
+                parent_run_id=sub_id,
+                depth=child_depth,
+                chat=chat,
+                sub_model=sub_model,
+                allowed=allowed,
+                caps=caps,
+                cancel_check=cancel_check,
+                session_id=session_id,
+            )
+        runs.record_start(
+            sub_id,
+            sub_dir,
+            sub_rel,
+            session_id=session_id,
+            task=prompt[:500],
+            source_desc=f"rlm_query from run {parent_run_id}",
+            root_model=nested_root,
+            sub_model=sub_model,
+            input_chars=staged.total_chars,
+            parent_run_id=parent_run_id,
+            depth=child_depth,
+        )
+        try:
+            result = nested.run()
+        except RLMRunError as e:
+            runs.record_finish(sub_id, sub_dir, RLMRunResult(answer="", status="failed", partial=True, error=str(e)))
+            return f"Error: nested RLM run {sub_id} failed - {e}"
+        runs.record_finish(sub_id, sub_dir, result)
+        if result.answer and result.answer.strip():
+            return result.answer
+        return f"Error: nested RLM run {sub_id} ended with status={result.status} and no answer"
+
+    return rlm_fn
 
 
 def rlm_process(task: str, source, model: str = "", _context: dict | None = None) -> str:
@@ -207,6 +278,18 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
         cancel_check=cancel_check,
         on_child_spawn=on_child_spawn,
     )
+    if settings.rlm_max_depth > 1:
+        engine.rlm_fn = _make_rlm_fn(
+            parent_engine=engine,
+            parent_run_id=run_id,
+            depth=0,
+            chat=_chat,
+            sub_model=sub_model,
+            allowed=allowed,
+            caps=caps,
+            cancel_check=cancel_check,
+            session_id=sid,
+        )
 
     started = time.monotonic()
     try:
