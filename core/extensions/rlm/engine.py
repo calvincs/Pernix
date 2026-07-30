@@ -281,8 +281,10 @@ class RLMEngine:
     def _salvage(self, status: str, e: Exception, start: float) -> RLMRunResult:
         partial = getattr(e, "partial_answer", None) or self._best_partial
         logger.info("RLM run ended early (%s): %s", status, e)
+        # No placeholder text: an empty answer is how the tool layer knows to
+        # return an Error:-prefixed result instead of a fake best-effort one.
         return RLMRunResult(
-            answer=partial or f"(run ended early: {e})",
+            answer=partial or "",
             status=status,
             iterations=self._iterations,
             subcalls=self.ledger.count,
@@ -335,7 +337,8 @@ class RLMEngine:
 
     def _write_answer(self, result: RLMRunResult) -> None:
         try:
-            (self.run_dir / "answer.txt").write_text(result.answer, encoding="utf-8")
+            body = result.answer or f"(no answer — run ended {result.status}: {result.error})"
+            (self.run_dir / "answer.txt").write_text(body, encoding="utf-8")
         except OSError:
             pass
 
