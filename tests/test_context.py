@@ -79,39 +79,60 @@ def test_view_pruning_preserves_originals():
 # ===========================================================================
 
 
-def test_instructions_block_is_framed_as_config_not_knowledge():
+def test_instructions_block_is_framed_as_config_not_knowledge(tmp_path, monkeypatch):
     """Regression: SESSIONS.md ships with placeholder lines ("Timezone: not
-    set"). Injected bare as [INSTRUCTIONS] — directly above [RELEVANT MEMORY]
-    — the model read them as ground truth and refused a weather request while
-    the user's city sat in the very next block. Production session
-    becce7a77bcb, 2026-07-24."""
-    from core.scout.report import ScoutReport
+    set"). Injected bare as [INSTRUCTIONS], the model read them as ground
+    truth and refused a weather request while the user's city sat in memory.
+    Production session becce7a77bcb, 2026-07-24. The block now comes from the
+    compiler's directives builder — the framing must have moved with it."""
+    from core.context.compiler import _build_agent_directives_block
 
-    r = ScoutReport()
-    r.instructions = "- Timezone: not set\n- Key facts: not set"
-    r.memory_context = "User Calvin Schultz is located in Rockford, Illinois (ZIP 61108)."
-    out = r.to_system_prompt_section()
+    monkeypatch.chdir(tmp_path)
+    agent_dir = tmp_path / "data" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "SESSIONS.md").write_text("- Timezone: not set\n- Key facts: not set")
 
-    assert "[INSTRUCTIONS]" in out and "\n[RELEVANT MEMORY]\n" in out
+    out = _build_agent_directives_block()
+
+    assert "[INSTRUCTIONS]" in out
     lowered = out.lower()
     assert "not pinned in config" in lowered, "unset config must not read as unknown fact"
     assert "defer to [relevant memory]" in lowered, "framing must point at memory as the fallback"
-    # Framing must sit inside the INSTRUCTIONS block, above the memory block.
+    # Framing sits inside the INSTRUCTIONS block, above the file content.
     assert out.index("not pinned in config") > out.index("[INSTRUCTIONS]")
-    assert out.index("not pinned in config") < out.index("\n[RELEVANT MEMORY]\n")
-    # The user's actual fact still survives intact.
-    assert "Rockford, Illinois (ZIP 61108)" in out
+    assert out.index("not pinned in config") < out.index("Timezone: not set")
 
 
-def test_instructions_framing_absent_when_no_instructions():
-    """No SESSIONS.md content → no [INSTRUCTIONS] block and no stray framing."""
-    from core.scout.report import ScoutReport
+def test_instructions_framing_absent_when_no_instructions(tmp_path, monkeypatch):
+    """No SESSIONS.md file → no [INSTRUCTIONS] block and no stray framing."""
+    from core.context.compiler import _build_agent_directives_block
 
-    r = ScoutReport()
-    r.memory_context = "Something recalled."
-    out = r.to_system_prompt_section()
+    monkeypatch.chdir(tmp_path)
+    out = _build_agent_directives_block()
     assert "[INSTRUCTIONS]" not in out
     assert "not pinned in config" not in out
+
+
+def test_scout_section_no_longer_renders_directives():
+    """identity/rules/instructions moved to the compiler's fixed prefix; the
+    scout section rendering them again would duplicate content and re-break
+    the prompt-prefix cache at the scout boundary."""
+    from core.scout.report import ScoutReport
+
+    r = ScoutReport(
+        identity="Be helpful",
+        rules="Test everything",
+        instructions="- Timezone: not set",
+        memory_context="Something recalled.",
+        approach_guidance="1. Do the thing.",
+    )
+    out = r.to_system_prompt_section()
+    assert "[IDENTITY]" not in out
+    assert "[RULES]" not in out
+    assert "[INSTRUCTIONS]" not in out
+    # Per-task curation still renders.
+    assert "[RELEVANT MEMORY]" in out
+    assert "[APPROACH]" in out
 
 
 def test_base_prompt_states_memory_beats_empty_config():

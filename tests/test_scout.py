@@ -31,8 +31,9 @@ def test_scout_report_to_prompt():
         approach_guidance="Start with research",
     )
     section = report.to_system_prompt_section()
-    assert "[IDENTITY]" in section
-    assert "[RULES]" in section
+    # identity/rules render via the compiler's directives block now — never here.
+    assert "[IDENTITY]" not in section
+    assert "[RULES]" not in section
     assert "[RELEVANT MEMORY]" in section
     assert "[APPROACH]" in section
 
@@ -167,7 +168,53 @@ def test_degenerate_report_detection():
     assert _is_degenerate_report(ScoutReport(approach_guidance="1. Read the file", from_fallback=True)) is False
     # A thin-but-real report is not degenerate either.
     assert _is_degenerate_report(ScoutReport(recommended_tools=["bash"])) is False
-    assert _is_degenerate_report(ScoutReport(identity="You are Pernix")) is False
+    # identity no longer counts as usable scout output — the compiler's
+    # directives block delivers it, so scout output never carries it.
+    assert _is_degenerate_report(ScoutReport(identity="You are Pernix")) is True
+
+
+def test_submit_report_schema_dropped_directive_fields():
+    """Scout is no longer asked to echo SOUL/RULES/SESSIONS — the compiler
+    injects the files whole. 14 fields → 11 for the structured output."""
+    from core.scout.runner import _SCOUT_TOOLS
+
+    submit = next(t for t in _SCOUT_TOOLS if t["function"]["name"] == "submit_report")
+    props = submit["function"]["parameters"]["properties"]
+    for gone in ("identity", "rules", "instructions"):
+        assert gone not in props
+    assert "approach_guidance" in props and "recommended_tools" in props
+
+
+def test_extract_report_ignores_echoed_directives():
+    """A model that still emits the old fields must not shadow the real files."""
+    from core.scout.runner import _extract_report
+
+    report = _extract_report(
+        {
+            "identity": "I am a re-worded identity",
+            "rules": "stale rules",
+            "approach_guidance": "1. Do the thing.",
+            "recommended_tools": ["bash"],
+        }
+    )
+    assert report.identity == ""
+    assert report.rules == ""
+    assert report.approach_guidance == "1. Do the thing."
+
+
+def test_fallback_report_leaves_directives_to_compiler(tmp_path, monkeypatch):
+    """Even with the files present, the fallback no longer copies them —
+    the compiler delivers them on every turn, fallback or not."""
+    monkeypatch.chdir(tmp_path)
+    agent_dir = tmp_path / "data" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "SOUL.md").write_text("# Identity\nBe helpful.")
+    (agent_dir / "RULES.md").write_text("# Rules\nTest everything.")
+
+    report = _build_fallback_report("Do something", SessionBrief(session_id="test"))
+    assert report.identity == ""
+    assert report.rules == ""
+    assert report.instructions == ""
 
 
 def test_fallback_report_carries_context_not_a_blank_stub():
@@ -183,7 +230,6 @@ def test_fallback_report_carries_context_not_a_blank_stub():
 def test_fallback_report_announces_degraded_scout():
     """The agent must be told the tool list is a default, not a curated plan."""
     report = _build_fallback_report("Build something", SessionBrief(session_id="test"))
-    report.identity = "You are Pernix"  # fallback loads SOUL.md when present
     section = report.to_system_prompt_section()
     assert "[SCOUT STATUS]" in section
     assert "discover_tools" in section
@@ -192,6 +238,5 @@ def test_fallback_report_announces_degraded_scout():
 def test_bypass_fallback_stays_quiet():
     """A deliberately bypassed turn is not a degradation — no warning."""
     report = _build_fallback_report("thanks", SessionBrief(session_id="test"), reason="bypass")
-    report.identity = "You are Pernix"
     assert report.from_fallback is True
     assert "[SCOUT STATUS]" not in report.to_system_prompt_section()

@@ -73,10 +73,15 @@ class SessionBrief:
 class ScoutReport:
     """Structured output from scout agent. Budget: ~1,800 tokens max."""
 
+    # Legacy fields — no longer requested from scout or rendered. SOUL.md/
+    # RULES.md/SESSIONS.md are delivered whole by the context compiler's
+    # fixed-prefix directives block. Kept so older callers/tests constructing
+    # reports with them keep working; nothing populates or reads them.
+    identity: str = ""
+    rules: str = ""
+    instructions: str = ""
+
     # Curated context sections
-    identity: str = ""  # From SOUL.md, max ~300 tokens
-    rules: str = ""  # From RULES.md, max ~300 tokens
-    instructions: str = ""  # From SESSIONS.md, max ~300 tokens
     memory_context: str = ""  # Relevant memory entries, max ~500 tokens
     memory_queries_used: list[str] = field(default_factory=list)
     cross_session_context: str = ""  # Findings from other sessions, max ~500 tokens
@@ -129,27 +134,16 @@ class ScoutReport:
     fallback_reason: str = ""
 
     def to_system_prompt_section(self) -> str:
-        """Format as text for injection into the main agent's system prompt."""
+        """Format as text for injection into the main agent's system prompt.
+
+        Deliberately does NOT render identity/rules/instructions: those are
+        session-invariant files delivered whole by the context compiler's
+        fixed-prefix directives block (`_build_agent_directives_block`).
+        Rendering them here would duplicate that content and re-break the
+        prompt-prefix cache the compiler ordering exists to protect.
+        """
         parts = []
 
-        if self.identity:
-            parts.append(f"[IDENTITY]\n{self.identity}")
-        if self.rules:
-            parts.append(f"[RULES]\n{self.rules}")
-        if self.instructions:
-            # Framing matters: SESSIONS.md is deployment config, and an unset
-            # field there is NOT evidence that a fact is unknown. Without this
-            # note the model reads placeholder lines ("Timezone: not set") as
-            # ground truth and refuses tasks whose answer is sitting in
-            # [RELEVANT MEMORY] directly below. Applied here rather than in the
-            # file so it holds for every deployment's SESSIONS.md.
-            parts.append(
-                f"[INSTRUCTIONS]\n"
-                f"(Deployment configuration. A blank or unset field below means "
-                f"'not pinned in config' — never that the fact is unknown. "
-                f"Defer to [RELEVANT MEMORY] for anything not pinned here.)\n"
-                f"{self.instructions}"
-            )
         if self.memory_context:
             parts.append(f"[RELEVANT MEMORY]\n{self.memory_context}")
         if self.cross_session_context:

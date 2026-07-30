@@ -436,3 +436,108 @@ def test_compile_context_messages_are_strip_clean():
     for m in payload.messages:
         leaked = [k for k in m.keys() if isinstance(k, str) and k.startswith("_")]
         assert not leaked, f"leaked private keys: {leaked}"
+
+
+# ---------------------------------------------------------------------------
+# Agent directives block (SOUL/RULES/SESSIONS in the fixed prefix)
+# ---------------------------------------------------------------------------
+
+
+def _write_agent_files(tmp_path, rules_size=6000):
+    agent_dir = tmp_path / "data" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "SOUL.md").write_text("# Identity\nBe helpful and curious.")
+    # Body sized so real deployments' RULES.md (>4K chars on the box) is
+    # represented: the old paths truncated at [:4000] and silently dropped
+    # the tail. The sentinel at the end proves the whole file arrives.
+    body = ("- rule line\n" * (rules_size // 12)) + "END-OF-RULES-SENTINEL"
+    (agent_dir / "RULES.md").write_text("# Rules\n" + body)
+    (agent_dir / "SESSIONS.md").write_text("- Timezone: not set")
+    return agent_dir
+
+
+def test_directives_block_delivers_files_whole(tmp_path, monkeypatch):
+    """Regression: every pre-existing path truncated RULES.md at 4000 chars,
+    silently dropping the tail of the file. The compiler block must not."""
+    from core.context.compiler import _build_agent_directives_block
+
+    monkeypatch.chdir(tmp_path)
+    _write_agent_files(tmp_path, rules_size=6000)
+
+    block = _build_agent_directives_block()
+    assert "[IDENTITY]" in block and "Be helpful and curious" in block
+    assert "[RULES]" in block
+    assert "END-OF-RULES-SENTINEL" in block, "content beyond the old 4K cap must survive"
+    assert "[INSTRUCTIONS]" in block and "not pinned in config" in block
+
+
+def test_directives_block_order_identity_rules_instructions(tmp_path, monkeypatch):
+    from core.context.compiler import _build_agent_directives_block
+
+    monkeypatch.chdir(tmp_path)
+    _write_agent_files(tmp_path)
+    block = _build_agent_directives_block()
+    assert block.index("[IDENTITY]") < block.index("[RULES]") < block.index("[INSTRUCTIONS]")
+
+
+def test_directives_block_empty_when_no_files(tmp_path, monkeypatch):
+    from core.context.compiler import _build_agent_directives_block
+
+    monkeypatch.chdir(tmp_path)
+    assert _build_agent_directives_block() == ""
+
+
+def test_directives_guard_truncates_loudly(tmp_path, monkeypatch, caplog):
+    """The 32K guard is an accident brake: it must clip AND warn — silent
+    truncation is exactly the failure mode this block exists to end."""
+    import logging
+
+    from core.context.compiler import _build_agent_directives_block, _directive_guard_warned
+
+    monkeypatch.chdir(tmp_path)
+    agent_dir = tmp_path / "data" / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "SOUL.md").write_text("x" * 40_000)
+    _directive_guard_warned.clear()  # module-level warn-once set
+
+    with caplog.at_level(logging.WARNING, logger="pernix.context.compiler"):
+        block = _build_agent_directives_block()
+    assert len(block) < 40_000
+    assert any("truncating" in r.message for r in caplog.records)
+    _directive_guard_warned.clear()
+
+
+def test_compile_context_directives_precede_scout_section(tmp_path, monkeypatch):
+    """Directives live in the FIXED PREFIX, before the per-turn scout text —
+    byte-stable content up front is what extends the prompt-prefix cache."""
+    from db import models as db
+
+    monkeypatch.chdir(tmp_path)
+    _write_agent_files(tmp_path)
+
+    sid = db.create_session(title="DirectivesTest")
+    db.add_message(sid, "user", "Hello")
+
+    payload = compile_context(sid, scout_report_text="[APPROACH]\n1. Per-turn plan goes here.")
+    system = payload.messages[0]["content"]
+    assert "[IDENTITY]" in system
+    assert "END-OF-RULES-SENTINEL" in system
+    assert system.index("[IDENTITY]") < system.index("[APPROACH]")
+
+
+def test_compile_context_no_directive_duplication(tmp_path, monkeypatch):
+    """One reader: the directives appear exactly once in the system prompt
+    even when a legacy scout report still carries identity text."""
+    from core.scout.report import ScoutReport
+    from db import models as db
+
+    monkeypatch.chdir(tmp_path)
+    _write_agent_files(tmp_path)
+
+    sid = db.create_session(title="DupTest")
+    db.add_message(sid, "user", "Hello")
+
+    legacy = ScoutReport(identity="Be helpful and curious.", approach_guidance="1. Plan.")
+    payload = compile_context(sid, scout_report_text=legacy.to_system_prompt_section())
+    system = payload.messages[0]["content"]
+    assert system.count("[IDENTITY]") == 1

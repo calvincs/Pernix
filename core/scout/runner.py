@@ -152,9 +152,6 @@ IMPORTANT: You have a maximum of 6 tool rounds. You MUST call submit_report by r
 You MUST call submit_report to deliver your findings. If you cannot use tools, output a raw JSON report instead (same fields as submit_report).
 
 REPORT FIELD GUIDANCE:
-- identity: Relevant personality directives from SOUL.md (max 300 tokens). Omit if no file provided.
-- rules: Relevant operational rules from RULES.md (max 300 tokens). Omit if no file provided.
-- instructions: Relevant project instructions from SESSIONS.md (max 300 tokens). Omit if no file provided.
 - memory_context: Relevant knowledge from your memory searches. Quote with attribution. Max 500 tokens. Report FACTS YOU FOUND — never conclusions about what is missing. Do NOT write "no X is configured" or "SESSIONS.md shows X: not set". An unfilled field in SOUL/RULES/SESSIONS is deployment config left blank, not evidence the fact is unknown, and asserting otherwise makes the main agent refuse tasks it could have answered from the very facts you just quoted. If memory answers the request, state the answer plainly and let the agent use it.
 - cross_session_context: Relevant findings from session searches. Quote with session attribution. Max 500 tokens. Empty string if nothing relevant.
 - recommended_tools: Array of tool names the main agent will need (5-15 tools). Only include extension tools — builtin tools are always available.
@@ -171,6 +168,7 @@ REPORT FIELD GUIDANCE:
 RULES:
 - Be terse. Every token costs the main agent context space.
 - Only include entries RELEVANT to this specific task.
+- SOUL.md/RULES.md/SESSIONS.md in your context are for YOUR planning only — the main agent receives those files directly and in full. Never copy their content into report fields; reference a rule by name in approach_guidance when it shapes the plan.
 - You have read-only access. You cannot modify anything.
 - SKILLS are the highest-leverage recommendation — a single skill can replace many tool rounds of trial-and-error. If memory mentions a skill in a successful context, recommend it.
 - APPROACH GUIDANCE is the most important field — it becomes the agent's playbook. Write numbered steps, name tools/skills, flag risks, reference past lessons.
@@ -325,18 +323,6 @@ _SCOUT_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "identity": {
-                        "type": "string",
-                        "description": "Relevant SOUL.md directives (max 300 tokens). Omit or empty if no file.",
-                    },
-                    "rules": {
-                        "type": "string",
-                        "description": "Relevant RULES.md directives (max 300 tokens). Omit or empty if no file.",
-                    },
-                    "instructions": {
-                        "type": "string",
-                        "description": "Relevant SESSIONS.md directives (max 300 tokens). Omit or empty if no file.",
-                    },
                     "memory_context": {
                         "type": "string",
                         "description": "Relevant memory entries with attribution (max 500 tokens)",
@@ -560,10 +546,10 @@ def _extract_report(args: dict) -> ScoutReport:
         # Clamp unknown / deprecated values (e.g. legacy "workers") to inline.
         mode = "inline"
 
+    # identity/rules/instructions are deliberately NOT read from args: the
+    # compiler injects those files whole, and honoring a model-echoed copy
+    # here would let a stale or re-worded variant shadow the real ones.
     return ScoutReport(
-        identity=str(args.get("identity", "")),
-        rules=str(args.get("rules", "")),
-        instructions=str(args.get("instructions", "")),
         memory_context=str(args.get("memory_context", "")),
         cross_session_context=str(args.get("cross_session_context", "")),
         recommended_tools=args.get("recommended_tools", []) if isinstance(args.get("recommended_tools"), list) else [],
@@ -592,19 +578,16 @@ def _extract_report(args: dict) -> ScoutReport:
 
 
 def _is_degenerate_report(report: ScoutReport) -> bool:
-    """True when scout produced nothing usable — no plan, no tools, no context.
+    """True when scout produced nothing usable — no plan and no tools.
 
     Distinct from a *thin* report (short approach, few tools), which is still a
     real answer. This catches the two ways the scout loop can bottom out with a
     blank ScoutReport: the model never called submit_report, or its final text
     was unparseable. Callers replace these with `_build_fallback_report`.
+    (identity/rules don't count here — they come from the compiler's
+    directives block now, so scout output never carries them.)
     """
-    return not (
-        (report.approach_guidance or "").strip()
-        or report.recommended_tools
-        or (report.identity or "").strip()
-        or (report.rules or "").strip()
-    )
+    return not ((report.approach_guidance or "").strip() or report.recommended_tools)
 
 
 def _unfixable_issues(report: ScoutReport) -> list[str]:
@@ -1796,10 +1779,8 @@ def _parse_scout_response(text: str) -> ScoutReport:
         report.from_fallback = True
         return report
 
+    # identity/rules/instructions ignored — see _extract_report for rationale.
     return ScoutReport(
-        identity=str(data.get("identity", "")),
-        rules=str(data.get("rules", "")),
-        instructions=str(data.get("instructions", "")),
         memory_context=str(data.get("memory_context", "")),
         cross_session_context=str(data.get("cross_session_context", "")),
         recommended_tools=data.get("recommended_tools", []) if isinstance(data.get("recommended_tools"), list) else [],
@@ -1954,27 +1935,12 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
     Skills are intentionally excluded — skill discovery requires NLP matching
     which is too expensive for a synchronous fallback. The agent can still
     call discover_skills() / load_skill() mid-loop since they're in CORE_MINIMUM.
+
+    SOUL.md/RULES.md/SESSIONS.md are intentionally NOT loaded here: the
+    context compiler's fixed-prefix directives block delivers them whole on
+    every turn, fallback or not — this report carries only what scout would
+    have curated.
     """
-    identity = ""
-    rules = ""
-    instructions = ""
-
-    # Load instruction files directly
-    soul_path = Path("data/agent/SOUL.md")
-    if soul_path.exists():
-        identity = soul_path.read_text()[:1200]
-
-    rules_path = Path("data/agent/RULES.md")
-    if rules_path.exists():
-        rules = rules_path.read_text()[:1200]
-
-    agent_dir = Path("data/agent")
-    for fname in ["SESSIONS.md", "INSTRUCTIONS.md"]:
-        ipath = agent_dir / fname
-        if ipath.exists():
-            instructions = ipath.read_text()[:1200]
-            break
-
     # Basic memory recall
     memory_context = ""
     try:
@@ -2036,9 +2002,6 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
         )
 
     return ScoutReport(
-        identity=identity,
-        rules=rules,
-        instructions=instructions,
         memory_context=memory_context,
         recommended_tools=sorted(tool_names),
         tool_rationale="Fallback: core tools + recently used (scout unavailable)"

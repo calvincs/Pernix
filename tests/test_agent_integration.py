@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from core.agent import _build_fallback_scout_text, _build_resource_status, run_agent
+from core.agent import _build_resource_status, run_agent
 from core.llm.types import StreamEvent, StreamEventType, TokenUsage, ToolCall
 from core.scout.report import ScoutReport
 from sessions.state import AgentSession
@@ -65,28 +65,6 @@ def _setup_registry(monkeypatch, tools: dict | None = None):
             )
     monkeypatch.setattr("core.agent.get_registry", lambda: reg)
     return reg
-
-
-# ---------------------------------------------------------------------------
-# _build_fallback_scout_text
-# ---------------------------------------------------------------------------
-
-
-def test_build_fallback_scout_text(tmp_path, monkeypatch):
-    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
-    text = _build_fallback_scout_text()
-    assert isinstance(text, str)
-
-
-def test_build_fallback_scout_text_reads_soul_md(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
-    soul_dir = tmp_path / "data" / "agent"
-    soul_dir.mkdir(parents=True)
-    (soul_dir / "SOUL.md").write_text("# Identity\nBe helpful and honest.")
-    text = _build_fallback_scout_text()
-    assert isinstance(text, str)
-    assert "Be helpful and honest" in text
 
 
 # ---------------------------------------------------------------------------

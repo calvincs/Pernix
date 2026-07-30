@@ -524,8 +524,11 @@ async def run_agent(
         active_tools_set = registry.expand_cooccurrence(active_tools_set)
         active_tools = sorted(active_tools_set)  # deterministic order for prompt cache
     else:
-        # Fallback: no scout report available
-        scout_text = _build_fallback_scout_text()
+        # No scout report available. Nothing to substitute: SOUL/RULES/SESSIONS
+        # arrive via the compiler's fixed-prefix directives block on every
+        # turn, so there is no identity to recover here — only the per-task
+        # curation is missing, and no deterministic text can stand in for that.
+        scout_text = ""
         active_tools = sorted(t.name for t in registry.enabled_tools())
 
     # Effective model: per-session override (for workers) or global default.
@@ -1820,36 +1823,6 @@ def _build_hallucinated_tool_hint(bad_name: str, registry) -> str:
         f"Retry with name=`{top}` and the same arguments if they match its schema."
         f"{others_str}"
     )
-
-
-def _build_fallback_scout_text() -> str:
-    """Phase 3 fallback: load SOUL/RULES directly instead of scout."""
-    from pathlib import Path
-
-    parts = []
-
-    soul_path = Path("data/agent/SOUL.md")
-    if soul_path.exists():
-        content = soul_path.read_text()[:4000]
-        parts.append(f"[IDENTITY]\n{content}")
-
-    rules_path = Path("data/agent/RULES.md")
-    if rules_path.exists():
-        content = rules_path.read_text()[:4000]
-        parts.append(f"[RULES]\n{content}")
-
-    # Memory recall (basic)
-    try:
-        from core.memory.store import get_memory_store
-
-        store = get_memory_store()
-        if store:
-            # Will be replaced by scout in Phase 5
-            pass
-    except Exception:
-        pass
-
-    return "\n\n".join(parts) if parts else ""
 
 
 def _build_resource_status(session_id: str, estimator, tool_round: int = 0, context_budget: int | None = None) -> str:
