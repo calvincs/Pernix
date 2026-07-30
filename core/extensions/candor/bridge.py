@@ -43,6 +43,7 @@ BASE_STATEMENTS: list[dict] = [
     {"pred": "tool_ok", "args": ["*"], "stmt_type": "frequency"},
     {"pred": "turn_ok", "args": ["*"], "stmt_type": "frequency"},
     {"pred": "reflect_verdict", "args": ["*"], "stmt_type": "categorical"},
+    {"pred": "user_fact", "args": ["*"], "stmt_type": "frequency"},
 ]
 
 _DRAIN_CHUNK_LINES = 200
@@ -96,6 +97,7 @@ class CandorBridge:
             self._system.set_actor_quota("agent:pernix", obs_per_epoch=100_000, cand_per_epoch=10_000)
             self._system.set_actor_quota("verifier:reflect", obs_per_epoch=100_000)
             self._system.set_actor_quota("agent:curiosity", cand_per_epoch=10_000)
+            self._system.set_actor_quota("human:user", obs_per_epoch=100_000)
             logger.info("Candor store opened at %s", self._root / "store")
         return self._system
 
@@ -169,6 +171,20 @@ class CandorBridge:
         Each observation dict: {pred, args, stmt_type, outcome|value, ctx, actor, ts}.
         """
         return await self._submit(self._record_impl, observations)
+
+    def record_nowait(self, observations: list[dict]) -> None:
+        """Fire-and-forget record, safe from ANY thread including the event loop.
+
+        Never blocks: it only enqueues onto the bridge executor. For callers
+        (like MemoryStore mutations) where waiting for the result would be
+        wrong in some contexts and pointless in all of them.
+        """
+        if self._broken or self._closed or not settings.candor_enabled or not observations:
+            return
+        try:
+            self._exec.submit(self._guarded, self._record_impl, observations)
+        except RuntimeError:
+            pass  # executor already shut down (process teardown)
 
     def _record_impl(self, system, observations: list[dict]) -> dict:
         observed = buffered = 0

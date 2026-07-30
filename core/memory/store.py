@@ -54,6 +54,29 @@ class MemoryStore:
     def _connect(self):
         return connect_memory()
 
+    def _candor_attest(self, file_name: str, event: str, source: str = "") -> None:
+        """Mirror a user-model mutation into the candor add-on, if enabled.
+
+        Fire-and-forget: enqueues onto the bridge's own executor and returns
+        immediately, so it is safe from any calling context (these methods run
+        both on to_thread workers and, at a few legacy sites, on the event
+        loop). Only `user.*` files produce observations; failure never
+        propagates into the memory operation.
+        """
+        if not settings.candor_enabled or not file_name.startswith("user."):
+            return
+        try:
+            from core.extensions.candor.bridge import get_candor_bridge
+            from core.extensions.candor.emit import build_memory_observations
+
+            observations = build_memory_observations(
+                file_name=file_name, event=event, source=source, ts_ms=int(time.time() * 1000)
+            )
+            if observations:
+                get_candor_bridge().record_nowait(observations)
+        except Exception as e:
+            logger.debug("Candor attestation skipped for %s: %s", file_name, e)
+
     def _validate_name(self, name: str) -> str:
         """Sanitize and validate a memory file name. Returns cleaned name."""
         if name.endswith(".md"):
@@ -178,6 +201,7 @@ class MemoryStore:
                 finally:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
+        self._candor_attest(file_name, "attest", source)
         return f"Saved to {file_name} (epoch={epoch})"
 
     # Canonical implementations live in core.memory.routing (shared with
@@ -492,6 +516,7 @@ class MemoryStore:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
         logger.info("Updated memory entry epoch=%d in '%s'", epoch, file_name)
+        self._candor_attest(file_name, "revise")
         return f"Updated entry epoch={epoch} in '{file_name}'"
 
     def delete_entry(self, file_name: str, epoch: int) -> str:
@@ -545,6 +570,7 @@ class MemoryStore:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
         logger.info("Deleted memory entry epoch=%d from '%s'", epoch, file_name)
+        self._candor_attest(file_name, "forget")
         return f"Deleted entry epoch={epoch} from '{file_name}'"
 
     # ------------------------------------------------------------------

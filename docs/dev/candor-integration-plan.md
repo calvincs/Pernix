@@ -312,6 +312,22 @@ conclusions about what is missing.
   existing fields; only if that proves lossy, add a dedicated field +
   `to_system_prompt_section()` part.
 
+**Phase 3b — user-fact attestations (SHIPPED)**
+Closes the "Candor gap" surfaced in live testing: Candor tracked only
+operational facts, while user-fact provenance lived solely in markdown
+`source=` tags. Now every mutation of a `user.*` memory file emits
+`user_fact(<area-slug>)` attestation observations (add → True, update →
+False+True, forget → False) via `MemoryStore._candor_attest` →
+`bridge.record_nowait` (fire-and-forget, safe from any thread). Prose never
+enters the ledger — slugs and outcomes only — so PII stays in the editable
+markdown store. Deliberately NOT full user-facts-in-Candor: Candor's own
+anti-use-cases exclude general knowledge storage, and without settlement
+events its per-fact numbers would be priors dressed as confidence. What this
+gives honestly: `p(user_fact(area))` = earned stability of that user-model
+area, `why_reliability` = the attestation chain, corrections = negative
+evidence. `move_entries` (snooze file-org) is deliberately unhooked so
+consolidation doesn't pollute attestation stats.
+
 **Phase 3 — trust, curiosity, backfill (each independent)**
 - **Backfill:** one-time script reusing `bench/ingest_pernix.py` to replay
   existing post_mortems / session history into the store with real
