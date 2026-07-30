@@ -93,8 +93,11 @@ def register(reg: ToolRegistry) -> None:
             "Get a calibrated probability that something works, from Candor operational memory. "
             "Tracked predicates: tool_ok (target=tool name or '*'), turn_ok ('*'), "
             "tool_failure_mode (target=tool name; returns a failure-mode distribution), "
-            "reflect_verdict ('*'). Returns p, credible interval, observation count, and caveats "
-            "(e.g. 'unstable', 'under_specified' = a missing variable is suspected)."
+            "reflect_verdict ('*'), user_fact (target=user-model area, e.g. 'profile' or "
+            "'professional_background', from the user.* memory file names; p = share of attested "
+            "facts in that area that have stood unrevised — the stability of that part of the user "
+            "model, NOT the truth of any single fact). Returns p, credible interval, observation "
+            "count, and caveats (e.g. 'unstable', 'under_specified' = a missing variable is suspected)."
         ),
         parameters={
             "type": "object",

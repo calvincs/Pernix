@@ -109,6 +109,123 @@ class TestEmit:
 
 
 # ---------------------------------------------------------------------------
+# emit.py — user-fact attestations
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryEmit:
+    def test_attest_dual_granularity_and_actor(self):
+        from core.extensions.candor.emit import build_memory_observations
+
+        obs = build_memory_observations(
+            file_name="user.professional_background", event="attest", source="user", ts_ms=NOW_MS
+        )
+        assert len(obs) == 2
+        per, agg = obs
+        assert per["pred"] == "user_fact" and per["args"] == ["professional_background"]
+        assert per["outcome"] is True and per["actor"] == "human:user"
+        assert agg["args"] == ["*"] and agg["ctx"]["target"] == "professional_background"
+        assert per["ctx"]["origin"] == "user"
+
+    def test_agent_derived_attest_uses_agent_actor(self):
+        from core.extensions.candor.emit import build_memory_observations
+
+        obs = build_memory_observations(file_name="user.profile", event="attest", source="distill", ts_ms=NOW_MS)
+        assert all(o["actor"] == "agent:pernix" for o in obs)
+        assert obs[0]["ctx"]["origin"] == "distill"
+
+    def test_revise_emits_negative_then_positive(self):
+        from core.extensions.candor.emit import build_memory_observations
+
+        obs = build_memory_observations(file_name="user.profile", event="revise", source="", ts_ms=NOW_MS)
+        per_slug = [o for o in obs if o["args"] == ["profile"]]
+        assert [o["outcome"] for o in per_slug] == [False, True]
+        assert all(o["actor"] == "agent:pernix" for o in obs)
+
+    def test_forget_is_negative(self):
+        from core.extensions.candor.emit import build_memory_observations
+
+        obs = build_memory_observations(file_name="user.profile", event="forget", source="", ts_ms=NOW_MS)
+        assert [o["outcome"] for o in obs] == [False, False]
+
+    def test_non_user_files_and_unknown_events_ignored(self):
+        from core.extensions.candor.emit import build_memory_observations
+
+        assert build_memory_observations(file_name="projects.pernix", event="attest", source="user", ts_ms=NOW_MS) == []
+        assert build_memory_observations(file_name="user.profile", event="archive", source="", ts_ms=NOW_MS) == []
+
+
+class TestStoreAttestHook:
+    @pytest.fixture
+    def recording_bridge(self, monkeypatch):
+        class _Recorder:
+            def __init__(self):
+                self.observations: list[dict] = []
+
+            def record_nowait(self, obs):
+                self.observations.extend(obs)
+
+        rec = _Recorder()
+        monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: rec)
+        return rec
+
+    def test_add_update_delete_on_user_file(self, tmp_path, enabled, recording_bridge, monkeypatch):
+        from core.memory.store import MemoryStore
+
+        store = MemoryStore(memory_dir=str(tmp_path / "memories"))
+        result = store.add_entry(
+            "Calvin worked as a network engineer at T6 Broadband.",
+            file_name="user.professional_background",
+            source="user",
+        )
+        assert result.startswith("Saved to user.professional_background")
+        assert [o["outcome"] for o in recording_bridge.observations] == [True, True]
+
+        epoch = int(result.rsplit("epoch=", 1)[1].rstrip(")"))
+        recording_bridge.observations.clear()
+        store.update_entry("user.professional_background", epoch, "Calvin was a network engineer (BGP/OSPF) 2003-2008.")
+        assert [o["outcome"] for o in recording_bridge.observations] == [False, False, True, True]
+
+        recording_bridge.observations.clear()
+        store.delete_entry("user.professional_background", epoch)
+        assert [o["outcome"] for o in recording_bridge.observations] == [False, False]
+
+    def test_non_user_file_and_disabled_are_silent(self, tmp_path, recording_bridge, monkeypatch):
+        from core.memory.store import MemoryStore
+
+        store = MemoryStore(memory_dir=str(tmp_path / "memories"))
+        monkeypatch.setattr(settings, "candor_enabled", True)
+        store.add_entry(
+            "Pernix uses FastAPI with SSE streaming for the chat UI.", file_name="projects.pernix", source="distill"
+        )
+        assert recording_bridge.observations == []
+
+        monkeypatch.setattr(settings, "candor_enabled", False)
+        store.add_entry("Calvin prefers dark roast coffee in the morning.", file_name="user.profile", source="user")
+        assert recording_bridge.observations == []
+
+    async def test_attestations_reach_predictions(self, tmp_path, enabled):
+        bridge = CandorBridge(store_dir=str(tmp_path / "candor"))
+        from core.extensions.candor.emit import build_memory_observations
+
+        for i in range(6):
+            bridge.record_nowait(
+                build_memory_observations(
+                    file_name="user.profile", event="attest", source="user", ts_ms=NOW_MS - i * 1000
+                )
+            )
+        bridge.record_nowait(
+            build_memory_observations(file_name="user.profile", event="forget", source="", ts_ms=NOW_MS)
+        )
+        await bridge.run_maintenance(lambda: False)
+        result = await asyncio.to_thread(bridge.predict_sync, "user_fact", ["profile"])
+        assert result is not None
+        assert result["observations"] == 7
+        assert result["p"] > 0.5  # 6 stood, 1 fell
+        await bridge.close()
+
+
+# ---------------------------------------------------------------------------
 # bridge.py — lifecycle, buffering, maintenance
 # ---------------------------------------------------------------------------
 

@@ -38,6 +38,52 @@ def classify_error(error_text: str) -> str:
     return "other"
 
 
+def build_memory_observations(
+    *,
+    file_name: str,
+    event: str,
+    source: str,
+    ts_ms: int,
+) -> list[dict]:
+    """Map a user-model memory mutation to user_fact attestation observations.
+
+    Only `user.*` memory files count — that namespace is the user model. The
+    ledger carries file slugs and counts, never entry prose, so no PII enters
+    the append-only chain. Semantics: p(user_fact(area)) is the share of
+    attestations in that area that have stood unrevised — earned stability,
+    not a confidence score for any single fact.
+
+    Events: "attest" (entry added → True), "revise" (entry superseded →
+    False + True: the old formulation died, a corrected one replaced it),
+    "forget" (entry deleted → False).
+    """
+    if not file_name.startswith("user."):
+        return []
+    slug = file_name[len("user.") :] or file_name
+    outcomes = {"attest": [True], "revise": [False, True], "forget": [False]}.get(event)
+    if not outcomes:
+        return []
+    # The user attests their own facts; agent-derived writes and later
+    # revisions are the system speaking.
+    actor = "human:user" if (event == "attest" and source == "user") else "agent:pernix"
+    ctx = {"origin": source or event}
+    observations: list[dict] = []
+    for outcome in outcomes:
+        for args, extra in (([slug], {}), (["*"], {"target": slug})):
+            observations.append(
+                {
+                    "pred": "user_fact",
+                    "args": args,
+                    "stmt_type": "frequency",
+                    "outcome": outcome,
+                    "ctx": {**ctx, **extra},
+                    "actor": actor,
+                    "ts": ts_ms,
+                }
+            )
+    return observations
+
+
 def build_turn_observations(
     *,
     tool_summary: dict,
