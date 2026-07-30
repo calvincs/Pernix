@@ -1661,6 +1661,20 @@
     border-top: 1px dashed var(--border-subtle);
 }
 .timeline-tool-row.expanded .tool-item-body { display: block; }
+/* In-flight (tool.start) row — upgraded in place when the result arrives. */
+.timeline-tool-row.running {
+    background: var(--bg-subtle, rgba(255, 255, 255, 0.04));
+    opacity: 0.85;
+}
+.tool-item-running-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent, #4a9eff);
+    animation: dot-pulse 1.2s ease-in-out infinite;
+    flex-shrink: 0;
+}
 .timeline-tool-row .tool-item-args {
     font-family: var(--font-mono, monospace);
     font-size: var(--text-xxs);

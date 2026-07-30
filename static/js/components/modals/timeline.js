@@ -32,6 +32,13 @@ let _overlay = null;
 let _mermaid = null;
 let _mermaidPromise = null;
 let _data = { stateLog: [], messages: [], liveTools: [], hasOlder: false };
+
+// In-flight tool rows: appended on tool.start, upgraded in place on tool.call.
+// Without these, a multi-minute tool run (rlm_process, bash, spawn_worker)
+// is invisible until it completes and then reads as an unexplained idle gap.
+// Purely a live-DOM affordance: entries only join _data.liveTools (export,
+// tally, graph) once the completed result arrives.
+let _pendingToolRows = [];
 let _filter = { mode: 'all', q: '' };
 let _scroller = null;   // .modal-body — the actual scroll container
 let _bodyEl = null;     // #timeline-modal-body — rebuilt by _renderTimeline
@@ -159,8 +166,26 @@ export function appendTimelineRow(row) {
     _refreshGraphIfVisible();
 }
 
+// Live-append from the tool.start SSE handler in app.js: a "running" row
+// that appendTimelineToolRow upgrades in place when the result arrives.
+export function appendTimelineToolStart(tool) {
+    if (!_bodyEl) return;
+    const entry = {
+        name: tool.name || 'tool',
+        args: tool.args || null,
+        content: '',
+        latency_ms: null,
+        was_error: false,
+        running: true,
+        ts: Date.now(),
+    };
+    const rowEl = _appendLiveEntry({ kind: 'tool', ts: entry.ts, turn: null, data: entry });
+    if (rowEl) _pendingToolRows.push({ name: entry.name, startTs: entry.ts, el: rowEl });
+}
+
 // Live-append from the tool.call SSE handler in app.js. Mirrors what the
-// reopen path reconstructs from session messages.
+// reopen path reconstructs from session messages. If a tool.start row for
+// this tool is on screen, upgrade it in place instead of appending.
 export function appendTimelineToolRow(tool) {
     const entry = {
         name: tool.name || 'tool',
@@ -170,6 +195,17 @@ export function appendTimelineToolRow(tool) {
         was_error: !!tool.was_error,
         ts: Date.now(),
     };
+    // Oldest matching pending row wins (parallel same-name calls complete FIFO).
+    _pendingToolRows = _pendingToolRows.filter(p => p.el.isConnected);
+    const idx = _pendingToolRows.findIndex(p => p.name === entry.name);
+    if (idx !== -1) {
+        const pending = _pendingToolRows.splice(idx, 1)[0];
+        entry.ts = pending.startTs; // keep the row anchored where the run began
+        pending.el.replaceWith(_buildToolRow(entry, entry.ts));
+        _data.liveTools.push(entry);
+        _refreshGraphIfVisible();
+        return;
+    }
     _data.liveTools.push(entry);
     _appendLiveEntry({ kind: 'tool', ts: entry.ts, turn: null, data: entry });
     _refreshGraphIfVisible();
@@ -183,8 +219,8 @@ function _refreshGraphIfVisible() {
 }
 
 function _appendLiveEntry(entry) {
-    if (!_bodyEl) return;
-    if (!_entryMatches(entry)) return;
+    if (!_bodyEl) return null;
+    if (!_entryMatches(entry)) return null;
 
     const placeholder = _bodyEl.querySelector('.timeline-empty');
     if (placeholder) placeholder.remove();
@@ -205,11 +241,13 @@ function _appendLiveEntry(entry) {
         groupBody.appendChild(_buildGapRow(entry.ts - _lastRowTs));
     }
     _lastRowTs = entry.ts;
-    groupBody.appendChild(entry.kind === 'state'
+    const rowEl = entry.kind === 'state'
         ? _buildStateRow(entry.data, entry.ts)
-        : _buildToolRow(entry.data, entry.ts));
+        : _buildToolRow(entry.data, entry.ts);
+    groupBody.appendChild(rowEl);
     group.classList.remove('collapsed');
     if (_scroller && _timelineActive()) _scroller.scrollTop = _scroller.scrollHeight;
+    return rowEl;
 }
 
 async function _load() {
@@ -229,6 +267,7 @@ async function _load() {
         console.error('Failed to load timeline data:', e);
         _data = { stateLog: [], messages: [], liveTools: [], hasOlder: false };
     }
+    _pendingToolRows = [];
 }
 
 async function _loadOlder(btn) {
@@ -922,6 +961,22 @@ function _buildStateRow(row, ts) {
 
 function _buildToolRow(tool, ts) {
     const timeEl = el('span', { class: 'tl-time' }, [text(_fmtClock(ts))]);
+
+    if (tool.running) {
+        // In-flight row: no body, no chevron — upgraded in place on completion.
+        const spinner = el('span', { class: 'tool-item-running-dot' });
+        const nameEl = el('div', { class: 'tool-item-name' }, [text(tool.name || 'tool')]);
+        let summary = '';
+        if (tool.args && typeof tool.args === 'object') {
+            summary = tool.name === 'bash' && tool.args.command
+                ? '$ ' + tool.args.command
+                : (tool.args.path || tool.args.task || Object.values(tool.args).map(v => String(v).slice(0, 40)).join(', '));
+        }
+        const summaryEl = el('span', { class: 'tool-item-summary' }, [text(String(summary).slice(0, 120))]);
+        const headerEl = el('div', { class: 'tool-item-header' }, [timeEl, spinner, nameEl, summaryEl]);
+        return el('div', { class: 'tool-item timeline-tool-row running' }, [headerEl]);
+    }
+
     const chevron = el('span', { class: 'tool-item-chevron' }, [text('▶')]);
 
     const nameChildren = [text(tool.name || 'tool')];

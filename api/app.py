@@ -440,6 +440,7 @@ from api.routers import (
     models,
     push,
     questions,
+    rlm,
     sessions,
     skills,
     tools,
@@ -460,6 +461,7 @@ app.include_router(jobs.router)
 app.include_router(skills.router)
 app.include_router(push.router)
 app.include_router(workflows.router)
+app.include_router(rlm.router)
 
 
 @app.get("/")

@@ -7,7 +7,7 @@ import { getPermission, requestPermission, connectGlobalNotifications, registerS
 import { el, text, clear, initMarked, renderMarkdown } from './render.js';
 import { initSigil } from './sigil.js';
 import { openSettings } from './components/modals/settings.js';
-import { openTimeline, appendTimelineRow, appendTimelineToolRow, isTimelineOpen } from './components/modals/timeline.js';
+import { openTimeline, appendTimelineRow, appendTimelineToolRow, appendTimelineToolStart, isTimelineOpen } from './components/modals/timeline.js';
 import { initBell, openBellPanel, closeBellPanel, refreshBell } from './components/notification-bell.js';
 import { initJobsIndicator } from './components/jobs-indicator.js';
 import { initSidebar, renderSessionList as renderSidebar, updateSessionActivity } from './components/sidebar.js';
@@ -1562,6 +1562,9 @@ function handleEvent(event) {
         }
         _runningTools.set(event.name, event.arguments || {});
         _showToolStatus(event.name, event.arguments || {}, { running: true });
+        if (isTimelineOpen()) {
+            appendTimelineToolStart({ name: event.name, args: event.arguments || null });
+        }
         if (state.sid) updateSessionActivity(state.sid, event.name);
     }
 
