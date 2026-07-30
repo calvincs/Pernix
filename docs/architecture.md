@@ -108,6 +108,7 @@ When no sessions are actively processing, **Snooze** runs background maintenance
 - **Memory consolidation** — clusters semantically related entries into the same file
 - **User profile extraction** — pulls preferences and recurring patterns into a profile memory
 - **Post-mortem cleanup** — old failure logs get summarized and archived
+- **Run-directory retention** — old workflow and RLM run directories (and their DB rows) are purged past their retention windows
 
 Snooze stops immediately when you start a new session — your work always takes priority. It's defined in `core/snooze.py`.
 
@@ -182,6 +183,8 @@ On every startup, the session manager sweeps the database for sessions stuck in 
 ```
 INFO pernix.api  Reconciled 2 stuck PROCESSING session(s) at startup
 ```
+
+The same startup pass also sweeps run records orphaned by a crash: `workflow_runs` rows stuck at `running` are marked `failed`, and `rlm_runs` rows stuck at `running` are marked `orphaned` (the RLM engine is synchronous and its child self-reaps with the server, so neither can legitimately survive a restart).
 
 ### Reaper rules (summary)
 
@@ -293,6 +296,8 @@ Concurrency is controlled per-provider via semaphores: `llm_max_concurrent` for 
 |---|---|---|
 | Sessions, messages, tool calls | `data/sessions.db` | SQLite |
 | State machine transition log | `data/sessions.db` (`session_state_log` table) | SQLite |
+| RLM run index + residue | `data/sessions.db` (`rlm_runs` table) + `data/workspace/rlm/<run_id>/` | SQLite + filesystem |
+| Candor operational-memory store (when enabled) | `data/candor/` | SQLite |
 | Memory entries (long-term) | `data/memories/*.md` | Markdown |
 | Memory search index | `data/memories/_index.db` | SQLite FTS5 |
 | Workspace files (agent's working dir) | `data/workspace/` | Filesystem |
@@ -347,5 +352,6 @@ If you want to read the code:
 | Workers | `core/extensions/orchestration/__init__.py` |
 | Memory store | `core/memory/store.py` |
 | Snooze | `core/snooze.py` |
+| RLM engine | `core/extensions/rlm/` |
 
 The codebase is intentionally small and readable. Pick a thread and pull on it.

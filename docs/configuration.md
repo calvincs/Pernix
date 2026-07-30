@@ -104,7 +104,7 @@ After each agent turn, a lightweight reflect pass verifies that the agent actual
 
 ## Snooze (Idle Optimization)
 
-During idle periods (no active sessions), Pernix runs background maintenance: deduplicating memory entries, consolidating similar notes, and profiling user preferences.
+During idle periods (no active sessions), Pernix runs background maintenance: deduplicating memory entries, consolidating similar notes, profiling user preferences, and purging expired run directories (workflow and RLM runs past retention).
 
 | Setting | Default | Description |
 |---|---|---|

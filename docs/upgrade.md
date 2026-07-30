@@ -24,7 +24,7 @@ If you want to be cautious, **back up `data/` first.** It's a directory tree of 
 
 ## DB migrations
 
-The schema is at v16. Migrations run sequentially at startup based on the version stored in the SQLite `user_version` pragma. Each migration is forward-only — there's no automatic downgrade.
+The schema is at v18. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
 
 If you ever need to downgrade Pernix to an older version (and therefore an older schema), the safe path is:
 
@@ -39,6 +39,10 @@ Running newer Pernix against an older DB is fine — that's just a normal upgrad
 ## Breaking changes worth knowing about
 
 These are the upgrade points where something the user might have set up needs attention. Each is dated.
+
+### 2026-07 — RLM (recursive processing) add-on, off by default
+
+Nothing to do on upgrade: migration v18 adds the `rlm_runs` table automatically (v17, from the same period, adds session pinning). If you want the feature, enabling `rlm_enabled` in Settings → General requires a **restart** — the `rlm_process` tool registers at startup only. Pick the root/sub-call models under Settings → Models → Model Roles (they fall back to your primary/background models). Runs leave residue in `data/workspace/rlm/<run_id>/`; snooze purges it after `rlm_run_retention_days` (default 30), and it's safe to delete by hand.
 
 ### 2026-05-05 — `data/agent/AGENTS.md` renamed to `SESSIONS.md`
 
