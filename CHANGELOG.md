@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- fix(scout): the final round keeps `submit_report` instead of losing every tool, and revisions are only spent on issues the post-scout sanitizer can't fix — the old pairing made a round-5 revision unwinnable by construction (17 revisions logged, 0 second submits)
 - fix(scout): a scout that never submits no longer hands the agent a blank report — it degrades to the deterministic fallback (identity, rules, memory, real tool list) instead of stripping the turn down to CORE_MINIMUM; degraded reports are kept out of the cache and no longer short-circuit the fallback model
 - feat(rlm): recursive long-input processing add-on (arXiv 2512.24601) — sandboxed child REPL engine, sub-call broker, `rlm_process` tool, settings + model roles, migration v18 (`rlm_runs`), snooze retention, scout/nudge/prompt discoverability wiring; off by default
 

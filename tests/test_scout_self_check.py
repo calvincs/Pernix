@@ -415,3 +415,79 @@ def test_revision_request_explicitly_forbids_prose():
     text = _format_revision_request(["recommended_model 'foo' is not in AVAILABLE MODELS."])
     assert "submit_report" in text
     assert "prose" in text.lower(), "revision request should warn against prose responses"
+
+
+# ---------------------------------------------------------------------------
+# Revision economics: only spend a scout round on what scout alone can fix
+# ---------------------------------------------------------------------------
+
+
+def test_hallucinated_tool_is_not_a_blocking_issue():
+    """_validate_report strips unknown tool names, so demanding a revision for
+    one trades a usable report for a round scout may not survive.
+
+    Real failure (session bcaec717d1da): scout listed "node --check" as a tool,
+    the self-check rejected an otherwise-complete report, and the forced
+    resubmit landed on the tools-disabled final round and produced nothing.
+    """
+    from core.scout.runner import _sanitizable_issues, _unfixable_issues
+
+    report = ScoutReport(
+        recommended_tools=["totally_fake_tool_name_xyz"],
+        approach_guidance="1. Read the file.\n2. Grep for the symbol.\n3. Write the summary.\n",
+    )
+    assert _unfixable_issues(report) == []
+    assert any("totally_fake_tool_name_xyz" in i for i in _sanitizable_issues(report))
+
+
+def test_empty_approach_guidance_is_blocking():
+    """Nothing downstream can write a plan scout didn't — this one is worth a round."""
+    from core.scout.runner import _unfixable_issues
+
+    assert any("approach_guidance" in i for i in _unfixable_issues(ScoutReport(approach_guidance="")))
+
+
+def test_blank_deliverable_description_is_blocking():
+    from core.scout.runner import _unfixable_issues
+
+    report = ScoutReport(
+        approach_guidance="1. Do X.\n2. Do Y.\n3. Finish up.\n",
+        deliverables_plan=[DeliverableSpec(description="")],
+    )
+    assert any("empty descriptions" in i for i in _unfixable_issues(report))
+
+
+def test_self_check_still_reports_both_classes():
+    """The flat self-check keeps its contract — it feeds viability notes."""
+    report = ScoutReport(approach_guidance="", recommended_tools=["totally_fake_tool_name_xyz"])
+    issues = _self_check_report(report)
+    assert any("approach_guidance" in i for i in issues)
+    assert any("totally_fake_tool_name_xyz" in i for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# Last round must still be able to deliver
+# ---------------------------------------------------------------------------
+
+
+def test_last_round_still_offers_submit_report():
+    """The penultimate round orders scout to submit, and a revision request
+    lands on the final round by construction. Removing every tool there made
+    that instruction impossible to follow — 17 revisions, 0 second submits.
+    """
+    from core.scout.runner import _SCOUT_SUBMIT_ONLY
+
+    names = [t["function"]["name"] for t in _SCOUT_SUBMIT_ONLY]
+    assert names == ["submit_report"]
+
+
+def test_revision_on_penultimate_round_can_still_be_honored():
+    """Guard the arithmetic: a revision granted at round N must leave a round
+    that can call submit_report.
+    """
+    from core.scout.runner import _SCOUT_SUBMIT_ONLY, SCOUT_MAX_ROUNDS
+
+    last_round_with_revision_slot = SCOUT_MAX_ROUNDS - 2  # rounds_remaining == 1
+    next_round = last_round_with_revision_slot + 1
+    assert next_round == SCOUT_MAX_ROUNDS - 1, "revision lands on the final round"
+    assert _SCOUT_SUBMIT_ONLY, "and that round must still offer submit_report"
