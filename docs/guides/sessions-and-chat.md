@@ -44,6 +44,36 @@ See [../api.md](../api.md) for full details.
 
 ---
 
+## The sidebar: session types, filtering, and finding things
+
+Not every session in the sidebar is a chat you started. Each carries a colored dot for its type, and the legend at the bottom of the sidebar shows the counts:
+
+| Type | What it is |
+|---|---|
+| **Session** | A conversation you started. |
+| **Cron** | A scheduled job run — each firing gets its own session. |
+| **Worker** | A sub-agent spawned by another session. |
+| **Dream** | The idle-time introspection journal (see below). |
+
+Click a legend entry to hide or show that type — useful when cron runs start to crowd out your own threads. The filter persists across reloads.
+
+Finding things:
+
+- The sidebar **search box** is full-text over all message content — it finds any past conversation, not just titles.
+- **Ctrl+K** opens a fuzzy-find palette to jump to any session by name.
+- **Ctrl+F** searches within the current transcript.
+- **↑** in an empty composer recalls your message history.
+
+(`/help` in any chat lists all of these.)
+
+---
+
+## Dream journal sessions
+
+When [Dream introspection](../internals/dream.md) is enabled, each day of dreaming narrates itself into a day-keyed journal session ("Dream Jul 31") — hypotheses raised, verdicts, report writes. These sessions are **read-only**: the composer is disabled with the hint *"Dream journal is read-only — Pernix writes it while dreaming."* They're excluded from search and memory distillation, and pruned after `dream_journal_retention_days` (default 14). Filter them out with the sidebar legend if you'd rather not see them.
+
+---
+
 ## The append-only model
 
 Pernix never modifies stored messages. When the conversation gets long enough to threaten the context window, **compaction** kicks in — older messages get replaced in the prompt with a summarized digest, but the originals stay in the database. The UI always shows full history; only the *view* sent to the next LLM call is changed.
@@ -89,7 +119,7 @@ You can give a single session a different primary model than your global setting
 - Running a research session on Claude Sonnet but a quick-script session on Qwen 3.
 - Comparing two models on the same prompt — open two sessions with different `model_override`.
 
-The override lives in `session.model_override` (not in global Settings). Set it via the UI session menu or via `PATCH /api/sessions/{id}` with `{"model_override": "..."}`.
+The override lives in `session.model_override` (not in global Settings). Set it by clicking the **model badge** in the status bar, via the UI session menu, or via `PATCH /api/sessions/{id}` with `{"model_override": "..."}`.
 
 The other model roles (scout, fallback, background) follow the global setting; only the primary is overridable per session.
 

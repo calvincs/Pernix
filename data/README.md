@@ -1,24 +1,28 @@
 # data/ — Runtime State
 
-All agent runtime data lives here. Wiped on `--fresh` except `skills/` and `settings.json`.
+All agent runtime data lives here. Wiped on `--rebuild` except `settings.json`,
+`skills/`, `certs/`, and `agent/` (see [agent/README.md](agent/README.md)).
 
 ```
 data/
   workspace/           # Unified file space — all agent files go here
     {project}/         #   Project folders (e.g. "my-gallery/app.html")
+    dreams/            #   Dream reports (DREAM-<date>.md), written during idle introspection
+    rlm/{run_id}/      #   RLM run residue (trace, staged context) — purged by snooze retention
     .venv/             #   Python venv for bash tool (auto-created)
     .cache/            #   pip cache and temp files
-    rlm/{run_id}/      #   RLM run residue (trace, staged context) — purged by snooze retention
-  skills/              # Skill packages — NOT wiped on fresh start
+  agent/               # Agent identity & behavior — SOUL.md, RULES.md, SESSIONS.md
+  skills/              # Skill packages — NOT wiped on rebuild
     {skill-name}/      #   Each skill has SKILL.md + optional scripts/, references/
     .disabled.json     #   Disabled skill names
+  workflows/           # WORKFLOW.md recipes for the workflow runner
   memories/            # Memory store (FTS5 index + markdown files)
+  candor/              # Candor operational-memory store (when candor_enabled)
+  certs/               # TLS certs for network mode — NOT wiped on rebuild
   sessions.db          # SQLite: sessions, messages, token usage
-  settings.json        # User settings (persists across fresh starts)
+  settings.json        # User settings (persists across rebuilds)
+  tools.json           # Custom tools created by the agent (toolmaker)
   logs/                # Application logs
-  RULES.md             # Agent behavioral rules
-  SOUL.md              # Agent identity/personality (optional)
-  birthdate.txt        # Agent creation timestamp
 ```
 
 ## Key concepts

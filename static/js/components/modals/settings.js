@@ -92,7 +92,7 @@ const SECTIONS = [
     },
     {
         title: 'Memory',
-        description: 'Automatic memory recall surfaces relevant past conversations at the start of each turn. Min recall score filters out low-relevance matches \u2014 higher values mean stricter matching.',
+        description: 'Automatic memory recall surfaces relevant past conversations at the start of each turn.',
         fields: [
             { key: 'memory_recall', label: 'Auto-Recall', type: 'bool' },
         ],

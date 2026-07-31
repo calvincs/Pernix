@@ -3,7 +3,7 @@
 Two non-obvious subsystems that run alongside the agent loop:
 
 - **Reflect** — a quality-gate pass that runs after every turn, verifies whether the user's intent was actually fulfilled, and can trigger bounded retries if it wasn't.
-- **Snooze** — idle-time housekeeping that runs in the background when no sessions are active, deduplicating memory, consolidating clusters, extracting user-profile facts, and archiving old post-mortems.
+- **Snooze** — idle-time housekeeping that runs in the background when no sessions are active, deduplicating memory, consolidating clusters, extracting user-profile facts, archiving old post-mortems — and, when enabled, running the [Dream](dream.md) introspection step.
 
 Both are off the critical path of any single user request, but they shape how Pernix behaves over weeks and months. This page explains what each does and where to tune it.
 
@@ -86,23 +86,42 @@ Defined in `core/snooze.py`. Runs every `snooze_interval_ticks` (default 10 tick
 
 ### What it does
 
-| Task | Cadence | What |
-|---|---|---|
-| Memory deduplication | Every `snooze_dedup_interval_days` (default 7) per file | Find near-duplicate entries; merge them. |
-| Memory consolidation | Every `snooze_consolidation_interval_hours` (default 24) | Cluster semantically related entries into the same file using `snooze_consolidation_cluster_threshold` (default 0.55). |
-| User profile extraction | Periodic | Pull recurring preferences and facts into `user.profile.md`. |
-| Post-mortem cleanup | Past retention | Synthesize patterns from accumulated post-mortems; archive old ones. |
-| Workflow run cleanup | Per cycle | Delete workflow run dirs beyond keep-10-per-workflow or older than 30 days. |
-| RLM run cleanup | Per cycle, age-based | Delete `data/workspace/rlm/<run_id>/` dirs + `rlm_runs` rows older than `rlm_run_retention_days` (default 30). Running runs are never touched. |
-| Candor maintenance | Per cycle, when `candor_enabled` | Run the admission gate, drain the observation buffer, checkpoint the store. |
+Each cycle walks an ordered ladder of activities (`core/snooze.py`). Later activities only run if the cycle isn't cancelled first, so the ordering is also a priority order:
 
-Each task is bounded by `snooze_max_cycle_seconds` (default 60). If a task can't finish in that window, it yields and resumes on the next tick.
+| # | Activity | What |
+|---|---|---|
+| 1 | Catch-up distillation | Review sessions that ended without a turn digest (max 1 LLM call). |
+| 2 | User insight extraction | Pull recurring preferences and facts into `user.profile.md`. |
+| 2b | Skill improvements | Propose skill edits + lessons from session reflects. |
+| 3 | Memory deduplication | Every `snooze_dedup_interval_days` (default 7) per file: find near-duplicate entries; merge them. |
+| 3b | Cross-file consolidation | Every `snooze_consolidation_interval_hours` (default 24): cluster related entries into the same file using `snooze_consolidation_cluster_threshold` (default 0.55). |
+| 3c | Entry re-routing | Move entries filed in the wrong memory file. |
+| 4 | Tag enrichment | Backfill missing `@tags:` on memory entries (no LLM). |
+| 5 | Index reconciliation | Check the FTS5 index against the markdown files; reindex if stale. |
+| 6 | File splitting | Split memory files that have grown too large. |
+| 7 | Cron cleanup | Prune old cron runs and their sessions. |
+| 8 | Staleness pruning | Age out stale lessons and superseded facts. |
+| 9 | Skill co-occurrence | Update which skills tend to load together. |
+| 10 | Signal synthesis | Fold post-mortems into tool/skill performance counters. |
+| 11 | Post-mortem TTL | Archive post-mortems past `post_mortem_retention_days` (default 90). |
+| 12 | Workflow run cleanup | Delete workflow run dirs beyond keep-10-per-workflow or older than 30 days. |
+| 12a | RLM run cleanup | Delete `data/workspace/rlm/<run_id>/` dirs + `rlm_runs` rows older than `rlm_run_retention_days` (default 30). Running runs are never touched. |
+| 12b | Candor maintenance | When `candor_enabled`: run the admission gate, drain the observation buffer, checkpoint the store. |
+| 13 | Refine pass | Whole-session refine — broader-gate sibling of Activity 2b. |
+| 14 | Dream step | Idle-time introspection (`core/dream/`) — see [dream.md](dream.md). Only when `dream_enabled`. |
+
+A cycle runs until the ladder **completes** — there is no per-task time slice. Two things end it early:
+
+- **User activity.** A new prompt, cron fire, or shutdown sets the cycle's cancel event, which aborts even in-flight LLM awaits. The interrupted activity records a watermark and resumes on the next cycle.
+- **The hang backstop.** `snooze_max_cycle_seconds` (default 900) is runaway protection, not a budget — it only fires if an activity genuinely hangs. Local (Ollama) background models get 4x headroom, since slow local inference is normal there, not a hang.
 
 ### Cooperative scheduling
 
-Snooze checks `idle_minutes` against `snooze_cooldown_minutes` (default 5). A session that just went idle won't trigger Snooze immediately — there's a cooldown so you don't get housekeeping running 30 seconds after every chat.
+Snooze checks `idle_minutes` against `snooze_cooldown_minutes` (default 5). A session that just went idle won't trigger Snooze immediately — there's a cooldown so you don't get housekeeping running 30 seconds after every chat. Cycles also skip entirely when nothing happened since the last one — no activity, no work to review.
 
-When a new session starts, Snooze yields immediately (`asyncio.CancelledError` propagates up, the in-progress task records its progress, and the next snooze tick picks up where it left off).
+When a new session starts mid-cycle, Snooze yields immediately: the cancel event aborts the in-flight activity (including a pending LLM call), the activity records its watermark, and the next cycle picks up where it left off. Your work always wins.
+
+For debugging, a localhost-only `POST /api/admin/snooze-cycle` triggers a cycle on demand, skipping the cadence and cooldown checks (but never the real gates — active sessions still refuse it). It also returns an `idle_blockers()` diagnostic explaining why a cycle *wouldn't* run.
 
 ### The cluster threshold
 

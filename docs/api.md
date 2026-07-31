@@ -442,6 +442,12 @@ POST /api/admin/restart
 ```
 Triggers a graceful server restart (uses `os.execv` to replace the process in-place). Useful after changing settings that require a restart.
 
+### Trigger a Snooze Cycle *(localhost-only)*
+```
+POST /api/admin/snooze-cycle
+```
+Runs one Snooze maintenance cycle on demand, skipping the cadence and cooldown checks (active sessions still refuse it). Returns the cycle outcome plus post-cycle stats; if the idle gate blocked the run, an `idle_blockers` diagnostic explains why. Useful for debugging memory maintenance and Dream without waiting for idle time.
+
 ---
 
 ## Skills

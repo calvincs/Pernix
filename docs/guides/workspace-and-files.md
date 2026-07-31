@@ -18,6 +18,7 @@ data/workspace/
 │   │   └── ...
 │   └── ...
 ├── scratch/                  # ad-hoc files
+├── dreams/                   # Dream reports (DREAM-<date>.md) — written during idle introspection
 ├── rlm/{run_id}/             # RLM run residue (trace, staged context) — self-purges
 └── .venv/                    # auto-managed venv for custom tools (not for dev use)
 ```
