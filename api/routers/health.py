@@ -395,7 +395,10 @@ async def trigger_snooze_cycle(request: Request):
 
     snooze = get_snooze()
     outcome = await snooze.run_cycle(force=True)
-    return {"outcome": outcome, "stats": snooze.get_stats()}
+    result = {"outcome": outcome, "stats": snooze.get_stats()}
+    if outcome == "skipped_idle":
+        result["idle_blockers"] = snooze.idle_blockers()
+    return result
 
 
 # ---------------------------------------------------------------------------

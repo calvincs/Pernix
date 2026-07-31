@@ -115,6 +115,47 @@ class SnoozeRunner:
 
         return True
 
+    def idle_blockers(self) -> list[str]:
+        """Read-only diagnostic: why _is_idle() would refuse right now.
+
+        Mirrors _is_idle's checks without short-circuiting so the admin
+        trigger can report every blocker. Never raises.
+        """
+        blockers: list[str] = []
+        try:
+            from sessions import state_v2 as _sv2
+            from sessions.manager import get_manager
+
+            _idle_v2 = (
+                _sv2.SessionStateV2.IDLE_READY,
+                _sv2.SessionStateV2.AWAITING_USER,
+                _sv2.SessionStateV2.AWAITING_WORKERS,
+            )
+            sessions = list(get_manager()._sessions.values())
+            cooldown = settings.snooze_cooldown_minutes * 60
+            now = time.time()
+            for session in sessions:
+                sid = getattr(session, "session_id", "?")[:8]
+                state = _sv2._current_state(session)
+                if state not in _idle_v2:
+                    blockers.append(f"session {sid}: state={getattr(state, 'value', state)}")
+                if session.has_background_tasks:
+                    blockers.append(f"session {sid}: background tasks")
+                idle_for = int(now - session.last_activity_time)
+                if idle_for < cooldown:
+                    blockers.append(f"session {sid}: active {idle_for}s ago (cooldown {int(cooldown)}s)")
+        except Exception as e:
+            blockers.append(f"manager unavailable: {type(e).__name__}")
+        try:
+            from db import models as db
+
+            for r in db.list_cron_runs(limit=5):
+                if r.get("status") == "running":
+                    blockers.append(f"cron run {r.get('job_name') or r.get('job_id')}: running")
+        except Exception:
+            pass
+        return blockers
+
     def _is_cancelled(self) -> bool:
         return self._cancel_generation != self._cycle_generation
 
