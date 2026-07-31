@@ -286,3 +286,39 @@ async def test_report_first_call_starts_clock_then_writes(store, dream_on):
     # instead verify the no-material path with a fresh window
     db.set_snooze_state("dream_last_report", datetime.now(timezone.utc).isoformat())
     assert await maybe_write_report() is None
+
+
+# ---------------------------------------------------------------------------
+# Journal
+# ---------------------------------------------------------------------------
+
+
+async def test_journal_creates_day_session_and_notices(store, dream_on):
+    from core.dream import journal
+
+    await journal.append("◐ line one")
+    await journal.append("💭 line two")
+    sessions = [s for s in db.list_sessions(limit=20) if s.get("session_type") == "snooze"]
+    assert len(sessions) == 1, "one day-keyed journal session"
+    sid = sessions[0]["id"]
+    msgs = db.get_messages(sid)
+    assert [m["role"] for m in msgs] == ["notice", "notice"]
+    assert "line two" in msgs[-1]["content"]
+    # Reused on subsequent appends, not re-created.
+    await journal.append("third")
+    assert len([s for s in db.list_sessions(limit=20) if s.get("session_type") == "snooze"]) == 1
+
+
+async def test_journal_inert_when_dream_disabled(store):
+    from core.dream import journal
+
+    await journal.append("should not exist")
+    assert not [s for s in db.list_sessions(limit=20) if s.get("session_type") == "snooze"]
+
+
+async def test_journal_invisible_to_fts_and_distill(store, dream_on):
+    from core.dream import journal
+
+    await journal.append("a unique zanzibar journal narration line for search")
+    assert db.search_messages_fts("zanzibar") == [], "journal must never enter cross-session search"
+    assert db.get_unreviewed_sessions(min_age_minutes=0) == [], "journal must never be a distill candidate"

@@ -125,6 +125,7 @@ async def generate(store, is_cancelled) -> int:
     call completed (even with zero output) — only a transport failure leaves
     them for retry.
     """
+    from core.dream.journal import append as journal
     from core.dream.observe import build_pack
 
     pack = await build_pack(store)
@@ -149,6 +150,15 @@ async def generate(store, is_cancelled) -> int:
         f"Produce at most {max_n} hypotheses as a JSON array, citing only the ref ids above."
     )
 
+    kind_counts: dict[str, int] = {}
+    for item in pack.items:
+        kind_counts[item.kind] = kind_counts.get(item.kind, 0) + 1
+    await journal(
+        f"🌘 Dreaming over {kind_counts.get('pm', 0)} post-mortems, "
+        f"{kind_counts.get('candor', 0)} reliability signals, and "
+        f"{kind_counts.get('memory', 0)} entries from '{pack.memory_file or '—'}'"
+    )
+
     response = await get_llm_client().chat(
         messages=[
             {"role": "system", "content": DREAM_PROMPT},
@@ -169,12 +179,15 @@ async def generate(store, is_cancelled) -> int:
             break
         if is_banned_claim(h["statement"]):
             logger.info("dream: rejected banned-claim hypothesis: %s", h["statement"][:120])
+            await journal(f"✗ rejected (banned claim class): {h['statement'][:160]}")
             continue
         cited = [refs[rid] for rid in h["evidence"] if rid in refs]
         if not cited:
             logger.debug("dream: dropped hypothesis with unknown refs: %s", h["evidence"])
+            await journal(f"✗ rejected (cited refs not in pack): {h['statement'][:160]}")
             continue
         if is_duplicate(h["statement"], existing):
+            await journal(f"✗ rejected (duplicate of a seen hypothesis): {h['statement'][:160]}")
             continue
         evidence = [{**item.ref, "type": item.kind, "quote": item.render[:400]} for item in cited]
         db.add_dream_hypothesis(
@@ -185,6 +198,10 @@ async def generate(store, is_cancelled) -> int:
         )
         existing.append(h["statement"])
         saved += 1
+        await journal(
+            f"💭 [{h['kind']}] {h['statement']} (confidence {h['confidence']:.2f}, "
+            f"evidence: {', '.join(h['evidence'])})"
+        )
 
     # LLM call completed — advance cursors.
     if pack.pm_high_water:

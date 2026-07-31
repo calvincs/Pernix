@@ -258,7 +258,7 @@ async def _validate_memory_claim(store, row: dict) -> str:
     return _finish(row, "refuted", "evidence_judge", note)
 
 
-async def _validate_lesson_ineffective(store, row: dict) -> str:
+async def _validate_lesson_ineffective(row: dict) -> str:
     pm_refs = [e for e in _evidence(row) if e.get("type") == "pm" and e.get("session_id")]
     if not pm_refs:
         return _finish(row, "expired", "scout_replay", "no post-mortem refs in evidence")
@@ -316,6 +316,28 @@ async def _validate_lesson_ineffective(store, row: dict) -> str:
     return _finish(row, "validated", "scout_replay", f"plan unchanged on failure axis — {note}", confidence=0.75)
 
 
+_VERDICT_ICONS = {"validated": "✔", "refuted": "✘", "expired": "◌", "skipped": "…"}
+
+
+async def _narrate_verdict(row: dict, outcome: str) -> None:
+    """One journal line per verdict, with the judge's note — the thought."""
+    from core.dream.journal import append as journal
+
+    try:
+        fresh = next((r for r in db.list_dream_hypotheses(limit=100) if r["id"] == row["id"]), None)
+        note = ""
+        if fresh and fresh.get("validation_json"):
+            v = json.loads(fresh["validation_json"])
+            note = str(v.get("note", "") or "")
+        icon = _VERDICT_ICONS.get(outcome, "?")
+        line = f"{icon} [{row.get('kind')}] {str(row.get('statement'))[:150]} → {outcome}"
+        if note:
+            line += f" — {note[:220]}"
+        await journal(line)
+    except Exception as e:
+        logger.debug("dream: verdict narration failed: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -331,16 +353,20 @@ async def validate_one(store, pending_oldest_first: list[dict], is_cancelled) ->
         if is_cancelled():
             return None
         kind = row.get("kind")
+        outcome: str | None = None
         try:
             if kind == "tool_pattern":
-                return await _validate_tool_pattern(row)
-            if kind in ("contradiction", "memory_stale"):
-                return await _validate_memory_claim(store, row)
-            if kind == "lesson_ineffective":
+                outcome = await _validate_tool_pattern(row)
+            elif kind in ("contradiction", "memory_stale"):
+                outcome = await _validate_memory_claim(store, row)
+            elif kind == "lesson_ineffective":
                 if not replay_budget_left():
                     continue  # try again tomorrow; other kinds may proceed
-                return await _validate_lesson_ineffective(store, row)
+                outcome = await _validate_lesson_ineffective(row)
         except Exception as e:
             logger.warning("dream validate: %s failed on %s: %s", kind, row.get("id", "")[:8], e)
-            return _bump_attempts(row, f"validator error: {type(e).__name__}")
+            outcome = _bump_attempts(row, f"validator error: {type(e).__name__}")
+        if outcome is not None:
+            await _narrate_verdict(row, outcome)
+            return outcome
     return None

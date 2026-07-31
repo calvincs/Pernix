@@ -115,4 +115,7 @@ async def maybe_write_report() -> str | None:
     db.add_dream_report(last, now.isoformat(), rel_path, json.dumps(stats))
     db.set_snooze_state("dream_last_report", now.isoformat())
     logger.info("dream: wrote report %s (%d hypotheses)", rel_path, len(rows))
+    from core.dream.journal import append as journal
+
+    await journal(f"📝 Dream report written: {rel_path} ({len(rows)} hypotheses this period)")
     return rel_path

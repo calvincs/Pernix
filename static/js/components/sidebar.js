@@ -11,6 +11,7 @@ const SESSION_TYPES = {
     chat:   { label: 'Session', cls: 'chat',   color: 'var(--accent)' },
     cron:   { label: 'Cron',   cls: 'cron',   color: 'var(--info)' },
     worker: { label: 'Worker', cls: 'worker', color: 'var(--teal-dim)' },
+    snooze: { label: 'Dream',  cls: 'snooze', color: 'var(--warning)' },
 };
 
 // ---------------------------------------------------------------------------
@@ -237,6 +238,7 @@ export function renderSessionList(sessions, activeSid) {
 
 function _getTypeKey(session) {
     if (session.session_type === 'worker') return 'worker';
+    if (session.session_type === 'snooze') return 'snooze';
     if (session.title && session.title.startsWith('Cron:')) return 'cron';
     return 'chat';
 }

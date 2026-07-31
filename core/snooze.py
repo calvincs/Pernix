@@ -80,8 +80,15 @@ class SnoozeRunner:
     # Idle detection
     # ------------------------------------------------------------------
 
-    def _is_idle(self) -> bool:
-        """Check if the system is truly idle (relaxed gate)."""
+    def _is_idle(self, ignore_cooldown: bool = False) -> bool:
+        """Check if the system is truly idle (relaxed gate).
+
+        ignore_cooldown: skip check #4 (recent-activity heuristic). Used by
+        forced triggers — the cooldown guesses "user may still be around",
+        but a forced cycle yields instantly if the user shows up, so the
+        guess adds nothing there. Checks #1-#3 (real in-progress work)
+        always apply.
+        """
         from sessions.manager import get_manager
 
         manager = get_manager()
@@ -121,11 +128,12 @@ class SnoozeRunner:
             pass
 
         # 4. Cooldown elapsed (5 min since last user activity)
-        cooldown = settings.snooze_cooldown_minutes * 60
-        now = time.time()
-        for session in sessions:
-            if (now - session.last_activity_time) < cooldown:
-                return False
+        if not ignore_cooldown:
+            cooldown = settings.snooze_cooldown_minutes * 60
+            now = time.time()
+            for session in sessions:
+                if (now - session.last_activity_time) < cooldown:
+                    return False
 
         return True
 
@@ -196,9 +204,12 @@ class SnoozeRunner:
     async def run_cycle(self, force: bool = False) -> str:
         """Run one Snooze cycle. Called by maintenance heartbeat.
 
-        force=True skips only the cadence check (used by the localhost admin
-        trigger for testing) — the active-work and idle gates still apply.
-        Returns a reason string; existing callers ignore it.
+        force=True (the localhost admin trigger) skips the cadence check and
+        the recent-activity cooldown — but never the real gates: sessions
+        actively processing, background tasks, or a running cron still
+        refuse the cycle, and user activity arriving mid-cycle preempts it
+        via the yield path. Returns a reason string; existing callers
+        ignore it.
         """
         if not settings.snooze_enabled:
             return "disabled"
@@ -217,7 +228,10 @@ class SnoozeRunner:
             # Don't let a manager import failure kill snooze.
             pass
 
-        if not self._is_idle():
+        # Forced triggers relax only the cooldown heuristic; the heartbeat
+        # path keeps the bare call (and its stricter gate).
+        idle_ok = self._is_idle(ignore_cooldown=True) if force else self._is_idle()
+        if not idle_ok:
             return "skipped_idle"
 
         # Skip if no activity since last cycle and last run was recent.
@@ -297,7 +311,9 @@ class SnoozeRunner:
             self._activity_since_last_cycle = False
             self._last_cycle_time = time.time()
             duration_ms = int((time.time() - _start) * 1000)
-            bus.emit({"type": "snooze.done", "duration_ms": duration_ms, "stats": {**self._stats}})
+            bus.emit(
+                {"type": "snooze.done", "duration_ms": duration_ms, "outcome": outcome, "stats": {**self._stats}}
+            )
             logger.info("Snooze cycle complete (outcome=%s, stats: %s)", outcome, self._stats)
         return outcome
 
