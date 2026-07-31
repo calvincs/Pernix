@@ -286,6 +286,17 @@ async function deleteSession(sid) {
     }
 }
 
+function _setComposerReadOnly(readonly) {
+    const input = document.getElementById('msg-input');
+    const btn = document.getElementById('send-btn');
+    if (!input || !btn) return;
+    input.disabled = readonly;
+    btn.disabled = readonly;
+    input.placeholder = readonly
+        ? 'Dream journal is read-only — Pernix writes it while dreaming'
+        : 'Message Pernix...';
+}
+
 async function selectSession(sid) {
     if (isMobile()) closeSidebar();
     state.sid = sid;
@@ -302,6 +313,10 @@ async function selectSession(sid) {
     await loadMessages(sid);
     await loadContextInfo(sid);
     _seedWorkerStrip(sid);
+
+    // Dream journals are read-only — the system writes them during snooze.
+    const _sess = (state.sessions || []).find(s => s.id === sid);
+    _setComposerReadOnly(_sess?.session_type === 'snooze');
 
     // Fetch session status to get event_seq and streaming state BEFORE connecting SSE
     state.streaming = false;
