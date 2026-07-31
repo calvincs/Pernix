@@ -41,6 +41,8 @@ const EVENT_TYPES = [
     'message.injected',
     // Workers
     'worker.started', 'worker.done', 'worker.failed',
+    // RLM runs (recursive processing — live progress on the parent's stream)
+    'rlm.started', 'rlm.activity', 'rlm.heartbeat', 'rlm.done',
     // Partial save (mid-stream persistence)
     'partial.saved',
     // Ask-user dialogs (questions + notifications + replies)

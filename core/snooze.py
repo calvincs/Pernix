@@ -332,9 +332,7 @@ class SnoozeRunner:
             self._activity_since_last_cycle = False
             self._last_cycle_time = time.time()
             duration_ms = int((time.time() - _start) * 1000)
-            bus.emit(
-                {"type": "snooze.done", "duration_ms": duration_ms, "outcome": outcome, "stats": {**self._stats}}
-            )
+            bus.emit({"type": "snooze.done", "duration_ms": duration_ms, "outcome": outcome, "stats": {**self._stats}})
             logger.info("Snooze cycle complete (outcome=%s, stats: %s)", outcome, self._stats)
         return outcome
 
@@ -2381,6 +2379,12 @@ Output valid JSON only. No markdown fences. /no_think"""
                 if run_dir.exists():
                     await asyncio.to_thread(shutil.rmtree, run_dir)
                 db.delete_rlm_run(run_id)
+                # The run's sidebar view session goes with it — it is pure
+                # navigation chrome over the (now deleted) trace. Mirror of
+                # manager._purge_rlm_artifacts, which handles the other
+                # direction (session deleted first).
+                if run.get("ui_session_id"):
+                    db.delete_session(run["ui_session_id"])
                 deleted += 1
             except Exception as e:
                 logger.warning("Snooze RLM cleanup: error deleting run %s: %s", run_id, e)

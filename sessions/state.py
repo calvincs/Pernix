@@ -102,7 +102,7 @@ class AgentSession:
     termination_reason: str | None = None
 
     # Session type
-    session_type: str = "normal"  # normal | worker | cron
+    session_type: str = "normal"  # normal | worker | cron | snooze (dream journal) | rlm (run view)
     parent_session_id: str | None = None
     worker_ids: list = field(default_factory=list)
 

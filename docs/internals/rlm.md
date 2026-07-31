@@ -90,8 +90,41 @@ else is transient residue in `data/workspace/rlm/<run_id>/` (manifest.json,
 trace.jsonl of every turn/cell/sub-call, staged context copies, child.log,
 answer.txt — workspace-visible so the agent can `file_read` its own trace),
 indexed by a lightweight `rlm_runs` DB row (migration v18). Snooze activity
-12a purges dirs + rows older than `rlm_run_retention_days` (default 30);
-a startup sweep marks rows orphaned by a restart.
+12a purges dirs + rows older than `rlm_run_retention_days` (default 30) —
+along with the run's view session (below) — and a startup sweep marks rows
+orphaned by a restart.
+
+## Live visibility (run views)
+
+A run used to be a black box between `tool.start` and the tool result. Three
+layers now surface it, all reading from the same trace:
+
+- **Engine progress seam** — `RLMEngine(progress_fn=...)` receives every
+  trace event plus a periodic `heartbeat` (iteration, sub-call count, broker
+  in-flight/quiet time) so long root calls and cells don't read as frozen.
+  Heartbeats are SSE-only; trace.jsonl records signal, not the passage of
+  time. Nested engines and the dream probe pass no `progress_fn`.
+- **Parent-session SSE + strip chip** — the tool glue forwards events as
+  `rlm.started` / `rlm.activity` / `rlm.heartbeat` / `rlm.done` on the
+  calling session's stream (the worker-event path), updates the `rlm_runs`
+  counters per iteration/sub-call, and the UI renders a live chip
+  (`RLM · it 7/20 · 6 calls · 4m10s`) in the activity strip next to worker
+  chips.
+- **View session + trace viewer** — each run gets a message-less
+  `session_type='rlm'` pseudo-session under its parent (linked via
+  `rlm_runs.ui_session_id`, migration v20): a sidebar anchor with the run's
+  state dot, nested like a worker. Selecting it renders the read-only trace
+  viewer (`static/js/components/rlm-viewer.js`) in place of the chat:
+  iteration cards, collapsible REPL cells with stdout/stderr, sub-call rows,
+  the final answer, and nested-run navigation. While the run is live the
+  viewer polls `GET /api/rlm/runs/{id}/trace?after=<byte offset>` (~2s); the
+  engine flushes whole lines, so the file tails cleanly and the same view
+  serves post-hoc inspection. Chat into a view session is rejected by the
+  shared read-only predicate in `sessions/policy.py` (dream-journal
+  precedent). Deleting the view session purges the finished run's dir + rows
+  (`manager._purge_rlm_artifacts`); retention deletes the view session with
+  the run — symmetric, no orphans. Dream probes (`session_id="dream"`) get no
+  view session; their runs remain inspectable from the Jobs tab.
 
 ## How the agent discovers it
 

@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from config import settings
-from core.extensions.rlm.types import RLMRunResult
+from core.extensions.rlm.types import RLMCaps, RLMRunResult
 from db import models as db
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,8 @@ def record_start(
     input_chars: int,
     parent_run_id: str | None = None,
     depth: int = 0,
+    ui_session_id: str | None = None,
+    caps: RLMCaps | None = None,
 ) -> None:
     manifest = {
         "run_id": run_id,
@@ -73,6 +75,16 @@ def record_start(
         "status": "running",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
+    if ui_session_id:
+        manifest["ui_session_id"] = ui_session_id
+    if caps is not None:
+        # The viewer needs the denominators ("iteration 7 of 20") — caps are
+        # settings at run time, so the manifest is the only durable record.
+        manifest["caps"] = {
+            "max_iterations": caps.max_iterations,
+            "max_subcalls": caps.max_subcalls,
+            "timeout_seconds": caps.timeout_seconds,
+        }
     _write_manifest(run_dir, manifest)
     try:
         db.create_rlm_run(
@@ -86,6 +98,7 @@ def record_start(
             run_dir=run_rel,
             parent_run_id=parent_run_id,
             depth=depth,
+            ui_session_id=ui_session_id,
         )
     except Exception:
         logger.exception("failed to record rlm_runs start row for %s", run_id)

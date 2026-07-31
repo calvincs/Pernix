@@ -120,9 +120,7 @@ def test_fused_entry_preserves_metadata_and_supersedes_target(store):
     stats = execute_merge(
         store,
         _decision(
-            fused_entries=[
-                {"file": "src.file", "epoch": 200, "fuse_target_epoch": 100, "fused_content": fused_text}
-            ]
+            fused_entries=[{"file": "src.file", "epoch": 200, "fuse_target_epoch": 100, "fused_content": fused_text}]
         ),
     )
 
@@ -252,8 +250,12 @@ def test_fuse_taints_origin_external(store):
         store,
         _decision(
             fused_entries=[
-                {"file": "src.file", "epoch": 200, "fuse_target_epoch": 100,
-                 "fused_content": "Server A backup window with best-practice notes merged together here."}
+                {
+                    "file": "src.file",
+                    "epoch": 200,
+                    "fuse_target_epoch": 100,
+                    "fused_content": "Server A backup window with best-practice notes merged together here.",
+                }
             ]
         ),
     )

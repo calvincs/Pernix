@@ -41,6 +41,8 @@
     --teal-subtle: rgba(90, 154, 138, 0.10);
     --dream: #9a7fd1;
     --dream-subtle: rgba(154, 127, 209, 0.10);
+    --rlm: #c06c8c;
+    --rlm-subtle: rgba(192, 108, 140, 0.10);
 
     /* Typography */
     --mono: 'DM Mono', 'SF Mono', 'Fira Code', monospace;

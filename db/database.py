@@ -650,6 +650,22 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_dream_reports_created ON dream_reports(created_at DESC)",
         ],
     ),
+    (
+        20,
+        "link rlm_runs to their sidebar view sessions (ui_session_id)",
+        [
+            # ui_session_id points at the session_type='rlm' pseudo-session
+            # that anchors the run in the sidebar under its parent chat. The
+            # session is pure navigation chrome — zero messages; the run's
+            # content stays in trace.jsonl on disk. NULL for runs with no UI
+            # surface: dream probes, nested rlm_query children, pre-v20 rows.
+            # Deleting either side must clean up the other (manager.delete_session
+            # purges run dir + rows; snooze retention deletes the session).
+            "ALTER TABLE rlm_runs ADD COLUMN ui_session_id TEXT",
+            """CREATE INDEX IF NOT EXISTS idx_rlm_runs_ui_session
+           ON rlm_runs(ui_session_id) WHERE ui_session_id IS NOT NULL""",
+        ],
+    ),
 ]
 
 

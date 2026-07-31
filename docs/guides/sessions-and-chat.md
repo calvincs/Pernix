@@ -54,6 +54,7 @@ Not every session in the sidebar is a chat you started. Each carries a colored d
 | **Cron** | A scheduled job run — each firing gets its own session. |
 | **Worker** | A sub-agent spawned by another session. |
 | **Dream** | The idle-time introspection journal (see below). |
+| **RLM** | A live view of one `rlm_process` run, nested under the session that launched it (see below). |
 
 Click a legend entry to hide or show that type — useful when cron runs start to crowd out your own threads. The filter persists across reloads.
 
@@ -70,7 +71,19 @@ Finding things:
 
 ## Dream journal sessions
 
-When [Dream introspection](../internals/dream.md) is enabled, each day of dreaming narrates itself into a day-keyed journal session ("Dream Jul 31") — hypotheses raised, verdicts, report writes. These sessions are **read-only**: the composer is disabled with the hint *"Dream journal is read-only — Pernix writes it while dreaming."* They're excluded from search and memory distillation, and pruned after `dream_journal_retention_days` (default 14). Filter them out with the sidebar legend if you'd rather not see them.
+When [Dream introspection](../internals/dream.md) is enabled, each day of dreaming narrates itself into a day-keyed journal session ("Dream Jul 31") — hypotheses raised, verdicts, report writes. These sessions are **read-only**: the composer is disabled and the server rejects messages. They're excluded from search and memory distillation, and pruned after `dream_journal_retention_days` (default 14). Filter them out with the sidebar legend if you'd rather not see them.
+
+---
+
+## RLM run views
+
+When the agent kicks off an [RLM run](../internals/rlm.md) (`rlm_process` over an input too large to read inline), the run appears in three places:
+
+- A **live chip** in the activity strip of the launching session — `RLM · it 7/20 · 6 calls · 4m10s` — pulsing while the run works, alongside any worker chips. The parent transcript also gets start/finish lines.
+- A nested **RLM session** in the sidebar under its parent (same collapsible group as workers), with a pulsing dot while running.
+- Clicking either opens the **trace viewer** in place of the chat: the root model's per-iteration reasoning, each REPL cell (collapsible, with code and stdout/stderr), every sub-LLM call with latency, live iteration/sub-call/elapsed progress against the run's caps, and the final answer once the run ends. The view tails the trace live and doubles as the permanent record afterward.
+
+Like dream journals, RLM sessions are **read-only** — there's no transcript to chat in; the conversation lives in the parent session. Deleting one also deletes the run's on-disk trace; runs older than `rlm_run_retention_days` (default 30) are purged together with their view sessions.
 
 ---
 

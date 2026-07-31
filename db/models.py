@@ -1641,14 +1641,16 @@ def create_rlm_run(
     run_dir: str,
     parent_run_id: str | None = None,
     depth: int = 0,
+    ui_session_id: str | None = None,
 ) -> None:
-    """Insert an rlm_runs row with status='running'. run_dir is workspace-relative."""
+    """Insert an rlm_runs row with status='running'. run_dir is workspace-relative.
+    ui_session_id links the run to its sidebar view session (None = no UI surface)."""
     with connect_sessions() as conn:
         conn.execute(
             """INSERT INTO rlm_runs
                (run_id, session_id, parent_run_id, depth, status, task, source_desc,
-                root_model, sub_model, input_chars, run_dir, created_at)
-               VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)""",
+                root_model, sub_model, input_chars, run_dir, ui_session_id, created_at)
+               VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 run_id,
                 session_id,
@@ -1660,6 +1662,7 @@ def create_rlm_run(
                 sub_model,
                 int(input_chars),
                 run_dir,
+                ui_session_id,
                 _now(),
             ),
         )
@@ -1693,6 +1696,11 @@ def fail_orphaned_rlm_runs() -> int:
     its child self-reaps when the server process goes away. Returns rows updated.
     """
     with connect_sessions() as conn:
+        # Park the runs' sidebar view sessions first (same transaction) so
+        # their dots stop pulsing on a run that will never finish.
+        conn.execute("""UPDATE sessions SET state = 'idle'
+               WHERE id IN (SELECT ui_session_id FROM rlm_runs
+                            WHERE status = 'running' AND ui_session_id IS NOT NULL)""")
         cur = conn.execute(
             """UPDATE rlm_runs SET status = 'orphaned', finished_at = ?
                WHERE status = 'running' AND finished_at IS NULL""",
@@ -1734,6 +1742,45 @@ def delete_rlm_run(run_id: str) -> int:
     with connect_sessions() as conn:
         cur = conn.execute("DELETE FROM rlm_runs WHERE run_id = ? OR parent_run_id = ?", (run_id, run_id))
         return cur.rowcount
+
+
+def get_rlm_run(run_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM rlm_runs WHERE run_id = ?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_rlm_run_by_ui_session(ui_session_id: str) -> dict | None:
+    """The run behind a session_type='rlm' view session (newest if several)."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT * FROM rlm_runs WHERE ui_session_id = ? ORDER BY created_at DESC LIMIT 1",
+            (ui_session_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_rlm_run_progress(run_id: str, iterations: int, subcalls: int) -> None:
+    """Mid-run counter refresh so list/detail readers see live progress.
+
+    Guarded on status='running': subcall progress arrives from broker handler
+    threads, and a straggler landing after finish_rlm_run must not overwrite
+    the terminal counters."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE rlm_runs SET iterations = ?, subcalls = ? WHERE run_id = ? AND status = 'running'",
+            (int(iterations), int(subcalls), run_id),
+        )
+
+
+def list_rlm_run_children(parent_run_id: str) -> list[dict]:
+    """Nested rlm_query runs of a parent, oldest first."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM rlm_runs WHERE parent_run_id = ? ORDER BY created_at",
+            (parent_run_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -1935,9 +1982,7 @@ def get_db_stats() -> dict:
 DREAM_HYPOTHESIS_KINDS = frozenset(
     {"contradiction", "lesson_ineffective", "tool_pattern", "memory_stale", "open_question"}
 )
-DREAM_HYPOTHESIS_STATUSES = frozenset(
-    {"pending", "validated", "refuted", "expired", "promoted", "archived"}
-)
+DREAM_HYPOTHESIS_STATUSES = frozenset({"pending", "validated", "refuted", "expired", "promoted", "archived"})
 
 
 def add_dream_hypothesis(
@@ -2047,9 +2092,3 @@ def list_post_mortems_since(created_after: str, limit: int = 20) -> list[dict]:
             (created_after, limit),
         ).fetchall()
         return [dict(r) for r in rows]
-
-
-def get_post_mortem(pm_id: str) -> dict | None:
-    with connect_sessions() as conn:
-        row = conn.execute("SELECT * FROM post_mortems WHERE id = ?", (pm_id,)).fetchone()
-        return dict(row) if row else None

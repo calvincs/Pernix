@@ -43,9 +43,7 @@ async def run_step(is_cancelled) -> dict:
     # Oldest-first pending queue; open questions are report material, not
     # validation candidates.
     pending = [
-        r
-        for r in reversed(db.list_dream_hypotheses(status="pending", limit=50))
-        if r.get("kind") != "open_question"
+        r for r in reversed(db.list_dream_hypotheses(status="pending", limit=50)) if r.get("kind") != "open_question"
     ]
     last_action = db.get_snooze_state("dream_last_action") or ""
 

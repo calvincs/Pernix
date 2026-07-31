@@ -560,8 +560,43 @@ class SessionManager:
         from core.llm.client import get_llm_client as _get_client
 
         _get_client().purge_session(session_id)
+        self._purge_rlm_artifacts(session_id)
         db.delete_session(session_id)
         logger.info("Deleted session %s", session_id)
+
+    def _purge_rlm_artifacts(self, session_id: str) -> None:
+        """Deleting an RLM view session (or a parent holding some) also removes
+        the backing run dir + rows — the session is just the sidebar anchor, and
+        without this the run would linger headless until retention.
+
+        Must run BEFORE db.delete_session (it needs the child rows to find the
+        runs). Running runs are skipped: the engine holds the dir open and the
+        row is still being written; retention reaps them later. Grandchildren
+        (a worker's own RLM runs) are handled when the worker itself passes
+        through delete_session; non-resident workers deleted via the DB cascade
+        leave their dirs to the retention sweep — acceptable residue.
+        """
+        import shutil
+        from pathlib import Path as _P
+
+        try:
+            row = db.get_session(session_id)
+            candidates = []
+            if row and row.get("session_type") == "rlm":
+                candidates.append(session_id)
+            candidates.extend(
+                child["id"] for child in db.get_worker_sessions(session_id) if child.get("session_type") == "rlm"
+            )
+            for view_sid in candidates:
+                run = db.get_rlm_run_by_ui_session(view_sid)
+                if not run or run.get("status") == "running":
+                    continue
+                run_dir = _P(settings.workspace_dir) / run["run_dir"]
+                if run_dir.exists():
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                db.delete_rlm_run(run["run_id"])
+        except Exception:
+            logger.exception("RLM artifact purge failed for session %s", session_id)
 
     # ------------------------------------------------------------------
     # Prompt routing

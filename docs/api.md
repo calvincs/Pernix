@@ -234,10 +234,19 @@ Every event includes `_seq` (sequence number), `session_id`, and `timestamp`.
 #### Workers
 | Event | Description |
 |---|---|
-| `worker.spawned` | A worker sub-agent was created. Fields: `worker_id`, `model`. |
-| `worker.done` | A worker finished successfully. Fields: `worker_id`. |
-| `worker.error` | A worker encountered an error. Fields: `worker_id`, `error`. |
-| `worker.cancelled` | A worker was cancelled. Fields: `worker_id`. |
+| `worker.started` | A worker sub-agent was created and prompted. Fields: `worker_id`, `title`, `model`. |
+| `worker.done` | A worker finished (any outcome — cancellation arrives as `termination_reason: "cancelled"`). Fields: `worker_id`, `termination_reason`, `error`. |
+| `worker.failed` | A worker failed to start (spawn-time error; it never ran). Fields: `worker_id`, `error`. |
+
+#### RLM runs
+Emitted on the launching session's stream while `rlm_process` works — see [internals/rlm.md](internals/rlm.md).
+
+| Event | Description |
+|---|---|
+| `rlm.started` | A run began. Fields: `run_id`, `ui_session_id`, `task_preview`, `source`, `root_model`, `sub_model`, `max_iterations`, `max_subcalls`, `timeout_seconds`. |
+| `rlm.activity` | One trace event completed. Fields: `run_id`, `ui_session_id`, `kind` (root/cell/subcall/notice/synthesis), `iteration`, `detail`, `iterations`, `subcalls`. |
+| `rlm.heartbeat` | ~10s liveness pulse during long steps. Fields: `run_id`, `ui_session_id`, `iterations`, `subcalls`, `in_flight`, `quiet_seconds`, `elapsed`. |
+| `rlm.done` | The run ended. Fields: `run_id`, `ui_session_id`, `status`, `iterations`, `subcalls`, `duration`, `partial`, `error`. |
 
 ---
 
@@ -535,11 +544,15 @@ POST   /api/workflows/proposals/{id}/apply
 
 ## RLM Runs
 
-Read-only history of RLM (recursive processing) runs — see [internals/rlm.md](internals/rlm.md). Listing works even when `rlm_enabled` is off, so past runs stay inspectable.
+Read-only history and live inspection of RLM (recursive processing) runs — see [internals/rlm.md](internals/rlm.md). Listing works even when `rlm_enabled` is off, so past runs stay inspectable.
 
 ```
-GET /api/rlm/runs?session_id=&limit=20   List runs, newest first (limit clamped to 100)
-GET /api/rlm/runs/{run_id}               One run: DB row + on-disk manifest + trace/answer paths
+GET /api/rlm/runs?session_id=&limit=20        List runs, newest first (limit clamped to 100)
+GET /api/rlm/runs/by-session/{ui_session_id}  Resolve a sidebar RLM view session to its run detail
+GET /api/rlm/runs/{run_id}                    One run: DB row + manifest + nested children + answer (when finished)
+GET /api/rlm/runs/{run_id}/trace?after=0      Parsed trace.jsonl events from byte offset `after`; returns
+                                              events, next_offset, and live status/counters — poll with
+                                              next_offset to tail a running trace (complete lines only)
 ```
 
 ---

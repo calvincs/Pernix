@@ -12,6 +12,7 @@ import { initBell, openBellPanel, closeBellPanel, refreshBell } from './componen
 import { initJobsIndicator } from './components/jobs-indicator.js';
 import { initSidebar, renderSessionList as renderSidebar, updateSessionActivity } from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel } from './components/file-panel.js';
+import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
 import { initMobile, isMobile, closeSidebar } from './mobile.js';
 
 // ---------------------------------------------------------------------------
@@ -278,6 +279,7 @@ async function deleteSession(sid) {
         if (state.sid === sid) {
             state.sid = null;
             disconnectSSE();
+            closeRlmViewer();
             showEmptyState();
         }
         await loadSessions();
@@ -286,14 +288,14 @@ async function deleteSession(sid) {
     }
 }
 
-function _setComposerReadOnly(readonly) {
+function _setComposerReadOnly(readonly, reason) {
     const input = document.getElementById('msg-input');
     const btn = document.getElementById('send-btn');
     if (!input || !btn) return;
     input.disabled = readonly;
     btn.disabled = readonly;
     input.placeholder = readonly
-        ? 'Dream journal is read-only — Pernix writes it while dreaming'
+        ? (reason || 'This session is read-only')
         : 'Message Pernix...';
 }
 
@@ -309,14 +311,36 @@ async function selectSession(sid) {
     _toolGroup = null;
     _toolGroupCount = 0;
     if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+    closeRlmViewer();
     renderSidebar(state.sessions, state.sid);
+
+    // RLM run views have no transcript — the chat area renders the live
+    // trace viewer instead, and the composer stays off (the server enforces
+    // the same read-only policy via sessions.policy).
+    const _sess = (state.sessions || []).find(s => s.id === sid);
+    if (_sess?.session_type === 'rlm') {
+        disconnectSSE();
+        _activeWorkers.clear();
+        _activeRlmRuns.clear();
+        _renderWorkerStrip();
+        _setComposerReadOnly(true, _sess.read_only_reason);
+        state.streaming = false;
+        _showSendButton();
+        updateStatus('');
+        _clearToolStatus();
+        _applyStateBadge('idle_ready', '');
+        _sessionModelOverride = null;
+        _renderModelBadge();
+        await openRlmViewer(_messagesInner(), sid);
+        return;
+    }
+
     await loadMessages(sid);
     await loadContextInfo(sid);
     _seedWorkerStrip(sid);
 
-    // Dream journals are read-only — the system writes them during snooze.
-    const _sess = (state.sessions || []).find(s => s.id === sid);
-    _setComposerReadOnly(_sess?.session_type === 'snooze');
+    // Read-only sessions (dream journals): policy rides on the session payload.
+    _setComposerReadOnly(!!_sess?.read_only, _sess?.read_only_reason);
 
     // Fetch session status to get event_seq and streaming state BEFORE connecting SSE
     state.streaming = false;
@@ -1212,12 +1236,14 @@ function _renderStreamIncremental(contentEl) {
 // of an opaque "awaiting workers" wait. Click a worker to open its session.
 // ---------------------------------------------------------------------------
 const _activeWorkers = new Map();  // worker_id → { title, startedAt }
+// run_id → { uiSid, label, iterations, maxIterations, subcalls, startedAt }
+const _activeRlmRuns = new Map();
 let _workerTicker = null;
 
 function _renderWorkerStrip() {
     const strip = document.getElementById('worker-strip');
     if (!strip) return;
-    if (_activeWorkers.size === 0) {
+    if (_activeWorkers.size === 0 && _activeRlmRuns.size === 0) {
         strip.hidden = true;
         strip.innerHTML = '';
         if (_workerTicker) { clearInterval(_workerTicker); _workerTicker = null; }
@@ -1225,8 +1251,11 @@ function _renderWorkerStrip() {
     }
     strip.hidden = false;
     strip.innerHTML = '';
+    const labelParts = [];
+    if (_activeWorkers.size) labelParts.push(`${_activeWorkers.size} worker${_activeWorkers.size === 1 ? '' : 's'}`);
+    if (_activeRlmRuns.size) labelParts.push(`${_activeRlmRuns.size} RLM`);
     strip.appendChild(el('span', { class: 'worker-strip-label' }, [
-        text(`${_activeWorkers.size} worker${_activeWorkers.size === 1 ? '' : 's'}`),
+        text(labelParts.join(' · ')),
     ]));
     for (const [wid, w] of _activeWorkers) {
         const elapsed = Math.max(0, Math.round((Date.now() - w.startedAt) / 1000));
@@ -1260,11 +1289,29 @@ function _renderWorkerStrip() {
         });
         strip.appendChild(el('span', { class: 'worker-chip-wrap' }, [chip, ctlBtn]));
     }
+    // RLM run chips — live iteration/sub-call counters; click opens the
+    // run's read-only trace view (its sidebar pseudo-session).
+    for (const [rid, r] of _activeRlmRuns) {
+        const elapsed = Math.max(0, Math.round((Date.now() - r.startedAt) / 1000));
+        const mins = Math.floor(elapsed / 60);
+        const elapsedStr = mins > 0 ? `${mins}m${elapsed % 60}s` : `${elapsed}s`;
+        const iter = r.maxIterations ? `it ${r.iterations}/${r.maxIterations}` : `it ${r.iterations}`;
+        const chip = el('button', {
+            class: 'worker-chip rlm-chip',
+            title: `${r.label} — click to watch the run`,
+            onClick: () => { if (r.uiSid) selectSession(r.uiSid); },
+        }, [
+            el('span', { class: 'worker-chip-dot rlm' }),
+            text(` RLM · ${iter} · ${r.subcalls} calls · ${elapsedStr}`),
+        ]);
+        strip.appendChild(el('span', { class: 'worker-chip-wrap', 'data-run': rid }, [chip]));
+    }
     if (!_workerTicker) _workerTicker = setInterval(_renderWorkerStrip, 5000);
 }
 
 async function _seedWorkerStrip(sid) {
     _activeWorkers.clear();
+    _activeRlmRuns.clear();
     try {
         const data = await get(`/api/sessions/${sid}/workers`);
         const now = Date.now();
@@ -1278,6 +1325,20 @@ async function _seedWorkerStrip(sid) {
             });
         }
     } catch { /* strip stays empty */ }
+    try {
+        const rd = await get(`/api/rlm/runs?session_id=${encodeURIComponent(sid)}&limit=8`);
+        for (const run of (rd.runs || [])) {
+            if (run.status !== 'running' || run.parent_run_id) continue;
+            _activeRlmRuns.set(run.run_id, {
+                uiSid: run.ui_session_id,
+                label: run.task || run.run_id,
+                iterations: run.iterations || 0,
+                maxIterations: 0,  // caps live in the manifest; the chip shows plain counts until an event arrives
+                subcalls: run.subcalls || 0,
+                startedAt: run.created_at ? (Date.parse(run.created_at) || Date.now()) : Date.now(),
+            });
+        }
+    } catch { /* chips stay absent */ }
     _renderWorkerStrip();
 }
 
@@ -1719,6 +1780,47 @@ function handleEvent(event) {
         _renderWorkerStrip();
     }
 
+    else if (type === 'rlm.started') {
+        const models = event.root_model ? ` [${event.root_model} → ${event.sub_model}]` : '';
+        appendMessage('system', `RLM run started: ${event.task_preview || event.run_id}${models}`);
+        _activeRlmRuns.set(event.run_id, {
+            uiSid: event.ui_session_id,
+            label: event.task_preview || event.run_id,
+            iterations: 0,
+            maxIterations: event.max_iterations || 0,
+            subcalls: 0,
+            startedAt: Date.now(),
+        });
+        _renderWorkerStrip();
+    }
+
+    else if (type === 'rlm.activity' || type === 'rlm.heartbeat') {
+        let r = _activeRlmRuns.get(event.run_id);
+        if (!r) {
+            // Run started before this client connected — synthesize the chip.
+            r = {
+                uiSid: event.ui_session_id,
+                label: event.run_id,
+                iterations: 0,
+                maxIterations: 0,
+                subcalls: 0,
+                startedAt: Date.now(),
+            };
+            _activeRlmRuns.set(event.run_id, r);
+        }
+        if (typeof event.iterations === 'number') r.iterations = event.iterations;
+        if (typeof event.subcalls === 'number') r.subcalls = event.subcalls;
+        _renderWorkerStrip();
+    }
+
+    else if (type === 'rlm.done') {
+        const dur = event.duration ? ` in ${Math.round(event.duration)}s` : '';
+        const err = event.error ? ` — ${event.error}` : '';
+        appendMessage('system', `RLM run ${event.status}: ${event.iterations} iterations, ${event.subcalls} sub-calls${dur}${err}`);
+        _activeRlmRuns.delete(event.run_id);
+        _renderWorkerStrip();
+    }
+
     else if (type === 'session.state_changed') {
         _renderStateBadge(event);
         const idleStates = ['idle_ready', 'awaiting_user', 'awaiting_workers'];
@@ -2119,7 +2221,9 @@ function _showStopButton() {
 
 function _showSendButton() {
     const btn = document.getElementById('send-btn');
-    btn.disabled = false;
+    // A read-only session keeps its send button off through stop/send churn —
+    // the composer input is the source of truth (_setComposerReadOnly).
+    btn.disabled = !!document.getElementById('msg-input')?.disabled;
     btn.title = 'Send message';
     btn.classList.remove('stop-mode');
     btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
