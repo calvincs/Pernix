@@ -96,6 +96,27 @@ def prune_old_journals_sync() -> int:
     return deleted
 
 
+def event_line(evt: dict) -> str | None:
+    """Map a snooze bus event to a journal line, or None to stay silent.
+
+    Deliberately quiet: the heartbeat runs no-op cycles every ~10 minutes,
+    and narrating every ladder line buried the actual thoughts under ~900
+    identical lines/day. The live jobs indicator already shows the ladder
+    in real time — the journal records only what a reviewer would reread:
+    the dream step marker and anomalous cycle outcomes (yielded/backstop/
+    error). The rich thought lines come from the dream modules directly.
+    """
+    etype = evt.get("type", "")
+    if etype == "snooze.activity" and evt.get("activity") == "dream":
+        return f"→ {evt.get('detail', 'dream step')}"
+    if etype == "snooze.done":
+        outcome = evt.get("outcome", "")
+        if outcome and outcome != "ran":
+            dur = int(evt.get("duration_ms", 0) / 1000)
+            return f"◆ Cycle ended after {dur}s: {outcome}"
+    return None
+
+
 async def run_journal_listener() -> None:
     """Narrate snooze bus events into the journal. Runs for process life;
     started from the app lifespan, cancelled at shutdown."""
@@ -109,17 +130,10 @@ async def run_journal_listener() -> None:
             evt = await q.get()
             if not settings.dream_enabled or not isinstance(evt, dict):
                 continue
-            etype = evt.get("type", "")
             try:
-                if etype == "snooze.start":
-                    await append("◐ Snooze cycle started")
-                elif etype == "snooze.activity":
-                    await append(f"→ {evt.get('activity', '?')}: {evt.get('detail', '')}")
-                elif etype == "snooze.done":
-                    dur = int(evt.get("duration_ms", 0) / 1000)
-                    outcome = evt.get("outcome", "")
-                    suffix = f" ({outcome})" if outcome and outcome != "ran" else ""
-                    await append(f"◆ Cycle complete in {dur}s{suffix}")
+                line = event_line(evt)
+                if line:
+                    await append(line)
             except Exception as e:
                 logger.debug("dream journal narration failed: %s", e)
     except asyncio.CancelledError:
