@@ -103,11 +103,17 @@ class MemoryStore:
         weight: str = "normal",
         epoch: int | None = None,
         source: str = "",
+        skip_dedup: bool = False,
     ) -> str:
         """Append an entry to a memory file and index it.
 
         If file_name is None, auto-routes to best matching file.
         Returns confirmation string.
+
+        skip_dedup: bypass the duplicate gate. For writers whose content is
+        by construction similar to entries they are about to supersede
+        (consolidation fuse) — the gate would block the write against the
+        very entry being replaced.
         """
         if not content.strip():
             return "Error: Empty content"
@@ -119,7 +125,7 @@ class MemoryStore:
 
         # Only dedup substantive entries — short strings (< 60 chars) have
         # unreliable similarity scores and are allowed through unconditionally.
-        if len(content) >= 60:
+        if not skip_dedup and len(content) >= 60:
             dup = self.find_duplicate(content)
             if dup is not None:
                 # Don't let a newer/corrected fact silently lose to a stale
@@ -660,6 +666,7 @@ class MemoryStore:
                     source=entry.source,
                     epoch=actual_epoch,
                     merged_from=source_file,
+                    updated=entry.updated,
                 )
                 md_path = self._dir / f"{target_file}.md"
                 with self._lock:
