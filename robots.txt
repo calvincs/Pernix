@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://calvincs.github.io/Pernix/sitemap.xml
+Sitemap: https://pernix.cc/sitemap.xml
