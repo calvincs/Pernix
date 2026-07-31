@@ -161,13 +161,17 @@ async def _run_probe(store, loop: asyncio.AbstractEventLoop) -> None:
         )
 
         await journal(f"🔬 Deep probe launched: {file_count} memory files, {len(corpus)} chars staged")
-        answer = await asyncio.to_thread(_run_engine_blocking, bundle, file_count, loop)
-        if answer is None:
-            await journal("🔬 Deep probe produced no answer (see RLM runs panel)")
+        result = await asyncio.to_thread(_run_engine_blocking, bundle, file_count, loop)
+        if result is None or result.status == "failed" or not result.answer:
+            status = result.status if result is not None else "no-run"
+            await journal(f"🔬 Deep probe ended without a usable answer (status={status} — see RLM runs panel)")
             return
 
-        saved, dropped = await _ingest_candidates(store, answer)
-        await journal(f"🔬 Deep probe complete: {saved} hypotheses saved, {dropped} dropped by filters")
+        saved, dropped = await _ingest_candidates(store, result.answer)
+        await journal(
+            f"🔬 Deep probe complete ({result.status}, {result.iterations} iterations): "
+            f"{saved} hypotheses saved, {dropped} dropped by filters"
+        )
     except Exception as e:
         logger.warning("dream probe failed: %s", e, exc_info=True)
         try:
@@ -176,8 +180,18 @@ async def _run_probe(store, loop: asyncio.AbstractEventLoop) -> None:
             pass
 
 
-def _run_engine_blocking(bundle: str, file_count: int, loop: asyncio.AbstractEventLoop) -> str | None:
-    """Stage + run the RLM engine. Blocking — call via to_thread only."""
+def _run_engine_blocking(bundle: str, file_count: int, loop: asyncio.AbstractEventLoop):
+    """Stage + run the RLM engine. Blocking — call via to_thread only.
+
+    Returns the RLMRunResult, or None if the run could not start.
+
+    Root model resolves like rlm_process (rlm_root_model or llm_model) — the
+    REPL protocol needs a model proven to follow it; the first live probe
+    failed outright with the background model as root (5 iterations of prose,
+    zero REPL blocks). Sub-calls stay on the background model: bulk chunk
+    work is where cheap local inference belongs, and the run's subcall cap
+    bounds the root-model spend.
+    """
     from core.extensions.rlm import runs
     from core.extensions.rlm.child_env import stage_context
     from core.extensions.rlm.engine import RLMEngine
@@ -185,11 +199,12 @@ def _run_engine_blocking(bundle: str, file_count: int, loop: asyncio.AbstractEve
     from core.llm.client import get_llm_client
 
     client = get_llm_client()
-    model = settings.background_model or settings.llm_model
+    root_model = settings.rlm_root_model or settings.llm_model
+    sub_model = settings.background_model or settings.llm_model
 
-    def _chat(messages: list[dict], timeout: float) -> str:
+    def _chat(messages: list[dict], use_model: str, timeout: float) -> str:
         future = asyncio.run_coroutine_threadsafe(
-            client.chat(messages, model=model, max_tokens=settings.max_tokens),
+            client.chat(messages, model=use_model, max_tokens=settings.max_tokens),
             loop,
         )
         try:
@@ -199,10 +214,10 @@ def _run_engine_blocking(bundle: str, file_count: int, loop: asyncio.AbstractEve
             raise
 
     def root_chat(messages, timeout):
-        return _chat(messages, timeout)
+        return _chat(messages, root_model, timeout)
 
     def sub_chat(prompt, sub_model_override, timeout):
-        return _chat([{"role": "user", "content": prompt}], timeout)
+        return _chat([{"role": "user", "content": prompt}], sub_model_override or sub_model, timeout)
 
     run_id, run_dir, run_rel = runs.mint_run_dir()
     staged = stage_context(run_dir, text=bundle)
@@ -220,8 +235,8 @@ def _run_engine_blocking(bundle: str, file_count: int, loop: asyncio.AbstractEve
         session_id="dream",
         task="dream deep probe: cross-file memory analysis",
         source_desc=f"memory corpus snapshot ({file_count} files)",
-        root_model=model,
-        sub_model=model,
+        root_model=root_model,
+        sub_model=sub_model,
         input_chars=len(bundle),
     )
     engine = RLMEngine(
@@ -234,9 +249,7 @@ def _run_engine_blocking(bundle: str, file_count: int, loop: asyncio.AbstractEve
     )
     result = engine.run()
     runs.record_finish(run_id, run_dir, result)
-    if not result.answer:
-        return None
-    return result.answer
+    return result
 
 
 async def _ingest_candidates(store, answer: str) -> tuple[int, int]:
