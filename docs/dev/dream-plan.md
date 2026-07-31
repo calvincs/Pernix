@@ -1,8 +1,23 @@
 # Dream integration plan — introspection over memory and Candor as a toggleable add-on
 
-Status: Phases 0–2 IMPLEMENTED (2026-07-30) — `core/dream/`, migration v19,
-snooze Activity 14, §13 defects #1–#5 fixed. Phases 3–4 not started; their
-settings flags will be added with their phases. Deviations from the proposal:
+Status: Phases 0–2 IMPLEMENTED and LIVE on the box (2026-07-31) — `core/dream/`,
+migration v19, snooze Activity 14, §13 defects #1–#5 fixed. Burn-in verified over
+six triggered rounds: generation, evidence-judge refutation, Candor-backed
+hypotheses, and a full generate→validate arc across natural heartbeat cycles.
+Post-plan additions shaken out by the live rounds: snooze cycles now run to
+ladder completion and yield to user activity (per-cycle cancel event aborts
+in-flight awaits; `snooze_max_cycle_seconds` demoted to a 900s hang backstop —
+the old 60s wall clock starved the ladder tail behind one slow 117B call);
+the admin trigger (`POST /api/admin/snooze-cycle`, localhost) bypasses the
+cooldown heuristic but never the real gates, and reports `idle_blockers`;
+a day-keyed `session_type="snooze"` Dream journal session narrates the full
+thread of thought in the session list (role="notice" lines — excluded from
+messages_fts and structurally invisible to distillation). Phases 3–4 not
+started; their settings flags will be added with their phases. Watch items:
+contradiction-judge polarity (fixed once — watch verdict notes), replay
+validation not yet exercised live (needs a qualifying failed single-turn
+session), journal session retention (1/day, unpruned). Deviations from the
+original proposal:
 (a) bridge gained async `predict` + `health_snapshot` only — `conjectures()`/
 `events_tail` deferred until used (ledger events carry payload hashes, not
 semantics; the intel brief is the semantic Candor source for evidence packs);
