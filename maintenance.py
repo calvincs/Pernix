@@ -130,9 +130,15 @@ class MaintenanceRunner:
         """
         from core.snooze import get_snooze
 
-        budget = max(settings.snooze_max_cycle_seconds, 1) + SNOOZE_TIMEOUT_GRACE
+        snooze = get_snooze()
+        # Shared backstop computation (local models get more headroom) so
+        # the cycle's own supervisor always fires before this outer bound.
+        # getattr: tests substitute minimal snooze stand-ins.
+        backstop_fn = getattr(snooze, "cycle_backstop_seconds", None)
+        base = backstop_fn() if backstop_fn else max(settings.snooze_max_cycle_seconds, 1)
+        budget = base + SNOOZE_TIMEOUT_GRACE
         try:
-            await asyncio.wait_for(get_snooze().run_cycle(), timeout=budget)
+            await asyncio.wait_for(snooze.run_cycle(), timeout=budget)
         except asyncio.TimeoutError:
             logger.warning("Snooze cycle exceeded its outer %ds bound", budget)
         except asyncio.CancelledError:

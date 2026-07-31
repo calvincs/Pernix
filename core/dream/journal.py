@@ -65,6 +65,32 @@ async def append(text: str) -> None:
     await asyncio.to_thread(append_sync, text)
 
 
+def prune_old_journals_sync() -> int:
+    """Delete journal sessions older than the retention window. Never
+    touches today's. Sync — call via to_thread. Returns count deleted."""
+    from datetime import timedelta
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=max(2, settings.dream_journal_retention_days))
+    ).isoformat()
+    today_title = f"Dream journal — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    deleted = 0
+    try:
+        for s in db.list_sessions(limit=500):
+            if (
+                s.get("session_type") == "snooze"
+                and s.get("title") != today_title
+                and (s.get("updated_at") or "") < cutoff
+            ):
+                db.delete_session(s["id"])
+                deleted += 1
+    except Exception as e:
+        logger.warning("dream journal prune failed: %s", e)
+    if deleted:
+        logger.info("dream journal: pruned %d old journal sessions", deleted)
+    return deleted
+
+
 async def run_journal_listener() -> None:
     """Narrate snooze bus events into the journal. Runs for process life;
     started from the app lifespan, cancelled at shutdown."""

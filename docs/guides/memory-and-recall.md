@@ -33,7 +33,6 @@ At the start of each turn, scout searches the memory store and injects the most 
 
 1. The user's incoming message is the search query.
 2. The FTS5 index returns matches scored with BM25.
-3. Entries scoring above `memory_recall_min_score` (default `2.0`) are kept.
 4. Each entry is truncated to `scout_preload_memory_char_limit` chars (default 300) in the auto-injected baseline to control prompt budget. When the agent actively calls `recall()` or `search_memory`, it receives the full entry content.
 5. Top matches go into the scout report; from there, the main agent's prompt.
 

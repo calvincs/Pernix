@@ -95,7 +95,6 @@ const SECTIONS = [
         description: 'Automatic memory recall surfaces relevant past conversations at the start of each turn. Min recall score filters out low-relevance matches \u2014 higher values mean stricter matching.',
         fields: [
             { key: 'memory_recall', label: 'Auto-Recall', type: 'bool' },
-            { key: 'memory_recall_min_score', label: 'Min Recall Score', type: 'number', step: 0.1 },
         ],
     },
     {
@@ -128,6 +127,9 @@ const SECTIONS = [
             { key: 'dream_hypotheses_per_cycle', label: 'Max Hypotheses / Step', type: 'number' },
             { key: 'dream_validation_replays_per_day', label: 'Scout Replays / Day', type: 'number' },
             { key: 'dream_report_interval_days', label: 'Report Interval (days)', type: 'number' },
+            { key: 'dream_journal_retention_days', label: 'Journal Retention (days)', type: 'number' },
+            { key: 'dream_rlm_probe', label: 'Deep Probes (RLM)', type: 'bool' },
+            { key: 'dream_rlm_probe_interval_days', label: 'Probe Interval (days)', type: 'number' },
         ],
     },
     {

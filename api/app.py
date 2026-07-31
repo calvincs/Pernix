@@ -425,7 +425,9 @@ class _AuthMiddleware:
         # arrives from 127.0.0.1 and skips auth entirely. Operators in that
         # topology set trust_local_requests = false.
         client = scope.get("client")
-        if settings.trust_local_requests and client and client[0] in ("127.0.0.1", "::1"):
+        from api.routers.health import is_local_client
+
+        if settings.trust_local_requests and client and is_local_client(client[0]):
             await self.app(scope, receive, send)
             return
 

@@ -572,3 +572,24 @@ def test_search_lessons_under_14_days_no_decay(store):
     assert len(results) == 2
     # Sanity: scores are positive (BM25 working)
     assert all(r.score > 0 for r in results)
+
+
+def test_inferred_tags_survive_markdown_roundtrip(store):
+    from core.memory.format import parse_entries_from_markdown
+
+    store.add_entry("Kubernetes deployment rollback procedure using kubectl rollout undo.", file_name="ops.k8s")
+    entries = parse_entries_from_markdown("ops.k8s", store.read_file("ops.k8s"))
+    assert entries[0].tags, "inferred tags must reach markdown, not just FTS"
+    n = store.reindex()
+    assert n == 1
+    results = store.search(entries[0].tags[0], mode="bm25", limit=3)
+    assert results, "tags must survive reindex"
+
+
+def test_at_tags_filter_is_real(store):
+    store.add_entry("Deploy notes for the alpha service revision batch.", file_name="ops.notes", tags="deploy,alpha")
+    store.add_entry("Deploy notes for the beta service revision batch two.", file_name="ops.notes", tags="deploy,beta", skip_dedup=True)
+    hits = store.search("deploy notes @tags: beta", mode="bm25", limit=5)
+    assert len(hits) == 1 and "beta" in hits[0].entry.tags
+    only_tag = store.search("@tags: alpha", mode="bm25", limit=5)
+    assert len(only_tag) == 1 and "alpha" in only_tag[0].entry.tags

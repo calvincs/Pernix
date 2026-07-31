@@ -106,3 +106,20 @@ async def test_force_bypasses_cooldown_but_still_checks_idle(runner):
     runner._activity_since_last_cycle = True  # keep cadence gate out of the way
     await runner.run_cycle()
     assert seen == [True, False], "force must relax only the cooldown heuristic"
+
+
+def test_backstop_scales_for_local_models(runner, monkeypatch):
+    monkeypatch.setattr("config.settings.snooze_max_cycle_seconds", 900)
+    monkeypatch.setattr("config.settings.background_model", "some-local-model")
+
+    class _FakeClient:
+        def __init__(self, provider):
+            self._p = provider
+
+        def resolve_provider(self, model):
+            return self._p
+
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: _FakeClient("ollama"))
+    assert runner.cycle_backstop_seconds() == 3600
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: _FakeClient("openrouter"))
+    assert runner.cycle_backstop_seconds() == 900

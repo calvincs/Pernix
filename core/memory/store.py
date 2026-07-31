@@ -104,6 +104,7 @@ class MemoryStore:
         epoch: int | None = None,
         source: str = "",
         skip_dedup: bool = False,
+        origin: str = "",
     ) -> str:
         """Append an entry to a memory file and index it.
 
@@ -182,7 +183,12 @@ class MemoryStore:
                         ).fetchone():
                             epoch += 1
 
-                        formatted = format_entry(content, entry_type, tags, weight, source=source, epoch=epoch)
+                        # tag_list, not tags: inferred tags must reach the
+                        # markdown too, or the next reindex() erases them
+                        # (markdown is source of truth).
+                        formatted = format_entry(
+                            content, entry_type, tag_list, weight, source=source, epoch=epoch, origin=origin
+                        )
                         f.write(formatted)
                         f.flush()
 
@@ -667,6 +673,7 @@ class MemoryStore:
                     epoch=actual_epoch,
                     merged_from=source_file,
                     updated=entry.updated,
+                    origin=entry.origin,
                 )
                 md_path = self._dir / f"{target_file}.md"
                 with self._lock:

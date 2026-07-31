@@ -65,6 +65,12 @@ def prepare_fts_query(query: str) -> tuple[str, int]:
     Returns (fts_query, token_count); token_count is used to length-
     normalize BM25 scores.
     """
+    # The one piece of syntax we honor before stripping: the advertised
+    # "@tags: foo" filter (RULES.md, the recall tool, scout's prompt). Each
+    # captured tag becomes a real FTS5 column filter ANDed onto the query.
+    tag_filters = [t for m in re.finditer(r"@tags:\s*([\w,-]+)", query) for t in m.group(1).split(",") if t]
+    query = re.sub(r"@tags:\s*[\w,-]+", " ", query)
+
     # Strip everything that isn't a word char, whitespace, or hyphen.
     # This avoids FTS5 column-filter (foo:bar) and operator (~ ? / .) parsing.
     clean = re.sub(r"[^\w\s-]", " ", query)
@@ -72,12 +78,19 @@ def prepare_fts_query(query: str) -> tuple[str, int]:
     # (includes day/month numbers like "04", "27" in date queries)
     words = [w.strip("-") for w in clean.split()]
     words = [w for w in words if len(w) >= 2]
-    if not words:
+    if not words and not tag_filters:
         return f'"{query}"', 1
+
+    tags_clause = " AND ".join(f'tags:"{t.strip("-")}"' for t in tag_filters)
+    if not words:
+        return tags_clause, max(1, len(tag_filters))
     # Quote every token: neutralizes FTS5 operators (NOT/AND/OR/NEAR), reserved
     # keywords, and bare hyphens (e.g. "foo-bar" parses as column-filter syntax).
     # The unicode61 tokenizer still splits inner words for matching.
-    return " OR ".join(f'"{w}"' for w in words), len(words)
+    or_clause = " OR ".join(f'"{w}"' for w in words)
+    if tags_clause:
+        return f"({or_clause}) AND {tags_clause}", len(words)
+    return or_clause, len(words)
 
 
 def _ripgrep_fallback(query: str, memory_dir: str, limit: int) -> list[SearchResult]:

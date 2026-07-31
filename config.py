@@ -177,7 +177,6 @@ class Settings:
 
     # --- Memory ---
     memory_recall: bool = True
-    memory_recall_min_score: float = 2.0
 
     # --- Candor (operational-memory add-on, off by default) ---
     # Calibrated reliability tracking via the external `candor` package.
@@ -212,6 +211,9 @@ class Settings:
     dream_hypotheses_per_cycle: int = 3  # cap on new hypotheses per dream step
     dream_validation_replays_per_day: int = 4  # counterfactual scout-replay budget
     dream_report_interval_days: int = 7  # dream report cadence
+    dream_journal_retention_days: int = 14  # journal sessions kept (1/day)
+    dream_rlm_probe: bool = False  # deep cross-file probes via RLM (needs rlm_enabled)
+    dream_rlm_probe_interval_days: int = 7  # min days between probes
 
     # --- Evaluation (extension) ---
     eval_auto: bool = False

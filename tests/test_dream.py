@@ -322,3 +322,17 @@ async def test_journal_invisible_to_fts_and_distill(store, dream_on):
     await journal.append("a unique zanzibar journal narration line for search")
     assert db.search_messages_fts("zanzibar") == [], "journal must never enter cross-session search"
     assert db.get_unreviewed_sessions(min_age_minutes=0) == [], "journal must never be a distill candidate"
+
+
+async def test_journal_prune_keeps_window_and_today(store, dream_on, monkeypatch):
+    from core.dream import journal
+
+    monkeypatch.setattr(config.settings, "dream_journal_retention_days", 2)
+    await journal.append("today's line")
+    old_sid = db.create_session(title="Dream journal — 2020-01-01", session_type="snooze")
+    with db.connect_sessions() as conn:
+        conn.execute("UPDATE sessions SET updated_at = '2020-01-02T00:00:00' WHERE id = ?", (old_sid,))
+    deleted = journal.prune_old_journals_sync()
+    assert deleted == 1
+    remaining = [s for s in db.list_sessions(limit=50) if s.get("session_type") == "snooze"]
+    assert len(remaining) == 1 and "2020" not in remaining[0]["title"]

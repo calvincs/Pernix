@@ -80,4 +80,26 @@ async def run_step(is_cancelled) -> dict:
         except Exception as e:
             logger.warning("dream: report write failed: %s", e)
 
+    # Deep probe: fire-and-forget launch when due (runs outside the cycle
+    # as a maintenance-tracked task; the cycle never waits on it).
+    if not is_cancelled():
+        from core.dream.probe import launch_if_due
+
+        try:
+            await launch_if_due(store)
+        except Exception as e:
+            logger.warning("dream: probe launch failed: %s", e)
+
+    # Journal retention: once per day, drop journal sessions past the window.
+    if not is_cancelled():
+        import asyncio
+        from datetime import datetime, timezone
+
+        from core.dream.journal import prune_old_journals_sync
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if db.get_snooze_state("dream_journal_prune") != today:
+            await asyncio.to_thread(prune_old_journals_sync)
+            db.set_snooze_state("dream_journal_prune", today)
+
     return stats

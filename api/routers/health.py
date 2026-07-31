@@ -31,7 +31,7 @@ async def health():
 async def health_detailed(request: Request):
     # Restrict detailed diagnostics to localhost to prevent info disclosure
     client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "::1", "localhost"):
+    if not is_local_client(client_host):
         raise HTTPException(403, detail="Detailed health info restricted to localhost")
 
     from core.llm.client import get_llm_client
@@ -118,6 +118,17 @@ async def get_settings():
     return data
 
 
+def is_local_client(host: str) -> bool:
+    """True when the request genuinely originates from this host's loopback.
+
+    Includes the IPv4-mapped-IPv6 form a dual-stack listener reports for
+    IPv4 loopback connections ("::ffff:127.0.0.1"). Docker-bridge sources
+    (e.g. 172.17.0.1) are deliberately NOT local — traffic through a
+    published port is remote to the container.
+    """
+    return host in ("127.0.0.1", "::1", "localhost") or host.startswith("::ffff:127.")
+
+
 _SETTING_BOUNDS = {
     "shell_timeout": (1, 600),
     "tool_timeout": (1, 3600),
@@ -148,6 +159,8 @@ _SETTING_BOUNDS = {
     "dream_hypotheses_per_cycle": (1, 20),
     "dream_validation_replays_per_day": (0, 50),
     "dream_report_interval_days": (1, 90),
+    "dream_journal_retention_days": (2, 365),
+    "dream_rlm_probe_interval_days": (1, 90),
 }
 
 
@@ -289,7 +302,7 @@ async def set_api_key(body: dict):
 async def get_auth_token(request: Request):
     """Return the auth token. Localhost only."""
     client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "::1", "localhost"):
+    if not is_local_client(client_host):
         raise HTTPException(403, detail="Auth token access restricted to localhost")
     return {"token": settings.auth_token or "", "network_enabled": settings.network_enabled}
 
@@ -298,7 +311,7 @@ async def get_auth_token(request: Request):
 async def regenerate_auth_token(request: Request):
     """Regenerate the auth token. Localhost only."""
     client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "::1", "localhost"):
+    if not is_local_client(client_host):
         raise HTTPException(403, detail="Auth token access restricted to localhost")
     import secrets
 
@@ -388,7 +401,7 @@ async def trigger_snooze_cycle(request: Request):
     and post-cycle stats so triggered testing can assert on both.
     """
     client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "::1", "localhost"):
+    if not is_local_client(client_host):
         raise HTTPException(403, detail="Snooze trigger restricted to localhost")
 
     from core.snooze import get_snooze
@@ -413,7 +426,7 @@ _restart_task = None  # strong ref for the delayed-shutdown task
 async def restart_server(request: Request):
     """Signal the server to restart. Creates a flag file, then triggers graceful shutdown."""
     client_host = request.client.host if request.client else ""
-    if client_host not in ("127.0.0.1", "::1", "localhost"):
+    if not is_local_client(client_host):
         raise HTTPException(403, detail="Restart restricted to localhost")
 
     import asyncio
