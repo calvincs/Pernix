@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- feat(snooze): cycles now run until the activity ladder completes instead of being killed by a 60s wall clock — user activity (prompt/cron/shutdown) aborts even in-flight LLM awaits immediately via a per-cycle cancel event, interrupted activities resume next cycle via their watermarks, and `snooze_max_cycle_seconds` (default now 900) is demoted to a hang backstop; `run_cycle` returns ran/yielded/backstop/error, and the admin trigger reports `idle_blockers` when the idle gate refuses
+
 - feat(dream): idle-time introspection add-on, Phases 0–2 of docs/dev/dream-plan.md — snooze Activity 14 generates typed hypotheses over memory, Candor evidence, and post-mortems (labeled evidence packs, fc329cb claim filter, dedup vs refuted), validates them (Candor re-predict, evidence judge, counterfactual scout replay with a per-day budget), and writes periodic reports to workspace/dreams/; sidecar tables via migration v19, all state in dream_* keys; off by default (`dream_enabled`)
 - feat(snooze): `run_cycle(force=)` skips only the cadence gate and returns the gate outcome; localhost-only `POST /api/admin/snooze-cycle` triggers a cycle for testing/ops
 - fix(memory): consolidation integrity — fused entries keep entry_type/tags/weight, bypass the dup gate that silently blocked them, key hit counts to the real post-collision epoch, and supersede their target contributor; entries a merge verdict omitted are rescued to the target instead of stranded in the archived source (previously unbounded silent data loss); archive stats count only real retirements; `updated` and non-default `weight` now roundtrip through markdown
