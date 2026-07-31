@@ -203,6 +203,16 @@ class Settings:
     rlm_timeout_seconds: int = 900  # wall clock per run
     rlm_run_retention_days: int = 30  # workspace/rlm/<run_id> purge age
 
+    # --- Dream (idle-time introspection add-on, off by default) ---
+    # Hypothesis generation over memory/Candor/post-mortems, validated against
+    # recorded outcomes, promoted only through gates — docs/dev/dream-plan.md.
+    # Fully inert when off: snooze Activity 14 is skipped and no dream tables
+    # are read or written. All call sites gate on dream_enabled at runtime.
+    dream_enabled: bool = False
+    dream_hypotheses_per_cycle: int = 3  # cap on new hypotheses per dream step
+    dream_validation_replays_per_day: int = 4  # counterfactual scout-replay budget
+    dream_report_interval_days: int = 7  # dream report cadence
+
     # --- Evaluation (extension) ---
     eval_auto: bool = False
     eval_threshold: float = 0.7

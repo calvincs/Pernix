@@ -145,6 +145,9 @@ _SETTING_BOUNDS = {
     "rlm_max_concurrent_subcalls": (1, 8),
     "rlm_timeout_seconds": (60, 3600),
     "rlm_run_retention_days": (1, 365),
+    "dream_hypotheses_per_cycle": (1, 20),
+    "dream_validation_replays_per_day": (0, 50),
+    "dream_report_interval_days": (1, 90),
 }
 
 
@@ -369,6 +372,30 @@ async def list_env_vars():
         "GOOGLE_API_KEY",
     ]
     return {"vars": [v for v in CHECK_VARS if v in os.environ]}
+
+
+# ---------------------------------------------------------------------------
+# Snooze trigger (testing/ops)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/api/admin/snooze-cycle")
+async def trigger_snooze_cycle(request: Request):
+    """Run one snooze cycle now, skipping only the cadence gate.
+
+    Localhost-only, like restart. The active-work and idle gates still
+    apply — this cannot preempt live sessions. Returns the gate outcome
+    and post-cycle stats so triggered testing can assert on both.
+    """
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(403, detail="Snooze trigger restricted to localhost")
+
+    from core.snooze import get_snooze
+
+    snooze = get_snooze()
+    outcome = await snooze.run_cycle(force=True)
+    return {"outcome": outcome, "stats": snooze.get_stats()}
 
 
 # ---------------------------------------------------------------------------
