@@ -179,7 +179,6 @@ Approvals are **per-invocation by default** — approving `bash` for `ps aux` do
 | Setting | Default | Description |
 |---|---|---|
 | `memory_recall` | `true` | Search memory at the start of each turn and inject relevant entries into the system prompt. |
-| `memory_recall_min_score` | `2.0` | Minimum BM25 relevance score a memory entry must have to be included. Higher values = stricter filtering. |
 
 ---
 

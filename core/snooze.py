@@ -178,6 +178,26 @@ class SnoozeRunner:
             pass
         return blockers
 
+    def cycle_backstop_seconds(self) -> int:
+        """Effective hang backstop for one cycle.
+
+        Local (Ollama) background models get 4x headroom: slow local
+        inference is free compute and user activity preempts instantly via
+        the yield path, so a tight cap only starves work. Remote (paid API)
+        models keep the configured cap to bound spend. Shared with
+        maintenance's outer budget so the inner backstop always fires first.
+        """
+        base = max(settings.snooze_max_cycle_seconds, 1)
+        try:
+            from core.llm.client import get_llm_client
+
+            model = settings.background_model or settings.llm_model
+            if model and get_llm_client().resolve_provider(model) == "ollama":
+                return base * 4
+        except Exception:
+            pass
+        return base
+
     def _is_cancelled(self) -> bool:
         return self._cancel_generation != self._cycle_generation
 
@@ -261,13 +281,14 @@ class SnoozeRunner:
         # snooze_max_cycle_seconds hang backstop — runaway protection, not a
         # scheduler.
         outcome = "ran"
+        backstop = self.cycle_backstop_seconds()
         cycle_task = asyncio.create_task(self._do_cycle())
         waiter = asyncio.create_task(self._cancel_event.wait())
         try:
             try:
                 done, _pending = await asyncio.wait(
                     {cycle_task, waiter},
-                    timeout=max(settings.snooze_max_cycle_seconds, 1),
+                    timeout=backstop,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
             except asyncio.CancelledError:
@@ -300,7 +321,7 @@ class SnoozeRunner:
                     outcome = "backstop"
                     logger.warning(
                         "Snooze cycle hit the %ds hang backstop — aborted in-flight activity",
-                        settings.snooze_max_cycle_seconds,
+                        backstop,
                     )
         finally:
             waiter.cancel()

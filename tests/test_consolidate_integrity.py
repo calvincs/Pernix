@@ -211,3 +211,59 @@ def test_archive_stats_count_only_source_retirements(store):
     assert stats["entries_archived"] == 1
     tgt_entries = parse_entries_from_markdown("tgt.file", store.read_file("tgt.file"))
     assert any(e.epoch == 50 for e in tgt_entries), "target entry must be left live"
+
+
+# ---------------------------------------------------------------------------
+# Claim-origin provenance
+# ---------------------------------------------------------------------------
+
+
+def test_origin_roundtrips_and_survives_move(store):
+    store.add_entry(
+        "A fact scraped from a web page about framework release dates.",
+        file_name="src.file",
+        epoch=100,
+        origin="external",
+    )
+    entries = parse_entries_from_markdown("src.file", store.read_file("src.file"))
+    assert entries[0].origin == "external"
+
+    store.add_entry("Anchor for target existence purposes.", file_name="tgt.file", epoch=50)
+    store.move_entries("src.file", "tgt.file", [100])
+    moved = next(e for e in parse_entries_from_markdown("tgt.file", store.read_file("tgt.file")) if e.epoch == 100)
+    assert moved.origin == "external", "origin lost on move"
+
+
+def test_fuse_taints_origin_external(store):
+    store.add_entry(
+        "Internal operational note about server A and its scheduled backup window.",
+        file_name="tgt.file",
+        epoch=100,
+        origin="internal",
+    )
+    store.add_entry(
+        "Web-sourced claim about server A backup best practices from a blog.",
+        file_name="src.file",
+        epoch=200,
+        origin="external",
+        skip_dedup=True,
+    )
+    execute_merge(
+        store,
+        _decision(
+            fused_entries=[
+                {"file": "src.file", "epoch": 200, "fuse_target_epoch": 100,
+                 "fused_content": "Server A backup window with best-practice notes merged together here."}
+            ]
+        ),
+    )
+    fused = parse_entries_from_markdown("tgt.file", store.read_file("tgt.file"))[0]
+    assert fused.origin == "external"
+
+
+def test_session_used_web_tools_detection():
+    from core.memory.distill import _session_used_web_tools
+
+    assert _session_used_web_tools([{"role": "assistant", "tool_calls": '[{"function": {"name": "search_web"}}]'}])
+    assert not _session_used_web_tools([{"role": "assistant", "tool_calls": '[{"function": {"name": "read_file"}}]'}])
+    assert not _session_used_web_tools([{"role": "user", "content": "please search_web for me"}])

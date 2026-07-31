@@ -20,6 +20,7 @@ class MemoryEntry:
     score: float = 0.0
     source: str = ""  # user | distill | snooze | "" (legacy)
     updated: int = 0  # set when the entry was corrected via update_entry
+    origin: str = ""  # claim origin: external (web-derived) | internal | "" (unknown)
 
     def __post_init__(self):
         if self.tags is None:
@@ -59,6 +60,7 @@ def format_entry(
     merged_from: str = "",
     fused_epochs: list[int] | None = None,
     updated: int = 0,
+    origin: str = "",
 ) -> str:
     """Format an entry for markdown file storage."""
     epoch = epoch or int(time.time())
@@ -77,6 +79,8 @@ def format_entry(
         lines.append(f"<!-- @weight: {weight} -->")
     if source:
         lines.append(f"<!-- @source: {source} -->")
+    if origin:
+        lines.append(f"<!-- @origin: {origin} -->")
     if updated:
         lines.append(f"<!-- @updated: {updated} -->")
     if merged_from:
@@ -164,6 +168,11 @@ def parse_entries_from_markdown(file_name: str, text: str) -> list[MemoryEntry]:
         if source_match:
             source = source_match.group(1)
 
+        origin = ""
+        origin_match = re.search(r"<!-- @origin:\s*(\w+)\s*-->", section)
+        if origin_match:
+            origin = origin_match.group(1)
+
         updated = 0
         updated_match = re.search(r"<!-- @updated:\s*(\d+)\s*-->", section)
         if updated_match:
@@ -187,6 +196,7 @@ def parse_entries_from_markdown(file_name: str, text: str) -> list[MemoryEntry]:
                     weight=weight,
                     source=source,
                     updated=updated,
+                    origin=origin,
                 )
             )
 

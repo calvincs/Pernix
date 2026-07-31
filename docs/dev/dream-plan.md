@@ -12,8 +12,13 @@ the admin trigger (`POST /api/admin/snooze-cycle`, localhost) bypasses the
 cooldown heuristic but never the real gates, and reports `idle_blockers`;
 a day-keyed `session_type="snooze"` Dream journal session narrates the full
 thread of thought in the session list (role="notice" lines — excluded from
-messages_fts and structurally invisible to distillation). Phases 3–4 not
-started; their settings flags will be added with their phases. Watch items:
+messages_fts and structurally invisible to distillation). 2026-07-31 second
+wave: §13 leftovers #6–#8 cleared, claim-origin provenance (§14 Q3) shipped
+(@origin roundtrip + distill web-tool detection + dream discounting), and
+**Phase 4a (RLM deep probes) is IMPLEMENTED** (`core/dream/probe.py`,
+`dream_rlm_probe` off by default) — 9b (in-session hooks) remains future.
+Phase 3 (promotion) DEFERRED by Calvin 2026-07-31: revisit after the first
+weekly dream report (~2026-08-07), whose quality gates the start. Watch items:
 contradiction-judge polarity (fixed once — watch verdict notes), replay
 validation not yet exercised live (needs a qualifying failed single-turn
 session), journal session retention (1/day, unpruned). Deviations from the

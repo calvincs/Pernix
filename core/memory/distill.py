@@ -69,6 +69,12 @@ async def distill_session(
     if not store:
         return
 
+    # Claim-origin provenance (coarse, session-level): if the session pulled
+    # external content in, everything distilled from it is marked external so
+    # downstream consumers (the dream evidence packs, future scout weighting)
+    # can discount web-derived claims relative to operational records.
+    origin = "external" if _session_used_web_tools(messages) else "internal"
+
     # Build conversation transcript (include tool results so LLM sees what was already saved)
     transcript_lines = [f"Session: {title} (type={session_type})"]
     for msg in messages:
@@ -145,10 +151,23 @@ async def distill_session(
             tags=tags,
             weight=entry.get("weight", "normal"),
             source="distill",
+            origin=origin,
         )
         saved += 1
 
     logger.info("Distilled session %s: %d saved, %d deduped", session_id, saved, skipped_dup)
+
+
+_WEB_TOOLS = ("search_web", "browse_web", "http_get")
+
+
+def _session_used_web_tools(messages: list[dict]) -> bool:
+    """True when any assistant turn called a web-facing tool."""
+    for m in messages:
+        tc = m.get("tool_calls") or ""
+        if tc and any(t in str(tc) for t in _WEB_TOOLS):
+            return True
+    return False
 
 
 def _parse_entries(text: str) -> list[dict]:

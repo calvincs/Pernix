@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- feat(dream): Phase 4a deep probes — an RLM run over the whole memory corpus (every active entry with file@epoch markers + hypothesis list + Candor brief) hunts cross-file contradictions the one-file-per-cycle dream step cannot see; maintenance-tracked outside the cycle, evidence resolved to content-hash refs at ingest, same filters as cycle output, visible in the RLM runs panel (`dream_rlm_probe`, off by default)
+- feat(memory): claim-origin provenance — distilled entries carry `@origin: external` when the session used web tools (`internal` otherwise), the origin survives moves/fuses (external taints), and dream evidence packs mark and discount web-derived entries
+- feat(memory): the advertised `@tags:` filter now works — `recall("deploy @tags: alpha")` compiles to a real FTS5 column filter; inferred tags now reach the markdown too instead of silently dying on the next reindex
+- feat(snooze): the hang backstop scales 4x when the background model is local (Ollama) — slow local inference is free and user activity preempts instantly; remote models keep the configured cap. Dream journal sessions now prune past `dream_journal_retention_days`
+- fix(api): localhost-gated endpoints accept IPv4-mapped-IPv6 loopback (`::ffff:127.0.0.1`) via a shared `is_local_client` helper; docker-bridge sources stay rejected
+- chore: removed the stale SCOUT SIGNALS block from the scout prompt (nothing has produced that section since signals became UI-only) and the dead `memory_recall_min_score` setting; added a full-lifespan boot smoke test
+
 - feat(snooze): cycles now run until the activity ladder completes instead of being killed by a 60s wall clock — user activity (prompt/cron/shutdown) aborts even in-flight LLM awaits immediately via a per-cycle cancel event, interrupted activities resume next cycle via their watermarks, and `snooze_max_cycle_seconds` (default now 900) is demoted to a hang backstop; `run_cycle` returns ran/yielded/backstop/error, and the admin trigger reports `idle_blockers` when the idle gate refuses
 
 - feat(dream): idle-time introspection add-on, Phases 0–2 of docs/dev/dream-plan.md — snooze Activity 14 generates typed hypotheses over memory, Candor evidence, and post-mortems (labeled evidence packs, fc329cb claim filter, dedup vs refuted), validates them (Candor re-predict, evidence judge, counterfactual scout replay with a per-day budget), and writes periodic reports to workspace/dreams/; sidecar tables via migration v19, all state in dream_* keys; off by default (`dream_enabled`)

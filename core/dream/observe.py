@@ -141,13 +141,14 @@ async def build_pack(store) -> EvidencePack:
                 now = time.time()
                 for i, e in enumerate(entries[:_MEMORY_ENTRY_LIMIT], 1):
                     age_days = max(0, int((now - e.epoch) // 86400))
+                    origin_tag = ", web-derived" if e.origin == "external" else ""
                     pack.items.append(
                         EvidenceItem(
                             ref_id=f"M{i}",
                             kind="memory",
                             render=(
                                 f"[M{i}] (memory {mem_file}@{e.epoch}, {e.entry_type}, "
-                                f"{age_days}d old) {e.content[:_RENDER_CHAR_CAP]}"
+                                f"{age_days}d old{origin_tag}) {e.content[:_RENDER_CHAR_CAP]}"
                             ),
                             ref={"file": mem_file, "epoch": e.epoch, "hash": content_hash(e.content)},
                         )

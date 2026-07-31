@@ -517,6 +517,11 @@ def execute_merge(store, decision: MergeDecision) -> dict:
             entry_type = next((e.entry_type for e in contributors if e.entry_type != "note"), "finding")
             tag_union = sorted({t for e in contributors for t in e.tags})
             weight = "high" if any(e.weight == "high" for e in contributors) else "normal"
+            # external taints the fuse: mixed-origin content is web-derived.
+            if any(e.origin == "external" for e in contributors):
+                origin = "external"
+            else:
+                origin = next((e.origin for e in contributors if e.origin), "")
 
             # Gather hit counts from both contributing entries
             total_hits = 0
@@ -546,6 +551,7 @@ def execute_merge(store, decision: MergeDecision) -> dict:
                 epoch=oldest_epoch,
                 source="consolidate",
                 skip_dedup=True,
+                origin=origin,
             )
             if not result.startswith("Saved to"):
                 stats["fuse_failures"] += 1
