@@ -54,6 +54,8 @@ Beyond the localhost-only default. Read these before exposing Pernix to anything
 - [internals/extensions.md](internals/extensions.md) — the eleven extension modules and their gates
 - [internals/reflect-and-snooze.md](internals/reflect-and-snooze.md) — quality-gate retry and idle-time consolidation
 - [internals/rlm.md](internals/rlm.md) — recursive long-input processing (sandboxed REPL + sub-LLM broker)
+- [internals/candor.md](internals/candor.md) — calibrated operational memory: earned tool reliability from recorded outcomes
+- [internals/dream.md](internals/dream.md) — idle-time introspection: hypotheses about itself, falsified against the record
 
 ## I want to contribute
 

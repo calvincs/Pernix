@@ -99,6 +99,8 @@ Everything is local:
 | Memory search index | `data/memories/_index.db` (FTS5) |
 | Workspace files | `data/workspace/` |
 | RLM run traces (when enabled) | `data/workspace/rlm/<run_id>/` — auto-purged after 30 days |
+| Dream reports (when enabled) | `data/workspace/dreams/` |
+| Candor evidence ledger (when enabled) | `data/candor/` |
 | Settings | `data/settings.json` |
 | API keys | `.env` |
 | Skills | `data/skills/` |
@@ -110,6 +112,10 @@ You can read, edit, or delete the markdown memory files directly with a text edi
 ### How do I reset memory?
 
 Delete the relevant `data/memories/*.md` files, or wipe everything with `python run.py --rebuild` (which preserves settings and API keys). The memory index regenerates on next start.
+
+### What's the "Dream" session in my sidebar?
+
+If you've enabled Dream (Settings → Dream (Introspection)), Pernix spends idle time examining its own memory and operational history — raising hypotheses about itself and testing them against recorded outcomes. Each day of dreaming keeps a journal as a read-only session in the sidebar (purple dot, titled like "Dream Jul 31"). You can't chat in it — Pernix writes it while dreaming — and it's excluded from search and memory distillation. Hide the whole category with the sidebar legend if you'd rather not see it, or turn `dream_enabled` off to stop dreaming entirely. Details: [internals/dream.md](internals/dream.md).
 
 ### Where do the agent's file outputs land?
 

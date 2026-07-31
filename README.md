@@ -40,6 +40,11 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Cron scheduling** — run agents on a schedule for recurring tasks
 - **Reflect & retry** — a quality gate verifies each response and automatically retries if the agent missed the intent
 
+### Experimental Add-ons (all off by default)
+- **RLM — recursive processing** ([docs](docs/internals/rlm.md)) — analyze inputs far larger than any model's context window: a root model writes code in a sandboxed REPL that holds the input as a variable, delegating chunks to budgeted sub-model calls. Adds two model roles (RLM Root, RLM Sub-call) and a "Recent RLM runs" panel
+- **Candor — operational memory** ([docs](docs/internals/candor.md)) — the agent learns from recorded outcomes how reliable its own tools actually are; scout gets an exception-report intel brief where silence means healthy. Requires the separate `candor` package
+- **Dream — introspection** ([docs](docs/internals/dream.md)) — during idle time the agent raises typed hypotheses about its own memory and behavior, then tries to falsify them against recorded outcomes; keeps a read-only daily journal in the sidebar and writes a periodic dream report
+
 ### Access & UI
 - **Built-in web UI** — PWA with real-time streaming, Monaco code editor, file explorer, and mobile support
 - **REST API + SSE streaming** — build integrations, scripts, or custom clients using the same API the UI uses
@@ -140,11 +145,12 @@ Pernix ships with a full progressive web app (PWA) at the root URL. Key panels:
 
 | Panel | What it does |
 |---|---|
-| **Session sidebar** | Create, switch between, and manage sessions |
+| **Session sidebar** | Create, switch between, and manage sessions — full-text search, and a legend to filter by type (chat, cron, worker, Dream) |
 | **Chat** | Real-time conversation with streamed responses and tool call visibility |
 | **Settings** | Configure all server settings without restarting |
 | **File explorer** | Browse, upload, and open files in the workspace |
-| **Timeline** | Step-by-step view of the state machine and every tool call in a turn |
+| **Jobs** | Cron jobs, live snooze activity, and recent RLM runs |
+| **Timeline** | Step-by-step view of the state machine and every tool call in a turn — including in-flight tool calls as they run |
 | **Notifications bell** | Alert when the agent is waiting for your input |
 
 The UI works on mobile when accessed via network mode. It can also be installed as a PWA for a native-app-like experience.

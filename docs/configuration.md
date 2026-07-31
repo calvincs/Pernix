@@ -104,7 +104,7 @@ After each agent turn, a lightweight reflect pass verifies that the agent actual
 
 ## Snooze (Idle Optimization)
 
-During idle periods (no active sessions), Pernix runs background maintenance: deduplicating memory entries, consolidating similar notes, profiling user preferences, and purging expired run directories (workflow and RLM runs past retention).
+During idle periods (no active sessions), Pernix runs background maintenance: deduplicating memory entries, consolidating similar notes, profiling user preferences, purging expired run directories (workflow and RLM runs past retention), and — when enabled — the [Dream](internals/dream.md) introspection step. Cycles run until the full activity ladder completes; any user activity cancels them instantly and the interrupted work resumes next cycle.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -115,7 +115,7 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 
 ## Candor (Operational Memory Add-on)
 
-Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Candor (Operational Memory). Design details: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
+Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Candor (Operational Memory). How it works: [internals/candor.md](internals/candor.md); design history: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -142,6 +142,22 @@ Recursive Language Models (arXiv 2512.24601): the agent processes inputs far bey
 | `rlm_max_concurrent_subcalls` | `3` | Parallel sub-calls (the global LLM scheduler still applies underneath). |
 | `rlm_timeout_seconds` | `900` | Wall clock per run; the child process group is killed at the deadline. |
 | `rlm_run_retention_days` | `30` | Age after which snooze purges `data/workspace/rlm/<run_id>/` dirs and their DB rows. |
+
+---
+
+## Dream (Introspection Add-on)
+
+Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems; generates typed hypotheses about itself (contradictions, stale memory, ineffective lessons, tool patterns); validates them against recorded outcomes; and writes a periodic report to `workspace/dreams/`. Hypotheses influence nothing until validated. Each day of dreaming narrates itself into a read-only Dream journal session in the sidebar. Toggles live in Settings → Dream (Introspection); all apply hot. How it works: [internals/dream.md](internals/dream.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `dream_enabled` | `false` | Master switch. Off removes the dream activity from the snooze cycle entirely. |
+| `dream_hypotheses_per_cycle` | `3` | Cap on new hypotheses per dream step. |
+| `dream_validation_replays_per_day` | `4` | Budget for counterfactual scout replays (the most expensive validation). `0` disables replay validation. |
+| `dream_report_interval_days` | `7` | Cadence for `workspace/dreams/DREAM-<date>.md` reports. |
+| `dream_journal_retention_days` | `14` | Days of Dream journal sessions kept (one per day). |
+| `dream_rlm_probe` | `false` | Deep cross-file probes over the whole memory corpus via [RLM](internals/rlm.md) — also requires `rlm_enabled`. |
+| `dream_rlm_probe_interval_days` | `7` | Minimum days between deep probes. |
 
 ---
 
@@ -260,7 +276,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `reflect_model` | *(empty)* | Override model for reflect; empty uses `background_model`. |
 | `post_mortem_retention_days` | `90` | Days to keep synthesized post-mortem records before snooze cleans them. |
 | `notify_webhook_timeout` | `10` | HTTP timeout for `notify_webhook_url` POST (seconds). |
-| `snooze_max_cycle_seconds` | `60` | Max time per Snooze cycle before yielding. |
+| `snooze_max_cycle_seconds` | `900` | Hang backstop per Snooze cycle — runaway protection, not a budget. Cycles run until the activity ladder completes; user activity cancels them instantly. Local (Ollama) background models get 4x headroom. |
 | `snooze_cooldown_minutes` | `5` | Minimum idle time before Snooze starts running. |
 | `snooze_dedup_interval_days` | `7` | Days between memory-dedup sweeps per file. |
 | `snooze_consolidation_interval_hours` | `24` | Hours between memory-consolidation scans. |

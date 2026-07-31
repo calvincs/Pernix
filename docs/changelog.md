@@ -8,6 +8,18 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ## 2026-07 (recent)
 
+**Pernix can now dream: idle-time introspection that fact-checks its own memory.** A new Dream add-on — off by default, Settings → Dream (Introspection) — runs as the final snooze activity: it examines memory, Candor evidence, and post-mortems; raises typed hypotheses about itself (contradictions, stale memory, ineffective lessons, tool patterns); and tries to *falsify* them against recorded outcomes, including counterfactual scout replays of past failed turns. Nothing influences live behavior until validated — the observable output is a weekly report in `workspace/dreams/` and a read-only **Dream journal session** per day in the sidebar (purple dot, own legend filter). See [internals/dream.md](internals/dream.md). (migration v19)
+
+**The agent now learns how reliable its own tools actually are.** A new Candor add-on — off by default, Settings → Candor (Operational Memory) — records tool outcomes and reflect verdicts into an auditable evidence ledger and gives scout an `[OPERATIONAL INTEL]` exception report before each turn: degraded tools are flagged, healthy ones are omitted, so silence means "no known problem." The agent can also answer reliability questions on demand (`predict_reliability`, `why_reliability`). See [internals/candor.md](internals/candor.md).
+
+**Snooze cycles now run to completion instead of being cut off mid-ladder.** The old 60-second wall clock starved the tail of the maintenance ladder behind one slow model call. Cycles now run until every activity finishes; your activity (a prompt, a cron fire, shutdown) cancels them instantly — even mid-LLM-call — and interrupted work resumes next cycle. `snooze_max_cycle_seconds` (now 900) is demoted to a hang backstop. A localhost-only `POST /api/admin/snooze-cycle` triggers a cycle on demand for debugging.
+
+**Memory consolidation no longer silently loses entries.** Fused entries keep their type, tags, and weight; entries the merge verdict omitted are rescued instead of stranded in archived files — previously unbounded silent data loss. The advertised `@tags:` recall filter now actually filters (it used to degrade to an ordinary search token), and recall output now shows each entry's age and origin (`@origin: external` marks web-derived content).
+
+**Scout no longer hands the agent a blank report.** A scout that ran out of revision rounds could previously submit nothing — the turn proceeded planless. The final round now always retains `submit_report`, and a scout that still never submits degrades to a deterministic fallback report instead of an empty one.
+
+**`SOUL.md` and `RULES.md` now reach the model whole.** The identity/rules/session files are injected verbatim by the context compiler instead of being excerpted by scout — so a rule you write is a rule the model sees, every turn. Long files are capped at 32K chars with a loud log warning instead of silent truncation.
+
 **The agent can now fully analyze inputs far larger than any model's context window.** A new RLM (Recursive Language Models) add-on — off by default, enabled in Settings → General → RLM (Recursive Processing) — gives the agent an `rlm_process` tool: instead of paginating a huge file and losing the whole-picture view, the input is held as a variable in a sandboxed Python REPL and a root model writes code to slice it, delegating chunks to budgeted sub-model calls until it has one answer. Works on documents, corpora, transcripts, logs, and codebase dumps. You pick the root and sub-call models under Settings → Models → Model Roles; iteration/sub-call/time caps prevent runaway runs; model-written code runs in a separate locked-down process that never sees your API keys. Run traces land in `workspace/rlm/<run_id>/` and are auto-purged after 30 days.
 
 ## 2026-05
@@ -66,7 +78,7 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ## Database migrations (chronological)
 
-The DB schema is at v18. Each migration runs automatically on next start. Unless you've made manual changes to `data/sessions.db`, you don't need to do anything — Pernix migrates forward in place.
+The DB schema is at v19. Each migration runs automatically on next start. Unless you've made manual changes to `data/sessions.db`, you don't need to do anything — Pernix migrates forward in place.
 
 | Version | Description |
 |---|---|
@@ -88,6 +100,7 @@ The DB schema is at v18. Each migration runs automatically on next start. Unless
 | 16 | Persist v2 state and watched_worker_ids on sessions for restart recovery |
 | 17 | Add pinned flag on sessions for sidebar pinning |
 | 18 | Add rlm_runs audit index for RLM (recursive processing) runs |
+| 19 | Add dream_hypotheses and dream_reports for Dream (introspection) |
 
 ---
 
