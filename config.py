@@ -225,7 +225,11 @@ class Settings:
     # --- Snooze (idle-time self-optimization) ---
     snooze_enabled: bool = True
     snooze_interval_ticks: int = 10  # Check every N maintenance ticks (N * 60s)
-    snooze_max_cycle_seconds: int = 60  # Max time per Snooze cycle
+    # Hang backstop per cycle — NOT a scheduler. A cycle runs until its
+    # activity ladder completes; user activity ends it early (graceful yield,
+    # watermark resume). This bound only kills a genuinely wedged cycle.
+    # 15 min accommodates slow local models; bump it for very large ones.
+    snooze_max_cycle_seconds: int = 900
     snooze_cooldown_minutes: int = 5  # Min idle time before Snooze starts
     snooze_dedup_interval_days: int = 7  # Days between dedup sweeps per file
     snooze_consolidation_interval_hours: int = 24  # Hours between consolidation scans

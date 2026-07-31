@@ -14,6 +14,7 @@ Interruptible via cooperative cancellation. Uses background_model only.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -48,11 +49,24 @@ class SnoozeRunner:
         }
         self._activity_since_last_cycle: bool = True  # first cycle always runs
         self._last_cycle_time: float = 0.0
+        # Per-cycle abort signal: fresh Event each cycle (no clear() races),
+        # set by request_cancel so the supervisor can abort in-flight awaits.
+        self._cancel_event: asyncio.Event | None = None
 
     def request_cancel(self) -> None:
-        """Signal Snooze to stop ASAP. Called when work arrives."""
+        """Signal Snooze to stop ASAP. Called when work arrives.
+
+        Two signals: the generation counter (polled by activities at their
+        loop boundaries — see __init__ for why a counter, not an Event) and
+        the per-cycle cancel event, which lets run_cycle's supervisor abort
+        an IN-FLIGHT await (e.g. a minutes-long background LLM call) instead
+        of waiting for the next poll point. User work preempts immediately.
+        """
         if self._running:
             self._cancel_generation += 1
+            evt = self._cancel_event
+            if evt is not None:
+                evt.set()
             logger.debug("Snooze cancel requested (gen=%d)", self._cancel_generation)
 
     def notify_activity(self) -> None:
@@ -216,6 +230,7 @@ class SnoozeRunner:
         # Capture current cancel generation. Any request_cancel() that fired
         # before this point will make _is_cancelled() return True immediately.
         self._cycle_generation = self._cancel_generation
+        self._cancel_event = asyncio.Event()
         self._running = True
         logger.info("Snooze cycle starting")
 
@@ -225,24 +240,57 @@ class SnoozeRunner:
         _start = time.time()
         bus.emit({"type": "snooze.start", "activity": "cycle"})
 
+        # The cycle runs until the ladder COMPLETES. Two things end it early:
+        # user activity (request_cancel sets the cancel event; the in-flight
+        # await is aborted so user work preempts immediately, and interrupted
+        # activities resume next cycle via their watermarks) and the
+        # snooze_max_cycle_seconds hang backstop — runaway protection, not a
+        # scheduler.
+        outcome = "ran"
+        cycle_task = asyncio.create_task(self._do_cycle())
+        waiter = asyncio.create_task(self._cancel_event.wait())
         try:
-            await asyncio.wait_for(
-                self._do_cycle(),
-                timeout=settings.snooze_max_cycle_seconds,
-            )
-        except asyncio.TimeoutError:
-            logger.info("Snooze cycle hit time limit (%ds)", settings.snooze_max_cycle_seconds)
-        except asyncio.CancelledError:
-            # Re-raise. Swallowing a cancel here meant that at shutdown,
-            # maint.stop() -> task.cancel() landed inside the cycle, was
-            # absorbed, and the maintenance tick carried on into the WAL
-            # checkpoint and vacuum branches while shutdown waited on it.
-            # The finally below still runs, so cycle bookkeeping is intact.
-            logger.debug("Snooze cycle cancelled")
-            raise
-        except Exception as e:
-            logger.error("Snooze cycle error: %s", e, exc_info=True)
+            try:
+                done, _pending = await asyncio.wait(
+                    {cycle_task, waiter},
+                    timeout=max(settings.snooze_max_cycle_seconds, 1),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except asyncio.CancelledError:
+                # Shutdown (maint.stop() cancels us): abort the cycle and
+                # re-raise. Swallowing this meant the maintenance tick
+                # carried on into WAL checkpoint/vacuum while shutdown
+                # waited. The finally below still runs, bookkeeping intact.
+                cycle_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await cycle_task
+                logger.debug("Snooze cycle cancelled")
+                raise
+            if cycle_task in done:
+                exc = cycle_task.exception()
+                if exc is not None:
+                    outcome = "error"
+                    logger.error("Snooze cycle error: %s", exc, exc_info=exc)
+            else:
+                yielded = self._cancel_event.is_set()
+                cycle_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await cycle_task
+                if yielded:
+                    outcome = "yielded"
+                    logger.info(
+                        "Snooze cycle yielded to user activity after %.0fs — will resume next cycle",
+                        time.time() - _start,
+                    )
+                else:
+                    outcome = "backstop"
+                    logger.warning(
+                        "Snooze cycle hit the %ds hang backstop — aborted in-flight activity",
+                        settings.snooze_max_cycle_seconds,
+                    )
         finally:
+            waiter.cancel()
+            self._cancel_event = None
             self._running = False
             self._stats["cycles"] += 1
             self._stats["last_cycle"] = datetime.now(timezone.utc).isoformat()
@@ -250,8 +298,8 @@ class SnoozeRunner:
             self._last_cycle_time = time.time()
             duration_ms = int((time.time() - _start) * 1000)
             bus.emit({"type": "snooze.done", "duration_ms": duration_ms, "stats": {**self._stats}})
-            logger.info("Snooze cycle complete (stats: %s)", self._stats)
-        return "ran"
+            logger.info("Snooze cycle complete (outcome=%s, stats: %s)", outcome, self._stats)
+        return outcome
 
     async def _do_cycle(self) -> None:
         """Execute activities in priority order."""
