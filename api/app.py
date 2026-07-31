@@ -197,6 +197,10 @@ async def lifespan(app: FastAPI):
 
     # 5b. Dream journal listener — narrates snooze cycles into the journal
     # session. Idles (no writes) unless dream_enabled; cancelled at shutdown.
+    # NB: `import asyncio` here is required — a later local import in this
+    # function makes the name function-local for the whole scope.
+    import asyncio
+
     from core.dream.journal import run_journal_listener
 
     app.state.dream_journal_task = asyncio.create_task(run_journal_listener())
