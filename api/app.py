@@ -195,6 +195,12 @@ async def lifespan(app: FastAPI):
     maint = get_maintenance()
     maint.start()
 
+    # 5b. Dream journal listener — narrates snooze cycles into the journal
+    # session. Idles (no writes) unless dream_enabled; cancelled at shutdown.
+    from core.dream.journal import run_journal_listener
+
+    app.state.dream_journal_task = asyncio.create_task(run_journal_listener())
+
     # 6. Initialize SSE shutdown event on the main event loop
     from api.streaming import get_shutdown_event
 
@@ -286,6 +292,12 @@ async def lifespan(app: FastAPI):
         from core.extensions.candor.bridge import shutdown_candor_bridge
 
         await shutdown_candor_bridge()
+    except Exception:
+        pass
+    try:
+        task = getattr(app.state, "dream_journal_task", None)
+        if task is not None:
+            task.cancel()
     except Exception:
         pass
     logger.info("Shutdown complete")

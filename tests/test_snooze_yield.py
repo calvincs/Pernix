@@ -17,7 +17,7 @@ from core.snooze import SnoozeRunner
 def runner(monkeypatch):
     monkeypatch.setattr("config.settings.snooze_enabled", True)
     r = SnoozeRunner()
-    r._is_idle = lambda: True
+    r._is_idle = lambda ignore_cooldown=False: True
     r._activity_since_last_cycle = True
     return r
 
@@ -88,3 +88,21 @@ async def test_cycle_error_reported_and_bookkept(runner):
     assert await runner.run_cycle(force=True) == "error"
     assert runner._stats["cycles"] == 1
     assert not runner._running
+
+
+async def test_force_bypasses_cooldown_but_still_checks_idle(runner):
+    seen = []
+
+    def spy_idle(ignore_cooldown=False):
+        seen.append(ignore_cooldown)
+        return True
+
+    async def quick():
+        return None
+
+    runner._is_idle = spy_idle
+    runner._do_cycle = quick
+    await runner.run_cycle(force=True)
+    runner._activity_since_last_cycle = True  # keep cadence gate out of the way
+    await runner.run_cycle()
+    assert seen == [True, False], "force must relax only the cooldown heuristic"
