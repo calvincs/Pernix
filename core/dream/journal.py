@@ -34,8 +34,13 @@ _LINE_CAP = 8000
 
 
 def _journal_session_id() -> str:
-    """Get or create today's journal session. Sync — call via to_thread."""
-    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Get or create today's journal session. Sync — call via to_thread.
+
+    "Today" is the CONTAINER-LOCAL date (astimezone), not UTC — the journal
+    is a per-day artifact for a human reader, and a UTC key rolls the day
+    over mid-evening for them. Set TZ in the deployment for correct days.
+    """
+    date = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
     key = f"dream_journal:{date}"
     sid = db.get_snooze_state(key)
     if sid and db.get_session(sid):
@@ -73,7 +78,7 @@ def prune_old_journals_sync() -> int:
     cutoff = (
         datetime.now(timezone.utc) - timedelta(days=max(2, settings.dream_journal_retention_days))
     ).isoformat()
-    today_title = f"Dream journal — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+    today_title = f"Dream journal — {datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d')}"
     deleted = 0
     try:
         for s in db.list_sessions(limit=500):

@@ -102,7 +102,7 @@ async def maybe_write_report() -> str | None:
         return None
 
     content = compose_report(last, now.isoformat(), rows)
-    rel_path = f"dreams/DREAM-{now.strftime('%Y-%m-%d')}.md"
+    rel_path = f"dreams/DREAM-{now.astimezone().strftime('%Y-%m-%d')}.md"
     abs_path = Path(settings.workspace_dir) / rel_path
 
     def _write() -> None:
