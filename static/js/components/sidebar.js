@@ -11,7 +11,7 @@ const SESSION_TYPES = {
     chat:   { label: 'Session', cls: 'chat',   color: 'var(--accent)' },
     cron:   { label: 'Cron',   cls: 'cron',   color: 'var(--info)' },
     worker: { label: 'Worker', cls: 'worker', color: 'var(--teal-dim)' },
-    snooze: { label: 'Dream',  cls: 'snooze', color: 'var(--warning)' },
+    snooze: { label: 'Dream',  cls: 'snooze', color: 'var(--dream)' },
 };
 
 // ---------------------------------------------------------------------------
@@ -365,9 +365,13 @@ function _renderSessionItem(session, container, activeSid, isWorker) {
     if (titleText.startsWith('Cron: ') && typeKey === 'cron') {
         titleText = titleText.slice(6);
     }
-    // Same for the journal: "Dream journal — 2026-07-31" reads as its date
+    // Journal titles read as "Dream Jul 31" — the shorthand carries the
+    // meaning, the dot carries the color.
     if (typeKey === 'snooze' && titleText.startsWith('Dream journal — ')) {
-        titleText = titleText.slice(16);
+        const d = new Date(titleText.slice(16) + 'T00:00:00');
+        titleText = isNaN(d)
+            ? titleText
+            : `Dream ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
     }
 
     const classes = ['session-item'];
