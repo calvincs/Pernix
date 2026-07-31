@@ -58,6 +58,7 @@ def format_entry(
     epoch: int | None = None,
     merged_from: str = "",
     fused_epochs: list[int] | None = None,
+    updated: int = 0,
 ) -> str:
     """Format an entry for markdown file storage."""
     epoch = epoch or int(time.time())
@@ -70,10 +71,14 @@ def format_entry(
     ]
     if tags:
         lines.append(f"<!-- @tags: {tags} -->")
-    if weight == "high":
+    # Any non-default weight must roundtrip through markdown, or the next
+    # reindex() silently resets it (markdown is source of truth).
+    if weight and weight != "normal":
         lines.append(f"<!-- @weight: {weight} -->")
     if source:
         lines.append(f"<!-- @source: {source} -->")
+    if updated:
+        lines.append(f"<!-- @updated: {updated} -->")
     if merged_from:
         lines.append(f"<!-- @merged_from: {merged_from} -->")
         lines.append(f"<!-- @merged_at: {int(time.time())} -->")

@@ -467,7 +467,13 @@ def execute_merge(store, decision: MergeDecision) -> dict:
     from core.memory.format import format_entry, parse_entries_from_markdown
     from db.database import connect_memory
 
-    stats = {"entries_kept": 0, "entries_archived": 0, "entries_fused": 0}
+    stats = {
+        "entries_kept": 0,
+        "entries_archived": 0,
+        "entries_fused": 0,
+        "entries_rescued": 0,
+        "fuse_failures": 0,
+    }
 
     # 1. Move kept entries from source files to target
     for file_name, epoch in decision.entries_to_keep:
@@ -478,7 +484,21 @@ def execute_merge(store, decision: MergeDecision) -> dict:
         stats["entries_kept"] += moved
 
     # 2. Handle fused entries (LLM-produced merged content)
+    # Fuse-verdict source refs whose fused write actually landed — only these
+    # count as "addressed" when deciding what step 3 must rescue.
+    fused_ok: set[tuple[str, int]] = set()
     if decision.fused_entries:
+        # Metadata of the contributing entries must survive the fuse: look the
+        # originals up before any of them is superseded.
+        originals: dict[tuple[str, int], object] = {}
+        lookup_files = {decision.target_file} | {f.get("file", "") for f in decision.fused_entries}
+        for name in lookup_files:
+            md = store.read_file(name)
+            if not md:
+                continue
+            for e in parse_entries_from_markdown(name, md):
+                originals[(name, e.epoch)] = e
+
         for fused in decision.fused_entries:
             fused_content = fused.get("fused_content", "")
             fuse_target_epoch = fused.get("fuse_target_epoch", fused.get("epoch", 0))
@@ -490,7 +510,13 @@ def execute_merge(store, decision: MergeDecision) -> dict:
 
             # Use the oldest epoch from the fused entries
             oldest_epoch = min(fuse_target_epoch, source_epoch)
-            fused_epochs = sorted(set([fuse_target_epoch, source_epoch]))
+
+            src_orig = originals.get((source_file, source_epoch))
+            tgt_orig = originals.get((decision.target_file, fuse_target_epoch))
+            contributors = [e for e in (tgt_orig, src_orig) if e is not None]
+            entry_type = next((e.entry_type for e in contributors if e.entry_type != "note"), "finding")
+            tag_union = sorted({t for e in contributors for t in e.tags})
+            weight = "high" if any(e.weight == "high" for e in contributors) else "normal"
 
             # Gather hit counts from both contributing entries
             total_hits = 0
@@ -508,14 +534,44 @@ def execute_merge(store, decision: MergeDecision) -> dict:
             finally:
                 conn.close()
 
-            # Add fused entry to target
-            store.add_entry(
+            # Add fused entry to target. skip_dedup: fused content is by
+            # construction similar to the live target contributor it is about
+            # to supersede — the duplicate gate would refuse the write.
+            result = store.add_entry(
                 content=fused_content,
                 file_name=decision.target_file,
-                entry_type="finding",
+                entry_type=entry_type,
+                tags=",".join(tag_union),
+                weight=weight,
                 epoch=oldest_epoch,
                 source="consolidate",
+                skip_dedup=True,
             )
+            if not result.startswith("Saved to"):
+                stats["fuse_failures"] += 1
+                logger.warning(
+                    "Fused entry write failed (%s@%d + %s@%d): %s — originals left in place",
+                    source_file,
+                    source_epoch,
+                    decision.target_file,
+                    fuse_target_epoch,
+                    result[:200],
+                )
+                continue
+
+            # add_entry bumps the epoch on collision (the target contributor
+            # may hold oldest_epoch) — key follow-up writes to the real one.
+            try:
+                actual_epoch = int(result.rsplit("epoch=", 1)[1].rstrip(")"))
+            except (IndexError, ValueError):
+                actual_epoch = oldest_epoch
+
+            # The fused entry carries all unique facts from both contributors
+            # (per the merge prompt contract); supersede the target-file
+            # contributor so the fuse doesn't duplicate it. The source-file
+            # contributor is retired by step 3's whole-file archive.
+            if tgt_orig is not None:
+                store.delete_entry(decision.target_file, fuse_target_epoch)
 
             # Write summed hit count for fused entry
             if total_hits > 0:
@@ -526,19 +582,57 @@ def execute_merge(store, decision: MergeDecision) -> dict:
                         "VALUES (?, ?, ?, ?) "
                         "ON CONFLICT(file_name, epoch) DO UPDATE SET "
                         "hit_count = ?, last_hit_at = ?",
-                        (decision.target_file, str(oldest_epoch), total_hits, max_last_hit, total_hits, max_last_hit),
+                        (decision.target_file, str(actual_epoch), total_hits, max_last_hit, total_hits, max_last_hit),
                     )
                     conn.commit()
                 finally:
                     conn.close()
 
+            fused_ok.add((source_file, source_epoch))
             stats["entries_fused"] += 1
 
-    # 3. Archive source files
+    # 3. Archive source files — after rescuing anything the merge verdict
+    # never addressed. Whole-file archival is otherwise silent data loss:
+    # an entry the planner omitted (LLM or trivial) would become invisible
+    # to search and reindex with no record anywhere.
+    kept_set = set(decision.entries_to_keep)
+    archive_set = set(decision.entries_to_archive)
+    archived_actual = 0
     for source in decision.source_files:
+        md = store.read_file(source)
+        if md:
+            unaddressed = [
+                e.epoch
+                for e in parse_entries_from_markdown(source, md)
+                if (source, e.epoch) not in kept_set
+                and (source, e.epoch) not in archive_set
+                and (source, e.epoch) not in fused_ok
+            ]
+            if unaddressed:
+                rescued = store.move_entries(source, decision.target_file, unaddressed)
+                stats["entries_rescued"] += rescued
+                logger.warning(
+                    "Merge verdict omitted %d entries in '%s' (epochs %s) — moved to '%s' instead of archiving",
+                    len(unaddressed),
+                    source,
+                    unaddressed[:20],
+                    decision.target_file,
+                )
+        archived_actual += sum(1 for f, _ in archive_set if f == source)
         store.archive_file(source)
 
-    stats["entries_archived"] = len(decision.entries_to_archive)
+    # Archive verdicts inside the target file are left live deliberately:
+    # there is no per-entry archive on the store, and the snooze dedup sweep
+    # (token-subset guarded) will retire true duplicates later. Count only
+    # entries actually retired by source-file archival.
+    target_archive_skipped = sum(1 for f, _ in archive_set if f == decision.target_file)
+    if target_archive_skipped:
+        logger.info(
+            "%d archive verdicts target '%s' itself — left live for the dedup sweep",
+            target_archive_skipped,
+            decision.target_file,
+        )
+    stats["entries_archived"] = archived_actual
 
     # 4. Log to consolidation_log
     conn = connect_memory()
