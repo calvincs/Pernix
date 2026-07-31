@@ -349,3 +349,20 @@ def test_journal_listener_filters_routine_noise():
     assert "Dreaming" in event_line({"type": "snooze.activity", "activity": "dream", "detail": "Dreaming: x"})
     assert "yielded" in event_line({"type": "snooze.done", "duration_ms": 9000, "outcome": "yielded"})
     assert "backstop" in event_line({"type": "snooze.done", "duration_ms": 9000, "outcome": "backstop"})
+
+
+async def test_chat_rejected_in_dream_journal_session():
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from api.routers import chat as chat_router
+
+    sid = db.create_session(title="Dream journal — 2026-07-31", session_type="snooze")
+    app = FastAPI()
+    app.include_router(chat_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.post("/api/chat", json={"session_id": sid, "message": "hello?"})
+        assert r.status_code == 400
+        assert "read-only" in r.json()["detail"]
+        r2 = await client.post("/api/chat/inject", json={"session_id": sid, "message": "context"})
+        assert r2.status_code == 400

@@ -286,6 +286,14 @@ async def chat(body: dict):
     session_db = db.get_session(session_id)
     if not session_db:
         raise HTTPException(404, detail=f"Session {session_id} not found")
+    # Dream journals are read-only records: chatting in one would interleave
+    # a conversation into the narration, retitle it, and hand your messages
+    # to the journal retention pruner.
+    if session_db.get("session_type") == "snooze":
+        raise HTTPException(
+            400,
+            detail="This is a dream journal (read-only). Start a chat session to discuss its contents.",
+        )
 
     # Rewrite attachment references: extract PDF text to sidecars, leave
     # image refs as-is for compile-time expansion. No base64 enters the DB.
@@ -330,6 +338,8 @@ async def inject(body: dict):
     session_db = db.get_session(session_id)
     if not session_db:
         raise HTTPException(404, detail=f"Session {session_id} not found")
+    if session_db.get("session_type") == "snooze":
+        raise HTTPException(400, detail="This is a dream journal (read-only) — messages cannot be injected.")
 
     manager = get_manager()
     session = manager.get(session_id)
