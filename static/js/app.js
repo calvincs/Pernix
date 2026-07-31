@@ -325,6 +325,7 @@ async function selectSession(sid) {
         _renderWorkerStrip();
         _setComposerReadOnly(true, _sess.read_only_reason);
         state.streaming = false;
+        _lastSeq = 0;  // no SSE stream here — a stale counter must not feed the reconciler
         _showSendButton();
         updateStatus('');
         _clearToolStatus();
@@ -2141,8 +2142,16 @@ async function _syncStreamingState() {
 // Soft reload — refresh messages from DB without full page refresh
 // ---------------------------------------------------------------------------
 
+function _isRlmView() {
+    // RLM view sessions render the trace viewer, not a transcript. They have
+    // no SSE stream and /status carries no event_seq for them, so the seq
+    // reconciler would misread them as "server restarted" and a soft reload
+    // would wipe the viewer mid-watch. The viewer polls its own endpoint.
+    return (state.sessions || []).find(s => s.id === state.sid)?.session_type === 'rlm';
+}
+
 async function _softReload() {
-    if (!state.sid) return;
+    if (!state.sid || _isRlmView()) return;
     console.info('SSE: soft reload triggered (gap detected or reconciliation)');
     // loadMessages() clears and re-renders the DOM, which detaches any live
     // _streamingEl reference. Reset it unconditionally so the next stream.token
@@ -2172,7 +2181,7 @@ async function _softReload() {
 
 async function _reconcile() {
     // Lightweight check: compare server event_seq with client _lastSeq
-    if (!state.sid || state.streaming) return;  // Don't reconcile mid-stream
+    if (!state.sid || state.streaming || _isRlmView()) return;  // no stream (or no transcript) to reconcile
     try {
         const status = await get(`/api/sessions/${state.sid}/status`);
         const serverSeq = status.event_seq || 0;
