@@ -336,3 +336,16 @@ async def test_journal_prune_keeps_window_and_today(store, dream_on, monkeypatch
     assert deleted == 1
     remaining = [s for s in db.list_sessions(limit=50) if s.get("session_type") == "snooze"]
     assert len(remaining) == 1 and "2020" not in remaining[0]["title"]
+
+
+def test_journal_listener_filters_routine_noise():
+    from core.dream.journal import event_line
+
+    # Routine ladder lines and healthy cycle completions stay out.
+    assert event_line({"type": "snooze.start", "activity": "cycle"}) is None
+    assert event_line({"type": "snooze.activity", "activity": "dedup", "detail": "x"}) is None
+    assert event_line({"type": "snooze.done", "duration_ms": 1000, "outcome": "ran"}) is None
+    # The dream step marker and anomalous outcomes are recorded.
+    assert "Dreaming" in event_line({"type": "snooze.activity", "activity": "dream", "detail": "Dreaming: x"})
+    assert "yielded" in event_line({"type": "snooze.done", "duration_ms": 9000, "outcome": "yielded"})
+    assert "backstop" in event_line({"type": "snooze.done", "duration_ms": 9000, "outcome": "backstop"})
