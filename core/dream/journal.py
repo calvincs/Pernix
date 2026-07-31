@@ -75,9 +75,7 @@ def prune_old_journals_sync() -> int:
     touches today's. Sync — call via to_thread. Returns count deleted."""
     from datetime import timedelta
 
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=max(2, settings.dream_journal_retention_days))
-    ).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(2, settings.dream_journal_retention_days))).isoformat()
     today_title = f"Dream journal — {datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d')}"
     deleted = 0
     try:

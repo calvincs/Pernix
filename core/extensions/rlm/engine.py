@@ -51,6 +51,10 @@ RootChatFn = Callable[[list[dict], float], str]
 ROOT_HISTORY_MAX_CHARS = 400_000
 # Skip the final synthesis call when less wall clock than this remains.
 MIN_SYNTHESIS_SECONDS = 30.0
+# Liveness pulse cadence while a root call / cell is in flight. Heartbeats go
+# to progress_fn only, never trace.jsonl — the trace records signal (what the
+# run did), not the fact that time passed (dream journal precedent).
+HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 _SYNTHESIS_MSG = {
     "role": "user",
@@ -80,6 +84,7 @@ class RLMEngine:
         deadline: float | None = None,
         on_child_spawn: Callable | None = None,
         rlm_fn: Callable[[str, str | None], str] | None = None,
+        progress_fn: Callable[[dict], None] | None = None,
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -102,12 +107,18 @@ class RLMEngine:
         # llm_query (the broker's fallback). Settable after construction so the
         # tool glue can close over this engine when building the callback.
         self.rlm_fn = rlm_fn
+        # Live-progress seam: called (best-effort, any thread) with every trace
+        # event plus periodic {"type": "heartbeat"} pulses. The tool glue uses
+        # it to feed SSE + mid-run DB counters; None = fully silent (tests,
+        # dream probe, nested runs).
+        self._progress_fn = progress_fn
         # Set at run() start; nested runs share the remaining wall clock.
         self.deadline: float | None = None
         self._trace_lock = threading.Lock()
         self._trace_fh = None
         self._best_partial: str | None = None
         self._iterations = 0
+        self._heartbeat_stop: threading.Event | None = None
 
     # ---- public API ----
 
@@ -139,6 +150,7 @@ class RLMEngine:
         result: RLMRunResult | None = None
         try:
             broker.start()
+            self._start_heartbeat(broker, start)
             child.start()
             if self._on_child_spawn is not None and child.popen is not None:
                 self._on_child_spawn(child.popen)
@@ -153,6 +165,8 @@ class RLMEngine:
         except RLMRunError as e:  # RLMChildDied, root-call failures
             result = self._salvage("failed", e, start)
         finally:
+            if self._heartbeat_stop is not None:
+                self._heartbeat_stop.set()
             child.cleanup()
             broker.stop()
             if result is not None:
@@ -316,15 +330,51 @@ class RLMEngine:
         )
 
     def _trace(self, event: dict) -> None:
-        if self._trace_fh is None:
-            return
         event = {"ts": round(time.time(), 3), "depth": self.depth, **event}
-        with self._trace_lock:
-            try:
-                self._trace_fh.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
-                self._trace_fh.flush()
-            except (OSError, ValueError):
-                pass  # trace is best-effort; never fail the run over it
+        if self._trace_fh is not None:
+            with self._trace_lock:
+                try:
+                    self._trace_fh.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+                    self._trace_fh.flush()
+                except (OSError, ValueError):
+                    pass  # trace is best-effort; never fail the run over it
+        self._emit_progress(event)
+
+    def _emit_progress(self, event: dict) -> None:
+        if self._progress_fn is None:
+            return
+        try:
+            self._progress_fn(event)
+        except Exception:  # progress is observability, never control flow
+            logger.debug("RLM progress_fn failed", exc_info=True)
+
+    def _start_heartbeat(self, broker: LLMBroker, start: float) -> None:
+        """Periodic liveness pulse while progress consumers are attached.
+
+        Trace events land only when a step *completes*, so a 3-minute cell or
+        slow root call otherwise reads as frozen. The pulse carries the
+        broker's live counters (the one place all delegated work is visible).
+        """
+        if self._progress_fn is None:
+            return
+        stop = self._heartbeat_stop = threading.Event()
+
+        def _beat() -> None:
+            while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+                self._emit_progress(
+                    {
+                        "ts": round(time.time(), 3),
+                        "depth": self.depth,
+                        "type": "heartbeat",
+                        "iteration": self._iterations,
+                        "subcalls": self.ledger.count,
+                        "in_flight": broker.in_flight(),
+                        "quiet_seconds": round(max(0.0, time.monotonic() - broker.last_activity()), 1),
+                        "elapsed": round(time.monotonic() - start, 1),
+                    }
+                )
+
+        threading.Thread(target=_beat, name="rlm-heartbeat", daemon=True).start()
 
     def _finalize_trace(self) -> None:
         with self._trace_lock:

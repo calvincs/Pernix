@@ -156,7 +156,8 @@ async def test_push_public_key():
     app = _make_app(push.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/push/vapid-public-key")
-    assert resp.status_code in (200, 404)
+    # 503 = VAPID not configured (the endpoint's no-config response)
+    assert resp.status_code in (200, 503)
 
 
 # ===========================================================================
@@ -170,7 +171,8 @@ async def test_settings_access_qr():
     app = _make_app(health.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/settings/access-qr")
-    assert resp.status_code in (200, 403)
+    # 404 = network mode disabled; 403 = auth middleware in a full app
+    assert resp.status_code in (200, 403, 404)
 
 
 # ===========================================================================

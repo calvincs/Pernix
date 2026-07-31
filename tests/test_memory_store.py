@@ -588,7 +588,12 @@ def test_inferred_tags_survive_markdown_roundtrip(store):
 
 def test_at_tags_filter_is_real(store):
     store.add_entry("Deploy notes for the alpha service revision batch.", file_name="ops.notes", tags="deploy,alpha")
-    store.add_entry("Deploy notes for the beta service revision batch two.", file_name="ops.notes", tags="deploy,beta", skip_dedup=True)
+    store.add_entry(
+        "Deploy notes for the beta service revision batch two.",
+        file_name="ops.notes",
+        tags="deploy,beta",
+        skip_dedup=True,
+    )
     hits = store.search("deploy notes @tags: beta", mode="bm25", limit=5)
     assert len(hits) == 1 and "beta" in hits[0].entry.tags
     only_tag = store.search("@tags: alpha", mode="bm25", limit=5)

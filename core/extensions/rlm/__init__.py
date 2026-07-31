@@ -15,6 +15,7 @@ call time so a hot toggle-off degrades to a clear error, never a run.
 
 import asyncio
 import logging
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -94,6 +95,134 @@ def _resolve_sources(source) -> tuple[str | None, list[Path], str]:
     return None, files, ", ".join(f.name for f in files)
 
 
+def _emit_session_event(sid: str, event: dict) -> None:
+    """Best-effort SSE emit onto the parent session's stream. Safe from any
+    thread — manager.emit → session.emit_event marshals delivery onto the
+    event loop (the same path worker.started/done use). No-ops when the
+    session is not resident (it always is mid-turn) or on any failure:
+    observability never breaks a run."""
+    if not sid:
+        return
+    try:
+        from sessions.manager import get_manager
+
+        get_manager().emit(sid, event)
+    except Exception:
+        logger.debug("rlm: failed to emit %s event", event.get("type"), exc_info=True)
+
+
+def _first_line(s: str, limit: int = 140) -> str:
+    stripped = (s or "").strip()
+    return stripped.splitlines()[0][:limit] if stripped else ""
+
+
+def _activity_detail(etype: str, event: dict) -> str | None:
+    """One human-readable line per trace event for the chip/strip UI."""
+    if etype == "root":
+        return _first_line(event.get("response_preview", ""))
+    if etype == "cell":
+        tag = "final answer" if event.get("final") else f"{event.get('duration', 0)}s"
+        return f"{_first_line(event.get('code', ''))} · {tag}"
+    if etype == "subcall":
+        model = event.get("model") or "sub-model"
+        outcome = "ok" if event.get("ok") else f"error: {_first_line(event.get('error', ''), 60)}"
+        return f"{model} · {outcome} · {event.get('duration', 0)}s"
+    if etype == "notice":
+        return str(event.get("notice", ""))
+    if etype == "synthesis":
+        return "synthesizing final answer"
+    return None
+
+
+def _make_progress_fn(run_id: str, ui_session_id: str | None, sid: str):
+    """Fan trace events out to the parent session's SSE stream and keep the
+    run row's counters live. Called from the engine thread (root/cell), broker
+    handler threads (subcall), and the heartbeat thread — hence the lock.
+    Nested engines get no progress_fn, so every event here is depth 0."""
+    lock = threading.Lock()
+    counters = {"iterations": 0, "subcalls": 0}
+
+    def progress_fn(event: dict) -> None:
+        etype = event.get("type", "")
+        with lock:
+            if etype == "root":
+                counters["iterations"] = int(event.get("iteration", 0)) + 1
+            elif etype == "subcall":
+                counters["subcalls"] += 1
+            iterations, subcalls = counters["iterations"], counters["subcalls"]
+        if etype in ("root", "subcall"):
+            try:
+                db.update_rlm_run_progress(run_id, iterations, subcalls)
+            except Exception:
+                logger.debug("rlm: progress row update failed for %s", run_id, exc_info=True)
+        if not sid:
+            return
+        if etype == "heartbeat":
+            _emit_session_event(
+                sid,
+                {
+                    "type": "rlm.heartbeat",
+                    "run_id": run_id,
+                    "ui_session_id": ui_session_id,
+                    "iterations": event.get("iteration", iterations),
+                    "subcalls": event.get("subcalls", subcalls),
+                    "in_flight": event.get("in_flight", 0),
+                    "quiet_seconds": event.get("quiet_seconds", 0),
+                    "elapsed": event.get("elapsed", 0),
+                },
+            )
+            return
+        if etype == "end":
+            return  # rlm.done (emitted by the tool with the full result) covers it
+        detail = _activity_detail(etype, event)
+        if detail is None:
+            return
+        _emit_session_event(
+            sid,
+            {
+                "type": "rlm.activity",
+                "run_id": run_id,
+                "ui_session_id": ui_session_id,
+                "kind": etype,
+                "iteration": event.get("iteration"),
+                "detail": detail,
+                "iterations": iterations,
+                "subcalls": subcalls,
+            },
+        )
+
+    return progress_fn
+
+
+def _finalize_run_ui(sid: str, ui_session_id: str | None, run_id: str, result: RLMRunResult) -> None:
+    """Park the sidebar view session and tell the parent stream the run ended."""
+    if ui_session_id:
+        try:
+            db.update_session(
+                ui_session_id,
+                state="idle",
+                subtitle=(
+                    f"{result.status} · {result.iterations} it · " f"{result.subcalls} calls · {result.duration:.0f}s"
+                ),
+            )
+        except Exception:
+            logger.debug("rlm: could not finalize view session %s", ui_session_id, exc_info=True)
+    _emit_session_event(
+        sid,
+        {
+            "type": "rlm.done",
+            "run_id": run_id,
+            "ui_session_id": ui_session_id,
+            "status": result.status,
+            "iterations": result.iterations,
+            "subcalls": result.subcalls,
+            "duration": round(result.duration, 1),
+            "partial": result.partial,
+            "error": (result.error or "")[:300],
+        },
+    )
+
+
 def _make_rlm_fn(*, parent_engine, parent_run_id, depth, chat, sub_model, allowed, caps, cancel_check, session_id):
     """Build the broker's rlm_query callback: run a nested engine (own child
     process, nested run dir, shared ledger, remaining deadline) at depth+1.
@@ -147,6 +276,7 @@ def _make_rlm_fn(*, parent_engine, parent_run_id, depth, chat, sub_model, allowe
             input_chars=staged.total_chars,
             parent_run_id=parent_run_id,
             depth=child_depth,
+            caps=caps,
         )
         try:
             result = nested.run()
@@ -255,6 +385,24 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
     except OSError as e:
         return f"Error: failed to stage source into the run dir: {e}"
 
+    # Sidebar anchor: a message-less session_type='rlm' child of the calling
+    # session, so the run nests under its parent like a worker. Pure navigation
+    # chrome — the run's content stays on disk; the viewer reads it via
+    # /api/rlm/runs/*. DB-only on purpose: a resident AgentSession could never
+    # run a turn and would only clutter the manager/reaper.
+    ui_session_id = None
+    if sid:
+        try:
+            ui_session_id = db.create_session(
+                title=f"RLM: {' '.join(task.split())[:60]}",
+                session_type="rlm",
+                parent_session_id=sid,
+            )
+            db.update_session(ui_session_id, state="processing", subtitle=source_desc[:200])
+        except Exception:
+            logger.exception("rlm_process: could not create RLM view session")
+            ui_session_id = None
+
     runs.record_start(
         run_id,
         run_dir,
@@ -265,6 +413,23 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
         root_model=root_model,
         sub_model=sub_model,
         input_chars=staged.total_chars,
+        ui_session_id=ui_session_id,
+        caps=caps,
+    )
+    _emit_session_event(
+        sid,
+        {
+            "type": "rlm.started",
+            "run_id": run_id,
+            "ui_session_id": ui_session_id,
+            "task_preview": task[:140],
+            "source": source_desc,
+            "root_model": root_model,
+            "sub_model": sub_model,
+            "max_iterations": caps.max_iterations,
+            "max_subcalls": caps.max_subcalls,
+            "timeout_seconds": caps.timeout_seconds,
+        },
     )
     engine = RLMEngine(
         run_dir=run_dir,
@@ -277,6 +442,7 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
         allowed_models=allowed,
         cancel_check=cancel_check,
         on_child_spawn=on_child_spawn,
+        progress_fn=_make_progress_fn(run_id, ui_session_id, sid),
     )
     if settings.rlm_max_depth > 1:
         engine.rlm_fn = _make_rlm_fn(
@@ -303,12 +469,14 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
             error=str(e),
         )
         runs.record_finish(run_id, run_dir, result)
+        _finalize_run_ui(sid, ui_session_id, run_id, result)
         return f"Error: RLM run {run_id} failed to start — {e}"
     finally:
         if session is not None:
             session._active_process = None
 
     runs.record_finish(run_id, run_dir, result)
+    _finalize_run_ui(sid, ui_session_id, run_id, result)
 
     header = (
         f"[RLM run {run_id}: {result.status}, {result.iterations} iterations, "

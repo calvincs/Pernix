@@ -54,7 +54,12 @@ def test_probe_due_gates(probe_on, monkeypatch):
 
 async def test_ingest_resolves_refs_and_filters(store, probe_on):
     store.add_entry("Server X claims port 8080 in the deployment guide notes.", file_name="deploy.guide", epoch=100)
-    store.add_entry("Server X claims port 9090 in the runbook, which differs.", file_name="runbook.ports", epoch=200, skip_dedup=True)
+    store.add_entry(
+        "Server X claims port 9090 in the runbook, which differs.",
+        file_name="runbook.ports",
+        epoch=200,
+        skip_dedup=True,
+    )
 
     answer = json.dumps(
         {

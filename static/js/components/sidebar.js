@@ -12,7 +12,11 @@ const SESSION_TYPES = {
     cron:   { label: 'Cron',   cls: 'cron',   color: 'var(--info)' },
     worker: { label: 'Worker', cls: 'worker', color: 'var(--teal-dim)' },
     snooze: { label: 'Dream',  cls: 'snooze', color: 'var(--dream)' },
+    rlm:    { label: 'RLM',    cls: 'rlm',    color: 'var(--rlm)' },
 };
+
+// Types that nest under their parent session instead of the top-level list.
+const CHILD_TYPES = new Set(['worker', 'rlm']);
 
 // ---------------------------------------------------------------------------
 // State
@@ -149,24 +153,24 @@ export function renderSessionList(sessions, activeSid) {
     const sidebarState = _loadState();
     const hidden = sidebarState.hiddenTypes || {};
 
-    // Separate top-level from workers, apply type filter
-    const allTopLevel = sessions.filter(s => s.session_type !== 'worker');
-    const allWorkers = sessions.filter(s => s.session_type === 'worker');
+    // Separate top-level from child sessions (workers, RLM runs), apply type filter
+    const allTopLevel = sessions.filter(s => !CHILD_TYPES.has(s.session_type));
+    const allChildren = sessions.filter(s => CHILD_TYPES.has(s.session_type));
 
     // Count all types (before filtering) for legend
-    const counts = { chat: 0, cron: 0, worker: 0, snooze: 0 };
+    const counts = { chat: 0, cron: 0, worker: 0, snooze: 0, rlm: 0 };
     for (const s of sessions) counts[_getTypeKey(s)]++;
     _updateLegendCounts(counts);
 
     // Filter by hidden types
     const topLevel = allTopLevel.filter(s => !hidden[_getTypeKey(s)]);
-    const workers = allWorkers.filter(s => !hidden.worker);
+    const children = allChildren.filter(s => !hidden[_getTypeKey(s)]);
 
-    const workersByParent = {};
-    for (const w of workers) {
-        const pid = w.parent_session_id || '_orphan';
-        if (!workersByParent[pid]) workersByParent[pid] = [];
-        workersByParent[pid].push(w);
+    const childrenByParent = {};
+    for (const c of children) {
+        const pid = c.parent_session_id || '_orphan';
+        if (!childrenByParent[pid]) childrenByParent[pid] = [];
+        childrenByParent[pid].push(c);
     }
 
     // Bucket by time group — pinned sessions get their own group on top.
@@ -190,7 +194,7 @@ export function renderSessionList(sessions, activeSid) {
         if (!group.length) continue;
 
         const hasActive = group.some(s => s.id === activeSid) ||
-            group.some(s => (workersByParent[s.id] || []).some(w => w.id === activeSid));
+            group.some(s => (childrenByParent[s.id] || []).some(w => w.id === activeSid));
         // User's saved choice wins over hasActive — otherwise clicking to
         // collapse the group containing the active session "un-toggles"
         // itself on the next SSE redraw because hasActive forces uncollapsed.
@@ -216,16 +220,16 @@ export function renderSessionList(sessions, activeSid) {
         });
 
         for (const s of group) {
-            _renderSessionWithWorkers(s, body, activeSid, workersByParent, sidebarState);
+            _renderSessionWithWorkers(s, body, activeSid, childrenByParent, sidebarState);
         }
 
         list.appendChild(header);
         list.appendChild(body);
     }
 
-    // Orphaned workers
+    // Orphaned children (parent filtered out or missing)
     const renderedParents = new Set(topLevel.map(s => s.id));
-    for (const [pid, ws] of Object.entries(workersByParent)) {
+    for (const [pid, ws] of Object.entries(childrenByParent)) {
         if (pid === '_orphan' || !renderedParents.has(pid)) {
             for (const w of ws) {
                 _renderSessionItem(w, list, activeSid, true);
@@ -243,6 +247,7 @@ export function renderSessionList(sessions, activeSid) {
 function _getTypeKey(session) {
     if (session.session_type === 'worker') return 'worker';
     if (session.session_type === 'snooze') return 'snooze';
+    if (session.session_type === 'rlm') return 'rlm';
     if (session.title && session.title.startsWith('Cron:')) return 'cron';
     return 'chat';
 }
@@ -251,20 +256,25 @@ function _getTypeKey(session) {
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
-function _renderSessionWithWorkers(session, container, activeSid, workersByParent, sidebarState) {
+function _renderSessionWithWorkers(session, container, activeSid, childrenByParent, sidebarState) {
     _renderSessionItem(session, container, activeSid, false);
 
-    const children = workersByParent[session.id];
+    const children = childrenByParent[session.id];
     if (!children || children.length === 0) return;
 
-    delete workersByParent[session.id];
+    delete childrenByParent[session.id];
 
     const wasCollapsed = sidebarState.parentCollapsed?.[session.id];
     const collapsed = wasCollapsed ?? true;
 
+    const nWorkers = children.filter(c => c.session_type === 'worker').length;
+    const nRlm = children.length - nWorkers;
+    const parts = [];
+    if (nWorkers) parts.push(`${nWorkers} worker${nWorkers > 1 ? 's' : ''}`);
+    if (nRlm) parts.push(`${nRlm} RLM run${nRlm > 1 ? 's' : ''}`);
     const summary = el('div', { class: 'worker-summary' + (collapsed ? ' collapsed' : '') }, [
         el('span', { class: 'ws-arrow' }, [text('\u25BC')]),
-        text(`${children.length} worker${children.length > 1 ? 's' : ''}`),
+        text(parts.join(' \u00B7 ')),
     ]);
 
     const group = el('div', { class: 'worker-group' + (collapsed ? ' collapsed' : '') });
@@ -365,6 +375,10 @@ function _renderSessionItem(session, container, activeSid, isWorker) {
     if (titleText.startsWith('Cron: ') && typeKey === 'cron') {
         titleText = titleText.slice(6);
     }
+    // Strip "RLM: " prefix — the dot carries the type; the rest is the task.
+    if (typeKey === 'rlm' && titleText.startsWith('RLM: ')) {
+        titleText = titleText.slice(5);
+    }
     // Journal titles read as "Dream Jul 31" — the shorthand carries the
     // meaning, the dot carries the color.
     if (typeKey === 'snooze' && titleText.startsWith('Dream journal — ')) {
@@ -379,6 +393,7 @@ function _renderSessionItem(session, container, activeSid, isWorker) {
     if (isWorker) classes.push('worker');
     if (typeKey === 'cron') classes.push('cron-session');
     if (typeKey === 'snooze') classes.push('snooze-session');
+    if (typeKey === 'rlm') classes.push('rlm-session');
 
     // Title with colored dot prefix
     const titleChildren = [];

@@ -28,7 +28,9 @@ async def create_session(body: dict = {}):
 
 @router.get("/api/sessions")
 async def list_sessions(limit: int = 50, offset: int = 0):
-    sessions = db.list_sessions_enriched(limit=limit, offset=offset)
+    from sessions.policy import annotate_read_only
+
+    sessions = [annotate_read_only(s) for s in db.list_sessions_enriched(limit=limit, offset=offset)]
     return {"items": sessions, "count": len(sessions)}
 
 
@@ -96,6 +98,9 @@ async def get_session(session_id: str, limit: int | None = None):
         raise HTTPException(404, detail=f"Session {session_id} not found")
     import asyncio as _asyncio
 
+    from sessions.policy import annotate_read_only
+
+    annotate_read_only(session)
     messages = await _asyncio.to_thread(db.get_messages, session_id, limit)
     total = db.count_messages(session_id) if limit is not None else len(messages)
     return {**session, "messages": messages, "total_messages": total, "has_more": total > len(messages)}
