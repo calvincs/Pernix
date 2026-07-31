@@ -221,11 +221,14 @@ def _run_engine_blocking(bundle: str, file_count: int, loop: asyncio.AbstractEve
 
     run_id, run_dir, run_rel = runs.mint_run_dir()
     staged = stage_context(run_dir, text=bundle)
+    # Iterations sized from observed completed runs on real corpora (5-11
+    # iterations under the tool's cap of 20): 8 proved too tight — the root
+    # spends early turns exploring the corpus structure before analyzing.
     caps = RLMCaps(
-        max_iterations=8,
+        max_iterations=14,
         max_subcalls=12,
         max_concurrent_subcalls=2,
-        timeout_seconds=600.0,
+        timeout_seconds=900.0,
         max_depth=1,
     )
     runs.record_start(
