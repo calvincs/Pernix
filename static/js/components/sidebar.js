@@ -154,7 +154,7 @@ export function renderSessionList(sessions, activeSid) {
     const allWorkers = sessions.filter(s => s.session_type === 'worker');
 
     // Count all types (before filtering) for legend
-    const counts = { chat: 0, cron: 0, worker: 0 };
+    const counts = { chat: 0, cron: 0, worker: 0, snooze: 0 };
     for (const s of sessions) counts[_getTypeKey(s)]++;
     _updateLegendCounts(counts);
 
@@ -178,7 +178,11 @@ export function renderSessionList(sessions, activeSid) {
     // Within each group: real conversations first, auto-created cron
     // sessions after — a busy schedule otherwise crowds chats out of view.
     for (const g of GROUP_ORDER) {
-        buckets[g].sort((a, b) => (_getTypeKey(a) === 'cron' ? 1 : 0) - (_getTypeKey(b) === 'cron' ? 1 : 0));
+        buckets[g].sort(
+            (a, b) =>
+                (['cron', 'snooze'].includes(_getTypeKey(a)) ? 1 : 0) -
+                (['cron', 'snooze'].includes(_getTypeKey(b)) ? 1 : 0)
+        );
     }
 
     for (const label of GROUP_ORDER) {
@@ -361,11 +365,16 @@ function _renderSessionItem(session, container, activeSid, isWorker) {
     if (titleText.startsWith('Cron: ') && typeKey === 'cron') {
         titleText = titleText.slice(6);
     }
+    // Same for the journal: "Dream journal — 2026-07-31" reads as its date
+    if (typeKey === 'snooze' && titleText.startsWith('Dream journal — ')) {
+        titleText = titleText.slice(16);
+    }
 
     const classes = ['session-item'];
     if (session.id === activeSid) classes.push('active');
     if (isWorker) classes.push('worker');
     if (typeKey === 'cron') classes.push('cron-session');
+    if (typeKey === 'snooze') classes.push('snooze-session');
 
     // Title with colored dot prefix
     const titleChildren = [];

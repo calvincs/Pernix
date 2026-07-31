@@ -171,6 +171,8 @@
 /* Auto-created cron sessions — present but de-emphasized */
 .session-item.cron-session:not(.active) { opacity: 0.6; }
 .session-item.cron-session:not(.active):hover { opacity: 1; }
+.session-item.snooze-session:not(.active) { opacity: 0.6; }
+.session-item.snooze-session:not(.active):hover { opacity: 1; }
 
 .session-delete.confirm {
     opacity: 1;
@@ -244,6 +246,7 @@
 .session-dot.chat   { background: var(--accent); }
 .session-dot.cron   { background: var(--info); }
 .session-dot.worker { background: var(--teal-dim); }
+.session-dot.snooze { background: var(--warning); }
 .session-dot.active-pulse { animation: dot-pulse 1.2s ease-in-out infinite; }
 @keyframes dot-pulse {
     0%, 100% { opacity: 1; }
@@ -323,6 +326,7 @@
 .legend-dot.chat   { background: var(--accent); }
 .legend-dot.cron   { background: var(--info); }
 .legend-dot.worker { background: var(--teal-dim); }
+.legend-dot.snooze { background: var(--warning); }
 
 .legend-label {
     letter-spacing: 0.03em;
