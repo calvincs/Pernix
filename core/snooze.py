@@ -138,10 +138,15 @@ class SnoozeRunner:
     # idle-but-unchanged system.
     _MIN_CYCLE_INTERVAL_SEC = 900  # 15 min
 
-    async def run_cycle(self) -> None:
-        """Run one Snooze cycle. Called by maintenance heartbeat."""
+    async def run_cycle(self, force: bool = False) -> str:
+        """Run one Snooze cycle. Called by maintenance heartbeat.
+
+        force=True skips only the cadence check (used by the localhost admin
+        trigger for testing) — the active-work and idle gates still apply.
+        Returns a reason string; existing callers ignore it.
+        """
         if not settings.snooze_enabled:
-            return
+            return "disabled"
 
         # Explicit active-work gate. Do NOT clear _activity_since_last_cycle
         # here — we want snooze to run at the next opportunity once things
@@ -152,20 +157,20 @@ class SnoozeRunner:
             if get_manager().has_active_work():
                 self._stats["cycles_skipped"] += 1
                 logger.debug("Snooze: skipping (active session or worker)")
-                return
+                return "skipped_active"
         except Exception:
             # Don't let a manager import failure kill snooze.
             pass
 
         if not self._is_idle():
-            return
+            return "skipped_idle"
 
         # Skip if no activity since last cycle and last run was recent.
-        if not self._activity_since_last_cycle:
+        if not force and not self._activity_since_last_cycle:
             if self._last_cycle_time and (time.time() - self._last_cycle_time < self._MIN_CYCLE_INTERVAL_SEC):
                 self._stats["cycles_skipped"] += 1
                 logger.debug("Snooze: no activity since last cycle, skipping")
-                return
+                return "skipped_cadence"
 
         # Capture current cancel generation. Any request_cancel() that fired
         # before this point will make _is_cancelled() return True immediately.
@@ -205,6 +210,7 @@ class SnoozeRunner:
             duration_ms = int((time.time() - _start) * 1000)
             bus.emit({"type": "snooze.done", "duration_ms": duration_ms, "stats": {**self._stats}})
             logger.info("Snooze cycle complete (stats: %s)", self._stats)
+        return "ran"
 
     async def _do_cycle(self) -> None:
         """Execute activities in priority order."""
@@ -417,6 +423,23 @@ class SnoozeRunner:
                     }
                 )
                 await self._refine_one_session()
+
+        # Activity 14: Dream step — idle-time introspection (core/dream).
+        # Runs independent of did_llm like refine: one bounded unit per cycle
+        # (a validation OR a hypothesis-generation call), watermarked in
+        # snooze_state under dream_* keys. Gated on dream_enabled — fully
+        # absent from the cycle when off.
+        if not self._is_cancelled() and settings.dream_enabled:
+            can_llm = self._llm_available() and bool(settings.background_model or settings.llm_model)
+            if can_llm:
+                bus.emit(
+                    {
+                        "type": "snooze.activity",
+                        "activity": "dream",
+                        "detail": "Dreaming: examining memory and outcome evidence for hypotheses",
+                    }
+                )
+                await self._dream_step()
 
     # ------------------------------------------------------------------
     # Activity 1: Catch-up distillation
@@ -2280,6 +2303,24 @@ Output valid JSON only. No markdown fences. /no_think"""
                 logger.info("Snooze candor maintenance: %s", stats)
         except Exception as e:
             logger.warning("Snooze candor maintenance failed: %s", e)
+
+    # ------------------------------------------------------------------
+    # Activity 14: Dream step (idle-time introspection — core/dream)
+    # ------------------------------------------------------------------
+
+    async def _dream_step(self) -> None:
+        """One bounded dream unit: validate a pending hypothesis or generate
+        new ones, then write the periodic report when due. Never raises."""
+        try:
+            from core.dream import run_step
+
+            result = await run_step(self._is_cancelled)
+            for key in ("dream_hypotheses", "dream_validated", "dream_refuted", "dream_expired", "dream_reports"):
+                if result.get(key):
+                    self._stats.setdefault(key, 0)
+                    self._stats[key] += result[key]
+        except Exception as e:
+            logger.warning("Snooze dream step failed: %s", e)
 
 
 # ---------------------------------------------------------------------------

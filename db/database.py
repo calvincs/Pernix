@@ -612,6 +612,44 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_rlm_runs_created ON rlm_runs(created_at)",
         ],
     ),
+    (
+        19,
+        "add dream_hypotheses + dream_reports for idle-time introspection",
+        [
+            # Sidecar state for the dream add-on (core/dream, docs/dev/
+            # dream-plan.md). Hypotheses reference their evidence by value
+            # (evidence_json carries content hashes), never by annotating the
+            # memory markdown — memory stays untouched. status lifecycle:
+            # pending -> validated | refuted | expired -> promoted | archived.
+            # Dropping both tables is safe (nothing else joins to them);
+            # watermarks live in snooze_state under dream_* keys.
+            """CREATE TABLE IF NOT EXISTS dream_hypotheses (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                statement TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                validation_json TEXT,
+                promoted_ref TEXT,
+                origin TEXT NOT NULL DEFAULT 'dream_cycle',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_dream_hyp_status
+           ON dream_hypotheses(status, created_at DESC)""",
+            "CREATE INDEX IF NOT EXISTS idx_dream_hyp_kind ON dream_hypotheses(kind, status)",
+            """CREATE TABLE IF NOT EXISTS dream_reports (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                path TEXT NOT NULL,
+                stats_json TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_dream_reports_created ON dream_reports(created_at DESC)",
+        ],
+    ),
 ]
 
 

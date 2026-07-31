@@ -121,6 +121,16 @@ const SECTIONS = [
         ],
     },
     {
+        title: 'Dream (Introspection)',
+        description: 'Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems, generates typed hypotheses about itself (contradictions, stale lessons, tool patterns), validates them against recorded outcomes, and writes a periodic dream report to workspace/dreams/. Hypotheses influence nothing until validated; replays/day bounds the counterfactual scout-replay spend (0 disables replay). All settings apply immediately.',
+        fields: [
+            { key: 'dream_enabled', label: 'Dreaming Enabled', type: 'bool' },
+            { key: 'dream_hypotheses_per_cycle', label: 'Max Hypotheses / Step', type: 'number' },
+            { key: 'dream_validation_replays_per_day', label: 'Scout Replays / Day', type: 'number' },
+            { key: 'dream_report_interval_days', label: 'Report Interval (days)', type: 'number' },
+        ],
+    },
+    {
         title: 'Reflect',
         description: 'Post-task verification re-reads the agent\'s work and checks for mistakes or incomplete steps. If issues are found, the agent retries automatically. Min messages prevents reflect from firing on trivial exchanges.',
         fields: [

@@ -382,6 +382,28 @@ class CandorBridge:
         return self._brief_cache
 
     # ------------------------------------------------------------------
+    # Async reads for the dream add-on (loop-safe; core/dream only)
+    # ------------------------------------------------------------------
+
+    async def predict(self, pred: str, args: list) -> dict | None:
+        """Loop-safe twin of predict_sync for background (snooze) callers."""
+
+        def _impl(system, pred, args):
+            from core.extensions.candor.intel import describe_prediction
+
+            return describe_prediction(system, pred, args)
+
+        return await self._submit(_impl, pred, args)
+
+    async def health_snapshot(self) -> dict | None:
+        """Candor's own health() report — calibration, invariants, queue depth."""
+
+        def _impl(system):
+            return system.health()
+
+        return await self._submit(_impl)
+
+    # ------------------------------------------------------------------
     # Sync reads for agent tools (tool-executor threads only)
     # ------------------------------------------------------------------
 

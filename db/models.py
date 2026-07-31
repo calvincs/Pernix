@@ -1926,3 +1926,130 @@ def get_db_stats() -> dict:
         page_size = row[0] if row else 4096
         tables["db_size_bytes"] = page_count * page_size
     return tables
+
+
+# ---------------------------------------------------------------------------
+# Dream (idle-time introspection add-on — core/dream)
+# ---------------------------------------------------------------------------
+
+DREAM_HYPOTHESIS_KINDS = frozenset(
+    {"contradiction", "lesson_ineffective", "tool_pattern", "memory_stale", "open_question"}
+)
+DREAM_HYPOTHESIS_STATUSES = frozenset(
+    {"pending", "validated", "refuted", "expired", "promoted", "archived"}
+)
+
+
+def add_dream_hypothesis(
+    kind: str,
+    statement: str,
+    evidence_json: str,
+    origin: str = "dream_cycle",
+    confidence: float = 0.0,
+) -> str:
+    """Insert a dream hypothesis (status=pending). Returns id."""
+    hid = _new_id()
+    now = _now()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO dream_hypotheses
+               (id, kind, statement, evidence_json, status, confidence, origin,
+                created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
+            (hid, kind, statement, evidence_json, float(confidence), origin, now, now),
+        )
+    return hid
+
+
+def list_dream_hypotheses(
+    status: str | None = None,
+    kind: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    clauses = []
+    params: list = []
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if kind:
+        clauses.append("kind = ?")
+        params.append(kind)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(limit)
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM dream_hypotheses {where} ORDER BY created_at DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_dream_hypothesis(
+    hypothesis_id: str,
+    *,
+    status: str | None = None,
+    confidence: float | None = None,
+    validation_json: str | None = None,
+    promoted_ref: str | None = None,
+) -> bool:
+    """Update mutable fields on a hypothesis. Returns True if a row changed."""
+    sets = ["updated_at = ?"]
+    params: list = [_now()]
+    if status is not None:
+        if status not in DREAM_HYPOTHESIS_STATUSES:
+            raise ValueError(f"invalid dream hypothesis status: {status}")
+        sets.append("status = ?")
+        params.append(status)
+    if confidence is not None:
+        sets.append("confidence = ?")
+        params.append(float(confidence))
+    if validation_json is not None:
+        sets.append("validation_json = ?")
+        params.append(validation_json)
+    if promoted_ref is not None:
+        sets.append("promoted_ref = ?")
+        params.append(promoted_ref)
+    params.append(hypothesis_id)
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            f"UPDATE dream_hypotheses SET {', '.join(sets)} WHERE id = ?",
+            params,
+        )
+        return cur.rowcount > 0
+
+
+def add_dream_report(period_start: str, period_end: str, path: str, stats_json: str) -> str:
+    """Insert a dream report row. Returns id."""
+    rid = _new_id()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO dream_reports (id, created_at, period_start, period_end, path, stats_json)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (rid, _now(), period_start, period_end, path, stats_json),
+        )
+    return rid
+
+
+def list_dream_reports(limit: int = 20) -> list[dict]:
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM dream_reports ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_post_mortems_since(created_after: str, limit: int = 20) -> list[dict]:
+    """Post-mortems newer than the cursor, oldest first (dream evidence feed)."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM post_mortems WHERE created_at > ? ORDER BY created_at ASC LIMIT ?",
+            (created_after, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_post_mortem(pm_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM post_mortems WHERE id = ?", (pm_id,)).fetchone()
+        return dict(row) if row else None
