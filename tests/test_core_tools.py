@@ -686,3 +686,98 @@ def test_approve_dangerous_tool_fails_without_ask_user(tmp_path, monkeypatch):
     )
     assert "Error" in result
     assert "ask_user" in result
+
+
+# ---------------------------------------------------------------------------
+# ask_user question_type="statement" — informational, must not pause
+# ---------------------------------------------------------------------------
+
+
+def _dialog_session(monkeypatch):
+    """Real manager + session in PROCESSING, wired in as the singleton."""
+    from sessions import state_v2 as sv2
+    from sessions.manager import SessionManager
+
+    mgr = SessionManager()
+    sid = mgr.create_session(title="dialog test")
+    session = mgr.get(sid)
+    sv2.transition(session, sv2.SessionStateV2.SCOUTING, "prompt-arrived")
+    sv2.transition(session, sv2.SessionStateV2.PROCESSING, "scout-done")
+    monkeypatch.setattr("sessions.manager.get_manager", lambda: mgr)
+    return sid, session
+
+
+def test_ask_user_statement_does_not_pause(monkeypatch):
+    """A statement is an FYI: the question panel gets it, but the session must
+    keep running. Regression: session 0dbee64fcd43 suspended on every progress
+    announcement ("I'll retry the cast now…") until the user dismissed it."""
+    from core.tools.builtin.dialog_tools import ask_user
+
+    sid, session = _dialog_session(monkeypatch)
+    result = ask_user(
+        question="I'll retry the cast now.",
+        question_type="statement",
+        _context={"session_id": sid},
+    )
+    assert "NOT paused" in result
+    assert session.waiting_for_input is False
+
+
+def test_ask_user_question_still_pauses(monkeypatch):
+    """The default question_type keeps the pause contract: AWAITING_USER."""
+    from core.tools.builtin.dialog_tools import ask_user
+
+    sid, session = _dialog_session(monkeypatch)
+    result = ask_user(question="Which device should I use?", _context={"session_id": sid})
+    assert "Question posted" in result
+    assert session.waiting_for_input is True
+
+
+# ---------------------------------------------------------------------------
+# --dangerous suppresses the approval ritual
+# ---------------------------------------------------------------------------
+
+
+def test_approve_dangerous_tool_not_registered_under_dangerous(monkeypatch):
+    """With the gate globally off, the tool that services it must not exist —
+    otherwise its description keeps teaching a permission ritual that nothing
+    enforces."""
+    from config import settings
+    from core.tools.builtin import dialog_tools
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(settings, "auto_approve_dangerous", True)
+    reg = ToolRegistry()
+    dialog_tools.register(reg)
+    assert reg.get("ask_user") is not None
+    assert reg.get("notify_user") is not None
+    assert reg.get("approve_dangerous_tool") is None
+
+    monkeypatch.setattr(settings, "auto_approve_dangerous", False)
+    reg2 = ToolRegistry()
+    dialog_tools.register(reg2)
+    assert reg2.get("approve_dangerous_tool") is not None
+
+
+def test_delete_tool_descriptions_drop_ritual_under_dangerous(monkeypatch):
+    """delete_skill/delete_workflow descriptions must describe the actual gate
+    behavior for the process: the ask_user + approve sequence only when the
+    executor will really block the call."""
+    from config import settings
+    from core.tools.builtin import skill_tools, workflow_tools
+    from core.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(settings, "auto_approve_dangerous", True)
+    reg = ToolRegistry()
+    skill_tools.register(reg)
+    workflow_tools.register(reg)
+    assert "approve_dangerous_tool" not in reg.get("delete_skill").description
+    assert "approve_dangerous_tool" not in reg.get("delete_workflow").description
+    assert "--dangerous" in reg.get("delete_skill").description
+
+    monkeypatch.setattr(settings, "auto_approve_dangerous", False)
+    reg2 = ToolRegistry()
+    skill_tools.register(reg2)
+    workflow_tools.register(reg2)
+    assert "approve_dangerous_tool" in reg2.get("delete_skill").description
+    assert "approve_dangerous_tool" in reg2.get("delete_workflow").description

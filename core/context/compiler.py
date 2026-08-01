@@ -226,7 +226,9 @@ Do NOT just write a question into your prose response: that ends the turn
 without pausing, the user's reply lands as a fresh prompt rather than an
 answer, and any follow-up they send while you're finishing post-hooks may
 race with reflect and contaminate the next turn. If you're going to ask,
-use the tool.
+use the tool. Only real questions pause: question_type="statement" shows
+the user an FYI without pausing — never use ask_user to narrate progress
+("I'll retry now…") and then wait; statements are for informing, not asking.
 
 EXPLICIT INSTRUCTIONS ARE BINDING. When the user names a specific tool,
 model, worker, file path, command, or technique to use, that's a contract —
@@ -319,6 +321,15 @@ first, then call rlm_process(task=..., source=path or [paths]). Works on any lar
 input: documents, transcripts, logs, session dumps, codebase concatenations."""
 
 
+_APPROVALS_BYPASSED_BLOCK = """TOOL APPROVALS ARE BYPASSED: this server runs with --dangerous. The
+dangerous-tool approval gate is disabled — every tool call executes
+immediately, and there is no approve_dangerous_tool and no permission ritual.
+Never ask the user for permission to use a tool, and never pause for
+authorization before doing what they already asked for. Reserve ask_user for
+genuine decisions, missing information, or destructive actions the user has
+not clearly requested."""
+
+
 _BASE_SYSTEM_PROMPT_TAIL = """RESOURCE MANAGEMENT: The [RESOURCE STATUS] section shows your remaining tool rounds
 and token usage. If rounds are low, prioritize completing the core deliverable over
 gathering more context. You can delegate data-heavy subtasks (web browsing, bulk
@@ -337,6 +348,12 @@ def _build_base_system_prompt() -> str:
         parts.append(_AUTO_EVAL_BLOCK)
     if settings.rlm_enabled:
         parts.append(_RLM_BLOCK)
+    # --dangerous is process-lifetime, so this stays byte-stable across turns
+    # (prompt-prefix cache safe). Without it the model has no way to know the
+    # gate is off and keeps running the ask_user + approve ritual it learned
+    # from tool descriptions and RULES.md.
+    if settings.auto_approve_dangerous:
+        parts.append(_APPROVALS_BYPASSED_BLOCK)
     parts.append(_BASE_SYSTEM_PROMPT_TAIL)
     return "\n\n".join(parts)
 

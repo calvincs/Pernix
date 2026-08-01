@@ -353,16 +353,27 @@ def register(reg) -> None:
         parallel_safe=True,
     )
 
+    # Under --dangerous the executor gate never fires — mirror the
+    # delete_skill registration so the description matches actual behavior.
+    if settings.auto_approve_dangerous:
+        _delete_workflow_sequence = (
+            "Executes immediately (--dangerous mode, no approval gate) — "
+            "only call this when the user clearly asked for the deletion."
+        )
+    else:
+        _delete_workflow_sequence = (
+            "Required call sequence: "
+            "1) ask_user() naming the workflow to be deleted, "
+            "2) approve_dangerous_tool(tool_name='delete_workflow', scope='delete workflow <name>'), "
+            "3) delete_workflow(name). "
+            "The executor will block this call if approval has not been granted."
+        )
     reg.register(
         name="delete_workflow",
         func=delete_workflow,
         description=(
             "Permanently delete a workflow and its directory from data/workflows/{name}/. "
-            "IRREVERSIBLE. Required call sequence: "
-            "1) ask_user() naming the workflow to be deleted, "
-            "2) approve_dangerous_tool(tool_name='delete_workflow', scope='delete workflow <name>'), "
-            "3) delete_workflow(name). "
-            "The executor will block this call if approval has not been granted."
+            "IRREVERSIBLE. " + _delete_workflow_sequence
         ),
         parameters={
             "type": "object",

@@ -91,6 +91,17 @@ def ask_user(
     bus = get_event_bus()
     bus.emit({**event_payload, "session_id": session_id})
 
+    # Statements are informational — deliver them to the question panel but do
+    # NOT park the session in AWAITING_USER. Pausing on announcements ("I'll
+    # retry the cast now…") suspends real work until the user dismisses the
+    # bubble: session 0dbee64fcd43 stalled repeatedly on exactly this.
+    if question_type == "statement":
+        return (
+            f"Statement delivered (id={qid}). The session is NOT paused — "
+            f"continue working now. If the user replies, their message will "
+            f"arrive as a new prompt."
+        )
+
     # Transition the session into AWAITING_USER. Agent loop sees the new
     # state at its post-tool-round checkpoint (core/agent.py) and exits the
     # turn cleanly; post-hooks then run normally with termination_reason=
@@ -356,7 +367,11 @@ def register(reg) -> None:
                 "question_type": {
                     "type": "string",
                     "enum": ["question", "statement"],
-                    "description": "Whether this is a question or informational statement",
+                    "description": (
+                        "'question' pauses the session until the user answers. "
+                        "'statement' is informational only — it is shown to the "
+                        "user but the session does NOT pause; keep working."
+                    ),
                 },
             },
             "required": ["question"],
@@ -388,6 +403,17 @@ def register(reg) -> None:
         timeout=10,
         parallel_safe=False,
     )
+    # approve_dangerous_tool exists to service the executor's dangerous-tool
+    # gate. Under --dangerous the gate never fires, so registering it would
+    # only teach the model a permission ritual with no enforcement behind it
+    # (session 0dbee64fcd43: 13 ask_user + approve rounds for caution-level
+    # bash calls that were never gated). The flag is process-lifetime, so
+    # skipping registration at startup suppresses the ritual for good.
+    from config import settings
+
+    if settings.auto_approve_dangerous:
+        return
+
     reg.register(
         name="approve_dangerous_tool",
         func=approve_dangerous_tool,

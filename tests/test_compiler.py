@@ -541,3 +541,27 @@ def test_compile_context_no_directive_duplication(tmp_path, monkeypatch):
     payload = compile_context(sid, scout_report_text=legacy.to_system_prompt_section())
     system = payload.messages[0]["content"]
     assert system.count("[IDENTITY]") == 1
+
+
+# ---------------------------------------------------------------------------
+# --dangerous bypass block
+# ---------------------------------------------------------------------------
+
+
+def test_base_prompt_bypass_block_only_under_dangerous(monkeypatch):
+    """The approvals-bypassed block must appear iff auto_approve_dangerous is
+    set — without it the model keeps running the ask_user + approve ritual it
+    learned from tool descriptions; with the flag off it would wrongly tell
+    the model the gate is open."""
+    from config import settings
+    from core.context.compiler import _build_base_system_prompt
+
+    monkeypatch.setattr(settings, "auto_approve_dangerous", False)
+    assert "APPROVALS ARE BYPASSED" not in _build_base_system_prompt()
+
+    monkeypatch.setattr(settings, "auto_approve_dangerous", True)
+    text = _build_base_system_prompt()
+    assert "APPROVALS ARE BYPASSED" in text
+    # The gate-off note must not blanket-discourage ask_user — genuine
+    # decisions still route through it.
+    assert "ask_user" in text
