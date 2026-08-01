@@ -190,30 +190,57 @@ async def _judge_chat(system_prompt: str, user_content: str) -> dict | None:
 
 
 async def _validate_tool_pattern(row: dict) -> str:
+    from core.dream.hypothesize import candor_keys, existing_candor_keys
     from core.extensions.candor.bridge import get_candor_bridge
-
-    if not settings.candor_enabled:
-        return _bump_attempts(row, "candor disabled — cannot re-check")
 
     candor_refs = [e for e in _evidence(row) if e.get("type") == "candor" and e.get("pred")]
     if not candor_refs:
         return _finish(row, "expired", "candor_predict", "no candor refs in evidence")
 
+    # Duplicate-evidence gate: when every Candor fact this hypothesis rests
+    # on already backs a resolved tool_pattern, re-checking can only restate
+    # a known verdict — expire it. Drains the paraphrase backlog built
+    # before generation deduped on evidence keys.
+    keys = candor_keys(candor_refs)
+    resolved = [
+        r
+        for r in db.list_dream_hypotheses(kind="tool_pattern", limit=500)
+        if r["id"] != row["id"] and r.get("status") in ("validated", "refuted")
+    ]
+    if keys and keys <= existing_candor_keys(resolved):
+        return _finish(row, "expired", "duplicate_evidence", "all cited candor facts already resolved")
+
+    if not settings.candor_enabled:
+        return _bump_attempts(row, "candor disabled — cannot re-check")
+
+    # Every checkable ref weighs in, not just the first: a hypothesis citing
+    # fetch_ok(*) plus fetch_ok(some.domain) must not validate off the
+    # wildcard alone while the specific claim went unexamined.
     bridge = get_candor_bridge()
+    degraded: list[str] = []
+    recovered: list[str] = []
+    thin: list[str] = []
     for ref in candor_refs:
         result = await bridge.predict(ref["pred"], ref.get("args") or [])
-        if result is None:
-            continue  # fact gone or bridge inert; try next ref
-        if "p" not in result:
-            continue  # categorical — not checkable this way
+        if result is None or "p" not in result:
+            continue  # fact gone, bridge inert, or categorical — not checkable
         p = float(result["p"])
         n = int(result.get("observations") or 0)
         note = f"{ref['pred']}({','.join(ref.get('args') or [])}): p={p:.2f} n={n}"
         if n < _MIN_OBSERVATIONS:
-            return _bump_attempts(row, f"insufficient observations — {note}")
-        if p < _DEGRADED_P:
-            return _finish(row, "validated", "candor_predict_degradation", note, confidence=0.75)
-        return _finish(row, "refuted", "candor_predict_degradation", f"degradation gone — {note}")
+            thin.append(note)
+        elif p < _DEGRADED_P:
+            degraded.append(note)
+        else:
+            recovered.append(note)
+    if recovered:
+        # Any cited fact back above the degradation line falsifies the
+        # claim as stated.
+        return _finish(row, "refuted", "candor_predict_degradation", "degradation gone — " + "; ".join(recovered))
+    if degraded:
+        return _finish(row, "validated", "candor_predict_degradation", "; ".join(degraded), confidence=0.75)
+    if thin:
+        return _bump_attempts(row, "insufficient observations — " + "; ".join(thin))
     return _bump_attempts(row, "no checkable candor fact (inert bridge or categorical only)")
 
 
@@ -343,15 +370,29 @@ async def _narrate_verdict(row: dict, outcome: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def validate_one(store, pending_oldest_first: list[dict], is_cancelled) -> str | None:
-    """Validate the first actionable pending hypothesis.
+_MAX_EXPIRIES_PER_PASS = 10
 
-    Returns "validated" | "refuted" | "expired" | "skipped", or None when
-    nothing was actionable (caller falls through to generation).
+
+async def validate_one(store, pending_oldest_first: list[dict], is_cancelled) -> tuple[str | None, int]:
+    """Work the pending queue for one cycle.
+
+    Expiries are administrative (duplicate evidence, unusable refs — no LLM
+    spend), so they don't consume the cycle's single validation slot: the
+    pass continues until one real verdict lands or the expiry cap is hit.
+    Returns (outcome, expired_count) where outcome is "validated" |
+    "refuted" | "expired" | "skipped", or None when nothing was actionable
+    (caller falls through to generation).
     """
+    expired = 0
+
+    def _result(outcome: str | None = None) -> tuple[str | None, int]:
+        if outcome is None and expired:
+            outcome = "expired"
+        return outcome, expired
+
     for row in pending_oldest_first:
         if is_cancelled():
-            return None
+            return _result()
         kind = row.get("kind")
         outcome: str | None = None
         try:
@@ -366,7 +407,13 @@ async def validate_one(store, pending_oldest_first: list[dict], is_cancelled) ->
         except Exception as e:
             logger.warning("dream validate: %s failed on %s: %s", kind, row.get("id", "")[:8], e)
             outcome = _bump_attempts(row, f"validator error: {type(e).__name__}")
-        if outcome is not None:
-            await _narrate_verdict(row, outcome)
-            return outcome
-    return None
+        if outcome is None:
+            continue
+        await _narrate_verdict(row, outcome)
+        if outcome == "expired":
+            expired += 1
+            if expired >= _MAX_EXPIRIES_PER_PASS:
+                return _result()
+            continue
+        return _result(outcome)
+    return _result()

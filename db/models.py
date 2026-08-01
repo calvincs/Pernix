@@ -123,6 +123,14 @@ def update_session(session_id: str, **kwargs) -> None:
         conn.execute(f"UPDATE sessions SET {cols} WHERE id = ?", vals)
 
 
+def touch_session(session_id: str) -> None:
+    """Bump only updated_at — for writers (e.g. journal notices) that add
+    content outside add_message's chat path, so recency ordering and
+    retention windows see the session as live."""
+    with connect_sessions() as conn:
+        conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (_now(), session_id))
+
+
 def set_session_meta(session_id: str, *, title: str | None = None, pinned: bool | None = None) -> None:
     """Set user-facing session metadata WITHOUT bumping updated_at —
     renaming or pinning a session must not change its recency ordering."""
@@ -2010,7 +2018,11 @@ def list_dream_hypotheses(
     status: str | None = None,
     kind: str | None = None,
     limit: int = 100,
+    oldest_first: bool = False,
 ) -> list[dict]:
+    """List hypotheses, newest-first by default. `oldest_first` orders (and
+    therefore windows) from the other end — queue consumers must use it, or
+    a backlog larger than `limit` permanently starves its oldest rows."""
     clauses = []
     params: list = []
     if status:
@@ -2020,10 +2032,11 @@ def list_dream_hypotheses(
         clauses.append("kind = ?")
         params.append(kind)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    order = "ASC" if oldest_first else "DESC"
     params.append(limit)
     with connect_sessions() as conn:
         rows = conn.execute(
-            f"SELECT * FROM dream_hypotheses {where} ORDER BY created_at DESC LIMIT ?",
+            f"SELECT * FROM dream_hypotheses {where} ORDER BY created_at {order} LIMIT ?",
             params,
         ).fetchall()
         return [dict(r) for r in rows]

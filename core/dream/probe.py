@@ -161,17 +161,26 @@ async def _run_probe(store, loop: asyncio.AbstractEventLoop) -> None:
         )
 
         await journal(f"🔬 Deep probe launched: {file_count} memory files, {len(corpus)} chars staged")
-        result = await asyncio.to_thread(_run_engine_blocking, bundle, file_count, loop)
-        if result is None or result.status == "failed" or not result.answer:
+        # One bounded retry: in burn-in the root model rambled prose instead
+        # of the answer JSON in 2 of 4 runs, burning the weekly slot on an
+        # unparseable answer. A week of silence costs more than a second run.
+        status = "no-run"
+        for attempt in (1, 2):
+            result = await asyncio.to_thread(_run_engine_blocking, bundle, file_count, loop)
             status = result.status if result is not None else "no-run"
-            await journal(f"🔬 Deep probe ended without a usable answer (status={status} — see RLM runs panel)")
-            return
-
-        saved, dropped = await _ingest_candidates(store, result.answer)
-        await journal(
-            f"🔬 Deep probe complete ({result.status}, {result.iterations} iterations): "
-            f"{saved} hypotheses saved, {dropped} dropped by filters"
-        )
+            ingested = None
+            if result is not None and result.status != "failed" and result.answer:
+                ingested = await _ingest_candidates(store, result.answer)
+            if ingested is not None:
+                saved, dropped = ingested
+                await journal(
+                    f"🔬 Deep probe complete ({result.status}, {result.iterations} iterations): "
+                    f"{saved} hypotheses saved, {dropped} dropped by filters"
+                )
+                return
+            if attempt == 1:
+                await journal(f"🔬 Deep probe attempt 1 unusable (status={status}) — retrying once")
+        await journal(f"🔬 Deep probe ended without a usable answer (status={status} — see RLM runs panel)")
     except Exception as e:
         logger.warning("dream probe failed: %s", e, exc_info=True)
         try:
@@ -255,12 +264,14 @@ def _run_engine_blocking(bundle: str, file_count: int, loop: asyncio.AbstractEve
     return result
 
 
-async def _ingest_candidates(store, answer: str) -> tuple[int, int]:
+async def _ingest_candidates(store, answer: str) -> tuple[int, int] | None:
     """Validate probe items and resolve evidence to full content-hash refs.
 
     Probe evidence is {"file", "epoch"} dicts (not pack ref ids), so this
     has its own shape validation; the banned-claim and dedup-vs-seen
-    filters are shared with the cycle path.
+    filters are shared with the cycle path. Returns (saved, dropped), or
+    None when the answer isn't hypothesis JSON at all — the caller treats
+    that as a failed run (retryable), not a clean zero.
     """
     from core.dream.hypothesize import _STATEMENT_MAX, _STATEMENT_MIN, is_banned_claim, is_duplicate
     from core.dream.observe import content_hash
@@ -276,9 +287,9 @@ async def _ingest_candidates(store, answer: str) -> tuple[int, int]:
         raw_items = data.get("hypotheses", []) if isinstance(data, dict) else data
     except (ValueError, TypeError):
         logger.warning("dream probe: unparseable answer: %s", text[:200])
-        return 0, 0
+        return None
     if not isinstance(raw_items, list):
-        return 0, 0
+        return None
 
     existing = [r["statement"] for r in db.list_dream_hypotheses(limit=500)]
     saved = 0

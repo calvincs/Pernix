@@ -62,6 +62,10 @@ def append_sync(text: str) -> None:
     try:
         sid = _journal_session_id()
         db.add_message(sid, "notice", text.strip()[:_LINE_CAP])
+        # add_message's chat path doesn't bump session recency for notices;
+        # without this the journal reads as dead (stale updated_at) in the
+        # session list even while it's being written.
+        db.touch_session(sid)
     except Exception as e:
         logger.debug("dream journal write failed: %s", e)
 
@@ -101,12 +105,12 @@ def event_line(evt: dict) -> str | None:
     and narrating every ladder line buried the actual thoughts under ~900
     identical lines/day. The live jobs indicator already shows the ladder
     in real time — the journal records only what a reviewer would reread:
-    the dream step marker and anomalous cycle outcomes (yielded/backstop/
-    error). The rich thought lines come from the dream modules directly.
+    anomalous cycle outcomes (yielded/backstop/error). The dream step
+    marker is written directly by the snooze cycle (not mapped here): the
+    listener's queue hop loses the race against instant verdicts, printing
+    the "→" header after the ◌ line it introduces.
     """
     etype = evt.get("type", "")
-    if etype == "snooze.activity" and evt.get("activity") == "dream":
-        return f"→ {evt.get('detail', 'dream step')}"
     if etype == "snooze.done":
         outcome = evt.get("outcome", "")
         if outcome and outcome != "ran":

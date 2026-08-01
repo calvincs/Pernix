@@ -7,6 +7,10 @@ empty on failure). Two hard filters before anything is stored:
     it is exactly the conclusion class that validated poorly in production;
   - near-duplicates of ANY existing hypothesis (including refuted ones) are
     dropped, so the dreamer cannot resurrect an idea validation killed.
+Two kind-specific gates on top: lesson_ineffective must cite a post-mortem
+(replay validation is impossible without one), and a tool_pattern must cite
+at least one Candor (pred, args) fact no existing hypothesis already rests
+on — lexical dedup cannot catch paraphrases of the same degradation.
 """
 
 from __future__ import annotations
@@ -53,6 +57,8 @@ Hypothesis kinds:
 Rules:
 - Cite evidence by ref id (e.g. ["M1", "P2"]). Cite ONLY ids present in the pack. Every \
 hypothesis needs at least one ref.
+- lesson_ineffective REQUIRES at least one post-mortem ref (P#): it is tested by replaying \
+the recorded failure, so without one it is untestable — do not propose it.
 - statement must be self-contained (readable without the pack), 1-2 sentences.
 - NEVER hypothesize that something is "not configured", "missing", or "not set up" — absence \
 of configuration is not evidence of absence.
@@ -121,6 +127,32 @@ def is_duplicate(statement: str, existing_statements: list[str]) -> bool:
     return False
 
 
+def candor_keys(evidence: list[dict]) -> set[tuple]:
+    """The Candor facts an evidence list rests on, as (pred, args) keys.
+
+    Lexical statement dedup cannot catch paraphrases, and in production the
+    same degradation ("fetch_ok(*) p=0.49") was validated as ten differently
+    worded tool_pattern hypotheses. The evidence key is the semantic
+    identity of a tool_pattern claim, so dedup on it instead."""
+    return {
+        (e.get("pred"), tuple(e.get("args") or []))
+        for e in evidence
+        if e.get("type") == "candor" and e.get("pred")
+    }
+
+
+def existing_candor_keys(rows: list[dict]) -> set[tuple]:
+    keys: set[tuple] = set()
+    for r in rows:
+        try:
+            ev = json.loads(r.get("evidence_json") or "[]")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(ev, list):
+            keys |= candor_keys([e for e in ev if isinstance(e, dict)])
+    return keys
+
+
 async def generate(store, is_cancelled) -> int:
     """One generation unit: build pack, one LLM call, persist survivors.
 
@@ -174,7 +206,9 @@ async def generate(store, is_cancelled) -> int:
 
     candidates = parse_hypotheses(raw)[:max_n]
     refs = pack.refs_by_id()
-    existing = [r["statement"] for r in db.list_dream_hypotheses(limit=_EXISTING_SCAN_LIMIT)]
+    existing_rows = db.list_dream_hypotheses(limit=_EXISTING_SCAN_LIMIT)
+    existing = [r["statement"] for r in existing_rows]
+    seen_keys = existing_candor_keys(existing_rows)
 
     saved = 0
     for h in candidates:
@@ -193,6 +227,20 @@ async def generate(store, is_cancelled) -> int:
             await journal(f"✗ rejected (duplicate of a seen hypothesis): {h['statement'][:160]}")
             continue
         evidence = [{**item.ref, "type": item.kind, "quote": item.render[:400]} for item in cited]
+        if h["kind"] == "lesson_ineffective" and not any(
+            e.get("type") == "pm" and e.get("session_id") for e in evidence
+        ):
+            # Untestable by construction: validation replays the recorded
+            # failure, so a lesson_ineffective claim without one only burns
+            # a validation slot before expiring.
+            await journal(f"✗ rejected (lesson_ineffective without post-mortem ref): {h['statement'][:160]}")
+            continue
+        if h["kind"] == "tool_pattern":
+            keys = candor_keys(evidence)
+            if keys and keys <= seen_keys:
+                await journal(f"✗ rejected (candor evidence already hypothesized): {h['statement'][:160]}")
+                continue
+            seen_keys |= keys
         db.add_dream_hypothesis(
             kind=h["kind"],
             statement=h["statement"],
