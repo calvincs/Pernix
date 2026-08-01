@@ -40,27 +40,33 @@ async def run_step(is_cancelled) -> dict:
     if store is None:
         return stats
 
-    # Oldest-first pending queue; open questions are report material, not
-    # validation candidates.
+    # Genuinely oldest-first pending queue (ordered at the query, so a
+    # backlog larger than the window cannot starve its oldest rows); open
+    # questions are report material, not validation candidates.
     pending = [
-        r for r in reversed(db.list_dream_hypotheses(status="pending", limit=50)) if r.get("kind") != "open_question"
+        r
+        for r in db.list_dream_hypotheses(status="pending", limit=200, oldest_first=True)
+        if r.get("kind") != "open_question"
     ]
     last_action = db.get_snooze_state("dream_last_action") or ""
+    # Backpressure: generation adds up to dream_hypotheses_per_cycle rows per
+    # step while validation resolves ~one, so an unbounded queue only grows.
+    # Past the cap, every step validates until the backlog drains.
+    backlogged = len(pending) > max(1, settings.dream_max_pending)
 
     did = None
-    if pending and last_action != "validate":
+    if pending and (last_action != "validate" or backlogged):
         from core.dream.validate import validate_one
 
-        outcome = await validate_one(store, pending, is_cancelled)
+        outcome, expired_count = await validate_one(store, pending, is_cancelled)
         if outcome == "validated":
             stats["dream_validated"] = 1
         elif outcome == "refuted":
             stats["dream_refuted"] = 1
-        elif outcome == "expired":
-            stats["dream_expired"] = 1
+        stats["dream_expired"] = expired_count
         if outcome is not None:
             did = "validate"
-    if did is None and not is_cancelled():
+    if did is None and not backlogged and not is_cancelled():
         from core.dream.hypothesize import generate
 
         stats["dream_hypotheses"] = await generate(store, is_cancelled)

@@ -556,13 +556,15 @@ class SnoozeRunner:
         if not self._is_cancelled() and settings.dream_enabled:
             can_llm = self._llm_available() and bool(settings.background_model or settings.llm_model)
             if can_llm:
-                bus.emit(
-                    {
-                        "type": "snooze.activity",
-                        "activity": "dream",
-                        "detail": "Dreaming: examining memory and outcome evidence for hypotheses",
-                    }
-                )
+                detail = "Dreaming: examining memory and outcome evidence for hypotheses"
+                bus.emit({"type": "snooze.activity", "activity": "dream", "detail": detail})
+                # Journal the step marker directly instead of via the bus
+                # listener: an instant verdict inside the step would win the
+                # race against the listener's queue and print above its own
+                # "→" header.
+                from core.dream.journal import append as journal_append
+
+                await journal_append(f"→ {detail}")
                 await self._dream_step()
 
     # ------------------------------------------------------------------

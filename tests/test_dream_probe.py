@@ -96,6 +96,9 @@ async def test_ingest_resolves_refs_and_filters(store, probe_on):
     assert all(e.get("hash") and e.get("quote") for e in ev)
 
 
-async def test_ingest_handles_garbage(store, probe_on):
-    assert await _ingest_candidates(store, "not json at all") == (0, 0)
-    assert await _ingest_candidates(store, json.dumps({"hypotheses": "nope"})) == (0, 0)
+async def test_ingest_garbage_is_retryable_not_zero(store, probe_on):
+    # None (not a clean zero) so the probe runner knows to retry the run.
+    assert await _ingest_candidates(store, "not json at all") is None
+    assert await _ingest_candidates(store, json.dumps({"hypotheses": "nope"})) is None
+    # An empty-but-valid answer IS a clean zero — no retry.
+    assert await _ingest_candidates(store, json.dumps({"hypotheses": []})) == (0, 0)

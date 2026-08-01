@@ -209,6 +209,7 @@ class Settings:
     # are read or written. All call sites gate on dream_enabled at runtime.
     dream_enabled: bool = False
     dream_hypotheses_per_cycle: int = 3  # cap on new hypotheses per dream step
+    dream_max_pending: int = 60  # validation backlog cap: above it, generation pauses
     dream_validation_replays_per_day: int = 4  # counterfactual scout-replay budget
     dream_report_interval_days: int = 7  # dream report cadence
     dream_journal_retention_days: int = 14  # journal sessions kept (1/day)
