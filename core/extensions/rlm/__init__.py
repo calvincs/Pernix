@@ -14,7 +14,10 @@ call time so a hot toggle-off degrades to a clear error, never a run.
 """
 
 import asyncio
+import json
 import logging
+import re
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -37,6 +40,14 @@ _DISPATCH_GRACE = 60
 # Session-budget headroom on top of the run's wall clock: root/sub calls in
 # flight at the deadline, salvage synthesis, and result bookkeeping.
 _BUDGET_GRACE = 120.0
+
+# continue_from targets root-level run dirs only (mint_run_dir: token_hex(4)).
+_RUN_ID_RE = re.compile(r"^[0-9a-f]{8}$")
+
+# Bounds on the `prior` payload loaded into the child for a continuation —
+# the frame protocol caps at 64MB; stay far under it and under child RAM.
+_PRIOR_MAX_SUBCALLS = 200
+_PRIOR_CHAR_BUDGET = 6_000_000
 
 # Upstream rlm_query semantics: the prompt (often a chunk assembled in the
 # parent's REPL) IS the child's context; the task is generic.
@@ -102,6 +113,104 @@ def _resolve_sources(source) -> tuple[str | None, list[Path], str]:
         else:
             raise ValueError(f"source file not found in workspace: {entry}")
     return None, files, ", ".join(f.name for f in files)
+
+
+def _resolve_prior_run(continue_from: str) -> tuple[str | None, Path | None, dict | None]:
+    """Validate a continue_from run id -> (error, prior_dir, manifest).
+
+    Deliberately strict on the id format: the value lands in a filesystem
+    path, so anything but a bare 8-hex run id is rejected outright."""
+    rid = continue_from.strip().lower()
+    if not _RUN_ID_RE.match(rid):
+        return f"Error: continue_from must be an 8-hex-char RLM run id, got {continue_from!r}.", None, None
+    prior_dir = (Path(settings.workspace_dir) / "rlm" / rid).resolve()
+    try:
+        manifest = json.loads((prior_dir / "manifest.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return (
+            f"Error: no RLM run {rid} found in the workspace — its artifacts may have been "
+            "purged by retention. Drop continue_from and start fresh.",
+            None,
+            None,
+        )
+    except (OSError, json.JSONDecodeError) as e:
+        return f"Error: could not read RLM run {rid}'s manifest: {e}", None, None
+    if manifest.get("status") == "running":
+        return f"Error: RLM run {rid} is still running — wait for it to finish before continuing from it.", None, None
+    return None, prior_dir, manifest
+
+
+def _load_prior(prior_dir: Path, manifest: dict) -> tuple[dict, str]:
+    """Build the `prior` REPL variable and the continuation note for the root.
+
+    Reloads the prior run's durable outputs — draft, returned answer, and
+    every completed sub-call prompt/response pair from payloads.jsonl. This
+    is continuation-by-artifact, deliberately NOT state resurrection: REPL
+    variables are cheap to recompute from context; sub-call output is the
+    thing that cost LLM time. Runs predating payloads.jsonl degrade to
+    draft/answer only."""
+
+    def _read(name: str) -> str:
+        try:
+            return (prior_dir / name).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    draft = _read("draft.txt")
+    answer = _read("answer.txt")
+    try:
+        lines = (prior_dir / "payloads.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    subcalls: list[dict] = []
+    total = 0
+    for line in reversed(lines):  # newest first under the budget, then restore order
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("kind") != "subcall" or not entry.get("ok"):
+            continue
+        prompt, response = str(entry.get("prompt") or ""), str(entry.get("response") or "")
+        if len(subcalls) >= _PRIOR_MAX_SUBCALLS or total + len(prompt) + len(response) > _PRIOR_CHAR_BUDGET:
+            break
+        subcalls.append({"prompt": prompt, "response": response, "model": entry.get("model")})
+        total += len(prompt) + len(response)
+    subcalls.reverse()
+
+    run_id = manifest.get("run_id", prior_dir.name)
+    meta = {
+        "run_id": run_id,
+        "status": manifest.get("status", "unknown"),
+        "iterations": manifest.get("iterations", 0),
+        "subcalls": manifest.get("subcalls", 0),
+        "task": manifest.get("task", ""),
+        # Relative to the NEW run dir (the child's cwd); both live under rlm/.
+        "trace_path": f"../{prior_dir.name}/trace.jsonl",
+    }
+    prior_vars = {"draft": draft, "answer": answer, "subcalls": subcalls, "meta": meta}
+
+    draft_line = (
+        f"- prior['draft']: its last running answer draft ({len(draft)} chars)."
+        if draft.strip()
+        else "- prior['draft']: empty (it kept no draft)."
+    )
+    note = "\n".join(
+        [
+            f"CONTINUATION: this run continues RLM run {run_id} on the same source "
+            f"(ended {meta['status']} after {meta['iterations']} iterations, {meta['subcalls']} sub-calls). "
+            "Its REPL variables are gone, but its durable outputs are pre-loaded in the REPL variable "
+            "`prior` (a dict):",
+            f"- prior['subcalls']: {len(subcalls)} completed sub-LLM results as {{prompt, response, model}} — "
+            "this work is already paid for; reuse it instead of re-issuing the same calls.",
+            draft_line,
+            f"- prior['answer']: the answer it returned ({len(answer)} chars).",
+            "- prior['meta']: run metadata; prior['meta']['trace_path'] is its trace, readable via open().",
+            "Recompute cheap derivations (indices, boundaries, counts) in one cell if needed, but do NOT "
+            "redo analysis `prior` already contains — verify it briefly, fill the gaps, and build on it.",
+        ]
+    )
+    return prior_vars, note
 
 
 def _emit_session_event(sid: str, event: dict) -> None:
@@ -300,7 +409,7 @@ def _make_rlm_fn(*, parent_engine, parent_run_id, depth, chat, sub_model, allowe
     return rlm_fn
 
 
-def rlm_process(task: str, source, model: str = "", _context: dict | None = None) -> str:
+def rlm_process(task: str, source, model: str = "", continue_from: str = "", _context: dict | None = None) -> str:
     """Run one RLM pass over a large input. Blocking; runs on a long-poll tool thread."""
     if not settings.rlm_enabled:
         return "Error: RLM is disabled (settings.rlm_enabled)."
@@ -319,6 +428,12 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
     total_bytes = len(inline_text.encode("utf-8", "ignore")) if inline_text else sum(f.stat().st_size for f in files)
     if total_bytes > MAX_SOURCE_BYTES:
         return f"Error: source is {total_bytes} bytes; the RLM cap is {MAX_SOURCE_BYTES}. Split the input."
+
+    prior_dir = prior_manifest = None
+    if continue_from:
+        err, prior_dir, prior_manifest = _resolve_prior_run(continue_from)
+        if err:
+            return err
     size_warning = (
         f"\n(note: large source, {total_bytes // (1024 * 1024)} MB — expect a slow run)"
         if total_bytes > SOURCE_WARN_BYTES
@@ -413,6 +528,24 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
     except OSError as e:
         return f"Error: failed to stage source into the run dir: {e}"
 
+    continuation_note = None
+    if prior_manifest is not None:
+        prior_hash = prior_manifest.get("source_sha256")
+        if prior_hash and staged.sha256 and prior_hash != staged.sha256:
+            # A continuation over different material would present the prior
+            # run's findings as if they described THIS source. Refuse, and
+            # leave nothing behind (no DB row or UI session exists yet).
+            shutil.rmtree(run_dir, ignore_errors=True)
+            return (
+                f"Error: continue_from={prior_manifest.get('run_id', continue_from)} refused — the staged "
+                "source differs from that run's source (content hash mismatch). Pass the exact same source, "
+                "or drop continue_from to start fresh."
+            )
+        if not prior_hash:
+            logger.debug("rlm_process: prior run %s has no source hash; continuing unverified", continue_from)
+        prior_vars, continuation_note = _load_prior(prior_dir, prior_manifest)
+        staged.extra_vars["prior"] = prior_vars
+
     # Sidebar anchor: a message-less session_type='rlm' child of the calling
     # session, so the run nests under its parent like a worker. Pure navigation
     # chrome — the run's content stays on disk; the viewer reads it via
@@ -443,6 +576,8 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
         input_chars=staged.total_chars,
         ui_session_id=ui_session_id,
         caps=caps,
+        source_sha256=staged.sha256 or None,
+        continued_from=continue_from or None,
     )
     _emit_session_event(
         sid,
@@ -471,6 +606,7 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
         cancel_check=cancel_check,
         on_child_spawn=on_child_spawn,
         progress_fn=_make_progress_fn(run_id, ui_session_id, sid),
+        continuation_note=continuation_note,
     )
     if settings.rlm_max_depth > 1:
         engine.rlm_fn = _make_rlm_fn(
@@ -513,6 +649,15 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
     if result.partial:
         header += " (best-effort answer — the run did not submit a final answer before ending)"
     footer = f"\n\n(full trace: rlm/{run_id}/trace.jsonl in the workspace)"
+    # Advertise continuation whenever the run left something worth reusing —
+    # session a45fa830cef9's agent restarted from scratch because nothing told
+    # it the dead run's work was recoverable.
+    salvageable = bool(result.answer and result.answer.strip()) or (run_dir / "draft.txt").exists()
+    if result.status != "completed" and salvageable:
+        footer += (
+            f"\n(partial work is saved — to build on it instead of restarting, call rlm_process again with "
+            f'continue_from="{run_id}", the same source, and a task narrowed to what remains)'
+        )
     if result.status != "completed" and not (result.answer and result.answer.strip()):
         return f"Error: RLM run {run_id} ended with status={result.status} and no answer. {result.error}{footer}"
     truncated, meta = truncate_output(f"{header}{size_warning}\n{result.answer}{footer}", "rlm_process")
@@ -541,7 +686,9 @@ def register(reg: ToolRegistry) -> None:
             "inline text. `task` is the question to answer about the source. Runs take minutes (caps: "
             f"{settings.rlm_max_iterations} turns, {settings.rlm_max_subcalls} sub-calls, "
             f"{settings.rlm_timeout_seconds}s) and return one answer plus a trace in workspace rlm/<run_id>/. "
-            "The optional `model` overrides the sub-call model for this run."
+            "The optional `model` overrides the sub-call model for this run. If a run ends partial "
+            "(timeout/caps), its durable outputs are saved — call again with continue_from=<run_id>, the "
+            "same source, and a narrowed task to build on that work instead of restarting."
         ),
         parameters={
             "type": "object",
@@ -560,6 +707,15 @@ def register(reg: ToolRegistry) -> None:
                 "model": {
                     "type": "string",
                     "description": "Optional sub-call model override (defaults to the RLM Sub-call role)",
+                },
+                "continue_from": {
+                    "type": "string",
+                    "description": (
+                        "Run id of a prior rlm_process run on the SAME source to continue. Its draft, "
+                        "answer, and completed sub-LLM outputs are pre-loaded into the REPL as `prior`, so "
+                        "paid-for work is reused rather than repeated. The source must be identical "
+                        "(verified by content hash)."
+                    ),
                 },
             },
             "required": ["task", "source"],

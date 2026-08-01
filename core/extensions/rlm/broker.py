@@ -91,6 +91,7 @@ class LLMBroker:
         allowed_models: set[str] | None = None,
         deadline: float | None = None,
         trace_fn: Callable[[dict], None] | None = None,
+        payload_fn: Callable[[dict], None] | None = None,
         rlm_fn: Callable[[str, str | None], str] | None = None,
     ):
         self.sock_path = Path(sock_path)
@@ -100,6 +101,10 @@ class LLMBroker:
         self._allowed_models = allowed_models or set()
         self._deadline = deadline
         self._trace_fn = trace_fn
+        # Full prompt/response pairs for the run's durable knowledge store
+        # (payloads.jsonl) — the trace records only previews, and sub-call
+        # output is the one thing a continuation cannot recompute cheaply.
+        self._payload_fn = payload_fn
         self._rlm_fn = rlm_fn
 
         self._sem = threading.Semaphore(caps.max_concurrent_subcalls)
@@ -182,6 +187,7 @@ class LLMBroker:
             timeout = min(timeout, remaining + 30.0)
         start = time.monotonic()
         self._touch(+1)
+        response = None
         try:
             with self._sem:
                 response = fn(prompt, model, timeout)
@@ -203,6 +209,18 @@ class LLMBroker:
                         "prompt_preview": prompt[:200],
                         "model": model,
                         "ok": ok,
+                        "error": detail,
+                        "duration": round(time.monotonic() - start, 3),
+                    }
+                )
+            if self._payload_fn is not None:
+                self._payload_fn(
+                    {
+                        "kind": "subcall",
+                        "model": model,
+                        "ok": ok,
+                        "prompt": prompt,
+                        "response": response if ok else None,
                         "error": detail,
                         "duration": round(time.monotonic() - start, 3),
                     }

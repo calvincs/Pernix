@@ -219,6 +219,165 @@ def test_rlm_process_size_gate(monkeypatch):
     assert out.startswith("Error: source is") and "cap is 100" in out
 
 
+def _seed_prior_run(ws: Path, run_id: str, *, source_sha256=None, status="timeout", with_artifacts=True) -> Path:
+    """Craft a finished prior run dir the way a real run leaves it."""
+    prior = ws / "rlm" / run_id
+    prior.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "run_id": run_id,
+        "status": status,
+        "iterations": 11,
+        "subcalls": 2,
+        "task": "the original oversized task",
+    }
+    if source_sha256:
+        manifest["source_sha256"] = source_sha256
+    (prior / "manifest.json").write_text(json.dumps(manifest))
+    if with_artifacts:
+        (prior / "draft.txt").write_text("DRAFT SO FAR")
+        (prior / "answer.txt").write_text("OLD PARTIAL ANSWER")
+        payload_lines = [
+            {"kind": "root", "iteration": 0, "content": "root prose"},
+            {"kind": "subcall", "ok": True, "prompt": "P1", "response": "R1", "model": None},
+            {"kind": "subcall", "ok": False, "prompt": "P2", "response": None, "error": "boom"},
+            "not json at all",
+            {"kind": "subcall", "ok": True, "prompt": "P3", "response": "R3", "model": "m2"},
+        ]
+        (prior / "payloads.jsonl").write_text(
+            "\n".join(line if isinstance(line, str) else json.dumps(line) for line in payload_lines) + "\n"
+        )
+    return prior
+
+
+class _CapturingEngine:
+    """Stands in for RLMEngine in tool tests: records ctor kwargs, returns a
+    canned result."""
+
+    captured: dict = {}
+    canned = RLMRunResult(answer="continued fine", status="completed", iterations=1, subcalls=0, duration=0.5)
+
+    def __init__(self, **kwargs):
+        type(self).captured = kwargs
+        self.rlm_fn = None
+
+    def run(self):
+        return type(self).canned
+
+
+def test_rlm_process_continue_from_rejects_bad_ids(monkeypatch):
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    out = rlm_process("t", "inline body", continue_from="../../etc", _context={"_loop": object()})
+    assert out.startswith("Error: continue_from must be an 8-hex-char RLM run id")
+    out = rlm_process("t", "inline body", continue_from="feedbeef", _context={"_loop": object()})
+    assert out.startswith("Error: no RLM run feedbeef found")
+
+
+def test_rlm_process_continue_from_refuses_running_prior(monkeypatch):
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    ws = Path(settings.workspace_dir)
+    _seed_prior_run(ws, "aaaa1111", status="running", with_artifacts=False)
+    out = rlm_process("t", "inline body", continue_from="aaaa1111", _context={"_loop": object()})
+    assert "still running" in out
+
+
+def test_rlm_process_continue_from_hash_mismatch_leaves_no_residue(monkeypatch, mock_llm_client):
+    """A continuation over different source material must refuse — otherwise
+    the prior findings are presented as if they described the new source."""
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    ws = Path(settings.workspace_dir)
+    _seed_prior_run(ws, "bbbb2222", source_sha256="0" * 64)
+
+    rows_before = len(db.list_rlm_runs())
+    out = rlm_process(
+        "continue it", "totally different source text", continue_from="bbbb2222", _context={"_loop": object()}
+    )
+    assert out.startswith("Error: continue_from=bbbb2222 refused") and "hash mismatch" in out
+    assert len(db.list_rlm_runs()) == rows_before, "refused continuation must leave no rlm_runs row"
+    # the just-minted run dir was removed; only the prior remains
+    assert {p.name for p in (ws / "rlm").iterdir()} == {"bbbb2222"}
+
+
+def test_rlm_process_continue_from_loads_prior_into_repl(monkeypatch, mock_llm_client):
+    """Happy path: matching source hash -> prior draft/answer/sub-calls are
+    staged as the `prior` REPL variable, the root gets a CONTINUATION note,
+    and the new manifest records the lineage."""
+    from core.extensions.rlm.child_env import _content_hash
+
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    monkeypatch.setattr("core.extensions.rlm.RLMEngine", _CapturingEngine)
+    ws = Path(settings.workspace_dir)
+    ws.mkdir(parents=True, exist_ok=True)
+    source_text = "the very same source material " * 10
+    (ws / "same.txt").write_text(source_text)
+    _seed_prior_run(ws, "cccc3333", source_sha256=_content_hash([source_text]))
+
+    out = rlm_process(
+        "finish chapters 9-12", "same.txt", continue_from="cccc3333", _context={"_loop": object(), "session_id": ""}
+    )
+    text = out[0] if isinstance(out, tuple) else out
+    assert "continued fine" in text
+
+    staged = _CapturingEngine.captured["staged"]
+    prior = staged.extra_vars["prior"]
+    assert prior["draft"] == "DRAFT SO FAR"
+    assert prior["answer"] == "OLD PARTIAL ANSWER"
+    # ok subcalls only, junk skipped, chronological order preserved
+    assert prior["subcalls"] == [
+        {"prompt": "P1", "response": "R1", "model": None},
+        {"prompt": "P3", "response": "R3", "model": "m2"},
+    ]
+    assert prior["meta"]["run_id"] == "cccc3333"
+    assert prior["meta"]["trace_path"] == "../cccc3333/trace.jsonl"
+
+    note = _CapturingEngine.captured["continuation_note"]
+    assert "CONTINUATION" in note and "cccc3333" in note
+    assert "2 completed sub-LLM results" in note
+
+    row = db.list_rlm_runs()[0]
+    manifest = json.loads((ws / row["run_dir"] / "manifest.json").read_text())
+    assert manifest["continued_from"] == "cccc3333"
+    assert manifest["source_sha256"] == _content_hash([source_text])
+
+
+def test_load_prior_degrades_without_payload_artifacts(tmp_path):
+    """Runs predating payloads.jsonl/draft.txt still continue — answer only."""
+    from core.extensions.rlm import _load_prior
+
+    d = tmp_path / "oldrun"
+    d.mkdir()
+    (d / "answer.txt").write_text("OLD")
+    manifest = {"run_id": "cafe0123", "status": "timeout", "iterations": 5, "subcalls": 2, "task": "t"}
+    prior, note = _load_prior(d, manifest)
+    assert prior == {
+        "draft": "",
+        "answer": "OLD",
+        "subcalls": [],
+        "meta": {
+            "run_id": "cafe0123",
+            "status": "timeout",
+            "iterations": 5,
+            "subcalls": 2,
+            "task": "t",
+            "trace_path": "../oldrun/trace.jsonl",
+        },
+    }
+    assert "kept no draft" in note and "0 completed sub-LLM results" in note
+
+
+def test_rlm_process_partial_result_advertises_continue_from(monkeypatch, mock_llm_client):
+    """A partial run's tool result must tell the agent the work is reusable —
+    session a45fa830cef9's agent restarted from scratch because nothing did."""
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    canned = RLMRunResult(answer="partial findings", status="timeout", iterations=9, subcalls=4, partial=True)
+    monkeypatch.setattr("core.extensions.rlm.engine.RLMEngine.run", lambda self: canned)
+
+    out = rlm_process("big task", "inline body text", _context={"_loop": object(), "session_id": ""})
+    text = out[0] if isinstance(out, tuple) else out
+    run_id = db.list_rlm_runs()[0]["run_id"]
+    assert f'continue_from="{run_id}"' in text
+    assert "partial work is saved" in text
+
+
 def test_rlm_process_budget_preflight_refuses_without_staging(monkeypatch, mock_llm_client):
     """Regression for session a45fa830cef9: runs fd5eea16/9e7d5270 staged
     ~300KB of context, spawned a child, and wrote run rows only to die on the

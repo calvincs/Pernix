@@ -149,6 +149,18 @@ def test_child_answer_ready_including_rebound_dict(child):
     assert r2.final_answer == "plain"
 
 
+def test_child_ships_draft_without_ready(child):
+    """Write-as-you-go: answer["content"] comes back with every cell even
+    when ready is False, so the parent can persist it as the draft."""
+    r0 = _cell(child, "print('no draft yet')")
+    assert r0.draft is None
+    r1 = _cell(child, "answer['content'] = 'partial notes'")
+    assert r1.draft == "partial notes" and r1.final_answer is None
+    # persists across cells that don't touch answer
+    r2 = _cell(child, "x = 1")
+    assert r2.draft == "partial notes"
+
+
 def test_child_error_traceback_is_cell_scoped(child):
     r = _cell(child, "def boom():\n    return 1 / 0\nboom()")
     assert "ZeroDivisionError" in r.stderr
@@ -338,6 +350,81 @@ def test_engine_timeout(tmp_path):
     caps = RLMCaps(max_iterations=5, timeout_seconds=0.01)
     result = _make_engine(tmp_path, root_chat=ScriptedRoot([]), caps=caps).run()
     assert result.status == "timeout" and result.partial
+
+
+def test_engine_payloads_record_full_content(tmp_path):
+    """payloads.jsonl is the durable knowledge store: full root responses and
+    full sub-call prompt/response pairs, not the trace's previews."""
+    import json as _json
+
+    long_prose = "finding: " + "x" * 600  # longer than the 500-char trace preview
+    root = ScriptedRoot(
+        [
+            long_prose + "\n```repl\nr = llm_query('the-prompt')\nprint(r)\n```",
+            "```repl\nanswer['content'] = 'done'\nanswer['ready'] = True\n```",
+        ]
+    )
+    engine = _make_engine(tmp_path, root_chat=root)
+    result = engine.run()
+    assert result.status == "completed"
+
+    payloads = [_json.loads(line) for line in (engine.run_dir / "payloads.jsonl").read_text().splitlines()]
+    roots = [p for p in payloads if p["kind"] == "root"]
+    assert long_prose in roots[0]["content"], "root payload must carry the FULL response"
+    subs = [p for p in payloads if p["kind"] == "subcall"]
+    assert subs == [
+        {
+            "ts": subs[0]["ts"],
+            "kind": "subcall",
+            "model": None,
+            "ok": True,
+            "prompt": "the-prompt",
+            "response": "echo:the-prompt",
+            "error": "",
+            "duration": subs[0]["duration"],
+        }
+    ]
+
+
+def test_engine_draft_salvaged_on_abnormal_exit(tmp_path):
+    """A run that dies after accumulating a draft returns the draft, not the
+    last root response — session a45fa830cef9's timeout run returned its
+    next-batch ```repl``` plan while the real findings died with the child."""
+    calls = {"n": 0}
+
+    def root(messages, timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "```repl\nanswer['content'] = 'CH1 findings so far'\n```"
+        raise ConnectionError("provider down")
+
+    engine = _make_engine(tmp_path, root_chat=root)
+    result = engine.run()
+    assert result.status == "failed" and result.partial
+    assert result.answer == "CH1 findings so far"
+    assert (engine.run_dir / "draft.txt").read_text() == "CH1 findings so far"
+    assert (engine.run_dir / "answer.txt").read_text() == "CH1 findings so far"
+
+
+def test_engine_iteration_cap_falls_back_to_draft(tmp_path):
+    """When the post-cap synthesis call fails, the draft beats the last root
+    response as the returned answer."""
+    caps = RLMCaps(max_iterations=1, timeout_seconds=60)
+    # One scripted response; the synthesis call then raises (ScriptedRoot is
+    # empty), which the engine swallows — the draft must win.
+    root = ScriptedRoot(["plan prose\n```repl\nanswer['content'] = 'DRAFT WINS'\n```"])
+    result = _make_engine(tmp_path, root_chat=root, caps=caps).run()
+    assert result.status == "iteration_cap"
+    assert result.answer == "DRAFT WINS"
+
+
+def test_build_system_messages_continuation_note():
+    from core.extensions.rlm.prompts import build_system_messages
+
+    msgs = build_system_messages("t", "str", 10, None, continuation="CONTINUATION: reuse prior['subcalls']")
+    assert "CONTINUATION: reuse prior['subcalls']" in msgs[1]["content"]
+    # absent by default
+    assert "CONTINUATION" not in build_system_messages("t", "str", 10)[1]["content"]
 
 
 def test_engine_cancelled(tmp_path):

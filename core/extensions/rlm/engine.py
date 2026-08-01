@@ -51,6 +51,10 @@ RootChatFn = Callable[[list[dict], float], str]
 ROOT_HISTORY_MAX_CHARS = 400_000
 # Skip the final synthesis call when less wall clock than this remains.
 MIN_SYNTHESIS_SECONDS = 30.0
+# Per-field cap in payloads.jsonl (full root responses and sub-call
+# prompt/response pairs — the durable knowledge store a continuation reloads;
+# the trace keeps only previews). Generous: the point is completeness.
+PAYLOAD_FIELD_CAP_CHARS = 300_000
 # Liveness pulse cadence while a root call / cell is in flight. Heartbeats go
 # to progress_fn only, never trace.jsonl — the trace records signal (what the
 # run did), not the fact that time passed (dream journal precedent).
@@ -85,6 +89,7 @@ class RLMEngine:
         on_child_spawn: Callable | None = None,
         rlm_fn: Callable[[str, str | None], str] | None = None,
         progress_fn: Callable[[dict], None] | None = None,
+        continuation_note: str | None = None,
     ):
         self.run_dir = Path(run_dir)
         self.task = task
@@ -112,11 +117,19 @@ class RLMEngine:
         # it to feed SSE + mid-run DB counters; None = fully silent (tests,
         # dream probe, nested runs).
         self._progress_fn = progress_fn
+        # Extra user-message paragraph for continue_from runs: tells the root
+        # what run it continues and what the `prior` REPL variable holds.
+        self._continuation_note = continuation_note
         # Set at run() start; nested runs share the remaining wall clock.
         self.deadline: float | None = None
         self._trace_lock = threading.Lock()
         self._trace_fh = None
+        self._payload_fh = None
         self._best_partial: str | None = None
+        # Latest non-empty answer["content"] snapshot (write-as-you-go). The
+        # preferred salvage: deliberate accumulated findings, not the last
+        # root response (which is usually a plan or a code block).
+        self._draft: str | None = None
         self._iterations = 0
         self._heartbeat_stop: threading.Event | None = None
 
@@ -130,6 +143,7 @@ class RLMEngine:
 
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._trace_fh = open(self.run_dir / "trace.jsonl", "a", encoding="utf-8")
+        self._payload_fh = open(self.run_dir / "payloads.jsonl", "a", encoding="utf-8")
 
         broker = LLMBroker(
             self.run_dir / "llm.sock",
@@ -139,6 +153,7 @@ class RLMEngine:
             allowed_models=self._allowed_models,
             deadline=deadline,
             trace_fn=self._trace,
+            payload_fn=self._payload,
             rlm_fn=self.rlm_fn,
         )
         child_kwargs = {"python_exe": self._python_exe}
@@ -188,7 +203,11 @@ class RLMEngine:
 
     def _loop(self, child: ChildREPL, broker: LLMBroker, deadline: float, start: float) -> RLMRunResult:
         messages = build_system_messages(
-            self.task, self.staged.context_type, self.staged.total_chars, self.staged.file_names
+            self.task,
+            self.staged.context_type,
+            self.staged.total_chars,
+            self.staged.file_names,
+            continuation=self._continuation_note,
         )
         budget_notified = False
         iterations = 0
@@ -210,6 +229,7 @@ class RLMEngine:
             if response and response.strip():
                 self._best_partial = response
             self._trace({"type": "root", "iteration": i, "response_preview": response[:500]})
+            self._payload({"kind": "root", "iteration": i, "content": response})
 
             blocks = find_code_blocks(response)
             if not blocks:
@@ -228,6 +248,7 @@ class RLMEngine:
                     last_activity=broker.last_activity,
                 )
                 cells.append(cell)
+                self._record_draft(cell.draft)
                 self._trace(
                     {
                         "type": "cell",
@@ -255,17 +276,18 @@ class RLMEngine:
             messages.extend(format_iteration(response, cells))
             self._trim_messages(messages)
 
-        # Iteration cap: one synthesis call, then best partial.
+        # Iteration cap: one synthesis call, then the draft, then best partial.
         answer = None
         remaining = deadline - time.monotonic()
         if remaining >= MIN_SYNTHESIS_SECONDS:
             try:
                 answer = self._call_root(messages + [_SYNTHESIS_MSG], remaining)
                 self._trace({"type": "synthesis", "response_preview": (answer or "")[:500]})
+                self._payload({"kind": "synthesis", "content": answer or ""})
             except Exception as e:
                 logger.warning("RLM synthesis call failed: %s", e)
         if not answer or not answer.strip():
-            answer = self._best_partial or "(no answer produced before the iteration cap)"
+            answer = self._draft or self._best_partial or "(no answer produced before the iteration cap)"
         return RLMRunResult(
             answer=answer,
             status="iteration_cap",
@@ -293,7 +315,12 @@ class RLMEngine:
             raise RLMCancelled("session cancelled", partial_answer=self._best_partial)
 
     def _salvage(self, status: str, e: Exception, start: float) -> RLMRunResult:
-        partial = getattr(e, "partial_answer", None) or self._best_partial
+        # Draft first: answer["content"] is the root's deliberate running
+        # answer, while the exception's partial / last root response is
+        # usually a plan or code block (session a45fa830cef9's timeout run
+        # returned its next-batch ```repl``` plan as the "answer" while eight
+        # chapters of findings died with the child).
+        partial = self._draft or getattr(e, "partial_answer", None) or self._best_partial
         logger.info("RLM run ended early (%s): %s", status, e)
         # No placeholder text: an empty answer is how the tool layer knows to
         # return an Error:-prefixed result instead of a fake best-effort one.
@@ -340,6 +367,42 @@ class RLMEngine:
                     pass  # trace is best-effort; never fail the run over it
         self._emit_progress(event)
 
+    def _payload(self, event: dict) -> None:
+        """Append to payloads.jsonl — full root/synthesis responses and
+        sub-call prompt/response pairs. This is the run's durable knowledge
+        store: everything that cost LLM time, so a continue_from run can
+        reload it instead of paying for it again. Never emitted as progress
+        (megabytes don't belong on the SSE stream). Called from the engine
+        thread (root/synthesis) and broker handler threads (subcall)."""
+        event = {"ts": round(time.time(), 3), **event}
+        for key in ("content", "prompt", "response"):
+            value = event.get(key)
+            if isinstance(value, str) and len(value) > PAYLOAD_FIELD_CAP_CHARS:
+                event[key] = (
+                    value[:PAYLOAD_FIELD_CAP_CHARS] + f"... [{len(value) - PAYLOAD_FIELD_CAP_CHARS} chars truncated]"
+                )
+        if self._payload_fh is not None:
+            with self._trace_lock:
+                try:
+                    self._payload_fh.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+                    self._payload_fh.flush()
+                except (OSError, ValueError):
+                    pass  # best-effort, like the trace
+
+    def _record_draft(self, draft: str | None) -> None:
+        """Persist the latest answer["content"] snapshot to draft.txt.
+
+        Written every cell it changes, so a run killed mid-cell (wall clock,
+        cancel, child death) still leaves its accumulated findings on disk —
+        for salvage now and for continue_from later."""
+        if not draft or not draft.strip() or draft == self._draft:
+            return
+        self._draft = draft
+        try:
+            (self.run_dir / "draft.txt").write_text(draft, encoding="utf-8")
+        except OSError:
+            logger.debug("failed to persist RLM draft in %s", self.run_dir)
+
     def _emit_progress(self, event: dict) -> None:
         if self._progress_fn is None:
             return
@@ -378,12 +441,14 @@ class RLMEngine:
 
     def _finalize_trace(self) -> None:
         with self._trace_lock:
-            if self._trace_fh is not None:
-                try:
-                    self._trace_fh.close()
-                except OSError:
-                    pass
-                self._trace_fh = None
+            for attr in ("_trace_fh", "_payload_fh"):
+                fh = getattr(self, attr)
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except OSError:
+                        pass
+                    setattr(self, attr, None)
 
     def _write_answer(self, result: RLMRunResult) -> None:
         try:
