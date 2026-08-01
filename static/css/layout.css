@@ -283,9 +283,14 @@
 /* Sidebar legend footer */
 #sidebar-legend {
     display: flex;
+    /* Five typed items no longer fit the 270px sidebar on one line; without
+       wrapping, the centered flex row clips at BOTH edges (overflow: hidden
+       on #sidebar) and the left items become unreachable. */
+    flex-wrap: wrap;
     align-items: center;
     justify-content: center;
     gap: 2px;
+    row-gap: 3px;
     padding: var(--sp-2) var(--sp-2);
     border-top: 1px solid var(--border);
     flex-shrink: 0;
