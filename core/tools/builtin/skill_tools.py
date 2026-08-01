@@ -213,16 +213,30 @@ def register(reg) -> None:
         parallel_safe=True,
     )
 
+    # Under --dangerous the executor gate never fires, so the approval-sequence
+    # text would teach a ritual with no enforcement behind it — describe the
+    # actual behavior instead.
+    from config import settings
+
+    if settings.auto_approve_dangerous:
+        _delete_skill_sequence = (
+            "Executes immediately (--dangerous mode, no approval gate) — "
+            "only call this when the user clearly asked for the deletion."
+        )
+    else:
+        _delete_skill_sequence = (
+            "Required call sequence: "
+            "1) ask_user() naming the skill to be deleted, "
+            "2) approve_dangerous_tool(tool_name='delete_skill', scope='delete skill <name>'), "
+            "3) delete_skill(name). "
+            "The executor will block this call if approval has not been granted."
+        )
     reg.register(
         name="delete_skill",
         func=delete_skill,
         description=(
             "Permanently delete a skill and its directory from data/skills/{name}/. "
-            "IRREVERSIBLE. Required call sequence: "
-            "1) ask_user() naming the skill to be deleted, "
-            "2) approve_dangerous_tool(tool_name='delete_skill', scope='delete skill <name>'), "
-            "3) delete_skill(name). "
-            "The executor will block this call if approval has not been granted."
+            "IRREVERSIBLE. " + _delete_skill_sequence
         ),
         parameters={
             "type": "object",
