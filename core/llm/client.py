@@ -72,6 +72,22 @@ def extend_session_budget(session_id: str, additional_seconds: float) -> float:
     return router._ollama_semaphore.extend_session_budget(session_id, additional_seconds)
 
 
+def ensure_session_budget(session_id: str, min_remaining_seconds: float) -> float:
+    """Ensure at least `min_remaining_seconds` of LLM budget remain, per provider.
+
+    Unlike extend_session_budget (headroom relative to the base timeout —
+    a no-op when re-granted within one turn), this measures each scheduler's
+    elapsed clock and tops the cap up so the caller's full window is left.
+    Use it before starting a long-running LLM-billed job (rlm_process) that
+    may run back-to-back with earlier jobs in the same turn. Each scheduler
+    computes its own deficit because each tracks its own first-acquire clock.
+    Returns the new effective Ollama timeout for diagnostics.
+    """
+    router = _get_router()
+    router._openrouter_semaphore.ensure_session_budget(session_id, min_remaining_seconds)
+    return router._ollama_semaphore.ensure_session_budget(session_id, min_remaining_seconds)
+
+
 def reset_session_budget(session_id: str) -> None:
     """Reset a session's wall-clock LLM budget tracking on every provider.
 

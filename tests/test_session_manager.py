@@ -866,6 +866,54 @@ async def test_process_pending_does_not_drain_while_awaiting_user():
     assert dispatched == [], f"Unexpected dispatch(es) while AWAITING_USER: {dispatched}"
 
 
+async def test_process_pending_resets_budget_for_queued_user_message(monkeypatch):
+    """A queued user message opens a new user turn and must get the same fresh
+    LLM budget window prompt() grants on immediate dispatch. Regression for
+    session a45fa830cef9: both RLM turns entered via the queued path (one
+    pre-empted a reflect retry, one queued behind a 25-minute turn), ran on a
+    budget clock started two turns earlier, and three runs died on the
+    session time limit."""
+    mgr = _make_manager()
+    sid = mgr.create_session(title="Queued budget reset")
+    session = mgr.get(sid)
+
+    resets: list[str] = []
+    monkeypatch.setattr("core.llm.client.reset_session_budget", resets.append)
+
+    async def _noop_turn(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(mgr, "_run_agent_safe", _noop_turn)
+
+    session.pending_messages.append(PendingMessage("queued follow-up", "", True, 0.0, 4242))
+    await mgr._process_pending(session)
+    if session.task is not None:
+        await session.task
+    assert resets == [sid], "queued user turn must reset the session LLM budget"
+
+
+async def test_process_pending_keeps_clock_for_synthetic_entries(monkeypatch):
+    """Worker resume / worker timeout entries (msg_id=None) continue the same
+    piece of work — a self-triggered turn must not refresh its own budget."""
+    mgr = _make_manager()
+    sid = mgr.create_session(title="Synthetic keeps clock")
+    session = mgr.get(sid)
+
+    resets: list[str] = []
+    monkeypatch.setattr("core.llm.client.reset_session_budget", resets.append)
+
+    async def _noop_turn(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(mgr, "_run_agent_safe", _noop_turn)
+
+    session.pending_messages.append(PendingMessage("worker resumed", None))
+    await mgr._process_pending(session)
+    if session.task is not None:
+        await session.task
+    assert resets == [], "synthetic entry must not reset the session LLM budget"
+
+
 def test_paused_reaper_edge_exists_in_transition_table():
     """PAUSED must have a reaper-unstick edge so the reaper can force it to
     IDLE_READY without logging an invariant violation."""

@@ -1871,6 +1871,22 @@ class SessionManager:
             # Synthetic entries (worker resume, worker timeout) have none.
             if entry.msg_id is not None:
                 session.current_turn_user_msg_id = entry.msg_id
+                # A queued user message is still a new user turn: give it the
+                # same fresh LLM budget window prompt() grants on immediate
+                # dispatch (manager.py "Reset the LLM wall-clock budget"
+                # block). Without this, a message queued behind a long turn —
+                # or one that pre-empted a reflect retry — runs on the prior
+                # turn's clock; session a45fa830cef9 lost three RLM runs to a
+                # cap whose window opened two turns earlier. Synthetic entries
+                # keep the running clock on purpose: they continue the same
+                # piece of work, and a self-triggered turn must not be able to
+                # refresh its own budget.
+                try:
+                    from core.llm.client import reset_session_budget as _reset_budget
+
+                    _reset_budget(session.session_id)
+                except Exception as _e:
+                    logger.debug("Budget reset failed for %s: %s", session.session_id, _e)
 
             # Start a new agent task for the pending message while lock is held
             session.task = asyncio.create_task(
