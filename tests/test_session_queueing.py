@@ -199,6 +199,77 @@ class TestExtendSessionBudget:
         assert sem.session_seconds_remaining("orch") <= 1800.0
 
 
+class TestEnsureSessionBudget:
+    """Regression for RLM stress-test session a45fa830cef9 (2026-07-31):
+    rlm_process called extend_session_budget(timeout+grace) before each run,
+    but extend grants headroom relative to the BASE timeout — for four
+    back-to-back runs in one turn every re-grant after the first was a no-op,
+    and the last three runs died on LLMSessionTimeoutError (two at iteration
+    0). ensure_session_budget is relative to the running clock instead: it
+    guarantees at least min_remaining seconds are left, however much of the
+    turn is already spent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_noop_when_remaining_already_sufficient(self):
+        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        await sem.acquire(session_id="rlm")
+        sem.release()
+        sem.ensure_session_budget("rlm", 1000.0)
+        # Base window already has >1000s left — no override installed.
+        assert sem._session_timeout_override.get("rlm") is None
+
+    @pytest.mark.asyncio
+    async def test_tops_up_relative_to_elapsed_clock(self, monkeypatch):
+        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        await sem.acquire(session_id="rlm")
+        sem.release()
+
+        import time as _t
+
+        from core.llm import semaphore as _sem_mod
+
+        original = _t.monotonic()
+        # 1700s into the window with only ~100s left, a run needing 1020s
+        # must be able to top the budget up to a full window again.
+        monkeypatch.setattr(_sem_mod, "time", type("T", (), {"monotonic": staticmethod(lambda: original + 1700.0)}))
+        sem.ensure_session_budget("rlm", 1020.0)
+        remaining = sem.session_seconds_remaining("rlm")
+        assert remaining >= 1020.0, f"top-up did not take: {remaining}"
+
+        # And it composes: another 1500s later, a second ensure tops up again
+        # (the exact scenario extend_session_budget silently no-ops on).
+        monkeypatch.setattr(_sem_mod, "time", type("T", (), {"monotonic": staticmethod(lambda: original + 3200.0)}))
+        sem.ensure_session_budget("rlm", 1020.0)
+        remaining = sem.session_seconds_remaining("rlm")
+        assert remaining >= 1020.0, f"second top-up did not take: {remaining}"
+        await sem.acquire(session_id="rlm")
+        sem.release()
+
+    @pytest.mark.asyncio
+    async def test_never_shrinks_a_granted_cap(self):
+        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem.extend_session_budget("rlm", 9000.0)  # effective 10800
+        sem.ensure_session_budget("rlm", 60.0)
+        assert sem._session_timeout_override["rlm"] == 1800.0 + 9000.0
+
+    @pytest.mark.asyncio
+    async def test_before_first_acquire_counts_elapsed_as_zero(self):
+        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=300.0)
+        sem.ensure_session_budget("rlm", 1020.0)
+        # Clock not started: remaining is inf, but the first acquire must
+        # open a window of at least min_remaining.
+        assert sem.session_seconds_remaining("rlm") == float("inf")
+        await sem.acquire(session_id="rlm")
+        sem.release()
+        assert sem.session_seconds_remaining("rlm") > 300.0
+
+    def test_empty_session_id_is_noop(self):
+        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        assert sem.ensure_session_budget("", 5000.0) == 1800.0
+        assert not sem._session_timeout_override
+
+
 class TestResetSessionBudget:
     """Regression for session 14af4333f6d8 (2026-04-28): an interactive
     chat session got "LLM time budget exhausted (>1800s) — turn aborted

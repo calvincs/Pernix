@@ -258,6 +258,35 @@ class SessionAwareLLMScheduler:
             self._session_timeout_override[session_id] = proposed
         return self._effective_timeout(session_id)
 
+    def ensure_session_budget(self, session_id: str, min_remaining_seconds: float) -> float:
+        """Grow the session's cap so at least `min_remaining_seconds` remain.
+
+        extend_session_budget grants headroom relative to the BASE timeout
+        (effective = base + additional), so back-to-back long-running tool
+        calls in one turn compose wrongly: the second call's identical
+        extension is a no-op even though the first consumed most of the
+        window, and the run dies on LLMSessionTimeoutError mid-flight
+        (RLM stress-test session a45fa830cef9 lost three runs this way).
+        This variant is relative to the clock: it measures elapsed time and
+        raises the cap just enough that `session_seconds_remaining` comes
+        back >= min_remaining_seconds.
+
+        Same guarantees as extend: never shrinks a granted cap, cleared by
+        purge/reset, session_id == "" is a no-op. A session that has not
+        acquired yet (clock not started) counts elapsed as 0 — the first
+        acquire then starts a window of at least min_remaining_seconds.
+        Returns the new effective timeout.
+        """
+        if not session_id:
+            return self._session_timeout
+        first = self._session_first_active.get(session_id)
+        elapsed = 0.0 if first is None else time.monotonic() - first
+        needed = elapsed + max(0.0, min_remaining_seconds)
+        existing = self._session_timeout_override.get(session_id, self._session_timeout)
+        if needed > existing:
+            self._session_timeout_override[session_id] = needed
+        return self._effective_timeout(session_id)
+
     @property
     def available(self) -> int:
         return self._available

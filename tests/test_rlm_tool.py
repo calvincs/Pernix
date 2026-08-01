@@ -219,6 +219,60 @@ def test_rlm_process_size_gate(monkeypatch):
     assert out.startswith("Error: source is") and "cap is 100" in out
 
 
+def test_rlm_process_budget_preflight_refuses_without_staging(monkeypatch, mock_llm_client):
+    """Regression for session a45fa830cef9: runs fd5eea16/9e7d5270 staged
+    ~300KB of context, spawned a child, and wrote run rows only to die on the
+    session LLM time limit at iteration 0 — and the generic error invited a
+    retry that failed identically. When the budget top-up doesn't take, the
+    tool must refuse before creating anything, with an answer that tells the
+    agent not to retry."""
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    monkeypatch.setattr("core.llm.client.ensure_session_budget", lambda sid, need: 0.0)
+    monkeypatch.setattr("core.llm.client.session_seconds_remaining", lambda sid: 42.0)
+
+    rlm_root = Path(settings.workspace_dir) / "rlm"
+    dirs_before = set(rlm_root.iterdir()) if rlm_root.exists() else set()
+    rows_before = len(db.list_rlm_runs())
+
+    out = rlm_process(
+        "compare things",
+        "inline source text " * 20,
+        _context={"_loop": object(), "session_id": "sess-budget-gone"},
+    )
+    assert isinstance(out, str) and out.startswith("Error:")
+    assert "~42s" in out
+    assert "Do not call rlm_process again this turn" in out
+    assert len(db.list_rlm_runs()) == rows_before, "refused run must leave no rlm_runs row"
+    dirs_after = set(rlm_root.iterdir()) if rlm_root.exists() else set()
+    assert dirs_after == dirs_before, "refused run must not mint a run dir"
+
+
+def test_rlm_process_budget_preflight_tops_up_and_proceeds(monkeypatch, mock_llm_client):
+    """The pre-flight requests the run's full window (timeout + grace) via
+    ensure_session_budget — relative-to-the-clock semantics, so back-to-back
+    runs in one turn each get their full window — and proceeds once the
+    top-up takes."""
+    from core.extensions.rlm import _BUDGET_GRACE
+
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    asked: list[tuple[str, float]] = []
+
+    def fake_ensure(sid, min_remaining):
+        asked.append((sid, min_remaining))
+        return 99999.0
+
+    monkeypatch.setattr("core.llm.client.ensure_session_budget", fake_ensure)
+    monkeypatch.setattr("core.llm.client.session_seconds_remaining", lambda sid: float("inf"))
+
+    canned = RLMRunResult(answer="the topped-up answer", status="completed", iterations=1, subcalls=0, duration=1.0)
+    monkeypatch.setattr("core.extensions.rlm.engine.RLMEngine.run", lambda self: canned)
+
+    out = rlm_process("q?", "inline text body", _context={"_loop": object(), "session_id": "sess-budget-ok"})
+    text = out[0] if isinstance(out, tuple) else out
+    assert "the topped-up answer" in text and "completed" in text
+    assert asked == [("sess-budget-ok", float(settings.rlm_timeout_seconds) + _BUDGET_GRACE)]
+
+
 # =============================================================================
 # discoverability wiring (all gated on rlm_enabled)
 # =============================================================================

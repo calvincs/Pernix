@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 # (BASH_MAX_TIMEOUT/dispatch-grace precedent).
 _DISPATCH_GRACE = 60
 
+# Session-budget headroom on top of the run's wall clock: root/sub calls in
+# flight at the deadline, salvage synthesis, and result bookkeeping.
+_BUDGET_GRACE = 120.0
+
 # Upstream rlm_query semantics: the prompt (often a chunk assembled in the
 # parent's REPL) IS the child's context; the task is generic.
 _NESTED_TASK = "Answer the query contained in the context."
@@ -84,9 +88,14 @@ def _resolve_sources(source) -> tuple[str | None, list[Path], str]:
     for entry in entries:
         try:
             p = safe_read_path(entry)
+            is_file = p is not None and p.is_file()
         except ValueError:
-            p = None
-        if p is not None and p.is_file():
+            p, is_file = None, False
+        except OSError:
+            # is_file() itself raises for un-stat-able "paths" — e.g. inline
+            # text over the 255-byte filename limit. That's just inline text.
+            p, is_file = None, False
+        if is_file:
             files.append(p)
         elif len(entries) == 1:
             return entry, [], f"inline text ({len(entry)} chars)"
@@ -298,7 +307,7 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
     if not task or not task.strip():
         return "Error: task is required — what question should the RLM answer about the source?"
 
-    from core.llm.client import extend_session_budget, get_llm_client
+    from core.llm.client import ensure_session_budget, get_llm_client, session_seconds_remaining
     from core.llm.semaphore import LLMSessionTimeoutError
     from core.tools.truncation import truncate_output
 
@@ -357,12 +366,31 @@ def rlm_process(task: str, source, model: str = "", _context: dict | None = None
         return bool(session and getattr(session, "cancel_requested", False))
 
     # The run's wall clock is dominated by child/sub-call time, but every
-    # sub-call bills to this session — extend upfront (spawn_worker precedent).
+    # root and sub call bills to this session's LLM budget. Top the budget up
+    # so the run's FULL window is still on the clock however much of the turn
+    # is already spent — extend_session_budget grants headroom relative to the
+    # base timeout only, so for back-to-back runs in one turn the re-grant was
+    # a silent no-op and later runs died budget_exhausted mid-flight or at
+    # iteration 0 (session a45fa830cef9). If the top-up didn't take, refuse
+    # here — before staging context, spawning a child, or minting run rows —
+    # with an answer the agent can act on instead of retrying.
     if sid:
+        needed = float(settings.rlm_timeout_seconds) + _BUDGET_GRACE
         try:
-            extend_session_budget(sid, float(settings.rlm_timeout_seconds) + 120.0)
+            ensure_session_budget(sid, needed)
+            remaining = session_seconds_remaining(sid)
         except Exception as e:
-            logger.debug("rlm_process: failed to extend session budget: %s", e)
+            # Fail open: the budget guard is an availability protection, and a
+            # genuinely exhausted budget still errors on the first LLM call.
+            logger.debug("rlm_process: session budget check failed open: %s", e)
+            remaining = float("inf")
+        if remaining < needed:
+            return (
+                f"Error: this session has ~{remaining:.0f}s of LLM time budget left, but an RLM run "
+                f"needs up to {needed:.0f}s. The run was refused before staging anything. Do not call "
+                "rlm_process again this turn — it will fail the same way. Report the results you "
+                "already have (including partial answers from earlier runs) instead."
+            )
 
     def on_child_spawn(popen):
         if session is not None:
