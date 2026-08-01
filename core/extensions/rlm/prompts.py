@@ -20,6 +20,8 @@ To use the REPL, you need to write code in ```repl``` blocks; the REPL persists 
 - `SHOW_VARS() -> str`: list every variable currently in the REPL.
 - `answer`: dict initialized to `{"content": "", "ready": False}`. To submit, set `answer["content"]` to the final answer and `answer["ready"] = True` inside a ```repl``` block.
 
+Keep `answer["content"]` updated as a running draft while findings accumulate — if the run is cut off by a time or turn cap, the latest draft is what gets returned, so an up-to-date draft turns a dead run into a partial success. Set `answer["ready"] = True` only when the answer is final.
+
 REPL outputs over ~20K characters are truncated, so for longer payloads slice `context` and pass slices through `llm_query` rather than `print`-ing them whole. The REPL is NOT a Jupyter cell — only `print(...)` output (stdout) is shown back to you between turns; a bare expression on the last line is silently discarded. Always wrap inspections in `print(...)`.
 
 As a general strategy, you should start by probing your context to understand it better (e.g. print a few lines, count them, etc.). Then, use the REPL to build up an answer to the query.
@@ -94,6 +96,7 @@ def build_system_messages(
     context_type: str,
     context_chars: int,
     context_files: list[str] | None = None,
+    continuation: str | None = None,
 ) -> list[dict[str, str]]:
     """System prompt + metadata user message that open every run's history."""
     system = f"{RLM_SYSTEM_PROMPT}\n\n{ORCHESTRATOR_ADDENDUM}"
@@ -103,6 +106,8 @@ def build_system_messages(
     )
     if context_files:
         metadata += f" The context was staged from {len(context_files)} file(s): {', '.join(context_files[:20])}."
+    if continuation:
+        metadata += f"\n\n{continuation}"
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": f"Answer the following: {task}\n\n{metadata}"},

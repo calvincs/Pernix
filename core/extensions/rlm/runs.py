@@ -61,6 +61,8 @@ def record_start(
     depth: int = 0,
     ui_session_id: str | None = None,
     caps: RLMCaps | None = None,
+    source_sha256: str | None = None,
+    continued_from: str | None = None,
 ) -> None:
     manifest = {
         "run_id": run_id,
@@ -75,6 +77,12 @@ def record_start(
         "status": "running",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
+    if source_sha256:
+        # continue_from compares against this so a continuation never builds
+        # on findings derived from different source material.
+        manifest["source_sha256"] = source_sha256
+    if continued_from:
+        manifest["continued_from"] = continued_from
     if ui_session_id:
         manifest["ui_session_id"] = ui_session_id
     if caps is not None:

@@ -73,6 +73,10 @@ def _recv_exact(sock, n):
 _LLM_STUB_TIMEOUT = 900.0
 _RLM_STUB_TIMEOUT = 3900.0
 
+# Cap on the answer["content"] draft shipped back with each exec_result, so a
+# runaway draft can't blow up the result frame.
+_DRAFT_CAP_CHARS = 200_000
+
 _SAFE_BUILTINS = {
     # Core types and functions
     "print": print,
@@ -324,12 +328,20 @@ class ChildREPLRunner:
         self._restore_scaffold()
         final = self._final_answer
         self._final_answer = None
+        # Write-as-you-go: the current answer["content"], ready or not. The
+        # parent persists it each cell, so a killed run salvages accumulated
+        # findings instead of losing them with this process.
+        try:
+            draft = str(self.ns["answer"].get("content", "") or "")
+        except Exception:
+            draft = ""
         return {
             "type": "exec_result",
             "id": frame.get("id"),
             "stdout": out_buf.getvalue(),
             "stderr": err_buf.getvalue(),
             "final_answer": final,
+            "draft": draft[:_DRAFT_CAP_CHARS] if draft.strip() else None,
             "duration": time.monotonic() - start,
             "var_names": [f"{k}:{t}" for k, t in sorted(self._visible_vars().items())],
         }

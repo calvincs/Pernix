@@ -29,6 +29,10 @@ class CellResult:
     duration: float = 0.0
     # Set the first time model code flips answer["ready"] = True.
     final_answer: str | None = None
+    # Current answer["content"] after the cell — the write-as-you-go draft.
+    # None when empty; the engine persists the latest non-empty draft so an
+    # abnormal exit salvages accumulated findings, not the last root prose.
+    draft: str | None = None
     # "name:type" entries for non-scaffold variables, for the model's benefit.
     var_names: list[str] = field(default_factory=list)
 

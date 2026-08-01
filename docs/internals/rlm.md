@@ -88,11 +88,55 @@ The Docker container Pernix runs in is the actual containment layer.
 The durable output is the tool result in the session transcript. Everything
 else is transient residue in `data/workspace/rlm/<run_id>/` (manifest.json,
 trace.jsonl of every turn/cell/sub-call, staged context copies, child.log,
-answer.txt — workspace-visible so the agent can `file_read` its own trace),
-indexed by a lightweight `rlm_runs` DB row (migration v18). Snooze activity
-12a purges dirs + rows older than `rlm_run_retention_days` (default 30) —
-along with the run's view session (below) — and a startup sweep marks rows
-orphaned by a restart.
+answer.txt, payloads.jsonl, draft.txt — workspace-visible so the agent can
+`file_read` its own trace), indexed by a lightweight `rlm_runs` DB row
+(migration v18). Snooze activity 12a purges dirs + rows older than
+`rlm_run_retention_days` (default 30) — along with the run's view session
+(below) — and a startup sweep marks rows orphaned by a restart.
+
+## Continuation (`continue_from`) — reuse a dead run's paid-for work
+
+Motivated by stress-test session `a45fa830cef9`: a full-corpus run timed out
+with 8 of 12 chapters analyzed, the salvaged "answer" was the root's
+next-batch code plan, and five follow-up runs re-derived everything from
+scratch. The design principle is **continuation-by-artifact, not state
+resurrection**: persist everything that cost LLM time; let Python state be
+recomputed (it cost milliseconds). Live-namespace checkpointing (pickling the
+REPL) was considered and rejected — it buys little over recompute-plus-reload
+and adds stale-state and mid-cell-kill failure modes. Continuation is also
+deliberately **explicit, never automatic**: sometimes the right move after a
+failed run is a different decomposition, and blind auto-resume would
+faithfully continue an infeasible plan. The agent decides; the tool provides
+the mechanism and advertises it.
+
+Three cooperating pieces:
+
+- **`payloads.jsonl`** — the run's durable knowledge store, appended by the
+  engine alongside the trace: full root responses (which contain every
+  ```repl``` cell), the synthesis response, and full sub-call
+  prompt/response pairs via the broker's `payload_fn` seam (the trace keeps
+  only previews; sub-call *responses* were previously not recorded at all).
+  Fields capped at `PAYLOAD_FIELD_CAP_CHARS` (300K); never emitted on the
+  SSE stream.
+- **`draft.txt` (write-as-you-go)** — the system prompt instructs the root to
+  keep `answer["content"]` updated as a running draft; the child ships the
+  current draft with every `exec_result` and the engine persists it whenever
+  it changes. Salvage on any abnormal exit — and the iteration-cap fallback
+  when synthesis fails — prefers the draft over the last root response, so a
+  killed run returns accumulated findings, not a plan.
+- **`continue_from=<run_id>`** on `rlm_process` — validated as a bare 8-hex
+  id (it lands in a path), refused while the prior run is still `running`,
+  and guarded by a source content hash: `stage_context` computes a sha256
+  over the staged content, `record_start` stores it in the manifest, and a
+  mismatch refuses the continuation (removing the just-minted run dir)
+  rather than presenting old findings as if they described new material.
+  On acceptance the prior draft, answer, and up to `_PRIOR_MAX_SUBCALLS` /
+  `_PRIOR_CHAR_BUDGET` of completed sub-call pairs are loaded into the new
+  child as the `prior` REPL variable, and the opening user message carries a
+  CONTINUATION note telling the root what `prior` holds and not to redo that
+  work. Runs predating `payloads.jsonl` degrade gracefully (draft/answer
+  only). Partial tool results advertise the mechanism: "partial work is
+  saved — call rlm_process again with continue_from=...".
 
 ## Live visibility (run views)
 

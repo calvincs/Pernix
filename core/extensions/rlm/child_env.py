@@ -10,6 +10,7 @@ Copyright (c) 2025 Alex Zhang), with docker replaced by a plain subprocess
 and dill state replaced by a persistent child holding globals in RAM.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -53,6 +54,18 @@ class StagedContext:
     context_type: str = "str"
     total_chars: int = 0
     file_names: list[str] = field(default_factory=list)
+    # sha256 of the staged content in staging order. continue_from compares it
+    # against the prior run's manifest so a continuation never silently builds
+    # on findings derived from different source material.
+    sha256: str = ""
+
+
+def _content_hash(contents: list[str]) -> str:
+    h = hashlib.sha256()
+    for c in contents:
+        h.update(c.encode("utf-8", "ignore"))
+        h.update(b"\x00")  # unambiguous boundary between staged items
+    return h.hexdigest()
 
 
 def stage_context(run_dir: Path, *, text: str | None = None, files: list[Path] | None = None) -> StagedContext:
@@ -68,6 +81,7 @@ def stage_context(run_dir: Path, *, text: str | None = None, files: list[Path] |
         path.write_text(text, encoding="utf-8")
         staged.items = [{"var": "context_0", "path": "context/context_0.txt", "format": "text"}]
         staged.total_chars = len(text)
+        staged.sha256 = _content_hash([text])
         return staged
 
     files = files or []
@@ -78,6 +92,7 @@ def stage_context(run_dir: Path, *, text: str | None = None, files: list[Path] |
         staged.items = [{"var": "context_0", "path": "context/context_0.txt", "format": "text"}]
         staged.total_chars = len(content)
         staged.file_names = [files[0].name]
+        staged.sha256 = _content_hash([content])
         return staged
 
     contents = [f.read_text(encoding="utf-8", errors="replace") for f in files]
@@ -89,6 +104,7 @@ def stage_context(run_dir: Path, *, text: str | None = None, files: list[Path] |
     staged.total_chars = sum(len(c) for c in contents)
     staged.file_names = [f.name for f in files]
     staged.extra_vars = {"context_files": staged.file_names}
+    staged.sha256 = _content_hash(contents)
     return staged
 
 
@@ -242,6 +258,7 @@ class ChildREPL:
                     stderr=reply.get("stderr", ""),
                     duration=float(reply.get("duration", 0.0)),
                     final_answer=reply.get("final_answer"),
+                    draft=reply.get("draft"),
                     var_names=list(reply.get("var_names", [])),
                 )
             logger.warning("discarding unexpected frame from child: %s", reply.get("type"))
