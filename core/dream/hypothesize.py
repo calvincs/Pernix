@@ -135,9 +135,7 @@ def candor_keys(evidence: list[dict]) -> set[tuple]:
     worded tool_pattern hypotheses. The evidence key is the semantic
     identity of a tool_pattern claim, so dedup on it instead."""
     return {
-        (e.get("pred"), tuple(e.get("args") or []))
-        for e in evidence
-        if e.get("type") == "candor" and e.get("pred")
+        (e.get("pred"), tuple(e.get("args") or [])) for e in evidence if e.get("type") == "candor" and e.get("pred")
     }
 
 
