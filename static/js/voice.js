@@ -25,6 +25,17 @@ let _fallbackNoticeShown = false; // one privacy notice per page load, not per u
 const MAX_RECORD_MS = 5 * 60 * 1000;
 let _autoStopTimer = null;
 
+// Press-duration gesture model (Telegram/WhatsApp/Discord-mobile style):
+// a tap toggles (press again to stop — right for long dictation), while
+// press-and-hold is push-to-talk (release stops and transcribes). A press
+// shorter than HOLD_MS is a tap; longer is a hold.
+const HOLD_MS = 500;
+let _gestureDownAt = 0;       // timestamp of the press that started this gesture
+let _gestureStopping = false; // press consumed as "stop" — ignore its release
+let _hotkeyDown = false;      // a Ctrl/Cmd+Shift+M gesture is in flight
+let _starting = false;        // engine spin-up in progress (getUserMedia etc.)
+let _stopRequested = null;    // release arrived before spin-up finished: {discard}
+
 function _btn() {
     return document.getElementById('voice-btn');
 }
@@ -56,19 +67,23 @@ export function initVoice(deps) {
     const btn = _btn();
     if (!btn) return;
 
-    btn.addEventListener('click', () => {
-        if (_recorder || _recognition) {
-            stopVoice();
-        } else {
-            _start();
-        }
+    // Pointer events (not click) so tap-vs-hold can be distinguished.
+    // preventDefault keeps focus in the textarea; pointer capture routes the
+    // release here even if the pointer drifts off the button mid-hold.
+    btn.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return; // main button/touch only
+        e.preventDefault();
+        try { btn.setPointerCapture(e.pointerId); } catch { /* capture unsupported */ }
+        _pressStart();
     });
+    btn.addEventListener('pointerup', () => _pressEnd());
+    btn.addEventListener('pointercancel', () => _pressEnd());
 
     // Escape cancels a live recording without transcribing (matches the
-    // "preempt instantly" feel of the rest of the app). Ctrl/Cmd+Shift+M
-    // toggles the mic — the de-facto mic-toggle combo (Discord, Teams).
+    // "preempt instantly" feel of the rest of the app). Ctrl/Cmd+Shift+M is
+    // the mic gesture key — the de-facto combo (Discord, Teams).
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && (_recorder || _recognition)) {
+        if (e.key === 'Escape' && (_recorder || _recognition || _starting)) {
             stopVoice({ discard: true });
             return;
         }
@@ -76,11 +91,15 @@ export function initVoice(deps) {
             const b = _btn();
             if (!b || b.hidden) return; // no engine configured — leave the combo alone
             e.preventDefault();
-            if (_recorder || _recognition) {
-                stopVoice();
-            } else {
-                _start();
-            }
+            if (e.repeat) return; // held keys auto-repeat; one gesture per physical press
+            _hotkeyDown = true;
+            _pressStart();
+        }
+    });
+    document.addEventListener('keyup', (e) => {
+        if (_hotkeyDown && e.key.toLowerCase() === 'm') {
+            _hotkeyDown = false;
+            _pressEnd();
         }
     });
 
@@ -90,7 +109,39 @@ export function initVoice(deps) {
     window.addEventListener('pernix:settings-saved', () => _updateVisibility());
 }
 
+// A press either starts the engine or, if one is live (or spinning up),
+// stops it — and flags the gesture so its own release doesn't re-evaluate.
+function _pressStart() {
+    if (_recorder || _recognition || _starting) {
+        _gestureStopping = true;
+        stopVoice();
+        return;
+    }
+    _gestureStopping = false;
+    _gestureDownAt = Date.now();
+    _start();
+}
+
+function _pressEnd() {
+    if (_gestureStopping) {
+        _gestureStopping = false;
+        return;
+    }
+    if (!_gestureDownAt) return;
+    const held = Date.now() - _gestureDownAt;
+    _gestureDownAt = 0;
+    // Hold = push-to-talk: release ends it. A quick tap toggles on and
+    // stays listening until the next press.
+    if (held >= HOLD_MS) stopVoice();
+}
+
 export function stopVoice({ discard = false } = {}) {
+    // Release can beat engine spin-up (getUserMedia prompt, recognizer
+    // start). Park the request; _start() honors it the moment it's live.
+    if (_starting && !_recorder && !_recognition) {
+        _stopRequested = { discard };
+        return;
+    }
     clearTimeout(_autoStopTimer);
     _autoStopTimer = null;
     if (_recognition) {
@@ -109,38 +160,52 @@ export function stopVoice({ discard = false } = {}) {
 }
 
 async function _start() {
-    const st = await _getStatus(true);
-    if (!st) {
-        _deps.appendMessage('system', 'Voice input: could not reach the server for voice status.');
-        return;
-    }
-    if (st.mode === 'off') return;
-
-    let engine = st.mode;
-    if (engine !== 'web_speech' && !st.usable) {
-        // Configured engine can't run right now — browser dictation only if
-        // the user opted into it (and its privacy ramifications) in settings.
-        if (st.fallback_web_speech && _speechRecognitionCtor()) {
-            engine = 'web_speech';
-            if (!_fallbackNoticeShown) {
-                _fallbackNoticeShown = true;
-                _deps.appendMessage('notice',
-                    `[voice: ${st.reason} — falling back to browser dictation. ` +
-                    'Audio is processed by your browser vendor’s speech service, not this machine. ' +
-                    'Configure this in Settings → Voice Input.]');
-            }
-        } else {
-            _deps.appendMessage('system',
-                `Voice input unavailable: ${st.reason}. ` +
-                'Fix the engine or enable the browser-dictation fallback in Settings → Voice Input.');
+    _starting = true;
+    _stopRequested = null;
+    try {
+        // Cached status keeps the press-to-listening gap imperceptible — a
+        // blocking refetch here used to swallow the first words. The cache
+        // is refreshed on load and whenever settings save.
+        const st = await _getStatus();
+        if (!st) {
+            _deps.appendMessage('system', 'Voice input: could not reach the server for voice status.');
             return;
         }
-    }
+        if (st.mode === 'off') return;
 
-    if (engine === 'web_speech') {
-        _startWebSpeech(st);
-    } else {
-        await _startRecording(engine, st);
+        let engine = st.mode;
+        if (engine !== 'web_speech' && !st.usable) {
+            // Configured engine can't run right now — browser dictation only if
+            // the user opted into it (and its privacy ramifications) in settings.
+            if (st.fallback_web_speech && _speechRecognitionCtor()) {
+                engine = 'web_speech';
+                if (!_fallbackNoticeShown) {
+                    _fallbackNoticeShown = true;
+                    _deps.appendMessage('notice',
+                        `[voice: ${st.reason} — falling back to browser dictation. ` +
+                        'Audio is processed by your browser vendor’s speech service, not this machine. ' +
+                        'Configure this in Settings → Voice Input.]');
+                }
+            } else {
+                _deps.appendMessage('system',
+                    `Voice input unavailable: ${st.reason}. ` +
+                    'Fix the engine or enable the browser-dictation fallback in Settings → Voice Input.');
+                return;
+            }
+        }
+
+        if (engine === 'web_speech') {
+            _startWebSpeech(st);
+        } else {
+            await _startRecording(engine, st);
+        }
+    } finally {
+        _starting = false;
+        if (_stopRequested) {
+            const req = _stopRequested;
+            _stopRequested = null;
+            if (_recorder || _recognition) stopVoice(req);
+        }
     }
 }
 
@@ -465,9 +530,9 @@ function _setUiState(state) {
     if (!btn) return;
     btn.classList.toggle('recording', state === 'recording');
     btn.classList.toggle('busy', state === 'busy');
-    btn.title = state === 'recording' ? 'Stop (Esc cancels)'
+    btn.title = state === 'recording' ? 'Listening — tap to stop, or release if holding (Esc cancels)'
         : state === 'busy' ? 'Transcribing…'
-        : 'Voice input (Ctrl+Shift+M)';
+        : 'Voice input — tap to toggle, hold to talk (Ctrl+Shift+M)';
     if (state === 'recording') {
         if (_savedPlaceholder === null) _savedPlaceholder = ta.placeholder;
         ta.placeholder = 'Listening…';

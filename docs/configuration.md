@@ -253,8 +253,10 @@ Settings → Voice Input: `local_whisper` keeps audio on the Pernix server;
 model hears it directly (local with Ollama, remote with cloud providers);
 `web_speech` sends audio to the browser vendor (e.g. Google for Chrome) and
 requires internet. The mic needs a secure context — HTTPS network mode or
-localhost. Ctrl/Cmd+Shift+M toggles the mic (the same combo Discord and
-Teams use); Esc cancels a recording without transcribing.
+localhost. The mic button and Ctrl/Cmd+Shift+M (the combo Discord and
+Teams use) share one gesture model: tap to toggle listening on and off,
+or press-and-hold for push-to-talk — release stops and transcribes.
+Esc cancels a recording without transcribing.
 
 ---
 
