@@ -65,10 +65,22 @@ export function initVoice(deps) {
     });
 
     // Escape cancels a live recording without transcribing (matches the
-    // "preempt instantly" feel of the rest of the app).
+    // "preempt instantly" feel of the rest of the app). Ctrl/Cmd+Shift+M
+    // toggles the mic — the de-facto mic-toggle combo (Discord, Teams).
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape' && (_recorder || _recognition)) {
             stopVoice({ discard: true });
+            return;
+        }
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'm') {
+            const b = _btn();
+            if (!b || b.hidden) return; // no engine configured — leave the combo alone
+            e.preventDefault();
+            if (_recorder || _recognition) {
+                stopVoice();
+            } else {
+                _start();
+            }
         }
     });
 
@@ -455,7 +467,7 @@ function _setUiState(state) {
     btn.classList.toggle('busy', state === 'busy');
     btn.title = state === 'recording' ? 'Stop (Esc cancels)'
         : state === 'busy' ? 'Transcribing…'
-        : 'Voice input';
+        : 'Voice input (Ctrl+Shift+M)';
     if (state === 'recording') {
         if (_savedPlaceholder === null) _savedPlaceholder = ta.placeholder;
         ta.placeholder = 'Listening…';

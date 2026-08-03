@@ -672,6 +672,7 @@ const SLASH_COMMANDS = {
         const caps = [
             ['Attach files', 'paperclip button, drag & drop, or paste a copied screenshot/file — images and audio go to the model'],
             ['Voice input', 'mic button dictates or records for the model — enable an engine in Settings → Voice Input'],
+            ['Ctrl+Shift+M', 'toggle the mic (same combo as Discord/Teams); Esc cancels a recording'],
             ['Schedule jobs', 'ask in chat ("every morning at 9, …") or Explorer 📁 → Jobs'],
             ['Skills', 'domain expertise packages the agent loads on demand — Explorer 📁 → Skills'],
             ['Memory', 'the agent remembers across sessions; just ask it to remember/recall things'],
