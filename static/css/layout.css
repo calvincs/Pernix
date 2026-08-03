@@ -2008,6 +2008,10 @@
 
 /* Mic button — same footprint as attach; recording state pulses red so a
    hot mic is never ambiguous. */
+#voice-btn[hidden] {
+    /* display:flex below would defeat the hidden attribute (voice_mode=off) */
+    display: none;
+}
 #voice-btn {
     background: transparent;
     color: var(--text-dim);
