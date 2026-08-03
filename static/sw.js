@@ -6,7 +6,7 @@
 //     instant loads, survives server downtime, refreshes itself when online
 //   - navigation (/): network-first, cached shell as offline fallback
 //   - API/SSE requests: never intercepted (pass through)
-const CACHE_VERSION = 'pernix-shell-v4';
+const CACHE_VERSION = 'pernix-shell-v5';
 const SHELL_ASSETS = [
     '/',
     '/static/css/tokens.css',

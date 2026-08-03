@@ -222,6 +222,20 @@ async def test_settings_whisper_model_enum_guard(monkeypatch):
         assert settings.voice_whisper_model == "small"
 
 
+async def test_settings_voice_language_guard(monkeypatch):
+    from api.routers import health
+
+    monkeypatch.setattr(settings, "voice_language", "")
+    async with _client(_make_app(health.router)) as client:
+        bad = await client.post("/api/settings", json={"voice_language": "eng-lish!"})
+        assert "voice_language" not in bad.json()["updated"]
+        assert settings.voice_language == ""
+
+        good = await client.post("/api/settings", json={"voice_language": "EN"})
+        assert "voice_language" in good.json()["updated"]
+        assert settings.voice_language == "en"  # normalized lowercase
+
+
 async def test_settings_voice_remote_url_clearable(monkeypatch):
     from api.routers import health
 
