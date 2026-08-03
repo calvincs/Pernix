@@ -40,6 +40,7 @@ async def test_status_mode_off(monkeypatch):
     data = resp.json()
     assert data["mode"] == "off"
     assert data["usable"] is False
+    assert "auto_send" in data  # the frontend reads its auto-send gate from here
 
 
 async def test_status_local_whisper_not_installed(monkeypatch):
@@ -254,4 +255,5 @@ async def test_settings_exposes_voice_fields():
     data = resp.json()
     assert "voice_mode" in data
     assert "voice_web_speech_fallback" in data
+    assert "voice_auto_send" in data
     assert "voice_stt_api_key_set" in data

@@ -131,6 +131,7 @@ const SECTIONS = [
                 { value: 'uk', label: 'Ukrainian' },
                 { value: 'vi', label: 'Vietnamese' },
             ] },
+            { key: 'voice_auto_send', label: 'Auto-send After Dictation', type: 'bool' },
             { key: 'voice_web_speech_fallback', label: 'Browser Dictation Fallback', type: 'bool' },
         ],
     },
@@ -335,6 +336,10 @@ function _updateVoiceVisibility() {
         voice_remote_model: mode === 'remote_whisper',
         voice_stt_api_key: mode === 'remote_whisper',
         voice_language: mode === 'local_whisper' || mode === 'remote_whisper' || mode === 'web_speech',
+        // Auto-send needs a transcript to prove speech was captured, so it
+        // only applies to the transcription engines — model_direct voice
+        // notes stay manual.
+        voice_auto_send: mode === 'local_whisper' || mode === 'remote_whisper' || mode === 'web_speech',
         // web_speech IS the fallback — offering it as its own fallback is noise
         voice_web_speech_fallback: mode !== 'off' && mode !== 'web_speech',
     };

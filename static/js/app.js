@@ -98,6 +98,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         textarea: () => document.getElementById('msg-input'),
         addPendingFiles,
         appendMessage,
+        send,
     });
     showEmptyState();
 

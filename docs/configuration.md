@@ -244,6 +244,7 @@ silently degrading. `web_search_enabled` can be used to disable the tool entirel
 | `voice_remote_url` | *(empty)* | OpenAI-compatible base URL for `remote_whisper` (the server POSTs to `{url}/audio/transcriptions`). API key via the `VOICE_STT_API_KEY` env var (Settings → Voice Input → Remote STT API Key). |
 | `voice_remote_model` | `whisper-1` | Model name sent to the remote transcription endpoint. |
 | `voice_language` | *(empty)* | ISO-639-1 language hint for the whisper engines and browser dictation. Empty = autodetect. |
+| `voice_auto_send` | `false` | Send the message automatically once dictation produces a non-empty transcript. Transcription engines only — an empty transcript (no speech detected) never sends, and `model_direct` voice notes stay manual. |
 | `voice_web_speech_fallback` | `false` | Fall back to browser dictation when the chosen engine is unavailable (whisper not installed, chat model can't hear audio). Off by default: enabling it is your acknowledgment that fallback audio is processed by your browser vendor's speech service, not your machines. |
 
 Each engine has a different privacy profile, shown as a disclaimer in
