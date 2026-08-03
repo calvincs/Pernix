@@ -256,6 +256,26 @@ class Settings:
     browser_headless: bool = True  # False = headed mode (for login flows, debugging)
     browser_timeout: int = 30  # Page load timeout in seconds
 
+    # --- Voice Input (STT) ---
+    # How the mic button turns speech into chat input. Each engine has a
+    # different privacy profile (surfaced as a disclaimer in Settings → Voice):
+    #   off           — no mic button
+    #   local_whisper — transcribed on this machine via faster-whisper; audio never leaves the box
+    #   remote_whisper— recording uploaded to an OpenAI-compatible /audio/transcriptions endpoint
+    #   model_direct  — recording attached to the message; the active chat model hears the audio
+    #                   (local for Ollama models, leaves the machine for cloud providers)
+    #   web_speech    — browser dictation; audio goes to the browser vendor's speech service
+    voice_mode: str = "off"
+    voice_whisper_model: str = "base"  # faster-whisper size: tiny | base | small | medium | large-v3
+    voice_remote_url: str = ""  # OpenAI-compatible base URL, e.g. https://api.openai.com/v1
+    voice_remote_model: str = "whisper-1"  # model name sent to the remote transcription endpoint
+    voice_language: str = ""  # ISO-639-1 hint for whisper engines ("" = autodetect)
+    # Fall back to browser dictation when the chosen engine is unavailable
+    # (whisper not installed, model has no audio support). Off by default —
+    # enabling it is the user's explicit acknowledgment that fallback audio
+    # is processed by their browser vendor, not this machine.
+    voice_web_speech_fallback: bool = False
+
     # --- Reflect (post-execution verification) ---
     reflect_enabled: bool = True  # Run Reflect after agent turns
     reflect_max_retries: int = 2  # Max retry attempts before giving up

@@ -14,6 +14,7 @@ import { initSidebar, renderSessionList as renderSidebar, updateSessionActivity 
 import { initFilePanel, toggleFilePanel, openFilePanel } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
 import { initMobile, isMobile, closeSidebar } from './mobile.js';
+import { initVoice, stopVoice } from './voice.js';
 
 // ---------------------------------------------------------------------------
 // File uploads state
@@ -93,6 +94,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupInput();
     setupNewSession();
     setupFileDrop();
+    initVoice({
+        textarea: () => document.getElementById('msg-input'),
+        addPendingFiles,
+        appendMessage,
+    });
     showEmptyState();
 
     // Sidebar toggle (desktop only — mobile handled by mobile.js)
@@ -664,7 +670,8 @@ const SLASH_COMMANDS = {
         // only listed session commands, so new users never found scheduling,
         // skills, memory, or attachments.
         const caps = [
-            ['Attach files', 'paperclip button, or drag & drop — images and audio go to the model'],
+            ['Attach files', 'paperclip button, drag & drop, or paste a copied screenshot/file — images and audio go to the model'],
+            ['Voice input', 'mic button dictates or records for the model — enable an engine in Settings → Voice Input'],
             ['Schedule jobs', 'ask in chat ("every morning at 9, …") or Explorer 📁 → Jobs'],
             ['Skills', 'domain expertise packages the agent loads on demand — Explorer 📁 → Skills'],
             ['Memory', 'the agent remembers across sessions; just ask it to remember/recall things'],
@@ -813,6 +820,9 @@ function setupInput() {
 }
 
 async function send() {
+    // A dictation session still running would keep writing into the input
+    // after we clear it below.
+    stopVoice();
     const textarea = document.getElementById('msg-input');
     const message = textarea.value.trim();
     if (!message && _pendingFiles.length === 0) return;
@@ -1053,6 +1063,32 @@ function setupFileDrop() {
             fileInput.value = '';
         });
     }
+
+    // Clipboard paste — a copied screenshot or file becomes an attachment
+    // chip, same as drag & drop. Plain text keeps native textarea behavior.
+    // Document-level so it works without the input focused, but pastes into
+    // OTHER editables (settings fields, Monaco) are left alone.
+    document.addEventListener('paste', (e) => {
+        const files = Array.from(e.clipboardData?.files || []);
+        if (files.length === 0) return;
+        const t = e.target;
+        const inMsgInput = t && t.id === 'msg-input';
+        if (!inMsgInput && t && (t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) {
+            return;
+        }
+        e.preventDefault();
+        addPendingFiles(files.map(_nameClipboardFile));
+    });
+}
+
+// Clipboard image data arrives as a generic "image.png" — every pasted
+// screenshot would collide on the same name. Timestamp them; files copied
+// from a file manager keep their real names.
+function _nameClipboardFile(file) {
+    if (file.name && !/^image\.(png|jpe?g|gif|webp)$/i.test(file.name)) return file;
+    const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    return new File([file], `pasted-${ts}.${ext}`, { type: file.type });
 }
 
 // Mirror of the server-side cap (api/routers/workspace.py) — reject before

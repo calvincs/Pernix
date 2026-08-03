@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- feat(voice): voice input for chat — a mic button with four engines selectable in Settings → Voice Input, each with an explicit where-does-my-audio-go disclaimer: `local_whisper` (faster-whisper on the Pernix server, audio never leaves the box; optional dep, 501 with install hint when absent), `remote_whisper` (OpenAI-compatible `/audio/transcriptions` endpoint, key via `VOICE_STT_API_KEY`), `model_direct` (recording attaches to the message and rides the existing ffmpeg→WAV pipeline into an audio-capable model), and `web_speech` (browser dictation — flagged as sending audio to the browser vendor). Whisper/model unavailability falls back to browser dictation only when the user enables the fallback toggle, which carries its own acknowledgment text. New `GET /api/voice/status` + `POST /api/voice/transcribe`; Esc cancels a live recording, send stops dictation, 5-minute hot-mic auto-stop
+- feat(ui): clipboard paste lands in chat — a copied screenshot or file pasted anywhere outside another input becomes a pending attachment chip (same pipeline as drag & drop); generic clipboard names (`image.png`) get timestamped. Plain-text paste keeps native behavior
+
 - fix(tools): `--dangerous` now suppresses the approval ritual end-to-end — `approve_dangerous_tool` is not registered, the `delete_skill`/`delete_workflow` descriptions drop the ask_user + approve sequence, and the system prompt states that approvals are bypassed. Previously the model had no way to know the gate was off and kept running the full ritual for tools that were never even gated (session 0dbee64fcd43: 13 ask_user + approve rounds for caution-level `bash`)
 - fix(dialog): `ask_user(question_type="statement")` no longer parks the session in AWAITING_USER — statements land in the question panel as FYIs while the agent keeps working; only real questions pause the turn
 
