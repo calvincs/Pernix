@@ -3,6 +3,7 @@
 import { el, text, clear } from '../../render.js';
 import { get, post } from '../../api.js';
 import { getPermission, requestPermission } from '../../notifications.js';
+import { runVoiceTest } from '../../voice.js';
 
 function _showToast(message, type = 'info') {
     const colors = { success: 'var(--success, #4c8)', error: 'var(--error, #e55)', info: 'var(--text-dim)' };
@@ -99,7 +100,37 @@ const SECTIONS = [
             { key: 'voice_remote_url', label: 'Remote STT Base URL', type: 'text' },
             { key: 'voice_remote_model', label: 'Remote STT Model', type: 'text' },
             { key: 'voice_stt_api_key', label: 'Remote STT API Key', type: 'apikey', envKey: 'VOICE_STT_API_KEY' },
-            { key: 'voice_language', label: 'Language Hint (ISO code, empty = auto)', type: 'text' },
+            { key: 'voice_language', label: 'Language', type: 'select', options: [
+                { value: '', label: 'Auto-detect' },
+                { value: 'ar', label: 'Arabic' },
+                { value: 'zh', label: 'Chinese' },
+                { value: 'cs', label: 'Czech' },
+                { value: 'da', label: 'Danish' },
+                { value: 'nl', label: 'Dutch' },
+                { value: 'en', label: 'English' },
+                { value: 'fi', label: 'Finnish' },
+                { value: 'fr', label: 'French' },
+                { value: 'de', label: 'German' },
+                { value: 'el', label: 'Greek' },
+                { value: 'he', label: 'Hebrew' },
+                { value: 'hi', label: 'Hindi' },
+                { value: 'hu', label: 'Hungarian' },
+                { value: 'id', label: 'Indonesian' },
+                { value: 'it', label: 'Italian' },
+                { value: 'ja', label: 'Japanese' },
+                { value: 'ko', label: 'Korean' },
+                { value: 'no', label: 'Norwegian' },
+                { value: 'pl', label: 'Polish' },
+                { value: 'pt', label: 'Portuguese' },
+                { value: 'ro', label: 'Romanian' },
+                { value: 'ru', label: 'Russian' },
+                { value: 'es', label: 'Spanish' },
+                { value: 'sv', label: 'Swedish' },
+                { value: 'th', label: 'Thai' },
+                { value: 'tr', label: 'Turkish' },
+                { value: 'uk', label: 'Ukrainian' },
+                { value: 'vi', label: 'Vietnamese' },
+            ] },
             { key: 'voice_web_speech_fallback', label: 'Browser Dictation Fallback', type: 'bool' },
         ],
     },
@@ -323,6 +354,9 @@ function _updateVoiceVisibility() {
     const note = document.getElementById('voice-fallback-note');
     if (note) note.style.display = rowVisibility.voice_web_speech_fallback ? '' : 'none';
 
+    const testRow = document.getElementById('voice-test-row');
+    if (testRow) testRow.style.display = mode === 'off' ? 'none' : 'flex';
+
     // Server-side reality check for the selected engine
     const statusLine = document.getElementById('voice-status-line');
     if (statusLine) {
@@ -378,6 +412,21 @@ function _wireVoiceSection() {
         ]));
     }
 
+    // Test button — records a short clip and round-trips it through the
+    // SAVED engine, so "it's configured" and "it works" stop being different
+    // things. Unsaved edits would test the wrong engine; require save first.
+    const testResult = el('span', {
+        id: 'voice-test-result',
+        style: 'font-size: 0.85rem; margin-left: 0.6rem; line-height: 1.4;',
+    });
+    const testBtn = el('button', { class: 'btn btn-secondary', id: 'voice-test-btn' }, [text('Test')]);
+    const testRow = el('div', {
+        id: 'voice-test-row',
+        style: 'display: flex; align-items: center; margin: 0.2rem 0 0.8rem;',
+    }, [testBtn, testResult]);
+    section.appendChild(testRow);
+    testBtn.addEventListener('click', () => _runVoiceTestClick(testBtn, testResult));
+
     modeSelect.addEventListener('change', _updateVoiceVisibility);
     _updateVoiceVisibility();
 
@@ -386,6 +435,40 @@ function _wireVoiceSection() {
     get('/api/voice/status')
         .then(st => { _voiceStatus = st; _updateVoiceVisibility(); })
         .catch(() => { _voiceStatus = null; });
+}
+
+async function _runVoiceTestClick(btn, resultEl) {
+    const mode = document.getElementById('setting-voice_mode')?.value || 'off';
+    resultEl.style.color = 'var(--text-dim)';
+    if (mode === 'off') {
+        resultEl.textContent = 'Select an engine first.';
+        return;
+    }
+    const relevant = ['voice_mode', 'voice_whisper_model', 'voice_remote_url', 'voice_remote_model', 'voice_language'];
+    const dirty = relevant.some(k => {
+        const inp = document.getElementById(`setting-${k}`);
+        return inp && inp.value !== String(_original[k] ?? '');
+    });
+    if (dirty) {
+        resultEl.textContent = 'Save your changes first — Test runs the saved configuration.';
+        return;
+    }
+    btn.disabled = true;
+    resultEl.textContent = '';
+    try {
+        const res = await runVoiceTest(mode, (phase) => {
+            btn.textContent = phase === 'listening' ? 'Listening — speak now…'
+                : phase === 'transcribing' ? 'Transcribing…'
+                : 'Checking…';
+        });
+        resultEl.style.color = res.ok ? 'var(--accent)' : 'var(--error, #e55)';
+        resultEl.textContent = res.ok
+            ? (res.text ? `✓ Heard: “${res.text}”` : `✓ ${res.detail}`)
+            : `✗ ${res.error}`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Test';
+    }
 }
 
 function _showRestartButton() {
@@ -534,10 +617,14 @@ function buildField(field, value) {
     } else if (type === 'model-select') {
         input = buildModelSelect(key, value, allowEmpty);
     } else if (type === 'select') {
+        // Options are either raw strings ('self_signed') or {value, label}
+        // pairs when the stored value shouldn't double as the display text.
         input = el('select', { id: `setting-${key}` },
-            (options || []).map(opt =>
-                el('option', { value: opt, ...(opt === value ? { selected: '' } : {}) }, [text(opt)])
-            )
+            (options || []).map(opt => {
+                const val = typeof opt === 'object' ? opt.value : opt;
+                const label = typeof opt === 'object' ? opt.label : opt;
+                return el('option', { value: val, ...(val === value ? { selected: '' } : {}) }, [text(label)]);
+            })
         );
     } else if (type === 'number') {
         input = el('input', {

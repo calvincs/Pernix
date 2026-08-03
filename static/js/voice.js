@@ -273,23 +273,27 @@ async function _startRecording(engine, st) {
     _autoStopTimer = setTimeout(() => stopVoice(), MAX_RECORD_MS);
 }
 
+async function _postTranscribe(file) {
+    const fd = new FormData();
+    fd.append('file', file);
+    const headers = {};
+    const token = getAuthToken();
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const resp = await fetch('/api/voice/transcribe', { method: 'POST', headers, body: fd });
+    if (!resp.ok) {
+        let detail = resp.statusText;
+        try { detail = (await resp.json()).detail || detail; } catch { /* keep statusText */ }
+        throw new Error(detail);
+    }
+    return ((await resp.json()).text || '').trim();
+}
+
 async function _transcribeUpload(file) {
     _setUiState('busy');
     try {
-        const fd = new FormData();
-        fd.append('file', file);
-        const headers = {};
-        const token = getAuthToken();
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-        const resp = await fetch('/api/voice/transcribe', { method: 'POST', headers, body: fd });
-        if (!resp.ok) {
-            let detail = resp.statusText;
-            try { detail = (await resp.json()).detail || detail; } catch { /* keep statusText */ }
-            throw new Error(detail);
-        }
-        const data = await resp.json();
-        if (data.text) {
-            _insertAtCursor(data.text);
+        const text = await _postTranscribe(file);
+        if (text) {
+            _insertAtCursor(text);
         } else {
             _deps.appendMessage('system', 'Voice: no speech detected in the recording.');
         }
@@ -311,6 +315,130 @@ function _insertAtCursor(text) {
     ta.value = before + inserted + ta.value.slice(end);
     ta.selectionStart = ta.selectionEnd = start + inserted.length;
     ta.dispatchEvent(new Event('input'));
+}
+
+// ---------------------------------------------------------------------------
+// Settings → Voice Input "Test" — round-trip the saved engine without
+// touching the chat input. Resolves {ok, text?|detail?, error?}; never
+// rejects, so callers just render the result.
+// ---------------------------------------------------------------------------
+
+const TEST_RECORD_MS = 4000;
+
+export function runVoiceTest(mode, onPhase = () => {}) {
+    if (mode === 'web_speech') return _testWebSpeech(onPhase);
+    if (mode === 'local_whisper' || mode === 'remote_whisper') return _testWhisper(onPhase);
+    if (mode === 'model_direct') return _testModelDirect(onPhase);
+    return Promise.resolve({ ok: false, error: 'Select an engine first' });
+}
+
+function _testWebSpeech(onPhase) {
+    return new Promise((resolve) => {
+        const Ctor = _speechRecognitionCtor();
+        if (!Ctor) {
+            resolve({ ok: false, error: 'This browser has no Web Speech API (try Chrome/Edge)' });
+            return;
+        }
+        const rec = new Ctor();
+        rec.interimResults = false;
+        let settled = false;
+        let timer = null;
+        const done = (res) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try { rec.stop(); } catch { /* already stopped */ }
+            resolve(res);
+        };
+        rec.onresult = (e) => done({ ok: true, text: e.results[0][0].transcript.trim() });
+        rec.onerror = (e) => done({
+            ok: false,
+            error: e.error === 'not-allowed' ? 'Microphone permission denied'
+                : e.error === 'network' ? 'Speech service unreachable — browser dictation needs internet'
+                : `Dictation error: ${e.error}`,
+        });
+        rec.onend = () => done({ ok: false, error: 'No speech detected — try again' });
+        timer = setTimeout(() => done({ ok: false, error: 'No speech detected — try again' }), TEST_RECORD_MS + 4000);
+        onPhase('listening');
+        try {
+            rec.start();
+        } catch (e) {
+            done({ ok: false, error: e.message });
+        }
+    });
+}
+
+async function _testWhisper(onPhase) {
+    let file;
+    try {
+        file = await _recordClip(TEST_RECORD_MS, onPhase);
+    } catch (e) {
+        return { ok: false, error: e.message };
+    }
+    onPhase('transcribing');
+    try {
+        const text = await _postTranscribe(file);
+        if (!text) return { ok: false, error: 'Engine responded but heard no speech — try again' };
+        return { ok: true, text };
+    } catch (e) {
+        return { ok: false, error: e.message };
+    }
+}
+
+async function _testModelDirect(onPhase) {
+    onPhase('checking');
+    if (!navigator.mediaDevices?.getUserMedia) {
+        return { ok: false, error: 'Microphone requires a secure context (HTTPS)' };
+    }
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(t => t.stop());
+    } catch (e) {
+        return { ok: false, error: `Microphone unavailable: ${e.message}` };
+    }
+    const st = await _getStatus(true);
+    if (!st) return { ok: false, error: 'Could not reach the server for voice status' };
+    if (!st.usable) return { ok: false, error: st.reason || 'Engine not usable' };
+    return { ok: true, detail: 'Microphone OK; the active model accepts audio. Recordings will attach to your messages.' };
+}
+
+/** Record a fixed-length clip from the mic and return it as a File. */
+function _recordClip(ms, onPhase) {
+    return new Promise((resolve, reject) => {
+        if (!navigator.mediaDevices?.getUserMedia) {
+            reject(new Error('Microphone requires a secure context (HTTPS)'));
+            return;
+        }
+        navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+            const mime = _pickMimeType();
+            let recorder;
+            try {
+                recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+            } catch (e) {
+                stream.getTracks().forEach(t => t.stop());
+                reject(new Error(`Recording not supported: ${e.message}`));
+                return;
+            }
+            const chunks = [];
+            recorder.ondataavailable = (e) => {
+                if (e.data && e.data.size > 0) chunks.push(e.data);
+            };
+            recorder.onstop = () => {
+                stream.getTracks().forEach(t => t.stop());
+                const blob = new Blob(chunks, { type: recorder.mimeType || mime || 'audio/webm' });
+                if (blob.size < 2048) {
+                    reject(new Error('Recording was empty — is the microphone muted?'));
+                    return;
+                }
+                resolve(new File([blob], `voice-test${_extForMime(blob.type)}`, { type: blob.type }));
+            };
+            onPhase('listening');
+            recorder.start();
+            setTimeout(() => {
+                try { recorder.stop(); } catch { /* already stopped */ }
+            }, ms);
+        }, (e) => reject(new Error(`Microphone unavailable: ${e.message}`)));
+    });
 }
 
 // ---------------------------------------------------------------------------

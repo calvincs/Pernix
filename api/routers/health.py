@@ -196,6 +196,13 @@ async def update_settings(body: dict):
             continue
         if key == "voice_whisper_model" and value not in ("tiny", "base", "small", "medium", "large-v3"):
             continue
+        # Language hint: "" (autodetect) or a 2-3 letter ISO code, normalized
+        # lowercase — anything else would surface as a transcription failure.
+        if key == "voice_language":
+            v = str(value).strip().lower()
+            if v and not (v.isascii() and v.isalpha() and len(v) in (2, 3)):
+                continue
+            value = v
         current = getattr(settings, key)
         try:
             # Reject empty strings for URL fields that have non-empty defaults.
