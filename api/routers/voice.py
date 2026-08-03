@@ -127,6 +127,7 @@ async def voice_status():
         "reason": reason,
         "language": settings.voice_language,
         "fallback_web_speech": settings.voice_web_speech_fallback,
+        "auto_send": settings.voice_auto_send,
         "whisper_installed": whisper_installed,
         "whisper_model": settings.voice_whisper_model,
         "remote_configured": remote_configured,

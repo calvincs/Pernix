@@ -14,7 +14,7 @@
 
 import { get, getAuthToken } from './api.js';
 
-let _deps = null;      // { textarea, addPendingFiles, appendMessage }
+let _deps = null;      // { textarea, addPendingFiles, appendMessage, send }
 let _status = null;    // cached /api/voice/status payload
 let _recorder = null;  // active MediaRecorder
 let _stream = null;    // active getUserMedia stream (closed on stop)
@@ -147,6 +147,7 @@ export function stopVoice({ discard = false } = {}) {
     if (_recognition) {
         const rec = _recognition;
         _recognition = null; // clear first — onend fires synchronously in some browsers
+        rec._discard = discard; // onend uses this to skip auto-send / restore text
         try { rec.stop(); } catch { /* already stopped */ }
         _setUiState('idle');
     }
@@ -256,6 +257,16 @@ function _startWebSpeech(st) {
         if (_recognition === rec) {
             _recognition = null;
             _setUiState('idle');
+        }
+        if (rec._discard) {
+            // Esc = cancel: put back whatever was typed before dictation.
+            ta.value = base.trimEnd();
+            ta.dispatchEvent(new Event('input'));
+        } else if (_status?.auto_send && finalText.trim()) {
+            // Speech was detected — auto-send if enabled. A manual send mid-
+            // dictation is safe: it empties the input, and send() no-ops on
+            // an empty message.
+            _deps.send();
         }
         ta.focus();
     };
@@ -371,6 +382,9 @@ async function _transcribeUpload(file) {
         const text = await _postTranscribe(file);
         if (text) {
             _insertAtCursor(text);
+            // Speech was detected — that's the auto-send gate. An empty
+            // transcript never sends, so a misclick can't fire a message.
+            if (_status?.auto_send) _deps.send();
         } else {
             _deps.appendMessage('system', 'Voice: no speech detected in the recording.');
         }

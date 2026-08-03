@@ -275,6 +275,11 @@ class Settings:
     # enabling it is the user's explicit acknowledgment that fallback audio
     # is processed by their browser vendor, not this machine.
     voice_web_speech_fallback: bool = False
+    # Send the message automatically once dictation produces a non-empty
+    # transcript. Applies to the transcription engines only — model_direct
+    # voice notes stay manual (no transcript exists to prove speech was
+    # captured before spending a model turn).
+    voice_auto_send: bool = False
 
     # --- Reflect (post-execution verification) ---
     reflect_enabled: bool = True  # Run Reflect after agent turns
