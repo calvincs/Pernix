@@ -428,11 +428,13 @@
         max-height: 120px;
     }
     #send-btn,
-    #attach-btn {
+    #attach-btn,
+    #voice-btn {
         width: 36px;  /* keep ≥36px touch target */
         height: 36px;
     }
-    #attach-btn svg {
+    #attach-btn svg,
+    #voice-btn svg {
         width: 20px;
         height: 20px;
     }

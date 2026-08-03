@@ -462,6 +462,7 @@ from api.routers import (
     sessions,
     skills,
     tools,
+    voice,
     workflows,
     workspace,
 )
@@ -480,6 +481,7 @@ app.include_router(skills.router)
 app.include_router(push.router)
 app.include_router(workflows.router)
 app.include_router(rlm.router)
+app.include_router(voice.router)
 
 
 @app.get("/")

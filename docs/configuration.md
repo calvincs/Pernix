@@ -235,6 +235,28 @@ silently degrading. `web_search_enabled` can be used to disable the tool entirel
 
 ---
 
+## Voice Input
+
+| Setting | Default | Description |
+|---|---|---|
+| `voice_mode` | `off` | Speech-to-text engine behind the chat mic button: `off`, `local_whisper`, `remote_whisper`, `model_direct`, or `web_speech`. |
+| `voice_whisper_model` | `base` | faster-whisper model size for `local_whisper`: `tiny`, `base`, `small`, `medium`, or `large-v3`. Downloads on first use (~150MB for `base`) — pre-fetch when baking images for offline boxes. |
+| `voice_remote_url` | *(empty)* | OpenAI-compatible base URL for `remote_whisper` (the server POSTs to `{url}/audio/transcriptions`). API key via the `VOICE_STT_API_KEY` env var (Settings → Voice Input → Remote STT API Key). |
+| `voice_remote_model` | `whisper-1` | Model name sent to the remote transcription endpoint. |
+| `voice_language` | *(empty)* | ISO-639-1 language hint for the whisper engines and browser dictation. Empty = autodetect. |
+| `voice_web_speech_fallback` | `false` | Fall back to browser dictation when the chosen engine is unavailable (whisper not installed, chat model can't hear audio). Off by default: enabling it is your acknowledgment that fallback audio is processed by your browser vendor's speech service, not your machines. |
+
+Each engine has a different privacy profile, shown as a disclaimer in
+Settings → Voice Input: `local_whisper` keeps audio on the Pernix server;
+`remote_whisper` uploads recordings to the endpoint you configure;
+`model_direct` attaches the recording to your message so an audio-capable chat
+model hears it directly (local with Ollama, remote with cloud providers);
+`web_speech` sends audio to the browser vendor (e.g. Google for Chrome) and
+requires internet. The mic needs a secure context — HTTPS network mode or
+localhost.
+
+---
+
 ## Notifications
 
 | Setting | Default | Description |

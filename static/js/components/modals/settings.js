@@ -91,6 +91,19 @@ const SECTIONS = [
         ],
     },
     {
+        title: 'Voice Input',
+        description: 'Speech-to-text for the chat input. Each engine has a different privacy profile — the disclaimer below the engine selector says where your voice audio goes. Local Whisper transcribes on the Pernix server; Remote Whisper uploads recordings to an OpenAI-compatible endpoint; Direct-to-Model attaches the recording for an audio-capable chat model to hear; Browser Dictation uses your browser vendor\'s speech service.',
+        fields: [
+            { key: 'voice_mode', label: 'Engine', type: 'select', options: ['off', 'local_whisper', 'remote_whisper', 'model_direct', 'web_speech'] },
+            { key: 'voice_whisper_model', label: 'Whisper Model', type: 'select', options: ['tiny', 'base', 'small', 'medium', 'large-v3'] },
+            { key: 'voice_remote_url', label: 'Remote STT Base URL', type: 'text' },
+            { key: 'voice_remote_model', label: 'Remote STT Model', type: 'text' },
+            { key: 'voice_stt_api_key', label: 'Remote STT API Key', type: 'apikey', envKey: 'VOICE_STT_API_KEY' },
+            { key: 'voice_language', label: 'Language Hint (ISO code, empty = auto)', type: 'text' },
+            { key: 'voice_web_speech_fallback', label: 'Browser Dictation Fallback', type: 'bool' },
+        ],
+    },
+    {
         title: 'Memory',
         description: 'Automatic memory recall surfaces relevant past conversations at the start of each turn.',
         fields: [
@@ -267,6 +280,112 @@ function _wireNetworkSection() {
 
     // Initial visibility
     _updateNetworkVisibility();
+}
+
+// ---------------------------------------------------------------------------
+// Voice Input section — per-engine privacy disclaimer + field visibility
+// ---------------------------------------------------------------------------
+
+const _VOICE_DISCLAIMERS = {
+    off: 'Voice input is disabled — no mic button in the chat bar.',
+    local_whisper: 'Private: recordings are transcribed on the Pernix server by faster-whisper and never leave your machines. Requires the faster-whisper package on the server; the chosen model downloads on first use (~150MB for "base").',
+    remote_whisper: 'Your voice recordings are uploaded to the endpoint configured below for transcription. Whoever operates that endpoint receives your audio.',
+    model_direct: 'Recordings attach to your message and the active chat model hears the audio itself — requires an audio-capable model. Audio stays on this machine with Ollama models, but leaves it when the model runs at a cloud provider.',
+    web_speech: 'Dictation uses your browser vendor’s speech service (e.g. Google for Chrome). Your voice audio is sent to that vendor and processed under their privacy policy — it does not stay on your machines. Requires internet; not supported by every browser.',
+};
+
+let _voiceStatus = null; // /api/voice/status snapshot fetched when the modal opens
+
+function _updateVoiceVisibility() {
+    const mode = document.getElementById('setting-voice_mode')?.value || 'off';
+    const rowVisibility = {
+        voice_whisper_model: mode === 'local_whisper',
+        voice_remote_url: mode === 'remote_whisper',
+        voice_remote_model: mode === 'remote_whisper',
+        voice_stt_api_key: mode === 'remote_whisper',
+        voice_language: mode === 'local_whisper' || mode === 'remote_whisper' || mode === 'web_speech',
+        // web_speech IS the fallback — offering it as its own fallback is noise
+        voice_web_speech_fallback: mode !== 'off' && mode !== 'web_speech',
+    };
+    for (const [key, show] of Object.entries(rowVisibility)) {
+        const row = document.getElementById(`setting-${key}`)?.closest('.setting-row');
+        if (row) row.style.display = show ? '' : 'none';
+    }
+
+    const disc = document.getElementById('voice-disclaimer');
+    if (disc) {
+        disc.textContent = _VOICE_DISCLAIMERS[mode] || '';
+        const warn = mode === 'web_speech';
+        disc.style.borderLeftColor = warn ? 'var(--error, #e55)' : 'var(--accent-dim, #888)';
+        disc.style.background = warn ? 'var(--surface-hover, #2a1a1a)' : 'var(--bg-soft, rgba(255,255,255,0.04))';
+    }
+
+    const note = document.getElementById('voice-fallback-note');
+    if (note) note.style.display = rowVisibility.voice_web_speech_fallback ? '' : 'none';
+
+    // Server-side reality check for the selected engine
+    const statusLine = document.getElementById('voice-status-line');
+    if (statusLine) {
+        const st = _voiceStatus;
+        let msg = '';
+        if (st) {
+            if (mode === 'local_whisper' && !st.whisper_installed) {
+                msg = 'Server check: faster-whisper is not installed — pip install faster-whisper on the server.';
+            } else if (mode === 'remote_whisper' && !st.remote_key_set) {
+                msg = 'Server check: no Remote STT API key is set (fine for endpoints that don’t need one).';
+            } else if (mode === 'model_direct' && st.mode === 'model_direct' && !st.usable) {
+                msg = `Server check: ${st.reason}.`;
+            }
+        }
+        statusLine.textContent = msg;
+        statusLine.style.display = msg ? '' : 'none';
+    }
+}
+
+function _wireVoiceSection() {
+    const modeSelect = document.getElementById('setting-voice_mode');
+    if (!modeSelect) return;
+    const section = modeSelect.closest('.settings-section');
+    if (!section) return;
+
+    const boxStyle =
+        'border-left: 3px solid var(--accent-dim, #888); '
+        + 'background: var(--bg-soft, rgba(255,255,255,0.04)); '
+        + 'padding: 0.6rem 0.8rem; margin: 0.5rem 0 0.8rem; '
+        + 'border-radius: 4px; font-size: 0.85rem; line-height: 1.4;';
+
+    const disclaimer = el('div', { id: 'voice-disclaimer', style: boxStyle });
+    const statusLine = el('div', {
+        id: 'voice-status-line',
+        style: 'display: none; color: var(--error, #e55); font-size: 0.85rem; margin: 0 0 0.6rem;',
+    });
+    // Disclaimer sits directly under the engine selector, where the choice is made
+    const modeRow = modeSelect.closest('.setting-row');
+    modeRow.after(statusLine);
+    modeRow.after(disclaimer);
+
+    // The fallback toggle re-introduces the web_speech privacy trade-off, so
+    // it carries its own acknowledgment text — enabling it IS the consent.
+    const fallbackRow = document.getElementById('setting-voice_web_speech_fallback')?.closest('.setting-row');
+    if (fallbackRow) {
+        fallbackRow.after(el('div', {
+            id: 'voice-fallback-note',
+            style: boxStyle + 'border-left-color: var(--error, #e55);',
+        }, [
+            text('When the engine above is unavailable (whisper missing, model can’t hear audio), '
+                + 'dictation falls back to your browser vendor’s speech service — your voice audio leaves '
+                + 'this machine, same as Browser Dictation. Enabling this switch is your acknowledgment of that.'),
+        ]));
+    }
+
+    modeSelect.addEventListener('change', _updateVoiceVisibility);
+    _updateVoiceVisibility();
+
+    // Availability facts (whisper installed? key set? model hears audio?)
+    // arrive async — re-render the status line once they do.
+    get('/api/voice/status')
+        .then(st => { _voiceStatus = st; _updateVoiceVisibility(); })
+        .catch(() => { _voiceStatus = null; });
 }
 
 function _showRestartButton() {
@@ -1587,6 +1706,10 @@ export async function openSettings(opts = {}) {
                         statusEl.textContent = `Saved: ${saved.join(', ')}`;
                         _original = { ..._original, ...changes };
 
+                        // Live features (voice mic button) re-check their
+                        // config on this instead of holding stale state.
+                        window.dispatchEvent(new CustomEvent('pernix:settings-saved', { detail: { saved } }));
+
                         // If openrouter_models changed, refresh model dropdowns
                         if (changes.openrouter_models) {
                             try {
@@ -1634,6 +1757,7 @@ export async function openSettings(opts = {}) {
 
     // Wire network section visibility toggles (must be after DOM append)
     _wireNetworkSection();
+    _wireVoiceSection();
 
     // Validate models after modal is visible
     const listEl = document.getElementById('or-model-list');

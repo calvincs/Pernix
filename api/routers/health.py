@@ -112,6 +112,7 @@ async def get_settings():
     # Indicate whether API keys are set, but never send the actual values
     data["openrouter_api_key_set"] = bool(os.environ.get("OPENROUTER_API_KEY"))
     data["tavily_api_key_set"] = bool(os.environ.get("TAVILY_API_KEY"))
+    data["voice_stt_api_key_set"] = bool(os.environ.get("VOICE_STT_API_KEY"))
     data["ssl_cert_path_set"] = bool(settings.ssl_cert_path)
     data["ssl_key_path_set"] = bool(settings.ssl_key_path)
     data["auth_token_set"] = bool(settings.auth_token)
@@ -184,10 +185,29 @@ async def update_settings(body: dict):
         # Validate ssl_mode enum
         if key == "ssl_mode" and value not in ("self_signed", "custom"):
             continue
+        # Validate voice enums — a typo'd mode would silently kill the mic button
+        if key == "voice_mode" and value not in (
+            "off",
+            "local_whisper",
+            "remote_whisper",
+            "model_direct",
+            "web_speech",
+        ):
+            continue
+        if key == "voice_whisper_model" and value not in ("tiny", "base", "small", "medium", "large-v3"):
+            continue
         current = getattr(settings, key)
         try:
-            # Reject empty strings for URL fields that have non-empty defaults
-            if isinstance(current, str) and current and value == "" and key.endswith("_url"):
+            # Reject empty strings for URL fields that have non-empty defaults.
+            # voice_remote_url is exempt: its default is empty and clearing it
+            # (to turn remote transcription off) is a legitimate edit.
+            if (
+                isinstance(current, str)
+                and current
+                and value == ""
+                and key.endswith("_url")
+                and key != "voice_remote_url"
+            ):
                 continue
             if isinstance(current, bool):
                 if isinstance(value, bool):
@@ -282,7 +302,7 @@ async def set_api_key(body: dict):
 
     key_name = body.get("key", "")
     value = body.get("value", "")
-    allowed = {"OPENROUTER_API_KEY", "TAVILY_API_KEY"}
+    allowed = {"OPENROUTER_API_KEY", "TAVILY_API_KEY", "VOICE_STT_API_KEY"}
     if key_name not in allowed:
         return {"error": f"Key {key_name} not allowed"}
     if value:

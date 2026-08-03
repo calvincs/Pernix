@@ -2006,6 +2006,49 @@
     height: 18px;
 }
 
+/* Mic button — same footprint as attach; recording state pulses red so a
+   hot mic is never ambiguous. */
+#voice-btn {
+    background: transparent;
+    color: var(--text-dim);
+    border: none;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background var(--transition), color var(--transition), transform 0.1s ease;
+}
+#voice-btn:hover {
+    background: var(--bg-soft, rgba(255, 255, 255, 0.05));
+    color: var(--text-bright);
+}
+#voice-btn:active { transform: scale(0.92); }
+#voice-btn:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: 2px;
+}
+#voice-btn svg {
+    width: 18px;
+    height: 18px;
+}
+#voice-btn.recording {
+    color: var(--error, #e55);
+    background: rgba(229, 85, 85, 0.12);
+    animation: voice-pulse 1.6s ease-in-out infinite;
+}
+@keyframes voice-pulse {
+    50% { box-shadow: 0 0 0 6px rgba(229, 85, 85, 0.18); }
+}
+#voice-btn.busy {
+    color: var(--accent);
+    opacity: 0.6;
+    pointer-events: none;
+}
+
 #input-bar textarea {
     flex: 1;
     background: transparent;
