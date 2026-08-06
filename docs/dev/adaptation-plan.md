@@ -1,14 +1,19 @@
 # Adaptation plan — prime-agent-inspired upgrades (kernel, gates, goals, adaptive layer)
 
-Status: **Phases 1 AND 2 IMPLEMENTED** (2026-08-05/06, branch
-`next-phase-features`) — Phase 1: 1a/1c/1d/1e/1f/1g; Phase 2: the §10.11
-socket fix (RLM suite green on macOS for the first time), 2a scaffold
-modes + snapshot/restore frames + round-trip lock, 2b SessionKernel
-lifecycle (soft aborts, LRU cap, idle reap below session reap, revival),
-2c repl tool + prompt-as-variable binding (ToolDef.idempotent flag,
-head/tail stubs with durable sidecars). Full suite: 1779 passed, 0 failed
-(1 deliberate darwin skip). Implementation deviations from spec are noted
-inline as [IMPL] / in §10. Phases 3/3.5/4 remain PROPOSED.
+Status: **Phases 1, 2 AND 3 IMPLEMENTED** (2026-08-05/06, branch
+`next-phase-features`) — Phase 1: 1a/1c/1d/1e/1f/1g; Phase 2: §10.11
+socket fix, 2a scaffold modes + snapshot/restore + lock, 2b SessionKernel
+lifecycle, 2c repl tool + binding; Phase 3: 3a gates (migration v22,
+reflect clamp before post-mortem write, watch_paths reuse guard,
+skipped-reflect retry fallback, H2 post-mortem fields), 3b goals
+(migration v23, goal_id-stamped budgets incl. worker spend,
+FINALIZING-only continuations on complete/round_ceiling/budget_exhausted
+with LLM-clock extension, budget_limited notifications), 3c heartbeats
+(steer = system row at next round boundary, parked states degrade to
+follow_up, per-turn + queued coalescing, user/agent namespaces separated,
+kind=heartbeat jobs riding the 1c round-trip + claim discipline). Full
+suite: 1805 passed, 0 failed (1 darwin skip). Deviations noted inline as
+[IMPL] / in §10. Phases 3.5/4 remain PROPOSED.
 
 **Decisions by Calvin:** (1) design doc before any code; (2) autonomy model for
 adaptive-layer changes = **auto-apply with rollback** for low-risk kinds,

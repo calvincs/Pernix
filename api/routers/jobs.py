@@ -189,3 +189,46 @@ async def job_events():
             bus.unsubscribe(queue)
 
     return sse_response(stream())
+
+
+# ---------------------------------------------------------------------------
+# User heartbeat (adaptation plan 3c) — one per session, API-only surface.
+# The agent's set_heartbeat/clear_heartbeat tools operate on a separate
+# owner namespace and can never see or modify this one.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/sessions/{session_id}/heartbeat")
+async def get_heartbeat(session_id: str):
+    from core.extensions.scheduling import get_user_heartbeat
+
+    hb = get_user_heartbeat(session_id)
+    return {"heartbeat": hb}
+
+
+@router.put("/api/sessions/{session_id}/heartbeat")
+async def put_heartbeat(session_id: str, body: dict):
+    from config import settings as _settings
+    from core.extensions.scheduling import set_user_heartbeat
+
+    if not _settings.heartbeats_enabled:
+        return {"error": "heartbeats are disabled (settings.heartbeats_enabled)"}
+    instruction = (body or {}).get("instruction", "").strip()
+    if not instruction:
+        return {"error": "instruction is required"}
+    result = set_user_heartbeat(
+        session_id,
+        instruction,
+        every=(body or {}).get("every", "5m"),
+        delivery=(body or {}).get("delivery", "steer"),
+    )
+    if result.startswith("Error:"):
+        return {"error": result}
+    return {"ok": True, "job_id": result}
+
+
+@router.delete("/api/sessions/{session_id}/heartbeat")
+async def delete_heartbeat(session_id: str):
+    from core.extensions.scheduling import clear_user_heartbeat
+
+    return {"ok": clear_user_heartbeat(session_id)}
