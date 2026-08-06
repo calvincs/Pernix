@@ -91,11 +91,13 @@ class TestRouterSemaphores:
             router = ProviderRouter()
 
         router._ollama = MagicMock()
+        router._ollama.name = "ollama"  # get_semaphore/_fallback_eligible key off .name
         router._ollama.chat = AsyncMock(return_value=_make_chat_response("ollama"))
         router._ollama.chat_stream = MagicMock(return_value=_make_stream_events())
         router._ollama.available = True
 
         router._openrouter = MagicMock()
+        router._openrouter.name = "openrouter"
         router._openrouter.chat = AsyncMock(return_value=_make_chat_response("openrouter"))
         router._openrouter.chat_stream = MagicMock(return_value=_make_stream_events())
         router._openrouter.available = True
@@ -103,6 +105,10 @@ class TestRouterSemaphores:
         router.registry = MagicMock()
         router._ollama_semaphore = FairLLMSemaphore(max_concurrent=ollama_max)
         router._openrouter_semaphore = FairLLMSemaphore(max_concurrent=openrouter_max)
+        # Name-keyed maps are the canonical router structure (1a); the
+        # attribute aliases above are kept for direct assertions.
+        router._providers = {"ollama": router._ollama, "openrouter": router._openrouter}
+        router._semaphores = {"ollama": router._ollama_semaphore, "openrouter": router._openrouter_semaphore}
 
         return router
 

@@ -22,7 +22,7 @@ from core.context.compiler import compile_context, normalize_for_openrouter
 from core.context.tokens import get_estimator
 from core.llm.client import get_llm_client
 from core.llm.errors import FailoverError, FailoverReason
-from core.llm.router import is_openrouter_model
+from core.llm.router import OPENAI_FORMAT_PROVIDERS
 from core.llm.semaphore import PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
 from core.llm.types import StreamEventType
 from core.tools.executor import execute_tool_round
@@ -771,7 +771,7 @@ async def run_agent(
         # Normalize for provider
         messages = payload.messages
         model = effective_model
-        if client.resolve_provider(model) == "openrouter":
+        if client.resolve_provider(model) in OPENAI_FORMAT_PROVIDERS:
             messages = normalize_for_openrouter(messages)
 
         # --- LLM call ---
@@ -860,11 +860,7 @@ async def run_agent(
                             cache_read_tokens=event.usage.cache_read_tokens,
                             cache_write_tokens=event.usage.cache_write_tokens,
                             source="provider",
-                            provider=(
-                                "openrouter"
-                                if client.resolve_provider(_stream_current_model) == "openrouter"
-                                else "ollama"
-                            ),
+                            provider=client.resolve_provider(_stream_current_model),
                         )
 
                     elif event.type == StreamEventType.ERROR and event.error:
@@ -937,7 +933,7 @@ async def run_agent(
                 fallback
                 and not _tried_fallback
                 and fallback != _stream_current_model
-                and is_openrouter_model(_stream_current_model) != is_openrouter_model(fallback)
+                and client.resolve_provider(_stream_current_model) != client.resolve_provider(fallback)
             ):
                 _tried_fallback = True
                 _stream_retries = 0
@@ -948,7 +944,7 @@ async def run_agent(
                     fallback,
                 )
                 session.emit_event({"type": "stream.fallback", "model": fallback})
-                if client.resolve_provider(fallback) == "openrouter":
+                if client.resolve_provider(fallback) in OPENAI_FORMAT_PROVIDERS:
                     messages = normalize_for_openrouter(payload.messages)
                 else:
                     messages = payload.messages
@@ -1630,7 +1626,7 @@ async def run_agent(
             turn_user_msg_id=_turn_user_msg_id,
         )
         messages = payload.messages
-        if client.resolve_provider(effective_model) == "openrouter":
+        if client.resolve_provider(effective_model) in OPENAI_FORMAT_PROVIDERS:
             messages = normalize_for_openrouter(messages)
 
         final_content = ""
@@ -1696,7 +1692,7 @@ async def run_agent(
                 fallback
                 and not _final_tried_fallback
                 and fallback != _final_model
-                and is_openrouter_model(_final_model) != is_openrouter_model(fallback)
+                and client.resolve_provider(_final_model) != client.resolve_provider(fallback)
             ):
                 _final_tried_fallback = True
                 _final_retries = 0
@@ -1707,7 +1703,7 @@ async def run_agent(
                     fallback,
                 )
                 session.emit_event({"type": "stream.fallback", "model": fallback})
-                if client.resolve_provider(fallback) == "openrouter":
+                if client.resolve_provider(fallback) in OPENAI_FORMAT_PROVIDERS:
                     messages = normalize_for_openrouter(messages)
                 continue
 
