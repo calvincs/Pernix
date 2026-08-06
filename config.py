@@ -98,7 +98,8 @@ class Settings:
 
     # --- Agent Loop ---
     max_tool_rounds: int = 10
-    max_continuations: int = 5
+    # (max_continuations removed in plan 3b — it was referenced nowhere in
+    #  core logic; goal continuation_budget is the real, per-goal knob.)
 
     # --- Scout ---
     scout_enabled: bool = True

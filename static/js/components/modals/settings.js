@@ -65,7 +65,6 @@ const SECTIONS = [
         description: 'Limits on the agent loop. Tool rounds caps tool calls per turn; continuations caps self-continue cycles. Scout sends a lightweight model ahead to discover relevant tools and context before the primary model responds.',
         fields: [
             { key: 'max_tool_rounds', label: 'Max Tool Rounds', type: 'number' },
-            { key: 'max_continuations', label: 'Max Continuations', type: 'number' },
             { key: 'scout_enabled', label: 'Scout Enabled', type: 'bool' },
             { key: 'scout_timeout', label: 'Scout Timeout (s)', type: 'number' },
         ],

@@ -192,6 +192,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Cron run reconcile failed (continuing): %s", e)
 
+    # 3.95 Orphan goal sweep (plan 3b): goals whose session row is gone can
+    # never complete — mark them error. Live sessions' goals stay active
+    # across restarts by design.
+    try:
+        from db import models as _db_models
+
+        orphan_goals = _db_models.reconcile_orphan_goals()
+        if orphan_goals:
+            logger.warning("Marked %d orphaned goal(s) as error at startup", orphan_goals)
+    except Exception as e:
+        logger.warning("Goal reconcile failed (continuing): %s", e)
+
     # 4. Scheduler (must init on main event loop before worker threads call it)
     try:
         from core.extensions.scheduling import init_scheduler

@@ -571,7 +571,61 @@ def _build_temporal_context() -> str:
     return "\n".join(lines)
 
 
-def _build_volatile_tail(resource_status: str) -> str:
+def _build_goal_block(session_id: str) -> str:
+    """Static fields of the session's active goal (plan 3b). Only
+    goal_complete finishes a goal — stated here so the model never declares
+    completion in prose."""
+    from config import settings as _s
+
+    if not _s.goals_enabled:
+        return ""
+    try:
+        from db import models as _db
+
+        goal = _db.get_active_goal(session_id)
+    except Exception:
+        return ""
+    if not goal:
+        return ""
+    lines = [f"[ACTIVE GOAL #{goal['id']}] status={goal['status']}", str(goal["objective"])]
+    budgets = []
+    if goal.get("token_budget"):
+        budgets.append(f"token budget {int(goal['token_budget']):,}")
+    if goal.get("time_budget_s"):
+        budgets.append(f"time budget {int(goal['time_budget_s'])}s")
+    if goal.get("continuation_budget"):
+        budgets.append(f"auto-continuations {goal.get('continuations_used', 0)}/{goal['continuation_budget']}")
+    if budgets:
+        lines.append("Budgets: " + " · ".join(budgets))
+    lines.append(
+        "Only the goal_complete tool finishes this goal (refused while its gates fail) — "
+        "never declare it done in prose. If blocked, report the blockage with "
+        "host-observable evidence."
+    )
+    return "\n".join(lines)
+
+
+def _build_goal_burn(session_id: str) -> str:
+    """Live budget burn — volatile-tail material, changes every round."""
+    try:
+        from db import models as _db
+
+        goal = _db.get_active_goal(session_id)
+        if not goal:
+            return ""
+        parts = []
+        if goal.get("token_budget"):
+            used = _db.goal_token_usage(goal["id"])
+            parts.append(f"goal tokens {used:,}/{int(goal['token_budget']):,}")
+        if goal.get("time_budget_s") and goal.get("started_at"):
+            elapsed = int((datetime.now(timezone.utc) - datetime.fromisoformat(goal["started_at"])).total_seconds())
+            parts.append(f"goal elapsed {elapsed}s/{int(goal['time_budget_s'])}s")
+        return "Goal burn: " + " · ".join(parts) if parts else ""
+    except Exception:
+        return ""
+
+
+def _build_volatile_tail(resource_status: str, goal_burn: str = "") -> str:
     """Per-call state that goes in a trailing system message, NOT the head.
 
     Everything here changes between LLM calls (clock, tool rounds remaining).
@@ -590,6 +644,8 @@ def _build_volatile_tail(resource_status: str) -> str:
     ]
     if resource_status:
         lines.append(resource_status)
+    if goal_burn:
+        lines.append(goal_burn)
     return "\n".join(lines)
 
 
@@ -717,12 +773,21 @@ def compile_context(
 
     if scout_report_text:
         system_parts.append(scout_report_text)
+
+    # Active goal — STATIC fields only (objective, ceilings, status), placed
+    # after the scout section: stable across the rounds of a turn, changing
+    # only between turns. Live burn goes in the volatile tail (plan 3b) —
+    # burn in the head would invalidate the cached prefix every round.
+    goal_block = _build_goal_block(session_id)
+    if goal_block:
+        system_parts.append(goal_block)
+
     system_prompt = "\n\n".join(system_parts)
     # The volatile per-call state (clock, resource status) is appended as a
     # trailing system message after trim — keeping it out of the head
     # preserves the provider's prompt-prefix cache. Its tokens still count
     # against the system share of the budget.
-    volatile_tail = _build_volatile_tail(resource_status)
+    volatile_tail = _build_volatile_tail(resource_status, goal_burn=_build_goal_burn(session_id) if goal_block else "")
     # Head is stable across the rounds of a turn — cached count. The tail is
     # tiny and changes per call, so it's counted raw.
     system_tokens = _count_text_cached(system_prompt, estimator) + estimator.count(volatile_tail)

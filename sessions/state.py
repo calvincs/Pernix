@@ -114,6 +114,11 @@ class AgentSession:
     # executor context -> paths.WORKSPACE_OVERRIDE.
     workspace_override: str | None = None
 
+    # Live goal id for token_usage stamping (plan 3b). Resolved at turn
+    # start from session_goals when goals_enabled; workers inherit the
+    # parent's at spawn so a goal's budget sees fan-out spend.
+    active_goal_id: int | None = None
+
     # Cooperative cancellation flag — checked by agent loop, tools, post-hooks
     cancel_requested: bool = False
 
