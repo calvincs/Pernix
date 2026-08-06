@@ -53,6 +53,11 @@ class SkillDef:
     path: Path  # Absolute path to skill directory
     tags: list[str] = field(default_factory=list)
     version: str = "1.0"
+    # Optional script contracts from frontmatter `scripts:` — a list of
+    # {path, purpose, usage} dicts rendered into the L2 injection so the
+    # agent knows invocation shape without a file_read round. Only
+    # well-formed entries (dicts with a 'path') are kept.
+    scripts_meta: list = field(default_factory=list)
 
 
 @dataclass
@@ -212,7 +217,10 @@ class SkillRegistry:
 
     def __init__(self):
         self._skills: dict[str, SkillDef] = {}
-        self._invalid: set[str] = set()  # Skills that failed pre-flight validation
+        # Skills that failed pre-flight validation, name -> issue strings.
+        # A dict (not a set) so load_skill can surface the concrete reason
+        # and fix instead of the agent discovering breakage mid-task.
+        self._invalid: dict[str, list[str]] = {}
         self._disabled: set[str] = set()  # User-toggled-off skills
         self._disabled_path: Path | None = None  # Set when scan() learns the dir
         self.index = SkillIndex()
@@ -248,22 +256,29 @@ class SkillRegistry:
 
                 try:
                     frontmatter, _body = parse_skill_md(skill_md)
+                    raw_scripts = frontmatter.get("scripts")
+                    scripts_meta = (
+                        [s for s in raw_scripts if isinstance(s, dict) and s.get("path")]
+                        if isinstance(raw_scripts, list)
+                        else []
+                    )
                     skill = SkillDef(
                         name=frontmatter["name"],
                         description=frontmatter["description"],
                         path=skill_dir.resolve(),
                         tags=frontmatter.get("tags", []),
                         version=frontmatter.get("version", "1.0"),
+                        scripts_meta=scripts_meta,
                     )
                     self._skills[skill.name] = skill
                     # Pre-flight validation: warn and track invalid skills
                     issues = self._validate(skill)
                     if issues:
-                        self._invalid.add(skill.name)
+                        self._invalid[skill.name] = issues
                         for issue in issues:
                             logger.warning("Skill '%s' validation: %s", skill.name, issue)
                     else:
-                        self._invalid.discard(skill.name)
+                        self._invalid.pop(skill.name, None)
                     count += 1
                     logger.debug("Scanned skill: %s%s", skill.name, " [INVALID]" if issues else "")
                 except (SkillParseError, OSError) as e:
@@ -378,6 +393,14 @@ class SkillRegistry:
 
         issues: list[str] = []
 
+        # Requirements satisfaction: a skill declaring requirements.txt whose
+        # packages aren't in the workspace venv would fail at first script
+        # run — surface it at scan time instead. Snooze's requirements
+        # activity installs on hash change, so this heals without user action.
+        req_file = skill.path / "requirements.txt"
+        if req_file.exists():
+            issues.extend(self._check_requirements(req_file))
+
         scripts_dir = skill.path / "scripts"
         if not scripts_dir.exists():
             return issues  # No scripts/ dir is fine — skill may be docs-only
@@ -413,12 +436,71 @@ class SkillRegistry:
                             _os.unlink(tf_path)
                         except Exception:
                             pass
+            elif script.suffix == ".sh":
+                import subprocess
 
+                try:
+                    proc = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True, timeout=10)
+                    if proc.returncode != 0:
+                        err_lines = (proc.stderr or proc.stdout).strip().splitlines()
+                        detail = err_lines[-1] if err_lines else "bash -n failed"
+                        issues.append(f"script '{script.name}' has shell syntax error: {detail}")
+                except FileNotFoundError:
+                    pass  # no bash on PATH — skip rather than false-positive
+                except Exception as e:
+                    issues.append(f"script '{script.name}' could not be checked: {e}")
+
+        return issues
+
+    def _check_requirements(self, req_file: Path) -> list[str]:
+        """Check each requirement in req_file against the workspace venv."""
+        from config import settings
+
+        issues: list[str] = []
+        try:
+            lines = req_file.read_text(encoding="utf-8").splitlines()
+        except OSError as e:
+            return [f"requirements.txt unreadable: {e}"]
+
+        # Normalized names of installed distributions (PEP 503).
+        import glob as _glob
+
+        ws_lib = Path(settings.workspace_dir).resolve() / ".venv" / "lib"
+        site_pkgs = next(_glob.iglob(str(ws_lib / "python*" / "site-packages")), None)
+        installed: set[str] | None = None
+        if site_pkgs:
+            installed = {
+                re.sub(r"[-_.]+", "-", p.name[: -len(".dist-info")].rsplit("-", 1)[0]).lower()
+                for p in Path(site_pkgs).glob("*.dist-info")
+            }
+
+        for line in lines:
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            pkg = re.split(r"[<>=!~\[;]", line, maxsplit=1)[0].strip()
+            if not pkg:
+                continue
+            if installed is None:
+                issues.append(
+                    f"requirements.txt: workspace venv not created yet — '{pkg}' unavailable "
+                    f"(snooze will install it, or run install_package('{pkg}'))"
+                )
+                break
+            if re.sub(r"[-_.]+", "-", pkg).lower() not in installed:
+                issues.append(
+                    f"requirements.txt: '{pkg}' not installed in workspace venv "
+                    f"(snooze will install it, or run install_package('{pkg}'))"
+                )
         return issues
 
     def is_valid(self, name: str) -> bool:
         """Return True if skill passed pre-flight validation (or has no scripts to validate)."""
         return name not in self._invalid
+
+    def validation_issues(self, name: str) -> list[str]:
+        """The concrete issue strings for a broken skill ([] when healthy)."""
+        return list(self._invalid.get(name, []))
 
     def get(self, name: str) -> SkillDef | None:
         return self._skills.get(name)
