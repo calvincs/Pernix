@@ -201,6 +201,10 @@ def test_child_multi_file_context(tmp_path):
         c.cleanup()
 
 
+@pytest.mark.skipif(
+    __import__("sys").platform == "darwin",
+    reason="macOS rejects RLIMIT_AS in forked children; the cap is best-effort there",
+)
 def test_child_soft_oom_survivable(tmp_path):
     c = ChildREPL(tmp_path, address_space_limit=1024 * 1024 * 1024)
     c.start()
@@ -233,14 +237,16 @@ def test_child_runaway_cell_gets_sigint(child, monkeypatch):
 @pytest.fixture
 def brokered_child(tmp_path):
     ledger = SubcallLedger(limit=5)
+    # Child first: it owns socket-dir resolution (short-/tmp fallback for
+    # deep tmpdirs); the broker binds where the child will dial.
+    c = ChildREPL(tmp_path)
     broker = LLMBroker(
-        tmp_path / "llm.sock",
+        c.llm_sock_path,
         sub_chat=_echo_sub_chat,
         caps=RLMCaps(max_subcalls=5, max_concurrent_subcalls=2),
         ledger=ledger,
     )
     broker.start()
-    c = ChildREPL(tmp_path)
     c.start()
     yield c, broker, ledger
     c.cleanup()
@@ -269,15 +275,15 @@ def test_brokered_ledger_cap(brokered_child):
 
 
 def test_brokered_model_allowlist(tmp_path):
+    c = ChildREPL(tmp_path)  # child first: owns socket-dir resolution
     broker = LLMBroker(
-        tmp_path / "llm.sock",
+        c.llm_sock_path,
         sub_chat=_echo_sub_chat,
         caps=RLMCaps(),
         ledger=SubcallLedger(50),
         allowed_models={"allowed-model"},
     )
     broker.start()
-    c = ChildREPL(tmp_path)
     c.start()
     try:
         r = _cell(c, "print(llm_query('x', model='gpt-expensive'))\nprint(llm_query('y', model='allowed-model'))")

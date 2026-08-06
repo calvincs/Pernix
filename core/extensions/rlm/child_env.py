@@ -124,6 +124,25 @@ def _build_child_env(run_dir: Path, venv_bin: Path | None) -> dict[str, str]:
     }
 
 
+# Conservative across platforms: macOS/BSD sun_path holds ~104 bytes,
+# Linux 108. Anything longer fails bind() with "AF_UNIX path too long".
+_SUN_PATH_MAX = 100
+
+
+def resolve_socket_dir(run_dir: Path) -> tuple[Path, bool]:
+    """Directory for this run's unix sockets, and whether it's a private tmp.
+
+    Uses the run dir itself when the socket paths fit within the sun_path
+    limit; otherwise a short mkdtemp under /tmp (never TMPDIR — on macOS
+    TMPDIR itself is a deep /var/folders path, which is the problem)."""
+    run_dir = Path(run_dir).resolve()
+    if len(str(run_dir / "exec.sock").encode()) <= _SUN_PATH_MAX:
+        return run_dir, False
+    import tempfile
+
+    return Path(tempfile.mkdtemp(prefix="pnx-", dir="/tmp")), True
+
+
 class ChildREPL:
     """One persistent child REPL process for one run."""
 
@@ -140,8 +159,13 @@ class ChildREPL:
         # paths against itself — <run_dir>/<run_dir>/exec.sock — and never
         # connect (found the hard way on box, run ba1e005a).
         self.run_dir = Path(run_dir).resolve()
-        self.exec_sock_path = self.run_dir / "exec.sock"
-        self.llm_sock_path = self.run_dir / "llm.sock"
+        # Sockets may live elsewhere: AF_UNIX sun_path caps at ~104 bytes on
+        # macOS/BSD, and a deep run dir (pytest tmpdirs, user-chosen
+        # workspace roots) makes bind() fail with "path too long". Fall back
+        # to a short private dir under /tmp; cleanup() removes it.
+        sock_dir, self._sock_dir_is_temp = resolve_socket_dir(self.run_dir)
+        self.exec_sock_path = sock_dir / "exec.sock"
+        self.llm_sock_path = sock_dir / "llm.sock"
         self._python_exe = python_exe or sys.executable
         self._as_limit = address_space_limit
         self._fsize_limit = fsize_limit
@@ -164,8 +188,18 @@ class ChildREPL:
 
         def _child_setup():
             os.setsid()
-            resource.setrlimit(resource.RLIMIT_AS, (as_limit, as_limit))
-            resource.setrlimit(resource.RLIMIT_FSIZE, (fsize_limit, fsize_limit))
+            try:
+                resource.setrlimit(resource.RLIMIT_AS, (as_limit, as_limit))
+            except (ValueError, OSError):
+                # macOS rejects RLIMIT_AS in a forked child (EINVAL) — the
+                # address-space cap is defense-in-depth (I7), not a boundary,
+                # so proceed without it rather than failing every spawn on
+                # Darwin. Linux enforces it normally.
+                pass
+            try:
+                resource.setrlimit(resource.RLIMIT_FSIZE, (fsize_limit, fsize_limit))
+            except (ValueError, OSError):
+                pass
 
         venv_bin = Path(self._python_exe).parent if "venv" in self._python_exe else None
         self._log_file = open(self.run_dir / "child.log", "ab")
@@ -300,6 +334,13 @@ class ChildREPL:
                     pass
                 self._log_file = None
             self.exec_sock_path.unlink(missing_ok=True)
+            if getattr(self, "_sock_dir_is_temp", False):
+                # Private short socket dir under /tmp (deep-run-dir fallback).
+                # The broker's llm.sock may live here too — its stop() unlinks
+                # with missing_ok, so removal order doesn't matter.
+                import shutil
+
+                shutil.rmtree(self.exec_sock_path.parent, ignore_errors=True)
 
     # ---- internals ----
 
