@@ -156,6 +156,7 @@ class ChildREPL:
         address_space_limit: int = _DEFAULT_AS_LIMIT,
         fsize_limit: int = _DEFAULT_FSIZE_LIMIT,
         scaffold: str = "rlm",
+        cwd: Path | None = None,
     ):
         # Resolve to absolute: the child's cwd IS the run dir, so a relative
         # workspace_dir (the default) would make the child resolve the socket
@@ -173,6 +174,9 @@ class ChildREPL:
         self._as_limit = address_space_limit
         self._fsize_limit = fsize_limit
         self.scaffold = scaffold  # "rlm" (sub-LLM stubs + answer) | "plain" (session kernel)
+        # Session kernels run with cwd = the shared workspace so repl and
+        # bash see the same files, while sockets/logs stay in run_dir.
+        self._cwd = Path(cwd).resolve() if cwd is not None else None
         self.popen: subprocess.Popen | None = None
         self._conn: socket.socket | None = None
         self._listener: socket.socket | None = None
@@ -226,7 +230,7 @@ class ChildREPL:
                     "--scaffold",
                     self.scaffold,
                 ],
-                cwd=str(self.run_dir),
+                cwd=str(self._cwd or self.run_dir),
                 env=_build_child_env(self.run_dir, venv_bin),
                 stdout=self._log_file,
                 stderr=self._log_file,
@@ -257,16 +261,27 @@ class ChildREPL:
         cancel_check=None,
         in_flight=None,
         last_activity=None,
+        soft_abort: bool = False,
     ) -> CellResult:
         """Run one cell; poll the watchdog while waiting for the result.
 
         `in_flight`/`last_activity` come from the broker: a cell with live (or
         recently active) sub-LLM calls is working, not hung.
+
+        soft_abort (session kernels, plan 2b): on cancel or deadline, SIGINT
+        the cell (aborting it, preserving the namespace) instead of killing
+        the child; the kill only happens if the interrupt doesn't land within
+        SIGINT_GRACE. RLM keeps the hard kill — its child is per-run anyway.
         """
         self._rt_lock.acquire()
         try:
             return self._execute_cell_locked(
-                code, deadline=deadline, cancel_check=cancel_check, in_flight=in_flight, last_activity=last_activity
+                code,
+                deadline=deadline,
+                cancel_check=cancel_check,
+                in_flight=in_flight,
+                last_activity=last_activity,
+                soft_abort=soft_abort,
             )
         finally:
             self._rt_lock.release()
@@ -279,6 +294,7 @@ class ChildREPL:
         cancel_check=None,
         in_flight=None,
         last_activity=None,
+        soft_abort: bool = False,
     ) -> CellResult:
         self._exec_id += 1
         exec_id = self._exec_id
@@ -291,11 +307,24 @@ class ChildREPL:
             if self.popen is not None and self.popen.poll() is not None:
                 raise RLMChildDied(f"child REPL exited with code {self.popen.returncode} mid-cell")
             if cancel_check is not None and cancel_check():
-                self.kill()
-                raise RLMCancelled("session cancelled during RLM cell execution")
+                if soft_abort:
+                    if interrupted_at is None:
+                        logger.info("cell cancelled — sending SIGINT (namespace preserved)")
+                        self.interrupt()
+                        interrupted_at = now
+                else:
+                    self.kill()
+                    raise RLMCancelled("session cancelled during RLM cell execution")
             if now > deadline:
-                self.kill()
-                raise RLMTimeout("RLM run wall clock expired during cell execution")
+                if soft_abort:
+                    if interrupted_at is None:
+                        logger.info("cell deadline reached — sending SIGINT (namespace preserved)")
+                        self.interrupt()
+                        interrupted_at = now
+                    # else: the SIGINT_GRACE check below escalates to kill
+                else:
+                    self.kill()
+                    raise RLMTimeout("RLM run wall clock expired during cell execution")
             if interrupted_at is not None and now - interrupted_at > SIGINT_GRACE:
                 self.kill()
                 raise RLMChildDied("cell unresponsive after interrupt — child killed")

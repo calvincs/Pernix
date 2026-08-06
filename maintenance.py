@@ -185,6 +185,21 @@ class MaintenanceRunner:
             except Exception as e:
                 logger.warning("Failed to read cron protection list: %s", e)
 
+            # Kernel reap BEFORE session reap (plan 2b): kernel_idle_seconds
+            # (1500) < session max_idle (1800), so a session's kernel is
+            # snapshotted+gone before the session object itself is popped —
+            # never an orphaned child process. Off-loop: a dill snapshot is
+            # seconds of blocking IO and must not hold the tick.
+            try:
+                from core.kernel import get_kernel_registry
+
+                _kreg = get_kernel_registry()
+                if _kreg.any_reapable():
+                    _ktask = asyncio.create_task(asyncio.to_thread(_kreg.reap_idle))
+                    self._tracked_tasks.add(_ktask)
+            except Exception as e:
+                logger.warning("Kernel reap scheduling failed: %s", e)
+
             reaped = manager.reap_idle_sessions(max_idle=1800, protected_ids=protected)
             if reaped:
                 self._stats["sessions_reaped"] += reaped
