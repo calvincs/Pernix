@@ -111,6 +111,7 @@ async def get_settings():
     data = {k: v for k, v in asdict(settings).items() if k not in _REDACTED_FIELDS}
     # Indicate whether API keys are set, but never send the actual values
     data["openrouter_api_key_set"] = bool(os.environ.get("OPENROUTER_API_KEY"))
+    data["openai_api_key_set"] = bool(os.environ.get("OPENAI_API_KEY"))
     data["tavily_api_key_set"] = bool(os.environ.get("TAVILY_API_KEY"))
     data["voice_stt_api_key_set"] = bool(os.environ.get("VOICE_STT_API_KEY"))
     data["ssl_cert_path_set"] = bool(settings.ssl_cert_path)
@@ -309,7 +310,7 @@ async def set_api_key(body: dict):
 
     key_name = body.get("key", "")
     value = body.get("value", "")
-    allowed = {"OPENROUTER_API_KEY", "TAVILY_API_KEY", "VOICE_STT_API_KEY"}
+    allowed = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", "TAVILY_API_KEY", "VOICE_STT_API_KEY"}
     if key_name not in allowed:
         return {"error": f"Key {key_name} not allowed"}
     if value:

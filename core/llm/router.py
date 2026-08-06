@@ -17,6 +17,11 @@ from core.llm.types import ChatResponse, HealthStatus, ModelInfo, StreamEvent, S
 
 logger = logging.getLogger("pernix.llm.router")
 
+# Providers that speak strict OpenAI wire format and need
+# normalize_for_openrouter() applied to compiled messages. Ollama is more
+# permissive and gets the raw compile output.
+OPENAI_FORMAT_PROVIDERS = frozenset({"openrouter", "openai"})
+
 
 def is_openrouter_model(model: str) -> bool:
     """OpenRouter models use org/model format and require an API key."""
@@ -86,8 +91,11 @@ class ProviderRouter:
     """Routes LLM requests to the appropriate provider with fallback."""
 
     def __init__(self):
+        from core.llm.providers.openai import OpenAIProvider
+
         self._ollama = OllamaProvider()
         self._openrouter = OpenRouterProvider()
+        self._openai = OpenAIProvider()
         self.registry = ModelRegistry()
         _timeout = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else float("inf")
         self._ollama_semaphore = SessionAwareLLMScheduler(
@@ -98,46 +106,67 @@ class ProviderRouter:
             max_concurrent=settings.openrouter_max_concurrent,
             session_timeout=_timeout,
         )
+        self._openai_semaphore = SessionAwareLLMScheduler(
+            max_concurrent=settings.openai_max_concurrent,
+            session_timeout=_timeout,
+        )
+        # Name-keyed maps are the canonical structure; the attributes above
+        # remain as aliases for tests/diagnostics that reach in directly.
+        self._providers = {
+            "ollama": self._ollama,
+            "openrouter": self._openrouter,
+            "openai": self._openai,
+        }
+        self._semaphores = {
+            "ollama": self._ollama_semaphore,
+            "openrouter": self._openrouter_semaphore,
+            "openai": self._openai_semaphore,
+        }
+
+    def _fallback_eligible(self, provider) -> bool:
+        """Transient remote-provider failures fall back to local Ollama."""
+        return getattr(provider, "name", "ollama") != "ollama"
 
     def get_provider(self, model: str = ""):
         """Select provider using the model registry."""
         model = model or settings.llm_model
         provider_name = self.registry.resolve_provider(model)
-        if provider_name == "openrouter" and self._openrouter.available:
-            return self._openrouter
+        provider = self._providers.get(provider_name)
+        if provider is not None and provider_name != "ollama" and provider.available:
+            return provider
         return self._ollama
 
     def get_semaphore(self, provider=None) -> FairLLMSemaphore:
         """Return the semaphore for a provider instance."""
-        if provider is self._openrouter:
-            return self._openrouter_semaphore
-        return self._ollama_semaphore
+        return self._semaphores.get(getattr(provider, "name", "ollama"), self._ollama_semaphore)
 
     @property
     def semaphore_stats(self) -> dict:
         """Combined semaphore stats for diagnostics."""
-        oll = self._ollama_semaphore
-        orr = self._openrouter_semaphore
-        return {
-            "available": oll.available + orr.available,
-            "waiting": oll.waiting + orr.waiting,
-            "capacity": oll.capacity + orr.capacity,
-            "ollama": oll.stats,
-            "openrouter": orr.stats,
+        stats: dict = {
+            "available": sum(s.available for s in self._semaphores.values()),
+            "waiting": sum(s.waiting for s in self._semaphores.values()),
+            "capacity": sum(s.capacity for s in self._semaphores.values()),
         }
+        for name, sem in self._semaphores.items():
+            stats[name] = sem.stats
+        return stats
 
     def resolve_provider(self, model: str = "") -> str:
-        """Return provider name ('ollama' or 'openrouter') for a model."""
+        """Return provider name ('ollama', 'openrouter', 'openai') for a model."""
         model = model or settings.llm_model
         return self.registry.resolve_provider(model)
 
+    def _remote_providers(self) -> list:
+        return [p for name, p in self._providers.items() if name != "ollama"]
+
     async def populate_registry(self) -> None:
         """Populate the model registry from provider APIs."""
-        await self.registry.populate(self._ollama, self._openrouter)
+        await self.registry.populate(self._ollama, *self._remote_providers())
 
     async def refresh_registry(self) -> None:
         """Re-populate the model registry (e.g. after model switch)."""
-        await self.registry.refresh(self._ollama, self._openrouter)
+        await self.registry.refresh(self._ollama, *self._remote_providers())
 
     def _pop_session_kwargs(self, kwargs: dict) -> tuple[str, float, int]:
         """Extract and remove scheduling kwargs; returns (session_id, created_at, priority)."""
@@ -160,7 +189,7 @@ class ProviderRouter:
         try:
             return await provider.chat(messages, **kwargs)
         except FailoverError as fe:
-            if fe.reason in FALLBACK_REASONS and provider is self._openrouter:
+            if fe.reason in FALLBACK_REASONS and self._fallback_eligible(provider):
                 sem.release()
                 released = True
                 return await self._fallback_chat(messages, sid, s_at, s_pri, **kwargs)
@@ -168,13 +197,13 @@ class ProviderRouter:
         except httpx.HTTPStatusError as e:
             body = e.response.text if hasattr(e.response, "text") else ""
             reason = classify_http_error(e.response.status_code, body)
-            if reason in FALLBACK_REASONS and provider is self._openrouter:
+            if reason in FALLBACK_REASONS and self._fallback_eligible(provider):
                 sem.release()
                 released = True
                 return await self._fallback_chat(messages, sid, s_at, s_pri, **kwargs)
             raise FailoverError(reason, str(e), original=e) from e
         except httpx.ConnectError:
-            if provider is self._openrouter:
+            if self._fallback_eligible(provider):
                 sem.release()
                 released = True
                 return await self._fallback_chat(messages, sid, s_at, s_pri, **kwargs)
@@ -196,7 +225,7 @@ class ProviderRouter:
             async for event in provider.chat_stream(messages, **kwargs):
                 yield event
         except FailoverError as fe:
-            if fe.reason in FALLBACK_REASONS and provider is self._openrouter:
+            if fe.reason in FALLBACK_REASONS and self._fallback_eligible(provider):
                 logger.warning("OpenRouter %s, falling back to Ollama", fe.reason.value)
                 sem.release()
                 released = True
@@ -207,7 +236,7 @@ class ProviderRouter:
         except httpx.HTTPStatusError as e:
             body = e.response.text if hasattr(e.response, "text") else ""
             reason = classify_http_error(e.response.status_code, body)
-            if reason in FALLBACK_REASONS and provider is self._openrouter:
+            if reason in FALLBACK_REASONS and self._fallback_eligible(provider):
                 logger.warning("OpenRouter %s, falling back to Ollama", reason.value)
                 sem.release()
                 released = True
@@ -216,7 +245,7 @@ class ProviderRouter:
             else:
                 raise FailoverError(reason, str(e), original=e) from e
         except httpx.ConnectError as e:
-            if provider is self._openrouter:
+            if self._fallback_eligible(provider):
                 sem.release()
                 released = True
                 async for event in self._fallback_stream(messages, sid, s_at, s_pri, **kwargs):
@@ -303,7 +332,7 @@ class ProviderRouter:
         else:
             cached_or = {}
 
-        whitelist = set(settings.openrouter_models or [])
+        whitelist = set(settings.openrouter_models or []) | set(settings.openai_models or [])
         result: dict[str, ModelInfo] = dict(cached_or)
         for m in ollama_live:
             if m.id in result and m.id in whitelist:
@@ -315,10 +344,11 @@ class ProviderRouter:
         """Check health of all providers."""
         results = {}
         results["ollama"] = await self._ollama.check_health()
-        if self._openrouter.available:
-            results["openrouter"] = await self._openrouter.check_health()
+        for name, provider in self._providers.items():
+            if name != "ollama" and provider.available:
+                results[name] = await provider.check_health()
         return results
 
     async def close(self) -> None:
-        await self._ollama.close()
-        await self._openrouter.close()
+        for provider in self._providers.values():
+            await provider.close()

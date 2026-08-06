@@ -523,6 +523,15 @@ async function loadContextInfo(sid) {
             if (sess.total_cost >= 0.005) title += ` (~$${sess.total_cost.toFixed(2)})`;
             title += '.';
         }
+        // Prompt-cache hit rate (providers that report it: OpenAI, OpenRouter/
+        // Anthropic). Verifies that the cache-stable context assembly pays off.
+        try {
+            const usage = await get(`/api/usage/${sid}`);
+            if (usage && usage.cache_read > 0 && usage.prompt > 0) {
+                const pct = Math.round((usage.cache_read / usage.prompt) * 100);
+                title += ` Cache: ${usage.cache_read.toLocaleString()} prompt tokens read from cache (${pct}%).`;
+            }
+        } catch {}
         el.title = title;
     } catch {}
 }

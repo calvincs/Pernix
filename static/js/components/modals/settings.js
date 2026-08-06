@@ -42,8 +42,11 @@ const SECTIONS = [
             { key: 'llm_max_concurrent', label: 'Ollama Max Concurrent', type: 'number' },
             { key: 'openrouter_base_url', label: 'OpenRouter URL', type: 'text' },
             { key: 'openrouter_max_concurrent', label: 'OpenRouter Max Concurrent', type: 'number' },
+            { key: 'openai_base_url', label: 'OpenAI URL (or any OpenAI-compatible server)', type: 'text' },
+            { key: 'openai_max_concurrent', label: 'OpenAI Max Concurrent', type: 'number' },
             { key: 'llm_session_timeout', label: 'Session LLM Timeout (s)', type: 'number' },
             { key: 'openrouter_api_key', label: 'OpenRouter API Key', type: 'apikey', envKey: 'OPENROUTER_API_KEY' },
+            { key: 'openai_api_key', label: 'OpenAI API Key', type: 'apikey', envKey: 'OPENAI_API_KEY' },
         ],
     },
     {
@@ -566,8 +569,9 @@ function buildModelSelect(key, value, allowEmpty) {
     }
 
     // Render optgroups, Ollama first
-    const providerOrder = ['ollama', 'openrouter', ...Object.keys(byProvider).filter(p => p !== 'ollama' && p !== 'openrouter')];
-    const providerLabels = { ollama: 'Ollama', openrouter: 'OpenRouter' };
+    const providerOrder = ['ollama', 'openrouter', 'openai',
+        ...Object.keys(byProvider).filter(p => p !== 'ollama' && p !== 'openrouter' && p !== 'openai')];
+    const providerLabels = { ollama: 'Ollama', openrouter: 'OpenRouter', openai: 'OpenAI' };
 
     for (const provider of providerOrder) {
         const models = byProvider[provider];

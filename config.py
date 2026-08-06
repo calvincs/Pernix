@@ -66,6 +66,15 @@ class Settings:
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_max_concurrent: int = 2  # Max concurrent OpenRouter requests
     openrouter_models: list = field(default_factory=list)
+    # Native OpenAI-compatible provider (adaptation plan 1a). The API key is
+    # env-only (OPENAI_API_KEY) — never a settings field, because
+    # settings.json is plaintext on disk. base_url is overridable so any
+    # OpenAI-compatible server works (vLLM, LM Studio, llama.cpp server).
+    # Listing models in openai_models is recommended: it routes bare names
+    # (gpt-4o) to this provider and keeps the UI dropdown curated.
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_max_concurrent: int = 2  # Max concurrent OpenAI requests
+    openai_models: list = field(default_factory=list)
     # Force supports_vision=True for models where auto-detection misses multimodal capability.
     vision_model_overrides: list = field(default_factory=list)
     # Force supports_audio=True for models where auto-detection misses audio capability.
@@ -463,3 +472,9 @@ if not settings.openrouter_models:
     env_models = os.environ.get("OPENROUTER_MODELS", "")
     if env_models:
         settings.openrouter_models = [m.strip() for m in env_models.split(",") if m.strip()]
+
+# Populate openai_models from env if not already set in settings.json
+if not settings.openai_models:
+    env_models = os.environ.get("OPENAI_MODELS", "")
+    if env_models:
+        settings.openai_models = [m.strip() for m in env_models.split(",") if m.strip()]

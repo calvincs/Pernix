@@ -44,6 +44,19 @@ def _get_semaphore_stats() -> dict:
     return _get_router().semaphore_stats
 
 
+def _all_semaphores(router) -> list:
+    """Every scheduler on the router — provider-map first, legacy attrs for
+    stubbed/partial routers (tests, failed resets)."""
+    sems = getattr(router, "_semaphores", None)
+    if sems:
+        return list(sems.values())
+    return [
+        s
+        for s in (getattr(router, "_ollama_semaphore", None), getattr(router, "_openrouter_semaphore", None))
+        if s is not None
+    ]
+
+
 def session_seconds_remaining(session_id: str) -> float:
     """Minimum remaining session-time budget across providers.
 
@@ -54,9 +67,8 @@ def session_seconds_remaining(session_id: str) -> float:
     started counting yet.
     """
     router = _get_router()
-    a = router._ollama_semaphore.session_seconds_remaining(session_id)
-    b = router._openrouter_semaphore.session_seconds_remaining(session_id)
-    return min(a, b)
+    remaining = [s.session_seconds_remaining(session_id) for s in _all_semaphores(router)]
+    return min(remaining) if remaining else float("inf")
 
 
 def extend_session_budget(session_id: str, additional_seconds: float) -> float:
@@ -68,8 +80,13 @@ def extend_session_budget(session_id: str, additional_seconds: float) -> float:
     both schedulers receive the same extension.
     """
     router = _get_router()
-    router._openrouter_semaphore.extend_session_budget(session_id, additional_seconds)
-    return router._ollama_semaphore.extend_session_budget(session_id, additional_seconds)
+    ollama_sem = getattr(router, "_ollama_semaphore", None)
+    result = 0.0
+    for sem in _all_semaphores(router):
+        val = sem.extend_session_budget(session_id, additional_seconds)
+        if sem is ollama_sem or result == 0.0:
+            result = val
+    return result
 
 
 def ensure_session_budget(session_id: str, min_remaining_seconds: float) -> float:
@@ -84,8 +101,13 @@ def ensure_session_budget(session_id: str, min_remaining_seconds: float) -> floa
     Returns the new effective Ollama timeout for diagnostics.
     """
     router = _get_router()
-    router._openrouter_semaphore.ensure_session_budget(session_id, min_remaining_seconds)
-    return router._ollama_semaphore.ensure_session_budget(session_id, min_remaining_seconds)
+    ollama_sem = getattr(router, "_ollama_semaphore", None)
+    result = 0.0
+    for sem in _all_semaphores(router):
+        val = sem.ensure_session_budget(session_id, min_remaining_seconds)
+        if sem is ollama_sem or result == 0.0:
+            result = val
+    return result
 
 
 def reset_session_budget(session_id: str) -> None:
@@ -98,8 +120,8 @@ def reset_session_budget(session_id: str) -> None:
     of that time was the user thinking, not the model running.
     """
     router = _get_router()
-    router._ollama_semaphore.reset_session_budget(session_id)
-    router._openrouter_semaphore.reset_session_budget(session_id)
+    for sem in _all_semaphores(router):
+        sem.reset_session_budget(session_id)
 
 
 class LLMClient:
@@ -211,14 +233,11 @@ class LLMClient:
         one, or a partially constructed router after a failed reset) must not
         turn "delete this session" into an AttributeError.
         """
-        for attr in ("_ollama_semaphore", "_openrouter_semaphore"):
-            sem = getattr(self.router, attr, None)
-            if sem is None:
-                continue
+        for sem in _all_semaphores(self.router):
             try:
                 sem.purge_session(session_id)
             except Exception as e:
-                logger.debug("purge_session on %s failed for %s: %s", attr, session_id, e)
+                logger.debug("purge_session failed for %s: %s", session_id, e)
 
     async def close(self) -> None:
         await self.router.close()
