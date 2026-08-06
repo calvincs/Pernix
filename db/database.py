@@ -777,6 +777,71 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_canary_runs_batch ON canary_runs(batch_id)",
         ],
     ),
+    (
+        25,
+        "adaptive layer (adaptation plan 4a)",
+        [
+            # Machine-managed policy store, DB-first unlike memory: version-
+            # chained rows with full-snapshot event history — hand-editing a
+            # version chain corrupts rollback, so the markdown mirror
+            # (data/adaptive/ADAPTIVE.md) is render-only, never read back.
+            """CREATE TABLE IF NOT EXISTS adaptive_entries (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT 'global',
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                risk TEXT NOT NULL DEFAULT 'low',
+                version INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'active',
+                source TEXT NOT NULL,
+                created_at TEXT,
+                updated_at TEXT
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_adaptive_entries_kind ON adaptive_entries(kind, status)",
+            # Append-only journal. The autoincrement id is the rollback
+            # ordering key — created_at text timestamps are not monotonic
+            # within a batch.
+            """CREATE TABLE IF NOT EXISTS adaptive_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                before_json TEXT,
+                after_json TEXT,
+                evidence_json TEXT,
+                actor TEXT,
+                proposal_id INTEGER,
+                batch_id TEXT,
+                created_at TEXT
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_adaptive_events_batch ON adaptive_events(batch_id)",
+            "CREATE INDEX IF NOT EXISTS idx_adaptive_events_entry ON adaptive_events(entry_id)",
+            # payload_json holds a pending batch's edits until the idle-window
+            # drain applies them ([IMPL] addition to §6 — the pending queue
+            # needs a home and the batch row is its natural one).
+            """CREATE TABLE IF NOT EXISTS adaptive_batches (
+                batch_id TEXT PRIMARY KEY,
+                producer TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                payload_json TEXT,
+                flagged_reason TEXT,
+                cleared_at TEXT,
+                created_at TEXT
+            )""",
+            # Apply-on-approve proposals — NOT skill_improvement_proposals,
+            # which is skill-shaped and whose approve is a bare status flip.
+            """CREATE TABLE IF NOT EXISTS adaptive_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                producer TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                evidence_json TEXT,
+                rationale TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                resolved_at TEXT,
+                created_at TEXT
+            )""",
+        ],
+    ),
 ]
 
 

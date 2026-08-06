@@ -140,6 +140,37 @@ def build_brief(system) -> str | None:
     return text[:_CHAR_CAP]
 
 
+def collect_degraded_tools(system) -> list[dict]:
+    """Tools whose calibrated tool_ok reliability sits below the degraded
+    threshold with enough observations to mean it (adaptive producer feed,
+    plan 4d). Runs on the bridge executor — do not call directly."""
+    out: list[dict] = []
+    try:
+        rows = list(
+            system.index.query(
+                "SELECT id, pred, args_json FROM facts "
+                "WHERE valid_to IS NULL AND pred = 'tool_ok' AND stmt_type IN ('frequency', 'crisp')"
+            )
+        )
+    except Exception as e:
+        logger.debug("Candor degraded-tools query failed: %s", e)
+        return out
+    for r in rows:
+        try:
+            args = json.loads(r["args_json"])
+            if not args or args[0] == "*":
+                continue
+            n = _observation_count(system, r["id"])
+            if n < _MIN_OBSERVATIONS:
+                continue
+            p = system.predict({"pred": "tool_ok", "args": args}, budget=_PREDICT_BUDGET)
+            if p.p < _DEGRADED_P:
+                out.append({"tool": str(args[0]), "p": round(p.p, 3), "n": n})
+        except Exception:
+            continue
+    return out
+
+
 def describe_prediction(system, pred: str, args: list) -> dict | None:
     """Structured prediction for the agent-facing tool. None = no admitted fact."""
     stmt = {"pred": pred, "args": args}

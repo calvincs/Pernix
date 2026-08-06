@@ -10,6 +10,7 @@ import {
     buildActiveTab, buildScheduledTab, buildHistoryTab,
     setJobsCallbacks, clearElapsedTimers,
 } from './modals/jobs.js';
+import { renderAdaptiveTab } from './modals/adaptive.js';
 
 // ---------------------------------------------------------------------------
 // Monaco Editor (CDN) with lightweight textarea fallback
@@ -386,6 +387,7 @@ function buildPanelDOM() {
     const jobsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'jobs', id: 'fp-jobs' });
     const toolsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'tools', id: 'fp-tools' });
     const workflowsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'workflows', id: 'fp-workflows' });
+    const adaptiveContent = el('div', { class: 'fp-tab-content', 'data-tab': 'adaptive', id: 'fp-adaptive' });
 
     _panel.appendChild(handle);
     _panel.appendChild(header);
@@ -396,6 +398,7 @@ function buildPanelDOM() {
     _panel.appendChild(toolsContent);
     _panel.appendChild(jobsContent);
     _panel.appendChild(workflowsContent);
+    _panel.appendChild(adaptiveContent);
 
     renderTabs();
 }
@@ -412,6 +415,7 @@ function renderTabs() {
         { key: 'tools', label: 'Tools' },
         { key: 'workflows', label: 'Workflows' },
         { key: 'jobs', label: 'Jobs' },
+        { key: 'adaptive', label: 'Adaptive' },
     ];
 
     tabs.forEach(t => {
@@ -432,7 +436,7 @@ function renderTabs() {
     });
 
     // Show/hide tab content
-    ['workspace', 'memory', 'skills', 'tools', 'workflows', 'jobs'].forEach(key => {
+    ['workspace', 'memory', 'skills', 'tools', 'workflows', 'jobs', 'adaptive'].forEach(key => {
         const container = document.getElementById(`fp-${key}`);
         if (container) container.classList.toggle('active', key === _state.tab);
     });
@@ -445,6 +449,7 @@ async function loadTabData() {
     else if (_state.tab === 'workflows') await loadWorkflows();
     else if (_state.tab === 'tools') await loadTools();
     else if (_state.tab === 'jobs') await loadJobs();
+    else if (_state.tab === 'adaptive') await renderAdaptiveTab(document.getElementById('fp-adaptive'));
 }
 
 // ---------------------------------------------------------------------------

@@ -128,6 +128,8 @@ When [OPERATIONAL INTEL] is present (calibrated reliability from logged outcome 
 - The percentages are calibrated from real observation counts. Weigh them by evidence: a wide credible interval or few obs is weak evidence; many obs is strong. An [unstable] or [under_specified] tag means the rate is context-dependent — flag that uncertainty in your plan rather than trusting the point estimate.
 - When reliability is central to the task, add predict_reliability / why_reliability / reliability_questions to recommended_tools so the main agent can query live calibrated numbers and their evidence chains.
 
+When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
+
 You also have tools to search deeper if the baseline is insufficient:
 - search_memory: Run additional memory queries with different keywords or modes. If a preloaded snippet is truncated and looks relevant, call search_memory with keywords from that entry and file=<file_name> to retrieve the complete content from that file.
 - search_sessions: Search other sessions with different queries
@@ -135,6 +137,7 @@ You also have tools to search deeper if the baseline is insufficient:
 - search_skills: Find more skill packages
 - read_skill_instructions: Read full instructions for a skill before recommending it
 - search_post_mortems: Look up past failure narratives (filter by failure_cause or subject tool/skill name). Use when you suspect a prior failure pattern is relevant.
+- search_adaptive: Search machine-curated routing hints, prompt notes, and policies by keyword (only useful when the adaptive layer is enabled).
 
 WORKFLOW:
 1. Review the user message, session context, and pre-loaded baseline data (memory, tools, skills).
@@ -313,6 +316,25 @@ _SCOUT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "search_adaptive",
+            "description": "Search the adaptive layer (machine-curated routing hints, prompt notes, policies) by keyword. Use when the preloaded [ADAPTIVE ROUTING HINTS] block looks relevant but truncated, or to check for policy on a specific tool/skill/topic.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keywords to match against titles and content"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["routing_hint", "prompt_note", "policy", "worker_spec"],
+                        "description": "Optional kind filter",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit_report",
             "description": "Submit the final scout report. Call this exactly once when you have gathered enough context. This ends the scout session.",
             "parameters": {
@@ -434,6 +456,34 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
             return result or "No relevant findings in other sessions."
         except Exception as e:
             return f"Session search error: {e}"
+
+    elif name == "search_adaptive":
+        try:
+            from config import settings as _settings
+
+            if not _settings.adaptive_enabled:
+                return "Adaptive layer is disabled."
+            from db import models as db
+
+            query = (args.get("query") or "").lower()
+            words = [w for w in query.split() if len(w) >= 2]
+            entries = db.adaptive_list_entries(kind=args.get("kind") or None)
+            scored = []
+            for e in entries:
+                haystack = f"{e['title']} {e['content']}".lower()
+                hits = sum(1 for w in words if w in haystack)
+                if hits or not words:
+                    scored.append((hits, e))
+            scored.sort(key=lambda t: -t[0])
+            if not scored:
+                return "No matching adaptive entries."
+            lines = [
+                f"[{e['kind']} id={e['id']} v{e['version']} scope={e['scope']}] {e['title']}: {e['content'][:400]}"
+                for _, e in scored[:8]
+            ]
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Adaptive search error: {e}"
 
     elif name == "search_tools":
         try:
@@ -1498,6 +1548,20 @@ async def _run_scout_llm(
             logger.debug("Scout candor intel failed: %s", e)
             return None
 
+    def _gather_adaptive_hints() -> str | None:
+        # Adaptive routing hints (plan 4e): learned tool/skill selection
+        # guidance renders ONLY here, beside [OPERATIONAL INTEL] — planning
+        # signal for scout, never agent-prompt weight (I5).
+        if not settings.adaptive_enabled:
+            return None
+        try:
+            from core.adaptive.render import build_routing_hints_block
+
+            return build_routing_hints_block() or None
+        except Exception as e:
+            logger.debug("Scout adaptive hints failed: %s", e)
+            return None
+
     gathered = await asyncio.gather(
         asyncio.to_thread(_gather_memory_baseline),
         asyncio.to_thread(_gather_deep_memory),
@@ -1507,6 +1571,7 @@ async def _run_scout_llm(
         asyncio.to_thread(_gather_lessons),
         _gather_models(),
         _gather_candor_intel(),
+        asyncio.to_thread(_gather_adaptive_hints),
     )
     user_content_parts.extend(part for part in gathered if part)
 
