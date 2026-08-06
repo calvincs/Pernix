@@ -229,8 +229,10 @@ def _build_user_content(
     )
 
 
-def _parse_output(raw: str) -> tuple[list[dict], list[dict]]:
-    """Parse the LLM JSON into (proposals, lessons). Tolerates fences."""
+def _parse_output(raw: str) -> tuple[list[dict], list[dict], list[dict]]:
+    """Parse the LLM JSON into (proposals, lessons, adaptive_edits).
+    Tolerates fences. adaptive_edits: same producer contract as refine
+    (plan 4d) — same call, same parse."""
     text = (raw or "").strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -239,14 +241,19 @@ def _parse_output(raw: str) -> tuple[list[dict], list[dict]]:
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning("snooze_reflect: could not parse LLM output as JSON: %s\n%s", e, text[:500])
-        return [], []
-    proposals = data.get("proposals", []) if isinstance(data, dict) else []
-    lessons = data.get("lessons", []) if isinstance(data, dict) else []
+        return [], [], []
+    if not isinstance(data, dict):
+        return [], [], []
+    proposals = data.get("proposals", []) or []
+    lessons = data.get("lessons", []) or []
+    adaptive_edits = data.get("adaptive_edits", []) or []
     if not isinstance(proposals, list):
         proposals = []
     if not isinstance(lessons, list):
         lessons = []
-    return proposals, lessons
+    if not isinstance(adaptive_edits, list):
+        adaptive_edits = []
+    return proposals, lessons, adaptive_edits
 
 
 async def run_for_session(session_id: str) -> dict:
@@ -325,10 +332,16 @@ async def run_for_session(session_id: str) -> dict:
 
     client = get_llm_client()
 
+    system_prompt = SESSION_REFLECT_PROMPT
+    if settings.adaptive_enabled:
+        from core.adaptive.contract import ADAPTIVE_EDITS_PROMPT
+
+        system_prompt = SESSION_REFLECT_PROMPT + ADAPTIVE_EDITS_PROMPT
+
     try:
         response = await client.chat(
             messages=[
-                {"role": "system", "content": SESSION_REFLECT_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
             model=model,
@@ -340,7 +353,19 @@ async def run_for_session(session_id: str) -> dict:
         stats["skipped_reason"] = f"llm_error:{type(e).__name__}"
         return stats
 
-    proposals, lessons = _parse_output(raw)
+    proposals, lessons, adaptive_edits = _parse_output(raw)
+
+    if adaptive_edits:
+        from core.adaptive.contract import queue_producer_edits
+
+        q = queue_producer_edits(
+            adaptive_edits,
+            "snooze_reflect",
+            session_id=session_id,
+            rationale=f"snooze_reflect on session {session_id[:12]}",
+        )
+        stats["adaptive_queued"] = q["queued"]
+        stats["adaptive_gated"] = q["gated"]
 
     # Persist proposals (only if we have an active skill and cause is in PROPOSAL_FAILURE_CAUSES).
     if active_skill and failure_cause in PROPOSAL_FAILURE_CAUSES:

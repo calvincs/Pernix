@@ -250,6 +250,12 @@ class CandorBridge:
                     stats["checkpointed"] = True
         return stats
 
+    async def degraded_tools(self) -> list[dict]:
+        """Calibrated below-threshold tools (adaptive producer feed, plan 4d)."""
+        from core.extensions.candor.intel import collect_degraded_tools
+
+        return await self._submit(collect_degraded_tools) or []
+
     def _seed_impl(self, system) -> int:
         """Assert base vocabulary + buffered statements as gate candidates."""
         pending_stmts: dict[tuple, dict] = {}

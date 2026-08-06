@@ -1,6 +1,6 @@
 # Adaptation plan — prime-agent-inspired upgrades (kernel, gates, goals, adaptive layer)
 
-Status: **Phases 1, 2, 3 AND 3.5 IMPLEMENTED** (2026-08-05/06, branch
+Status: **ALL PHASES (1, 2, 3, 3.5, 4) IMPLEMENTED** (2026-08-05/06, branch
 `next-phase-features`) — Phase 1: 1a/1c/1d/1e/1f/1g; Phase 2: §10.11
 socket fix, 2a scaffold modes + snapshot/restore + lock, 2b SessionKernel
 lifecycle, 2c repl tool + binding; Phase 3: 3a gates (migration v22,
@@ -30,8 +30,35 @@ runner scores by re-running gates against the final workspace state
 (equivalent to "final attempt's gates" and robust when gates_enabled is
 off); canary sessions are treated as unattended for the dangerous-tool
 gate like cron; CANARY.md gained an optional `files:` fixture map so
-seeds are self-contained.] Deviations noted inline as [IMPL] / in §10.
-Phase 4 remains PROPOSED.
+seeds are self-contained.]
+Phase 4: migration v25 (adaptive_entries/events/batches/proposals),
+core/adaptive/ (engine: validate → queue_edits split → plan/apply with
+version-moved rejection + per-kind cap + auto-cooldown → exact rollback
+by reverse event id; contract: shared ADAPTIVE_EDITS_PROMPT +
+queue_producer_edits; render: compiler block + scout-only routing hints
++ read-only ADAPTIVE.md mirror; tripwire: canary-delta primary +
+post-mortem-drift secondary, suspect/clear lifecycle, auto-rollback
+behind its flag); producers wired (refine + snooze_reflect same-call
+adaptive_edits, dream promotion via core/dream/promote.py using the
+reserved promoted status/promoted_ref, candor degraded-tool hints in
+Activity 12b); consumption (adaptive block between directives and
+skills, scout [ADAPTIVE ROUTING HINTS] + search_adaptive tool); snooze
+Activity 15 (drain → post-batch sweep enqueue → tripwire); apply-on-
+approve proposals + /api/adaptive/* + Explorer Adaptive tab; settings
+UI sections added for Phases 3/3.5/4 (§7.2 closed). [IMPL deviations
+from §6: adaptive_batches gained payload_json — the pending-auto-apply
+queue needs a home and the batch row is its natural one; 4b's "any
+global-scope Dream edit is gated" escalation wins over 4d's
+"tool_pattern auto-eligible" phrasing (compute_risk enforces it);
+contradiction/memory_stale promote as review-only proposals with empty
+payload — approving acknowledges, memory edits stay human (I3); the
+drain applies session-scoped edits in the same snooze idle window as
+global ones (strictly safer than the per-session IDLE_READY window);
+secondary-tripwire drift threshold reuses canary_regression_delta —
+§6 named no separate number.] Deviations noted inline as [IMPL] / in
+§10. The plan is fully implemented; §8 burn-in sequencing still
+applies: run canary baselines ≥1 week before flipping
+adaptive_auto_apply on.
 
 **Decisions by Calvin:** (1) design doc before any code; (2) autonomy model for
 adaptive-layer changes = **auto-apply with rollback** for low-risk kinds,

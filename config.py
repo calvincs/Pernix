@@ -229,6 +229,24 @@ class Settings:
     canary_baseline_runs: int = 3
     canary_regression_delta: float = 0.15
 
+    # --- Adaptive Layer (plan §6, off by default) ---
+    # Governed machine-editable policy store. While off: zero rows, compiler
+    # output byte-identical, no producer emits edits.
+    adaptive_enabled: bool = False
+    # Auto-apply low-risk kinds (routing_hint, prompt_note) at idle; high-
+    # risk always proposal-gated. Per Calvin: on when enabled — but the plan
+    # ships the first week with this OFF to build canary baselines first.
+    adaptive_auto_apply: bool = True
+    # Promote a canary-regression tripwire hit to automatic rollback. Off
+    # until the metric earns trust; a hit only flags the batch 'suspect'.
+    adaptive_auto_rollback: bool = False
+    adaptive_max_entries_per_kind: int = 12
+    adaptive_max_auto_applies_per_day: int = 6
+    adaptive_edit_cooldown_hours: int = 24
+    # Passive tripwire: post-mortem retry drift over this many organic turns
+    # after a batch (canary-stamped post-mortems excluded).
+    adaptive_tripwire_window_turns: int = 20
+
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
     # namespace survives tool rounds, turns, and compaction (I1), and — via

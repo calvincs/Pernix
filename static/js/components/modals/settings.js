@@ -208,6 +208,39 @@ const SECTIONS = [
             { key: 'plan_review_timeout', label: 'Plan Review Timeout (s)', type: 'number' },
         ],
     },
+    {
+        title: 'Autonomy (Gates, Goals, Heartbeats, Kernel)',
+        description: 'Long-running autonomous task substrate. Gates: deterministic shell checks Reflect cannot overrule. Goals: persistent objectives with budgets and auto-continuations. Heartbeats: recurring instructions steered into running work. Session kernel: a persistent per-session Python REPL whose variables survive turns and restarts.',
+        fields: [
+            { key: 'gates_enabled', label: 'Deterministic Gates', type: 'bool' },
+            { key: 'goals_enabled', label: 'Persistent Goals', type: 'bool' },
+            { key: 'heartbeats_enabled', label: 'Heartbeats', type: 'bool' },
+            { key: 'session_kernel_enabled', label: 'Session Kernel (REPL)', type: 'bool' },
+        ],
+    },
+    {
+        title: 'Canary Suite',
+        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline on a nightly schedule. Measures whether the agent is getting better or worse — the Adaptive Layer\'s tripwire reads these results. Canary sessions are isolated: no memory writes, no FTS, no reflect-signal contamination.',
+        fields: [
+            { key: 'canary_enabled', label: 'Canary Suite Enabled', type: 'bool' },
+            { key: 'canary_schedule', label: 'Sweep Schedule (cron)', type: 'text' },
+            { key: 'canary_retention_days', label: 'Run Retention (days)', type: 'number' },
+            { key: 'canary_baseline_runs', label: 'Baseline Sweeps', type: 'number' },
+            { key: 'canary_regression_delta', label: 'Regression Delta', type: 'number', step: 0.05 },
+        ],
+    },
+    {
+        title: 'Adaptive Layer',
+        description: 'Governed machine-editable policy: routing hints and prompt notes the agent may auto-apply at idle (with full history and one-click rollback), and policies/worker specs that always wait for your approval. The canary tripwire flags any batch that makes the agent measurably worse. Run the canary suite for at least a week before enabling auto-apply.',
+        fields: [
+            { key: 'adaptive_enabled', label: 'Adaptive Layer Enabled', type: 'bool' },
+            { key: 'adaptive_auto_apply', label: 'Auto-apply Low-risk Edits', type: 'bool' },
+            { key: 'adaptive_auto_rollback', label: 'Auto-rollback on Canary Regression', type: 'bool' },
+            { key: 'adaptive_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number' },
+            { key: 'adaptive_max_entries_per_kind', label: 'Max Entries / Kind', type: 'number' },
+            { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (h)', type: 'number' },
+        ],
+    },
 ];
 
 const MODEL_SELECT_FIELDS = [

@@ -162,6 +162,14 @@ _SETTING_BOUNDS = {
     "dream_report_interval_days": (1, 90),
     "dream_journal_retention_days": (2, 365),
     "dream_rlm_probe_interval_days": (1, 90),
+    "canary_retention_days": (1, 365),
+    "canary_baseline_runs": (1, 20),
+    "canary_regression_delta": (0.01, 1.0),
+    "canary_max_concurrent": (1, 4),
+    "adaptive_max_entries_per_kind": (1, 100),
+    "adaptive_max_auto_applies_per_day": (0, 50),
+    "adaptive_edit_cooldown_hours": (0, 720),
+    "adaptive_tripwire_window_turns": (5, 200),
 }
 
 

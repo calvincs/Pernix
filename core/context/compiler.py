@@ -527,6 +527,18 @@ def _build_available_skills_block(max_skills: int = 24, desc_chars: int = 180) -
     return "\n".join(lines)
 
 
+def _build_adaptive_block(session_id: str) -> str:
+    """Adaptive-layer prompt_notes + policies (plan 4e). Empty string while
+    the layer is off or holds nothing — never shifts bytes on first deploy."""
+    try:
+        from core.adaptive.render import build_adaptive_block
+
+        return build_adaptive_block(session_id)
+    except Exception as e:
+        logger.warning("Adaptive block unavailable: %s", e)
+        return ""
+
+
 def _build_temporal_context() -> str:
     """Build the STATIC temporal guidance section (birthdate + how to use time).
 
@@ -761,6 +773,16 @@ def compile_context(
     directives_block = _build_agent_directives_block()
     if directives_block:
         system_parts.append(directives_block)
+
+    # Adaptive layer block (plan 4e): machine-curated prompt_notes/policies
+    # between directives and the skills catalog. Stable between applies
+    # (applies happen only in idle windows, so no mid-turn prefix bust, I8);
+    # omitted entirely while empty or disabled — flag-off output is
+    # byte-identical. routing_hints deliberately absent here: they render
+    # into the scout prompt only (I5).
+    adaptive_block = _build_adaptive_block(session_id)
+    if adaptive_block:
+        system_parts.append(adaptive_block)
 
     # Static skill catalog — cache-stable across turns; placed before the
     # per-turn scout report so prompt cache hits the same prefix every turn.

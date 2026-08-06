@@ -1224,6 +1224,249 @@ def prune_canary_runs(retention_days: int) -> int:
         return cur.rowcount
 
 
+# ---------------------------------------------------------------------------
+# Adaptive layer (adaptation plan 4a): entries, events, batches, proposals
+# ---------------------------------------------------------------------------
+
+
+def adaptive_get_entry(entry_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM adaptive_entries WHERE id = ?", (entry_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def adaptive_list_entries(
+    kind: str | None = None,
+    scope: str | None = None,
+    status: str | None = "active",
+    limit: int = 200,
+) -> list[dict]:
+    clauses = []
+    params: list = []
+    if kind:
+        clauses.append("kind = ?")
+        params.append(kind)
+    if scope:
+        clauses.append("scope = ?")
+        params.append(scope)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(int(limit))
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM adaptive_entries {where} ORDER BY kind, id LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def adaptive_put_entry(row: dict) -> None:
+    """Write a full entry row (insert or replace). The apply/rollback engine
+    owns version arithmetic — this is a dumb store."""
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO adaptive_entries
+               (id, kind, scope, title, content, risk, version, status, source, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row["id"],
+                row["kind"],
+                row.get("scope", "global"),
+                row.get("title", ""),
+                row.get("content", ""),
+                row.get("risk", "low"),
+                int(row.get("version", 1)),
+                row.get("status", "active"),
+                row.get("source", "user"),
+                row.get("created_at") or _now(),
+                row.get("updated_at") or _now(),
+            ),
+        )
+
+
+def adaptive_remove_entry(entry_id: str) -> None:
+    """Hard delete — used only by rollback of a create (before_json absent)."""
+    with connect_sessions() as conn:
+        conn.execute("DELETE FROM adaptive_entries WHERE id = ?", (entry_id,))
+
+
+def adaptive_entry_count(kind: str) -> int:
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM adaptive_entries WHERE kind = ? AND status = 'active'",
+            (kind,),
+        ).fetchone()
+        return int(row["n"])
+
+
+def adaptive_add_event(
+    entry_id: str,
+    action: str,
+    before_json: str | None,
+    after_json: str | None,
+    evidence_json: str,
+    actor: str,
+    batch_id: str | None = None,
+    proposal_id: int | None = None,
+) -> int:
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """INSERT INTO adaptive_events
+               (entry_id, action, before_json, after_json, evidence_json,
+                actor, proposal_id, batch_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (entry_id, action, before_json, after_json, evidence_json, actor, proposal_id, batch_id, _now()),
+        )
+        return cur.lastrowid
+
+
+def adaptive_list_events(
+    batch_id: str | None = None,
+    entry_id: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    """Events newest-first (UI order). Rollback uses events_for_batch."""
+    clauses = []
+    params: list = []
+    if batch_id:
+        clauses.append("batch_id = ?")
+        params.append(batch_id)
+    if entry_id:
+        clauses.append("entry_id = ?")
+        params.append(entry_id)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(int(limit))
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM adaptive_events {where} ORDER BY id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def adaptive_events_for_batch(batch_id: str) -> list[dict]:
+    """Ascending autoincrement order — reverse it to roll back."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM adaptive_events WHERE batch_id = ? ORDER BY id ASC",
+            (batch_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def adaptive_get_event(event_id: int) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM adaptive_events WHERE id = ?", (int(event_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def adaptive_auto_apply_batches_since(since_iso: str) -> int:
+    """Distinct batches auto-applied since the cutoff (daily-cap accounting)."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT COUNT(DISTINCT batch_id) AS n FROM adaptive_events
+               WHERE actor = 'auto' AND action != 'rollback' AND created_at >= ?""",
+            (since_iso,),
+        ).fetchone()
+        return int(row["n"])
+
+
+def adaptive_create_batch(batch_id: str, producer: str, payload_json: str, status: str = "pending") -> None:
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO adaptive_batches
+               (batch_id, producer, status, payload_json, flagged_reason, cleared_at, created_at)
+               VALUES (?, ?, ?, ?, NULL, NULL, ?)""",
+            (batch_id, producer, status, payload_json, _now()),
+        )
+
+
+def adaptive_get_batch(batch_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM adaptive_batches WHERE batch_id = ?", (batch_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def adaptive_list_batches(status: str | None = None, limit: int = 100) -> list[dict]:
+    with connect_sessions() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM adaptive_batches WHERE status = ? ORDER BY created_at ASC LIMIT ?",
+                (status, int(limit)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM adaptive_batches ORDER BY created_at DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def adaptive_update_batch(
+    batch_id: str,
+    status: str | None = None,
+    flagged_reason: str | None = None,
+    cleared_at: str | None = None,
+    payload_json: str | None = None,
+) -> None:
+    updates: dict = {}
+    if status is not None:
+        updates["status"] = status
+    if flagged_reason is not None:
+        updates["flagged_reason"] = flagged_reason
+    if cleared_at is not None:
+        updates["cleared_at"] = cleared_at
+    if payload_json is not None:
+        updates["payload_json"] = payload_json
+    if not updates:
+        return
+    cols = ", ".join(f"{k} = ?" for k in updates)
+    with connect_sessions() as conn:
+        conn.execute(f"UPDATE adaptive_batches SET {cols} WHERE batch_id = ?", [*updates.values(), batch_id])
+
+
+def adaptive_add_proposal(producer: str, payload_json: str, evidence_json: str, rationale: str) -> int:
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """INSERT INTO adaptive_proposals
+               (producer, payload_json, evidence_json, rationale, status, resolved_at, created_at)
+               VALUES (?, ?, ?, ?, 'pending', NULL, ?)""",
+            (producer, payload_json, evidence_json, rationale, _now()),
+        )
+        return cur.lastrowid
+
+
+def adaptive_get_proposal(proposal_id: int) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM adaptive_proposals WHERE id = ?", (int(proposal_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def adaptive_list_proposals(status: str | None = None, limit: int = 100) -> list[dict]:
+    with connect_sessions() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM adaptive_proposals WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                (status, int(limit)),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM adaptive_proposals ORDER BY created_at DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def adaptive_resolve_proposal(proposal_id: int, status: str) -> None:
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE adaptive_proposals SET status = ?, resolved_at = ? WHERE id = ?",
+            (status, _now(), int(proposal_id)),
+        )
+
+
 def list_cron_runs(job_name: str | None = None, limit: int = 50) -> list[dict]:
     with connect_sessions() as conn:
         if job_name:

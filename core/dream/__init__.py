@@ -75,6 +75,17 @@ async def run_step(is_cancelled) -> dict:
     if did:
         db.set_snooze_state("dream_last_action", did)
 
+    # Promotion (plan 4d): validated hypotheses climb into the adaptive
+    # layer — gated by adaptive_enabled, bounded per step, stamped
+    # status='promoted' so each promotes exactly once.
+    if settings.adaptive_enabled and not is_cancelled():
+        from core.dream.promote import promote_validated
+
+        try:
+            stats["dream_promoted"] = await promote_validated()
+        except Exception as e:
+            logger.warning("dream: promotion failed: %s", e)
+
     if not is_cancelled():
         from core.dream.report import maybe_write_report
 

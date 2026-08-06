@@ -92,7 +92,7 @@ def test_parse_refine_output_handles_fences():
     from core.refine import _parse_refine_output
 
     fenced = "```json\n" + json.dumps({"nothing_actionable": False, "proposals": [], "lessons": []}) + "\n```"
-    proposals, lessons, na = _parse_refine_output(fenced)
+    proposals, lessons, edits, na = _parse_refine_output(fenced)
     assert proposals == []
     assert lessons == []
     assert na is False
@@ -102,14 +102,14 @@ def test_parse_refine_output_nothing_actionable_flag():
     from core.refine import _parse_refine_output
 
     raw = json.dumps({"nothing_actionable": True, "proposals": [], "lessons": []})
-    _, _, na = _parse_refine_output(raw)
+    _, _, _, na = _parse_refine_output(raw)
     assert na is True
 
 
 def test_parse_refine_output_malformed_returns_empty():
     from core.refine import _parse_refine_output
 
-    proposals, lessons, na = _parse_refine_output("not json at all")
+    proposals, lessons, edits, na = _parse_refine_output("not json at all")
     assert proposals == []
     assert lessons == []
     assert na is False

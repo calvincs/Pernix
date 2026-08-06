@@ -476,6 +476,7 @@ app.add_middleware(_AuthMiddleware)
 
 # Mount routers
 from api.routers import (
+    adaptive,
     canary,
     chat,
     context,
@@ -495,6 +496,7 @@ from api.routers import (
 )
 
 app.include_router(health.router)
+app.include_router(adaptive.router)
 app.include_router(canary.router)
 app.include_router(sessions.router)
 app.include_router(chat.router)

@@ -130,8 +130,11 @@ def _latest_reflect_verdict(messages: list[dict]) -> dict | None:
     return None
 
 
-def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], bool]:
-    """Parse the LLM JSON into (proposals, lessons, nothing_actionable). Tolerates fences."""
+def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], bool]:
+    """Parse the LLM JSON into (proposals, lessons, adaptive_edits,
+    nothing_actionable). Tolerates fences. adaptive_edits (plan 4d) rides
+    the same call and the same parse — an empty array while the adaptive
+    layer is off or the model has nothing durable."""
     text = (raw or "").strip()
     if text.startswith("```"):
         lines = text.splitlines()
@@ -140,17 +143,20 @@ def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], bool]:
         data = json.loads(text)
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning("refine: could not parse LLM output as JSON: %s\n%s", e, text[:500])
-        return [], [], False
+        return [], [], [], False
     if not isinstance(data, dict):
-        return [], [], False
+        return [], [], [], False
     proposals = data.get("proposals", []) or []
     lessons = data.get("lessons", []) or []
+    adaptive_edits = data.get("adaptive_edits", []) or []
     if not isinstance(proposals, list):
         proposals = []
     if not isinstance(lessons, list):
         lessons = []
+    if not isinstance(adaptive_edits, list):
+        adaptive_edits = []
     nothing_actionable = bool(data.get("nothing_actionable"))
-    return proposals, lessons, nothing_actionable
+    return proposals, lessons, adaptive_edits, nothing_actionable
 
 
 def _build_user_content(
@@ -285,10 +291,16 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
 
     client = get_llm_client()
 
+    system_prompt = REFINE_PROMPT
+    if settings.adaptive_enabled:
+        from core.adaptive.contract import ADAPTIVE_EDITS_PROMPT
+
+        system_prompt = REFINE_PROMPT + ADAPTIVE_EDITS_PROMPT
+
     try:
         response = await client.chat(
             messages=[
-                {"role": "system", "content": REFINE_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
             model=model,
@@ -300,8 +312,20 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
         stats["skipped_reason"] = f"llm_error:{type(e).__name__}"
         return stats
 
-    proposals, lessons, nothing_actionable = _parse_refine_output(raw)
+    proposals, lessons, adaptive_edits, nothing_actionable = _parse_refine_output(raw)
     stats["nothing_actionable"] = nothing_actionable
+
+    if adaptive_edits:
+        from core.adaptive.contract import queue_producer_edits
+
+        q = queue_producer_edits(
+            adaptive_edits,
+            "refine",
+            session_id=session_id,
+            rationale=f"refine pass on session {session_id[:12]} ({session.get('title', '?')[:40]})",
+        )
+        stats["adaptive_queued"] = q["queued"]
+        stats["adaptive_gated"] = q["gated"]
 
     # Persist proposals only when an active skill is identified.
     if active_skill:

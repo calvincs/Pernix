@@ -613,6 +613,21 @@ class SnoozeRunner:
                 await journal_append(f"→ {detail}")
                 await self._dream_step()
 
+        # Activity 15: Adaptive layer — drain pending auto-applies, enqueue
+        # post-batch canary sweeps, evaluate the tripwire (plan §6c). Runs
+        # inside the idle window by construction, which is what makes
+        # global-scope applies safe (no session's cached prefix is mid-turn).
+        # No LLM — pure store work.
+        if not self._is_cancelled() and settings.adaptive_enabled:
+            bus.emit(
+                {
+                    "type": "snooze.activity",
+                    "activity": "adaptive_apply",
+                    "detail": "Applying pending adaptive edits and evaluating the tripwire",
+                }
+            )
+            await self._adaptive_step()
+
     # ------------------------------------------------------------------
     # Activity 1: Catch-up distillation
     # ------------------------------------------------------------------
@@ -2589,6 +2604,91 @@ Output valid JSON only. No markdown fences. /no_think"""
                 logger.info("Snooze candor maintenance: %s", stats)
         except Exception as e:
             logger.warning("Snooze candor maintenance failed: %s", e)
+            return
+
+        # Candor producer (plan 4d): calibrated reliability regressions →
+        # routing_hint edits. Deduped by slug — an existing hint for the
+        # same tool is left alone (updates would churn the cooldown; the
+        # ledger ref lets a reviewer pull the full audit chain on demand).
+        if settings.adaptive_enabled and not self._is_cancelled():
+            try:
+                from core.adaptive.contract import queue_producer_edits
+                from core.extensions.candor.bridge import get_candor_bridge
+                from db import models as db
+
+                edits = []
+                for d in await get_candor_bridge().degraded_tools():
+                    entry_id = f"tool-{d['tool']}-degraded"
+                    if db.adaptive_get_entry(entry_id):
+                        continue
+                    edits.append(
+                        {
+                            "action": "create",
+                            "kind": "routing_hint",
+                            "scope": "global",
+                            "entry_id": entry_id,
+                            "title": f"tool {d['tool']} degraded",
+                            "content": (
+                                f"Calibrated reliability for {d['tool']} is {d['p']:.0%} over "
+                                f"{d['n']} observations — prefer an alternative or verify its "
+                                f"output; see why_reliability('tool_ok', '{d['tool']}')."
+                            ),
+                            "evidence": [f"candor:tool_ok({d['tool']})"],
+                        }
+                    )
+                if edits:
+                    q = queue_producer_edits(edits[:2], "candor", rationale="candor reliability regression")
+                    if q["queued"] or q["gated"]:
+                        logger.info("Candor adaptive hints queued: %d, gated: %d", q["queued"], q["gated"])
+            except Exception as e:
+                logger.warning("Candor adaptive producer failed: %s", e)
+
+    # ------------------------------------------------------------------
+    # Activity 15: Adaptive layer drain + tripwire (plan §6c)
+    # ------------------------------------------------------------------
+
+    async def _adaptive_step(self) -> None:
+        """Drain pending auto-applies → enqueue post-batch sweeps → evaluate
+        the tripwire. Each stage guarded; a failure never kills the cycle."""
+        import asyncio as _asyncio
+
+        try:
+            from core.adaptive import drain_pending
+
+            out = await _asyncio.to_thread(drain_pending)
+            applied = out.get("applied_batches") or []
+            if applied:
+                edits_n = sum(len(r.get("applied") or []) for r in out.get("results") or [])
+                self._stats.setdefault("adaptive_batches_applied", 0)
+                self._stats["adaptive_batches_applied"] += len(applied)
+                from db import models as db
+
+                db.add_notification(
+                    title="Adaptive layer: edits auto-applied",
+                    body=f"{edits_n} edit(s) across {len(applied)} batch(es) applied at idle — review in the Adaptive panel.",
+                    urgency="normal",
+                )
+                # Post-batch sweeps: batch-tagged canary data for the
+                # tripwire join. Enqueued through the scheduler for its own
+                # idle window — NEVER dispatched inline from this activity.
+                if settings.canary_enabled:
+                    from core.extensions.scheduling import enqueue_post_batch_sweep
+
+                    for bid in applied:
+                        enqueue_post_batch_sweep(bid)
+        except Exception as e:
+            logger.warning("Adaptive drain failed: %s", e)
+
+        if self._is_cancelled():
+            return
+        try:
+            from core.adaptive.tripwire import evaluate_tripwire
+
+            actions = await _asyncio.to_thread(evaluate_tripwire)
+            for a in actions:
+                logger.info("Adaptive tripwire: %s %s (%s)", a["action"], a["batch_id"], a.get("detail", ""))
+        except Exception as e:
+            logger.warning("Adaptive tripwire failed: %s", e)
 
     # ------------------------------------------------------------------
     # Activity 14: Dream step (idle-time introspection — core/dream)
