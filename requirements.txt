@@ -28,3 +28,4 @@ playwright==1.58.*     # headless browser for browse_web + eval screenshots
 trafilatura==2.*       # HTML-to-markdown content extraction for browse_web
 tavily-python==0.5.*   # primary web search (needs API key)
 numpy>=1.26
+dill==0.3.*          # per-variable kernel state snapshots (adaptation plan 2a)

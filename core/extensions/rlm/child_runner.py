@@ -202,22 +202,30 @@ class _AnswerDict(dict):
 
 
 class ChildREPLRunner:
-    def __init__(self, llm_sock_path: str):
+    def __init__(self, llm_sock_path: str, scaffold: str = "rlm"):
         self._llm_sock_path = llm_sock_path
         self._final_answer = None
+        # "rlm" installs the sub-LLM stubs + answer dict; "plain" (session
+        # kernels, adaptation plan 2a) omits them — there is no broker socket
+        # to dial, and the stubs would hang against it. The restricted
+        # builtins table stays in both modes.
+        self.scaffold_mode = scaffold if scaffold in ("rlm", "plain") else "rlm"
         self.ns = {
             "__builtins__": dict(_SAFE_BUILTINS),
             "__name__": "__main__",
         }
-        self._scaffold = {
-            "llm_query": self._llm_query,
-            "llm_query_batched": self._llm_query_batched,
-            "rlm_query": self._rlm_query,
-            "rlm_query_batched": self._rlm_query_batched,
-            "SHOW_VARS": self._show_vars,
-        }
-        self.ns.update(self._scaffold)
-        self.ns["answer"] = _AnswerDict(on_ready=self._capture_answer)
+        if self.scaffold_mode == "rlm":
+            self._scaffold = {
+                "llm_query": self._llm_query,
+                "llm_query_batched": self._llm_query_batched,
+                "rlm_query": self._rlm_query,
+                "rlm_query_batched": self._rlm_query_batched,
+                "SHOW_VARS": self._show_vars,
+            }
+            self.ns.update(self._scaffold)
+            self.ns["answer"] = _AnswerDict(on_ready=self._capture_answer)
+        else:
+            self._scaffold = {}
         self._hidden = set(self.ns) | {"answer"}
 
     # ---- sub-LLM stubs (brokered to the parent; no credentials here) ----
@@ -279,8 +287,10 @@ class ChildREPLRunner:
 
     def _restore_scaffold(self):
         """Undo model overwrites of scaffold names so the next cell still works."""
-        self.ns.update(self._scaffold)
         self.ns["__builtins__"] = dict(_SAFE_BUILTINS)
+        if self.scaffold_mode != "rlm":
+            return  # plain mode: only the builtins guardrail is restored
+        self.ns.update(self._scaffold)
         current = self.ns.get("answer")
         if not isinstance(current, _AnswerDict):
             replacement = _AnswerDict(on_ready=self._capture_answer)
@@ -310,6 +320,87 @@ class ChildREPLRunner:
             return {"type": "load_result", "ok": True, "chars": total}
         except Exception as e:
             return {"type": "load_result", "ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def snapshot(self, frame: dict) -> dict:
+        """Serialize the namespace ONE top-level name at a time (adaptation
+        plan 2a): one unpicklable object (socket, handle) is skipped and
+        reported instead of aborting the whole snapshot. The file is written
+        by this process directly (atomically, tmp+rename) so payload size is
+        never bounded by the frame cap; the reply carries only names."""
+        path = frame.get("path", "")
+        max_bytes = int(frame.get("max_bytes") or 256 * 1024 * 1024)
+        try:
+            import dill
+        except ImportError:
+            return {
+                "type": "snapshot_result",
+                "ok": False,
+                "error": "dill not importable in the kernel interpreter",
+            }
+        import types as _types
+
+        stored: dict[str, bytes] = {}
+        skipped: dict[str, str] = {}
+        total = 0
+        for name in sorted(self.ns):
+            if name.startswith("_") or name in self._hidden:
+                continue
+            value = self.ns[name]
+            if isinstance(value, _types.ModuleType):
+                skipped[name] = "module (re-import on revival)"
+                continue
+            try:
+                blob = dill.dumps(value)
+            except (Exception, RecursionError) as e:
+                skipped[name] = f"{type(e).__name__}: {e}"[:200]
+                continue
+            if total + len(blob) > max_bytes:
+                skipped[name] = f"size cap ({len(blob)} bytes would exceed {max_bytes} total)"
+                continue
+            stored[name] = blob
+            total += len(blob)
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "wb") as f:
+                dill.dump(stored, f)
+            os.replace(tmp, path)
+        except Exception as e:
+            return {"type": "snapshot_result", "ok": False, "error": f"{type(e).__name__}: {e}"}
+        return {
+            "type": "snapshot_result",
+            "ok": True,
+            "stored": sorted(stored),
+            "skipped": skipped,
+            "bytes": total,
+        }
+
+    def restore(self, frame: dict) -> dict:
+        """Load a snapshot per-name: one stale/unloadable blob fails alone."""
+        path = frame.get("path", "")
+        try:
+            import dill
+        except ImportError:
+            return {
+                "type": "restore_result",
+                "ok": False,
+                "error": "dill not importable in the kernel interpreter",
+            }
+        try:
+            with open(path, "rb") as f:
+                blobs = dill.load(f)
+        except Exception as e:
+            return {"type": "restore_result", "ok": False, "error": f"{type(e).__name__}: {e}"}
+        restored: list[str] = []
+        failed: dict[str, str] = {}
+        for name, blob in blobs.items():
+            if name in self._hidden:
+                continue  # never clobber scaffold/guardrail names
+            try:
+                self.ns[name] = dill.loads(blob)
+                restored.append(name)
+            except Exception as e:
+                failed[name] = f"{type(e).__name__}: {e}"[:200]
+        return {"type": "restore_result", "ok": True, "restored": sorted(restored), "failed": failed}
 
     def execute(self, frame: dict) -> dict:
         code = frame.get("code", "")
@@ -375,6 +466,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exec-sock", required=True)
     parser.add_argument("--llm-sock", required=True)
+    parser.add_argument("--scaffold", choices=("rlm", "plain"), default="rlm")
     args = parser.parse_args()
 
     _set_pdeathsig()
@@ -382,7 +474,7 @@ def main() -> int:
     # running cell (aborting the cell, preserving the namespace).
     signal.signal(signal.SIGINT, signal.default_int_handler)
 
-    runner = ChildREPLRunner(args.llm_sock)
+    runner = ChildREPLRunner(args.llm_sock, scaffold=args.scaffold)
 
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     conn.connect(args.exec_sock)
@@ -400,6 +492,10 @@ def main() -> int:
             reply = runner.execute(frame)
         elif ftype == "load_context":
             reply = runner.load_context(frame)
+        elif ftype == "snapshot":
+            reply = runner.snapshot(frame)
+        elif ftype == "restore":
+            reply = runner.restore(frame)
         elif ftype == "shutdown":
             send_frame(conn, {"type": "bye"})
             return 0

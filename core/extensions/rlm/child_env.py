@@ -19,6 +19,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +39,7 @@ CELL_QUIET_TIMEOUT = 300.0
 SIGINT_GRACE = 10.0
 SPAWN_TIMEOUT = 15.0
 LOAD_TIMEOUT = 120.0
+SNAPSHOT_TIMEOUT = 300.0  # per-variable dill of up to 256MiB + fsync
 
 _DEFAULT_AS_LIMIT = 8 * 1024 * 1024 * 1024
 _DEFAULT_FSIZE_LIMIT = 2 * 1024 * 1024 * 1024
@@ -153,6 +155,7 @@ class ChildREPL:
         python_exe: str | None = None,
         address_space_limit: int = _DEFAULT_AS_LIMIT,
         fsize_limit: int = _DEFAULT_FSIZE_LIMIT,
+        scaffold: str = "rlm",
     ):
         # Resolve to absolute: the child's cwd IS the run dir, so a relative
         # workspace_dir (the default) would make the child resolve the socket
@@ -169,11 +172,19 @@ class ChildREPL:
         self._python_exe = python_exe or sys.executable
         self._as_limit = address_space_limit
         self._fsize_limit = fsize_limit
+        self.scaffold = scaffold  # "rlm" (sub-LLM stubs + answer) | "plain" (session kernel)
         self.popen: subprocess.Popen | None = None
         self._conn: socket.socket | None = None
         self._listener: socket.socket | None = None
         self._log_file = None
         self._exec_id = 0
+        # One driver at a time (adaptation plan 2a): the connection carries
+        # interleaved frames from exactly one exchange. RLM's broker is a
+        # single driver by construction; session kernels add concurrent
+        # callers (repl cells vs. maintenance snapshots), which without this
+        # would interleave frames and hang both. interrupt()/kill() stay
+        # lock-free — they are the escape hatch while a cell holds the lock.
+        self._rt_lock = threading.Lock()
 
     def start(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -212,6 +223,8 @@ class ChildREPL:
                     str(self.exec_sock_path),
                     "--llm-sock",
                     str(self.llm_sock_path),
+                    "--scaffold",
+                    self.scaffold,
                 ],
                 cwd=str(self.run_dir),
                 env=_build_child_env(self.run_dir, venv_bin),
@@ -250,6 +263,23 @@ class ChildREPL:
         `in_flight`/`last_activity` come from the broker: a cell with live (or
         recently active) sub-LLM calls is working, not hung.
         """
+        self._rt_lock.acquire()
+        try:
+            return self._execute_cell_locked(
+                code, deadline=deadline, cancel_check=cancel_check, in_flight=in_flight, last_activity=last_activity
+            )
+        finally:
+            self._rt_lock.release()
+
+    def _execute_cell_locked(
+        self,
+        code: str,
+        *,
+        deadline: float,
+        cancel_check=None,
+        in_flight=None,
+        last_activity=None,
+    ) -> CellResult:
         self._exec_id += 1
         exec_id = self._exec_id
         self._send({"type": "exec", "id": exec_id, "code": code})
@@ -296,6 +326,32 @@ class ChildREPL:
                     var_names=list(reply.get("var_names", [])),
                 )
             logger.warning("discarding unexpected frame from child: %s", reply.get("type"))
+
+    def snapshot(self, path: Path, *, max_bytes: int = 256 * 1024 * 1024) -> dict:
+        """Per-variable dill snapshot of the child namespace (plan 2a).
+
+        Returns the child's report: {ok, stored: [names], skipped: {name:
+        reason}, bytes}. The child writes the file itself (atomically), so
+        payload size is never bounded by the frame cap. Serialized with
+        cell execution via the round-trip lock."""
+        reply = self._roundtrip(
+            {"type": "snapshot", "path": str(path), "max_bytes": int(max_bytes)},
+            deadline=time.monotonic() + SNAPSHOT_TIMEOUT,
+        )
+        if reply.get("type") != "snapshot_result":
+            raise RLMChildDied(f"unexpected snapshot reply: {reply.get('type')}")
+        return reply
+
+    def restore(self, path: Path) -> dict:
+        """Load a snapshot per-name; one stale blob fails alone. Returns
+        {ok, restored: [names], failed: {name: reason}}."""
+        reply = self._roundtrip(
+            {"type": "restore", "path": str(path)},
+            deadline=time.monotonic() + SNAPSHOT_TIMEOUT,
+        )
+        if reply.get("type") != "restore_result":
+            raise RLMChildDied(f"unexpected restore reply: {reply.get('type')}")
+        return reply
 
     def interrupt(self) -> None:
         if self.popen is not None and self.popen.poll() is None:
@@ -353,6 +409,10 @@ class ChildREPL:
             raise RLMChildDied(f"failed to send to child REPL: {e}") from e
 
     def _roundtrip(self, frame: dict, *, deadline: float) -> dict:
+        with self._rt_lock:
+            return self._roundtrip_locked(frame, deadline=deadline)
+
+    def _roundtrip_locked(self, frame: dict, *, deadline: float) -> dict:
         self._send(frame)
         while True:
             if time.monotonic() > deadline:
