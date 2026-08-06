@@ -660,6 +660,140 @@ async def _init_scheduler_async():
 
 
 # ---------------------------------------------------------------------------
+# Canary triggers (adaptation plan 3.5): scheduled / post_batch / manual
+# ---------------------------------------------------------------------------
+
+# One sweep at a time (canary_max_concurrent=1). A second trigger firing
+# mid-sweep skips rather than queues — canaries measure, they don't backlog.
+_canary_sweep_lock = asyncio.Lock()
+
+# Post-batch retry cap: ~1 hour of 5-minute retries before giving up.
+_CANARY_BATCH_MAX_ATTEMPTS = 12
+_CANARY_BATCH_RETRY_S = 300
+
+
+async def _execute_canary_sweep_job(meta: dict):
+    """Scheduled/manual sweep executor. Never raises."""
+    if not settings.canary_enabled:
+        return
+    if _canary_sweep_lock.locked():
+        logger.info("Canary sweep skipped: another sweep is running")
+        return
+    async with _canary_sweep_lock:
+        try:
+            from core.canary import run_sweep
+
+            await run_sweep(
+                trigger=meta.get("trigger", "scheduled"),
+                batch_id=meta.get("batch_id"),
+                names=meta.get("names"),
+            )
+        except Exception as e:
+            logger.error("Canary sweep failed: %s", e)
+
+
+async def _execute_canary_batch_job(meta: dict):
+    """Post-batch sweep executor: waits for an idle window by rescheduling.
+
+    Enqueued by a Phase 4 apply (including approved-proposal applies). NEVER
+    dispatched inline from a snooze activity — inline dispatch would cancel
+    the cycle that produced the batch. Real user work defers the sweep;
+    after _CANARY_BATCH_MAX_ATTEMPTS deferrals it runs anyway (batch-tagged
+    data is worth more than a perfect idle window).
+    """
+    if not settings.canary_enabled:
+        return
+    from sessions.manager import get_manager
+
+    attempts = int(meta.get("attempts", 0)) + 1
+    if get_manager().has_active_work() and attempts < _CANARY_BATCH_MAX_ATTEMPTS:
+        scheduler = _get_scheduler()
+        if scheduler:
+            from datetime import timedelta
+
+            from apscheduler.triggers.date import DateTrigger
+
+            retry_meta = dict(meta)
+            retry_meta["attempts"] = attempts
+            scheduler.add_job(
+                _execute_canary_batch_job,
+                trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=_CANARY_BATCH_RETRY_S)),
+                id=f"_canary_batch_{meta.get('batch_id', '?')}",
+                replace_existing=True,
+                kwargs={"meta": retry_meta},
+            )
+            logger.info(
+                "Post-batch canary sweep deferred (attempt %d): active work present",
+                attempts,
+            )
+        return
+    await _execute_canary_sweep_job({**meta, "trigger": "post_batch"})
+
+
+def enqueue_post_batch_sweep(batch_id: str, delay_s: int = 60) -> bool:
+    """Queue a batch-tagged sweep for the next idle window (Phase 4 hook)."""
+    if not settings.canary_enabled:
+        return False
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return False
+    from datetime import timedelta
+
+    from apscheduler.triggers.date import DateTrigger
+
+    scheduler.add_job(
+        _execute_canary_batch_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=max(1, delay_s))),
+        id=f"_canary_batch_{batch_id}",
+        replace_existing=True,
+        kwargs={"meta": {"kind": "canary", "transient": True, "batch_id": batch_id}},
+    )
+    return True
+
+
+def enqueue_manual_canary(name: str) -> bool:
+    """Fire a single canary ASAP without blocking the caller's turn."""
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return False
+    from apscheduler.triggers.date import DateTrigger
+
+    scheduler.add_job(
+        _execute_canary_sweep_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc)),
+        id=f"_canary_manual_{name}",
+        replace_existing=True,
+        kwargs={"meta": {"kind": "canary", "transient": True, "trigger": "manual", "names": [name]}},
+    )
+    return True
+
+
+def ensure_canary_schedule() -> None:
+    """Install the nightly sweep job from settings (config is the truth —
+    the job is transient, recreated each boot, never persisted to JSON)."""
+    if not settings.canary_enabled:
+        return
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+
+        scheduler.add_job(
+            _execute_canary_sweep_job,
+            trigger=CronTrigger.from_crontab(settings.canary_schedule, timezone="UTC"),
+            id="_canary_sweep",
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=3600,
+            kwargs={"meta": {"kind": "canary", "transient": True, "trigger": "scheduled"}},
+        )
+        logger.info("Canary sweep scheduled: %s", settings.canary_schedule)
+    except Exception as e:
+        logger.warning("Failed to schedule canary sweep: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Tool functions
 # ---------------------------------------------------------------------------
 

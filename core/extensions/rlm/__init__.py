@@ -726,7 +726,6 @@ def register(reg: ToolRegistry) -> None:
         timeout=settings.rlm_timeout_seconds + _DISPATCH_GRACE,
         long_poll=True,
         parallel_safe=False,
-        worker_allowed=True,
         safety_level="caution",
         source="extension",
     )

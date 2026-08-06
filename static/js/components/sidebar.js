@@ -13,6 +13,7 @@ const SESSION_TYPES = {
     worker: { label: 'Worker', cls: 'worker', color: 'var(--teal-dim)' },
     snooze: { label: 'Dream',  cls: 'snooze', color: 'var(--dream)' },
     rlm:    { label: 'RLM',    cls: 'rlm',    color: 'var(--rlm)' },
+    canary: { label: 'Canary', cls: 'canary', color: 'var(--canary)' },
 };
 
 // Types that nest under their parent session instead of the top-level list.
@@ -158,7 +159,7 @@ export function renderSessionList(sessions, activeSid) {
     const allChildren = sessions.filter(s => CHILD_TYPES.has(s.session_type));
 
     // Count all types (before filtering) for legend
-    const counts = { chat: 0, cron: 0, worker: 0, snooze: 0, rlm: 0 };
+    const counts = { chat: 0, cron: 0, worker: 0, snooze: 0, rlm: 0, canary: 0 };
     for (const s of sessions) counts[_getTypeKey(s)]++;
     _updateLegendCounts(counts);
 
@@ -184,8 +185,8 @@ export function renderSessionList(sessions, activeSid) {
     for (const g of GROUP_ORDER) {
         buckets[g].sort(
             (a, b) =>
-                (['cron', 'snooze'].includes(_getTypeKey(a)) ? 1 : 0) -
-                (['cron', 'snooze'].includes(_getTypeKey(b)) ? 1 : 0)
+                (['cron', 'snooze', 'canary'].includes(_getTypeKey(a)) ? 1 : 0) -
+                (['cron', 'snooze', 'canary'].includes(_getTypeKey(b)) ? 1 : 0)
         );
     }
 
@@ -248,6 +249,7 @@ function _getTypeKey(session) {
     if (session.session_type === 'worker') return 'worker';
     if (session.session_type === 'snooze') return 'snooze';
     if (session.session_type === 'rlm') return 'rlm';
+    if (session.session_type === 'canary') return 'canary';
     if (session.title && session.title.startsWith('Cron:')) return 'cron';
     return 'chat';
 }

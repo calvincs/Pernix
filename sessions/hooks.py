@@ -200,6 +200,10 @@ async def _maybe_distill(session_id: str, session: dict) -> None:
     """Trigger memory distillation if session qualifies."""
     if not settings.memory_recall:
         return
+    # Canary isolation (plan §5): memory writes are disabled for synthetic
+    # runs — reads stay (recall quality is part of what canaries measure).
+    if session.get("session_type") == "canary":
+        return
 
     # Full read: distill_session summarizes the whole session. Off-loop.
     messages = await asyncio.to_thread(db.get_messages, session_id)
@@ -233,6 +237,12 @@ async def _maybe_candor(session_id: str, session: dict, session_obj=None) -> Non
     double-observes the earlier attempt's tool calls. Failure is never fatal:
     a Candor problem logs a warning and the turn completes normally.
     """
+    # Canary isolation (plan §5): deliberately-hard synthetic tasks would
+    # poison the reliability ledger Phase 4 consumes. §10.9 revisits a
+    # separate ledger namespace for calibration.
+    if session.get("session_type") == "canary":
+        return
+
     import time as _time
 
     try:

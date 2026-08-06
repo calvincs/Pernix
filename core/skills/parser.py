@@ -14,23 +14,20 @@ class SkillParseError(Exception):
     """Raised when a SKILL.md file cannot be parsed."""
 
 
-def parse_skill_md(path: Path) -> tuple[dict, str]:
-    """Parse a SKILL.md file into (frontmatter_dict, body_markdown).
+def parse_frontmatter_md(path: Path, error_cls: type[Exception] = SkillParseError) -> tuple[dict, str]:
+    """Split a markdown file into (yaml_frontmatter_dict, body).
 
-    Frontmatter is YAML between --- delimiters at the top of the file.
-    Body is everything after the closing ---.
-
-    Raises SkillParseError if the file is missing required fields.
+    Shared by SKILL.md and CANARY.md (adaptation plan §5). Raises error_cls
+    on structural problems; field-level validation is the caller's job.
     """
     text = path.read_text(encoding="utf-8")
 
-    # Split frontmatter from body
     if not text.startswith("---"):
-        raise SkillParseError(f"{path}: Missing YAML frontmatter (must start with ---)")
+        raise error_cls(f"{path}: Missing YAML frontmatter (must start with ---)")
 
     parts = text.split("---", 2)
     if len(parts) < 3:
-        raise SkillParseError(f"{path}: Malformed frontmatter (needs opening and closing ---)")
+        raise error_cls(f"{path}: Malformed frontmatter (needs opening and closing ---)")
 
     # parts[0] is empty (before first ---), parts[1] is YAML, parts[2] is body
     raw_yaml = parts[1].strip()
@@ -39,10 +36,23 @@ def parse_skill_md(path: Path) -> tuple[dict, str]:
     try:
         frontmatter = yaml.safe_load(raw_yaml)
     except yaml.YAMLError as e:
-        raise SkillParseError(f"{path}: Invalid YAML frontmatter: {e}") from e
+        raise error_cls(f"{path}: Invalid YAML frontmatter: {e}") from e
 
     if not isinstance(frontmatter, dict):
-        raise SkillParseError(f"{path}: Frontmatter must be a YAML mapping")
+        raise error_cls(f"{path}: Frontmatter must be a YAML mapping")
+
+    return frontmatter, body
+
+
+def parse_skill_md(path: Path) -> tuple[dict, str]:
+    """Parse a SKILL.md file into (frontmatter_dict, body_markdown).
+
+    Frontmatter is YAML between --- delimiters at the top of the file.
+    Body is everything after the closing ---.
+
+    Raises SkillParseError if the file is missing required fields.
+    """
+    frontmatter, body = parse_frontmatter_md(path)
 
     # Validate required fields (enforce string types — YAML may parse bare values as int/bool)
     name = frontmatter.get("name")

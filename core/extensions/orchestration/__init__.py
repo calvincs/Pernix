@@ -2,7 +2,7 @@
 
 Workers run in fresh context (Ralph pattern). Each worker gets its own scout.
 Communication: parent↔worker only. Worker↔worker forbidden.
-Workers cannot spawn sub-workers (enforced by executor via worker_allowed flag).
+Workers cannot spawn sub-workers (enforced by executor via denied_session_types).
 """
 
 from __future__ import annotations
@@ -1354,7 +1354,7 @@ def notify_parent(
         parent sees it on its next compile_context call without a new turn.
       * No parent → returns an error.
 
-    Only callable from worker sessions (worker_allowed=True).
+    Only callable from worker sessions (not in any denied_session_types set).
     """
     ctx = _context or {}
     session_id = ctx.get("session_id", "")
@@ -2471,7 +2471,7 @@ def _write_manifest(run_dir: Path, manifest: dict) -> None:
 
 def register(reg) -> None:
     """Register orchestration extension tools."""
-    common = {"category": "orchestration", "source": "extension", "worker_allowed": False}
+    common = {"category": "orchestration", "source": "extension", "denied_session_types": {"worker"}}
     orch_tags = ["parallel", "worker", "orchestrate", "delegate", "concurrent", "spawn", "multi"]
 
     reg.register(
@@ -2624,7 +2624,6 @@ def register(reg) -> None:
         safety_level="safe",
         category="orchestration",
         source="extension",
-        worker_allowed=True,
     )
     reg.register(
         name="message_worker",

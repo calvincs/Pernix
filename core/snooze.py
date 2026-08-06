@@ -26,6 +26,13 @@ from config import settings
 logger = logging.getLogger("pernix.snooze")
 
 
+# Session types snooze looks straight through (plan §5, pass-3 F3): they
+# neither cancel a running cycle, nor block the idle gate, nor refresh the
+# activity cooldown. Without this, a canary sweep and snooze deadlock — the
+# sweep waits for idle while its own sessions keep snooze from being idle.
+SNOOZE_TRANSPARENT_TYPES = frozenset({"canary"})
+
+
 class SnoozeRunner:
     """Background idle-time self-optimization."""
 
@@ -106,7 +113,12 @@ class SnoozeRunner:
         # (spawn_worker -> create_session) while this runs on the event loop,
         # and iterating the live dict raises "dictionary changed size during
         # iteration" — which would kill the snooze cycle outright.
-        sessions = list(manager._sessions.values())
+        # Transparent types (canary) are invisible to every check below.
+        sessions = [
+            s
+            for s in list(manager._sessions.values())
+            if getattr(s, "session_type", "") not in SNOOZE_TRANSPARENT_TYPES
+        ]
 
         for session in sessions:
             if _sv2._current_state(session) not in _idle_v2:
@@ -153,7 +165,11 @@ class SnoozeRunner:
                 _sv2.SessionStateV2.AWAITING_USER,
                 _sv2.SessionStateV2.AWAITING_WORKERS,
             )
-            sessions = list(get_manager()._sessions.values())
+            sessions = [
+                s
+                for s in list(get_manager()._sessions.values())
+                if getattr(s, "session_type", "") not in SNOOZE_TRANSPARENT_TYPES
+            ]
             cooldown = settings.snooze_cooldown_minutes * 60
             now = time.time()
             for session in sessions:
@@ -544,6 +560,21 @@ class SnoozeRunner:
                 }
             )
             await self._candor_maintenance()
+
+        # Activity 12c: Canary retention cleanup (no LLM). Prunes canary_runs
+        # rows and the canary sessions behind them past canary_retention_days.
+        # NEVER dispatches sweeps — post-batch sweeps are enqueued through the
+        # scheduler for the next idle window (plan §5: inline dispatch from a
+        # snooze activity would cancel the cycle that produced the batch).
+        if not self._is_cancelled() and settings.canary_enabled:
+            bus.emit(
+                {
+                    "type": "snooze.activity",
+                    "activity": "cleanup_canary_runs",
+                    "detail": "Pruning old canary runs and sessions",
+                }
+            )
+            await self._cleanup_canary_runs()
 
         # Activity 13: Refine pass — broader-gate sibling of Activity 2b.
         # Runs independent of did_llm: refine has its own budget, bounded to
@@ -2372,6 +2403,35 @@ Output valid JSON only. No markdown fences. /no_think"""
                 self._stats["post_mortems_pruned"] += deleted
         except Exception as e:
             logger.warning("Snooze post-mortem cleanup failed: %s", e)
+
+    async def _cleanup_canary_runs(self) -> None:
+        """Prune canary_runs rows and stale canary sessions past retention.
+
+        Session prune mirrors the dream-journal pattern (core/dream/journal.py):
+        list, filter by type + age, delete. Scoring rows outlive their session
+        only inside the retention window — the tripwire's baseline math reads
+        canary_runs, never the sessions.
+        """
+        from db import models as db
+
+        retention_days = max(int(settings.canary_retention_days or 0), 1)
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        try:
+            deleted = await asyncio.to_thread(db.prune_canary_runs, retention_days)
+            pruned_sessions = 0
+            for s in await asyncio.to_thread(db.list_sessions, 500):
+                if s.get("session_type") == "canary" and (s.get("updated_at") or "") < cutoff:
+                    await asyncio.to_thread(db.delete_session, s["id"])
+                    pruned_sessions += 1
+            if deleted or pruned_sessions:
+                logger.info(
+                    "Snooze canary cleanup: %d run row(s), %d session(s) older than %dd",
+                    deleted,
+                    pruned_sessions,
+                    retention_days,
+                )
+        except Exception as e:
+            logger.warning("Snooze canary cleanup failed: %s", e)
 
     async def _cleanup_workflow_runs(self) -> None:
         """Delete old workflow run directories and DB rows beyond retention limits.

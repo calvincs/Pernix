@@ -214,6 +214,21 @@ class Settings:
     # Heartbeats: recurring instructions steered into running work (3c).
     heartbeats_enabled: bool = False
 
+    # --- Golden-task canary suite (plan 3.5, off by default) ---
+    # Canned tasks + deterministic gates run headlessly through the full
+    # pipeline in session_type="canary" sessions. The Phase 4 tripwire's
+    # primary signal. Zero rows, zero behavior change while off.
+    canary_enabled: bool = False
+    canaries_dir: str = "data/canaries"
+    canary_schedule: str = "0 3 * * *"  # nightly sweep cron expression
+    canary_max_concurrent: int = 1
+    canary_retention_days: int = 30
+    # Regression detection (consumed by the Phase 4 tripwire): compare a
+    # post-batch sweep's pass rate against the trailing N scheduled sweeps;
+    # a drop larger than the delta is a tripwire signal.
+    canary_baseline_runs: int = 3
+    canary_regression_delta: float = 0.15
+
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
     # namespace survives tool rounds, turns, and compaction (I1), and — via

@@ -43,6 +43,8 @@
     --dream-subtle: rgba(154, 127, 209, 0.10);
     --rlm: #c06c8c;
     --rlm-subtle: rgba(192, 108, 140, 0.10);
+    --canary: #c9a35a;
+    --canary-subtle: rgba(201, 163, 90, 0.10);
 
     /* Typography */
     --mono: 'DM Mono', 'SF Mono', 'Fira Code', monospace;

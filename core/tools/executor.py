@@ -113,7 +113,7 @@ def _batch_timeout(indices: list[int], tool_calls: list[dict], registry: ToolReg
 
 
 def _is_unattended_session(sid: str) -> bool:
-    """Return True for cron sessions and workers spawned from cron sessions.
+    """Return True for cron/canary sessions and workers spawned from them.
 
     These run without a user present, so the ask_user → approve_dangerous_tool
     flow is not viable and the dangerous gate is skipped.
@@ -125,11 +125,11 @@ def _is_unattended_session(sid: str) -> bool:
     s = get_manager().get(sid)
     if s is None:
         return False
-    if s.session_type == "cron":
+    if s.session_type in ("cron", "canary"):
         return True
     if s.session_type == "worker" and s.parent_session_id:
         parent = get_manager().get(s.parent_session_id)
-        return bool(parent and parent.session_type == "cron")
+        return bool(parent and parent.session_type in ("cron", "canary"))
     return False
 
 
@@ -156,20 +156,21 @@ async def _execute_single(
             latency_ms=0,
         )
 
-    # Enforce worker_allowed restriction (prevent workers from spawning sub-workers)
+    # Enforce denied_session_types (plan §5, generalizing worker_allowed):
+    # workers can't spawn sub-workers; canaries can't write memory; etc.
     sid = (context or {}).get("session_id", "")
-    is_worker = False
+    session_type = ""
     workspace_override: str | None = None
     if sid:
         from sessions.manager import get_manager
 
         s = get_manager().get(sid)
-        is_worker = bool(s and s.session_type == "worker")
+        session_type = (s.session_type or "") if s else ""
         workspace_override = getattr(s, "workspace_override", None) if s else None
-    if not tool.worker_allowed and is_worker:
+    if session_type and session_type in tool.denied_session_types:
         return ToolExecutionResult(
             tool_name=name,
-            content=f"Error: Tool '{name}' cannot be used in worker sessions.",
+            content=f"Error: Tool '{name}' cannot be used in {session_type} sessions.",
             was_error=True,
             latency_ms=0,
         )

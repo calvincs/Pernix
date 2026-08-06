@@ -54,6 +54,12 @@ def attribute(pm_row: dict) -> list[Attribution]:
     """
     payload = _parse_payload(pm_row.get("payload_json"))
 
+    # Canary post-mortems are stamped at write time (plan §5) — synthetic
+    # tasks must not move real tool/skill reliability signal. The row still
+    # gets marked synthesized by the caller so it never re-queues.
+    if payload.get("session_type") == "canary":
+        return []
+
     scout_summary = payload.get("scout_summary") or {}
 
     # Attribution sensitivity:

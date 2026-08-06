@@ -682,6 +682,7 @@ def search_messages_fts(
             LEFT JOIN sessions s ON f.session_id = s.id
             WHERE messages_fts MATCH ?
               AND f.role IN ('user', 'assistant', 'tool')
+              AND (s.session_type IS NULL OR s.session_type NOT IN ('canary'))
         """
         params: list = [fts_query]
 
@@ -1149,6 +1150,80 @@ def remove_gate(session_id: str, name: str) -> bool:
         return cur.rowcount > 0
 
 
+# ---------------------------------------------------------------------------
+# Canary runs (adaptation plan 3.5): active-measurement scoring rows
+# ---------------------------------------------------------------------------
+
+
+def add_canary_run(
+    task: str,
+    trigger: str,
+    session_id: str | None,
+    gate_results_json: str,
+    passed: bool,
+    retries: int = 0,
+    tokens: int = 0,
+    duration_s: float = 0.0,
+    batch_id: str | None = None,
+) -> int:
+    """Record a completed canary run. batch_id links post-batch sweeps to the
+    Phase 4 adaptive batch that triggered them (the tripwire joins on it)."""
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """INSERT INTO canary_runs
+               (task, trigger, batch_id, session_id, gate_results_json,
+                passed, retries, tokens, duration_s, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                task,
+                trigger,
+                batch_id,
+                session_id,
+                gate_results_json,
+                1 if passed else 0,
+                int(retries),
+                int(tokens),
+                float(duration_s),
+                _now(),
+            ),
+        )
+        return cur.lastrowid
+
+
+def list_canary_runs(
+    task: str | None = None,
+    batch_id: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Canary runs, newest first, optionally filtered by task or batch."""
+    clauses = []
+    params: list = []
+    if task:
+        clauses.append("task = ?")
+        params.append(task)
+    if batch_id:
+        clauses.append("batch_id = ?")
+        params.append(batch_id)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(int(limit))
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM canary_runs {where} ORDER BY created_at DESC, id DESC LIMIT ?",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def prune_canary_runs(retention_days: int) -> int:
+    """Delete canary runs older than the retention window. Returns count."""
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))).isoformat()
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM canary_runs WHERE created_at < ?", (cutoff,))
+        return cur.rowcount
+
+
 def list_cron_runs(job_name: str | None = None, limit: int = 50) -> list[dict]:
     with connect_sessions() as conn:
         if job_name:
@@ -1339,7 +1414,7 @@ def get_unreviewed_sessions(min_age_minutes: int = 10, limit: int = 5) -> list[d
                WHERE s.snooze_reviewed_at IS NULL
                  AND s.state = 'idle'
                  AND s.updated_at < ?
-                 AND s.session_type != 'worker'
+                 AND s.session_type NOT IN ('worker', 'canary')
                  AND (
                      SELECT COUNT(*) FROM messages m
                      WHERE m.session_id = s.id
@@ -1383,7 +1458,7 @@ def get_unproposed_sessions(min_age_minutes: int = 10, limit: int = 5) -> list[d
             """SELECT s.* FROM sessions s
                WHERE s.state = 'idle'
                  AND s.updated_at < ?
-                 AND s.session_type != 'worker'
+                 AND s.session_type NOT IN ('worker', 'canary')
                  AND NOT EXISTS (
                      SELECT 1 FROM snooze_state ss
                      WHERE ss.key = 'proposal_reviewed:' || s.id
@@ -1416,7 +1491,7 @@ def get_unrefined_sessions(min_idle_minutes: int = 10, limit: int = 1) -> list[d
             """SELECT s.* FROM sessions s
                WHERE s.state = 'idle'
                  AND s.updated_at < ?
-                 AND s.session_type != 'worker'
+                 AND s.session_type NOT IN ('worker', 'canary')
                  AND NOT EXISTS (
                      SELECT 1 FROM snooze_state ss
                      WHERE ss.key = 'refined:' || s.id

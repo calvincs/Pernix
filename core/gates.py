@@ -100,6 +100,19 @@ def run_gates(session_id: str, prior: dict[str, tuple[str, "GateResult"]], attem
     if not rows:
         return []
     ws = _workspace()
+    # Honor the session's workspace override (plan 1g). Gates run from
+    # post-hooks, outside the per-tool-call ContextVar window that
+    # execute_sync sets — so resolve the override from the session directly
+    # (canary runs execute in a temp workspace; their gates must too).
+    try:
+        from sessions.manager import get_manager
+
+        _s = get_manager().get(session_id)
+        _ov = getattr(_s, "workspace_override", None) if _s else None
+        if _ov:
+            ws = Path(_ov).resolve()
+    except Exception:
+        pass
     results: list[GateResult] = []
     for row in rows:
         name = row["name"]

@@ -79,6 +79,10 @@ async def build_pack(store) -> EvidencePack:
                 payload = json.loads(pm.get("payload_json") or "{}")
             except (TypeError, ValueError):
                 payload = {}
+            # Canary isolation (plan §5): synthetic-task post-mortems must not
+            # feed dream promotion evidence. Cursor already advanced above.
+            if payload.get("session_type") == "canary":
+                continue
             detail = str(payload.get("what_failed") or payload.get("diagnostic") or "").strip()
             render = (
                 f"[P{i}] post-mortem {str(pm.get('created_at', ''))[:10]}: "

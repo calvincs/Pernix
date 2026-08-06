@@ -1,6 +1,6 @@
 # Adaptation plan — prime-agent-inspired upgrades (kernel, gates, goals, adaptive layer)
 
-Status: **Phases 1, 2 AND 3 IMPLEMENTED** (2026-08-05/06, branch
+Status: **Phases 1, 2, 3 AND 3.5 IMPLEMENTED** (2026-08-05/06, branch
 `next-phase-features`) — Phase 1: 1a/1c/1d/1e/1f/1g; Phase 2: §10.11
 socket fix, 2a scaffold modes + snapshot/restore + lock, 2b SessionKernel
 lifecycle, 2c repl tool + binding; Phase 3: 3a gates (migration v22,
@@ -11,9 +11,27 @@ FINALIZING-only continuations on complete/round_ceiling/budget_exhausted
 with LLM-clock extension, budget_limited notifications), 3c heartbeats
 (steer = system row at next round boundary, parked states degrade to
 follow_up, per-turn + queued coalescing, user/agent namespaces separated,
-kind=heartbeat jobs riding the 1c round-trip + claim discipline). Full
-suite: 1805 passed, 0 failed (1 darwin skip). Deviations noted inline as
-[IMPL] / in §10. Phases 3.5/4 remain PROPOSED.
+kind=heartbeat jobs riding the 1c round-trip + claim discipline);
+Phase 3.5: migration v24 canary_runs, core/canary/ (parser reusing the
+extracted `parse_frontmatter_md` helper, runner scoring the final
+workspace state via real gates, seed suite of 7 self-tested canaries),
+`denied_session_types` replacing `worker_allowed`, all §5 isolation
+predicates landed before any sweep can run (FTS join-exclusion,
+distill/refine/unrefined sweeps, candor + inline-distill early-returns,
+payload-stamped post-mortems skipped by synthesis + dream evidence,
+sidebar legend type), SNOOZE_TRANSPARENT_TYPES wired at manager.prompt /
+create_session / _is_idle / idle_blockers / has_active_work, triggers
+scheduled (transient `_canary_sweep` job rebuilt from settings each
+boot) / post_batch (idle-deferring one-shot with retry cap — the Phase 4
+hook `enqueue_post_batch_sweep`) / manual (canary_run tool + /api/canary
+routes), snooze Activity 12c retention pruning. [IMPL deviations from §5:
+`worker_allowed` was removed outright rather than kept as an alias; the
+runner scores by re-running gates against the final workspace state
+(equivalent to "final attempt's gates" and robust when gates_enabled is
+off); canary sessions are treated as unattended for the dangerous-tool
+gate like cron; CANARY.md gained an optional `files:` fixture map so
+seeds are self-contained.] Deviations noted inline as [IMPL] / in §10.
+Phase 4 remains PROPOSED.
 
 **Decisions by Calvin:** (1) design doc before any code; (2) autonomy model for
 adaptive-layer changes = **auto-apply with rollback** for low-risk kinds,
