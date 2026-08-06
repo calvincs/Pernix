@@ -919,6 +919,15 @@ def _write_post_mortem(
             payload["turn_digest"] = result.turn_digest
         if extra_payload:
             payload.update(extra_payload)
+        # Canary isolation (plan §5): stamp the payload so downstream
+        # consumers (synthesis, dream evidence, the Phase 4 tripwire window)
+        # can exclude these rows even after the session itself is pruned.
+        try:
+            _sess = db.get_session(session_id) or {}
+            if _sess.get("session_type") == "canary":
+                payload["session_type"] = "canary"
+        except Exception:
+            pass
         scout_viability = None
         execution_mode = None
         if scout_report is not None:

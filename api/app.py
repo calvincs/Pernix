@@ -206,9 +206,12 @@ async def lifespan(app: FastAPI):
 
     # 4. Scheduler (must init on main event loop before worker threads call it)
     try:
-        from core.extensions.scheduling import init_scheduler
+        from core.extensions.scheduling import ensure_canary_schedule, init_scheduler
 
         init_scheduler()
+        # Canary nightly sweep (plan 3.5): derived from settings each boot,
+        # never persisted — a no-op while canary_enabled is off.
+        ensure_canary_schedule()
     except Exception as e:
         logger.warning("Scheduler init failed: %s", e)
 
@@ -473,6 +476,7 @@ app.add_middleware(_AuthMiddleware)
 
 # Mount routers
 from api.routers import (
+    canary,
     chat,
     context,
     health,
@@ -491,6 +495,7 @@ from api.routers import (
 )
 
 app.include_router(health.router)
+app.include_router(canary.router)
 app.include_router(sessions.router)
 app.include_router(chat.router)
 app.include_router(tools.router)

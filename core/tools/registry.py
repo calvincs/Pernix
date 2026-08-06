@@ -123,7 +123,11 @@ class ToolDef:
     # silently does nothing — see core/tools/executor.py:_resolve_timeout.
     max_timeout: int = 0
     parallel_safe: bool = False
-    worker_allowed: bool = True
+    # Session types this tool refuses to run in (plan §5, generalizing the old
+    # worker_allowed bool: worker_allowed=False ≙ {"worker"}). Empty = allowed
+    # everywhere. Memory-write tools add "canary" so synthetic runs can read
+    # memory but never mutate it.
+    denied_session_types: set[str] = field(default_factory=set)
     source: str = "builtin"  # builtin | extension | custom
     safety_level: str = "safe"  # safe | caution | dangerous
     # Long-poll tools (await_workers, run_workflow) block their thread for up
@@ -344,7 +348,7 @@ class ToolRegistry:
         timeout: int = 300,
         max_timeout: int = 0,
         parallel_safe: bool = False,
-        worker_allowed: bool = True,
+        denied_session_types: set[str] | None = None,
         source: str = "builtin",
         safety_level: str | None = None,
         long_poll: bool = False,
@@ -373,7 +377,7 @@ class ToolRegistry:
             timeout=timeout,
             max_timeout=max_timeout,
             parallel_safe=parallel_safe,
-            worker_allowed=worker_allowed,
+            denied_session_types=set(denied_session_types or ()),
             source=source,
             safety_level=safety_level,
             long_poll=long_poll,

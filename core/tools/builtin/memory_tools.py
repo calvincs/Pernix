@@ -455,6 +455,7 @@ def register(reg) -> None:
         tags=["remember", "save", "store", "memory", "persist", "note", "record"],
         timeout=30,
         parallel_safe=True,
+        denied_session_types={"canary"},  # plan §5: canaries read memory, never write
     )
 
     reg.register(
@@ -480,6 +481,7 @@ def register(reg) -> None:
         tags=["ingest", "import", "restore", "bulk", "memory", "document", "backup"],
         timeout=120,
         parallel_safe=False,
+        denied_session_types={"canary"},
     )
 
     reg.register(
@@ -592,6 +594,7 @@ def register(reg) -> None:
         safety_level="caution",
         timeout=15,
         parallel_safe=False,
+        denied_session_types={"canary"},
     )
 
     reg.register(
@@ -616,4 +619,5 @@ def register(reg) -> None:
         safety_level="caution",
         timeout=15,
         parallel_safe=False,
+        denied_session_types={"canary"},
     )

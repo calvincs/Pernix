@@ -125,7 +125,6 @@ def register(reg) -> None:
         timeout=300,
         max_timeout=1800,
         parallel_safe=False,
-        worker_allowed=True,
         safety_level="caution",  # arbitrary code execution — same posture as bash
         idempotent=False,  # repeated identical cells MUST re-execute
     )

@@ -522,9 +522,10 @@ class SessionManager:
         )
         self._sessions[sid] = session
         logger.info("Created session %s (type=%s)", sid, session_type)
-        from core.snooze import get_snooze
+        from core.snooze import SNOOZE_TRANSPARENT_TYPES, get_snooze
 
-        get_snooze().notify_activity()
+        if session_type not in SNOOZE_TRANSPARENT_TYPES:
+            get_snooze().notify_activity()
         return sid
 
     async def _maybe_enqueue_goal_continuation(self, session: AgentSession) -> None:
@@ -740,11 +741,15 @@ class SessionManager:
         so a concurrent re-submission with the same key is caught by the
         chat-router dedup check (api/routers/chat.py).
         """
-        # Cancel Snooze if running (user work takes priority)
-        from core.snooze import get_snooze
+        # Cancel Snooze if running (user work takes priority). Snooze-
+        # transparent sessions (canary sweeps) skip both signals — a 3am
+        # sweep must not cancel the very snooze cycle it coexists with.
+        from core.snooze import SNOOZE_TRANSPARENT_TYPES, get_snooze
 
-        get_snooze().request_cancel()
-        get_snooze().notify_activity()
+        _pre = self.get(session_id)
+        if _pre is None or _pre.session_type not in SNOOZE_TRANSPARENT_TYPES:
+            get_snooze().request_cancel()
+            get_snooze().notify_activity()
 
         session = self.get_or_create(session_id)
 
@@ -2248,8 +2253,13 @@ class SessionManager:
             sv2.SessionStateV2.AWAITING_WORKERS,
         )
         # Snapshot — a tool thread can insert into _sessions (spawn_worker ->
-        # create_session) while this runs on the event loop.
+        # create_session) while this runs on the event loop. Snooze-transparent
+        # types (canary) never count as active work (plan §5).
+        from core.snooze import SNOOZE_TRANSPARENT_TYPES
+
         for session in list(self._sessions.values()):
+            if session.session_type in SNOOZE_TRANSPARENT_TYPES:
+                continue
             if sv2._current_state(session) not in _idle_v2:
                 return True
             if session.has_background_tasks:

@@ -750,6 +750,33 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE token_usage ADD COLUMN goal_id INTEGER",
         ],
     ),
+    (
+        24,
+        "golden-task canary suite (adaptation plan 3.5)",
+        [
+            # One row per canary run. batch_id is a real nullable column —
+            # the Phase 4 tripwire joins post-batch sweeps against the
+            # adaptive batch that triggered them; smuggling it into a string
+            # would make that join impossible. gate_results_json carries the
+            # FINAL attempt's per-gate payloads; retries records how many
+            # reflect retries the run burned.
+            """CREATE TABLE IF NOT EXISTS canary_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task TEXT NOT NULL,
+                trigger TEXT NOT NULL DEFAULT 'manual',
+                batch_id TEXT,
+                session_id TEXT,
+                gate_results_json TEXT,
+                passed INTEGER,
+                retries INTEGER DEFAULT 0,
+                tokens INTEGER DEFAULT 0,
+                duration_s REAL DEFAULT 0,
+                created_at TEXT
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_canary_runs_task ON canary_runs(task, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_canary_runs_batch ON canary_runs(batch_id)",
+        ],
+    ),
 ]
 
 
