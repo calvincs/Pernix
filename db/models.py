@@ -956,21 +956,60 @@ def send_session_message(
         )
 
 
-def add_cron_run(job_name: str, session_id: str | None = None) -> int:
+def add_cron_run(
+    job_name: str,
+    session_id: str | None = None,
+    status: str = "running",
+    fire_time: str | None = None,
+) -> int:
+    """Record a cron run. status='claimed' + fire_time implements
+    claim-before-deliver: the row exists before the prompt is dispatched, so
+    a crash between claim and dispatch is visible (and never replayed) at the
+    next startup."""
     with connect_sessions() as conn:
         cur = conn.execute(
-            "INSERT INTO cron_runs (job_name, session_id, started_at, status) VALUES (?, ?, ?, 'running')",
-            (job_name, session_id, _now()),
+            "INSERT INTO cron_runs (job_name, session_id, started_at, status, fire_time) VALUES (?, ?, ?, ?, ?)",
+            (job_name, session_id, _now(), status, fire_time),
         )
         return cur.lastrowid
 
 
 def update_cron_run(run_id: int, status: str, error: str | None = None) -> None:
     with connect_sessions() as conn:
-        conn.execute(
-            "UPDATE cron_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?",
-            (status, error, _now(), run_id),
-        )
+        if status in ("claimed", "running"):
+            # Non-terminal transition — completed_at stays empty until the
+            # run actually finishes.
+            conn.execute(
+                "UPDATE cron_runs SET status = ?, error = ? WHERE id = ?",
+                (status, error, run_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE cron_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?",
+                (status, error, _now(), run_id),
+            )
+
+
+def reconcile_uncertain_cron_runs() -> list[dict]:
+    """Mark runs stuck in claimed/running as 'uncertain' — never replayed.
+
+    Called at startup BEFORE the scheduler initializes. A 'claimed' row means
+    the process died between claim and dispatch (the prompt may or may not
+    have been sent); a 'running' row means it died mid-run. Either way the
+    honest answer is "uncertain": report it, don't guess, don't re-send.
+    Returns the affected rows so the caller can notify the user.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute("SELECT * FROM cron_runs WHERE status IN ('claimed', 'running')").fetchall()
+        affected = [dict(r) for r in rows]
+        if affected:
+            conn.execute(
+                "UPDATE cron_runs SET status = 'uncertain', completed_at = ?, "
+                "error = 'server restarted mid-run; outcome unknown, not replayed' "
+                "WHERE status IN ('claimed', 'running')",
+                (_now(),),
+            )
+        return affected
 
 
 def list_cron_runs(job_name: str | None = None, limit: int = 50) -> list[dict]:

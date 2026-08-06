@@ -666,6 +666,17 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
            ON rlm_runs(ui_session_id) WHERE ui_session_id IS NOT NULL""",
         ],
     ),
+    (
+        21,
+        "cron claim-before-deliver (fire_time on cron_runs)",
+        [
+            # fire_time = the scheduled tick this run was claimed for, written
+            # BEFORE dispatch so a crash mid-run can never replay the prompt:
+            # the startup reconcile marks claimed/running rows 'uncertain' and
+            # never re-sends. Adaptation plan 1c.
+            "ALTER TABLE cron_runs ADD COLUMN fire_time TEXT",
+        ],
+    ),
 ]
 
 
