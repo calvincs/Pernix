@@ -55,6 +55,12 @@ def init_scheduler():
 # ---------------------------------------------------------------------------
 
 
+# Entry keys that are positional args or derived state, not meta payload.
+# Everything else in a persisted entry round-trips through extra_meta so
+# variant fields (kind, last_fired_at, workflow_name, ...) survive restarts.
+_ENTRY_STRUCTURAL_KEYS = frozenset({"name", "cron_expr", "prompt", "session_id", "model", "cron_trigger", "paused"})
+
+
 def _load_jobs():
     """Load persisted jobs from JSON."""
     if not CRON_PATH.exists():
@@ -62,12 +68,16 @@ def _load_jobs():
     try:
         jobs = json.loads(CRON_PATH.read_text())
         for job in jobs:
+            # Round-trip every non-structural field verbatim — dropping
+            # unknown keys here silently erased job variants on restart.
+            extra = {k: v for k, v in job.items() if k not in _ENTRY_STRUCTURAL_KEYS}
             _add_job_internal(
                 job["name"],
                 job["cron_expr"],
                 job["prompt"],
                 session_id=job.get("session_id"),
                 model=job.get("model", ""),
+                extra_meta=extra,
             )
             # Restore paused state
             if job.get("paused") and _scheduler:
@@ -76,6 +86,7 @@ def _load_jobs():
                 except Exception:
                     pass
         logger.info("Loaded %d cron jobs", len(jobs))
+        _schedule_coalesced_catchup(jobs)
     except Exception as e:
         logger.warning("Failed to load cron jobs: %s", e)
 
@@ -89,6 +100,11 @@ def _save_jobs():
         jobs = []
         for job in scheduler.get_jobs():
             meta = job.kwargs.get("meta", {})
+            # One-shot catch-up dispatches (coalesced missed runs) are not
+            # real jobs — persisting one would resurrect it as a recurring
+            # job on the next restart.
+            if meta.get("transient"):
+                continue
             entry = {
                 "name": job.id,
                 "cron_expr": meta.get("cron_expr", ""),
@@ -100,11 +116,11 @@ def _save_jobs():
                 "paused": job.next_run_time is None,
                 "created_at": meta.get("created_at", ""),
             }
-            # Preserve workflow-specific fields if present
-            if "workflow_name" in meta:
-                entry["workflow_name"] = meta["workflow_name"]
-            if "workflow_inputs" in meta:
-                entry["workflow_inputs"] = meta["workflow_inputs"]
+            # Round-trip every remaining meta key verbatim (workflow_name,
+            # last_fired_at, kind, ...) — the load side mirrors this.
+            for k, v in meta.items():
+                if k not in entry and k != "name":
+                    entry[k] = v
             jobs.append(entry)
         CRON_PATH.parent.mkdir(parents=True, exist_ok=True)
         CRON_PATH.write_text(json.dumps(jobs, indent=2))
@@ -131,6 +147,117 @@ def _read_jobs_json() -> list[dict]:
         return json.loads(CRON_PATH.read_text())
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# Claim-before-deliver + missed-run coalescing (adaptation plan 1c)
+# ---------------------------------------------------------------------------
+
+
+def _count_missed_fires(cron_expr: str, last_fired_iso: str, now: datetime, cap: int = 1000) -> int:
+    """Count scheduled fires strictly after last_fired and at/before now.
+
+    Pure computation over the cron expression — used at startup to decide
+    whether downtime swallowed any ticks. Capped so a years-stale
+    last_fired_at on a every-minute job can't spin."""
+    from apscheduler.triggers.cron import CronTrigger
+
+    try:
+        trigger = CronTrigger.from_crontab(cron_expr, timezone="UTC")
+        prev = datetime.fromisoformat(last_fired_iso)
+    except (ValueError, TypeError):
+        return 0
+    if prev.tzinfo is None:
+        prev = prev.replace(tzinfo=timezone.utc)
+    missed = 0
+    while missed < cap:
+        nxt = trigger.get_next_fire_time(prev, prev)
+        if nxt is None or nxt > now:
+            break
+        missed += 1
+        prev = nxt
+    return missed
+
+
+def _schedule_coalesced_catchup(job_entries: list[dict]) -> None:
+    """After loading jobs at startup, dispatch AT MOST ONE catch-up run per
+    job whose schedule fired while the server was down.
+
+    APScheduler adds loaded jobs fresh (next fire is in the future), so
+    missed ticks are entirely our responsibility — and a crash can therefore
+    never double-fire. The catch-up run is a transient one-shot: never
+    persisted (see _save_jobs), and the parent's last_fired_at is advanced
+    BEFORE dispatch so a crash during catch-up can't re-coalesce the same
+    span (the claimed row -> 'uncertain' sweep covers honesty)."""
+    scheduler = _scheduler
+    if not scheduler:
+        return
+    now = datetime.now(timezone.utc)
+    advanced = False
+    for entry in job_entries:
+        name = entry.get("name", "")
+        expr = entry.get("cron_expr") or ""
+        job = scheduler.get_job(name) if name else None
+        if job is None or not expr or entry.get("paused"):
+            continue
+        # Only plain prompt jobs — workflow jobs run a different callable and
+        # coalescing them through _execute_cron_job would misroute them.
+        if job.func is not _execute_cron_job:
+            continue
+        meta = job.kwargs.get("meta", {})
+        last = meta.get("last_fired_at")
+        if not last:
+            # Legacy job predating 1c: baseline now, no catch-up (there is
+            # no honest way to know what it missed).
+            meta["last_fired_at"] = now.isoformat()
+            advanced = True
+            continue
+        missed = _count_missed_fires(expr, last, now)
+        if missed < 1:
+            continue
+        meta["last_fired_at"] = now.isoformat()
+        advanced = True
+        co_meta = dict(meta)
+        co_meta["transient"] = True
+        co_meta["prompt"] = (
+            f"[coalesced {missed} missed run(s) since {last}; the server was down "
+            f"across the scheduled time(s) — this single run stands in for all of them]\n\n"
+        ) + meta.get("prompt", "")
+        from apscheduler.triggers.date import DateTrigger
+
+        scheduler.add_job(
+            _execute_cron_job,
+            trigger=DateTrigger(run_date=now),
+            id=f"{name}__coalesced",
+            replace_existing=True,
+            misfire_grace_time=300,
+            kwargs={"meta": co_meta},
+        )
+        logger.info("Job '%s': coalesced %d missed run(s) since %s into one catch-up", name, missed, last)
+    if advanced:
+        _save_jobs()
+
+
+def reconcile_cron_runs() -> int:
+    """Startup sweep: mark claimed/running rows 'uncertain', notify the user.
+
+    Must be called BEFORE init_scheduler() so no job fires into a
+    half-reconciled table. Uncertain runs are reported, never replayed."""
+    affected = db.reconcile_uncertain_cron_runs()
+    if affected:
+        names = ", ".join(sorted({r["job_name"] for r in affected}))
+        db.add_notification(
+            session_id="",
+            title=f"{len(affected)} cron run(s) uncertain after restart",
+            body=(
+                f"Jobs: {names}. The server restarted mid-run; each outcome is "
+                f"unknown and was NOT re-run. Check the job history and re-run "
+                f"manually if needed."
+            ),
+            urgency="high",
+        )
+        logger.warning("Marked %d cron run(s) uncertain at startup: %s", len(affected), names)
+    return len(affected)
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +339,18 @@ async def _execute_cron_job(meta: dict):
     model = meta.get("model", "")
 
     start_time = time.time()
-    run_id = db.add_cron_run(name, session_id)
+
+    # Claim BEFORE dispatch (adaptation plan 1c): the run row (status=claimed,
+    # fire_time) and the advanced last_fired_at hit disk before the prompt is
+    # sent, so a crash anywhere past this point surfaces as an 'uncertain' run
+    # at next startup — reported, never replayed.
+    fire_time = datetime.now(timezone.utc).isoformat()
+    run_id = db.add_cron_run(name, session_id, status="claimed", fire_time=fire_time)
+    meta["last_fired_at"] = fire_time  # meta is the live APScheduler job's dict
+    try:
+        _save_jobs()
+    except Exception as e:  # persistence best-effort; the DB claim is the record
+        logger.warning("Failed to persist last_fired_at for '%s': %s", name, e)
 
     bus.emit({"type": "job.started", "job_name": name, "session_id": session_id, "run_id": run_id})
 
@@ -231,6 +369,7 @@ async def _execute_cron_job(meta: dict):
         if session and model:
             session.model_override = model
 
+        db.update_cron_run(run_id, "running")
         cron_timeout = settings.tool_timeout * settings.max_tool_rounds
         await asyncio.wait_for(
             manager.prompt(session_id, prompt),

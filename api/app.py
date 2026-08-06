@@ -181,6 +181,17 @@ async def lifespan(app: FastAPI):
     notifier = get_dispatcher()
     notifier.start()
 
+    # 3.9 Cron uncertain-run sweep — must run BEFORE the scheduler starts so
+    # no job fires into a half-reconciled table. Claimed/running rows left by
+    # a dead process are marked 'uncertain' and never replayed; the user gets
+    # a notification listing what may or may not have fired. Adaptation plan 1c.
+    try:
+        from core.extensions.scheduling import reconcile_cron_runs
+
+        reconcile_cron_runs()
+    except Exception as e:
+        logger.warning("Cron run reconcile failed (continuing): %s", e)
+
     # 4. Scheduler (must init on main event loop before worker threads call it)
     try:
         from core.extensions.scheduling import init_scheduler
