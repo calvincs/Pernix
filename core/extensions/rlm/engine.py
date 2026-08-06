@@ -145,8 +145,17 @@ class RLMEngine:
         self._trace_fh = open(self.run_dir / "trace.jsonl", "a", encoding="utf-8")
         self._payload_fh = open(self.run_dir / "payloads.jsonl", "a", encoding="utf-8")
 
+        # Child first: it resolves the socket directory (short-/tmp fallback
+        # for deep run dirs), and the broker must bind exactly where the
+        # child will dial.
+        child_kwargs = {"python_exe": self._python_exe}
+        if self._as_limit is not None:
+            child_kwargs["address_space_limit"] = self._as_limit
+        child = ChildREPL(self.run_dir, **child_kwargs)
+        self.child = child  # exposed so the tool can register popen as the session's active process
+
         broker = LLMBroker(
-            self.run_dir / "llm.sock",
+            child.llm_sock_path,
             sub_chat=self._sub_chat,
             caps=self.caps,
             ledger=self.ledger,
@@ -156,11 +165,6 @@ class RLMEngine:
             payload_fn=self._payload,
             rlm_fn=self.rlm_fn,
         )
-        child_kwargs = {"python_exe": self._python_exe}
-        if self._as_limit is not None:
-            child_kwargs["address_space_limit"] = self._as_limit
-        child = ChildREPL(self.run_dir, **child_kwargs)
-        self.child = child  # exposed so the tool can register popen as the session's active process
 
         result: RLMRunResult | None = None
         try:
