@@ -1475,6 +1475,13 @@ function _renderSkillsFiltered() {
                 title: `${pendingCount} pending proposal${pendingCount === 1 ? '' : 's'} — see banner above to review`,
             }, [text(`⚠ ${pendingCount} pending`)]));
         }
+        if (skill.valid === false) {
+            const issues = (skill.validation_issues || []).join('\n');
+            nameChildren.push(el('span', {
+                class: 'fp-skill-pending-badge',
+                title: issues || 'Skill failed validation',
+            }, [text('✗ broken')]));
+        }
         item.appendChild(el('div', { class: 'fp-skill-header' }, [
             el('div', { class: 'fp-skill-name' }, nameChildren),
             el('div', { class: 'fp-skill-actions' }, [toggle, deleteBtn]),

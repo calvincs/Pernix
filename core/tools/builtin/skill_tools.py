@@ -71,7 +71,33 @@ def load_skill(
         return f"Error: Skill '{name}' not found. Use discover_skills to search."
 
     # Build response with instructions + resource manifest
-    parts = [instructions]
+    parts = []
+
+    # Surface broken-skill health FIRST with the concrete reason and fix —
+    # otherwise the agent discovers the breakage mid-task via a bash stack
+    # trace. Instructions still load: a broken script doesn't invalidate the
+    # procedural guidance around it.
+    issues = registry.validation_issues(name)
+    if issues:
+        parts.append(
+            "[SKILL HEALTH] This skill has known problems — fix or work around them "
+            "before relying on its scripts:\n" + "\n".join(f"  - {i}" for i in issues) + "\n---"
+        )
+
+    parts.append(instructions)
+
+    # Script contracts from frontmatter: invocation shape without a
+    # file_read round.
+    skill_def = registry.get(name)
+    if skill_def and skill_def.scripts_meta:
+        parts.append("\n---\n**Scripts:**")
+        for s in skill_def.scripts_meta:
+            line = f"  - {s['path']}"
+            if s.get("purpose"):
+                line += f" — {s['purpose']}"
+            parts.append(line)
+            if s.get("usage"):
+                parts.append(f"    usage: `{s['usage']}`")
 
     resources = registry.list_resources(name)
     if resources:

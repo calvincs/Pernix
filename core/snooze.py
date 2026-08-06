@@ -389,6 +389,21 @@ class SnoozeRunner:
                 if used_llm:
                     did_llm = True
 
+        # Activity 2c: Skill requirements install (no LLM). Hash-triggered:
+        # a skill whose requirements.txt changed since the last successful
+        # install gets its packages installed into the workspace venv, then
+        # the registry rescans so the 1d health flag clears. Bounded to one
+        # skill per cycle to keep cycles short.
+        if not self._is_cancelled():
+            bus.emit(
+                {
+                    "type": "snooze.activity",
+                    "activity": "skill_requirements",
+                    "detail": "Installing changed skill requirements into workspace venv",
+                }
+            )
+            await self._install_skill_requirements()
+
         # Activity 3: Dedup sweep (no LLM)
         if not self._is_cancelled():
             bus.emit(
@@ -952,6 +967,72 @@ Output valid JSON only. No markdown fences. /no_think"""
             logger.warning("Snooze: refine pass failed for %s: %s", sid, e)
             db.set_snooze_state(f"refined:{sid}", datetime.now(timezone.utc).isoformat())
             return False
+
+    # ------------------------------------------------------------------
+    # Activity 2c: Skill requirements install (adaptation plan 1d)
+    # ------------------------------------------------------------------
+
+    async def _install_skill_requirements(self) -> None:
+        """Install one changed skill's requirements.txt into the workspace venv.
+
+        Hash-watermarked via snooze_state['skill_reqs_hash:{name}'] so each
+        requirements.txt is installed once per content change. Network work
+        never happens in scan() (it runs in the startup path); it happens
+        here, off the user's critical path. One skill per cycle.
+        """
+        import hashlib
+        import subprocess
+        from pathlib import Path as _Path
+
+        from config import settings
+        from core.skills.registry import get_skill_registry
+        from db import models as db
+
+        registry = get_skill_registry()
+        venv_python = _Path(settings.workspace_venv_python)
+        if not venv_python.exists():
+            # bash creates the venv lazily on first use; install next cycle.
+            return
+
+        for skill in registry.all_skills():
+            if self._is_cancelled():
+                return
+            req = skill.path / "requirements.txt"
+            if not req.exists():
+                continue
+            try:
+                content = req.read_bytes()
+            except OSError:
+                continue
+            digest = hashlib.sha256(content).hexdigest()
+            if db.get_snooze_state(f"skill_reqs_hash:{skill.name}") == digest:
+                continue
+
+            logger.info("Snooze: installing requirements for skill '%s'", skill.name)
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    [str(venv_python), "-m", "pip", "install", "--quiet", "-r", str(req)],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+            except Exception as e:
+                logger.warning("Snooze: pip install failed for skill '%s': %s", skill.name, e)
+                return
+            if proc.returncode != 0:
+                tail = (proc.stderr or proc.stdout or "").strip()[-400:]
+                logger.warning("Snooze: pip install failed for skill '%s': %s", skill.name, tail)
+                # No watermark on failure — retried next cycle (a transient
+                # network error shouldn't permanently skip the install).
+                return
+            db.set_snooze_state(f"skill_reqs_hash:{skill.name}", digest)
+            # Rescan so the health flag from 1d's requirements check clears.
+            try:
+                registry.rescan(_Path(settings.skills_dir))
+            except Exception as e:
+                logger.warning("Snooze: post-install rescan failed: %s", e)
+            return  # one install per cycle
 
     # ------------------------------------------------------------------
     # Activity 3: Memory deduplication sweep

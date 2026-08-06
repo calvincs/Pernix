@@ -55,6 +55,8 @@ async def list_skills():
                 "version": s.version,
                 "tags": s.tags,
                 "enabled": not reg.is_disabled(s.name),
+                "valid": reg.is_valid(s.name),
+                "validation_issues": reg.validation_issues(s.name),
                 "has_scripts": "scripts" in resources,
                 "has_references": "references" in resources,
                 "has_assets": "assets" in resources,

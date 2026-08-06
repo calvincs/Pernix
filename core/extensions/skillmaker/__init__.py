@@ -239,12 +239,17 @@ def add_skill_script(
     script_name: str,
     content: str,
     executable: bool = True,
+    purpose: str = "",
+    usage: str = "",
     approved: bool = False,
     _context: dict | None = None,
 ) -> str:
     """Add or update a standalone CLI script in a skill's scripts/ directory.
 
-    Scripts should be self-contained and callable via bash.
+    Scripts should be self-contained and callable via bash. Provide `purpose`
+    (one line: what it does) and `usage` (invocation example) so the contract
+    is recorded in SKILL.md frontmatter and future sessions know how to call
+    the script without reading it.
     Requires user approval (set approved=true after user approves).
     """
     if not approved:
@@ -297,6 +302,14 @@ def add_skill_script(
     else:
         script_path.chmod(mode & ~0o111)
 
+    # Record the script contract in frontmatter so the L2 injection can show
+    # invocation shape without a file_read round (adaptation plan 1d).
+    if purpose or usage:
+        try:
+            _upsert_script_contract(skill_path, f"scripts/{script_name}", purpose, usage)
+        except Exception as e:
+            logger.warning("Could not record script contract for '%s': %s", script_name, e)
+
     # Rescan to update resource metadata
     from core.skills.registry import get_skill_registry
 
@@ -304,6 +317,30 @@ def add_skill_script(
 
     verb = "updated" if is_update else "added"
     return f"Script '{script_name}' {verb} in skill '{name}'. Run: bash {script_path}"
+
+
+def _upsert_script_contract(skill_path: Path, rel_path: str, purpose: str, usage: str) -> None:
+    """Add or update this script's entry in SKILL.md frontmatter `scripts:`."""
+    import yaml
+
+    from core.skills.parser import parse_skill_md
+
+    skill_md = skill_path / "SKILL.md"
+    frontmatter, body = parse_skill_md(skill_md)
+    scripts = frontmatter.get("scripts")
+    if not isinstance(scripts, list):
+        scripts = []
+    entry = next((s for s in scripts if isinstance(s, dict) and s.get("path") == rel_path), None)
+    if entry is None:
+        entry = {"path": rel_path}
+        scripts.append(entry)
+    if purpose:
+        entry["purpose"] = purpose
+    if usage:
+        entry["usage"] = usage
+    frontmatter["scripts"] = scripts
+    raw = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).strip()
+    skill_md.write_text(f"---\n{raw}\n---\n\n{body}\n", encoding="utf-8")
 
 
 def add_skill_reference(
@@ -529,6 +566,14 @@ def register(reg) -> None:
                 "script_name": {"type": "string", "description": "Script filename (e.g. 'check.sh', 'analyze.py')"},
                 "content": {"type": "string", "description": "Script content"},
                 "executable": {"type": "boolean", "description": "Set executable permission (default true)"},
+                "purpose": {
+                    "type": "string",
+                    "description": "One line: what the script does (recorded as a contract in SKILL.md)",
+                },
+                "usage": {
+                    "type": "string",
+                    "description": "Invocation example, e.g. 'bash scripts/check.sh <url>'",
+                },
                 "approved": _approved_param,
             },
             "required": ["name", "script_name", "content"],
