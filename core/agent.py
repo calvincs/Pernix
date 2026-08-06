@@ -1242,7 +1242,12 @@ async def run_agent(
             seen_calls.add(key)
             # Cross-round hard dedup: if this exact call already succeeded in a prior round,
             # return an informative stub so the model can use the known result without re-executing.
-            if key in _cross_round_calls and tc["name"] not in _CROSS_ROUND_DEDUP_EXCLUDED:
+            # Non-idempotent tools (repl — a repeated `next(pages)` MUST run
+            # twice; the mutated state lives in the kernel namespace, invisible
+            # to the file-based invalidators) always re-execute.
+            _dedup_tool = registry.get(tc["name"])
+            _tool_idempotent = getattr(_dedup_tool, "idempotent", True) if _dedup_tool else True
+            if key in _cross_round_calls and tc["name"] not in _CROSS_ROUND_DEDUP_EXCLUDED and _tool_idempotent:
                 prior_round, prior_result = _cross_round_calls[key]
                 stub = (
                     f"(already executed in round {prior_round} with identical arguments — "

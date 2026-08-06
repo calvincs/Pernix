@@ -421,4 +421,80 @@ async def execute_tool_round(
 
     # Every slot is filled by construction: each index lands in exactly one
     # of the two buckets, and both loops assign unconditionally.
-    return [r for r in results if r is not None]
+    final = [r for r in results if r is not None]
+    await _bind_large_results(tool_calls, final, context)
+    return final
+
+
+# Tools whose oversized results are worth binding into the session kernel
+# (prompt-as-a-variable, plan 2c). Deliberately read-shaped tools only:
+# their payloads are DATA the model wants to slice, not status output.
+_BINDING_ELIGIBLE = frozenset({"file_read", "http_get", "browse_web", "session_read"})
+
+_BIND_HEAD_CHARS = 2_000
+_BIND_TAIL_CHARS = 800
+
+
+async def _bind_large_results(tool_calls: list[dict], results: list[ToolExecutionResult], context: dict | None) -> None:
+    """Post-pass: oversized results from binding-eligible tools are loaded
+    into the session kernel as tool_result_<n> variables, spilled to a
+    durable sidecar file (the transcript stays reconstructible — this is a
+    view transform with a durable copy, not a discard), and replaced
+    in-context by a head/tail stub with a pointer.
+
+    Runs OUTSIDE per-call timeouts. Any failure leaves the result untouched.
+    """
+    from config import settings
+
+    if not settings.session_kernel_enabled:
+        return
+    threshold = int(settings.large_result_bind_threshold)
+    session_id = (context or {}).get("session_id", "")
+    if not session_id or threshold <= 0:
+        return
+
+    for tc, res in zip(tool_calls, results):
+        if tc.get("name") not in _BINDING_ELIGIBLE or res.was_error:
+            continue
+        content = res.content or ""
+        if len(content) <= threshold:
+            continue
+        try:
+            from core.kernel import get_kernel_registry
+
+            kernel = get_kernel_registry().get_or_create(session_id)
+            ordinal = kernel.next_bind_ordinal()
+            var = f"tool_result_{ordinal}"
+            payload_path = kernel.payloads_dir / f"{var}.txt"
+
+            def _spill_and_bind(k=kernel, v=var, p=payload_path, c=content):
+                k.payloads_dir.mkdir(parents=True, exist_ok=True)
+                p.write_text(c, encoding="utf-8")
+                k.bind_variable(v, c)
+
+            await asyncio.to_thread(_spill_and_bind)
+        except Exception as e:
+            logger.warning("Result binding failed for %s: %s", tc.get("name"), e)
+            continue
+
+        res.metadata = {
+            **(res.metadata or {}),
+            "bound_var": var,
+            "payload_path": str(payload_path),
+            "orig_chars": len(content),
+        }
+        res.content = (
+            f"{content[:_BIND_HEAD_CHARS]}\n"
+            f"… [{len(content):,} chars total — middle omitted] …\n"
+            f"{content[-_BIND_TAIL_CHARS:]}\n"
+            f"[full result bound as `{var}` in the session kernel (durable copy: "
+            f"{payload_path}). Slice/search it with the repl tool instead of re-reading, "
+            f'e.g. repl(code="print({var}[:1000])").]'
+        )
+        logger.info(
+            "Bound %s result (%d chars) as %s for session %s",
+            tc.get("name"),
+            len(content),
+            var,
+            session_id[:12],
+        )
