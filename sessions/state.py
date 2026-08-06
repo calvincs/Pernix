@@ -106,6 +106,14 @@ class AgentSession:
     parent_session_id: str | None = None
     worker_ids: list = field(default_factory=list)
 
+    # Per-session workspace root override (absolute path). None = the shared
+    # global workspace (settings.workspace_dir) — the default and the normal
+    # case. Set at spawn time for sessions that need filesystem isolation
+    # (canary runs, isolated tasks). Runtime-only: not persisted; sessions
+    # that need it are re-created with it. Plumbed to file tools per-call via
+    # executor context -> paths.WORKSPACE_OVERRIDE.
+    workspace_override: str | None = None
+
     # Cooperative cancellation flag — checked by agent loop, tools, post-hooks
     cancel_requested: bool = False
 
