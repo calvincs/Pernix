@@ -513,6 +513,14 @@ class ToolRegistry:
                 )
                 arguments = {k: v for k, v in arguments.items() if k in valid_params}
 
+        # Scope the session's workspace override to this call. execute_sync
+        # runs in the same thread as the tool function (to_thread or the
+        # long-poll executor), so a set/reset around the invocation is
+        # visible to every paths.workspace() call the tool makes and to
+        # nothing else.
+        from core.tools import paths as _paths
+
+        _ws_token = _paths.WORKSPACE_OVERRIDE.set((context or {}).get("workspace_override"))
         try:
             result = tool.function(**arguments)
             # Tools can return (str, dict) to include structured metadata
@@ -538,6 +546,11 @@ class ToolRegistry:
             )
         except Exception as e:
             return f"Error: {e}"
+        finally:
+            # Always reset: the long-poll executor reuses thread contexts
+            # across calls, so a leaked override would bleed into the next
+            # session's tool call on that thread.
+            _paths.WORKSPACE_OVERRIDE.reset(_ws_token)
 
     # --- Health report ---
 

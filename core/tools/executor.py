@@ -159,11 +159,13 @@ async def _execute_single(
     # Enforce worker_allowed restriction (prevent workers from spawning sub-workers)
     sid = (context or {}).get("session_id", "")
     is_worker = False
+    workspace_override: str | None = None
     if sid:
         from sessions.manager import get_manager
 
         s = get_manager().get(sid)
         is_worker = bool(s and s.session_type == "worker")
+        workspace_override = getattr(s, "workspace_override", None) if s else None
     if not tool.worker_allowed and is_worker:
         return ToolExecutionResult(
             tool_name=name,
@@ -271,6 +273,8 @@ async def _execute_single(
         loop = asyncio.get_running_loop()
         ctx = dict(context) if context else {}
         ctx["_loop"] = loop
+        if workspace_override:
+            ctx["workspace_override"] = workspace_override
         if tool.long_poll:
             # Long-poll tools (await_workers, run_workflow) hold their thread
             # for up to 30-60 minutes while the workers they wait on need

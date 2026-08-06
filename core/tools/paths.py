@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from pathlib import Path
 
 from config import settings
+
+# Per-call workspace override, set by ToolRegistry.execute_sync from the
+# session's workspace_override before invoking a tool function and reset
+# after. A ContextVar (not a global) so concurrent tool calls from different
+# sessions on different threads never see each other's override — execute_sync
+# runs in the same thread as the tool function regardless of which executor
+# dispatched it, so set/reset around the call is always visible to the tool
+# and only the tool.
+WORKSPACE_OVERRIDE: ContextVar[str | None] = ContextVar("workspace_override", default=None)
 
 # Files whose names are reserved for agent instructions / secrets.
 # Only protected when located *directly* at the root of an allowed tree,
@@ -26,6 +36,16 @@ PROTECTED_DIRS = frozenset({".git", "__pycache__"})
 
 
 def workspace() -> Path:
+    """The active workspace root for the current tool call.
+
+    Honors the session's workspace_override when one is set (canary runs,
+    isolated tasks); otherwise the shared global workspace. Callers must
+    always call this fresh rather than caching the result — the override is
+    per-call state.
+    """
+    override = WORKSPACE_OVERRIDE.get()
+    if override:
+        return Path(override).resolve()
     return Path(settings.workspace_dir).resolve()
 
 
