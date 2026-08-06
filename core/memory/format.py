@@ -39,6 +39,22 @@ class MemoryFile:
     updated_at: int = 0
 
 
+# Wiki-links (H4, plan §12.5): [[file-name]] pulls that file's entries into
+# recall; [[file-name@epoch]] pins one entry. File-keyed — memory entries
+# have no titles, so [[entry-title]] waits until they do.
+WIKILINK_RE = re.compile(r"\[\[([a-zA-Z0-9._-]{1,64}(?:@\d{1,12})?)\]\]")
+
+
+def extract_links(content: str) -> list[str]:
+    """Unique [[refs]] in order of first appearance. Never raises."""
+    seen: list[str] = []
+    for m in WIKILINK_RE.finditer(content or ""):
+        ref = m.group(1)
+        if ref not in seen:
+            seen.append(ref)
+    return seen
+
+
 def sanitize_entry_content(content: str) -> str:
     """Neutralize bare ``---`` lines in entry content.
 

@@ -62,6 +62,42 @@ async def search_sessions(q: str = "", limit: int = 20):
     return {"results": list(grouped.values())}
 
 
+@router.get("/api/sessions/{session_id}/goal")
+async def get_session_goal(session_id: str):
+    """Active goal + live burn for the session header (plan §12.6)."""
+    import asyncio as _asyncio
+
+    goal = await _asyncio.to_thread(db.get_active_goal, session_id)
+    if not goal:
+        return {"goal": None}
+    tokens_used = await _asyncio.to_thread(db.goal_token_usage, int(goal["id"]))
+    return {"goal": {**goal, "tokens_used": tokens_used}}
+
+
+@router.get("/api/sessions/{session_id}/gates")
+async def get_session_gates(session_id: str):
+    """Deterministic gates registered on the session (plan §12.6)."""
+    import asyncio as _asyncio
+
+    return {"gates": await _asyncio.to_thread(db.get_gates, session_id, False)}
+
+
+@router.get("/api/kernel/status")
+async def kernel_status():
+    """Live kernel counts + whether THIS deployment has kernels enabled."""
+    from config import settings
+
+    out = {"enabled": settings.session_kernel_enabled, "kernels": 0, "alive": 0, "max": settings.kernel_max_concurrent}
+    if settings.session_kernel_enabled:
+        try:
+            from core.kernel import get_kernel_registry
+
+            out.update(get_kernel_registry().stats())
+        except Exception:
+            pass
+    return out
+
+
 @router.get("/api/sessions/{session_id}/workers")
 async def list_workers(session_id: str):
     """Workers spawned by this session, with live state — feeds the worker

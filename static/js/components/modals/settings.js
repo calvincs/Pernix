@@ -42,6 +42,7 @@ const SECTIONS = [
             { key: 'llm_max_concurrent', label: 'Ollama Max Concurrent', type: 'number' },
             { key: 'openrouter_base_url', label: 'OpenRouter URL', type: 'text' },
             { key: 'openrouter_max_concurrent', label: 'OpenRouter Max Concurrent', type: 'number' },
+            { key: 'openrouter_cache_control', label: 'Anthropic Cache Breakpoints (via OpenRouter)', type: 'bool' },
             { key: 'openai_base_url', label: 'OpenAI URL (or any OpenAI-compatible server)', type: 'text' },
             { key: 'openai_max_concurrent', label: 'OpenAI Max Concurrent', type: 'number' },
             { key: 'llm_session_timeout', label: 'Session LLM Timeout (s)', type: 'number' },

@@ -2022,6 +2022,18 @@ def get_top_signals(
     return [dict(r) for r in rows]
 
 
+def get_model_route_signals(limit: int = 100) -> list[dict]:
+    """model_route counter rows (H2, plan §12.4). Subject format is
+    "{agent_model}|{task_category}". Ordered by subject for deterministic
+    brief rendering (I8 — identical counters → identical bytes)."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT * FROM scout_signals WHERE signal_type = 'model_route' ORDER BY subject LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def delete_signal(signal_type: str, subject: str) -> bool:
     """Hard-delete a performance row (used for testing and manual cleanup)."""
     with connect_sessions() as conn:

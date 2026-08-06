@@ -1140,3 +1140,132 @@ residency (1f); dill reintroduction tension with RLM's removal rationale
 | Gates/Goals/Heartbeats (3) | ✏️ `core/extensions/evaluation/__init__.py` (gate tools), `core/reflect.py` (clamp before `_write_post_mortem`; +turn model/category), `sessions/hooks.py` (gate execution, extra_evidence, build_retry_context, eval-payload `kind`), `sessions/manager.py` (continuation enqueue rules), `core/context/compiler.py` (goal block + volatile burn), `core/extensions/scheduling/__init__.py` (heartbeats, owner field), `core/scout/runner.py` (synthetic-prompt cache discriminator), `core/workflows/parser.py` + `validator.py` + workflow docs, `db/database.py` (v22 gates, v23 goals + `token_usage.goal_id`), `db/models.py` (accessors, goal_id stamp), `maintenance.py` (prune exemption), `config.py` (3 flags; delete orphaned `max_continuations`) |
 | Canaries (3.5) | ➕ `core/canary/` (parser, runner, scoring), `data/canaries/` seed suite; ✏️ `core/tools/registry.py` + `core/tools/executor.py` (`denied_session_types`), `db/models.py` (FTS/distill exclusions), `sessions/hooks.py` (Candor early-return, post-mortem stamp), `core/snooze.py` (transparency set), `sessions/manager.py` + `core/extensions/scheduling/__init__.py` (transparency at request_cancel callers; canary job kind), `db/database.py` (v24), session-list UI filter |
 | Adaptive Layer (4) | ➕ `core/adaptive/` (store, apply, rollback, tripwire), `data/adaptive/ADAPTIVE.md` (generated), `api/routers/adaptive.py`, Adaptive panel UI; ✏️ `core/refine.py` + `core/snooze_reflect.py` (adaptive_edits output), `core/dream/` (promotion mapping), `core/scout/runner.py` (routing_hint injection at `:125-129`; `search_adaptive`), `core/context/compiler.py` (`_build_adaptive_block`), `core/snooze.py` (Activity 15), `db/database.py` (v25: entries/events/batches/proposals) |
+
+---
+
+## 12. Follow-on work (2026-08-06 — planned from three-agent seam scan, IMPLEMENTED same day)
+
+Everything §§2-6 scheduled shipped; this section covers what §§2-9 left
+open, grounded by three parallel code scans (cache-breakpoint seams,
+worker_spec/H2 seams, canary-growth/H4/docs-UI inventory). Corrections the
+scans made to earlier premises are folded in — each item names its seam.
+
+### 12.1 — §1b prompt-cache breakpoints (corrected respec)
+
+The §1b respec named the wrong seam: `normalize_for_openrouter` lives in
+`core/context/compiler.py`, not the provider, and the provider never sees a
+hook point. Implemented design:
+
+- `ContextPayload.static_prefix_chars` — character offset where the
+  cross-turn static prefix ends (through the temporal block, which is
+  verified static; scout/goal follow it). Computed at the `system_parts`
+  join; trim never touches `messages[0]`, so the offset stays valid.
+- `attach_cache_breakpoints(messages, model, provider, offset)` in
+  compiler.py, called in `core/agent.py` at all four normalize sites AFTER
+  `normalize_for_openrouter` (normalization rewrites later system messages
+  to user-role but never edits the head). Splits the head into two text
+  parts with `cache_control: {"type": "ephemeral"}` — static prefix +
+  turn section. Only for provider=openrouter AND model `anthropic/*` AND
+  `settings.openrouter_cache_control` (new flag, default on). When a
+  mid-turn fallback switches to a non-Anthropic model, the same call
+  FLATTENS stale parts back to a plain string (some backends reject
+  unknown part keys). `sanitize_for_fallback` independently strips for
+  Ollama. `TokenEstimator.count_message` already sums list-content parts.
+- Fixed a latent pre-existing bug the scan surfaced: `_is_pinned` called
+  `content.startswith` without an isinstance guard — a live AttributeError
+  on the vision path's list content.
+- UI: the cache tooltip existed already (`app.js`); added the
+  `cache_write` clause — writes with no reads = breakpoints landing on
+  unstable bytes.
+
+### 12.2 — Canary growth (§5 "growing the suite" + §10.8)
+
+- Refine gains a `canary_proposals` output array (same call/parse pattern
+  as `adaptive_edits`), emitted only while `canary_enabled`:
+  `[{name, prompt, gates, files?, rationale}]` from real failed turns.
+- Proposals ride `adaptive_proposals` with `producer="canary_propose"` and
+  `payload_json={"canary": {...}}` — a dict payload, distinguished by
+  `approve_proposal` from list-shaped edit batches. **Approve =
+  materialize**: validated round-trip through `parse_canary_md` (temp
+  write → parse → move), then a manual vetting run is enqueued
+  (`enqueue_manual_canary`). Nothing writes `data/canaries/` without a
+  human approval (I6).
+- Staleness (§10.8): Activity 12c gains the 90-day `last_reviewed` nudge —
+  `db.add_notification` once per (name, last_reviewed) via a
+  `snooze_state` watermark that self-rearms when the date is bumped.
+
+### 12.3 — worker_spec consumption (closing the 4b table's third column)
+
+- `core/adaptive/specs.py`: YAML template parse (`instructions`, `model`,
+  `gates`), prose fallback; `load_worker_spec` requires kind + active;
+  `build_worker_specs_block` renders the `[WORKER SPECS]` catalog.
+- `spawn_worker(spec=...)` — one parameter, not a second tool (a second
+  tool duplicates the 250-line spawn body). Spec resolves FIRST so its
+  model flows through the existing validation; instructions prepend the
+  worker system prompt; gates attach via `db.add_gate` between session
+  creation and first prompt — the worker's hook path runs them with zero
+  changes (verified: gates are per-session-id, not session-typed).
+- Catalog renders in the compiler prefix beside the adaptive block,
+  suppressed for worker sessions (they can't spawn; extra bytes would
+  fork their prefix from the parent's).
+- `ADAPTIVE_EDITS_PROMPT` now offers `worker_spec` (with the YAML content
+  schema) so producers can propose templates — high-risk kind, always
+  human-gated.
+
+### 12.4 — H2 learned model routing (now "just a new producer", as §9 predicted)
+
+- **Blocking bug found by the scan**: `core/reflect.py` read
+  `model_override` from `db.get_session` — not a DB column, so
+  `agent_model` was ALWAYS `settings.llm_model`, mislabeling exactly the
+  override-running workers H2 exists to learn about. Fixed to read the
+  live `AgentSession`.
+- Aggregation piggybacks `core/synthesis.py::attribute` — a
+  `model_route` attribution keyed `"{agent_model}|{task_category}"` into
+  the existing `scout_signals` store. Inherits for free: canary
+  exclusion, from_fallback exclusion, the low-confidence filter,
+  latest-attempt dedupe, the consume-once watermark, and survival past
+  post-mortem retention. No new snooze activity, no new table.
+- `build_model_routing_brief()` — exception-report brief (the Candor
+  `intel.py` shape: ≥5 observations, skip healthy ≥70%, line+char caps,
+  None when empty) injected into the scout prompt beside
+  `[OPERATIONAL INTEL]`, steering `recommended_model`.
+
+### 12.5 — Horizon verdicts
+
+- **H4 memory wiki-links — implemented in its honest minimal form.** The
+  scan found the plan's `[[entry-title]]` wording impossible as written:
+  memory entries have no title field; identity is `(file_name, epoch)`.
+  Shipped: `[[file-name]]` / `[[file@epoch]]` refs, recall-side one-hop
+  expansion (opt-in kwarg, results labeled `link`), consolidation-prompt
+  preservation guard + regression tests. `[[entry-title]]` deferred until
+  entries have titles (large: schema + FTS + backfill + every producer).
+- **H1 workspace checkpointing — deferred.** Git shadow repo over the
+  workspace is real infrastructure (init/exclude discipline, commit-at-
+  turn-boundary hooks, GC). Nothing currently needs it: parallel
+  file-mutating workers remain rare, and 1g's temp-workspace isolation
+  covers canaries. Revisit when H3 or parallel mutation demand it.
+- **H3 speculative best-of-N — deferred, blocked on H1** (isolated
+  discardable workspaces are its precondition). The reflect-judge and
+  auto-stamp arbitration hooks it needs are all live.
+
+### 12.6 — Documentation + UI parity (the branch's real debt)
+
+Docs: zero of ~30 new settings were in `configuration.md`; `api.md` was
+missing /api/adaptive/*, /api/canary/*, heartbeat routes; README still
+said two providers; CHANGELOG had nothing. Swept: configuration.md
+sections mirroring the settings-modal grouping, api.md endpoint blocks,
+README feature/provider bullets, docs/README.md index, new
+`internals/autonomy.md` (gates/goals/heartbeats/kernel) +
+`internals/canary-and-adaptive.md`, semantic-retrieval + wiki-link
+paragraphs in `guides/memory-and-recall.md`, snooze ladder refresh in
+`internals/reflect-and-snooze.md`, migration list in `upgrade.md`,
+CHANGELOG entry.
+
+UI: settings modal was already at parity (§7.2). Added: **Canary tab** in
+the Explorer (suite table with per-task pass rates, run buttons, recent
+runs — closes the loop from the Adaptive tab's tripwire flags), plus the
+read-only HTTP surfaces the scan flagged as missing entirely:
+`GET /api/sessions/{id}/goal`, `GET /api/sessions/{id}/gates`,
+`GET /api/kernel/status`. Goal/gate/kernel state renders in the session
+header tooltip + Canary/Adaptive tabs rather than new panels — small
+surfaces first; a dedicated autonomy panel can follow usage.

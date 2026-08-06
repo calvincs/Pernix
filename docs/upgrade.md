@@ -24,7 +24,7 @@ If you want to be cautious, **back up `data/` first.** It's a directory tree of 
 
 ## DB migrations
 
-The schema is at v18. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
+The schema is at v25. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
 
 If you ever need to downgrade Pernix to an older version (and therefore an older schema), the safe path is:
 
@@ -39,6 +39,12 @@ Running newer Pernix against an older DB is fine — that's just a normal upgrad
 ## Breaking changes worth knowing about
 
 These are the upgrade points where something the user might have set up needs attention. Each is dated.
+
+### 2026-08 — Autonomy, canary suite, adaptive layer (migrations v21–v25)
+
+Nothing to do on upgrade: migrations v21–v25 run automatically at startup — v21 adds `cron_runs.fire_time` (claim-before-deliver scheduling), v22 the `gates` table, v23 `session_goals` plus `token_usage.goal_id`, v24 `canary_runs`, and v25 the `adaptive_*` tables. Every new feature is behind a flag that defaults **off** (`gates_enabled`, `goals_enabled`, `heartbeats_enabled`, `session_kernel_enabled`, `canary_enabled`, `adaptive_enabled`; semantic retrieval activates only when `embedding_model` is set), so behavior is unchanged until you opt in. The new OpenAI-compatible provider likewise stays invisible until `OPENAI_API_KEY` is set.
+
+If you plan to enable the self-improvement pair, follow the burn-in order: **`canary_enabled` first** and let nightly sweeps build a baseline for at least a week, **then** `adaptive_enabled` (initially with auto-apply off). See [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md#burn-in--the-recommended-order).
 
 ### 2026-07 — RLM (recursive processing) add-on, off by default
 

@@ -539,6 +539,27 @@ def _build_adaptive_block(session_id: str) -> str:
         return ""
 
 
+def _build_worker_specs_block(session_id: str) -> str:
+    """[WORKER SPECS] catalog — empty for workers, disabled layer, or an
+    empty store. Never shifts bytes when there is nothing to show."""
+    try:
+        from config import settings as _settings
+
+        if not _settings.adaptive_enabled:
+            return ""
+        from db import models as _db
+
+        sess = _db.get_session(session_id) or {}
+        if sess.get("session_type") == "worker":
+            return ""
+        from core.adaptive.specs import build_worker_specs_block
+
+        return build_worker_specs_block()
+    except Exception as e:
+        logger.warning("Worker specs block unavailable: %s", e)
+        return ""
+
+
 def _build_temporal_context() -> str:
     """Build the STATIC temporal guidance section (birthdate + how to use time).
 
@@ -722,6 +743,13 @@ class ContextPayload:
     needs_compaction: bool
     has_compaction_summary: bool
     metadata: ContextMetadata
+    # Character offset into messages[0]["content"] where the cross-turn
+    # static prefix ends (base prompt … temporal block). Everything after it
+    # is the per-turn scout/goal section. 0 = unknown/not computed. Consumed
+    # by attach_cache_breakpoints (plan 1b) — offsets are valid only for the
+    # original messages[0] string; anything that re-derives it must not
+    # reuse them.
+    static_prefix_chars: int = 0
 
 
 @dataclass
@@ -784,6 +812,14 @@ def compile_context(
     if adaptive_block:
         system_parts.append(adaptive_block)
 
+    # Approved worker_spec catalog (follow-on: worker_spec consumption).
+    # Suppressed for worker sessions — they can't spawn workers, and the
+    # extra bytes would fork their prefix from the parent's. Stable between
+    # idle-window applies like the adaptive block.
+    specs_block = _build_worker_specs_block(session_id)
+    if specs_block:
+        system_parts.append(specs_block)
+
     # Static skill catalog — cache-stable across turns; placed before the
     # per-turn scout report so prompt cache hits the same prefix every turn.
     skills_block = _build_available_skills_block()
@@ -792,6 +828,12 @@ def compile_context(
 
     # Temporal context (current time + birthdate)
     system_parts.append(_build_temporal_context())
+
+    # Boundary for prompt-cache breakpoints (plan 1b): everything up to and
+    # including the temporal block is stable ACROSS turns; scout/goal below
+    # are stable only within a turn. Character offset into the joined
+    # system_prompt ("\n\n" separator is 2 chars, counted by join()).
+    static_prefix_chars = len("\n\n".join(system_parts))
 
     if scout_report_text:
         system_parts.append(scout_report_text)
@@ -1052,6 +1094,7 @@ def compile_context(
             messages_included=len(messages) - 1,
             messages_trimmed=messages_trimmed,
         ),
+        static_prefix_chars=static_prefix_chars,
     )
 
 
@@ -1067,6 +1110,9 @@ def _is_pinned(msg: dict) -> bool:
         return True
     if msg.get("_pinned"):
         return True
+    # Vision messages carry list content — startswith would AttributeError.
+    if not isinstance(content, str):
+        return False
     if content.startswith("[Context was reset"):
         return True
     if content.startswith("[User answered"):
@@ -1254,6 +1300,59 @@ def _strip_private_fields(messages: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Provider normalization
 # ---------------------------------------------------------------------------
+
+
+def attach_cache_breakpoints(
+    messages: list[dict],
+    model: str,
+    provider: str,
+    static_prefix_chars: int,
+) -> list[dict]:
+    """Prompt-cache breakpoints for Anthropic models via OpenRouter (plan 1b).
+
+    Converts messages[0] (the lead system message) into content-parts form
+    with `cache_control: {"type": "ephemeral"}` markers at two boundaries:
+    end of the cross-turn static prefix, and end of the whole system head
+    (scout/goal section — stable across the rounds of one turn). OpenRouter
+    forwards cache_control to Anthropic; other backends ignore it.
+
+    Call AFTER normalize_for_openrouter — normalization rewrites later
+    system messages to user role, so messages[0] is reliably the head, and
+    the offsets (computed pre-normalization on that same string) stay valid
+    because normalization never edits the lead system message's content.
+
+    No-op unless: provider is openrouter, model is anthropic/*, the flag is
+    on, the offset is usable, and messages[0] is a plain-string system head.
+    When conditions DON'T hold but messages[0] carries our breakpoint parts
+    (a mid-turn fallback to a non-Anthropic model), the parts are flattened
+    back to a plain string — some backends reject unknown part keys.
+    sanitize_for_fallback independently flattens for the Ollama path.
+    """
+    eligible = (
+        settings.openrouter_cache_control
+        and provider == "openrouter"
+        and model.startswith("anthropic/")
+        and bool(messages)
+        and messages[0].get("role") == "system"
+    )
+    content = messages[0].get("content") if messages else None
+    if isinstance(content, list) and any(isinstance(p, dict) and "cache_control" in p for p in content):
+        if eligible:
+            return messages  # already in parts form for an eligible model
+        flat = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+        return [{**messages[0], "content": flat}, *messages[1:]]
+    if not eligible:
+        return messages
+    if not isinstance(content, str) or static_prefix_chars <= 0 or static_prefix_chars > len(content):
+        return messages
+
+    static_part = content[:static_prefix_chars]
+    turn_part = content[static_prefix_chars:]
+    parts = [{"type": "text", "text": static_part, "cache_control": {"type": "ephemeral"}}]
+    if turn_part.strip():
+        parts.append({"type": "text", "text": turn_part, "cache_control": {"type": "ephemeral"}})
+    head = {**messages[0], "content": parts}
+    return [head, *messages[1:]]
 
 
 def normalize_for_openrouter(messages: list[dict]) -> list[dict]:

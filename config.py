@@ -73,6 +73,11 @@ class Settings:
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_max_concurrent: int = 2  # Max concurrent OpenRouter requests
     openrouter_models: list = field(default_factory=list)
+    # Prompt-cache breakpoints for anthropic/* models via OpenRouter (plan
+    # 1b): the lead system message is split into content-parts with
+    # cache_control markers at the static-prefix and scout-section
+    # boundaries. Other models/providers are untouched.
+    openrouter_cache_control: bool = True
     # Native OpenAI-compatible provider (adaptation plan 1a). The API key is
     # env-only (OPENAI_API_KEY) — never a settings field, because
     # settings.json is plaintext on disk. base_url is overridable so any

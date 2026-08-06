@@ -149,7 +149,78 @@ def attribute(pm_row: dict) -> list[Attribution]:
                 )
             )
 
+    # --- Model-route attribution (H2, plan §12.4) ---
+    # Keyed "{agent_model}|{task_category}" — the counters feed the scout's
+    # [MODEL ROUTING INTEL] exception brief. Inherits every filter above
+    # (canary exclusion, from_fallback skip, low-confidence skip) plus the
+    # caller's latest-attempt-per-session dedupe and exactly-once watermark.
+    agent_model = str(payload.get("agent_model") or "").strip()
+    if agent_model:
+        category = str(payload.get("task_category") or "").strip() or "general"
+        if verdict == "pass":
+            attributions.append(
+                Attribution(
+                    "model_route",
+                    f"{agent_model}|{category}",
+                    delta_successes=1,
+                    rationale="session verdict=pass",
+                )
+            )
+        elif verdict in ("retry", "escalate"):
+            attributions.append(
+                Attribution(
+                    "model_route",
+                    f"{agent_model}|{category}",
+                    delta_failures=1,
+                    rationale=f"verdict={verdict}, cause={failure_cause}",
+                )
+            )
+
     return attributions
+
+
+# --- Model routing brief (H2, plan §12.4) --------------------------------
+# Exception-report shape borrowed from candor/intel.py: only degraded pairs
+# render; a (model, category) absent from the brief has no known problem.
+
+_ROUTE_MIN_OBSERVATIONS = 5
+_ROUTE_HEALTHY_RATE = 0.7
+_ROUTE_MAX_LINES = 8
+_ROUTE_CHAR_CAP = 1200
+
+_ROUTE_HEADER = (
+    "[MODEL ROUTING INTEL] Observed reflect-verdict rates by (model, task "
+    "category) — exception report: models absent here have no known problem. "
+    "Steer recommended_model away from listed pairs when alternatives exist."
+)
+
+
+def build_model_routing_brief() -> str | None:
+    """Scout-facing brief over model_route counters. None when nothing
+    qualifies, so the scout prompt is byte-identical without signal."""
+    try:
+        rows = db.get_model_route_signals()
+    except Exception as e:
+        logger.warning("Model routing brief read failed: %s", e)
+        return None
+    lines: list[str] = []
+    for r in rows:
+        if len(lines) >= _ROUTE_MAX_LINES:
+            break
+        wins = int(r.get("successes") or 0)
+        losses = int(r.get("failures") or 0)
+        n = wins + losses
+        if n < _ROUTE_MIN_OBSERVATIONS:
+            continue
+        rate = wins / n
+        if rate >= _ROUTE_HEALTHY_RATE:
+            continue
+        subject = str(r.get("subject") or "")
+        model, _, category = subject.partition("|")
+        lines.append(f"- {model} on {category or 'general'}: {rate:.0%} pass over {n} turns")
+    if not lines:
+        return None
+    return "\n".join([_ROUTE_HEADER, *lines])[:_ROUTE_CHAR_CAP]
 
 
 def apply_attributions(attrs: Iterable[Attribution]) -> int:

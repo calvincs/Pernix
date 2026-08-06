@@ -4,8 +4,9 @@ The Dream subsystem (`core/dream/`) gives Pernix an idle-time faculty that
 examines its own memory, Candor evidence, and post-mortems; generates typed
 hypotheses about itself; and then **tries to falsify them** against recorded
 outcomes. Nothing a dream produces influences live behavior until it has been
-validated — and the promotion step that would feed validated conclusions back
-into scout is deliberately not shipped yet.
+validated — and validated conclusions reach live behavior only through the
+[Adaptive Layer](canary-and-adaptive.md)'s governed promotion path (itself
+off by default).
 
 Off by default. Enable in Settings → Dream (Introspection); all settings apply
 hot. Runs as the final activity of the [Snooze ladder](reflect-and-snooze.md),
@@ -86,9 +87,13 @@ cycle-generated hypotheses — no special write powers.
 
 ## What it deliberately doesn't do
 
-- **No promotion yet.** Validated conclusions do not reach scout or the live
-  prompt; the dream's entire observable output is the journal, the report, and
-  sidecar rows. Promotion (with its own gates and flag) is a later phase.
+- **No direct promotion.** Validated conclusions never reach scout or the
+  live prompt from here; they route through the
+  [Adaptive Layer](canary-and-adaptive.md) (when `adaptive_enabled`), where
+  mechanically-validated tool patterns may auto-apply as routing hints and
+  everything else — including any global-scope dream edit — waits for human
+  approval. With the adaptive layer off, the dream's entire observable
+  output remains the journal, the report, and sidecar rows.
 - **No self-modification.** Skills, prompts, and code are untouched.
 - **Strict write-permission rule.** The dream may write its own tables, files
   under `workspace/dreams/`, and (once promotion ships) memory entries marked

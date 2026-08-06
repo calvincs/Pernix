@@ -421,3 +421,66 @@ def search_hybrid(conn, query: str, limit: int = 5, after_epoch: int | None = No
         final = fallback
 
     return final
+
+
+# ---------------------------------------------------------------------------
+# Wiki-link expansion (H4, plan §12.5): one hop, read-only, opt-in
+# ---------------------------------------------------------------------------
+
+
+def expand_links(conn, results: list[SearchResult], max_extra: int = 3) -> list[SearchResult]:
+    """Pull entries referenced by [[file-name]] / [[file@epoch]] in the
+    result contents. One hop, deduped against results already present,
+    appended with source="link" so the model can see they arrived by
+    reference. An unresolvable ref degrades to no expansion — dangling
+    links (e.g. after a re-route renamed a file) are silent by design."""
+    from core.memory.format import extract_links
+
+    if not results or max_extra <= 0:
+        return results
+    have = {(r.entry.file_name, r.entry.epoch) for r in results}
+    extra: list[SearchResult] = []
+    for r in results:
+        for ref in extract_links(r.entry.content):
+            if len(extra) >= max_extra:
+                break
+            file_name, _, epoch_s = ref.partition("@")
+            try:
+                if epoch_s:
+                    rows = conn.execute(
+                        "SELECT file_name, content, tags, entry_type, weight, epoch, source, updated "
+                        "FROM memory_fts WHERE file_name = ? AND epoch = ?",
+                        (file_name, epoch_s),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT file_name, content, tags, entry_type, weight, epoch, source, updated "
+                        "FROM memory_fts WHERE file_name = ? "
+                        "ORDER BY CAST(epoch AS INTEGER) DESC LIMIT 2",
+                        (file_name,),
+                    ).fetchall()
+            except Exception as e:
+                logger.debug("Link expansion query failed for %r: %s", ref, e)
+                continue
+            for row in rows:
+                key = (row["file_name"], int(row["epoch"]))
+                if key in have:
+                    continue
+                have.add(key)
+                extra.append(
+                    SearchResult(
+                        entry=MemoryEntry(
+                            file_name=row["file_name"],
+                            content=row["content"],
+                            epoch=int(row["epoch"]),
+                            entry_type=row["entry_type"],
+                            tags=[t.strip() for t in (row["tags"] or "").split(",") if t.strip()],
+                            weight=row["weight"],
+                            source=row["source"] or "",
+                            updated=int(row["updated"] or 0),
+                        ),
+                        score=0.0,
+                        source="link",
+                    )
+                )
+    return results + extra

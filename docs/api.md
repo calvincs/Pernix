@@ -576,6 +576,100 @@ GET    /api/jobs/events       SSE stream of job events
 
 ---
 
+## Goals, Gates & Heartbeats
+
+Read-side surfaces for the [autonomy substrate](internals/autonomy.md). Goals and gates are created by the agent's tools (`goal_create`, `add_gate`, …) when `goals_enabled` / `gates_enabled` are on; these endpoints let clients inspect them.
+
+### Get the Session's Active Goal
+```
+GET /api/sessions/{session_id}/goal
+```
+Returns `{"goal": null}` when the session has no active goal, otherwise the goal row (objective, status, budgets, continuation counters) plus live `tokens_used` (worker spend included).
+
+### List the Session's Gates
+```
+GET /api/sessions/{session_id}/gates
+```
+Returns the deterministic gates registered on the session: name, command, watch paths, scope, enabled state.
+
+### User Heartbeat
+One heartbeat per session, owned by **you** — the agent's `set_heartbeat`/`clear_heartbeat` tools operate on a separate `agent` namespace and can never see or modify this one. Requires `heartbeats_enabled`.
+
+```
+GET    /api/sessions/{session_id}/heartbeat    Read the user heartbeat (null when unset)
+PUT    /api/sessions/{session_id}/heartbeat    Set/replace it
+DELETE /api/sessions/{session_id}/heartbeat    Clear it
+```
+
+`PUT` body:
+```json
+{
+  "instruction": "Report progress and stay on the migration task.",
+  "every": "5m",
+  "delivery": "steer"
+}
+```
+`instruction` is required. `every` accepts durations (`30s`, `5m`, `2h`) or a 5-field cron expression (default `5m`). `delivery` is `steer` (inject into the running turn at the next round boundary — the default) or `follow_up` (queue as a prompt for the next idle moment); a parked session (awaiting workers/user) degrades `steer` to `follow_up`. Returns `{"ok": true, "job_id": ...}` or `{"error": ...}`.
+
+---
+
+## Canary Suite
+
+Golden-task canaries — see [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md). Listing works even when `canary_enabled` is off; triggering a run requires it on.
+
+### List the Suite
+```
+GET /api/canary
+```
+Returns `enabled`, the sweep `schedule`, and every canary definition (name, tags, flaky flag, gate names, timeout, `last_reviewed`) with per-task stats over the retention window (`runs`, `passed`, `last_run`).
+
+### List Runs
+```
+GET /api/canary/runs?task=&batch_id=&limit=50
+```
+Run history, newest first (limit clamped to 500). Filter by task name or by the adaptive `batch_id` a post-batch sweep was tagged with.
+
+### Trigger a Run
+```
+POST /api/canary/run
+```
+```json
+{ "name": "fix-failing-test" }
+```
+Queues one canary by name, or the whole suite with `"name": "*"`. Returns `{"queued": ...}`; `400` when `canary_enabled` is off, `404` for an unknown name.
+
+---
+
+## Adaptive Layer
+
+The governed policy store — see [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md). Read endpoints work regardless of `adaptive_enabled`.
+
+```
+GET  /api/adaptive/entries?kind=&status=active&limit=200   Entries by kind/status (+ enabled/auto_apply flags)
+GET  /api/adaptive/events?batch_id=&entry_id=&limit=100    Append-only event journal (before/after snapshots)
+GET  /api/adaptive/batches?status=&limit=100               Apply batches and their tripwire status
+GET  /api/adaptive/proposals?status=pending&limit=100      High-risk edit proposals awaiting review
+POST /api/adaptive/proposals/{id}/approve                  Apply-on-approve: executes the batch through the
+                                                           same apply engine as auto-applies and enqueues a
+                                                           batch-tagged canary sweep
+POST /api/adaptive/proposals/{id}/reject                   Reject a pending proposal
+POST /api/adaptive/rollback                                Roll back — body {"batch_id": ...} or {"event_id": ...};
+                                                           walks events in reverse and restores exact snapshots
+POST /api/adaptive/batches/{batch_id}/dismiss              Human dismiss of a tripwire flag: suspect → applied
+```
+
+---
+
+## Kernel
+
+### Kernel Status
+```
+GET /api/kernel/status
+```
+Returns whether this deployment has session kernels enabled plus live counts: `{"enabled": ..., "kernels": ..., "alive": ..., "max": ...}`. See [internals/autonomy.md](internals/autonomy.md).
+
+---
+
 ## Push Notifications
 
 Pernix supports Web Push notifications via the PWA service worker.

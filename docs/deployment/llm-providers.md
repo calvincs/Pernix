@@ -1,21 +1,22 @@
 # LLM providers
 
-Pernix routes every model call through one of two providers: **Ollama** (local) or **OpenRouter** (cloud). It supports them simultaneously, with automatic failover.
+Pernix routes every model call through one of three providers: **Ollama** (local), **OpenRouter** (cloud), or the **OpenAI provider** (api.openai.com or any OpenAI-compatible server such as vLLM, LM Studio, or llama.cpp). It supports them simultaneously, with automatic failover.
 
-This page explains the provider model, the four model roles, how routing decides which provider handles a call, and how rate-limit failover works.
+This page explains the provider model, the model roles, how routing decides which provider handles a call, and how rate-limit failover works.
 
 ---
 
-## Two providers, picked by model name
+## Providers, picked by model name
 
 Pernix detects which provider to use based on the model name:
 
 | Model name format | Provider |
 |---|---|
-| `qwen3:32b`, `llama3.2`, anything without a slash | **Ollama** |
+| A bare name listed in `openai_models` (`gpt-4o`) | **OpenAI provider** (if `OPENAI_API_KEY` is set) — the whitelist wins before the heuristic below |
+| `qwen3:32b`, `llama3.2`, anything else without a slash | **Ollama** |
 | `anthropic/claude-sonnet-4.6`, `openai/gpt-4o`, anything with a slash | **OpenRouter** (if `OPENROUTER_API_KEY` is set) |
 
-The detection is in `core/llm/router.py:is_openrouter_model()`. The "has a slash and we have an OpenRouter key" rule matches OpenRouter's standard `org/model` slug format.
+The slash rule matches OpenRouter's standard `org/model` slug format. Bare names default to Ollama — which is why listing your OpenAI-provider models in `openai_models` matters: without the whitelist, `gpt-4o` would misroute to Ollama.
 
 If a name has a slash but you don't have an OpenRouter key, the call falls through to Ollama (which will fail with "model not found" — Ollama doesn't use slashed names).
 
@@ -69,6 +70,34 @@ Setup:
 
 Without `OPENROUTER_API_KEY`, OpenRouter is invisible to Pernix — only Ollama is available.
 
+### Prompt caching for Anthropic models
+
+When an `anthropic/*` model runs via OpenRouter, Pernix attaches prompt-cache breakpoints (`cache_control` markers) at the system prompt's stable boundaries, so the static prefix is cached across turns instead of re-billed. This is `openrouter_cache_control`, **on by default**; other models and providers are untouched. Cache reads and writes appear in the session cost tooltip — writes with no subsequent reads suggest the breakpoints are landing on unstable bytes.
+
+---
+
+## OpenAI (and OpenAI-compatible servers)
+
+A native provider for the OpenAI API. Because the base URL is overridable, the same provider speaks to anything OpenAI-compatible — vLLM, LM Studio, a llama.cpp server.
+
+Setup:
+
+1. Add `OPENAI_API_KEY=sk-...` to `.env` (or set it in Settings → LLM Providers → OpenAI API Key). The key is **env-only by design** — it is never stored in `settings.json`, which is plaintext on disk.
+2. List the models you want in `openai_models` (Settings) or `OPENAI_MODELS` in `.env` (comma-separated, e.g. `gpt-4o,gpt-4o-mini`). This is what routes bare names to the provider.
+3. In Settings, set `llm_model` (or any role) to one of those names.
+
+For a self-hosted OpenAI-compatible server, additionally point `openai_base_url` at it (e.g. `http://localhost:8000/v1` for vLLM, `http://localhost:1234/v1` for LM Studio) and whitelist the model names it serves. The server still needs *some* `OPENAI_API_KEY` value set for the provider to activate — most local servers accept any string.
+
+| Setting | Default | Notes |
+|---|---|---|
+| `openai_base_url` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint |
+| `openai_max_concurrent` | `2` | Max simultaneous requests to this provider |
+| `openai_models` | empty list | Whitelist; routes bare names here and curates the UI picker |
+
+Resolution and fallback work like OpenRouter's: a whitelisted bare name routes here (on a name collision with a local model, Ollama wins unless the name is whitelisted), and rate-limit/overload/timeout failures fall back to your local `fallback_model` with the same message sanitization. Cached prompt tokens reported by the API (`prompt_tokens_details.cached_tokens`) surface as cache reads in the cost tooltip.
+
+Without `OPENAI_API_KEY`, this provider is invisible to Pernix.
+
 ---
 
 ## When both providers offer the same name
@@ -94,6 +123,8 @@ Pernix uses **four model roles**. You can assign a different model to each, or u
 | Background | `background_model` | Auto-titling sessions, message distillation, reflect re-analysis (fire-and-forget) | A small fast model — `qwen3:8b`, `anthropic/claude-haiku-4.5` |
 
 You don't have to fill all four. If `background_model` is empty, Pernix falls back to the primary `llm_model` for background tasks. If `fallback_model` is empty, rate-limit failover is disabled.
+
+There is also a fifth, optional role: `embedding_model` — a local Ollama embedding model (e.g. `nomic-embed-text`) that turns memory search hybrid (BM25 + vector). Setting it is the switch; empty keeps search purely lexical. See [memory-and-recall.md](../guides/memory-and-recall.md#semantic-retrieval).
 
 ### Why a separate scout model?
 
@@ -140,6 +171,7 @@ Each provider has its own concurrency limit, enforced via async semaphores:
 
 - `llm_max_concurrent` (default 1) — Ollama
 - `openrouter_max_concurrent` (default 2) — OpenRouter
+- `openai_max_concurrent` (default 2) — OpenAI provider
 
 Workers and the main session share the semaphore. If you spawn 5 parallel workers all using the same provider, they queue against this limit.
 

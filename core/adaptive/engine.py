@@ -347,12 +347,31 @@ def approve_proposal(proposal_id: int, actor: str = "user") -> dict:
     if prop.get("status") != "pending":
         raise AdaptiveError(f"proposal {proposal_id} is {prop.get('status')}, not pending")
 
-    # Review-only proposals (Dream memory reviews) carry no engine payload:
-    # approving acknowledges — nothing to apply, no batch, no sweep.
     try:
         payload_edits = json.loads(prop.get("payload_json") or "[]")
     except (TypeError, ValueError):
         payload_edits = []
+
+    # Canary proposals (§12.2): dict payload, not an edit batch. Approving
+    # MATERIALIZES the CANARY.md (validated round-trip) and enqueues a
+    # manual vetting run — the human approval is what satisfies I6.
+    if isinstance(payload_edits, dict) and payload_edits.get("canary"):
+        from core.canary.propose import materialize_canary
+
+        name, err = materialize_canary(payload_edits["canary"])
+        if name is None:
+            raise AdaptiveError(f"canary materialization failed: {err}")
+        db.adaptive_resolve_proposal(proposal_id, "approved")
+        try:
+            from core.extensions.scheduling import enqueue_manual_canary
+
+            enqueue_manual_canary(name)
+        except Exception as e:
+            logger.warning("Vetting run enqueue failed for canary '%s': %s", name, e)
+        return {"batch_id": None, "applied": [], "rejected": [], "canary_written": name}
+
+    # Review-only proposals (Dream memory reviews) carry no engine payload:
+    # approving acknowledges — nothing to apply, no batch, no sweep.
     if not payload_edits:
         db.adaptive_resolve_proposal(proposal_id, "approved")
         return {"batch_id": None, "applied": [], "rejected": [], "review_only": True}

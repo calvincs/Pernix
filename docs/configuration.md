@@ -44,11 +44,24 @@ These are the most important settings to configure before first use.
 | `openrouter_base_url` | `https://openrouter.ai/api/v1` | OpenRouter API endpoint. Locked in network mode. |
 | `openrouter_max_concurrent` | `2` | Simultaneous requests to OpenRouter. |
 | `openrouter_models` | *(empty list)* | Comma-separated list of OpenRouter model IDs to make available (e.g. `anthropic/claude-sonnet-4.6,anthropic/claude-haiku-4.5,x-ai/grok-4.1-fast`). If empty, all models on your OpenRouter account are shown. Use current frontier models — agent workloads benefit a lot from strong tool-call and reasoning behavior. |
+| `openrouter_cache_control` | `true` | Attach prompt-cache breakpoints (`cache_control` markers) to the system prompt for `anthropic/*` models routed via OpenRouter — the static prefix and the per-turn section become separately cacheable. Other models and providers are untouched. Cache reads/writes show in the session cost tooltip. |
 | `vision_model_overrides` | *(empty list)* | Force `supports_vision = true` for specific models where auto-detection fails. |
+
+### OpenAI (and OpenAI-compatible servers)
+
+A native provider for the OpenAI API — and, because `openai_base_url` is overridable, for any OpenAI-compatible server (vLLM, LM Studio, llama.cpp server). The API key is **env-only**: set `OPENAI_API_KEY` in `.env` (or via Settings → LLM Providers → OpenAI API Key); it is deliberately never a `settings.json` field because that file is plaintext on disk.
+
+| Setting | Default | Description |
+|---|---|---|
+| `openai_base_url` | `https://api.openai.com/v1` | OpenAI API endpoint. Point it at any OpenAI-compatible server to use vLLM, LM Studio, or llama.cpp instead. |
+| `openai_max_concurrent` | `2` | Simultaneous requests to the OpenAI provider. |
+| `openai_models` | *(empty list)* | Whitelist of model names served by this provider (also settable via the `OPENAI_MODELS` env var). Listing models is recommended: it routes bare names like `gpt-4o` to this provider (otherwise slash-less names go to Ollama) and keeps the UI dropdown curated. |
+
+See [deployment/llm-providers.md](deployment/llm-providers.md) for setup walkthroughs.
 
 ### How Model Resolution Works
 
-Pernix can use Ollama and OpenRouter at the same time. When both have a model with the same name, **Ollama wins by default** (local, free, lower latency). If you want to use the OpenRouter version of a model, add it to `openrouter_models` — that list is the explicit whitelist that overrides the default.
+Pernix can use Ollama, OpenRouter, and the OpenAI provider at the same time. Slash-less model names route to Ollama by default; names listed in `openai_models` route to the OpenAI provider first (the whitelist wins before the heuristic); slugged `org/model` names go to OpenRouter. When two providers offer the same name, **Ollama wins by default** (local, free, lower latency) — the `openrouter_models` / `openai_models` whitelists are the explicit overrides. Rate-limited or overloaded cloud calls fall back to the local `fallback_model` regardless of which cloud provider they started on.
 
 ---
 
@@ -73,7 +86,6 @@ Pernix tracks how many tokens are in the active conversation and automatically c
 | Setting | Default | Description |
 |---|---|---|
 | `max_tool_rounds` | `10` | Maximum number of tool-call cycles in a single turn. Prevents infinite tool loops. |
-| `max_continuations` | `5` | Maximum in-turn continuations when the model's output is cut off mid-response (e.g. `finish_reason: length`). |
 
 ---
 
@@ -161,6 +173,55 @@ Idle-time introspection: during snooze the agent examines its own memory, Candor
 
 ---
 
+## Autonomy (Gates, Goals, Heartbeats, Session Kernel)
+
+The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, heartbeats steered into running work, and a persistent per-session Python REPL. All off by default; a goal + gates + a heartbeat compose into an autonomous task. Toggles live in Settings → Autonomy (Gates, Goals, Heartbeats, Kernel). How it works: [internals/autonomy.md](internals/autonomy.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `gates_enabled` | `false` | Deterministic gates: user-authored shell checks that run before Reflect; a failing gate mechanically clamps a `pass` verdict to `retry`. Registers the `add_gate` / `list_gates` / `remove_gate` tools (restart). |
+| `goals_enabled` | `false` | Persistent cross-turn goals with token/time/continuation budgets; only `goal_complete` finishes one. Registers the `goal_create` / `goal_status` / `goal_update` / `goal_complete` tools (restart). |
+| `heartbeats_enabled` | `false` | Recurring instructions steered into running work at round boundaries. Registers the agent's `set_heartbeat` / `clear_heartbeat` / `list_heartbeats` tools (restart) and enables the user heartbeat API. |
+| `session_kernel_enabled` | `false` | Persistent per-session Python REPL (the `repl` tool, registered at startup): variables survive tool rounds, turns, compaction, and — via snapshots — restarts. |
+| `kernel_idle_seconds` | `1500` | Idle seconds before a kernel is snapshotted and reaped. Deliberately below the 1800 s session reap so a kernel never outlives its session as an orphan process. |
+| `kernel_snapshot_max_bytes` | `268435456` | Cap (256 MB) on a kernel's dill snapshot; oversized namespaces skip the offending variables and report them. |
+| `kernel_max_concurrent` | `3` | Live kernels across all sessions; beyond the cap the least-recently-used idle kernel is snapshotted and reaped. |
+| `large_result_bind_threshold` | `20000` | Tool results larger than this (chars) from binding-eligible tools are loaded into the kernel as `tool_result_<n>` variables, with only a head/tail stub in context. |
+
+---
+
+## Canary Suite
+
+Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated temp workspaces on a nightly schedule. Measures whether the agent is getting better or worse — the Adaptive Layer's tripwire reads these results. Zero rows, zero behavior change while off. Toggles live in Settings → Canary Suite; runs surface in the Explorer's Canary tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `canary_enabled` | `false` | Master switch for the suite: the scheduled sweep, the `canary_run` / `canary_status` tools, and the manual-run API. |
+| `canaries_dir` | `data/canaries` | Directory scanned for `<name>/CANARY.md` task definitions. |
+| `canary_schedule` | `0 3 * * *` | Cron expression for the scheduled sweep (default: nightly at 03:00). |
+| `canary_max_concurrent` | `1` | Canary sessions run at once during a sweep. |
+| `canary_retention_days` | `30` | Age after which Snooze prunes `canary_runs` rows and their sessions. |
+| `canary_baseline_runs` | `3` | Trailing scheduled sweeps a post-batch sweep's pass rate is compared against. |
+| `canary_regression_delta` | `0.15` | Pass-rate drop (vs. the baseline) that counts as a regression and trips the Adaptive tripwire. |
+
+---
+
+## Adaptive Layer
+
+A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies/worker specs that always wait for your approval. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Adaptive Layer; entries, events, and proposals surface in the Explorer's Adaptive tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `adaptive_enabled` | `false` | Master switch for the store, the producers, and the compiler/scout consumption. |
+| `adaptive_auto_apply` | `true` | Auto-apply low-risk kinds (`routing_hint`, `prompt_note`) during idle windows; high-risk kinds are always proposal-gated. Run the canary suite for at least a week before relying on this. |
+| `adaptive_auto_rollback` | `false` | Promote a canary-regression tripwire hit to automatic rollback. Off until the metric earns trust — a hit otherwise only flags the batch `suspect`. |
+| `adaptive_max_entries_per_kind` | `12` | Cap on active entries per kind. |
+| `adaptive_max_auto_applies_per_day` | `6` | Cap on auto-applied batches per day. |
+| `adaptive_edit_cooldown_hours` | `24` | Minimum hours between machine edits to the same entry. |
+| `adaptive_tripwire_window_turns` | `20` | Organic turns after a batch over which post-mortem retry drift is watched (the passive tripwire; canary-stamped post-mortems excluded). |
+
+---
+
 ## Shell & Tool Safety
 
 > See also: [security.md](security.md)
@@ -195,6 +256,8 @@ Approvals are **per-invocation by default** — approving `bash` for `ps aux` do
 | Setting | Default | Description |
 |---|---|---|
 | `memory_recall` | `true` | Search memory at the start of each turn and inject relevant entries into the system prompt. |
+| `embedding_model` | *(empty)* | Ollama embedding model (e.g. `nomic-embed-text`) for semantic memory retrieval — setting it **is** the switch; empty keeps every search purely lexical (BM25). Vectors live in a rebuildable sidecar next to the FTS index. See [guides/memory-and-recall.md](guides/memory-and-recall.md#semantic-retrieval). |
+| `embedding_batch_size` | `16` | Texts per `/api/embed` call during the background embedding sweeps that run in Snooze. |
 
 ---
 

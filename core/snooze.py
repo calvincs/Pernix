@@ -2448,6 +2448,39 @@ Output valid JSON only. No markdown fences. /no_think"""
         except Exception as e:
             logger.warning("Snooze canary cleanup failed: %s", e)
 
+        # Staleness nudge (§10.8 / §12.2): a canary 90+ days past its
+        # last_reviewed date gets one notification per (name, date) —
+        # keying the watermark on the date makes the nudge self-rearm
+        # when a human bumps it. No LLM, no writes to the suite.
+        try:
+            from core.canary import scan_canaries
+
+            for c in await asyncio.to_thread(scan_canaries):
+                if not c.last_reviewed:
+                    continue
+                try:
+                    reviewed = datetime.fromisoformat(str(c.last_reviewed))
+                    if reviewed.tzinfo is None:
+                        reviewed = reviewed.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                if (datetime.now(timezone.utc) - reviewed).days < 90:
+                    continue
+                key = f"canary_stale_notified:{c.name}:{c.last_reviewed}"
+                if db.get_snooze_state(key):
+                    continue
+                db.add_notification(
+                    title=f"Canary '{c.name}' is stale",
+                    body=(
+                        f"last_reviewed {c.last_reviewed} is over 90 days old. Re-verify its "
+                        f"gates still reflect a daily-driver task, then bump last_reviewed."
+                    ),
+                    urgency="normal",
+                )
+                db.set_snooze_state(key, "1")
+        except Exception as e:
+            logger.warning("Canary staleness nudge failed: %s", e)
+
     async def _cleanup_workflow_runs(self) -> None:
         """Delete old workflow run directories and DB rows beyond retention limits.
 

@@ -357,6 +357,7 @@ For each entry, provide a verdict:
 Rules:
 - NEVER discard unique facts. If in doubt, KEEP.
 - For FUSE: keep the OLDEST epoch as timestamp. Include all distinct details from both entries.
+- PRESERVE wiki-links verbatim: any [[file-name]] or [[file@epoch]] token in an entry must appear unchanged in the fused content — they are live cross-references, not formatting.
 - Pick one target file name (prefer the most general/canonical name).
 - Output JSON only, no markdown fences.
 

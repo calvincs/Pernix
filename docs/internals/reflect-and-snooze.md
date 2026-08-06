@@ -93,22 +93,25 @@ Each cycle walks an ordered ladder of activities (`core/snooze.py`). Later activ
 | 1 | Catch-up distillation | Review sessions that ended without a turn digest (max 1 LLM call). |
 | 2 | User insight extraction | Pull recurring preferences and facts into `user.profile.md`. |
 | 2b | Skill improvements | Propose skill edits + lessons from session reflects. |
+| 2c | Skill requirements install | Hash-triggered: a skill whose `requirements.txt` changed gets its packages installed into the workspace venv (one skill per cycle, no LLM), then the registry rescans so the health flag clears. |
 | 3 | Memory deduplication | Every `snooze_dedup_interval_days` (default 7) per file: find near-duplicate entries; merge them. |
 | 3b | Cross-file consolidation | Every `snooze_consolidation_interval_hours` (default 24): cluster related entries into the same file using `snooze_consolidation_cluster_threshold` (default 0.55). |
 | 3c | Entry re-routing | Move entries filed in the wrong memory file. |
 | 4 | Tag enrichment | Backfill missing `@tags:` on memory entries (no LLM). |
-| 5 | Index reconciliation | Check the FTS5 index against the markdown files; reindex if stale. |
+| 5 | Index reconciliation | Check the FTS5 index against the markdown files; reindex if stale. When `embedding_model` is set, also the embedding sweep: batch-embed new/stale entries for [semantic retrieval](../guides/memory-and-recall.md#semantic-retrieval) (every cycle, no-op when nothing is pending). |
 | 6 | File splitting | Split memory files that have grown too large. |
 | 7 | Cron cleanup | Prune old cron runs and their sessions. |
 | 8 | Staleness pruning | Age out stale lessons and superseded facts. |
 | 9 | Skill co-occurrence | Update which skills tend to load together. |
-| 10 | Signal synthesis | Fold post-mortems into tool/skill performance counters. |
+| 10 | Signal synthesis | Fold post-mortems into tool/skill performance counters (and, per model, into the routing counters behind scout's `[MODEL ROUTING INTEL]` brief). |
 | 11 | Post-mortem TTL | Archive post-mortems past `post_mortem_retention_days` (default 90). |
 | 12 | Workflow run cleanup | Delete workflow run dirs beyond keep-10-per-workflow or older than 30 days. |
 | 12a | RLM run cleanup | Delete `data/workspace/rlm/<run_id>/` dirs + `rlm_runs` rows older than `rlm_run_retention_days` (default 30). Running runs are never touched. |
-| 12b | Candor maintenance | When `candor_enabled`: run the admission gate, drain the observation buffer, checkpoint the store. |
+| 12b | Candor maintenance | When `candor_enabled`: run the admission gate, drain the observation buffer, checkpoint the store. When `adaptive_enabled` too: queue `routing_hint` edits for tools whose calibrated reliability regressed (the Candor producer). |
+| 12c | Canary cleanup | When `canary_enabled`: prune `canary_runs` rows and their sessions past `canary_retention_days` (default 30), and nudge once per canary whose `last_reviewed` is over 90 days old. Never dispatches sweeps — those are enqueued for the next idle window. |
 | 13 | Refine pass | Whole-session refine — broader-gate sibling of Activity 2b. |
 | 14 | Dream step | Idle-time introspection (`core/dream/`) — see [dream.md](dream.md). Only when `dream_enabled`. |
+| 15 | Adaptive layer | When `adaptive_enabled`: drain pending auto-applies (safe here — the idle window means no session's cached prefix is mid-turn), enqueue post-batch canary sweeps, evaluate the tripwire (no LLM) — see [canary-and-adaptive.md](canary-and-adaptive.md). |
 
 A cycle runs until the ladder **completes** — there is no per-task time slice. Two things end it early:
 
