@@ -71,15 +71,15 @@ else
 fi
 
 # ── 4. pytest + coverage ─────────────────────────────────────────────────────
-step "pytest — unit tests + coverage (≥60%)"
+step "pytest — unit tests + coverage (≥63%)"
 if "$VENV_PYTHON" -m pytest \
         --cov \
         --cov-report=term-missing \
-        --cov-fail-under=60 \
+        --cov-fail-under=63 \
         -n auto 2>&1; then
-    ok "pytest (coverage ≥ 60%)"
+    ok "pytest (coverage ≥ 63%)"
 else
-    fail "pytest (tests failed or coverage < 60%)"
+    fail "pytest (tests failed or coverage < 63%)"
 fi
 
 # ── summary ──────────────────────────────────────────────────────────────────

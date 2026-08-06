@@ -28,8 +28,11 @@ omit = [
     "data/*",
     "static/*",
     "docs/*",
-    # Hard-to-test without heavy external deps (Playwright, git, SSL)
-    "core/extensions/*",        # each requires external deps
+    # Hard-to-test without heavy external deps (Playwright, git, SSL).
+    # NOTE (adaptation plan 1e): core/extensions/* is deliberately NOT
+    # omitted anymore — orchestration, scheduling, RLM, and toolmaker are
+    # the largest, most concurrent code in the repo and the gate must see
+    # them. fail_under was re-baselined in the same commit; ratchet upward.
     "run.py",                   # app entrypoint (integration-level)
     "core/certs.py",            # SSL certificate generation
 ]
@@ -37,7 +40,11 @@ omit = [
 [tool.coverage.report]
 show_missing = true
 skip_empty = true
-fail_under = 60
+# Re-baselined 2026-08-05 with core/extensions/* INCLUDED (adaptation plan
+# 1e): measured 66% (undercounted — the RLM engine tests can't run on
+# machines whose tmpdir exceeds the AF_UNIX path limit). 63 leaves margin
+# for machine variance; ratchet upward as coverage grows.
+fail_under = 63
 
 [tool.black]
 line-length = 120
