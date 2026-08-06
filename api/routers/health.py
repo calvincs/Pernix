@@ -137,7 +137,6 @@ _SETTING_BOUNDS = {
     "context_budget": (1000, 2_000_000),
     "max_tokens": (100, 200_000),
     "max_tool_rounds": (1, 100),
-    "max_continuations": (1, 50),
     "llm_max_concurrent": (1, 20),
     "openrouter_max_concurrent": (1, 20),
     "max_concurrent_workers": (1, 20),

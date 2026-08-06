@@ -527,6 +527,110 @@ class SessionManager:
         get_snooze().notify_activity()
         return sid
 
+    async def _maybe_enqueue_goal_continuation(self, session: AgentSession) -> None:
+        """Auto-continue a live goal after a qualifying turn end (plan 3b).
+
+        Triggers on termination_reason ∈ {complete, round_ceiling,
+        budget_exhausted} — the latter two ARE the long-running case (the
+        turn ran out of rounds or LLM session budget mid-goal, not out of
+        work). Never on cancelled/error/compaction_failed (a human is
+        needed), never in AWAITING_USER (waiting on a human is a legitimate
+        block — push notifications alert them), never over queued user
+        messages (the user's words outrank the machine's).
+        """
+        from sessions import state_v2 as sv2
+        from sessions.state import PendingMessage
+
+        if sv2._current_state(session) is not sv2.SessionStateV2.FINALIZING:
+            return
+        if session.termination_reason not in ("complete", "round_ceiling", "budget_exhausted"):
+            return
+        if session.pending_messages:
+            return
+
+        goal = await asyncio.to_thread(db.get_active_goal, session.session_id)
+        if not goal or goal["status"] != "active":
+            return
+
+        # Token/time budget enforcement: exhausted -> budget_limited + loud
+        # notification, never a silent continuation.
+        if goal.get("token_budget"):
+            used = await asyncio.to_thread(db.goal_token_usage, goal["id"])
+            if used >= int(goal["token_budget"]):
+                await self._limit_goal(session, goal, f"token budget spent ({used:,}/{int(goal['token_budget']):,})")
+                return
+        if goal.get("time_budget_s") and goal.get("started_at"):
+            from datetime import datetime, timezone
+
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(goal["started_at"])).total_seconds()
+            if elapsed >= int(goal["time_budget_s"]):
+                await self._limit_goal(
+                    session, goal, f"time budget spent ({int(elapsed)}s/{int(goal['time_budget_s'])}s)"
+                )
+                return
+
+        budget = int(goal.get("continuation_budget") or 0)
+        used_cont = int(goal.get("continuations_used") or 0)
+        if used_cont >= budget:
+            return  # opt-in exhausted (or never granted) — goal stays live, user drives
+
+        # A budget_exhausted turn's continuation would inherit the exhausted
+        # LLM session clock and die immediately — synthetic messages don't
+        # get the reset real user messages get. Extend deliberately; the
+        # goal's own budgets are the governing limit now.
+        if session.termination_reason == "budget_exhausted":
+            try:
+                from core.llm.client import extend_session_budget
+
+                extend_session_budget(session.session_id, float(settings.llm_session_timeout))
+            except Exception as _e:
+                logger.warning("Session budget extension failed for goal continuation: %s", _e)
+
+        ordinal = used_cont + 1
+        await asyncio.to_thread(db.update_goal, goal["id"], continuations_used=ordinal)
+        prompt = (
+            f"[goal continuation {ordinal}/{budget}] The goal is still active:\n"
+            f"{goal['objective']}\n\n"
+            f"Continue working toward it, or report blockage with host-observable "
+            f"evidence — do not end the goal yourself. Use goal_complete only when "
+            f"the objective is met and its gates pass."
+        )
+        session.pending_messages.append(PendingMessage(prompt, None, False))
+        session.emit_event({"type": "goal.continuation", "goal_id": goal["id"], "ordinal": ordinal, "budget": budget})
+        logger.info(
+            "Goal #%d: auto-continuation %d/%d enqueued for %s (termination=%s)",
+            goal["id"],
+            ordinal,
+            budget,
+            session.session_id[:12],
+            session.termination_reason,
+        )
+
+    async def _limit_goal(self, session: AgentSession, goal: dict, reason: str) -> None:
+        await asyncio.to_thread(db.update_goal, goal["id"], status="budget_limited")
+        try:
+            nid = await asyncio.to_thread(
+                db.add_notification,
+                session_id=session.session_id,
+                title=f"Goal #{goal['id']} budget-limited",
+                body=f"{reason}. The goal is paused at budget_limited — raise its budget "
+                f"(goal_update) or complete it to proceed.",
+                urgency="high",
+            )
+            self.broadcast(
+                {
+                    "type": "dialog.notification",
+                    "notification_id": nid,
+                    "title": f"Goal #{goal['id']} budget-limited",
+                    "body": reason,
+                    "urgency": "high",
+                    "source_session_id": session.session_id,
+                }
+            )
+        except Exception as _e:
+            logger.warning("Goal budget notification failed: %s", _e)
+        logger.info("Goal #%d budget-limited for %s: %s", goal["id"], session.session_id[:12], reason)
+
     def remove(self, session_id: str) -> None:
         """Remove session from memory (does NOT delete from DB)."""
         session = self._sessions.pop(session_id, None)
@@ -1337,6 +1441,16 @@ class SessionManager:
                 await self._finalize_worker(session)
             except Exception as _fin_err:
                 logger.error("Worker finalize failed for %s: %s", session.session_id, _fin_err)
+
+        # Goal continuation (plan 3b): enqueued ONLY here — after the reflect
+        # retry loop broke, while still FINALIZING, before pending dispatch.
+        # An earlier enqueue would suppress reflect (_run_post_hooks early-
+        # returns on pending) or cancel a requested retry.
+        if settings.goals_enabled and session.session_type == "normal":
+            try:
+                await self._maybe_enqueue_goal_continuation(session)
+            except Exception as _e:
+                logger.warning("Goal continuation check failed for %s: %s", session.session_id[:12], _e)
 
         # FINALIZING → IDLE_READY — turn fully done.
         if sv2._current_state(session) == sv2.SessionStateV2.FINALIZING:

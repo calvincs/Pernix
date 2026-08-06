@@ -724,6 +724,32 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_gates_session ON gates(session_id, enabled)",
         ],
     ),
+    (
+        23,
+        "persistent goals (adaptation plan 3b)",
+        [
+            # One active goal per session (enforced in the accessor). Only
+            # goal_complete reaches status=complete. token_usage.goal_id is
+            # stamped at write time — including worker rows, which bill to
+            # their own session_id but inherit the parent's goal — so budget
+            # accounting is a flat SUM, no parent rollup needed.
+            """CREATE TABLE IF NOT EXISTS session_goals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                token_budget INTEGER,
+                time_budget_s INTEGER,
+                continuation_budget INTEGER DEFAULT 0,
+                continuations_used INTEGER DEFAULT 0,
+                started_at TEXT,
+                updated_at TEXT,
+                completed_at TEXT
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_session_goals ON session_goals(session_id, status)",
+            "ALTER TABLE token_usage ADD COLUMN goal_id INTEGER",
+        ],
+    ),
 ]
 
 

@@ -792,13 +792,14 @@ def add_token_usage(
     cost_estimate: float | None = None,
     source: str = "provider",
     provider: str = "",
+    goal_id: int | None = None,
 ) -> None:
     with connect_sessions() as conn:
         conn.execute(
             """INSERT INTO token_usage (session_id, model, prompt_tokens,
                completion_tokens, total_tokens, cache_read_tokens,
-               cache_write_tokens, cost_estimate, source, provider)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               cache_write_tokens, cost_estimate, source, provider, goal_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id,
                 model,
@@ -810,6 +811,7 @@ def add_token_usage(
                 cost_estimate,
                 source,
                 provider,
+                goal_id,
             ),
         )
 
@@ -1013,6 +1015,88 @@ def reconcile_uncertain_cron_runs() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Goals (adaptation plan 3b)
+# ---------------------------------------------------------------------------
+
+
+def create_goal(
+    session_id: str,
+    objective: str,
+    token_budget: int | None = None,
+    time_budget_s: int | None = None,
+    continuation_budget: int = 0,
+) -> int | None:
+    """Create a goal. Returns None if the session already has an active one
+    (one active goal per session — update or complete it first)."""
+    with connect_sessions() as conn:
+        existing = conn.execute(
+            "SELECT id FROM session_goals WHERE session_id = ? AND status IN ('active', 'paused', 'budget_limited')",
+            (session_id,),
+        ).fetchone()
+        if existing:
+            return None
+        cur = conn.execute(
+            "INSERT INTO session_goals (session_id, objective, status, token_budget, time_budget_s, "
+            "continuation_budget, started_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?, ?)",
+            (session_id, objective[:4000], token_budget, time_budget_s, continuation_budget, _now(), _now()),
+        )
+        return cur.lastrowid
+
+
+def get_active_goal(session_id: str) -> dict | None:
+    """The session's live goal (active/paused/budget_limited), if any."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT * FROM session_goals WHERE session_id = ? "
+            "AND status IN ('active', 'paused', 'budget_limited') ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_goal(goal_id: int, **fields) -> None:
+    allowed = {"objective", "status", "token_budget", "time_budget_s", "continuation_budget", "continuations_used"}
+    sets, params = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k} = ?")
+            params.append(v)
+    if not sets:
+        return
+    sets.append("updated_at = ?")
+    params.append(_now())
+    if fields.get("status") in ("complete", "error"):
+        sets.append("completed_at = ?")
+        params.append(_now())
+    params.append(goal_id)
+    with connect_sessions() as conn:
+        conn.execute(f"UPDATE session_goals SET {', '.join(sets)} WHERE id = ?", params)
+
+
+def goal_token_usage(goal_id: int) -> int:
+    """Total tokens billed to this goal — flat SUM across all sessions
+    (workers stamp the parent's goal_id at write time)."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(total_tokens), 0) AS t FROM token_usage WHERE goal_id = ?",
+            (goal_id,),
+        ).fetchone()
+        return int(row["t"]) if row else 0
+
+
+def reconcile_orphan_goals() -> int:
+    """Goals whose session row no longer exists -> error (startup sweep)."""
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "UPDATE session_goals SET status = 'error', updated_at = ?, completed_at = ? "
+            "WHERE status IN ('active', 'paused', 'budget_limited') "
+            "AND session_id NOT IN (SELECT id FROM sessions)",
+            (_now(), _now()),
+        )
+        return cur.rowcount or 0
+
+
+# ---------------------------------------------------------------------------
 # Gates (adaptation plan 3a)
 # ---------------------------------------------------------------------------
 
@@ -1193,10 +1277,13 @@ def prune_orphaned_token_usage(max_age_days: int = 30) -> int:
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
     with connect_sessions() as conn:
-        # Orphaned rows (session deleted, FK set to NULL)
-        cur1 = conn.execute("DELETE FROM token_usage WHERE session_id IS NULL")
+        # Orphaned rows (session deleted, FK set to NULL). Rows billed to a
+        # LIVE goal are exempt — a long-lived goal must not lose its
+        # accounting base to the 30-day TTL (plan 3b).
+        live_goal = "(goal_id IS NULL OR goal_id NOT IN (SELECT id FROM session_goals WHERE status IN ('active', 'paused', 'budget_limited')))"
+        cur1 = conn.execute(f"DELETE FROM token_usage WHERE session_id IS NULL AND {live_goal}")
         # Old rows beyond retention
-        cur2 = conn.execute("DELETE FROM token_usage WHERE created_at < ?", (cutoff,))
+        cur2 = conn.execute(f"DELETE FROM token_usage WHERE created_at < ? AND {live_goal}", (cutoff,))
         total = (cur1.rowcount or 0) + (cur2.rowcount or 0)
         return total
 

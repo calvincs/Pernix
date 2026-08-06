@@ -463,6 +463,16 @@ async def run_agent(
     except Exception:
         _sched_created_at = float("inf")
 
+    # Resolve the live goal id once per turn for token_usage stamping
+    # (plan 3b). Workers keep an inherited id from spawn; everyone else
+    # re-resolves so a goal created/completed between turns is respected.
+    if settings.goals_enabled and session.session_type != "worker":
+        try:
+            _goal_row = await asyncio.to_thread(db.get_active_goal, session_id)
+            session.active_goal_id = (_goal_row or {}).get("id")
+        except Exception:
+            session.active_goal_id = None
+
     # Save user message (skip on retry or when already persisted by the caller).
     # The manager locks current_turn_user_msg_id in at pre-save time so it
     # stays stable even if a queued message overwrites session.last_user_msg_id
@@ -861,6 +871,7 @@ async def run_agent(
                             cache_write_tokens=event.usage.cache_write_tokens,
                             source="provider",
                             provider=client.resolve_provider(_stream_current_model),
+                            goal_id=session.active_goal_id,
                         )
 
                     elif event.type == StreamEventType.ERROR and event.error:
@@ -1663,9 +1674,8 @@ async def run_agent(
                             completion_tokens=event.usage.completion_tokens,
                             total_tokens=event.usage.total_tokens,
                             source="provider",
-                            provider=(
-                                "openrouter" if client.resolve_provider(_final_model) == "openrouter" else "ollama"
-                            ),
+                            provider=client.resolve_provider(_final_model),
+                            goal_id=session.active_goal_id,
                         )
                     elif event.type == StreamEventType.ERROR and event.error:
                         _final_err = event.error

@@ -200,6 +200,12 @@ def spawn_worker(
     worker_session = manager.get(worker_id)
     if worker_session and model:
         worker_session.model_override = model
+    # Workers inherit the parent's live goal for token_usage stamping
+    # (plan 3b): a goal's budget must see fan-out spend, and workers bill
+    # to their own session_id — the flat goal_id SUM is what unifies them.
+    if worker_session is not None:
+        parent_session = manager.get(parent_id)
+        worker_session.active_goal_id = getattr(parent_session, "active_goal_id", None)
 
     # Resolve event loop before any threadsafe operations.
     ctx = _context or {}
