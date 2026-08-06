@@ -882,6 +882,92 @@ class MemoryStore:
     # Maintenance
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Semantic-retrieval sidecar (adaptation plan 1f)
+    # ------------------------------------------------------------------
+
+    def pending_embeddings(self, limit: int = 256) -> list[dict]:
+        """Entries whose vector is missing, model-mismatched, or content-stale.
+
+        Staleness is judged in Python against the stored content_hash — the
+        markdown is truth and the vector must describe the current text.
+        """
+        from core.llm.embeddings import content_hash as _hash
+
+        model = settings.embedding_model
+        if not model:
+            return []
+        with self._lock:
+            conn = self._connect()
+            try:
+                existing = {
+                    (r["file_name"], str(r["epoch"])): (r["model"], r["content_hash"])
+                    for r in conn.execute("SELECT file_name, epoch, model, content_hash FROM vectors")
+                }
+                pending: list[dict] = []
+                for row in conn.execute("SELECT file_name, epoch, content FROM memory_fts"):
+                    key = (row["file_name"], str(row["epoch"]))
+                    h = _hash(row["content"])
+                    have = existing.get(key)
+                    if have is not None and have[0] == model and have[1] == h:
+                        continue
+                    pending.append(
+                        {
+                            "file_name": row["file_name"],
+                            "epoch": str(row["epoch"]),
+                            "content": row["content"],
+                            "content_hash": h,
+                        }
+                    )
+                    if len(pending) >= limit:
+                        break
+                return pending
+            finally:
+                conn.close()
+
+    def store_embeddings(self, rows: list[tuple]) -> int:
+        """Persist (file_name, epoch, content_hash, vector) rows. Returns count."""
+        import struct
+
+        model = settings.embedding_model
+        if not model or not rows:
+            return 0
+        with self._lock:
+            conn = self._connect()
+            try:
+                now = int(time.time())
+                for file_name, epoch, chash, vec in rows:
+                    blob = struct.pack(f"<{len(vec)}f", *vec)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO vectors "
+                        "(file_name, epoch, model, dim, content_hash, vec, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (file_name, str(epoch), model, len(vec), chash, blob, now),
+                    )
+                conn.execute(
+                    "INSERT OR REPLACE INTO vectors_meta (key, value) VALUES ('model', ?)",
+                    (model,),
+                )
+                conn.commit()
+                return len(rows)
+            finally:
+                conn.close()
+
+    def _prune_orphan_vectors(self, conn) -> int:
+        """Drop vector rows whose entry no longer exists in the FTS index.
+        Called at the end of reindex(); never re-embeds (snooze work)."""
+        try:
+            cur = conn.execute(
+                "DELETE FROM vectors WHERE NOT EXISTS ("
+                "  SELECT 1 FROM memory_fts f"
+                "  WHERE f.file_name = vectors.file_name AND CAST(f.epoch AS TEXT) = vectors.epoch"
+                ")"
+            )
+            return cur.rowcount or 0
+        except Exception as e:
+            logger.warning("Vector prune during reindex failed: %s", e)
+            return 0
+
     def reindex(self) -> int:
         """Rebuild FTS5 index from markdown files. Returns entry count."""
         conn = self._connect()
@@ -934,8 +1020,14 @@ class MemoryStore:
                     )
                     total += 1
 
+            pruned = self._prune_orphan_vectors(conn)
             conn.commit()
-            logger.info("Reindexed %d entries from %d files", total, len(list(self._dir.glob("*.md"))))
+            logger.info(
+                "Reindexed %d entries from %d files%s",
+                total,
+                len(list(self._dir.glob("*.md"))),
+                f" (pruned {pruned} orphan vectors)" if pruned else "",
+            )
             return total
         finally:
             conn.close()

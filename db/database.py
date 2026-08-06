@@ -252,6 +252,28 @@ CREATE TABLE IF NOT EXISTS consolidation_log (
     reason TEXT NOT NULL,
     executed_at INTEGER NOT NULL
 );
+
+-- Semantic-retrieval sidecar (adaptation plan 1f). Rebuildable like FTS:
+-- markdown stays the source of truth (I3). Keyed on the composite
+-- (file_name, epoch) — epochs are unique only per file. content_hash marks
+-- staleness; model guards against mixed embedding spaces. reindex() prunes
+-- orphans but never re-embeds (embedding is snooze work, off the sync
+-- startup path).
+CREATE TABLE IF NOT EXISTS vectors (
+    file_name TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    vec BLOB NOT NULL,
+    updated_at INTEGER DEFAULT 0,
+    PRIMARY KEY (file_name, epoch)
+);
+
+CREATE TABLE IF NOT EXISTS vectors_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 # ---------------------------------------------------------------------------

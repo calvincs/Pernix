@@ -61,6 +61,13 @@ class Settings:
     fallback_model: str = ""
     background_model: str = ""
     scout_model: str = ""
+    # Fifth model role (adaptation plan 1f): local embedding model served by
+    # Ollama (e.g. "nomic-embed-text"). Setting it IS the switch — empty
+    # keeps every search purely lexical. Vectors live in a rebuildable
+    # sidecar next to the FTS index; embedding happens during snooze, never
+    # on the write path.
+    embedding_model: str = ""
+    embedding_batch_size: int = 16  # texts per /api/embed call during snooze sweeps
     llm_max_concurrent: int = 1  # Max concurrent Ollama requests (semaphore slots)
     llm_session_timeout: int = 1800  # Max seconds any session may hold LLM slots (0 = unlimited)
     openrouter_base_url: str = "https://openrouter.ai/api/v1"

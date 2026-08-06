@@ -296,6 +296,18 @@ class OllamaProvider:
     # Model info
     # ------------------------------------------------------------------
 
+    async def embed(self, model: str, texts: list[str]) -> list[list[float]]:
+        """Embed texts via Ollama's native /api/embed. Raises on failure —
+        callers degrade to lexical search, they don't retry here."""
+        base = self._config.base_url.replace("/v1", "")
+        client = self._get_client()
+        resp = await client.post(f"{base}/api/embed", json={"model": model, "input": texts})
+        resp.raise_for_status()
+        embeddings = resp.json().get("embeddings", [])
+        if len(embeddings) != len(texts):
+            raise ValueError(f"/api/embed returned {len(embeddings)} vectors for {len(texts)} texts")
+        return embeddings
+
     async def get_model_info(self, model: str) -> ModelInfo:
         model = self._model(model)
         client = self._get_quick_client()
