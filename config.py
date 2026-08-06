@@ -202,6 +202,17 @@ class Settings:
     candor_scout_brief: bool = True  # inject [OPERATIONAL INTEL] into scout preload
     candor_max_obs_per_turn: int = 200  # safety valve on turn-end emission volume
 
+    # --- Gates / goals / heartbeats (long-running work, plan Phase 3) ---
+    # Deterministic gates: user-authored shell checks that run before
+    # Reflect; a failing gate mechanically clamps a pass verdict to retry.
+    # A passing gate verifies only what that gate checks.
+    gates_enabled: bool = False
+    # Persistent cross-turn goals with budgets; only goal_complete finishes
+    # one. continuation defaults are opt-in per goal (plan 3b).
+    goals_enabled: bool = False
+    # Heartbeats: recurring instructions steered into running work (3c).
+    heartbeats_enabled: bool = False
+
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
     # namespace survives tool rounds, turns, and compaction (I1), and — via

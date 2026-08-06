@@ -60,9 +60,20 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
     # Memory distillation
     await _maybe_distill(session_id, session)
 
+    # Deterministic gates (plan 3a): run in FINALIZING immediately before
+    # Reflect, once per attempt (they re-run on every reflect retry — the
+    # unchanged-watch_paths guard exists for exactly that). Results feed the
+    # clamp inside reflect; when reflect doesn't run, a failing gate
+    # requests the retry directly.
+    gate_results: list = []
+    if settings.gates_enabled and session_obj:
+        gate_results = await _run_turn_gates(session_id, session_obj, emit=emit)
+
     # Reflect: post-execution verification
     if settings.reflect_enabled and session_obj:
-        await _maybe_reflect(session_id, session, emit=emit, session_obj=session_obj)
+        await _maybe_reflect(session_id, session, emit=emit, session_obj=session_obj, gate_results=gate_results)
+    elif gate_results and session_obj:
+        _apply_gate_retry_fallback(session_id, session, session_obj, gate_results, emit=emit)
 
     # Evaluation: feature QA against acceptance criteria
     if settings.eval_auto and session_obj:
@@ -301,7 +312,84 @@ def _broadcast_reflect_notification(
     get_event_bus().emit({**notification, "session_id": session_id})
 
 
-async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=None) -> None:
+async def _run_turn_gates(session_id: str, session_obj, emit=None) -> list:
+    """Execute this attempt's gates (blocking runner via to_thread), persist
+    a transcript-visible eval row, emit SSE. Never raises."""
+    import json as _json
+
+    from core.gates import run_gates_for_turn
+
+    try:
+        attempt = session_obj.reflect_count + 1
+        results = await asyncio.to_thread(run_gates_for_turn, session_id, session_obj, attempt)
+    except Exception as e:
+        logger.warning("Gate execution failed for %s: %s", session_id, e)
+        return []
+    if not results:
+        return []
+    failed = [r for r in results if not r.passed]
+    try:
+        await asyncio.to_thread(
+            db.add_message,
+            session_id,
+            "eval",
+            _json.dumps({"kind": "gate", "attempt": attempt, "gates": [r.to_payload() for r in results]}),
+        )
+    except Exception as e:
+        logger.debug("Gate eval-row insert skipped: %s", e)
+    if emit:
+        emit(
+            {
+                "type": "gates.done",
+                "attempt": attempt,
+                "total": len(results),
+                "failed": len(failed),
+                "names_failed": [r.name for r in failed],
+            }
+        )
+    return results
+
+
+def _apply_gate_retry_fallback(session_id: str, session: dict, session_obj, gate_results, emit=None) -> None:
+    """When Reflect doesn't run (disabled, or skipped for a short turn), a
+    failing gate still requests the retry — subject to the same cap Reflect
+    honors. AWAITING_USER and errored turns deliberately get no fallback:
+    waiting on a human is a legitimate block, and error turns lack reliable
+    evidence."""
+    from core.gates import failing, format_retry_guidance
+
+    bad = failing(gate_results)
+    if not bad:
+        return
+    max_retries = (
+        settings.reflect_max_retries_worker if session.get("session_type") == "worker" else settings.reflect_max_retries
+    )
+    if session_obj.reflect_count >= max_retries:
+        logger.info("Gates failing for %s but retry cap reached (%d)", session_id, session_obj.reflect_count)
+        return
+    session_obj.reflect_count += 1
+    guidance = format_retry_guidance(gate_results)
+    session_obj.reflect_lessons = ((session_obj.reflect_lessons or "") + "\n\n" + guidance).strip()
+    session_obj.reflect_retry_requested = True
+    logger.info(
+        "Gate retry fallback: requesting retry #%d for %s (%s failing, reflect skipped)",
+        session_obj.reflect_count,
+        session_id,
+        ", ".join(g.name for g in bad),
+    )
+    if emit:
+        emit(
+            {
+                "type": "reflect.retry",
+                "attempt": session_obj.reflect_count,
+                "max": max_retries,
+                "reasoning": f"deterministic gate failure ({', '.join(g.name for g in bad)}); reflect skipped",
+                "strategy": "",
+            }
+        )
+
+
+async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=None, gate_results=None) -> None:
     """Run Reflect verification if session qualifies."""
     if not session_obj:
         return
@@ -424,6 +512,10 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                     "min": settings.reflect_min_messages,
                 }
             )
+        # Reflect skipped, but gates still enforce (plan 3a): a failing
+        # deterministic check requests the retry directly.
+        if gate_results:
+            _apply_gate_retry_fallback(session_id, session, session_obj, gate_results, emit=emit)
         return
 
     # Pre-reflect enrichment: lessons recall + (when stuck) trial-hint peek at
@@ -514,6 +606,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             turn_user_msg_id=session_obj.current_turn_user_msg_id,
             termination_reason=current_reason,
             prior_termination_reasons=prior_reasons,
+            gate_results=gate_results,
         )
 
         # Stash the verdict for _maybe_candor (which runs after reflect).
@@ -561,6 +654,14 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                 max_retries,
                 tool_summary=session_obj.last_tool_summary or None,
             )
+            # Failed-gate output rides the lessons channel — the only path
+            # the retry attempt's scout message actually reads (plan 3a).
+            if gate_results and any(not g.passed for g in gate_results):
+                from core.gates import format_retry_guidance
+
+                session_obj.reflect_lessons = (
+                    session_obj.reflect_lessons + "\n\n" + format_retry_guidance(gate_results)
+                ).strip()
             # Budget guard: refuse a retry if the LLM session-time budget
             # cannot accommodate at least one scout + one agent turn floor.
             # Without this, reflect-retry would push past llm_session_timeout

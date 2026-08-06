@@ -1012,6 +1012,59 @@ def reconcile_uncertain_cron_runs() -> list[dict]:
         return affected
 
 
+# ---------------------------------------------------------------------------
+# Gates (adaptation plan 3a)
+# ---------------------------------------------------------------------------
+
+
+def add_gate(
+    session_id: str,
+    name: str,
+    command: str,
+    watch_paths: list[str] | None = None,
+    cwd: str | None = None,
+    scope: str = "session",
+) -> int:
+    """Create or replace a gate (upsert on (session_id, name))."""
+    import json as _json
+
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "INSERT INTO gates (session_id, scope, name, command, watch_paths, cwd, enabled, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 1, ?) "
+            "ON CONFLICT(session_id, name) DO UPDATE SET "
+            "command = excluded.command, watch_paths = excluded.watch_paths, "
+            "cwd = excluded.cwd, scope = excluded.scope, enabled = 1",
+            (session_id, scope, name, command, _json.dumps(watch_paths or []), cwd, _now()),
+        )
+        return cur.lastrowid
+
+
+def get_gates(session_id: str, enabled_only: bool = True) -> list[dict]:
+    import json as _json
+
+    with connect_sessions() as conn:
+        q = "SELECT * FROM gates WHERE session_id = ?"
+        if enabled_only:
+            q += " AND enabled = 1"
+        rows = conn.execute(q + " ORDER BY id", (session_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["watch_paths"] = _json.loads(d.get("watch_paths") or "[]")
+            except (ValueError, TypeError):
+                d["watch_paths"] = []
+            out.append(d)
+        return out
+
+
+def remove_gate(session_id: str, name: str) -> bool:
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM gates WHERE session_id = ? AND name = ?", (session_id, name))
+        return cur.rowcount > 0
+
+
 def list_cron_runs(job_name: str | None = None, limit: int = 50) -> list[dict]:
     with connect_sessions() as conn:
         if job_name:

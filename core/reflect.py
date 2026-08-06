@@ -965,6 +965,7 @@ async def reflect_on_session(
     turn_user_msg_id: int | None = None,
     termination_reason: str | None = None,
     prior_termination_reasons: list[str] | None = None,
+    gate_results: list | None = None,
 ) -> ReflectResult:
     """Analyze a completed session turn and decide if the task was fulfilled.
 
@@ -1002,6 +1003,13 @@ async def reflect_on_session(
 
     if extra_evidence:
         evidence = f"{evidence}\n\n{extra_evidence}"
+
+    # Deterministic gate evidence (plan 3a): appended so the model sees it,
+    # and enforced mechanically below regardless of what it concludes.
+    if gate_results:
+        from core.gates import format_evidence as _gate_evidence
+
+        evidence = f"{evidence}\n\n{_gate_evidence(gate_results)}"
 
     if emit:
         emit({"type": "reflect.start"})
@@ -1112,6 +1120,31 @@ async def reflect_on_session(
                         "the task into smaller pieces or raise max_tool_rounds in settings."
                     )
 
+            # Gate clamp (plan 3a): a failing deterministic gate makes `pass`
+            # unreachable — mechanically, AFTER the LLM call, BEFORE the
+            # post-mortem write, so the artifact records the clamped verdict
+            # (Phase 4's tripwire reads post-mortems; an unclamped record
+            # would poison it). An LLM judge cannot overrule an exit code.
+            if gate_results:
+                from core.gates import failing as _gates_failing
+
+                _failed = _gates_failing(gate_results)
+                if _failed and result.verdict == "pass":
+                    names = ", ".join(g.name for g in _failed)
+                    logger.info(
+                        "Gate clamp: verdict pass -> retry for session %s (failing: %s)",
+                        session_id,
+                        names,
+                    )
+                    result.verdict = "retry"
+                    result.failure_cause = result.failure_cause or "task"
+                    result.reasoning = (
+                        f"[gate clamp] Deterministic gate(s) failing: {names}. "
+                        f"A pass verdict is unreachable while a gate fails. "
+                    ) + (result.reasoning or "")
+                    if not result.missing:
+                        result.missing = f"Make the failing gate(s) pass: {names}"
+
             logger.info(
                 "Reflect verdict=%s for session %s (%dms, inner=%d): %s",
                 result.verdict,
@@ -1142,6 +1175,19 @@ async def reflect_on_session(
                 # can still extract a lesson without us flipping the verdict, and
                 # so metrics can surface this self-inconsistent case.
                 extra_payload = {"pass_with_lessons": True}
+            # H2 hook (plan 3a): record the TURN's model and task-category
+            # signal, not just the judge's — post-mortems previously stored
+            # only reflect_model, making learned model routing underivable.
+            extra_payload = extra_payload or {}
+            try:
+                _sess_row = db.get_session(session_id) or {}
+                extra_payload["agent_model"] = _sess_row.get("model_override") or settings.llm_model or ""
+            except Exception:
+                pass
+            if scout_report is not None:
+                extra_payload["task_category"] = getattr(scout_report, "execution_mode", "") or ""
+            if gate_results:
+                extra_payload["gates"] = [g.to_payload() for g in gate_results]
             _write_post_mortem(session_id, attempt, result, scout_report, tool_summary, extra_payload=extra_payload)
             return result
 
