@@ -54,6 +54,21 @@ class SessionKernel:
         self._repl: ChildREPL | None = None
         self._lock = threading.RLock()
         self.last_used = time.monotonic()
+        self._bind_counter = 0
+
+    def next_bind_ordinal(self) -> int:
+        """Monotonic ordinal for tool_result_<n> bindings. Seeded from disk
+        so a restart never reuses a number the transcript already cites."""
+        with self._lock:
+            if self._bind_counter == 0 and self.payloads_dir.exists():
+                existing = [
+                    int(p.stem.rsplit("_", 1)[-1])
+                    for p in self.payloads_dir.glob("tool_result_*.txt")
+                    if p.stem.rsplit("_", 1)[-1].isdigit()
+                ]
+                self._bind_counter = max(existing, default=0)
+            self._bind_counter += 1
+            return self._bind_counter
 
     # ------------------------------------------------------------------
     # Paths

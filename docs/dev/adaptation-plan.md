@@ -1,11 +1,14 @@
 # Adaptation plan — prime-agent-inspired upgrades (kernel, gates, goals, adaptive layer)
 
-Status: **Phase 1 IMPLEMENTED** (2026-08-05, branch `next-phase-features`) —
-all of 1a/1c/1d/1e/1f/1g landed with tests; full suite green (1723 passed;
-the only failures are the pre-existing `test_rlm_engine.py` AF_UNIX
-path-length environment issue, identical on a clean tree — see §10.11).
-Implementation deviations from spec are noted inline as [IMPL]. Phases 2-4
-remain PROPOSED.
+Status: **Phases 1 AND 2 IMPLEMENTED** (2026-08-05/06, branch
+`next-phase-features`) — Phase 1: 1a/1c/1d/1e/1f/1g; Phase 2: the §10.11
+socket fix (RLM suite green on macOS for the first time), 2a scaffold
+modes + snapshot/restore frames + round-trip lock, 2b SessionKernel
+lifecycle (soft aborts, LRU cap, idle reap below session reap, revival),
+2c repl tool + prompt-as-variable binding (ToolDef.idempotent flag,
+head/tail stubs with durable sidecars). Full suite: 1779 passed, 0 failed
+(1 deliberate darwin skip). Implementation deviations from spec are noted
+inline as [IMPL] / in §10. Phases 3/3.5/4 remain PROPOSED.
 
 **Decisions by Calvin:** (1) design doc before any code; (2) autonomy model for
 adaptive-layer changes = **auto-apply with rollback** for low-risk kinds,

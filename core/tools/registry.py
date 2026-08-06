@@ -131,6 +131,12 @@ class ToolDef:
     # so they can never starve the shared to_thread pool that the very workers
     # they're waiting on need for their own tool calls.
     long_poll: bool = False
+    # False for tools where an identical repeated call MUST re-execute
+    # (repl: `next(pages)` twice must run twice — the mutated state is the
+    # kernel namespace, invisible to the file-based dedup invalidators).
+    # Checked by the cross-round dedup in core/agent.py; True keeps today's
+    # stub-the-duplicate behavior. Adaptation plan 2c.
+    idempotent: bool = True
 
     def to_openai_schema(self) -> dict:
         """Convert to OpenAI function-calling tool format."""
@@ -342,6 +348,7 @@ class ToolRegistry:
         source: str = "builtin",
         safety_level: str | None = None,
         long_poll: bool = False,
+        idempotent: bool = True,
     ) -> None:
         """Register a tool.
 
@@ -370,6 +377,7 @@ class ToolRegistry:
             source=source,
             safety_level=safety_level,
             long_poll=long_poll,
+            idempotent=idempotent,
         )
         self.metrics.setdefault(name, ToolHealthMetrics())
         logger.debug("Registered tool: %s [%s]", name, source)

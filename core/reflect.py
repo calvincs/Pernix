@@ -47,7 +47,7 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
       "key_findings": ["bullet 1", "bullet 2"],
       "what_was_tried": "1-3 sentences on the approach taken"
     }
-  Include only tool calls that produced evidence informing your verdict — skip pure bookkeeping calls (memory writes, task admin, switch_*, approve_*). On retry, the next scout will read this digest as the carry-forward record of what was tried. result_excerpt MUST be verbatim text from the actual tool result so the next scout sees real evidence, not your interpretation. If a result was very long, take the most relevant ~2000 chars and note "[+N chars truncated]" at the end.
+  Include only tool calls that produced evidence informing your verdict — skip pure bookkeeping calls (memory writes, task admin, switch_*, approve_*). On retry, the next scout will read this digest as the carry-forward record of what was tried. result_excerpt MUST be verbatim text from the actual tool result so the next scout sees real evidence, not your interpretation. If a result was very long, take the most relevant ~2000 chars and note "[+N chars truncated]" at the end. Note: some large results appear as a head/tail stub with a "[full result bound as `tool_result_N` in the session kernel …]" pointer — the stub IS the verbatim record in that case; quote from it and mention the binding.
 
 RULES:
 - Be strict: if the user asked for a file/deliverable and none was created, that's a retry.
