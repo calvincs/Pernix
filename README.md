@@ -27,11 +27,14 @@ It is **not** a polished commercial product. It is a working personal tool with 
 ### LLM Support
 - **Local models via Ollama** — no API key, no internet required, runs entirely on your hardware
 - **Cloud models via OpenRouter** — access GPT-4o, Claude, Gemini, and hundreds of others with a single API key
-- **Automatic fallback** — if OpenRouter hits a rate limit, Pernix seamlessly falls back to your local Ollama model
-- **Multiple model roles** — primary model for conversations, scout model for fast planning, background model for auto-titling and memory tasks, fallback model for resilience
+- **Native OpenAI & OpenAI-compatible servers** — point `openai_base_url` at api.openai.com, vLLM, LM Studio, or a llama.cpp server; key via `OPENAI_API_KEY`
+- **Automatic fallback** — if a cloud provider hits a rate limit, Pernix seamlessly falls back to your local Ollama model
+- **Prompt caching** — cache breakpoints for Anthropic models via OpenRouter (on by default); cache hit rates show in the session cost tooltip
+- **Multiple model roles** — primary model for conversations, scout model for fast planning, background model for auto-titling and memory tasks, fallback model for resilience, optional embedding model for semantic recall
 
 ### Agent Capabilities
 - **Persistent memory** — the agent remembers facts, decisions, and lessons across sessions using a full-text-searchable collection of markdown files
+- **Semantic recall** — set an Ollama embedding model and memory search becomes hybrid BM25 + vector (with `[[wiki-links]]` between entries expanded at recall); leave it unset for pure lexical search
 - **Web search** — Tavily (with AI summaries, requires API key at tavily.com)
 - **Headless browser** — Playwright renders JavaScript-heavy pages, SPAs, and dynamic content
 - **Workspace** — sandboxed file area the agent can read, write, and organize
@@ -39,11 +42,15 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Skills system** — installable capability packs that teach the agent domain-specific workflows
 - **Cron scheduling** — run agents on a schedule for recurring tasks
 - **Reflect & retry** — a quality gate verifies each response and automatically retries if the agent missed the intent
+- **Session kernel** — an optional persistent per-session Python REPL (`repl` tool) whose variables survive turns, compaction, and restarts; huge tool results auto-bind as variables instead of flooding context
+- **Long-running autonomy** — deterministic gates (shell checks Reflect can't overrule), persistent goals with budgets and auto-continuations, and heartbeats steered into running work — composing into unattended multi-hour tasks ([docs](docs/internals/autonomy.md))
 
 ### Experimental Add-ons (all off by default)
 - **RLM — recursive processing** ([docs](docs/internals/rlm.md)) — analyze inputs far larger than any model's context window: a root model writes code in a sandboxed REPL that holds the input as a variable, delegating chunks to budgeted sub-model calls. Adds two model roles (RLM Root, RLM Sub-call) and a "Recent RLM runs" panel
 - **Candor — operational memory** ([docs](docs/internals/candor.md)) — the agent learns from recorded outcomes how reliable its own tools actually are; scout gets an exception-report intel brief where silence means healthy. Requires the separate `candor` package
 - **Dream — introspection** ([docs](docs/internals/dream.md)) — during idle time the agent raises typed hypotheses about its own memory and behavior, then tries to falsify them against recorded outcomes; keeps a read-only daily journal in the sidebar and writes a periodic dream report
+- **Canary suite** ([docs](docs/internals/canary-and-adaptive.md)) — golden tasks with deterministic gates run headlessly on a nightly schedule in isolated workspaces, measuring whether the agent is actually getting better or worse; the suite grows via human-approved proposals from real failed turns
+- **Adaptive layer** ([docs](docs/internals/canary-and-adaptive.md)) — a governed, machine-editable policy store: low-risk routing hints and prompt notes auto-apply at idle with full history and one-click rollback, high-risk edits wait for your approval, and a canary tripwire flags any batch that makes the agent measurably worse
 
 ### Access & UI
 - **Built-in web UI** — PWA with real-time streaming, Monaco code editor, file explorer, and mobile support

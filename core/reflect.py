@@ -928,6 +928,23 @@ def _write_post_mortem(
                 payload["session_type"] = "canary"
         except Exception:
             pass
+        # H2 stamps (plan §12.4), here at the single choke point so EVERY
+        # post-mortem carries them (parse-error and error paths included).
+        # model_override is an in-memory AgentSession field, never a DB
+        # column — reading it from the sessions row mislabeled every
+        # override-running session as settings.llm_model.
+        if "agent_model" not in payload:
+            try:
+                from sessions.manager import get_manager as _get_mgr
+
+                _live = _get_mgr().get(session_id)
+                payload["agent_model"] = (
+                    (getattr(_live, "model_override", None) if _live else None) or settings.llm_model or ""
+                )
+            except Exception:
+                pass
+        if scout_report is not None and "task_category" not in payload:
+            payload["task_category"] = getattr(scout_report, "execution_mode", "") or ""
         scout_viability = None
         execution_mode = None
         if scout_report is not None:
@@ -1184,17 +1201,9 @@ async def reflect_on_session(
                 # can still extract a lesson without us flipping the verdict, and
                 # so metrics can surface this self-inconsistent case.
                 extra_payload = {"pass_with_lessons": True}
-            # H2 hook (plan 3a): record the TURN's model and task-category
-            # signal, not just the judge's — post-mortems previously stored
-            # only reflect_model, making learned model routing underivable.
+            # H2 stamps (agent_model/task_category) now land inside
+            # _write_post_mortem itself, covering every write path.
             extra_payload = extra_payload or {}
-            try:
-                _sess_row = db.get_session(session_id) or {}
-                extra_payload["agent_model"] = _sess_row.get("model_override") or settings.llm_model or ""
-            except Exception:
-                pass
-            if scout_report is not None:
-                extra_payload["task_category"] = getattr(scout_report, "execution_mode", "") or ""
             if gate_results:
                 extra_payload["gates"] = [g.to_payload() for g in gate_results]
             _write_post_mortem(session_id, attempt, result, scout_report, tool_summary, extra_payload=extra_payload)

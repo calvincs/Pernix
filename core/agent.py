@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from config import settings
 from core.context.compaction import compact_with_llm
-from core.context.compiler import compile_context, normalize_for_openrouter
+from core.context.compiler import attach_cache_breakpoints, compile_context, normalize_for_openrouter
 from core.context.tokens import get_estimator
 from core.llm.client import get_llm_client
 from core.llm.errors import FailoverError, FailoverReason
@@ -781,8 +781,10 @@ async def run_agent(
         # Normalize for provider
         messages = payload.messages
         model = effective_model
-        if client.resolve_provider(model) in OPENAI_FORMAT_PROVIDERS:
+        _provider = client.resolve_provider(model)
+        if _provider in OPENAI_FORMAT_PROVIDERS:
             messages = normalize_for_openrouter(messages)
+            messages = attach_cache_breakpoints(messages, model, _provider, payload.static_prefix_chars)
 
         # --- LLM call ---
         # Keep tools available throughout the loop so the model can chain
@@ -955,8 +957,10 @@ async def run_agent(
                     fallback,
                 )
                 session.emit_event({"type": "stream.fallback", "model": fallback})
-                if client.resolve_provider(fallback) in OPENAI_FORMAT_PROVIDERS:
+                _fb_provider = client.resolve_provider(fallback)
+                if _fb_provider in OPENAI_FORMAT_PROVIDERS:
                     messages = normalize_for_openrouter(payload.messages)
+                    messages = attach_cache_breakpoints(messages, fallback, _fb_provider, payload.static_prefix_chars)
                 else:
                     messages = payload.messages
                 continue
@@ -1642,8 +1646,10 @@ async def run_agent(
             turn_user_msg_id=_turn_user_msg_id,
         )
         messages = payload.messages
-        if client.resolve_provider(effective_model) in OPENAI_FORMAT_PROVIDERS:
+        _final_provider = client.resolve_provider(effective_model)
+        if _final_provider in OPENAI_FORMAT_PROVIDERS:
             messages = normalize_for_openrouter(messages)
+            messages = attach_cache_breakpoints(messages, effective_model, _final_provider, payload.static_prefix_chars)
 
         final_content = ""
         _final_retries = 0
@@ -1718,8 +1724,12 @@ async def run_agent(
                     fallback,
                 )
                 session.emit_event({"type": "stream.fallback", "model": fallback})
-                if client.resolve_provider(fallback) in OPENAI_FORMAT_PROVIDERS:
+                _fb2_provider = client.resolve_provider(fallback)
+                if _fb2_provider in OPENAI_FORMAT_PROVIDERS:
                     messages = normalize_for_openrouter(messages)
+                    # Re-run for the NEW model: flattens stale anthropic
+                    # cache parts when the fallback isn't anthropic/*.
+                    messages = attach_cache_breakpoints(messages, fallback, _fb2_provider, payload.static_prefix_chars)
                 continue
 
             logger.error("Final response error: %s", _final_err)

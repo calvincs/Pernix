@@ -38,6 +38,26 @@ At the start of each turn, scout searches the memory store and injects the most 
 
 You can disable recall entirely with `memory_recall = false`, or tighten the threshold if you find too many irrelevant entries leaking in.
 
+### Semantic retrieval
+
+By default memory search is purely lexical (BM25 over the FTS5 index) — an entry about "deploy credentials" won't match a query about "release passwords". Setting **`embedding_model`** to a local Ollama embedding model (e.g. `nomic-embed-text`, in Settings → Models) turns search **hybrid**: BM25 and vector cosine similarity each contribute their top matches, fused with reciprocal-rank fusion, so both exact-term and by-meaning matches surface.
+
+The mechanics stay true to the store's design:
+
+- **Setting the model is the switch.** Leave it empty and every search behaves exactly as before — no vectors, no Ollama embedding calls.
+- **Embedding is background work.** Writes never block on it: new or edited entries are embedded during Snooze's index-reconciliation sweep (`embedding_batch_size` texts per call, scheduled behind live turns so it can't stall your chat). Until an entry is embedded it simply doesn't participate in the vector channel yet.
+- **Degrades gracefully.** If Ollama or the embedding model is unavailable, search falls back to lexical with a logged warning.
+- **The vectors are a rebuildable sidecar** in `data/memories/_index.db`, like the FTS index — the markdown files remain the only source of truth. Changing the embedding model marks all vectors stale; they re-embed in the background.
+
+### Wiki-links
+
+Entry content can reference other memory with wiki-link syntax:
+
+- `[[file-name]]` — links to a memory file (e.g. `[[pernix.decisions]]`)
+- `[[file-name@epoch]]` — pins one specific entry in that file
+
+At recall time, links found in matched entries are expanded **one hop**: the linked entries are appended to the results, labeled `source=link` so the agent can see they arrived by reference rather than by matching the query. This lets a lesson in `pernix.debugging.md` pull in the config entry it depends on without duplicating it. Consolidation and other Snooze maintenance preserve `[[...]]` refs when merging or moving entries — you can also write them yourself when editing the files by hand.
+
 ---
 
 ## How writes happen

@@ -130,6 +130,8 @@ When [OPERATIONAL INTEL] is present (calibrated reliability from logged outcome 
 
 When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
 
+When [MODEL ROUTING INTEL] is present (observed verdict rates by model and task category): it is an exception report — a model absent from it has no known problem. Steer recommended_model away from listed (model, category) pairs when a viable alternative exists; never report a model's absence as a concern.
+
 You also have tools to search deeper if the baseline is insufficient:
 - search_memory: Run additional memory queries with different keywords or modes. If a preloaded snippet is truncated and looks relevant, call search_memory with keywords from that entry and file=<file_name> to retrieve the complete content from that file.
 - search_sessions: Search other sessions with different queries
@@ -425,7 +427,13 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
             mode = args.get("mode", "hybrid")
             limit = min(args.get("limit", 10), 20)
             file_filter = args.get("file", "")
-            results = store.search(query, mode=mode, limit=limit * 2 if file_filter else limit, _track_hits=False)
+            results = store.search(
+                query,
+                mode=mode,
+                limit=limit * 2 if file_filter else limit,
+                _track_hits=False,
+                expand_wikilinks=True,  # H4: [[refs]] pull linked entries
+            )
             if file_filter:
                 results = [r for r in results if r.entry.file_name.lower() == file_filter.lower()][:limit]
             if not results:
@@ -1548,6 +1556,17 @@ async def _run_scout_llm(
             logger.debug("Scout candor intel failed: %s", e)
             return None
 
+    def _gather_model_routing_intel() -> str | None:
+        # H2 (plan §12.4): learned (model, task-category) verdict rates as
+        # an exception brief steering recommended_model. Pure SQLite read.
+        try:
+            from core.synthesis import build_model_routing_brief
+
+            return build_model_routing_brief()
+        except Exception as e:
+            logger.debug("Scout model-routing intel failed: %s", e)
+            return None
+
     def _gather_adaptive_hints() -> str | None:
         # Adaptive routing hints (plan 4e): learned tool/skill selection
         # guidance renders ONLY here, beside [OPERATIONAL INTEL] — planning
@@ -1572,6 +1591,7 @@ async def _run_scout_llm(
         _gather_models(),
         _gather_candor_intel(),
         asyncio.to_thread(_gather_adaptive_hints),
+        asyncio.to_thread(_gather_model_routing_intel),
     )
     user_content_parts.extend(part for part in gathered if part)
 

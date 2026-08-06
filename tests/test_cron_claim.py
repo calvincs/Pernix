@@ -107,7 +107,9 @@ class _FakeScheduler:
     def get_job(self, name):
         return self._jobs.get(name)
 
-    def add_job(self, func, trigger=None, id=None, replace_existing=False, misfire_grace_time=None, kwargs=None, **_opts):
+    def add_job(
+        self, func, trigger=None, id=None, replace_existing=False, misfire_grace_time=None, kwargs=None, **_opts
+    ):
         job = _FakeJob(id, (kwargs or {}).get("meta", {}), func=func, trigger=trigger)
         self._jobs[id] = job
         self.added.append(job)

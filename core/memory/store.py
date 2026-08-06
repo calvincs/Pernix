@@ -757,8 +757,13 @@ class MemoryStore:
         limit: int = 5,
         after_epoch: int | None = None,
         _track_hits: bool = True,
+        expand_wikilinks: bool = False,
     ) -> list[SearchResult]:
-        """Search memory entries."""
+        """Search memory entries.
+
+        expand_wikilinks: one-hop [[file-name]]/[[file@epoch]] expansion
+        (H4, plan §12.5) — linked entries append with source="link".
+        """
         conn = self._connect()
         try:
             if mode == "bm25":
@@ -767,6 +772,10 @@ class MemoryStore:
                 results = search_recent(conn, limit=limit)
             else:
                 results = search_hybrid(conn, query, limit=limit, after_epoch=after_epoch)
+            if expand_wikilinks and results:
+                from core.memory.search import expand_links
+
+                results = expand_links(conn, results)
         finally:
             conn.close()
 

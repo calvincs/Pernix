@@ -49,7 +49,7 @@ def test_refine_parse_carries_adaptive_edits():
             "adaptive_edits": [{"action": "create", "kind": "prompt_note", "title": "t", "content": "c"}],
         }
     )
-    _, _, edits, _ = _parse_refine_output(raw)
+    _, _, edits, _, _ = _parse_refine_output(raw)
     assert edits and edits[0]["kind"] == "prompt_note"
 
 

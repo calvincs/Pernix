@@ -531,6 +531,33 @@ async function loadContextInfo(sid) {
                 const pct = Math.round((usage.cache_read / usage.prompt) * 100);
                 title += ` Cache: ${usage.cache_read.toLocaleString()} prompt tokens read from cache (${pct}%).`;
             }
+            // Cache writes = breakpoints being PLACED (plan 1b). Writes with
+            // no reads means the breakpoints land on unstable bytes.
+            if (usage && usage.cache_write > 0) {
+                title += ` ${usage.cache_write.toLocaleString()} written to cache.`;
+            }
+        } catch {}
+        // Autonomy substrate (plan §12.6): active goal, gates, live kernel.
+        try {
+            const g = await get(`/api/sessions/${sid}/goal`);
+            if (g && g.goal) {
+                const gl = g.goal;
+                let goalLine = ` Goal: "${(gl.objective || '').slice(0, 60)}" — ${gl.continuations_used || 0}/${gl.continuation_budget || 0} continuations`;
+                if (gl.token_budget) goalLine += `, ${(gl.tokens_used || 0).toLocaleString()}/${gl.token_budget.toLocaleString()} tokens`;
+                title += goalLine + '.';
+            }
+        } catch {}
+        try {
+            const gt = await get(`/api/sessions/${sid}/gates`);
+            if (gt && gt.gates && gt.gates.length) {
+                title += ` ${gt.gates.length} deterministic gate${gt.gates.length === 1 ? '' : 's'} active.`;
+            }
+        } catch {}
+        try {
+            const k = await get('/api/kernel/status');
+            if (k && k.enabled && k.alive > 0) {
+                title += ` Kernel: ${k.alive}/${k.max} live.`;
+            }
         } catch {}
         el.title = title;
     } catch {}
