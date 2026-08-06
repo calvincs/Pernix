@@ -107,7 +107,7 @@ class _FakeScheduler:
     def get_job(self, name):
         return self._jobs.get(name)
 
-    def add_job(self, func, trigger=None, id=None, replace_existing=False, misfire_grace_time=None, kwargs=None):
+    def add_job(self, func, trigger=None, id=None, replace_existing=False, misfire_grace_time=None, kwargs=None, **_opts):
         job = _FakeJob(id, (kwargs or {}).get("meta", {}), func=func, trigger=trigger)
         self._jobs[id] = job
         self.added.append(job)
@@ -132,7 +132,7 @@ def test_save_jobs_roundtrips_extra_meta_and_skips_transient(tmp_path, monkeypat
         "session_id": None,
         "session_mode": "fresh",
         "created_at": "2026-08-01T00:00:00+00:00",
-        "kind": "heartbeat",
+        "kind": "future-variant",
         "last_fired_at": "2026-08-04T09:00:00+00:00",
         "workflow_name": "wf",
     }
@@ -145,7 +145,7 @@ def test_save_jobs_roundtrips_extra_meta_and_skips_transient(tmp_path, monkeypat
     assert len(entries) == 1  # transient skipped
     e = entries[0]
     assert e["name"] == "j1"
-    assert e["kind"] == "heartbeat"
+    assert e["kind"] == "future-variant"
     assert e["last_fired_at"] == "2026-08-04T09:00:00+00:00"
     assert e["workflow_name"] == "wf"
 
@@ -163,7 +163,7 @@ def test_save_jobs_roundtrips_extra_meta_and_skips_transient(tmp_path, monkeypat
     assert len(captured) == 1
     name, extra = captured[0]
     assert name == "j1"
-    assert extra["kind"] == "heartbeat"
+    assert extra["kind"] == "future-variant"
     assert extra["last_fired_at"] == "2026-08-04T09:00:00+00:00"
     assert extra["created_at"] == "2026-08-01T00:00:00+00:00"
     assert "cron_expr" not in extra  # structural keys stay positional

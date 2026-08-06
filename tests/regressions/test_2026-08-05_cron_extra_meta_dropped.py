@@ -46,7 +46,7 @@ def test_unknown_job_fields_survive_save_load_cycle(tmp_path, monkeypatch):
         "prompt": "p",
         "model": "",
         "session_id": None,
-        "kind": "heartbeat",  # the class of field that used to vanish
+        "kind": "future-variant",  # the class of field that used to vanish
         "owner": "user",
         "last_fired_at": "2026-08-04T09:00:00+00:00",
     }
@@ -62,6 +62,6 @@ def test_unknown_job_fields_survive_save_load_cycle(tmp_path, monkeypatch):
     monkeypatch.setattr(sched, "_schedule_coalesced_catchup", lambda entries: None)
     sched._load_jobs()
 
-    assert captured["kind"] == "heartbeat"
+    assert captured["kind"] == "future-variant"
     assert captured["owner"] == "user"
     assert captured["last_fired_at"] == "2026-08-04T09:00:00+00:00"
