@@ -210,9 +210,129 @@ def _collect_evidence(session_id: str, feat: dict) -> str:
     return evidence
 
 
+def add_gate(
+    name: str,
+    command: str,
+    watch_paths: str = "",
+    cwd: str = "",
+    _context: dict | None = None,
+) -> str:
+    """Register a deterministic gate for this session."""
+    from config import settings as _settings
+
+    if not _settings.gates_enabled:
+        return "Error: gates are disabled (settings.gates_enabled)."
+    session_id = (_context or {}).get("session_id", "")
+    if not session_id:
+        return "Error: add_gate requires a session context."
+    if not name or not command:
+        return "Error: both name and command are required."
+    from db import models as db
+
+    paths = [p.strip() for p in watch_paths.split(",") if p.strip()] if watch_paths else []
+    db.add_gate(session_id, name.strip(), command.strip(), watch_paths=paths, cwd=cwd.strip() or None)
+    guard = (
+        f" watch_paths={paths} (unchanged paths reuse a prior failure on later retries)"
+        if paths
+        else " (no watch_paths — the gate re-runs every attempt)"
+    )
+    return (
+        f"Gate '{name}' registered: `{command}`.{guard} "
+        f"It runs before Reflect at every turn end; a non-zero exit blocks a pass verdict. "
+        f"A passing gate verifies only what it checks."
+    )
+
+
+def list_gates(_context: dict | None = None) -> str:
+    session_id = (_context or {}).get("session_id", "")
+    if not session_id:
+        return "Error: list_gates requires a session context."
+    from db import models as db
+
+    rows = db.get_gates(session_id, enabled_only=False)
+    if not rows:
+        return "No gates registered for this session."
+    lines = []
+    for r in rows:
+        state = "enabled" if r.get("enabled") else "disabled"
+        watch = f" watch={r['watch_paths']}" if r.get("watch_paths") else ""
+        lines.append(f"- {r['name']} [{state}] ({r.get('scope', 'session')}): `{r['command']}`{watch}")
+    return "\n".join(lines)
+
+
+def remove_gate(name: str, _context: dict | None = None) -> str:
+    session_id = (_context or {}).get("session_id", "")
+    if not session_id:
+        return "Error: remove_gate requires a session context."
+    from db import models as db
+
+    if db.remove_gate(session_id, name):
+        return f"Gate '{name}' removed."
+    return f"Error: no gate named '{name}' in this session."
+
+
 def register(reg) -> None:
     common = {"category": "evaluation", "source": "extension"}
     tags = ["evaluate", "test", "verify", "validate", "check", "qa", "quality", "assess"]
+
+    from config import settings as _settings
+
+    if _settings.gates_enabled:
+        reg.register(
+            name="add_gate",
+            func=add_gate,
+            description=(
+                "Register a deterministic gate: a shell command that runs at every turn end "
+                "before Reflect. A non-zero exit mechanically blocks a pass verdict — use for "
+                "tests, builds, linters, or any host-observable completion check. Optional "
+                "watch_paths (comma-separated, relative to the workspace) scope an unchanged-"
+                "files guard so a stale failure isn't pointlessly re-run on later retries."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Short gate name (e.g. 'tests')"},
+                    "command": {"type": "string", "description": "Shell command; exit 0 = pass"},
+                    "watch_paths": {
+                        "type": "string",
+                        "description": "Optional comma-separated files/dirs the gate depends on",
+                    },
+                    "cwd": {"type": "string", "description": "Optional working directory (default: workspace)"},
+                },
+                "required": ["name", "command"],
+            },
+            tags=tags + ["gate", "deterministic", "ci", "build"],
+            timeout=30,
+            parallel_safe=False,
+            safety_level="caution",  # user-authored shell run automatically at every turn end
+            **common,
+        )
+        reg.register(
+            name="list_gates",
+            func=list_gates,
+            description="List this session's deterministic gates.",
+            parameters={"type": "object", "properties": {}},
+            tags=tags + ["gate", "list"],
+            timeout=30,
+            parallel_safe=True,
+            safety_level="safe",
+            **common,
+        )
+        reg.register(
+            name="remove_gate",
+            func=remove_gate,
+            description="Remove a deterministic gate by name.",
+            parameters={
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Gate name to remove"}},
+                "required": ["name"],
+            },
+            tags=tags + ["gate", "remove"],
+            timeout=30,
+            parallel_safe=False,
+            safety_level="safe",
+            **common,
+        )
 
     reg.register(
         name="evaluate",

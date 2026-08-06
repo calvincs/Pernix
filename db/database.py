@@ -699,6 +699,31 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE cron_runs ADD COLUMN fire_time TEXT",
         ],
     ),
+    (
+        22,
+        "deterministic gates (adaptation plan 3a)",
+        [
+            # A gate is a user-authored shell command whose exit code is
+            # host-observable evidence Reflect cannot overrule: any failing
+            # gate clamps a pass verdict to retry. watch_paths (JSON list)
+            # scopes the unchanged-workspace reuse guard — the global
+            # workspace churns from unrelated sessions, so a whole-tree
+            # fingerprint would be meaningless.
+            """CREATE TABLE IF NOT EXISTS gates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT 'session',
+                name TEXT NOT NULL,
+                command TEXT NOT NULL,
+                watch_paths TEXT,
+                cwd TEXT,
+                enabled INTEGER DEFAULT 1,
+                created_at TEXT,
+                UNIQUE(session_id, name)
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_gates_session ON gates(session_id, enabled)",
+        ],
+    ),
 ]
 
 
