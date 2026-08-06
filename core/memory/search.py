@@ -293,9 +293,89 @@ def search_recent(conn, limit: int = 3, hours: int = 24) -> list[SearchResult]:
     return results
 
 
+def search_vector(conn, query_vec: list[float], limit: int = 5) -> list[SearchResult]:
+    """Cosine similarity over the vectors sidecar (adaptation plan 1f).
+
+    Brute force over an in-memory float32 matrix — corpus sizes here are
+    thousands, not millions; no ANN dependency. Only rows embedded by the
+    CURRENT model participate, so a model change can never mix spaces.
+    """
+    from config import settings as _s
+
+    try:
+        import numpy as np
+    except ImportError:
+        return []
+
+    try:
+        rows = conn.execute(
+            "SELECT file_name, epoch, dim, vec FROM vectors WHERE model = ?",
+            (_s.embedding_model,),
+        ).fetchall()
+    except Exception as e:
+        logger.debug("Vector search unavailable: %s", e)
+        return []
+    if not rows:
+        return []
+
+    dim = rows[0]["dim"]
+    rows = [r for r in rows if r["dim"] == dim]
+    q = np.asarray(query_vec, dtype=np.float32)
+    if q.shape[0] != dim:
+        return []  # stale query-model mismatch; lexical carries the search
+    mat = np.vstack([np.frombuffer(r["vec"], dtype=np.float32, count=dim) for r in rows])
+    norms = np.linalg.norm(mat, axis=1) * (np.linalg.norm(q) or 1.0)
+    norms[norms == 0] = 1.0
+    scores = (mat @ q) / norms
+
+    top = np.argsort(scores)[::-1][:limit]
+    results: list[SearchResult] = []
+    for idx in top:
+        r = rows[int(idx)]
+        row = conn.execute(
+            "SELECT file_name, content, tags, entry_type, weight, epoch, source, updated "
+            "FROM memory_fts WHERE file_name = ? AND CAST(epoch AS TEXT) = ?",
+            (r["file_name"], str(r["epoch"])),
+        ).fetchone()
+        if row is None:
+            continue  # orphan vector; reindex prune will collect it
+        entry = MemoryEntry(
+            file_name=row["file_name"],
+            content=row["content"],
+            epoch=int(row["epoch"]),
+            entry_type=row["entry_type"],
+            tags=[t.strip() for t in (row["tags"] or "").split(",") if t.strip()],
+            weight=row["weight"],
+            source=row["source"] or "",
+            updated=int(row["updated"] or 0),
+        )
+        results.append(SearchResult(entry=entry, score=float(scores[int(idx)]), source="vector"))
+    return results
+
+
+_RRF_K = 60  # standard reciprocal-rank-fusion constant
+
+
+def _rrf_fuse(ranked_lists: list[list[SearchResult]], limit: int) -> list[SearchResult]:
+    """Reciprocal-rank fusion across ranked result lists, deduped by
+    (file, epoch). The first list's result object wins ties for identity."""
+    fused: dict[tuple, list] = {}  # key -> [result, fused_score]
+    for ranked in ranked_lists:
+        for rank, r in enumerate(ranked):
+            key = (r.entry.file_name, r.entry.epoch)
+            contribution = 1.0 / (_RRF_K + rank + 1)
+            if key in fused:
+                fused[key][1] += contribution
+            else:
+                fused[key] = [r, contribution]
+    ordered = sorted(fused.values(), key=lambda pair: pair[1], reverse=True)[:limit]
+    return [SearchResult(entry=pair[0].entry, score=pair[1], source=pair[0].source) for pair in ordered]
+
+
 def search_hybrid(conn, query: str, limit: int = 5, after_epoch: int | None = None) -> list[SearchResult]:
-    """Multi-signal search: BM25 ranked first, recent entries pad remaining
-    slots, ripgrep fallback when both come back empty. Deduped by (file, epoch).
+    """Multi-signal search: BM25 ∪ vector (RRF-fused when embeddings are
+    enabled), recent entries pad remaining slots, ripgrep fallback when all
+    come back empty. Deduped by (file, epoch).
     """
     # Signal 1: BM25 keyword search — dedupe keeping highest score
     seen: dict[tuple, SearchResult] = {}
@@ -303,7 +383,19 @@ def search_hybrid(conn, query: str, limit: int = 5, after_epoch: int | None = No
         key = (r.entry.file_name, r.entry.epoch)
         if key not in seen or r.score > seen[key].score:
             seen[key] = r
-    final = sorted(seen.values(), key=lambda r: r.score, reverse=True)[:limit]
+    bm25_ranked = sorted(seen.values(), key=lambda r: r.score, reverse=True)[:limit]
+
+    # Signal 1b: semantic channel (1f). Degrades to lexical-only on any
+    # failure — unset model, Ollama down, no vectors yet.
+    final = bm25_ranked
+    from core.llm import embeddings as _emb
+
+    if _emb.enabled():
+        query_vec = _emb.embed_query_sync(query)
+        if query_vec:
+            vector_ranked = search_vector(conn, query_vec, limit=limit)
+            if vector_ranked:
+                final = _rrf_fuse([bm25_ranked, vector_ranked], limit)
 
     # Signal 2: Recent entries (last 24h) fill remaining slots only — their
     # flat score is relevance-blind, so they must not displace a weak-but-

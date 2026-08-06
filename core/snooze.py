@@ -1778,6 +1778,19 @@ Output valid JSON only. No markdown fences. /no_think"""
         if not store:
             return
 
+        # Embedding sweep (adaptation plan 1f) runs every cycle, OUTSIDE the
+        # 6-hour reconcile throttle — new entries should gain vectors within
+        # a cycle of being written, and it's a no-op when nothing is pending.
+        from config import settings as _settings
+
+        if _settings.embedding_model and not self._is_cancelled():
+            try:
+                from core.llm.embeddings import embed_pending
+
+                await embed_pending(store)
+            except Exception as e:
+                logger.warning("Snooze: embedding sweep failed: %s", e)
+
         # Check if reconciliation is due (6 hours)
         last = db.get_snooze_state("last_index_reconcile")
         if last:

@@ -219,6 +219,9 @@ const MODEL_SELECT_FIELDS = [
     { key: 'fallback_model', label: 'Fallback Model', type: 'model-select', allowEmpty: true },
     { key: 'rlm_root_model', label: 'RLM Root Model', type: 'model-select', allowEmpty: true },
     { key: 'rlm_sub_model', label: 'RLM Sub-call Model', type: 'model-select', allowEmpty: true },
+    // Free text, not model-select: embedding models (nomic-embed-text, ...)
+    // don't appear in the chat-model dropdown. Empty = lexical search only.
+    { key: 'embedding_model', label: 'Embedding Model (Ollama; empty = lexical search only)', type: 'text' },
 ];
 
 // Resolve the effective reflect model given the configured fallback chain:

@@ -1,6 +1,11 @@
 # Adaptation plan — prime-agent-inspired upgrades (kernel, gates, goals, adaptive layer)
 
-Status: PROPOSED (2026-08-05), pending Calvin's review. No code written yet.
+Status: **Phase 1 IMPLEMENTED** (2026-08-05, branch `next-phase-features`) —
+all of 1a/1c/1d/1e/1f/1g landed with tests; full suite green (1723 passed;
+the only failures are the pre-existing `test_rlm_engine.py` AF_UNIX
+path-length environment issue, identical on a clean tree — see §10.11).
+Implementation deviations from spec are noted inline as [IMPL]. Phases 2-4
+remain PROPOSED.
 
 **Decisions by Calvin:** (1) design doc before any code; (2) autonomy model for
 adaptive-layer changes = **auto-apply with rollback** for low-risk kinds,
@@ -1049,9 +1054,21 @@ residency (1f); dill reintroduction tension with RLM's removal rationale
 9. Should canaries feed Candor as a **separate ledger namespace** (a
    calibration set) rather than being excluded? Revisit after Phase 4
    burn-in.
-10. Skills requirements-install ladder position (1d) — assign the snooze
-    activity number when implementing (the ladder is dense: 1–14 + letter
-    suffixes, `core/snooze.py:349-568`).
+10. Skills requirements-install ladder position (1d) — RESOLVED: landed as
+    Activity 2c (after 2b's skill proposals; no LLM; one skill per cycle).
+11. Pre-existing on Calvin's box: `tests/test_rlm_engine.py` fails wholesale
+    with "AF_UNIX path too long" (macOS 104-char sun_path limit vs. deep
+    pytest tmpdirs). Identical on a clean tree — not introduced by this
+    branch. Fix candidate: point the ChildREPL socket at a short mkdtemp
+    under /tmp instead of the run dir in tests.
+12. [IMPL] 1f deviations, deliberate: (a) query-time embedding is a bounded
+    SYNC httpx call (5s timeout + 60s failure backoff) rather than routed
+    through the async scheduler — search runs in sync tool threads and
+    bridging onto the loop risks deadlock; batch embedding follows the
+    scheduler rule. (b) Coverage gate RATCHETED UP to 63 (measured 66% with
+    extensions included) instead of the anticipated lowering. (c) 1d's
+    SkillDef gained scripts_meta + registry.validation_issues() instead of a
+    stored health string (single source of truth, no state duplication).
 
 ---
 
