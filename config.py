@@ -202,6 +202,23 @@ class Settings:
     candor_scout_brief: bool = True  # inject [OPERATIONAL INTEL] into scout preload
     candor_max_obs_per_turn: int = 200  # safety valve on turn-end emission volume
 
+    # --- Session kernel (persistent per-session REPL, off by default) ---
+    # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
+    # namespace survives tool rounds, turns, and compaction (I1), and — via
+    # per-variable dill snapshots — restarts. Same containment posture as
+    # RLM (I7): defense-in-depth, the container/VM is the boundary.
+    session_kernel_enabled: bool = False
+    # Idle reap threshold. Deliberately BELOW the session reap (1800s in
+    # maintenance.py): session reap pops the AgentSession, and a kernel
+    # outliving its session would leak as an orphan process.
+    kernel_idle_seconds: int = 1500
+    kernel_snapshot_max_bytes: int = 256 * 1024 * 1024
+    kernel_max_concurrent: int = 3  # live kernels across all sessions (LRU reap beyond)
+    # Tool results larger than this (chars) from binding-eligible tools are
+    # loaded into the kernel as tool_result_<n> variables with only a
+    # head/tail stub in context (prompt-as-a-variable, plan 2c).
+    large_result_bind_threshold: int = 20_000
+
     # --- RLM (recursive long-input processing add-on, off by default) ---
     # Recursive Language Models engine (core/extensions/rlm): processes inputs
     # beyond the context window in a sandboxed child REPL. All call sites gate

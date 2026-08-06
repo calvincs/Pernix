@@ -535,6 +535,16 @@ class SessionManager:
         from core.llm.client import get_llm_client as _get_client
 
         _get_client().purge_session(session_id)
+        # Kernel shutdown rides a daemon thread (plan 2b): the snapshot is
+        # seconds of blocking IO and remove() runs on the event loop. The
+        # snapshot preserves the namespace for revival if the session comes
+        # back. No-op when the session never had a kernel.
+        try:
+            from core.kernel import get_kernel_registry
+
+            get_kernel_registry().shutdown_session_detached(session_id, snapshot=True)
+        except Exception as e:
+            logger.warning("Kernel shutdown scheduling failed for %s: %s", session_id[:12], e)
 
     def delete_session(self, session_id: str) -> None:
         """Delete session from both memory and DB (cascades workers)."""
@@ -561,6 +571,14 @@ class SessionManager:
 
         _get_client().purge_session(session_id)
         self._purge_rlm_artifacts(session_id)
+        # Session deletion purges kernel state entirely — no snapshot; there
+        # is no session left to revive into (plan 2b).
+        try:
+            from core.kernel import get_kernel_registry
+
+            get_kernel_registry().shutdown_session_detached(session_id, snapshot=False, purge_state=True)
+        except Exception as e:
+            logger.warning("Kernel purge scheduling failed for %s: %s", session_id[:12], e)
         db.delete_session(session_id)
         logger.info("Deleted session %s", session_id)
 
