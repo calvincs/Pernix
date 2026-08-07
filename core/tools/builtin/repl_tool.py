@@ -2,8 +2,8 @@
 
 A persistent Python namespace per session: variables, imports, and helper
 functions survive across tool rounds, turns, and compaction, and revive
-across restarts from per-variable snapshots. Large results from binding-
-eligible tools appear here as `tool_result_<n>` variables.
+across restarts from per-variable snapshots. Large results from other tools
+appear here as `tool_result_<n>` variables.
 """
 
 from __future__ import annotations

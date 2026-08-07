@@ -533,3 +533,50 @@ async def test_fallback_sticky_across_rounds(monkeypatch):
         f"Fallback model must handle all subsequent rounds; "
         f"got {len(fallback_calls)}. Full call sequence: {models_called}"
     )
+
+
+async def test_fallback_fires_on_same_provider(monkeypatch):
+    """A fallback model on the SAME provider is still a viable failover
+    target (model-specific failures, per-model rate buckets). The old gate
+    required a different provider, so an Ollama-primary/Ollama-fallback
+    config silently had no failover at all (audit P1i)."""
+    from core.llm.types import StreamEvent, StreamEventType
+    from core.scout.report import ScoutReport
+    from db import models as db
+    from tests.conftest import FakeLLMClient
+
+    monkeypatch.setattr("config.settings.llm_model", "local-primary")
+    monkeypatch.setattr("config.settings.fallback_model", "local-fallback")
+
+    models_called: list[str] = []
+
+    class SameProviderClient(FakeLLMClient):
+        async def chat_stream(self, messages, tools=None, model="", **kwargs):
+            models_called.append(model)
+            self.call_count += 1
+            if model == "local-primary":
+                yield StreamEvent(type=StreamEventType.ERROR, error="429 rate limit exceeded")
+            else:
+                yield StreamEvent(type=StreamEventType.TOKEN, content="rescued by sibling model")
+                yield StreamEvent(type=StreamEventType.DONE)
+
+        def resolve_provider(self, model=""):
+            return "ollama"  # both models resolve to the same provider
+
+    fake = SameProviderClient()
+    monkeypatch.setattr("core.agent.get_llm_client", lambda: fake)
+
+    sid = db.create_session(title="Same Provider Fallback Test")
+    session = _make_session(sid)
+    session.last_scout_report = ScoutReport(recommended_tools=[])
+
+    await run_agent(sid, "go", session)
+
+    assert "local-fallback" in models_called, (
+        f"Same-provider fallback must be attempted after the primary fails; "
+        f"call sequence: {models_called}"
+    )
+    msgs = db.get_messages(sid)
+    assert any(
+        m["role"] == "assistant" and "rescued by sibling model" in (m["content"] or "") for m in msgs
+    ), "Fallback response must be persisted as the assistant turn"

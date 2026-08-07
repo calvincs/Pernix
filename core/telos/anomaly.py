@@ -28,21 +28,27 @@ _MAX_OPEN_QUESTIONS = 120
 _MAX_QUESTIONS_PER_TURN = 2
 
 
-def _candor_prior(tool: str) -> float | None:
-    """Calibrated p for tool_ok(tool), when Candor has one worth trusting."""
-    if not settings.candor_enabled:
-        return None
+async def _candor_priors(tools: list[str]) -> dict[str, float]:
+    """Calibrated p for tool_ok(tool) per tool, when Candor has one worth
+    trusting. Uses the loop-safe async ``predict`` — ``predict_sync`` raises
+    on the event loop (it is for tool-executor threads only), which used to
+    silently disable the prior here: surprise was always the fixed 0.9 and
+    the known-flaky-tool skip never fired."""
+    priors: dict[str, float] = {}
+    if not settings.candor_enabled or not tools:
+        return priors
     try:
         from core.extensions.candor.bridge import get_candor_bridge
 
         bridge = get_candor_bridge()
-        outcome = bridge.predict_sync("tool_ok", [tool]) if hasattr(bridge, "predict_sync") else None
-        p = outcome.get("p") if isinstance(outcome, dict) else getattr(outcome, "p", None)
-        if p is not None:
-            return float(p)
+        for tool in tools:
+            outcome = await bridge.predict("tool_ok", [tool])
+            p = outcome.get("p") if isinstance(outcome, dict) else getattr(outcome, "p", None)
+            if p is not None:
+                priors[tool] = float(p)
     except Exception as e:
         logger.debug("telos: candor prior lookup failed: %s", e)
-    return None
+    return priors
 
 
 def extract_turn_anomalies(
@@ -50,15 +56,21 @@ def extract_turn_anomalies(
     termination_reason: str | None,
     reflect_retry: bool,
     session_type: str,
+    priors: dict[str, float] | None = None,
 ) -> list[dict]:
-    """Turn record -> anomaly candidates, highest surprise first."""
+    """Turn record -> anomaly candidates, highest surprise first.
+
+    ``priors`` carries pre-fetched Candor calibrations (tool -> p); this
+    function stays mechanical and synchronous.
+    """
     anomalies: list[dict] = []
+    priors = priors or {}
     for tool, s in (tool_summary or {}).items():
         calls = int(s.get("calls", 0))
         failures = int(s.get("failures", 0))
         if calls <= 0 or failures <= 0:
             continue
-        prior = _candor_prior(tool)
+        prior = priors.get(tool)
         if prior is not None and prior < 0.6:
             continue  # known-flaky tool failing is not an anomaly — no violated prior
         surprise = prior if prior is not None else 0.9
@@ -98,21 +110,55 @@ def extract_turn_anomalies(
 
 async def on_post_task(session_id: str, session: dict, session_obj) -> None:
     """The _maybe_telos hook body. Appends the turn to the trace, mints
-    questions from anomalies, delta-tracked per turn like Candor's hook."""
+    questions from anomalies, delta-tracked per turn like Candor's hook.
+
+    Runs at turn end on the event loop: the Candor priors are awaited via the
+    loop-safe bridge, and all filesystem store work (glob + YAML parse +
+    SequenceMatcher dedup over the question corpus) is pushed to a thread so
+    the turn's critical path never blocks on it.
+    """
+    import asyncio
+
     if session.get("session_type") == "canary":
         return  # canary isolation: synthetic turns must not mint questions
-
-    from core.telos.store import TelosStore
 
     turn_id = getattr(session_obj, "current_turn_user_msg_id", None)
     if getattr(session_obj, "_telos_turn_traced", None) == turn_id and turn_id is not None:
         return
     session_obj._telos_turn_traced = turn_id
 
-    store = TelosStore.open()
     tool_summary = getattr(session_obj, "last_tool_summary", None) or {}
     termination = getattr(session_obj, "termination_reason", None)
     reflect_retry = bool(getattr(session_obj, "reflect_count", 0))
+
+    failing_tools = [t for t, s in tool_summary.items() if int(s.get("calls", 0)) > 0 and int(s.get("failures", 0)) > 0]
+    priors = await _candor_priors(failing_tools)
+
+    await asyncio.to_thread(
+        _post_task_store_work,
+        session_id,
+        session.get("session_type") or "normal",
+        turn_id,
+        tool_summary,
+        termination,
+        reflect_retry,
+        priors,
+    )
+
+
+def _post_task_store_work(
+    session_id: str,
+    session_type: str,
+    turn_id,
+    tool_summary: dict,
+    termination,
+    reflect_retry: bool,
+    priors: dict[str, float],
+) -> None:
+    """Synchronous store side of the post-task hook (runs in a thread)."""
+    from core.telos.store import TelosStore
+
+    store = TelosStore.open()
 
     # 1) Trace: every turn lands in the record ("the story that is told of us").
     store.trace_append(
@@ -120,7 +166,7 @@ async def on_post_task(session_id: str, session: dict, session_obj) -> None:
         {
             "session": session_id,
             "turn": turn_id,
-            "session_type": session.get("session_type") or "normal",
+            "session_type": session_type,
             "termination": termination,
             "reflect_retry": reflect_retry,
             "tools": {
@@ -135,7 +181,7 @@ async def on_post_task(session_id: str, session: dict, session_obj) -> None:
         return
     serendipity_due = _serendipity_due(store)
     minted = 0
-    for a in extract_turn_anomalies(tool_summary, termination, reflect_retry, session.get("session_type") or "normal"):
+    for a in extract_turn_anomalies(tool_summary, termination, reflect_retry, session_type, priors=priors):
         if minted >= _MAX_QUESTIONS_PER_TURN:
             break
         if store.question_is_duplicate(a["text"]):
@@ -154,10 +200,19 @@ async def on_post_task(session_id: str, session: dict, session_obj) -> None:
         minted += 1
 
 
+_SERENDIPITY_WINDOW = 30
+
+
 def _serendipity_due(store) -> bool:
-    """Keep the serendipity share of minted questions near the budget."""
+    """Keep the serendipity share of *recent* minting near the budget.
+
+    Measured over the last _SERENDIPITY_WINDOW questions rather than the
+    lifetime corpus — a lifetime share stops serendipity permanently once the
+    historical average crosses the budget, regardless of recent throughput.
+    """
     qs = store.list_questions()
     if not qs:
         return False
-    share = sum(1 for q in qs if q.get("origin") == "serendipity") / len(qs)
+    recent = sorted(qs, key=lambda q: q.get("created_at") or "")[-_SERENDIPITY_WINDOW:]
+    share = sum(1 for q in recent if q.get("origin") == "serendipity") / len(recent)
     return share < store.serendipity_budget()

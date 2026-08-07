@@ -40,11 +40,42 @@ SIGINT_GRACE = 10.0
 SPAWN_TIMEOUT = 15.0
 LOAD_TIMEOUT = 120.0
 SNAPSHOT_TIMEOUT = 300.0  # per-variable dill of up to 256MiB + fsync
+# How long a driver waits for the round-trip lock before giving up. Long
+# enough to sit out a full-length repl cell (repl's max_timeout is 1800s only
+# for deliberate long runs); a wait that exceeds this is reported as busy —
+# never as a dead child, and never by killing the kernel.
+RT_LOCK_TIMEOUT = 900.0
 
+# Fallbacks only — the live values come from the same shell_* settings the
+# bash tool honours (see _rlimit_defaults), so one knob governs both sandboxes.
 _DEFAULT_AS_LIMIT = 8 * 1024 * 1024 * 1024
 _DEFAULT_FSIZE_LIMIT = 2 * 1024 * 1024 * 1024
 
 _CHILD_RUNNER = str(Path(__file__).resolve().parent / "child_runner.py")
+
+
+def _rlimit_defaults() -> tuple[int, int]:
+    """(RLIMIT_AS, RLIMIT_FSIZE) for a child REPL, read from config at call
+    time so a settings change takes effect on the next spawn. Missing or
+    non-positive settings fall back to the module constants."""
+    as_limit = fsize_limit = 0
+    try:
+        from config import settings
+
+        as_limit = int(getattr(settings, "shell_address_space_limit_bytes", 0) or 0)
+        fsize_limit = int(getattr(settings, "shell_fsize_limit_bytes", 0) or 0)
+    except Exception:  # config unavailable / malformed: the constants still hold
+        logger.debug("RLM child: could not read shell rlimit settings; using defaults", exc_info=True)
+    return as_limit or _DEFAULT_AS_LIMIT, fsize_limit or _DEFAULT_FSIZE_LIMIT
+
+
+class ChildBusy(RLMTimeout):
+    """Another driver held the round-trip lock past RT_LOCK_TIMEOUT.
+
+    Distinct from RLMTimeout-the-run-expired: the child is alive and working,
+    so callers must NOT tear it down. Subclasses RLMTimeout so the RLM engine's
+    existing handling is unchanged (its broker is a single driver by
+    construction, so it can never actually raise this)."""
 
 
 @dataclass
@@ -153,8 +184,8 @@ class ChildREPL:
         run_dir: Path,
         *,
         python_exe: str | None = None,
-        address_space_limit: int = _DEFAULT_AS_LIMIT,
-        fsize_limit: int = _DEFAULT_FSIZE_LIMIT,
+        address_space_limit: int | None = None,
+        fsize_limit: int | None = None,
         scaffold: str = "rlm",
         cwd: Path | None = None,
     ):
@@ -171,8 +202,9 @@ class ChildREPL:
         self.exec_sock_path = sock_dir / "exec.sock"
         self.llm_sock_path = sock_dir / "llm.sock"
         self._python_exe = python_exe or sys.executable
-        self._as_limit = address_space_limit
-        self._fsize_limit = fsize_limit
+        default_as, default_fsize = _rlimit_defaults()
+        self._as_limit = address_space_limit if address_space_limit is not None else default_as
+        self._fsize_limit = fsize_limit if fsize_limit is not None else default_fsize
         self.scaffold = scaffold  # "rlm" (sub-LLM stubs + answer) | "plain" (session kernel)
         # Session kernels run with cwd = the shared workspace so repl and
         # bash see the same files, while sockets/logs stay in run_dir.
@@ -273,11 +305,11 @@ class ChildREPL:
         the child; the kill only happens if the interrupt doesn't land within
         SIGINT_GRACE. RLM keeps the hard kill — its child is per-run anyway.
         """
-        self._rt_lock.acquire()
+        waited = self._acquire_rt("cell execution")
         try:
             return self._execute_cell_locked(
                 code,
-                deadline=deadline,
+                deadline=deadline + waited,
                 cancel_check=cancel_check,
                 in_flight=in_flight,
                 last_activity=last_activity,
@@ -437,9 +469,27 @@ class ChildREPL:
         except (OSError, FrameError) as e:
             raise RLMChildDied(f"failed to send to child REPL: {e}") from e
 
+    def _acquire_rt(self, what: str, timeout: float = RT_LOCK_TIMEOUT) -> float:
+        """Take the round-trip lock; return how long the wait took.
+
+        Callers compute their deadline BEFORE this wait, so a long-running cell
+        holding the lock would otherwise consume the whole budget: the frame
+        would be sent and immediately declared timed out, killing a perfectly
+        healthy kernel. Deadlines are shifted by the returned wait — the frame
+        always gets its full allowance measured from when it is actually sent.
+        A wait longer than `timeout` raises ChildBusy without touching the
+        child."""
+        started = time.monotonic()
+        if not self._rt_lock.acquire(timeout=timeout):
+            raise ChildBusy(f"child REPL busy: {what} waited {timeout:.0f}s for the round-trip lock")
+        return time.monotonic() - started
+
     def _roundtrip(self, frame: dict, *, deadline: float) -> dict:
-        with self._rt_lock:
-            return self._roundtrip_locked(frame, deadline=deadline)
+        waited = self._acquire_rt(str(frame.get("type", "frame")))
+        try:
+            return self._roundtrip_locked(frame, deadline=deadline + waited)
+        finally:
+            self._rt_lock.release()
 
     def _roundtrip_locked(self, frame: dict, *, deadline: float) -> dict:
         self._send(frame)

@@ -20,6 +20,18 @@ async def list_entries(kind: str = "", status: str = "active", limit: int = 200)
     return {"enabled": settings.adaptive_enabled, "auto_apply": settings.adaptive_auto_apply, "entries": rows}
 
 
+@router.delete("/api/adaptive/entries/{entry_id}")
+async def delete_entry_route(entry_id: str):
+    """Release valve: soft-delete an entry (journaled, rollback-able) so a
+    per-kind cap wedged full of stale machine entries can be freed."""
+    from core.adaptive import AdaptiveError, delete_entry
+
+    try:
+        return await _asyncio.to_thread(delete_entry, entry_id, "human")
+    except AdaptiveError as e:
+        raise HTTPException(404, detail=str(e)) from e
+
+
 @router.get("/api/adaptive/events")
 async def list_events(batch_id: str = "", entry_id: str = "", limit: int = 100):
     rows = await _asyncio.to_thread(
@@ -80,7 +92,11 @@ async def rollback_route(body: dict = {}):
 
 @router.post("/api/adaptive/batches/{batch_id}/dismiss")
 async def dismiss_suspect(batch_id: str):
-    """Human dismiss of a tripwire flag: suspect → applied, cleared_at set."""
+    """Human dismiss of a tripwire flag: suspect → applied, cleared_at set.
+
+    cleared_at is what makes the dismiss durable — the tripwire sweep skips
+    cleared batches, so it cannot re-flag this one on the same evidence.
+    """
     batch = await _asyncio.to_thread(db.adaptive_get_batch, batch_id)
     if batch is None:
         raise HTTPException(404, detail=f"no batch {batch_id}")

@@ -157,6 +157,13 @@ _SETTING_BOUNDS = {
     "rlm_max_concurrent_subcalls": (1, 8),
     "rlm_timeout_seconds": (60, 3600),
     "rlm_run_retention_days": (1, 365),
+    # Session kernel. kernel_idle_seconds must stay under the 1800s session
+    # reap in practice, but the hard ceiling is a day; below 60s the kernel
+    # would be reaped between tool rounds and never persist anything.
+    "kernel_idle_seconds": (60, 86_400),
+    "kernel_snapshot_max_bytes": (1_048_576, 4 * 1024 * 1024 * 1024),
+    "kernel_max_concurrent": (1, 64),
+    "large_result_bind_threshold": (1000, 10_000_000),
     "dream_hypotheses_per_cycle": (1, 20),
     "dream_validation_replays_per_day": (0, 50),
     "dream_report_interval_days": (1, 90),

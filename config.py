@@ -265,9 +265,10 @@ class Settings:
     kernel_idle_seconds: int = 1500
     kernel_snapshot_max_bytes: int = 256 * 1024 * 1024
     kernel_max_concurrent: int = 3  # live kernels across all sessions (LRU reap beyond)
-    # Tool results larger than this (chars) from binding-eligible tools are
-    # loaded into the kernel as tool_result_<n> variables with only a
-    # head/tail stub in context (prompt-as-a-variable, plan 2c).
+    # Tool results larger than this (chars) are loaded into the kernel as
+    # tool_result_<n> variables with only a head/tail stub in context
+    # (prompt-as-a-variable, plan 2c). Every tool except the small exclusion
+    # set in core/tools/executor.py qualifies.
     large_result_bind_threshold: int = 20_000
 
     # --- RLM (recursive long-input processing add-on, off by default) ---

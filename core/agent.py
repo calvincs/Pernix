@@ -941,13 +941,12 @@ async def run_agent(
                 await asyncio.sleep(wait)
                 continue
 
+            # A different model is a viable fallback even on the same provider
+            # (model-specific failures, per-model rate buckets). Requiring a
+            # different provider meant an Ollama-primary/Ollama-fallback
+            # config silently had no failover at all.
             fallback = settings.fallback_model
-            if (
-                fallback
-                and not _tried_fallback
-                and fallback != _stream_current_model
-                and client.resolve_provider(_stream_current_model) != client.resolve_provider(fallback)
-            ):
+            if fallback and not _tried_fallback and fallback != _stream_current_model:
                 _tried_fallback = True
                 _stream_retries = 0
                 _stream_current_model = fallback
@@ -1653,8 +1652,13 @@ async def run_agent(
 
         final_content = ""
         _final_retries = 0
-        _final_tried_fallback = False
-        _final_model = effective_model
+        # Honor the tool loop's sticky failover: once a turn has failed over,
+        # re-attempting the known-bad primary for the final response just
+        # burns the backoff ladder again before landing on the same fallback.
+        _final_tried_fallback = _tried_fallback and settings.fallback_model != ""
+        _final_model = (
+            settings.fallback_model if _final_tried_fallback and settings.fallback_model else effective_model
+        )
         while True:  # final response retry loop
             final_content = ""
             _final_err: str | None = None
@@ -1708,13 +1712,10 @@ async def run_agent(
                 await asyncio.sleep(wait)
                 continue
 
+            # Same-provider different-model fallback is allowed here for the
+            # same reason as the tool loop (see above).
             fallback = settings.fallback_model
-            if (
-                fallback
-                and not _final_tried_fallback
-                and fallback != _final_model
-                and client.resolve_provider(_final_model) != client.resolve_provider(fallback)
-            ):
+            if fallback and not _final_tried_fallback and fallback != _final_model:
                 _final_tried_fallback = True
                 _final_retries = 0
                 _final_model = fallback

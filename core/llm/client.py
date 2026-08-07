@@ -7,7 +7,7 @@ from typing import AsyncGenerator
 
 from config import settings
 from core.llm.router import ProviderRouter
-from core.llm.semaphore import PRIORITY_BACKGROUND
+from core.llm.semaphore import PRIORITY_BACKGROUND, PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
 from core.llm.types import ChatResponse, HealthStatus, ModelInfo, StreamEvent
 
 logger = logging.getLogger("pernix.llm.client")
@@ -122,6 +122,33 @@ def reset_session_budget(session_id: str) -> None:
     router = _get_router()
     for sem in _all_semaphores(router):
         sem.reset_session_budget(session_id)
+
+
+def sched_identity(session_id: str) -> tuple[float, int]:
+    """Scheduling identity for in-band calls made on behalf of a live session.
+
+    Compaction and reflect block the turn that awaits them, so they must queue
+    with the session's own FIFO position and priority. Acquiring with the
+    defaults (created_at=inf, PRIORITY_BACKGROUND) sorts them behind every
+    other session in the fair queue — a priority inversion in the hot path.
+    """
+    created_at = float("inf")
+    priority = PRIORITY_BACKGROUND
+    try:
+        from db import models as db
+
+        row = db.get_session(session_id) or {}
+        from datetime import datetime as _dt
+
+        created_at = _dt.fromisoformat(row.get("created_at", "").replace("Z", "+00:00")).timestamp()
+        stype = row.get("session_type", "")
+        if stype == "worker":
+            priority = PRIORITY_WORKER
+        elif stype in ("normal", "cron"):
+            priority = PRIORITY_ORCHESTRATOR
+    except Exception:
+        pass
+    return created_at, priority
 
 
 class LLMClient:

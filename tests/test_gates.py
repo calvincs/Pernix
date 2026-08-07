@@ -121,7 +121,7 @@ class _StubClient:
     def __init__(self, verdict="pass"):
         self._verdict = verdict
 
-    async def chat(self, messages=None, model="", max_tokens=0):
+    async def chat(self, messages=None, model="", max_tokens=0, **kwargs):
         return SimpleNamespace(
             content=json.dumps(
                 {

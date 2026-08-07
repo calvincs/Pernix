@@ -427,17 +427,32 @@ async def execute_tool_round(
     return final
 
 
-# Tools whose oversized results are worth binding into the session kernel
-# (prompt-as-a-variable, plan 2c). Deliberately read-shaped tools only:
-# their payloads are DATA the model wants to slice, not status output.
-_BINDING_ELIGIBLE = frozenset({"file_read", "http_get", "browse_web", "session_read"})
+# Binding (prompt-as-a-variable, plan 2c) applies to ANY tool's oversized
+# result except the few where it is pointless or harmful. An exclusion set,
+# not an allowlist: a big payload is a big payload whatever produced it, and
+# tools added later get binding by default instead of silently missing it.
+#
+#   repl          — output is already kernel-side; binding it would copy the
+#                   kernel's own print back into the kernel.
+#   rlm_process   — returns a synthesized answer over source material, not the
+#                   material; there is nothing to slice.
+#   ask_user / notify_* — conversational turns, never data to slice.
+_BINDING_EXCLUDED = frozenset(
+    {
+        "repl",
+        "rlm_process",
+        "ask_user",
+        "notify_user",
+        "notify_parent",
+    }
+)
 
 _BIND_HEAD_CHARS = 2_000
 _BIND_TAIL_CHARS = 800
 
 
 async def _bind_large_results(tool_calls: list[dict], results: list[ToolExecutionResult], context: dict | None) -> None:
-    """Post-pass: oversized results from binding-eligible tools are loaded
+    """Post-pass: oversized results from any non-excluded tool are loaded
     into the session kernel as tool_result_<n> variables, spilled to a
     durable sidecar file (the transcript stays reconstructible — this is a
     view transform with a durable copy, not a discard), and replaced
@@ -455,29 +470,35 @@ async def _bind_large_results(tool_calls: list[dict], results: list[ToolExecutio
         return
 
     for tc, res in zip(tool_calls, results):
-        if tc.get("name") not in _BINDING_ELIGIBLE or res.was_error:
+        if tc.get("name") in _BINDING_EXCLUDED or res.was_error:
             continue
         content = res.content or ""
         if len(content) <= threshold:
             continue
         try:
-            from core.kernel import get_kernel_registry
+            # The WHOLE sequence runs off the loop. get_or_create can trip an
+            # LRU eviction whose shutdown snapshot is up to SNAPSHOT_TIMEOUT
+            # (300s) of blocking dill IO, and next_bind_ordinal scans the
+            # payloads dir — neither may run on the event loop.
+            def _spill_and_bind(sid=session_id, c=content):
+                from core.kernel import get_kernel_registry
 
-            kernel = get_kernel_registry().get_or_create(session_id)
-            ordinal = kernel.next_bind_ordinal()
-            var = f"tool_result_{ordinal}"
-            payload_path = kernel.payloads_dir / f"{var}.txt"
-
-            def _spill_and_bind(k=kernel, v=var, p=payload_path, c=content):
+                k = get_kernel_registry().get_or_create(sid)
+                v = f"tool_result_{k.next_bind_ordinal()}"
+                p = k.payloads_dir / f"{v}.txt"
                 k.payloads_dir.mkdir(parents=True, exist_ok=True)
                 p.write_text(c, encoding="utf-8")
                 k.bind_variable(v, c)
+                return v, p
 
-            await asyncio.to_thread(_spill_and_bind)
+            var, payload_path = await asyncio.to_thread(_spill_and_bind)
         except Exception as e:
             logger.warning("Result binding failed for %s: %s", tc.get("name"), e)
             continue
 
+        # A result that a tool already truncated is a preview over its own
+        # disk spill, not the whole payload — don't call the bound copy "full".
+        label = "result preview" if (res.metadata or {}).get("truncated") else "full result"
         res.metadata = {
             **(res.metadata or {}),
             "bound_var": var,
@@ -488,7 +509,7 @@ async def _bind_large_results(tool_calls: list[dict], results: list[ToolExecutio
             f"{content[:_BIND_HEAD_CHARS]}\n"
             f"… [{len(content):,} chars total — middle omitted] …\n"
             f"{content[-_BIND_TAIL_CHARS:]}\n"
-            f"[full result bound as `{var}` in the session kernel (durable copy: "
+            f"[{label} bound as `{var}` in the session kernel (durable copy: "
             f"{payload_path}). Slice/search it with the repl tool instead of re-reading, "
             f'e.g. repl(code="print({var}[:1000])").]'
         )

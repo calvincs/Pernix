@@ -114,6 +114,49 @@ def test_dead_child_respawns_with_revival():
         k.shutdown(snapshot=False)
 
 
+def test_spawn_failure_surfaces_as_kernel_error(monkeypatch):
+    """repl_tool only catches KernelError. A start() failure raising
+    RLMChildDied straight through would escape that handler and surface as a
+    raw tool error instead of the "kernel will restart" path."""
+    from core.extensions.rlm.child_env import ChildREPL
+    from core.extensions.rlm.types import RLMChildDied
+
+    def _boom(self):
+        raise RLMChildDied("child REPL failed to start: simulated")
+
+    monkeypatch.setattr(ChildREPL, "start", _boom)
+    k = _mk("sess-nostart")
+    with pytest.raises(kernel_mod.KernelError) as excinfo:
+        k.execute("x = 1", timeout=30)
+    assert isinstance(excinfo.value.__cause__, RLMChildDied)  # cause preserved
+    assert k._repl is None  # no half-built kernel left behind
+
+
+def test_busy_lock_is_reported_not_reaped():
+    """A driver that can't get the round-trip lock reports busy; the kernel is
+    alive and working, so it must not be cleaned up."""
+    from core.extensions.rlm.child_env import ChildBusy
+
+    k = _mk("sess-busy")
+    try:
+        k.execute("x = 1", timeout=30)
+
+        def _busy(what, timeout=None):
+            raise ChildBusy(f"child REPL busy: {what}")
+
+        k._repl._acquire_rt = _busy  # instance attr shadows the method
+        with pytest.raises(kernel_mod.KernelError) as excinfo:
+            k.execute("print(x)", timeout=30)
+        assert "busy" in str(excinfo.value)
+        del k._repl._acquire_rt
+
+        assert k.alive  # not torn down
+        result, note = k.execute("print(x)", timeout=30)
+        assert note is None and "1" in result.stdout  # same kernel, namespace intact
+    finally:
+        k.shutdown(snapshot=False)
+
+
 def test_bind_variable():
     k = _mk("sess-bind")
     try:

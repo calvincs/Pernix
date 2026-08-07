@@ -208,7 +208,7 @@ The long-running-autonomy substrate: deterministic gates Reflect cannot overrule
 | `kernel_idle_seconds` | `1500` | Idle seconds before a kernel is snapshotted and reaped. Deliberately below the 1800 s session reap so a kernel never outlives its session as an orphan process. |
 | `kernel_snapshot_max_bytes` | `268435456` | Cap (256 MB) on a kernel's dill snapshot; oversized namespaces skip the offending variables and report them. |
 | `kernel_max_concurrent` | `3` | Live kernels across all sessions; beyond the cap the least-recently-used idle kernel is snapshotted and reaped. |
-| `large_result_bind_threshold` | `20000` | Tool results larger than this (chars) from binding-eligible tools are loaded into the kernel as `tool_result_<n>` variables, with only a head/tail stub in context. |
+| `large_result_bind_threshold` | `20000` | Tool results larger than this (chars) are loaded into the kernel as `tool_result_<n>` variables, with only a head/tail stub in context. Applies to every tool except `repl`, `rlm_process`, and the conversational ones. |
 
 ---
 

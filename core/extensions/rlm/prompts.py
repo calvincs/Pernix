@@ -14,7 +14,7 @@ You can iteratively interact with the Python REPL, which has access to LLM calls
 
 To use the REPL, you need to write code in ```repl``` blocks; the REPL persists across turns. Available in the REPL:
 - `context`: the important, potentially very long information related to the prompt (`str`, or `list[str]` with one element per source file — see `context_files` for their names).
-- `llm_query(prompt: str, model: str | None = None) -> str`: a single sub-LLM completion. Use for extraction, summarization, or Q&A over a chunk of text. Sub-LLM context window ≈ 500K chars.
+- `llm_query(prompt: str, model: str | None = None) -> str`: a single sub-LLM completion. Use for extraction, summarization, or Q&A over a chunk of text. A sub-call's input is bounded by the sub model's context window; keep each prompt to ~100K characters.
 - `llm_query_batched(prompts: list[str], model=None) -> list[str]`: concurrently call several LLM calls in parallel over a list of prompts; same order out as in.
 - `rlm_query(prompt, model=None)` / `rlm_query_batched(prompts, model=None)`: recursive RLM sub-calls. Fall back to `llm_query` / `llm_query_batched` when recursion is disabled.
 - `SHOW_VARS() -> str`: list every variable currently in the REPL.
@@ -30,65 +30,76 @@ Plan in prose, then execute one ```repl``` block every turn, get feedback from t
 """
 )
 
-ORCHESTRATOR_ADDENDUM = "\n\n".join(
-    [
-        "As an RLM, you should act as an orchestrator, not a solver.",
-        (
-            "Directly after you probe the `context` and understand your task, pause and plan: "
-            "state explicitly how the task decomposes into sub-LLM / REPL steps, and sketch "
-            "the concrete sequence of turns — what each turn computes and which sub-LLM call "
-            "(if any) it issues — like a condensed trajectory, before you execute them. "
-            "Then execute one turn at a time: after each step `print` a small sample of the "
-            'result, verify it looks right, and only flip `answer["ready"] = True` once you '
-            "have actually printed the candidate answer. If you are running out of turns "
-            "without a confirmed answer, submit your best inference rather than letting the "
-            "rollout terminate unsubmitted."
-        ),
-        (
-            "Your own context window is small. Push every long-context operation that would "
-            "not fit comfortably in your own working window — reading, summarizing, "
-            "classifying, verifying, answering sub-questions, even recapping your own "
-            "progress — into `llm_query` / `llm_query_batched` calls instead of pulling that "
-            "text into your own message stream. (Conversely: if a Python keyword / regex "
-            "search over `context` would already pin the answer, or if a single visible "
-            "passage already contains it, just read it directly — sub-LMs are for when the "
-            "raw text won't fit or the question needs semantic interpretation.) Long REPL "
-            "stdout pollutes history the same way raw `context` does: if you want a recap, "
-            "ask `llm_query` for a 1–2 sentence summary and `print` only that. Aggregate "
-            "the small results back in the REPL."
-        ),
-        (
-            "Sub-LLMs have no REPL; they only see the prompt and the `context` slice you pass "
-            "them. Hand them clean, focused inputs and ask for terse, structured outputs you "
-            "can manipulate programmatically."
-        ),
-        (
-            "Sub-call budget is finite on two independent axes, and `llm_query_batched` only "
-            "parallelizes — it does not relax either. (1) Per-prompt capacity: a single "
-            "sub-call answers well only when its input stays modestly sized — a useful rough "
-            "ceiling is ~100K characters per prompt, less when the text is dense. Pack each "
-            "prompt close to that capacity (a chunk of many items, a whole document) so one "
-            "call accomplishes a lot of work. (2) Per-batch fan-out: `llm_query_batched` "
-            "concurrency is bounded too — a useful rough ceiling is ~20 prompts per batch. "
-            "Tiny-prompt mega-batches (hundreds or thousands of single-item prompts) are the "
-            "anti-pattern; fat-prompt small batches are correct. For many independent units, "
-            "use several ~20-wide batches of full-capacity prompts in sequence, not one "
-            "mega-batch of tiny prompts. When the work can be expressed either as a "
-            "sequential loop of `llm_query`s or as one comparably-sized batched call, "
-            "prefer batched — same total work, far fewer turns burned. After Python-side "
-            "filtering has narrowed the candidate set, batch-extract the survivors rather "
-            "than reading them by hand. If the raw workload exceeds both budgets at once "
-            "(e.g. a context far larger than ~20 × 100K chars), don't brute-force it: "
-            "filter aggressively in Python first to a tractable subset, or stage the task — "
-            "a cheap coarse pass narrows candidates, then a targeted second pass extracts "
-            "from the survivors."
-        ),
-        (
-            "Reserve your own tokens for high-level decisions: what to ask next, how to combine "
-            "sub-LM outputs, when to finalize. Delegate everything else."
-        ),
-    ]
-)
+DEFAULT_MAX_CONCURRENT_SUBCALLS = 3
+
+
+def build_orchestrator_addendum(max_concurrent_subcalls: int = DEFAULT_MAX_CONCURRENT_SUBCALLS) -> str:
+    """Orchestration guidance, parameterized by the run's real concurrency cap
+    (settings.rlm_max_concurrent_subcalls) so the fan-out advice matches what
+    the broker will actually do with a batch."""
+    concurrency = max(1, int(max_concurrent_subcalls))
+    return "\n\n".join(
+        [
+            "As an RLM, you should act as an orchestrator, not a solver.",
+            (
+                "Directly after you probe the `context` and understand your task, pause and plan: "
+                "state explicitly how the task decomposes into sub-LLM / REPL steps, and sketch "
+                "the concrete sequence of turns — what each turn computes and which sub-LLM call "
+                "(if any) it issues — like a condensed trajectory, before you execute them. "
+                "Then execute one turn at a time: after each step `print` a small sample of the "
+                'result, verify it looks right, and only flip `answer["ready"] = True` once you '
+                "have actually printed the candidate answer. If you are running out of turns "
+                "without a confirmed answer, submit your best inference rather than letting the "
+                "rollout terminate unsubmitted."
+            ),
+            (
+                "Your own context window is small. Push every long-context operation that would "
+                "not fit comfortably in your own working window — reading, summarizing, "
+                "classifying, verifying, answering sub-questions, even recapping your own "
+                "progress — into `llm_query` / `llm_query_batched` calls instead of pulling that "
+                "text into your own message stream. (Conversely: if a Python keyword / regex "
+                "search over `context` would already pin the answer, or if a single visible "
+                "passage already contains it, just read it directly — sub-LMs are for when the "
+                "raw text won't fit or the question needs semantic interpretation.) Long REPL "
+                "stdout pollutes history the same way raw `context` does: if you want a recap, "
+                "ask `llm_query` for a 1–2 sentence summary and `print` only that. Aggregate "
+                "the small results back in the REPL."
+            ),
+            (
+                "Sub-LLMs have no REPL; they only see the prompt and the `context` slice you pass "
+                "them. Hand them clean, focused inputs and ask for terse, structured outputs you "
+                "can manipulate programmatically."
+            ),
+            (
+                "Sub-call budget is finite on two independent axes, and `llm_query_batched` only "
+                "parallelizes — it does not relax either. (1) Per-prompt capacity: a single "
+                "sub-call answers well only when its input stays modestly sized — a useful rough "
+                "ceiling is ~100K characters per prompt, less when the text is dense. Pack each "
+                "prompt close to that capacity (a chunk of many items, a whole document) so one "
+                "call accomplishes a lot of work. (2) Per-batch fan-out: `llm_query_batched` does "
+                f"NOT run your whole list at once — this run executes at most {concurrency} "
+                f"sub-call(s) concurrently, so a batch of K prompts costs about K/{concurrency} "
+                "rounds of latency. Batching still beats a Python loop (one turn instead of K), "
+                "but an enormous batch is no faster per item than a right-sized one; ~20 prompts "
+                "per batch is a sensible working ceiling. Tiny-prompt mega-batches (hundreds or "
+                "thousands of single-item prompts) are the anti-pattern; fat-prompt small batches "
+                "are correct. For many independent units, use several ~20-wide batches of "
+                "full-capacity prompts in sequence, not one mega-batch of tiny prompts. When the "
+                "work can be expressed either as a sequential loop of `llm_query`s or as one "
+                "comparably-sized batched call, prefer batched — same total work, far fewer turns "
+                "burned. After Python-side filtering has narrowed the candidate set, batch-extract "
+                "the survivors rather than reading them by hand. If the raw workload exceeds both "
+                "budgets at once (e.g. a context far larger than ~20 × 100K chars), don't "
+                "brute-force it: filter aggressively in Python first to a tractable subset, or "
+                "stage the task — a cheap coarse pass narrows candidates, then a targeted second "
+                "pass extracts from the survivors."
+            ),
+            (
+                "Reserve your own tokens for high-level decisions: what to ask next, how to combine "
+                "sub-LM outputs, when to finalize. Delegate everything else."
+            ),
+        ]
+    )
 
 
 def build_system_messages(
@@ -97,12 +108,13 @@ def build_system_messages(
     context_chars: int,
     context_files: list[str] | None = None,
     continuation: str | None = None,
+    max_concurrent_subcalls: int = DEFAULT_MAX_CONCURRENT_SUBCALLS,
 ) -> list[dict[str, str]]:
     """System prompt + metadata user message that open every run's history."""
-    system = f"{RLM_SYSTEM_PROMPT}\n\n{ORCHESTRATOR_ADDENDUM}"
+    system = f"{RLM_SYSTEM_PROMPT}\n\n{build_orchestrator_addendum(max_concurrent_subcalls)}"
     metadata = (
         f"Your context is a {context_type} of {context_chars} total characters. "
-        "Each sub-LLM call can handle roughly ~100k tokens at once."
+        "Each sub-LLM call can handle roughly ~100K characters of input at once."
     )
     if context_files:
         metadata += f" The context was staged from {len(context_files)} file(s): {', '.join(context_files[:20])}."

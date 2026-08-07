@@ -315,6 +315,118 @@ def test_tripwire_auto_rollback_when_enabled(monkeypatch):
     assert db.adaptive_get_batch(batch_id)["status"] == "rolled_back"
 
 
+def _backdate(table, created_at, where, params=()):
+    from db.database import connect_sessions
+
+    with connect_sessions() as conn:
+        conn.execute(f"UPDATE {table} SET created_at = ? WHERE {where}", (created_at, *params))
+
+
+def _post_mortem(created_at, verdict):
+    sid = db.create_session(title="tripwire-window-test")
+    pm_id = db.add_post_mortem(sid, 1, verdict, "cause", 0.9, "m", 1, None, None, "{}")
+    _backdate("post_mortems", created_at, "id = ?", (pm_id,))
+    return pm_id
+
+
+def test_tripwire_after_window_is_the_turns_right_after_the_apply(monkeypatch):
+    """The passive window must be the OLDEST turns after the apply, not the
+    newest turns overall — otherwise it drifts away from the batch."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    monkeypatch.setattr("config.settings.adaptive_tripwire_window_turns", 2)
+
+    for t in ("2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"):
+        _post_mortem(t, "pass")
+    batch_id = _apply_hint(title="drifter", content="x")
+    _backdate("adaptive_batches", "2026-01-02T00:00:00+00:00", "batch_id = ?", (batch_id,))
+    _backdate("adaptive_events", "2026-01-02T00:00:00+00:00", "batch_id = ?", (batch_id,))
+    # The two turns immediately after the apply regressed...
+    for t in ("2026-01-03T00:00:00+00:00", "2026-01-03T01:00:00+00:00"):
+        _post_mortem(t, "retry")
+    # ...and the system later recovered. Slicing the newest-first feed would
+    # score the recovery and miss the regression entirely.
+    for t in ("2026-01-09T00:00:00+00:00", "2026-01-09T01:00:00+00:00", "2026-01-09T02:00:00+00:00"):
+        _post_mortem(t, "pass")
+
+    actions = evaluate_tripwire()
+    flagged = [a for a in actions if a["action"] == "flagged" and a["batch_id"] == batch_id]
+    assert flagged and "post-mortem retry rate 100% vs 0%" in flagged[0]["detail"]
+
+
+def test_tripwire_anchors_on_apply_time_not_queue_time(monkeypatch):
+    """A batch can sit pending for days; the baseline boundary is the APPLY."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    batch_id = _apply_hint(title="late apply", content="x")
+    _backdate("adaptive_batches", "2026-01-01T00:00:00+00:00", "batch_id = ?", (batch_id,))
+    _backdate("adaptive_events", "2026-01-03T00:00:00+00:00", "batch_id = ?", (batch_id,))
+
+    # Baseline runs land BETWEEN queue and apply — only an apply-anchored
+    # boundary admits them, and without a baseline there is no signal at all.
+    for _ in range(3):
+        db.add_canary_run("t1", "scheduled", None, "[]", True)
+    _backdate("canary_runs", "2026-01-02T00:00:00+00:00", "trigger = 'scheduled'")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id)
+
+    actions = evaluate_tripwire()
+    assert any(a["action"] == "flagged" and a["batch_id"] == batch_id for a in actions)
+
+
+async def test_tripwire_dismiss_is_durable(monkeypatch):
+    """cleared_at is terminal: the sweep must not re-flag a dismissed batch."""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from api.routers import adaptive as adaptive_router
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    _seed_canary_history("ab-dismissed", baseline_pass=True, post_pass=False)
+    assert any(a["action"] == "flagged" for a in evaluate_tripwire())
+
+    app = FastAPI()
+    app.include_router(adaptive_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/adaptive/batches/ab-dismissed/dismiss")
+    assert resp.status_code == 200 and resp.json()["cleared"]
+
+    # Same evidence, next cycle — the dismiss holds instead of re-flagging.
+    assert evaluate_tripwire() == []
+    assert db.adaptive_get_batch("ab-dismissed")["status"] == "applied"
+
+
+async def test_delete_entry_endpoint_frees_the_cap(monkeypatch):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from api.routers import adaptive as adaptive_router
+    from core.adaptive.render import build_routing_hints_block
+
+    monkeypatch.setattr("config.settings.adaptive_max_entries_per_kind", 1)
+    _apply_hint(title="wedged", content="stale hint")
+    assert "stale hint" in build_routing_hints_block()
+
+    app = FastAPI()
+    app.include_router(adaptive_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.delete("/api/adaptive/entries/wedged")
+        assert resp.status_code == 200 and resp.json()["status"] == "deleted"
+        # Second delete is a 404 — the soft delete is idempotent-by-refusal.
+        assert (await client.delete("/api/adaptive/entries/wedged")).status_code == 404
+
+    assert build_routing_hints_block() == ""  # gone from the scout prompt
+    assert db.adaptive_entry_count("routing_hint") == 0  # and from the cap
+    ev = db.adaptive_list_events(entry_id="wedged")[0]
+    assert ev["action"] == "delete" and ev["actor"] == "human" and ev["before_json"]
+
+    # Cap freed: a fresh hint lands where the wedged one blocked it.
+    _apply_hint(title="successor", content="fresh hint")
+    assert db.adaptive_get_entry("successor")["status"] == "active"
+
+
 def test_tripwire_flaky_canaries_never_trip(monkeypatch):
     from core.adaptive.tripwire import evaluate_tripwire
 
@@ -357,3 +469,84 @@ async def test_adaptive_step_drains_and_enqueues_sweeps(monkeypatch):
     assert db.adaptive_get_entry("drained") is not None
     assert swept == [r["batch_id"]]
     assert any("auto-applied" in (n.get("title") or "") for n in db.get_notifications())
+
+
+async def test_adaptive_step_skips_sweep_and_notify_when_nothing_applied(monkeypatch):
+    """A fully-rejected batch changed nothing: no sweep to join, no news."""
+    from core.adaptive import queue_edits
+    from core.snooze import SnoozeRunner
+
+    monkeypatch.setattr("config.settings.canary_enabled", True)
+    monkeypatch.setattr("config.settings.adaptive_max_entries_per_kind", 0)
+    monkeypatch.setattr(
+        "sessions.manager.get_manager",
+        lambda: SimpleNamespace(has_active_work=lambda: False),
+    )
+    swept = []
+    monkeypatch.setattr(
+        "core.extensions.scheduling.enqueue_post_batch_sweep",
+        lambda bid: swept.append(bid) or True,
+    )
+    r = queue_edits(
+        [{"action": "create", "kind": "routing_hint", "title": "doomed", "content": "x", "evidence": ["e"]}],
+        "refine",
+    )
+    runner = SnoozeRunner.__new__(SnoozeRunner)
+    runner._stats = {}
+    runner._is_cancelled = lambda: False
+    await SnoozeRunner._adaptive_step(runner)
+
+    assert db.adaptive_get_batch(r["batch_id"])["status"] == "rejected"
+    assert swept == []
+    assert runner._stats.get("adaptive_batches_applied") is None
+    assert not any("auto-applied" in (n.get("title") or "") for n in db.get_notifications())
+
+
+# ---------------------------------------------------------------------------
+# Candor producer: mint AND retire
+# ---------------------------------------------------------------------------
+
+
+async def test_candor_retires_recovered_hints(monkeypatch):
+    """Candor must release cap slots it took, or it wedges routing_hint."""
+    from core.adaptive import apply_batch
+    from core.snooze import SnoozeRunner
+
+    degraded = [{"tool": "http_get", "p": 0.41, "n": 30}]
+
+    class _Bridge:
+        async def run_maintenance(self, cancelled):
+            return {}
+
+        async def degraded_tools(self):
+            return list(degraded)
+
+    monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: _Bridge())
+    runner = SnoozeRunner.__new__(SnoozeRunner)
+    runner._is_cancelled = lambda: False
+
+    async def _pass():
+        await SnoozeRunner._candor_maintenance(runner)
+        pending = db.adaptive_list_batches(status="pending")
+        return apply_batch(pending[0]["batch_id"], actor="user") if pending else None
+
+    assert (await _pass())["applied"] == ["tool-http_get-degraded"]
+    assert db.adaptive_entry_count("routing_hint") == 1
+
+    # Still degraded → the live hint dedupes, nothing new is queued.
+    await SnoozeRunner._candor_maintenance(runner)
+    assert db.adaptive_list_batches(status="pending") == []
+
+    # Reliability recovers → the tool drops out of the degraded set and its
+    # hint is retired, freeing the slot. Same-producer delete stays low-risk,
+    # so it rides an auto batch rather than a human-review proposal.
+    degraded.clear()
+    assert (await _pass())["applied"] == ["tool-http_get-degraded"]
+    assert db.adaptive_get_entry("tool-http_get-degraded")["status"] == "deleted"
+    assert db.adaptive_entry_count("routing_hint") == 0
+    assert db.adaptive_list_proposals(status="pending") == []
+
+    # A retired hint must be able to come back if the tool degrades again.
+    degraded.append({"tool": "http_get", "p": 0.3, "n": 40})
+    assert (await _pass())["applied"] == ["tool-http_get-degraded"]
+    assert db.adaptive_get_entry("tool-http_get-degraded")["status"] == "active"

@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import settings
-from core.extensions.rlm.child_env import ChildREPL
+from core.extensions.rlm.child_env import ChildBusy, ChildREPL
 from core.extensions.rlm.types import CellResult
 
 logger = logging.getLogger("pernix.kernel")
@@ -171,7 +171,15 @@ class SessionKernel:
         """Run one cell. Soft aborts on cancel/deadline (SIGINT, namespace
         preserved); a dead child surfaces as KernelError and the next call
         respawns (reviving from the last snapshot, if any)."""
-        note = self.ensure_started()
+        try:
+            note = self.ensure_started()
+        except Exception as e:
+            # Spawn/restore failure (RLMChildDied from repl.start(), venv or
+            # socket trouble). It must surface as KernelError: the repl tool
+            # only catches that, and anything else escapes as a raw tool
+            # error instead of the "kernel will restart" path.
+            self._repl = None
+            raise KernelError(f"kernel failed to start: {e}") from e
         self.last_used = time.monotonic()
         repl = self._repl
         try:
@@ -181,6 +189,10 @@ class SessionKernel:
                 cancel_check=cancel_check,
                 soft_abort=True,
             )
+        except ChildBusy as e:
+            # Another driver (snapshot/bind) held the round-trip lock past its
+            # wait budget. The child is alive and working — report, never reap.
+            raise KernelError(f"kernel busy: {e}") from e
         except Exception as e:
             # RLMChildDied / RLMTimeout after failed interrupt / connection
             # loss — the process is gone or unusable. Drop it; next call

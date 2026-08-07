@@ -131,8 +131,11 @@ async def distill_session(
         if not content:
             continue
 
-        # Dedup check (multi-signal: BM25 top-3 + SequenceMatcher + Jaccard)
-        if store.is_duplicate(content):
+        # Dedup check (multi-signal: BM25 top-3 + SequenceMatcher + Jaccard).
+        # Threaded: with an embedding model set, is_duplicate runs a hybrid
+        # search whose query embedding is a blocking HTTP call — this hook
+        # runs on the event loop at turn end.
+        if await asyncio.to_thread(store.is_duplicate, content):
             skipped_dup += 1
             continue
 

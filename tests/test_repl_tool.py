@@ -108,6 +108,12 @@ def bind_registry():
         description="fake bash",
         parameters={"type": "object", "properties": {}},
     )
+    reg.register(
+        name="rlm_process",
+        func=lambda query="": payload,
+        description="fake rlm",
+        parameters={"type": "object", "properties": {}},
+    )
     return reg, payload
 
 
@@ -132,13 +138,28 @@ def test_large_eligible_result_is_bound(monkeypatch, bind_registry):
     assert str(len(payload)) in out and "DATA-" in out
 
 
-def test_binding_skips_ineligible_small_and_disabled(monkeypatch, bind_registry):
+def test_binding_covers_any_tool_not_excluded(monkeypatch, bind_registry):
+    """Binding is an exclusion list, not a 4-tool allowlist: a big bash dump
+    is data the model wants to slice exactly like a big file_read."""
+    reg, payload = bind_registry
+    monkeypatch.setattr("config.settings.large_result_bind_threshold", 100)
+    ctx = {"session_id": "bind-bash"}
+
+    r = _round(reg, [{"name": "bash", "arguments": {"command": "x"}}], ctx)[0]
+    assert r.metadata["bound_var"] == "tool_result_1"
+    assert "bound as `tool_result_1`" in r.content
+    assert r.metadata["orig_chars"] == len(payload)
+    out = repl("print(len(tool_result_1))", _context=ctx)
+    assert str(len(payload)) in out
+
+
+def test_binding_skips_excluded_small_and_disabled(monkeypatch, bind_registry):
     reg, payload = bind_registry
     monkeypatch.setattr("config.settings.large_result_bind_threshold", 100)
     ctx = {"session_id": "bind-2"}
 
-    # Ineligible tool: full content untouched.
-    results = _round(reg, [{"name": "bash", "arguments": {"command": "x"}}], ctx)
+    # Excluded tool (its answer is synthesized, not source data): untouched.
+    results = _round(reg, [{"name": "rlm_process", "arguments": {"query": "x"}}], ctx)
     assert results[0].content == payload
 
     # Below threshold: untouched.
@@ -167,3 +188,34 @@ def test_bind_ordinals_increment_and_survive_restart(monkeypatch, bind_registry)
     # sidecar files, so restarts never reuse a cited ordinal.
     fresh = SessionKernel("bind-3")
     assert fresh.next_bind_ordinal() == 3
+
+
+def test_bound_payload_path_is_actually_readable(monkeypatch, bind_registry):
+    """The stub advertises the sidecar path to the model. data/kernels/ is
+    outside the workspace, so without it as a read root every one of those
+    pointers is dead on arrival — file_read refuses the path it was told to
+    use."""
+    from core.tools.builtin.core_tools import file_read
+    from core.tools.paths import safe_read_path
+
+    reg, payload = bind_registry
+    monkeypatch.setattr("config.settings.large_result_bind_threshold", 100)
+    ctx = {"session_id": "bind-path"}
+
+    r = _round(reg, [{"name": "file_read", "arguments": {}}], ctx)[0]
+    advertised = r.metadata["payload_path"]
+    assert advertised in r.content  # the model is shown this exact path
+
+    assert safe_read_path(advertised).read_text() == payload
+    out = file_read(advertised)
+    assert "DATA-" in out and not out.startswith("Error:")
+
+
+def test_kernel_payload_root_absent_when_kernel_disabled(monkeypatch):
+    from core.tools.paths import allowed_read_roots, kernel_state_root
+
+    monkeypatch.setattr("config.settings.session_kernel_enabled", False)
+    assert kernel_state_root() is None
+    monkeypatch.setattr("config.settings.session_kernel_enabled", True)
+    root = kernel_state_root()
+    assert root is not None and root in allowed_read_roots()

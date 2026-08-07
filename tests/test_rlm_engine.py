@@ -7,13 +7,14 @@ persistence, and kill discipline are exercised for real.
 
 import socket
 import struct
+import threading
 import time
 
 import pytest
 
 from core.extensions.rlm import child_env as child_env_mod
 from core.extensions.rlm import protocol
-from core.extensions.rlm.broker import LLMBroker, SubcallLedger
+from core.extensions.rlm.broker import LLMBroker, SubcallLedger, SubcallLimiter
 from core.extensions.rlm.child_env import ChildREPL, stage_context
 from core.extensions.rlm.engine import RLMEngine
 from core.extensions.rlm.parsing import MAX_CELL_OUTPUT_CHARS, find_code_blocks, format_iteration
@@ -301,6 +302,201 @@ def test_rlm_query_falls_back_to_llm(brokered_child):
 
 
 # =============================================================================
+# broker: shared concurrency limiter / budget fairness / error paths
+# =============================================================================
+
+
+class _ConcurrencyProbe:
+    """sub_chat fake that records the peak number of simultaneous callers."""
+
+    def __init__(self, hold: float = 0.05):
+        self.hold = hold
+        self._lock = threading.Lock()
+        self.live = 0
+        self.peak = 0
+
+    def __call__(self, prompt, model, timeout):
+        with self._lock:
+            self.live += 1
+            self.peak = max(self.peak, self.live)
+        try:
+            time.sleep(self.hold)
+            return f"echo:{prompt}"
+        finally:
+            with self._lock:
+                self.live -= 1
+
+
+def _bare_broker(tmp_path, name, *, sub_chat, caps, limiter=None, ledger=None, **kw):
+    """A broker with no child attached — dispatch() is driven directly."""
+    return LLMBroker(
+        tmp_path / f"{name}.sock",
+        sub_chat=sub_chat,
+        caps=caps,
+        ledger=ledger if ledger is not None else SubcallLedger(1000),
+        limiter=limiter,
+        **kw,
+    )
+
+
+def test_shared_limiter_bounds_concurrency_across_depths(tmp_path):
+    """Regression (P1e): every nested engine used to mint its own semaphore, so
+    peak in-flight sub-calls was max_concurrent ** depth. One shared limiter
+    passed down keeps the run-wide total at max_concurrent."""
+    probe = _ConcurrencyProbe()
+    caps = RLMCaps(max_subcalls=1000, max_concurrent_subcalls=2)
+    limiter = SubcallLimiter(caps.max_concurrent_subcalls)
+    ledger = SubcallLedger(1000)
+    brokers = [
+        _bare_broker(tmp_path, f"d{d}", sub_chat=probe, caps=caps, limiter=limiter, ledger=ledger) for d in range(3)
+    ]
+    try:
+        threads = [
+            threading.Thread(
+                target=b.dispatch,
+                args=({"type": "llm_batched", "prompts": [f"d{i}-p{j}" for j in range(6)]},),
+            )
+            for i, b in enumerate(brokers)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        assert not any(t.is_alive() for t in threads)
+        assert probe.peak <= caps.max_concurrent_subcalls
+        assert ledger.count == 18
+    finally:
+        for b in brokers:
+            b.stop()
+
+
+def test_recursion_wrapper_holds_no_concurrency_slot(tmp_path):
+    """A nested rlm_query must not pin a parent slot for its whole run — the
+    nested engine's own sub-calls draw on the same shared limiter, so holding
+    one would deadlock (or at best starve) the recursion."""
+    caps = RLMCaps(max_subcalls=1000, max_concurrent_subcalls=1)
+    limiter = SubcallLimiter(1)
+    ledger = SubcallLedger(1000)
+    parent = _bare_broker(tmp_path, "parent", sub_chat=_echo_sub_chat, caps=caps, limiter=limiter, ledger=ledger)
+    nested = _bare_broker(tmp_path, "nested", sub_chat=_echo_sub_chat, caps=caps, limiter=limiter, ledger=ledger)
+
+    def rlm_fn(prompt, model):
+        # Stands in for a nested engine: it issues a leaf sub-call, which needs
+        # the single shared slot the wrapper must not be holding.
+        return nested.dispatch({"type": "llm", "prompt": f"nested({prompt})"})["response"]
+
+    parent._rlm_fn = rlm_fn
+    try:
+        done = []
+        t = threading.Thread(target=lambda: done.append(parent.dispatch({"type": "rlm", "prompt": "go"})))
+        t.start()
+        t.join(timeout=15)
+        assert not t.is_alive(), "recursion wrapper deadlocked on the shared limiter"
+        assert done[0] == {"ok": True, "response": "echo:nested(go)"}
+        # the rlm_query and its leaf sub-call each debit once
+        assert ledger.count == 2
+    finally:
+        parent.stop()
+        nested.stop()
+
+
+def test_call_one_base_exception_does_not_mask_original(tmp_path):
+    """Regression (P1e): ok/detail were bound only in the try/except-Exception
+    paths, so a BaseException made the finally block raise NameError over the
+    real error."""
+    traced: list[dict] = []
+
+    def exploding(prompt, model, timeout):
+        raise KeyboardInterrupt("ctrl-c mid sub-call")
+
+    broker = _bare_broker(
+        tmp_path,
+        "boom",
+        sub_chat=exploding,
+        caps=RLMCaps(max_subcalls=5, max_concurrent_subcalls=2),
+        trace_fn=traced.append,
+    )
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            broker._call_one(broker._sub_chat, "p", None)
+    finally:
+        broker.stop()
+    assert traced and traced[0]["ok"] is False
+    assert traced[0]["error"]  # a real detail string, not an unbound-name crash
+    assert broker.in_flight() == 0
+
+
+def test_transport_error_refunds_subcall_budget(tmp_path):
+    """A call that never reached the model must not burn sub-call budget;
+    a model-side failure must."""
+    import httpx
+
+    calls = {"n": 0}
+
+    def flaky(prompt, model, timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("connection refused")
+        if calls["n"] == 2:
+            raise RuntimeError("model returned garbage")
+        return f"echo:{prompt}"
+
+    ledger = SubcallLedger(3)
+    broker = _bare_broker(
+        tmp_path,
+        "flaky",
+        sub_chat=flaky,
+        caps=RLMCaps(max_subcalls=3, max_concurrent_subcalls=2),
+        ledger=ledger,
+    )
+    try:
+        r1 = broker.dispatch({"type": "llm", "prompt": "a"})
+        assert r1["ok"] is False and "connection refused" in r1["error"]
+        assert ledger.count == 0, "transport failure should be refunded"
+
+        r2 = broker.dispatch({"type": "llm", "prompt": "b"})
+        assert r2["ok"] is False and "model returned garbage" in r2["error"]
+        assert ledger.count == 1, "model-side failure keeps its debit"
+
+        assert broker.dispatch({"type": "llm", "prompt": "c"})["ok"] is True
+        assert ledger.count == 2
+    finally:
+        broker.stop()
+
+
+def test_expired_deadline_does_not_debit(tmp_path):
+    """Pre-flight rejections never touch the model, so they must not spend
+    sub-call budget (the debit used to precede the deadline check)."""
+    ledger = SubcallLedger(5)
+    broker = _bare_broker(
+        tmp_path,
+        "expired",
+        sub_chat=_echo_sub_chat,
+        caps=RLMCaps(max_subcalls=5, max_concurrent_subcalls=2),
+        ledger=ledger,
+        deadline=time.monotonic() - 1.0,
+    )
+    try:
+        r = broker.dispatch({"type": "llm", "prompt": "x"})
+        assert r["ok"] is False and "wall clock expired" in r["error"]
+        assert ledger.count == 0
+    finally:
+        broker.stop()
+
+
+def test_engine_recursion_gated_by_caps_max_depth(tmp_path):
+    """caps.max_depth is now wired: past the deepest allowed level the engine
+    drops rlm_fn and rlm_query degrades to a plain llm_query."""
+    root = ScriptedRoot(["```repl\nres = rlm_query('deep')\nanswer['content'] = res\nanswer['ready'] = True\n```"])
+    caps = RLMCaps(max_iterations=3, timeout_seconds=60, max_depth=1)
+    engine = _make_engine(tmp_path, root_chat=root, caps=caps)
+    engine.rlm_fn = lambda prompt, model: "NESTED-SHOULD-NOT-RUN"
+    assert engine._recursion_allowed() is False
+    result = engine.run()
+    assert result.answer == "echo:deep"
+
+
+# =============================================================================
 # engine end-to-end (scripted root, real child)
 # =============================================================================
 
@@ -497,7 +693,8 @@ def test_engine_recursion_nested_run(tmp_path):
             "```repl\nanswer['content'] = 'ROOT got ' + res\nanswer['ready'] = True\n```",
         ]
     )
-    engine = _make_engine(tmp_path, root_chat=root)
+    # max_depth=2: the root (depth 0) may spawn one nested level.
+    engine = _make_engine(tmp_path, root_chat=root, caps=RLMCaps(max_iterations=5, timeout_seconds=60, max_depth=2))
 
     def rlm_fn(prompt, model):
         sub_dir = engine.run_dir / "sub" / "s1"
@@ -534,7 +731,7 @@ def test_engine_nested_failure_degrades_to_error_string(tmp_path):
             "```repl\nanswer['content'] = 'root survived: ' + res\nanswer['ready'] = True\n```",
         ]
     )
-    engine = _make_engine(tmp_path, root_chat=root)
+    engine = _make_engine(tmp_path, root_chat=root, caps=RLMCaps(max_iterations=5, timeout_seconds=60, max_depth=2))
     engine.rlm_fn = lambda prompt, model: (_ for _ in ()).throw(RuntimeError("nested exploded"))
     result = engine.run()
     # broker converts the exception to an inline error; the root recovers

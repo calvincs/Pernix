@@ -11,7 +11,10 @@ Escalation ladder: L1 log + immediate ordo re-rank -> L2 (persists two
 windows) freeze the subgoal pending re-justification -> L3 operator
 escalation. The 0.35 threshold will false-positive during legitimate deep
 pushes; L1 is deliberately just "log + ordo" so a justified push survives
-one re-ranking with its budget intact (spec §8).
+one re-ranking with its budget intact (spec §8). A frozen subgoal stays under
+observation: the freeze is a hold pending re-justification, so the monitor
+keeps re-checking it — the alarm either clears (and the freeze lifts) or
+climbs to L3.
 
 Mechanical — no LLM.
 """
@@ -101,10 +104,26 @@ def _split_epoch(events: list[dict]) -> int:
     return (min(epochs) + max(epochs)) // 2
 
 
+def _monitored_goals(store: TelosStore) -> list[TelosObject]:
+    """Active goals, plus any goal this monitor froze at L2 that still has a
+    live alarm. The freeze is a hold, not a verdict: a frozen subgoal must
+    stay under observation so its alarm can either clear (un-freeze) or climb
+    to L3. Without this, L2 is a terminal state nothing ever revisits."""
+    out = []
+    for g in store.list_goals():
+        if g.id == "g_root":
+            continue
+        state = g.get("state")
+        if state == "active":
+            out.append(g)
+        elif state == "suspended" and _live_binding_alarm(store, g.id) is not None:
+            out.append(g)
+    return out
+
+
 def run_binding_monitor(store: TelosStore) -> dict:
     result = {"checked": 0, "alarms": []}
-    goals = [g for g in store.list_goals() if g.id != "g_root" and g.get("state") == "active"]
-    for g in goals:
+    for g in _monitored_goals(store):
         result["checked"] += 1
         sig = _window_signals(store, g.id)
         bound = (
@@ -113,11 +132,16 @@ def run_binding_monitor(store: TelosStore) -> dict:
             and not sig["entropy_reduced"]
             and sig["claims_in_window"] < settings.telos_claims_floor_per_window
         )
-        prior = _open_binding_alarm(store, g.id)
+        prior = _live_binding_alarm(store, g.id)
         if not bound:
             if prior is not None:
                 store.update(prior, state="cleared", cleared_reason="signature no longer holds")
                 store.trace_append("alarm_cleared", {"id": prior.id, "target": g.id})
+                # Release our own freeze — and only our own: a goal suspended
+                # by ordo or an operator keeps its suspension.
+                if g.get("state") == "suspended" and prior.id in str(g.get("suspended_reason") or ""):
+                    store.update(g, state="active", suspended_reason=None)
+                    store.trace_append("goal_unsuspended", {"id": g.id, "alarm": prior.id, "reason": "binding cleared"})
             continue
 
         if prior is None:
@@ -144,7 +168,16 @@ def run_binding_monitor(store: TelosStore) -> dict:
             if _hours_since(prior.get("window_advanced_at") or prior.get("created_at")) >= _WINDOW_ADVANCE_HOURS:
                 windows = int(prior.get("windows", 1)) + 1
                 level = 3 if windows > 2 else 2
-                alarm = store.update(prior, level=level, windows=windows, evidence=sig, window_advanced_at=_now_iso())
+                # A climb is new evidence, so an acknowledged alarm reopens;
+                # the ack silenced the level it was given, not this one.
+                alarm = store.update(
+                    prior,
+                    level=level,
+                    windows=windows,
+                    evidence=sig,
+                    window_advanced_at=_now_iso(),
+                    state="open",
+                )
             else:
                 level = int(prior.get("level", 1))
                 alarm = store.update(prior, evidence=sig)
@@ -180,7 +213,10 @@ def run_binding_monitor(store: TelosStore) -> dict:
     return result
 
 
-def _open_binding_alarm(store: TelosStore, goal_id: str):
+def _live_binding_alarm(store: TelosStore, goal_id: str):
+    """The goal's alarm if one is still live (open OR acknowledged). Ack must
+    not reset the ladder — treating an acked alarm as absent would mint a
+    fresh L1 on the next pass and a persistent binding could never reach L3."""
     for a in store.list_alarms(open_only=True):
         if a.get("type") == "binding" and a.get("target") == goal_id:
             return a

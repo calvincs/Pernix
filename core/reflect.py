@@ -1086,10 +1086,24 @@ async def reflect_on_session(
             # verbatim tool-result excerpts, which can easily exceed 2k tokens.
             # Output cost is per-token-generated, so the headroom is free until
             # actually used.
+            # Reflect gates turn completion (and parent check_workers), so it
+            # queues with the session's own scheduling identity rather than the
+            # default background identity, which sorts last in the fair queue.
+            # Carrying the session_id also subjects the call to the session's
+            # wall-clock budget — guarantee headroom so a turn that spent its
+            # whole budget still gets a verdict instead of an UNVERIFIED stamp.
+            from core.llm.client import ensure_session_budget
+            from core.llm.client import sched_identity as _sched_identity
+
+            ensure_session_budget(session_id, 120)
+            _created_at, _priority = _sched_identity(session_id)
             response = await client.chat(
                 messages=messages,
                 model=model,
                 max_tokens=8192,
+                session_id=session_id,
+                session_created_at=_created_at,
+                session_priority=_priority,
             )
 
             latency_ms = int((time.monotonic() - start) * 1000)

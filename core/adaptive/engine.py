@@ -113,10 +113,19 @@ def queue_edits(edits: list[dict], producer: str, rationale: str = "") -> dict:
     """Split a producer pass into pending auto-applies and gated proposals.
 
     Returns {"batch_id": str|None, "queued": n, "proposal_id": int|None,
-    "gated": n, "rejected": [(edit, reason)]}. One producer pass mints at
-    most one auto batch and one proposal (plan 4d).
+    "proposal_ids": [int], "gated": n, "rejected": [(edit, reason)]}. One
+    producer pass mints at most one auto batch and one proposal PER RISK
+    TIER (plan 4d) — with auto-apply off that is two, so a reviewer can take
+    the low-risk edits without also taking the high-risk ones.
     """
-    result: dict = {"batch_id": None, "queued": 0, "proposal_id": None, "gated": 0, "rejected": []}
+    result: dict = {
+        "batch_id": None,
+        "queued": 0,
+        "proposal_id": None,
+        "proposal_ids": [],
+        "gated": 0,
+        "rejected": [],
+    }
     if not settings.adaptive_enabled:
         return result
 
@@ -145,10 +154,29 @@ def queue_edits(edits: list[dict], producer: str, rationale: str = "") -> dict:
             risk = edit["risk"] = "high"
         (high if risk == "high" else low).append(edit)
 
+    low_gated: list[dict] = []
     if low and not settings.adaptive_auto_apply:
-        # Auto-apply off: everything routes through human review.
-        high = low + high
-        low = []
+        # Auto-apply off: everything routes through human review — but as its
+        # OWN proposal per tier. Folding low-risk edits into the high-risk
+        # proposal would make approval all-or-nothing across risk tiers, so a
+        # reviewer could not take the safe hint without also taking the policy.
+        low_gated, low = low, []
+
+    split = bool(high and low_gated)  # qualify rationales only when it matters
+
+    def _propose(edits: list[dict], tier: str) -> None:
+        evidence = [ref for e in edits for ref in (e.get("evidence") or [])]
+        why = rationale or f"{len(edits)} gated edit(s) from {producer}"
+        pid = db.adaptive_add_proposal(
+            producer=producer,
+            payload_json=json.dumps(edits),
+            evidence_json=json.dumps(evidence),
+            rationale=f"{why} — {tier}-risk tier" if split else why,
+        )
+        result["proposal_ids"].append(pid)
+        if result["proposal_id"] is None:
+            result["proposal_id"] = pid
+        result["gated"] += len(edits)
 
     if low:
         batch_id = _mint_batch_id()
@@ -156,14 +184,9 @@ def queue_edits(edits: list[dict], producer: str, rationale: str = "") -> dict:
         result["batch_id"] = batch_id
         result["queued"] = len(low)
     if high:
-        evidence = [ref for e in high for ref in (e.get("evidence") or [])]
-        result["proposal_id"] = db.adaptive_add_proposal(
-            producer=producer,
-            payload_json=json.dumps(high),
-            evidence_json=json.dumps(evidence),
-            rationale=rationale or f"{len(high)} gated edit(s) from {producer}",
-        )
-        result["gated"] = len(high)
+        _propose(high, "high")
+    if low_gated:
+        _propose(low_gated, "low")
     return result
 
 
@@ -273,12 +296,17 @@ def apply_batch(batch_id: str, actor: str = "auto", proposal_id: int | None = No
         else:
             applied.append(_entry_id_for(edit))
 
-    db.adaptive_update_batch(batch_id, status="applied")
-    from core.adaptive.render import render_mirror
+    # A batch where NOTHING landed changed no state. Calling it 'applied'
+    # would enrol it in the tripwire sweep and the post-batch canary sweep
+    # with nothing to measure, so it gets its own terminal, inert status.
+    status = "applied" if applied else "rejected"
+    db.adaptive_update_batch(batch_id, status=status)
+    if applied:
+        from core.adaptive.render import render_mirror
 
-    render_mirror()
-    logger.info("Adaptive batch %s applied: %d ok, %d rejected", batch_id, len(applied), len(rejected))
-    return {"batch_id": batch_id, "applied": applied, "rejected": rejected}
+        render_mirror()
+    logger.info("Adaptive batch %s %s: %d ok, %d rejected", batch_id, status, len(applied), len(rejected))
+    return {"batch_id": batch_id, "applied": applied, "rejected": rejected, "status": status}
 
 
 # ---------------------------------------------------------------------------
@@ -384,11 +412,51 @@ def approve_proposal(proposal_id: int, actor: str = "user") -> dict:
     try:
         from core.extensions.scheduling import enqueue_post_batch_sweep
 
-        if enqueue_post_batch_sweep(batch_id):
+        # Nothing landed (every edit refused) → no state change to measure.
+        if result["applied"] and enqueue_post_batch_sweep(batch_id):
             result["sweep_enqueued"] = True
     except Exception as e:
         logger.warning("Post-batch sweep enqueue failed for %s: %s", batch_id, e)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Delete (human release valve)
+# ---------------------------------------------------------------------------
+
+
+def delete_entry(entry_id: str, actor: str = "human") -> dict:
+    """Soft-delete one entry outside the batch machinery.
+
+    The valve for a wedged per-kind cap: producers can only ever add under
+    their own rails, so without a direct human delete a full kind stays full.
+    Same status flip the engine's own delete action uses (version bumped,
+    before_json journaled), so rollback restores it byte-for-byte and the
+    entry drops out of the prompt blocks and the cap count immediately.
+    """
+    existing = db.adaptive_get_entry(entry_id)
+    if existing is None or existing.get("status") != "active":
+        raise AdaptiveError(f"entry '{entry_id}' not found or not active")
+
+    new_row = dict(existing)
+    new_row["status"] = "deleted"
+    new_row["version"] = int(existing["version"]) + 1
+    new_row["updated_at"] = _now_iso()
+    db.adaptive_put_entry(new_row)
+    event_id = db.adaptive_add_event(
+        entry_id=entry_id,
+        action="delete",
+        before_json=_snapshot(existing),
+        after_json=_snapshot(new_row),
+        evidence_json=json.dumps([f"human delete of {entry_id} via /api/adaptive/entries"]),
+        actor=actor,
+    )
+
+    from core.adaptive.render import render_mirror
+
+    render_mirror()
+    logger.info("Adaptive entry %s deleted by %s (event %s)", entry_id, actor, event_id)
+    return {"entry_id": entry_id, "status": "deleted", "version": new_row["version"], "event_id": event_id}
 
 
 # ---------------------------------------------------------------------------

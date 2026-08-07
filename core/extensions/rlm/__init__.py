@@ -343,12 +343,14 @@ def _finalize_run_ui(sid: str, ui_session_id: str | None, run_id: str, result: R
 
 def _make_rlm_fn(*, parent_engine, parent_run_id, depth, chat, sub_model, allowed, caps, cancel_check, session_id):
     """Build the broker's rlm_query callback: run a nested engine (own child
-    process, nested run dir, shared ledger, remaining deadline) at depth+1.
+    process, nested run dir, shared ledger, shared concurrency limiter,
+    remaining deadline) at depth+1.
 
-    Runs on a broker handler thread, which already holds one concurrency slot —
-    so nested fan-out stays bounded by the parent's semaphore. An engine at
-    depth d gets a callback only when d+1 < rlm_max_depth; past that, the
-    broker's built-in fallback degrades rlm_query to a plain llm_query.
+    Runs on a broker handler thread that deliberately holds NO concurrency
+    slot; total in-flight sub-calls stay bounded because every depth's broker
+    shares the ROOT engine's SubcallLimiter. An engine at depth d gets a
+    callback only when d+1 < caps.max_depth; past that, the broker's built-in
+    fallback degrades rlm_query to a plain llm_query.
     """
     child_depth = depth + 1
 
@@ -368,9 +370,10 @@ def _make_rlm_fn(*, parent_engine, parent_run_id, depth, chat, sub_model, allowe
             cancel_check=cancel_check,
             depth=child_depth,
             ledger=parent_engine.ledger,
+            limiter=parent_engine.limiter,
             deadline=parent_engine.deadline,
         )
-        if child_depth + 1 < settings.rlm_max_depth:
+        if child_depth + 1 < caps.max_depth:
             nested.rlm_fn = _make_rlm_fn(
                 parent_engine=nested,
                 parent_run_id=sub_id,
@@ -608,7 +611,7 @@ def rlm_process(task: str, source, model: str = "", continue_from: str = "", _co
         progress_fn=_make_progress_fn(run_id, ui_session_id, sid),
         continuation_note=continuation_note,
     )
-    if settings.rlm_max_depth > 1:
+    if caps.max_depth > 1:  # caps is the single source of truth (built from settings above)
         engine.rlm_fn = _make_rlm_fn(
             parent_engine=engine,
             parent_run_id=run_id,
