@@ -62,6 +62,11 @@ class Settings:
     fallback_model: str = ""
     background_model: str = ""
     scout_model: str = ""
+    # Criticality tier (audit P3): model for calls whose output the primary
+    # model must trust or that can force an expensive retry — compaction
+    # summaries (the session's permanent memory), reflect verdicts, and eval.
+    # Empty = llm_model. The fast/offline tier stays on scout/background.
+    critical_model: str = ""
     # Fifth model role (adaptation plan 1f): local embedding model served by
     # Ollama (e.g. "nomic-embed-text"). Setting it IS the switch — empty
     # keeps every search purely lexical. Vectors live in a rebuildable
@@ -72,7 +77,7 @@ class Settings:
     llm_max_concurrent: int = 1  # Max concurrent Ollama requests (semaphore slots)
     llm_session_timeout: int = 1800  # Max seconds any session may hold LLM slots (0 = unlimited)
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_max_concurrent: int = 2  # Max concurrent OpenRouter requests
+    openrouter_max_concurrent: int = 4  # Max concurrent OpenRouter requests
     openrouter_models: list = field(default_factory=list)
     # Prompt-cache breakpoints for anthropic/* models via OpenRouter (plan
     # 1b): the lead system message is split into content-parts with
@@ -86,7 +91,7 @@ class Settings:
     # Listing models in openai_models is recommended: it routes bare names
     # (gpt-4o) to this provider and keeps the UI dropdown curated.
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_max_concurrent: int = 2  # Max concurrent OpenAI requests
+    openai_max_concurrent: int = 4  # Max concurrent OpenAI requests
     openai_models: list = field(default_factory=list)
     # Force supports_vision=True for models where auto-detection misses multimodal capability.
     vision_model_overrides: list = field(default_factory=list)
@@ -96,18 +101,34 @@ class Settings:
     audio_model_overrides: list = field(default_factory=list)
 
     # --- Context ---
+    # Fallback context budget when the model registry does not report a
+    # context_length for the active model (audit P2: the budget is otherwise
+    # derived per-session from the registry at turn start).
     context_budget: int = 192_000
     max_tokens: int = 32_000
     compaction_threshold: float = 0.75
     compaction_keep_tokens: int = 51_000
     context_critical_threshold: float = 0.85
+    # View pruning (audit P2). Previously an unconditional hardcode: every
+    # tool result >300 chars beyond the last 10 messages was stubbed on every
+    # compile, regardless of budget pressure, with no event. Now it only
+    # engages when history chars exceed view_prune_pressure of the (char-
+    # equivalent) budget, keeps more recent messages intact, and only stubs
+    # genuinely large results. The compiler emits context.view_pruned.
+    view_prune_keep_recent: int = 30
+    view_prune_min_chars: int = 2000
+    view_prune_pressure: float = 0.5
     # Ceiling on the total bytes of attachment data inlined into one compile
     # (core/context/compiler.py). Past it, the oldest attachments are dropped
     # back to text markers. 32MB fits audio (a 19MB WAV → ~25MB base64).
     max_inline_attach_bytes: int = 32 * 1024 * 1024
 
     # --- Agent Loop ---
-    max_tool_rounds: int = 10
+    # Raised 10 -> 50 (audit P2): ten rounds was a weak-local-model-era value
+    # that manufactured its own failure (round_ceiling -> reflect escalate) and
+    # forced the goal-continuation machinery to paper over it. Goal token/time
+    # budgets and the stuck detector are the real spend guards.
+    max_tool_rounds: int = 50
     # (max_continuations removed in plan 3b — it was referenced nowhere in
     #  core logic; goal continuation_budget is the real, per-goal knob.)
 
@@ -116,7 +137,7 @@ class Settings:
     scout_timeout: int = 90
     # Per-item char cap on memory search results injected into scout's user
     # content. Smaller = less context pressure on long-running sessions.
-    scout_preload_memory_char_limit: int = 300
+    scout_preload_memory_char_limit: int = 600
     # Retry once when primary scout returns a structurally-valid but empty
     # approach_guidance — this pattern indicates the LLM gave up, not that the
     # task needed no planning.

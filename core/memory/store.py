@@ -754,7 +754,7 @@ class MemoryStore:
         self,
         query: str,
         mode: str = "hybrid",
-        limit: int = 5,
+        limit: int = 10,
         after_epoch: int | None = None,
         _track_hits: bool = True,
         expand_wikilinks: bool = False,
@@ -803,7 +803,7 @@ class MemoryStore:
         except Exception as e:
             logger.debug("Failed to record memory hits: %s", e)
 
-    def search_lessons(self, query: str, limit: int = 5, _track_hits: bool = True) -> list[SearchResult]:
+    def search_lessons(self, query: str, limit: int = 10, _track_hits: bool = True) -> list[SearchResult]:
         """Search lesson-type memory entries with age-based decay.
 
         Lessons are operational workarounds extracted by snooze_reflect from
@@ -855,7 +855,7 @@ class MemoryStore:
             return ""
         lines = []
         for r in results:
-            lines.append(f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:400]}")
+            lines.append(f"[{r.entry.file_name} score={r.score:.1f}] {r.entry.content[:800]}")
         return "\n\n".join(lines)
 
     # ------------------------------------------------------------------

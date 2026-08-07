@@ -364,12 +364,15 @@ async def test_reflect_model_priority(monkeypatch, mock_llm_client):
     assert mock_llm_client.calls[-1]["model"] == "reflect-special"
 
 
-async def test_reflect_model_fallback_to_background(monkeypatch, mock_llm_client):
-    """When reflect_model is empty, falls back to background_model."""
+async def test_reflect_model_fallback_to_critical(monkeypatch, mock_llm_client):
+    """When reflect_model is empty, falls back to critical_model (audit P3:
+    the verifier must never silently land on the smallest model — the old
+    chain fell through background and even scout)."""
     from db import models as db
 
     monkeypatch.setattr("config.settings.reflect_model", "")
-    monkeypatch.setattr("config.settings.background_model", "bg-model")
+    monkeypatch.setattr("config.settings.critical_model", "bg-model")
+    monkeypatch.setattr("config.settings.background_model", "tiny-model")
     monkeypatch.setattr("config.settings.scout_model", "scout-model")
 
     sid = db.create_session(title="Model Fallback")

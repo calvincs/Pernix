@@ -824,7 +824,8 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                         ),
                     )
                     try:
-                        db.add_message(
+                        await asyncio.to_thread(
+                            db.add_message,
                             session_id,
                             "notice",
                             f"[reflect circuit breaker: last two attempts failed identically "

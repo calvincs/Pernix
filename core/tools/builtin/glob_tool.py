@@ -77,7 +77,7 @@ def glob_search(pattern: str, path: str = "") -> str:
 
     # Limit to 100 results
     total = len(matches)
-    matches = matches[:100]
+    matches = matches[:300]
 
     # Format output as relative paths
     lines = []

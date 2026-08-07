@@ -318,8 +318,8 @@ async def ingest_document(
         entry_content = f"{section['heading']}: {content}" if section["heading"] != "preamble" else content
 
         # Cap to prevent bloat
-        if len(entry_content) > 2000:
-            entry_content = entry_content[:2000] + "... [truncated]"
+        if len(entry_content) > 20000:
+            entry_content = entry_content[:20000] + "... [truncated]"
 
         await asyncio.to_thread(
             store.add_entry,

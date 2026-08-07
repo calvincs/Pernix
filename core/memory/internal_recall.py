@@ -65,13 +65,13 @@ _MEMORY_STRONG_SCORE = 3.0
 # scout uses (scout_preload_memory_char_limit, default 300) so the agent
 # sees consistent excerpt lengths whether it reads the scout baseline or
 # this search_web augmentation.
-_MEMORY_ENTRY_CHAR_CAP = 400
+_MEMORY_ENTRY_CHAR_CAP = 800
 
 
 def internal_recall(
     query: str,
     current_session_id: str | None = None,
-    memory_limit: int = 5,
+    memory_limit: int = 8,
 ) -> InternalRecall:
     """Run memory + cross-session recall for `query`. Failure-quiet.
 

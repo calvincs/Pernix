@@ -39,7 +39,7 @@ def test_view_pruning():
         {"role": "user", "content": f"msg {i}"} for i in range(10)
     ]  # 10 recent messages
 
-    pruned = apply_view_pruning(messages, keep_recent=10)
+    pruned = apply_view_pruning(messages, keep_recent=10, min_chars=300)
     # First tool message should be pruned (>300 chars, outside recent 10)
     assert "[pruned" in pruned[1]["content"]
     # Second tool message kept (< 300 chars)
@@ -67,7 +67,7 @@ def test_view_pruning_preserves_originals():
     """Ensure view pruning doesn't modify original messages."""
     original = {"role": "tool", "content": "x" * 500}
     messages = [original] + [{"role": "user", "content": "a"}] * 10
-    pruned = apply_view_pruning(messages, keep_recent=10)
+    pruned = apply_view_pruning(messages, keep_recent=10, min_chars=300)
     # Original should be untouched
     assert len(original["content"]) == 500
     # Pruned view should have stub

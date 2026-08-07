@@ -944,7 +944,31 @@ def compile_context(
     history.sort(key=lambda m: (_parent_id(m), m["id"]))
 
     # --- Apply view transforms (NEVER modifies DB) ---
-    history = apply_view_pruning(history)
+    # View pruning engages only under budget pressure (audit P2). It used to
+    # run unconditionally, silently stubbing every tool result >300 chars
+    # beyond the last 10 messages even in a 5%-full context.
+    _budget_tokens = context_budget or settings.context_budget
+    _history_chars = sum(len(str(m.get("content") or "")) for m in history)
+    _pressure_chars = _budget_tokens * 4 * float(getattr(settings, "view_prune_pressure", 0.5))
+    if _history_chars > _pressure_chars:
+        history = apply_view_pruning(history)
+        _pruned_n = sum(1 for m in history if m.get("_view_pruned"))
+        if _pruned_n:
+            logger.info(
+                "View pruning stubbed %d old tool results for %s (history %d chars > %.0f pressure)",
+                _pruned_n,
+                session_id,
+                _history_chars,
+                _pressure_chars,
+            )
+            try:
+                from sessions.manager import get_manager
+
+                _s = get_manager().get(session_id)
+                if _s:
+                    _s.emit_event({"type": "context.view_pruned", "stubbed": _pruned_n})
+            except Exception:
+                pass
     history = exclude_orphans(history)
 
     # --- Build final message list ---

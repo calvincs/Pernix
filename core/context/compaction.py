@@ -60,12 +60,24 @@ Output an updated summary in the same JSON + prose format. Merge new information
 # ---------------------------------------------------------------------------
 
 
-def apply_view_pruning(messages: list[dict], keep_recent: int = 10) -> list[dict]:
+def apply_view_pruning(
+    messages: list[dict],
+    keep_recent: int | None = None,
+    min_chars: int | None = None,
+) -> list[dict]:
     """Prune old tool results in a VIEW — original messages unchanged.
 
-    Returns a new list where old tool results > 300 chars are stubbed.
+    Returns a new list where old, large tool results are stubbed. Stubbed
+    entries carry a private ``_view_pruned`` marker (stripped before the LLM
+    sees them) so the compiler can count and surface what was dropped.
     This is a view transform for context assembly, NOT a DB mutation.
+    The caller decides WHETHER to prune (budget pressure); this function
+    only decides WHAT to prune.
     """
+    if keep_recent is None:
+        keep_recent = int(getattr(settings, "view_prune_keep_recent", 30))
+    if min_chars is None:
+        min_chars = int(getattr(settings, "view_prune_min_chars", 2000))
     if len(messages) <= keep_recent:
         return list(messages)
 
@@ -74,10 +86,10 @@ def apply_view_pruning(messages: list[dict], keep_recent: int = 10) -> list[dict
     for i, msg in enumerate(messages):
         if i < cutoff and msg.get("role") == "tool":
             content = msg.get("content", "")
-            if len(content) > 300:
+            if len(content) > min_chars:
                 preview = content[:80].replace("\n", " ")
                 stub = f"[pruned — {len(content)} chars] {preview}..."
-                result.append({**msg, "content": stub})
+                result.append({**msg, "content": stub, "_view_pruned": True})
                 continue
         result.append(msg)
     return result
@@ -198,7 +210,10 @@ async def compact_with_llm(
     from core.llm.client import ensure_session_budget, sched_identity
 
     client = get_llm_client()
-    model = settings.background_model or settings.llm_model
+    # Criticality tier (audit P3): the summary becomes the session's
+    # permanent memory for the primary model — never author it on a
+    # silently-weaker background model.
+    model = settings.critical_model or settings.llm_model
     sched_created_at, sched_priority = sched_identity(session_id)
     # Carrying the session_id subjects this call to the session's wall-clock
     # budget; guarantee headroom so a budget-exhausted turn can still compact
@@ -211,7 +226,7 @@ async def compact_with_llm(
                 {"role": "user", "content": prompt},
             ],
             model=model,
-            max_tokens=2000,
+            max_tokens=4000,
             session_id=session_id,
             session_created_at=sched_created_at,
             session_priority=sched_priority,
@@ -273,7 +288,7 @@ async def compact_with_llm(
     return True
 
 
-def _serialize_messages(messages: list[dict], max_chars: int = 30000) -> str:
+def _serialize_messages(messages: list[dict], max_chars: int = 60000) -> str:
     """Serialize messages for LLM summarization prompt."""
     lines = []
     total = 0
@@ -282,7 +297,7 @@ def _serialize_messages(messages: list[dict], max_chars: int = 30000) -> str:
         content = msg.get("content", "")
         if isinstance(content, list):
             content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
-        line = f"[{role}] {content[:800]}"
+        line = f"[{role}] {content[:2000]}"
         if total + len(line) > max_chars:
             lines.append("[... truncated ...]")
             break
