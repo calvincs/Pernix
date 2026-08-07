@@ -179,6 +179,9 @@ class AgentSession:
     reflect_count: int = 0  # Retries used this turn
     reflect_lessons: str = ""  # Lessons from prior attempts
     reflect_retry_requested: bool = False
+    # Tools mechanically disabled for the current retry attempt (reflect's
+    # retry_without_tools effector). Cleared at each fresh user turn.
+    retry_excluded_tools: set = field(default_factory=set)
 
     # Worker watch-set: worker IDs this session is waiting on (Gap 1+2+5)
     _watched_worker_ids: set = field(default_factory=set)

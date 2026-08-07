@@ -873,6 +873,7 @@ class SessionManager:
             session.reflect_count = 0
             session.reflect_lessons = ""
             session.reflect_retry_requested = False
+            session.retry_excluded_tools = set()
             session.last_tool_summary = {}
             session.eval_count = 0
             session.eval_retry_requested = False
@@ -1057,6 +1058,7 @@ class SessionManager:
             # user message.
             session.reflect_lessons = ""
             session.reflect_count = 0
+            session.retry_excluded_tools = set()
 
             # --- Scout phase ---
             # Distinguish an answer-resumed turn from a fresh user prompt.

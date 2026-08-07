@@ -48,6 +48,41 @@ def test_gate_crud_upsert():
     assert not db.remove_gate(sid, "tests")
 
 
+def test_add_gate_tool_exposes_scope():
+    """The add_gate tool must be able to reach scope='goal' — otherwise the
+    documented goal-scoped gate is unreachable from the toolset."""
+    from core.extensions.evaluation import add_gate as add_gate_tool
+
+    sid = db.create_session(title="scoped")
+    ctx = {"session_id": sid}
+
+    out = add_gate_tool("plain", "true", _context=ctx)
+    assert "scope=session" in out
+    out = add_gate_tool("goalie", "true", scope="goal", _context=ctx)
+    assert "scope=goal" in out
+
+    scopes = {r["name"]: r["scope"] for r in db.get_gates(sid)}
+    assert scopes == {"plain": "session", "goalie": "goal"}
+
+    bad = add_gate_tool("nope", "true", scope="bogus", _context=ctx)
+    assert bad.startswith("Error:") and "scope" in bad
+    assert "nope" not in {r["name"] for r in db.get_gates(sid)}
+
+
+def test_add_gate_tool_scope_registered_in_schema():
+    from core.extensions.evaluation import register as eval_register
+
+    captured = {}
+
+    class _Reg:
+        def register(self, name="", parameters=None, **_kw):
+            captured[name] = parameters or {}
+
+    eval_register(_Reg())
+    props = captured["add_gate"]["properties"]
+    assert props["scope"]["enum"] == ["session", "goal"]
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------

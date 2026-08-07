@@ -36,6 +36,7 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
 - what_worked: If retry — tools/approaches that produced useful results (carry forward). Empty string if pass.
 - what_failed: If retry — tools/approaches that failed or wasted time (avoid). Empty string if pass.
 - strategy: If retry — concrete instruction for the retry attempt. Must propose a DIFFERENT approach if the same tools failed repeatedly. Empty string if pass.
+- retry_without_tools: OPTIONAL, only meaningful with verdict "retry" — array of tool names (e.g. ["spawn_worker"]) that the agent misused this attempt and must NOT be allowed to call on the retry. Use when the failure was caused by reaching for a tool against the plan (e.g. delegating to workers when told to work inline). The harness enforces this mechanically — the listed tools are disabled for the retry attempt — so name a tool only when its absence would force the correct approach. Omit or empty array otherwise.
 - missing: If escalate — what specific information or clarification is needed from the user. Empty string otherwise.
 - turn_digest: REQUIRED when verdict is "retry" or "escalate"; optional on "pass" (you may omit the key entirely). When emitted, structure exactly as:
     {
@@ -135,6 +136,13 @@ class ReflectResult:
     # settings.reflect_emit_digest_on_pass). Empty dict when absent.
     # Schema documented in REFLECT_PROMPT.
     turn_digest: dict = field(default_factory=dict)
+
+    # Mechanical lesson effector (audit P1f): tools reflect wants disabled on
+    # the retry attempt. Advisory-prose lessons demonstrably don't stop the
+    # agent from repeating a tool misuse (field case 2072ab68cfd4: ten retries,
+    # each spawning workers against explicit instructions); this is enforced by
+    # the executor and the active-tool filter instead.
+    retry_without_tools: list = field(default_factory=list)
 
 
 # Tools whose successful execution has one-shot, externally visible effects —
@@ -822,6 +830,12 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
         emit_on_pass = bool(getattr(settings, "reflect_emit_digest_on_pass", False))
         if result.verdict != "pass" or emit_on_pass:
             result.turn_digest = _sanitize_turn_digest(raw_digest)
+
+    # Mechanical lesson effector — only meaningful on retry; capped and
+    # validated against the registry by the consumer (hooks).
+    raw_excl = data.get("retry_without_tools")
+    if result.verdict == "retry" and isinstance(raw_excl, list):
+        result.retry_without_tools = [str(t)[:80] for t in raw_excl if isinstance(t, str) and t.strip()][:5]
 
     return result
 
