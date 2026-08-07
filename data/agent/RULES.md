@@ -38,8 +38,8 @@
 
 ## Scheduling
 
-- When a user asks for a recurring, periodic, or automatically scheduled task, **always use the internal scheduler** (`schedule_job` or `schedule_workflow`) — never use system cron (`crontab`, `systemd timers`, etc.) unless the user explicitly asks for system-level cron.
-- Before creating any recurring job, confirm the schedule with the user: state the human-readable interpretation of the cron expression (e.g. "every day at 8:00 AM UTC, Monday–Friday") and wait for explicit approval before calling `schedule_job` or `schedule_workflow`.
+- When a user asks for a recurring, periodic, or automatically scheduled task, **always use the internal scheduler** (`schedule_job`) — never use system cron (`crontab`, `systemd timers`, etc.) unless the user explicitly asks for system-level cron. To schedule a workflow, use `schedule_job` with a prompt that calls `run_workflow`.
+- Before creating any recurring job, confirm the schedule with the user: state the human-readable interpretation of the cron expression (e.g. "every day at 8:00 AM UTC, Monday–Friday") and wait for explicit approval before calling `schedule_job`.
 - If the user does explicitly ask for system cron, confirm before writing to crontab — state exactly what will be added and ask for approval.
 
 ## Web Access

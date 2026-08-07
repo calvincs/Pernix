@@ -229,6 +229,8 @@ async def test_maintenance_protects_heartbeat_sessions(monkeypatch, tmp_path):
 
     data = tmp_path / "data"
     data.mkdir()
+    # maintenance reads the scheduler's own CRON_PATH constant.
+    monkeypatch.setattr(sched, "CRON_PATH", data / "cron_jobs.json")
     (data / "cron_jobs.json").write_text(
         _json.dumps(
             [

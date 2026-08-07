@@ -77,7 +77,6 @@ Always enabled. Cron job lifecycle.
 | `set_job_state` | safe | Pause/resume a job |
 | `remove_scheduled_job` | safe | Delete a job |
 | `list_scheduled_jobs` | safe | List all jobs |
-| `schedule_workflow` | safe | Put a workflow on a cron schedule |
 
 Cron-spawned sessions are flagged unattended in `_is_unattended_session()` (`core/tools/executor.py`) and skip the dangerous-tool gate. Workers spawned from such sessions inherit that. See [../guides/scheduling-cron.md](../guides/scheduling-cron.md).
 

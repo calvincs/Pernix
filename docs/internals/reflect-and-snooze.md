@@ -72,7 +72,7 @@ The cause feeds into Snooze for offline analysis. Repeated `agent`-class failure
 | `reflect_emit_digest_on_pass` | `false` | Have reflect emit a turn digest even on `pass` verdicts (audit/debug). Default off — pass turns omit the digest to save output tokens. |
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Defensive trim at parse time regardless of what the model emits. |
 | `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op. |
-| `reflect_model` | empty | Override which model runs reflect; empty uses `background_model` |
+| *(reflect model)* | — | Reflect runs on the Primary role (`llm_model`); on failure it retries once on Backup (`fallback_model`) |
 
 ### Post-mortems
 
@@ -86,13 +86,12 @@ Defined in `core/snooze.py`. Runs every `snooze_interval_ticks` (default 10 tick
 
 ### What it does
 
-Each cycle walks an ordered ladder of activities (`core/snooze.py`). Later activities only run if the cycle isn't cancelled first, so the ordering is also a priority order:
+Each cycle walks an ordered ladder of activities. `core/snooze.py` owns the lifecycle, the idle gate, and the ladder; the work itself lives next to the store it touches — memory-store surgery in `core/memory/sweeps.py`, retention pruners in `core/retention.py`. Later activities only run if the cycle isn't cancelled first, so the ordering is also a priority order:
 
 | # | Activity | What |
 |---|---|---|
 | 1 | Catch-up distillation | Review sessions that ended without a turn digest (max 1 LLM call). |
 | 2 | User insight extraction | Pull recurring preferences and facts into `user.profile.md`. |
-| 2b | Skill improvements | Propose skill edits + lessons from session reflects. |
 | 2c | Skill requirements install | Hash-triggered: a skill whose `requirements.txt` changed gets its packages installed into the workspace venv (one skill per cycle, no LLM), then the registry rescans so the health flag clears. |
 | 3 | Memory deduplication | Every `snooze_dedup_interval_days` (default 7) per file: find near-duplicate entries; merge them. |
 | 3b | Cross-file consolidation | Every `snooze_consolidation_interval_hours` (default 24): cluster related entries into the same file using `snooze_consolidation_cluster_threshold` (default 0.55). |
@@ -109,7 +108,7 @@ Each cycle walks an ordered ladder of activities (`core/snooze.py`). Later activ
 | 12a | RLM run cleanup | Delete `data/workspace/rlm/<run_id>/` dirs + `rlm_runs` rows older than `rlm_run_retention_days` (default 30). Running runs are never touched. |
 | 12b | Candor maintenance | When `candor_enabled`: run the admission gate, drain the observation buffer, checkpoint the store. When `adaptive_enabled` too: queue `routing_hint` edits for tools whose calibrated reliability regressed (the Candor producer). |
 | 12c | Canary cleanup | When `canary_enabled`: prune `canary_runs` rows and their sessions past `canary_retention_days` (default 30), and nudge once per canary whose `last_reviewed` is over 90 days old. Never dispatches sweeps — those are enqueued for the next idle window. |
-| 13 | Refine pass | Whole-session refine — broader-gate sibling of Activity 2b. |
+| 13 | Refine pass | Whole-session refine (`core/refine.py`) — the single session-improvement rung: skill-edit proposals + lessons from any idle session, not gated on the reflect verdict. |
 | 14 | Dream step | Idle-time introspection (`core/dream/`) — see [dream.md](dream.md). Only when `dream_enabled`. |
 | 15 | Adaptive layer | When `adaptive_enabled`: drain pending auto-applies (safe here — the idle window means no session's cached prefix is mid-turn), enqueue post-batch canary sweeps, evaluate the tripwire (no LLM) — see [canary-and-adaptive.md](canary-and-adaptive.md). |
 

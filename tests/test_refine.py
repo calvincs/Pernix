@@ -84,6 +84,41 @@ def _llm_response(payload: dict) -> ChatResponse:
 
 
 # ---------------------------------------------------------------------------
+# _identify_active_skill / _build_tool_summary (ported from snooze_reflect)
+# ---------------------------------------------------------------------------
+
+
+def test_identify_active_skill_finds_load_skill_call():
+    from core.refine import _identify_active_skill
+    from db import models as db
+
+    sid = _make_basic_session(skill_name="my-skill")
+    assert _identify_active_skill(db.get_messages(sid)) == "my-skill"
+
+
+def test_identify_active_skill_returns_none_without_load_skill():
+    from core.refine import _identify_active_skill
+    from db import models as db
+
+    sid = _make_basic_session(skill_name=None)
+    assert _identify_active_skill(db.get_messages(sid)) is None
+
+
+def test_build_tool_summary_counts_calls_and_failures():
+    """Tool messages whose content begins with 'Error' count as failures."""
+    from core.refine import _build_tool_summary
+    from db import models as db
+
+    sid = db.create_session(title="ToolSummary")
+    tool_calls = json.dumps([{"id": "c1", "function": {"name": "bash", "arguments": "{}"}}])
+    db.add_message(sid, "assistant", "Running bash.", tool_calls=tool_calls)
+    db.add_message(sid, "tool", "Error: command failed", tool_call_id="c1")
+    summary = _build_tool_summary(db.get_messages(sid))
+    assert summary["bash"]["calls"] == 1
+    assert summary["bash"]["failures"] == 1
+
+
+# ---------------------------------------------------------------------------
 # _parse_refine_output
 # ---------------------------------------------------------------------------
 

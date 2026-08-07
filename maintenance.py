@@ -173,11 +173,13 @@ class MaintenanceRunner:
             protected: set[str] = set()
             try:
                 import json
-                from pathlib import Path
 
-                cron_path = Path("data/cron_jobs.json")
-                if cron_path.exists():
-                    jobs = json.loads(cron_path.read_text())
+                # The scheduler owns where jobs are persisted — read its
+                # constant rather than duplicating the path here.
+                from core.extensions.scheduling import CRON_PATH
+
+                if CRON_PATH.exists():
+                    jobs = json.loads(CRON_PATH.read_text())
                     for job in jobs:
                         # Heartbeat jobs park session_id=None and carry the real
                         # id under heartbeat_session_id — without it their host
@@ -242,12 +244,20 @@ class MaintenanceRunner:
             except Exception as e:
                 logger.warning("Incremental vacuum failed: %s", e)
 
-            # Cron cleanup (also done by snooze, but this ensures it happens even if snooze disabled)
+            # Cron cleanup (also done by snooze, but this ensures it happens
+            # even if snooze is disabled). Same implementation as snooze's
+            # Activity 7 — one set of retention budgets, two callers.
             try:
-                pruned_runs = db.prune_cron_runs()
-                pruned_sessions = db.prune_cron_sessions()
-                if pruned_runs or pruned_sessions:
-                    logger.info("Cron cleanup: %d runs, %d sessions pruned", pruned_runs, pruned_sessions)
+                from core.retention import prune_cron
+
+                counts = prune_cron()
+                if any(counts.values()):
+                    logger.info(
+                        "Cron cleanup: %d runs, %d sessions, %d state_log rows pruned",
+                        counts["runs"],
+                        counts["sessions"],
+                        counts["state_log"],
+                    )
             except Exception as e:
                 logger.warning("Cron cleanup failed: %s", e)
 
