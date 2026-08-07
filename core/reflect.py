@@ -1054,7 +1054,7 @@ async def reflect_on_session(
     if emit:
         emit({"type": "reflect.start"})
 
-    model = settings.reflect_model or settings.background_model or settings.scout_model or settings.llm_model
+    model = settings.reflect_model or settings.critical_model or settings.llm_model
     start = time.monotonic()
 
     # Inner retry budget for the reflect LLM call itself. A parse failure here

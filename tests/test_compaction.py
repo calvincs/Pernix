@@ -28,27 +28,29 @@ def test_view_pruning_short_list():
 
 
 def test_view_pruning_stubs_old_tools():
-    """Old tool results > 300 chars are stubbed."""
+    """Old tool results above min_chars are stubbed (and marked)."""
     messages = []
     for i in range(15):
         messages.append({"role": "user", "content": f"msg {i}"})
         messages.append({"role": "tool", "content": f"output {'x' * 500}"})
 
-    result = apply_view_pruning(messages, keep_recent=4)
+    result = apply_view_pruning(messages, keep_recent=4, min_chars=300)
     # Old tool messages should be stubbed
     old_tool = result[1]  # Second message (first tool)
     assert "[pruned" in old_tool["content"]
+    assert old_tool.get("_view_pruned") is True  # compiler counts these
     # Recent tool messages should be intact
     recent_tool = result[-1]
     assert "output" in recent_tool["content"]
 
 
 def test_view_pruning_preserves_short_tools():
-    """Old tool results <= 300 chars are kept intact."""
+    """Old tool results at or below min_chars are kept intact — the raised
+    default (2000) means routine tool results survive pruning now."""
     messages = []
     for i in range(15):
         messages.append({"role": "user", "content": f"msg {i}"})
-        messages.append({"role": "tool", "content": "short output"})
+        messages.append({"role": "tool", "content": "x" * 1500})
 
     result = apply_view_pruning(messages, keep_recent=4)
     assert all("[pruned" not in m.get("content", "") for m in result)
@@ -129,10 +131,10 @@ def test_serialize_basic():
 
 def test_serialize_truncates_long():
     messages = [
-        {"role": "user", "content": "x" * 1000},
+        {"role": "user", "content": "x" * 3000},
     ]
     result = _serialize_messages(messages)
-    assert len(result) <= 850  # 800 char content + role prefix
+    assert len(result) <= 2050  # 2000 char content + role prefix
 
 
 def test_serialize_budget():

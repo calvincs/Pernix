@@ -261,6 +261,7 @@ const MODEL_SELECT_FIELDS = [
     { key: 'llm_model', label: 'Primary Model', type: 'model-select' },
     { key: 'scout_model', label: 'Scout Model', type: 'model-select', allowEmpty: true },
     { key: 'background_model', label: 'Background Model', type: 'model-select', allowEmpty: true },
+    { key: 'critical_model', label: 'Critical Model (compaction/reflect/eval; empty = Primary)', type: 'model-select', allowEmpty: true },
     { key: 'reflect_model', label: 'Reflect Model', type: 'model-select', allowEmpty: true },
     { key: 'fallback_model', label: 'Fallback Model', type: 'model-select', allowEmpty: true },
     { key: 'rlm_root_model', label: 'RLM Root Model', type: 'model-select', allowEmpty: true },
@@ -271,10 +272,11 @@ const MODEL_SELECT_FIELDS = [
 ];
 
 // Resolve the effective reflect model given the configured fallback chain:
-// reflect_model -> background_model -> scout_model -> llm_model.
+// reflect_model -> critical_model -> llm_model (audit P3: the verifier never
+// silently lands on the background/scout tier).
 // Mirrors core/reflect.py so the UI warning matches runtime behavior.
-function _effectiveReflectModel({ reflect_model, background_model, scout_model, llm_model }) {
-    return reflect_model || background_model || scout_model || llm_model || '';
+function _effectiveReflectModel({ reflect_model, critical_model, llm_model }) {
+    return reflect_model || critical_model || llm_model || '';
 }
 
 // ---------------------------------------------------------------------------
@@ -918,8 +920,7 @@ function _updateReflectWarning() {
     const read = (k) => document.getElementById(`setting-${k}`)?.value ?? '';
     const effective = _effectiveReflectModel({
         reflect_model: read('reflect_model'),
-        background_model: read('background_model'),
-        scout_model: read('scout_model'),
+        critical_model: read('critical_model'),
         llm_model: read('llm_model'),
     });
     const primary = read('llm_model');

@@ -8,7 +8,7 @@ def test_settings_defaults():
     assert s.llm_base_url == "http://localhost:11434/v1"
     assert s.scout_enabled is True
     assert s.context_budget == 192_000
-    assert s.max_tool_rounds == 10
+    assert s.max_tool_rounds == 50
     assert len(s.shell_allowlist) > 30
 
 

@@ -547,7 +547,7 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
             instructions = skill_reg.load_instructions(skill_name)
             if not instructions:
                 return f"Skill '{skill_name}' has no instructions (empty SKILL.md)."
-            return instructions[:5000]
+            return instructions[:12000]
         except Exception as e:
             return f"Skill read error: {e}"
 
@@ -1367,7 +1367,7 @@ async def _run_scout_llm(
     ]:
         path = Path(filename)
         if path.exists():
-            content = path.read_text()[:4000]
+            content = path.read_text()[:12000]
             user_content_parts.append(f"\n{label}:\n{content}")
 
     # Check data/agent/ for SESSIONS.md / INSTRUCTIONS.md
@@ -1376,7 +1376,7 @@ async def _run_scout_llm(
     for fname in ["SESSIONS.md", "INSTRUCTIONS.md"]:
         agent_path = agent_dir / fname
         if agent_path.exists():
-            content = agent_path.read_text()[:4000]
+            content = agent_path.read_text()[:12000]
             user_content_parts.append(f"\nProject instructions ({fname}):\n{content}")
             break
 

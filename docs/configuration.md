@@ -33,7 +33,8 @@ These are the most important settings to configure before first use.
 | `llm_model` | *(empty)* | **Required.** The primary model used for agent turns. Set this before your first session. |
 | `scout_model` | *(empty)* | Fast, small model used in the planning phase. Can be the same as `llm_model` to start. A lightweight model (3–8B) works well here. |
 | `fallback_model` | *(empty)* | Ollama model to use when OpenRouter hits a rate limit or quota. Should be a locally-available Ollama model. |
-| `background_model` | *(empty)* | Model used for **every** non-agent-turn LLM call. Large blast radius — roughly 20 call sites: session auto-titling, memory distillation and ingest, compaction summaries, reflect (via `reflect_model` fallback), scout (fallback after `scout_model`), evaluation, workflow reflect, refine and adaptive-policy authoring, every LLM-backed Snooze activity, Dream, Telos, and RLM sub-calls (via `rlm_sub_model` fallback). Usually a smaller/faster model — but note that anything too weak degrades reflect verdicts, compaction fidelity, and memory quality across the whole system, not just titles. Empty falls back to `llm_model` everywhere. |
+| `background_model` | *(empty)* | Model for the fast/offline tier: session auto-titling, memory distillation and ingest, scout fallback, workflow reflect, refine input prep, LLM-backed Snooze activities, Dream, Telos, and RLM sub-calls (via `rlm_sub_model` fallback). Quality-critical calls (compaction, reflect, eval) now live on `critical_model` instead. Empty falls back to `llm_model`. |
+| `critical_model` | *(empty)* | Criticality tier: compaction summaries (the session's permanent memory), reflect verdict fallback, and evaluation. Anything whose output the primary model must trust, or that can force an expensive retry. Empty falls back to `llm_model` — deliberately NOT `background_model`, so these calls are never silently authored by a weaker model. |
 | `llm_max_concurrent` | `1` | Maximum simultaneous requests to Ollama. Increase only if your hardware supports parallel inference. |
 | `llm_session_timeout` | `1800` | Maximum wall-clock seconds a session may hold an LLM slot. Prevents hung sessions from blocking others. Set to `0` for unlimited. |
 
@@ -385,7 +386,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `reflect_emit_digest_on_pass` | `false` | Have reflect emit a turn digest even on `pass` verdicts. Default off; the digest is always emitted on `retry`/`escalate` so the next scout can plan around real evidence. |
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Enforced at parse time. |
 | `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op kept for back-compat. |
-| `reflect_model` | *(empty)* | Override model for reflect; empty uses `background_model`. |
+| `reflect_model` | *(empty)* | Override model for reflect; empty uses `critical_model`, then `llm_model`. |
 | `post_mortem_retention_days` | `90` | Days to keep synthesized post-mortem records before snooze cleans them. |
 | `notify_webhook_timeout` | `10` | HTTP timeout for `notify_webhook_url` POST (seconds). |
 | `snooze_max_cycle_seconds` | `900` | Hang backstop per Snooze cycle — runaway protection, not a budget. Cycles run until the activity ladder completes; user activity cancels them instantly. Local (Ollama) background models get 4x headroom. |

@@ -568,6 +568,21 @@ async def run_agent(
     effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
     _last_effective_model = effective_model
 
+    # Model-derived context budget (audit P2): settings.context_budget is a
+    # fallback, not a global truth — a 1M-context model should not silently
+    # run at the fallback size. Registry catalog lookup, no network.
+    def _derive_model_budget(model: str) -> int | None:
+        try:
+            _mb_info = client.router.registry.get_model_info(model)
+            _mb_len = int(getattr(_mb_info, "context_length", 0) or 0) if _mb_info else 0
+            if _mb_len > 0:
+                return max(32_000, int(_mb_len * 0.9))
+        except Exception as _e:
+            logger.debug("Model context budget lookup failed for %s: %s", model, _e)
+        return None
+
+    _model_budget: int | None = _derive_model_budget(effective_model)
+
     # Tool loop state
     stuck = StuckDetector()
     tool_failures: dict[str, list[str]] = {}
@@ -647,6 +662,7 @@ async def run_agent(
         # after a page reload (live SSE events aren't replayed from DB).
         effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
         if effective_model != _last_effective_model:
+            _model_budget = _derive_model_budget(effective_model)
             override_active = session.model_override is not None
             session.emit_event(
                 {
@@ -695,7 +711,7 @@ async def run_agent(
         # Both run off-loop: resource status aggregates token_usage, and
         # compile_context loads the full message history + tokenizes — per
         # round, this was the single heaviest synchronous block on the loop.
-        effective_budget = session.context_budget_override or settings.context_budget
+        effective_budget = session.context_budget_override or _model_budget or settings.context_budget
         resource_status = await asyncio.to_thread(
             _build_resource_status, session_id, estimator, tool_round, context_budget=effective_budget
         )
@@ -1646,7 +1662,7 @@ async def run_agent(
             resource_status=resource_status,
             supports_vision=model_supports_vision,
             supports_audio=model_supports_audio,
-            context_budget=session.context_budget_override or settings.context_budget,
+            context_budget=session.context_budget_override or _model_budget or settings.context_budget,
             model_name=effective_model,
             turn_user_msg_id=_turn_user_msg_id,
         )

@@ -104,7 +104,7 @@ async def distill_session(
         response = await client.chat(
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": transcript[:15000]},
+                {"role": "user", "content": transcript[:40000]},
             ],
             model=model,
             max_tokens=2000,

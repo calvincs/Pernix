@@ -12,7 +12,7 @@ from core.tools.truncation import truncate_output
 
 logger = logging.getLogger("pernix.tools.grep")
 
-MAX_MATCHES = 100
+MAX_MATCHES = 400
 MAX_LINE_LENGTH = 500
 
 
