@@ -202,34 +202,61 @@ Every event includes `_seq` (sequence number), `session_id`, and `timestamp`.
 | `session.queued` | A message was queued because the session is busy. Fields: `queue_depth`. |
 | `session.queue_full` | Message rejected — queue is at `max_pending_messages`. |
 | `session.message_combined` | A rapid follow-up message was merged into the running turn's DB row (rapid-fire combining within a 3-second window). Fields: `message_id`. |
+| `session.message_combine_skipped` | The merge above was refused — the turn had already answered — so a new turn was queued instead. Fields: `message_id`, `reason`. |
 | `session.prompt_rejected` | Message rejected (e.g., session is cancelling). Fields: `reason`. |
 
 #### Agent Turn
 | Event | Description |
 |---|---|
 | `scout.start` | Scout (planning) phase began. |
-| `scout.done` | Scout completed. Fields: `approach` (the plan summary). |
+| `scout.done` | Scout completed. Fields include `approach` (the plan summary), `tools`, `skills`, `memory`, `model`, `from_cache`, `latency_ms`, `scout_model` (the model scout actually ran on). |
 | `stream.token` | One streamed text token from the agent. Fields: `content`. |
 | `stream.done` | The model finished generating for this round. Fields: `finish_reason`. |
-| `turn.complete` | The full agent turn is finished. Fields: `message_id`, `reflect_verdict`. |
+| `stream.fallback` | Retries were exhausted and the turn switched to the Backup model. Fields: `model`. |
+| `turn.complete` | The full agent turn is finished (fires after post-hooks). |
 | `stream.error` | An error occurred during generation. Fields: `error`. |
 
 #### Tool Calls
 | Event | Description |
 |---|---|
-| `tool.call.start` | A tool invocation is starting. Fields: `name`, `call_id`, `input` (args). |
-| `tool.call.result` | A tool returned a result. Fields: `name`, `call_id`, `output`, `duration_ms`, `error` (if failed). |
+| `tool.start` | A tool invocation is starting. Fields: `name`, `arguments` (summarized). |
+| `tool.call` | A tool returned a result. Fields: `name`, `arguments`, `result`, `full_result`, `truncated`, `was_error`, `latency_ms`. |
 
 #### User Interaction
 | Event | Description |
 |---|---|
-| `ask_user` | The agent is pausing to ask the user a question. Fields: `question_id`, `question`, `choices` (optional list). Answer via `POST /api/questions/{question_id}/answer`. |
+| `dialog.question` | The agent is pausing to ask the user a question. Fields: `question_id`, `question`, `context`, `urgency`, `session_title`. Answer via `POST /api/questions/{question_id}/answer`. |
+| `dialog.notification` | Broadcast to every connected browser, not just those viewing the session. Also carries goal budget-limited alerts. Fields: `notification_id`, `title`, `body`, `urgency`, `source_session_id`. |
+| `dialog.answered` / `dialog.dismissed` | The question was resolved. |
 
 #### Context Management
 | Event | Description |
 |---|---|
-| `context.compacted` | The conversation context was pruned. Fields: `tokens_before`, `tokens_after`. |
-| `context.warning` | Context usage is approaching the critical threshold. Fields: `utilization`. |
+| `context.compacting` | Compaction is starting. |
+| `context.compacted` | The conversation context was compacted. Fields: `summarized_messages`, `summary_tokens`. |
+| `context.view_pruned` | Budget-gated view pruning stubbed oversized tool results out of the compiled view for this turn. Stored messages are untouched. Fields: `stubbed` (count). |
+| `context.reset` | The conversation context was cleared. |
+
+#### Reflect, Eval, and Gates
+| Event | Description |
+|---|---|
+| `reflect.start` / `reflect.done` | The post-turn quality gate ran. The verdict rides on `reflect.done`. |
+| `reflect.skipped` | The gate was skipped (disabled, or the turn was shorter than `reflect_min_messages`). |
+| `reflect.retry` | A retry attempt is starting. Fields: `attempt`, `max`, `reasoning`. |
+| `reflect.exhausted` | `reflect_max_retries` was reached. Fields: `reasoning`. |
+| `reflect.escalate` | Reflect cannot fix this automatically. Fields: `missing`, `reasoning`. |
+| `reflect.budget_exhausted` | Reflect was skipped for lack of LLM time headroom. Fields: `remaining_s`, `needed_s`. |
+| `reflect.circuit_breaker` | A further retry was refused because the last two attempts failed identically. Fields: `attempts`, `signature`, `reasoning`. |
+| `eval.start` / `eval.pass` / `eval.done` / `eval.retry` / `eval.exhausted` | The optional autonomous evaluation pass. |
+| `gates.done` | Deterministic goal gates finished. Fields: `attempt`, `total`, `failed`, `names_failed`. |
+
+#### Goals
+| Event | Description |
+|---|---|
+| `goal.continuation` | An auto-continuation turn was enqueued for the active goal. Fields: `goal_id`, `ordinal`, `budget`. |
+| `goal.budget_exceeded` | The in-turn budget checkpoint tripped mid-round; the turn ends with `termination_reason="budget_exhausted"`. Fields: `reason`. |
+
+Continuation-budget *exhaustion* has no dedicated event — the goal moves to `budget_limited` and a high-urgency `dialog.notification` is broadcast.
 
 #### Workers
 | Event | Description |
@@ -646,6 +673,11 @@ The governed policy store — see [internals/canary-and-adaptive.md](internals/c
 
 ```
 GET  /api/adaptive/entries?kind=&status=active&limit=200   Entries by kind/status (+ enabled/auto_apply flags)
+DEL  /api/adaptive/entries/{entry_id}                      Release valve: soft-delete one entry as actor
+                                                           "human" (status -> deleted, version bumped,
+                                                           journaled so it rolls back). 404 if unknown or
+                                                           not active. Frees a per-kind cap slot that
+                                                           producers can otherwise only ever fill
 GET  /api/adaptive/events?batch_id=&entry_id=&limit=100    Append-only event journal (before/after snapshots)
 GET  /api/adaptive/batches?status=&limit=100               Apply batches and their tripwire status
 GET  /api/adaptive/proposals?status=pending&limit=100      High-risk edit proposals awaiting review
@@ -656,7 +688,13 @@ POST /api/adaptive/proposals/{id}/reject                   Reject a pending prop
 POST /api/adaptive/rollback                                Roll back — body {"batch_id": ...} or {"event_id": ...};
                                                            walks events in reverse and restores exact snapshots
 POST /api/adaptive/batches/{batch_id}/dismiss              Human dismiss of a tripwire flag: suspect → applied
+                                                           and cleared_at stamped, which is what makes the
+                                                           dismiss durable — the tripwire sweep skips
+                                                           cleared batches, so the same evidence can never
+                                                           re-flag it. 400 if the batch is not suspect
 ```
+
+Neither the adaptive layer nor the canary suite emits SSE events. Both are polled through the endpoints above; the tripwire's only push signal is a high-urgency row in the notifications feed.
 
 ---
 

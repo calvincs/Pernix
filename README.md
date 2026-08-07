@@ -28,9 +28,9 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Local models via Ollama** — no API key, no internet required, runs entirely on your hardware
 - **Cloud models via OpenRouter** — access GPT-4o, Claude, Gemini, and hundreds of others with a single API key
 - **Native OpenAI & OpenAI-compatible servers** — point `openai_base_url` at api.openai.com, vLLM, LM Studio, or a llama.cpp server; key via `OPENAI_API_KEY`
-- **Automatic fallback** — if a cloud provider hits a rate limit, Pernix seamlessly falls back to your local Ollama model
+- **Automatic fallback** — if a call fails or a cloud provider hits a rate limit, Pernix retries on your backup model; it can cross providers (OpenRouter → local Ollama) or just swap models within the same provider
 - **Prompt caching** — cache breakpoints for Anthropic models via OpenRouter (on by default); cache hit rates show in the session cost tooltip
-- **Multiple model roles** — primary model for conversations, scout model for fast planning, background model for auto-titling and memory tasks, fallback model for resilience, optional embedding model for semantic recall
+- **Three model roles** — **Primary** (`llm_model`) handles your conversation and every quality-critical call (compaction, reflect, eval); **Background** (`background_model`) runs the cheap/offline tier (scout, auto-titling, memory distillation, idle work); **Backup** (`fallback_model`) catches failures from either. Plus an optional embedding model for semantic recall, and per-request overrides for workers and workflow steps
 
 ### Agent Capabilities
 - **Persistent memory** — the agent remembers facts, decisions, and lessons across sessions using a full-text-searchable collection of markdown files
@@ -46,7 +46,7 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Long-running autonomy** — deterministic gates (shell checks Reflect can't overrule), persistent goals with budgets and auto-continuations, and heartbeats steered into running work — composing into unattended multi-hour tasks ([docs](docs/internals/autonomy.md))
 
 ### Experimental Add-ons (all off by default)
-- **RLM — recursive processing** ([docs](docs/internals/rlm.md)) — analyze inputs far larger than any model's context window: a root model writes code in a sandboxed REPL that holds the input as a variable, delegating chunks to budgeted sub-model calls. Adds two model roles (RLM Root, RLM Sub-call) and a "Recent RLM runs" panel
+- **RLM — recursive processing** ([docs](docs/internals/rlm.md)) — analyze inputs far larger than any model's context window: a root model writes code in a sandboxed REPL that holds the input as a variable, delegating chunks to budgeted sub-model calls. No new model roles — the root runs on Primary and sub-calls on Background, sharing one concurrency limiter across every recursion depth. Adds a "Recent RLM runs" panel
 - **Candor — operational memory** ([docs](docs/internals/candor.md)) — the agent learns from recorded outcomes how reliable its own tools actually are; scout gets an exception-report intel brief where silence means healthy. Requires the separate `candor` package
 - **Dream — introspection** ([docs](docs/internals/dream.md)) — during idle time the agent raises typed hypotheses about its own memory and behavior, then tries to falsify them against recorded outcomes; keeps a read-only daily journal in the sidebar and writes a periodic dream report
 - **Canary suite** ([docs](docs/internals/canary-and-adaptive.md)) — golden tasks with deterministic gates run headlessly on a nightly schedule in isolated workspaces, measuring whether the agent is actually getting better or worse; the suite grows via human-approved proposals from real failed turns
@@ -100,7 +100,7 @@ Open **http://localhost:8090** in your browser.
 
 1. Click the gear icon → **Settings**
 2. Set **`llm_model`** — the name of your Ollama model (e.g. `qwen3:32b`) or an OpenRouter model ID (e.g. `anthropic/claude-sonnet-4.6`, `x-ai/grok-4.1-fast`)
-3. Set **`scout_model`** — a fast model for planning. Something like `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter, works well. You can use the same model as `llm_model` while getting started
+3. Optionally set **`background_model`** — a fast, cheap model for scout planning, auto-titling, and idle work. Something like `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter, works well. Leave it empty and everything runs on `llm_model`
 4. Click **Save**
 
 Start a new session and say hello. Then, while it's working, open [`/docs`](http://localhost:8090/docs) in another tab to see the live API.
@@ -141,7 +141,7 @@ Configure in Settings:
 
 ### Using Both Simultaneously
 
-Pernix can use Ollama and OpenRouter at the same time. You can use a cloud model as your primary (`llm_model`) and a local Ollama model as your `fallback_model` — if OpenRouter is rate-limited, Pernix switches to Ollama automatically.
+Pernix can use Ollama and OpenRouter at the same time. You can use a cloud model as your Primary (`llm_model`) and a local Ollama model as your Backup (`fallback_model`) — if OpenRouter is rate-limited, Pernix switches to Ollama automatically. Backup doesn't have to cross providers, though: a second Ollama model is a perfectly good backup for an Ollama primary, and failover still works.
 
 When both providers have a model with the same name, Ollama wins (local, free, lower latency). To use the OpenRouter version of a model, add it explicitly to `OPENROUTER_MODELS` in your `.env`.
 

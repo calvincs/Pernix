@@ -67,7 +67,7 @@ For the full reaper rules and timeouts, see [internals/state-machine.md §0.7](i
 
 Two safety nets:
 
-- **`max_tool_rounds`** (default 10) caps the number of tool-call cycles per turn. The loop ends with a `round_ceiling` outcome instead of looping forever.
+- **`max_tool_rounds`** (default 50) caps the number of tool-call cycles per turn. The loop ends with a `round_ceiling` outcome instead of looping forever. It is a backstop against a runaway loop, not a spending limit — goal token/time budgets and the stuck detector are what actually bound cost. (It defaulted to 10 before the 2026-08 refactor, which was low enough that ordinary long tasks tripped it and had to be papered over by goal continuations.)
 - **Reflect** runs after every turn. It compares the original request against what the agent produced, and can trigger up to 2 retries with corrective lessons (`reflect_max_retries = 2`). After that it escalates by surfacing the issue to you.
 
 If the agent is doing something destructive, hit the cancel button in the UI — that triggers a `CANCELLING → IDLE_READY` transition and tears down the loop within ~30 seconds.

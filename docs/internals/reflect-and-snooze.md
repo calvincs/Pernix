@@ -36,11 +36,20 @@ When the verdict is `retry` or `escalate`, reflect emits a structured **turn dig
 
 Reflect-N never sees attempt-(N-1)'s transcript directly. The chain is: each cycle slices its own transcript by scout marker, produces its own digest, and that digest — not the raw transcript — is what the next scout reads.
 
+Alongside the verdict, a `retry` may carry **`retry_without_tools`** — up to five tool names to withhold from the next attempt. Names are validated against the live tool registry (hallucinated ones are dropped) and each is truncated to 80 chars. The exclusion is enforced twice: the names are subtracted from the schema slice the model is shown — overriding both the builtin set and the monotonically-growing allowlist — and the executor refuses them with an error result if the model calls one regardless. It is the one *mechanical* effector reflect has: "stop reaching for `browse_web` on this" becomes a constraint rather than a suggestion. The set clears at the next genuine user turn.
+
 ### Bounded retries
 
 Each `retry` increments `retry_index` on the same `turn_id`. When `retry_index` reaches `reflect_max_retries` (default 2), retries stop — total of 3 attempts. The next reflect verdict at that point can only be `pass` or `escalate`.
 
 For worker sessions, `reflect_max_retries_worker` is a separate cap (default 2). Workers run on tighter budgets so you might want fewer retries there.
+
+Two guards can stop retries before that cap:
+
+- **Time budget.** If the session's remaining LLM time headroom is less than another attempt plausibly needs, reflect is skipped with `reflect.budget_exhausted {remaining_s, needed_s}`.
+- **The cross-retry circuit breaker.** From the second retry onward, the last two post-mortems for the turn are compared. If both have verdict `retry`, the *same* `failure_cause`, and reasoning text at least 0.7 similar (`difflib.SequenceMatcher` over lowercased reasoning + diagnostic), the retry is refused. Pernix emits `reflect.circuit_breaker {attempts, signature, reasoning}`, writes a `notice` row into the transcript, and raises a notification titled "Retry stopped — same failure repeating". The counter is per-turn, so the two compared post-mortems always belong to the current turn.
+
+  The reasoning: a retry is worth paying for when the next attempt might differ. Two byte-similar failures in a row are evidence that it won't — the loop is stuck on something a third identical attempt cannot fix, and continuing just spends budget to produce the same failure a third time.
 
 ### When reflect skips
 
@@ -110,7 +119,12 @@ Each cycle walks an ordered ladder of activities. `core/snooze.py` owns the life
 | 12c | Canary cleanup | When `canary_enabled`: prune `canary_runs` rows and their sessions past `canary_retention_days` (default 30), and nudge once per canary whose `last_reviewed` is over 90 days old. Never dispatches sweeps — those are enqueued for the next idle window. |
 | 13 | Refine pass | Whole-session refine (`core/refine.py`) — the single session-improvement rung: skill-edit proposals + lessons from any idle session, not gated on the reflect verdict. |
 | 14 | Dream step | Idle-time introspection (`core/dream/`) — see [dream.md](dream.md). Only when `dream_enabled`. |
+| 16 | Telos step | The teleological slow loops (`core/telos/`) — see [telos.md](telos.md). Only when `telos_enabled`. |
 | 15 | Adaptive layer | When `adaptive_enabled`: drain pending auto-applies (safe here — the idle window means no session's cached prefix is mid-turn), enqueue post-batch canary sweeps, evaluate the tripwire (no LLM) — see [canary-and-adaptive.md](canary-and-adaptive.md). |
+
+Activity 16 running *before* 15 is deliberate, not a typo: Telos may queue adaptive edits (a `supported` claim becomes a `routing_hint`), so the adaptive drain has to come after it or those edits wait a whole cycle.
+
+Numbering has gaps because it is historical, not ordinal — an activity that is removed does not renumber the ones after it, so cross-references in code and logs stay valid. Activity 2b (a separate snooze-reflect pass) was removed and folded into Activity 13.
 
 A cycle runs until the ladder **completes** — there is no per-task time slice. Two things end it early:
 
@@ -155,7 +169,7 @@ This is the slow feedback loop. You won't see it move the needle on a single tur
 
 ## Observability
 
-- **Reflect activity** is emitted as `reflect.start` / `reflect.done` SSE events (the verdict rides on `reflect.done`), plus `reflect.skipped` / `reflect.exhausted` markers. The UI's timeline drawer shows them inline with the turn.
+- **Reflect activity** is emitted as `reflect.start` / `reflect.done` SSE events (the verdict rides on `reflect.done`), plus `reflect.skipped`, `reflect.retry`, `reflect.escalate`, `reflect.exhausted`, `reflect.budget_exhausted` and `reflect.circuit_breaker` markers. The UI's timeline drawer shows them inline with the turn.
 - **Snooze cycle output** is logged to `data/logs/pernix.log`. Each cycle records what it ran and how long it took.
 - **`POST /api/memory/maintenance`** runs the memory-index health check and returns the result inline.
 

@@ -76,7 +76,7 @@ The loop:
 2. Stream a response from the LLM
 3. If the response includes tool calls, execute them, append results to the conversation, and loop back to step 1
 4. If the response is a final text answer (no tool calls), the loop exits
-5. If the loop hits `max_tool_rounds` (default 10), it terminates with a "round ceiling" reason
+5. If the loop hits `max_tool_rounds` (default 50), it terminates with a "round ceiling" reason. The ceiling is a backstop, not a budget — the real spend guards are the per-goal token/time budgets and the stuck detector
 
 While running, the loop emits SSE events: every token, every tool call, every tool result. The UI uses these to show real-time progress.
 
@@ -112,7 +112,7 @@ When no sessions are actively processing, **Snooze** runs background maintenance
 - **Candor maintenance** — when enabled, runs the admission gate over recorded tool outcomes and checkpoints the operational-memory store
 - **Dream step** — when enabled, one increment of idle-time introspection: hypotheses about the agent's own memory and behavior, validated against recorded outcomes (see [internals/dream.md](internals/dream.md))
 
-A cycle runs until the full activity ladder completes; Snooze cancels instantly when you start a new session — your work always takes priority — and the interrupted activity resumes next cycle. It's defined in `core/snooze.py`.
+A cycle runs until the full activity ladder completes; Snooze cancels instantly when you start a new session — your work always takes priority — and the interrupted activity resumes next cycle. `core/snooze.py` owns the lifecycle, the idle gate and the ladder; the work itself lives next to the store it touches — memory-store surgery in `core/memory/sweeps.py`, retention pruners in `core/retention.py`.
 
 ---
 
@@ -286,7 +286,7 @@ Pernix supports multiple providers simultaneously. The router (`core/llm/router.
 2. **Registry** — a runtime catalog populated from both providers' `/v1/models` endpoints
 3. **Conflict policy** — when both providers have a model with the same name, Ollama wins (local, free, lower latency) unless you've explicitly added the model to `openrouter_models`
 
-If OpenRouter returns a rate-limit, quota, or context-overflow error, the router falls back to your configured `fallback_model` on Ollama. This is automatic — the user doesn't see the failure.
+If a cloud provider returns a rate-limit, quota, or overload error, the router falls back to your configured `fallback_model` (the **Backup** role) on Ollama. Above the router, the agent loop can also switch a whole turn to the Backup model once its retry budget is spent — and there a *different model on the same provider* counts, so an all-Ollama setup has real failover too. Every non-streaming call (compaction, reflect, titles, eval, distill) gets a one-shot Backup retry as well. All of this is automatic — the user doesn't see the failure. Context overflow deliberately does **not** fail over; it triggers a compaction retry instead.
 
 Concurrency is controlled per-provider via semaphores: `llm_max_concurrent` for Ollama, `openrouter_max_concurrent` for OpenRouter. Workers and the main session all share these slots fairly.
 
@@ -355,7 +355,7 @@ If you want to read the code:
 | LLM routing | `core/llm/router.py`, `core/llm/registry.py` |
 | Workers | `core/extensions/orchestration/__init__.py` |
 | Memory store | `core/memory/store.py` |
-| Snooze | `core/snooze.py` |
+| Snooze | `core/snooze.py` (memory sweeps in `core/memory/sweeps.py`, retention in `core/retention.py`) |
 | RLM engine | `core/extensions/rlm/` |
 
 The codebase is intentionally small and readable. Pick a thread and pull on it.

@@ -147,21 +147,62 @@ corrupt rollback, so don't.
 
 ### Producers
 
-Four subsystems emit adaptive edits, each batch carrying ≥1 evidence
-reference (post-mortem ids, dream hypothesis ids, Candor ledger refs) — an
-edit without evidence is refused:
+Producers emit adaptive edits, each batch carrying ≥1 evidence reference
+(post-mortem ids, dream hypothesis ids, Candor ledger refs) — an edit without
+evidence is refused:
 
-- **Refine** and **snooze-reflect** — user corrections → `prompt_note`,
-  technique/tool patterns → `routing_hint`, sequencing rules → `policy`
-  (gated). Refine may also propose canaries (above).
+- **Refine** — user corrections → `prompt_note`, technique/tool patterns →
+  `routing_hint`, sequencing rules → `policy` (gated). Refine may also
+  propose canaries (above). (A separate `snooze_reflect` producer existed
+  briefly and was folded back into Refine; the module is gone.)
 - **Dream promotion** — the deferred phase from
   [dream.md](dream.md) now ships here: mechanically-validated tool patterns
   → `routing_hint`; counterfactually-validated ineffective lessons →
-  `policy` proposals; contradiction/stale-memory findings → review-only
-  proposals where approving *acknowledges* — memory edits stay human.
+  `policy` proposals; contradiction/stale-memory findings → proposals
+  carrying the **memory-correction effector** (below).
 - **Candor** — calibrated reliability regressions → `routing_hint` with the
   ledger's audit chain as evidence (queued during Snooze's Candor
-  maintenance activity).
+  maintenance activity). The same activity also **retires** hints it no
+  longer needs (below).
+- **Telos** — a hypothesis evaluated `supported` with real evidence and
+  confidence ≥ 0.65 queues a global `routing_hint` under producer `telos`,
+  so a validated claim about how the agent should work actually reaches
+  scout instead of dying in the journal.
+
+#### Candor hint retirement
+
+Minting alone is a ratchet: every degraded tool consumes a slot in the
+per-kind cap and nothing ever gives one back. So the Candor maintenance pass
+also proposes deletes. A `routing_hint` is retired when all three hold: its
+`source` is `candor` (a producer deleting its own entry stays low-risk, so
+the cross-producer escalation doesn't fire), its id has the
+`tool-<name>-degraded` shape, and the tool has **recovered** — it no longer
+appears in `degraded_tools()` because calibrated reliability climbed back
+above threshold. Evidence reads `candor:tool_ok recovered (<id>)`. Mints and
+retires are capped at 2 each per pass and queued as one batch. Dedupe on the
+mint side only checks *live* hints, so a hint can legitimately come back if
+the tool degrades again.
+
+#### The memory-correction effector
+
+Dream's contradiction and stale-memory findings used to produce review-only
+proposals: approving them merely acknowledged the finding and wrote nothing,
+which is why the great majority of pending proposals on a long-running
+install had no effector at all.
+
+Approving such a proposal now runs `apply_memory_correction()`, which is
+**additive and non-destructive**. For each cited memory file (capped at 3,
+drawn from the hypothesis's pinned evidence) it appends one new entry —
+`entry_type="note"`, `weight="high"`, `source="dream_fix"`, tagged
+`correction,<kind>` — prefixed `CONTRADICTION RESOLVED` or `STALE-INFO
+CORRECTION` and ending with an instruction to treat the note as overriding
+conflicting older entries in that file. **The disputed entries are left in
+place.** Nothing is edited or deleted, so the correction is itself reviewable
+and the original record survives. The approve response reports
+`corrections_written`.
+
+This path is handled before the normal batch machinery: `memory_correction`
+is a payload action, not one of the three entry actions.
 
 ### Apply discipline
 
@@ -180,6 +221,23 @@ edit without evidence is refused:
 - **Structural immutability** — the apply path writes only `adaptive_*`
   rows; it has no file-write capability. `SOUL.md`/`RULES.md` and the base
   prompt stay machine-untouchable.
+- **Release valve** — `DELETE /api/adaptive/entries/{id}` (the *Delete*
+  button on each entry in the Adaptive tab) soft-deletes one entry as actor
+  `human`: status flips to `deleted`, the version increments, and a `delete`
+  event with full before/after snapshots is journaled, so it rolls back like
+  any other change. This exists because producers can only ever *fill* the
+  per-kind cap; without a human way to free a slot, a cap wedged full of
+  stale machine entries stays wedged. The event is intentionally minted
+  outside any batch, so it is reversible by `event_id` rather than by batch.
+
+### Per-tier proposals
+
+When a producer's batch mixes risk tiers and `adaptive_auto_apply` is off,
+the queue mints **one proposal per tier** — the rationale is suffixed
+`— high-risk tier` / `— low-risk tier`, and the result carries both
+`proposal_id` (the first) and `proposal_ids` (all). Folding low-risk edits in
+with high-risk ones would make approval all-or-nothing across tiers, forcing
+you to accept a `policy` change to get a `routing_hint`.
 
 ### Proposals, rollback, and the tripwire
 
@@ -195,21 +253,41 @@ reverse and restores each entry byte-for-byte (or deletes what the batch
 created). Rollback is itself an event. One click in the Adaptive tab, or
 `POST /api/adaptive/rollback`.
 
-**The tripwire** watches every batch with two signals:
+**The tripwire** watches every batch with two signals, both anchored on when
+the batch actually **applied** — not when it was queued. `created_at` is
+stamped at queue time, and a batch can sit pending in the proposal queue for
+days, so the anchor is the earliest non-rollback journal event for the batch
+(events are read ascending), falling back to `created_at` only when nothing
+landed.
 
 - *Primary (active)*: the batch's post-batch canary sweep vs. the trailing
-  `canary_baseline_runs` scheduled sweeps — a pass-rate drop ≥
-  `canary_regression_delta` (0.15) is a regression.
+  `canary_baseline_runs` scheduled sweeps that ran *before* the apply — a
+  pass-rate drop ≥ `canary_regression_delta` (0.15) is a regression. Canaries
+  detected as flaky are excluded.
 - *Secondary (passive)*: organic post-mortem reflect-retry drift over the
-  `adaptive_tripwire_window_turns` (20) turns after the batch
-  (canary-stamped post-mortems excluded, so the probe can't contaminate the
-  signal).
+  `adaptive_tripwire_window_turns` (20) turns after the apply, compared
+  against the 20 organic turns immediately before it (canary-stamped
+  post-mortems excluded, so the probe can't contaminate the signal).
+
+The "after" window is fetched **oldest-first from the apply timestamp**, and
+the sweep simply waits until that many organic turns exist. Slicing the
+newest-first feed instead would compare the newest turns *overall* — a moving
+target that drifts further from the batch the longer the system keeps
+running, so a batch could be judged on turns that had nothing to do with it.
 
 Either signal flags the batch **`suspect`** — surfaced in the Adaptive tab,
-cleared by human dismiss (`POST /api/adaptive/batches/{id}/dismiss`) or a
-subsequent clean sweep. With `adaptive_auto_rollback` on (off by default), a
-canary regression promotes to automatic rollback; leave it off until the
+cleared by human dismiss (`POST /api/adaptive/batches/{id}/dismiss`, the
+*Dismiss flag* button) or a subsequent clean sweep. **Dismissal is durable**:
+it stamps `cleared_at`, and the sweep skips any batch that has one, so the
+same evidence can never re-raise a flag you already looked at. Only the
+primary (canary) signal can promote to automatic rollback, and only with
+`adaptive_auto_rollback` on (off by default) — the passive post-mortem signal
+never rolls anything back on its own. Leave auto-rollback off until the
 metric has earned that trust on your suite.
+
+Neither the adaptive layer nor the canary suite emits SSE. Both surface
+through the polled REST endpoints, plus a high-urgency notification row when
+the tripwire flags or auto-rolls-back a batch.
 
 ---
 

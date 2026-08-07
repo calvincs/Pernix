@@ -9,8 +9,16 @@ and rewritten for Pernix rather than taken as a dependency (each adapted file
 carries an attribution header).
 
 Off by default. Enable in Settings → General → RLM (Recursive Processing);
-the `rlm_process` tool registers at startup (restart after toggling), and
-models are chosen in Settings → Models → Model Roles.
+the `rlm_process` tool registers at startup (restart after toggling).
+
+RLM adds **no model roles of its own**. The root runs on the Primary role
+(`settings.llm_model`) and sub-calls run on the Background role
+(`settings.background_model`, falling back to Primary when unset) — see
+`_resolve_root_model` / `_resolve_sub_model` in `core/extensions/rlm/__init__.py`.
+The `rlm_root_model` and `rlm_sub_model` settings that earlier releases exposed
+no longer exist. The per-call `model=` argument on `rlm_process` still overrides
+the sub-call model for one run, and the broker's allowlist is the union of the
+root model, the sub model, `background_model` and `llm_model`.
 
 ## The idea
 
@@ -54,6 +62,34 @@ tool thread (long-poll pool)                 child process (sandboxed)
   (own child, `sub/<id>` run dir, shared ledger and deadline) on the broker
   handler thread it already occupies. Past the cap it silently degrades to a
   plain `llm_query`.
+
+### The concurrency limiter is genuinely shared
+
+`SubcallLimiter` (`broker.py`) is a single `threading.Semaphore` bounded by
+`rlm_max_concurrent_subcalls` (default 3). It is minted once by the **root**
+engine and handed down to every nested engine and every depth's broker, so
+peak in-flight sub-calls across the whole run tree is the cap. It used to be
+per-depth, which made real peak concurrency `max_concurrent ** max_depth`.
+
+Two calls deliberately take **no** slot, and this is a correctness requirement
+rather than an oversight: the root model call, and the `rlm_query()` recursion
+wrapper. The invariant is that a slot holder must never block waiting on work
+that itself needs a slot — otherwise a full limiter deadlocks the run. Each
+broker still keeps its own `ThreadPoolExecutor` sized to the same cap for local
+fan-out, but those threads all queue behind the one shared semaphore.
+
+### Reading bound tool results
+
+Large tool results are spilled by the session kernel to
+`data/kernels/<sid>/payloads/`, and the stub the model sees in context ends
+with the durable copy's path. `kernel_state_root()` is registered as an allowed
+**read** root (never a write root), so that advertised path resolves — which is
+what lets `rlm_process(source="…/payloads/tool_result_7.txt")` re-open the full
+payload instead of the pointer being dead on arrival. `_resolve_sources()`
+routes every `source` entry through the same `safe_read_path` the file tools
+use: a single string that resolves to no file is treated as inline text, but
+inside a list a non-existent path is an error rather than silently-analyzed
+literal text.
 
 ## Kill discipline
 

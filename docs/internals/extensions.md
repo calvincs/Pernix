@@ -166,7 +166,7 @@ Operational-memory add-on (off by default): calibrated reliability tracking with
 |---|---|---|
 | `rlm_process` | caution | `rlm_enabled` |
 
-Recursive long-input processing (off by default): analyzes inputs far beyond the context window in a sandboxed child REPL with brokered, budgeted sub-LLM calls. Same restart-gated registration pattern as candor; the `rlm_*` caps and model roles apply hot. Run residue at `data/workspace/rlm/<run_id>/` (purged by snooze retention); audit rows in the `rlm_runs` table (migration v18). Architecture and security posture: [rlm.md](rlm.md).
+Recursive long-input processing (off by default): analyzes inputs far beyond the context window in a sandboxed child REPL with brokered, budgeted sub-LLM calls. Same restart-gated registration pattern as candor; the `rlm_*` caps apply hot, and there are no RLM-specific model settings — the root uses Primary, sub-calls use Background. Run residue at `data/workspace/rlm/<run_id>/` (purged by snooze retention); audit rows in the `rlm_runs` table (migration v18). Architecture and security posture: [rlm.md](rlm.md).
 
 ### `telos`
 

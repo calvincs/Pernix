@@ -30,8 +30,8 @@ These are the most important settings to configure before first use.
 | Setting | Default | Description |
 |---|---|---|
 | `llm_base_url` | `http://localhost:11434/v1` | Base URL for the primary LLM provider. Points to Ollama by default. Change to any OpenAI-compatible endpoint. |
-| `llm_model` | *(empty)* | **Required.** The primary model used for agent turns. Set this before your first session. |
-| `fallback_model` | *(empty)* | Ollama model to use when OpenRouter hits a rate limit or quota. Should be a locally-available Ollama model. |
+| `llm_model` | *(empty)* | **Required. Primary** role — agent turns, plus every quality-critical call: compaction summaries, reflect verdicts, eval, and the RLM root. Set this before your first session. |
+| `fallback_model` | *(empty)* | **Backup** role — used whenever a Primary *or* Background call fails: provider failover, agent-loop stream failover, scout's last resort, and the one-shot retry wrapped around every non-streaming call. A different model on the **same** provider counts, so an all-Ollama setup still gets failover. Empty disables failover entirely. |
 | `background_model` | *(empty)* | **Background** role — the fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, workflow reflect, refine input prep, LLM-backed Snooze activities, Dream, Telos, and RLM sub-calls. Quality-critical calls (compaction, reflect, eval) run on Primary instead. Empty falls back to `llm_model`. |
 | `llm_max_concurrent` | `1` | Maximum simultaneous requests to Ollama. Increase only if your hardware supports parallel inference. |
 | `llm_session_timeout` | `1800` | Maximum wall-clock seconds a session may hold an LLM slot. Prevents hung sessions from blocking others. Set to `0` for unlimited. |
@@ -41,7 +41,7 @@ These are the most important settings to configure before first use.
 | Setting | Default | Description |
 |---|---|---|
 | `openrouter_base_url` | `https://openrouter.ai/api/v1` | OpenRouter API endpoint. Locked in network mode. |
-| `openrouter_max_concurrent` | `2` | Simultaneous requests to OpenRouter. |
+| `openrouter_max_concurrent` | `4` | Simultaneous requests to OpenRouter. |
 | `openrouter_models` | *(empty list)* | Comma-separated list of OpenRouter model IDs to make available (e.g. `anthropic/claude-sonnet-4.6,anthropic/claude-haiku-4.5,x-ai/grok-4.1-fast`). If empty, all models on your OpenRouter account are shown. Use current frontier models — agent workloads benefit a lot from strong tool-call and reasoning behavior. |
 | `openrouter_cache_control` | `true` | Attach prompt-cache breakpoints (`cache_control` markers) to the system prompt for `anthropic/*` models routed via OpenRouter — the static prefix and the per-turn section become separately cacheable. Other models and providers are untouched. Cache reads/writes show in the session cost tooltip. |
 | `vision_model_overrides` | *(empty list)* | Force `supports_vision = true` for specific models where auto-detection fails. |
@@ -53,7 +53,7 @@ A native provider for the OpenAI API — and, because `openai_base_url` is overr
 | Setting | Default | Description |
 |---|---|---|
 | `openai_base_url` | `https://api.openai.com/v1` | OpenAI API endpoint. Point it at any OpenAI-compatible server to use vLLM, LM Studio, or llama.cpp instead. |
-| `openai_max_concurrent` | `2` | Simultaneous requests to the OpenAI provider. |
+| `openai_max_concurrent` | `4` | Simultaneous requests to the OpenAI provider. |
 | `openai_models` | *(empty list)* | Whitelist of model names served by this provider (also settable via the `OPENAI_MODELS` env var). Listing models is recommended: it routes bare names like `gpt-4o` to this provider (otherwise slash-less names go to Ollama) and keeps the UI dropdown curated. |
 
 See [deployment/llm-providers.md](deployment/llm-providers.md) for setup walkthroughs.
@@ -70,14 +70,26 @@ Pernix tracks how many tokens are in the active conversation and automatically c
 
 | Setting | Default | Description |
 |---|---|---|
-| `context_budget` | `192000` | Soft token limit for the conversation window. Set this to match your model's actual context length. |
+| `context_budget` | `192000` | **Fallback only.** The budget is normally derived per session at turn start from the active model's registry `context_length` (`max(32000, context_length × 0.9)`). This value is used only when the registry reports no context length for that model. |
 | `max_tokens` | `32000` | Maximum tokens the model can generate per request (one response turn). |
 | `compaction_threshold` | `0.75` | Compact when the conversation reaches this fraction of `context_budget`. At 75%, older messages are summarized and replaced with a compact representation. |
 | `compaction_keep_tokens` | `51000` | How many tokens to preserve verbatim after compaction. Recent messages and tool results are kept. |
 | `context_critical_threshold` | `0.85` | Show a visual warning in the UI when context fills to this fraction. |
 | `max_inline_attach_bytes` | `33554432` (32 MB) | Ceiling on the total base64 attachment bytes inlined into a single compile. Past it, the oldest attachments fall back to text markers. 32 MB fits audio (a 19 MB WAV expands to ~25 MB base64). |
 
-> **Tip:** If you are using a model with a small context window (e.g. 8K or 16K tokens), reduce `context_budget` and `compaction_keep_tokens` accordingly.
+### View pruning
+
+Before compaction is needed, the context compiler can stub oversized tool results out of the **compiled view**. Stored messages are never touched — re-reading the session or exporting it still shows the full result.
+
+This used to be an unconditional hardcode: every tool result over 300 characters beyond the last 10 messages was stubbed on every compile, regardless of whether the context was under any pressure at all, and with no event to say it had happened. It is now budget-gated and emits `context.view_pruned` when it fires.
+
+| Setting | Default | Description |
+|---|---|---|
+| `view_prune_pressure` | `0.5` | Only prune when history size exceeds this fraction of the (character-equivalent) context budget. Below it, nothing is stubbed. |
+| `view_prune_keep_recent` | `30` | Number of most recent messages left completely intact. |
+| `view_prune_min_chars` | `2000` | Only tool results larger than this are candidates for stubbing. |
+
+> **Tip:** If you are using a model with a small context window (e.g. 8K or 16K tokens), reduce `compaction_keep_tokens` accordingly. `context_budget` normally follows the model automatically.
 
 ---
 
@@ -85,7 +97,7 @@ Pernix tracks how many tokens are in the active conversation and automatically c
 
 | Setting | Default | Description |
 |---|---|---|
-| `max_tool_rounds` | `10` | Maximum number of tool-call cycles in a single turn. Prevents infinite tool loops. |
+| `max_tool_rounds` | `50` | Maximum number of tool-call cycles in a single turn. A backstop against infinite tool loops — not a spend cap. Goal token/time budgets and the stuck detector are the real guards. (Raised from `10` in the 2026-08 refactor; ten rounds manufactured its own failures on ordinary long tasks.) |
 
 ---
 
@@ -98,7 +110,7 @@ The scout is a fast sub-agent that runs at the start of each turn to plan the ap
 | `scout_enabled` | `true` | Enable/disable the scout phase. Disable only for debugging; the scout significantly improves response quality. |
 | `scout_timeout` | `90` | Seconds before the scout is abandoned and the main agent runs without its guidance. |
 | `scout_retry_on_empty_approach` | `true` | Retry scout once if it returns no guidance (empty plan). |
-| `scout_preload_memory_char_limit` | `300` | Characters per memory result in the scout's auto-injected baseline. Only affects the preload phase — active recall tool calls return full entry content. |
+| `scout_preload_memory_char_limit` | `600` | Characters per memory result in the scout's auto-injected baseline. Only affects the preload phase — active recall tool calls return full entry content. |
 
 ---
 
@@ -141,13 +153,13 @@ The store lives at `data/candor/` (machine-local, not in `settings.json`).
 
 ## RLM (Recursive Processing Add-on)
 
-Recursive Language Models (arXiv 2512.24601): the agent processes inputs far beyond the context window — huge files, corpora, transcripts, log dumps — by writing code in a sandboxed child REPL that holds the input as a variable and delegates chunk work to budgeted sub-LLM calls. Adapted from the MIT-licensed reference implementation (no new dependency). Toggles live in Settings → General → RLM (Recursive Processing); model roles under Settings → Models. Architecture + security posture: [internals/rlm.md](internals/rlm.md).
+Recursive Language Models (arXiv 2512.24601): the agent processes inputs far beyond the context window — huge files, corpora, transcripts, log dumps — by writing code in a sandboxed child REPL that holds the input as a variable and delegates chunk work to budgeted sub-LLM calls. Adapted from the MIT-licensed reference implementation (no new dependency). Toggles live in Settings → General → RLM (Recursive Processing). RLM adds **no model roles of its own** — it reuses Primary and Background (see below). Architecture + security posture: [internals/rlm.md](internals/rlm.md).
 
 | Setting | Default | Description |
 |---|---|---|
-| `rlm_enabled` | `false` | Master switch. Caps and model roles apply hot; the `rlm_process` tool registers at startup only, so enabling/disabling needs a restart. |
+| `rlm_enabled` | `false` | Master switch. Caps apply hot; the `rlm_process` tool registers at startup only, so enabling/disabling needs a restart. |
 | *(RLM root)* | — | Runs on Primary (`llm_model`). |
-| *(RLM sub-calls)* | — | Run on Background (`background_model`), falling back to Primary. |
+| *(RLM sub-calls)* | — | Run on Background (`background_model`), falling back to Primary. The `model=` argument on `rlm_process` overrides this for one run. |
 | `rlm_max_iterations` | `20` | Root REPL turns per run before best-effort synthesis. |
 | `rlm_max_depth` | `1` | `1` = sub-calls only; `2`–`3` lets `rlm_query()` spawn nested RLM runs. |
 | `rlm_max_subcalls` | `50` | Total sub-LLM calls per run (one ledger shared across recursion depths). |

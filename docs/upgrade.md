@@ -40,6 +40,24 @@ Running newer Pernix against an older DB is fine — that's just a normal upgrad
 
 These are the upgrade points where something the user might have set up needs attention. Each is dated.
 
+### 2026-08-07 — Three model roles; `schedule_workflow` removed
+
+**Model roles collapsed from six to three.** `scout_model`, `reflect_model`, `critical_model`, `rlm_root_model` and `rlm_sub_model` no longer exist. Everything is now one of:
+
+| Role | Setting | Covers |
+|---|---|---|
+| Primary | `llm_model` | agent turns + compaction, reflect, eval, RLM root |
+| Background | `background_model` | scout, titles, distill, snooze, dream, telos, RLM sub-calls |
+| Backup | `fallback_model` | any Primary or Background call that fails |
+
+**What to do:** if you had a distinct `scout_model`, copy it to `background_model` before or after upgrading. Everything else folds into `llm_model` and needs no action. Stale keys left in `data/settings.json` are ignored rather than erroring, so an un-migrated file still boots — it just runs scout on your Primary model until you set `background_model`. Nothing in the UI references the removed keys any more.
+
+Backup failover also got more useful: it now allows a **different model on the same provider**. An Ollama-primary / Ollama-backup configuration previously had no failover at all, because failover required crossing providers.
+
+**`schedule_workflow` was deleted.** The tool was a thin scheduling wrapper whose metadata never persisted. Schedule a workflow the same way you schedule anything else: `schedule_job` with a prompt that runs the workflow. Existing cron jobs are unaffected — only the tool is gone. If a skill of yours calls `schedule_workflow` by name, update it.
+
+Two smaller defaults changed: `max_tool_rounds` is now **50** (was 10 — low enough that ordinary long tasks tripped the ceiling and had to be papered over by goal continuations), and view pruning is now budget-gated rather than unconditional (`view_prune_pressure`, `view_prune_keep_recent`, `view_prune_min_chars`). Neither needs action.
+
 ### 2026-08 — Autonomy, canary suite, adaptive layer (migrations v21–v25)
 
 Nothing to do on upgrade: migrations v21–v25 run automatically at startup — v21 adds `cron_runs.fire_time` (claim-before-deliver scheduling), v22 the `gates` table, v23 `session_goals` plus `token_usage.goal_id`, v24 `canary_runs`, and v25 the `adaptive_*` tables. Every new feature is behind a flag that defaults **off** (`gates_enabled`, `goals_enabled`, `heartbeats_enabled`, `session_kernel_enabled`, `canary_enabled`, `adaptive_enabled`; semantic retrieval activates only when `embedding_model` is set), so behavior is unchanged until you opt in. The new OpenAI-compatible provider likewise stays invisible until `OPENAI_API_KEY` is set.
@@ -48,7 +66,7 @@ If you plan to enable the self-improvement pair, follow the burn-in order: **`ca
 
 ### 2026-07 — RLM (recursive processing) add-on, off by default
 
-Nothing to do on upgrade: migration v18 adds the `rlm_runs` table automatically (v17, from the same period, adds session pinning). If you want the feature, enabling `rlm_enabled` in Settings → General requires a **restart** — the `rlm_process` tool registers at startup only. Pick the root/sub-call models under Settings → Models → Model Roles (they fall back to your primary/background models). Runs leave residue in `data/workspace/rlm/<run_id>/`; snooze purges it after `rlm_run_retention_days` (default 30), and it's safe to delete by hand.
+Nothing to do on upgrade: migration v18 adds the `rlm_runs` table automatically (v17, from the same period, adds session pinning). If you want the feature, enabling `rlm_enabled` in Settings → General requires a **restart** — the `rlm_process` tool registers at startup only. RLM has no model settings of its own: the root runs on your Primary model and sub-calls on Background. Runs leave residue in `data/workspace/rlm/<run_id>/`; snooze purges it after `rlm_run_retention_days` (default 30), and it's safe to delete by hand.
 
 ### 2026-05-05 — `data/agent/AGENTS.md` renamed to `SESSIONS.md`
 
