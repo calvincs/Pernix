@@ -25,6 +25,7 @@ _EXPECTED_NO_PERSIST = {
     "skills_dir",
     "workflows_dir",
     "candor_store_dir",
+    "telos_dir",
 }
 
 

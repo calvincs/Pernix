@@ -17,6 +17,7 @@ def isolate_data(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.db_path", str(tmp_path / "sessions.db"))
     monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path / "workspace"))
     monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    monkeypatch.setattr("config.settings.telos_dir", str(tmp_path / "telos"))
 
     # Redirect settings.json writes to the temp directory so tests never
     # pollute data/settings.json with test values (e.g. "test-model-123").

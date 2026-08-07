@@ -170,6 +170,16 @@ _SETTING_BOUNDS = {
     "adaptive_max_auto_applies_per_day": (0, 50),
     "adaptive_edit_cooldown_hours": (0, 720),
     "adaptive_tripwire_window_turns": (5, 200),
+    "telos_serendipity_budget": (0.05, 0.5),
+    "telos_eig_floor": (0.0, 1.0),
+    "telos_hypotheses_per_question": (1, 10),
+    "telos_max_gated_backlog": (1, 100),
+    "telos_max_eval_tokens": (1000, 200_000),
+    "telos_question_max_attempts": (1, 10),
+    "telos_soup_context_entries": (4, 40),
+    "telos_budget_share_max": (0.1, 0.9),
+    "telos_claims_floor_per_window": (0, 20),
+    "telos_divergence_max": (0.01, 1.0),
 }
 
 

@@ -173,6 +173,28 @@ Idle-time introspection: during snooze the agent examines its own memory, Candor
 
 ---
 
+## Telos (Teleological Layer Add-on)
+
+A non-convergent drive with correction machinery over the whole loop: turn anomalies mint Questions, an idle-time SOUP generates cross-domain hypotheses (only falsifiable ones execute; the rest wait in a speculation pool), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (Ordo), detecting Goodhart binding, measuring goal discharge (Hevel), reconciling the agent's self-story against its append-only trace ledger, and keeping exploration entropy above floor. All state is markdown+YAML under `data/telos/`. Toggles live in Settings → Telos (Teleological Layer); everything applies hot except tool registration (restart). How it works: [internals/telos.md](internals/telos.md); derivation: [dev/telos-spec.md](dev/telos-spec.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `telos_enabled` | `false` | Master switch. Off: no directories created, snooze Activity 16 skipped, cron never installs, post-task hook inert. Registers the `telos_status` / `telos_ask` / `telos_goal_add` / `telos_goal_complete` tools (restart). |
+| `telos_root_text` | `"What is actually going on here, and what is it for?"` | The root objective — a question with no satisfaction predicate. Re-expressing it is an operator-only edit. |
+| `telos_schedule` | `0 4 * * *` | Daily slow-loop cron (UTC): Ordo Pass + Binding Monitor, with weekly Hevel/reconciliation/entropy blocks watermarked inside it. |
+| `telos_serendipity_budget` | `0.15` | Share of scheduler throughput reserved for high-surprise questions with no goal relevance. |
+| `telos_eig_floor` | `0.15` | Testability-gate admission floor on expected information gain. |
+| `telos_hypotheses_per_question` | `3` | SOUP output cap per generation pass. |
+| `telos_max_gated_backlog` | `12` | Above this many gated hypotheses, every idle step evaluates instead of generating. |
+| `telos_max_eval_tokens` | `20000` | Gate ceiling on a hypothesis's estimated evaluation cost. |
+| `telos_question_max_attempts` | `3` | Dry generation passes before a question is abandoned. |
+| `telos_soup_context_entries` | `10` | Memory entries in the band-sampled SOUP context. |
+| `telos_budget_share_max` | `0.35` | Binding Monitor: 7-day budget share above which the Goodhart signature can fire. |
+| `telos_claims_floor_per_window` | `1` | Binding Monitor: new-claims floor — below it (with the other three conditions) the signature holds. |
+| `telos_divergence_max` | `0.15` | Ledger reconciliation: unsupported-autobiography-claims share that raises a divergence alarm. |
+
+---
+
 ## Autonomy (Gates, Goals, Heartbeats, Session Kernel)
 
 The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, heartbeats steered into running work, and a persistent per-session Python REPL. All off by default; a goal + gates + a heartbeat compose into an autonomous task. Toggles live in Settings → Autonomy (Gates, Goals, Heartbeats, Kernel). How it works: [internals/autonomy.md](internals/autonomy.md).

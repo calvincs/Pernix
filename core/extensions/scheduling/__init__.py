@@ -794,6 +794,72 @@ def ensure_canary_schedule() -> None:
 
 
 # ---------------------------------------------------------------------------
+# TELOS slow loops: daily ordo/binding, weekly hevel/reconcile/entropy
+# ---------------------------------------------------------------------------
+
+_telos_slow_lock = asyncio.Lock()
+
+
+async def _execute_telos_slow_job(meta: dict):
+    """Daily TELOS slow-loop executor. Never raises."""
+    if not settings.telos_enabled:
+        return
+    if _telos_slow_lock.locked():
+        logger.info("TELOS slow loops skipped: another pass is running")
+        return
+    async with _telos_slow_lock:
+        try:
+            from core.telos import run_slow_loops
+
+            stats = await run_slow_loops(force_weekly=bool(meta.get("force_weekly")))
+            logger.info("TELOS slow loops done: %s", {k: v for k, v in stats.items() if v})
+        except Exception as e:
+            logger.error("TELOS slow loops failed: %s", e)
+
+
+def ensure_telos_schedule() -> None:
+    """Install the daily slow-loop job from settings (config is the truth —
+    transient, recreated each boot, never persisted to JSON)."""
+    if not settings.telos_enabled:
+        return
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+
+        scheduler.add_job(
+            _execute_telos_slow_job,
+            trigger=CronTrigger.from_crontab(settings.telos_schedule, timezone="UTC"),
+            id="_telos_slow",
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=3600,
+            kwargs={"meta": {"kind": "telos", "transient": True}},
+        )
+        logger.info("TELOS slow loops scheduled: %s", settings.telos_schedule)
+    except Exception as e:
+        logger.warning("Failed to schedule TELOS slow loops: %s", e)
+
+
+def enqueue_manual_telos(force_weekly: bool = False) -> bool:
+    """Fire the slow-loop pass ASAP without blocking the caller's turn."""
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return False
+    from apscheduler.triggers.date import DateTrigger
+
+    scheduler.add_job(
+        _execute_telos_slow_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc)),
+        id="_telos_manual",
+        replace_existing=True,
+        kwargs={"meta": {"kind": "telos", "transient": True, "force_weekly": force_weekly}},
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Tool functions
 # ---------------------------------------------------------------------------
 
