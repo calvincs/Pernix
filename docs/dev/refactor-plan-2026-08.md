@@ -1,6 +1,13 @@
 # Refactor plan — 2026-08 systems audit follow-through
 
-Status: **IN PROGRESS** (2026-08-07, branch `next-phase-features`)
+Status: **IMPLEMENTED** (2026-08-07, branch `next-phase-features`, 11 commits
+`a1f3271..`). All phases landed. One supersession: operator direction replaced
+Phase 3's `critical_model` tier with a three-role scheme — Primary
+(`llm_model`: agent turns + compaction/reflect/eval), Background
+(`background_model`: scout/titles/distill/idle work/RLM subs), Backup
+(`fallback_model`: used when Primary or Background fail, any provider).
+Deferred to next cycle: full Dream→Telos store merge; state-machine v2
+stages 2–5 (dual-write removal).
 
 Source: whole-system audit of 2026-08-07 (six parallel code audits + live field check
 on box). Full report: claude.ai artifact "Pernix — next-phase-features Systems Audit";
