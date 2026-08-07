@@ -12,9 +12,11 @@ Two signals per applied batch:
 
 Either signal → status='suspect' + a notification. A later clean comparison
 clears the flag (status back to 'applied', cleared_at stamped) — the other
-clear path is human dismiss via the API. adaptive_auto_rollback promotes a
-PRIMARY hit to automatic rollback once that metric has earned trust; the
-passive signal never auto-rolls-back (too noisy by construction).
+clear path is human dismiss via the API. cleared_at is TERMINAL either way:
+a cleared batch drops out of the sweep, so a dismiss is not re-litigated on
+the next cycle against the very evidence it dismissed. adaptive_auto_rollback
+promotes a PRIMARY hit to automatic rollback once that metric has earned
+trust; the passive signal never auto-rolls-back (too noisy by construction).
 """
 
 from __future__ import annotations
@@ -43,7 +45,25 @@ def _pass_rate(rows: list[dict]) -> float | None:
     return sum(1 for r in rows if r.get("passed")) / len(rows)
 
 
-def _canary_signal(batch: dict, flaky: set[str]) -> tuple[bool, str] | None:
+def _applied_at(batch: dict) -> str:
+    """Wall-clock of the APPLY, not the queue.
+
+    adaptive_batches.created_at is stamped when the batch is QUEUED; a batch
+    can sit pending for hours before the idle window drains it. The batch's
+    adaptive_events are written during apply, so the earliest non-rollback
+    one is the real boundary. No events (nothing landed) → created_at.
+    """
+    try:
+        events = db.adaptive_events_for_batch(batch["batch_id"])  # ascending id
+    except Exception:
+        events = []
+    for ev in events:
+        if ev.get("action") != "rollback" and ev.get("created_at"):
+            return ev["created_at"]
+    return batch.get("created_at") or ""
+
+
+def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool, str] | None:
     """(regressed, detail) from the post-batch sweep, or None when no sweep
     data exists yet (batch stays as-is; the sweep may still be queued)."""
     post = [r for r in db.list_canary_runs(batch_id=batch["batch_id"], limit=500) if r["task"] not in flaky]
@@ -56,7 +76,7 @@ def _canary_signal(batch: dict, flaky: set[str]) -> tuple[bool, str] | None:
         rows = [
             r
             for r in db.list_canary_runs(task=task, limit=200)
-            if r.get("trigger") == "scheduled" and (r.get("created_at") or "") < (batch.get("created_at") or "")
+            if r.get("trigger") == "scheduled" and (r.get("created_at") or "") < applied_at
         ]
         baseline_rows.extend(rows[:per_task])  # list is newest-first
     base = _pass_rate(baseline_rows)
@@ -68,10 +88,9 @@ def _canary_signal(batch: dict, flaky: set[str]) -> tuple[bool, str] | None:
     return (drop >= settings.canary_regression_delta, detail)
 
 
-def _post_mortem_signal(batch: dict) -> tuple[bool, str] | None:
+def _post_mortem_signal(batch: dict, applied_at: str) -> tuple[bool, str] | None:
     """(drifted, detail) from organic reflect-retry rates around the apply."""
     window = max(1, settings.adaptive_tripwire_window_turns)
-    applied_at = batch.get("created_at") or ""
 
     def _organic(rows: list[dict]) -> list[dict]:
         out = []
@@ -84,7 +103,11 @@ def _post_mortem_signal(batch: dict) -> tuple[bool, str] | None:
             out.append(r)
         return out
 
-    after = _organic(db.list_post_mortems(since_iso=applied_at, limit=window * 3))[:window]
+    # ASCENDING feed: the window we want is the turns IMMEDIATELY after the
+    # apply. list_post_mortems is newest-first, so slicing it would compare
+    # the newest turns overall — a moving target that drifts away from the
+    # batch as the system keeps running.
+    after = _organic(db.list_post_mortems_since(applied_at, limit=window * 3))[:window]
     if len(after) < window:
         return None  # not enough organic turns yet — keep waiting
     before = _organic([r for r in db.list_post_mortems(limit=window * 6) if (r.get("created_at") or "") < applied_at])[
@@ -109,7 +132,15 @@ def evaluate_tripwire() -> list[dict]:
         return actions
     flaky = _flaky_tasks()
     try:
-        batches = [b for b in db.adaptive_list_batches(limit=200) if b.get("status") in ("applied", "suspect")]
+        batches = [
+            b
+            for b in db.adaptive_list_batches(limit=200)
+            # cleared_at is terminal. A human dismiss (or an earlier clean
+            # comparison) settles the batch for good — without this the sweep
+            # re-derives the same signal from the same rows and re-flags the
+            # batch on every cycle, so "dismiss" never sticks.
+            if b.get("status") in ("applied", "suspect") and not b.get("cleared_at")
+        ]
     except Exception as e:
         logger.warning("Tripwire batch listing failed: %s", e)
         return actions
@@ -117,8 +148,9 @@ def evaluate_tripwire() -> list[dict]:
     for batch in batches:
         bid = batch["batch_id"]
         try:
-            canary = _canary_signal(batch, flaky)
-            pm = _post_mortem_signal(batch)
+            applied_at = _applied_at(batch)
+            canary = _canary_signal(batch, flaky, applied_at)
+            pm = _post_mortem_signal(batch, applied_at)
             regressed = (canary is not None and canary[0]) or (pm is not None and pm[0])
             details = "; ".join(d for s in (canary, pm) if s is not None for d in [s[1]])
 

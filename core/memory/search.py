@@ -22,7 +22,7 @@ class SearchResult:
 
     entry: MemoryEntry
     score: float
-    source: str  # "bm25" | "temporal" | "ripgrep"
+    source: str  # "bm25" | "vector" | "temporal" | "link"
 
 
 def format_result_line(result: SearchResult, char_cap: int = 0) -> str:
@@ -36,7 +36,7 @@ def format_result_line(result: SearchResult, char_cap: int = 0) -> str:
     """
     e = result.entry
     parts = [e.file_name, f"epoch={e.epoch}"]
-    # getattr-tolerant: ripgrep-fallback and test-shim entries may lack fields.
+    # getattr-tolerant: test-shim entries may lack fields.
     updated = int(getattr(e, "updated", 0) or 0)
     ts = updated or int(e.epoch or 0)
     if ts:
@@ -91,69 +91,6 @@ def prepare_fts_query(query: str) -> tuple[str, int]:
     if tags_clause:
         return f"({or_clause}) AND {tags_clause}", len(words)
     return or_clause, len(words)
-
-
-def _ripgrep_fallback(query: str, memory_dir: str, limit: int) -> list[SearchResult]:
-    """Last-resort search via ripgrep when FTS5 returns no results.
-
-    Only fires when the full hybrid search (BM25 + temporal) returns nothing,
-    so it never affects normal-path performance. Returns rough MemoryEntry
-    objects built from matched lines — no epoch/tag metadata.
-    """
-    rg = shutil.which("rg") or "/usr/bin/rg"
-    if not Path(rg).exists():
-        return []
-
-    # Use the longest token as the primary rg pattern (most specific)
-    tokens = [w.strip("-@:.") for w in re.sub(r"[^\w\s-]", " ", query).split()]
-    tokens = [t for t in tokens if len(t) >= 3]
-    if not tokens:
-        return []
-    pattern = max(tokens, key=len)
-
-    try:
-        proc = subprocess.run(
-            [rg, "--ignore-case", "--json", "--max-count", "3", pattern, memory_dir],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        logger.debug("ripgrep fallback failed: %s", e)
-        return []
-
-    results: list[SearchResult] = []
-    seen: set[tuple[str, str]] = set()
-
-    for line in proc.stdout.splitlines():
-        try:
-            data = json.loads(line)
-            if data.get("type") != "match":
-                continue
-            file_path = data["data"]["path"]["text"]
-            file_name = Path(file_path).stem
-            if file_name == "_index":
-                continue
-            match_text = data["data"]["lines"]["text"].strip()
-            key = (file_name, match_text[:80])
-            if key in seen:
-                continue
-            seen.add(key)
-            entry = MemoryEntry(
-                file_name=file_name,
-                content=match_text,
-                epoch=0,
-                entry_type="note",
-                tags=[],
-                weight="normal",
-            )
-            results.append(SearchResult(entry=entry, score=1.0, source="ripgrep"))
-            if len(results) >= limit:
-                break
-        except (json.JSONDecodeError, KeyError):
-            continue
-
-    return results
 
 
 def rg_memory_text(pattern: str, memory_dir: str, max_matches: int = 10) -> str:
@@ -355,27 +292,56 @@ def search_vector(conn, query_vec: list[float], limit: int = 5) -> list[SearchRe
 
 _RRF_K = 60  # standard reciprocal-rank-fusion constant
 
+# Cosine → BM25-scale mapping for entries only the semantic channel surfaced.
+# Every consumer of `score` reads one absolute scale (RULES.md, recall/
+# search_lessons, internal_recall's strong-match nudge): > 3.0 strong ·
+# 1.0–3.0 weak · < 1.0 noise. Raw RRF scores cap at ~2/(60+1) ≈ 0.033, which
+# reads as noise everywhere — so fusion decides *order* only and the exposed
+# score stays on the BM25 scale. A linear cosine × 4.0 is the simplest map
+# that preserves the documented bands: a strong paraphrase (cos ≥ 0.75)
+# crosses 3.0, near-orthogonal noise (cos ≤ 0.25) stays under 1.0.
+_VECTOR_SCORE_SCALE = 4.0
 
-def _rrf_fuse(ranked_lists: list[list[SearchResult]], limit: int) -> list[SearchResult]:
-    """Reciprocal-rank fusion across ranked result lists, deduped by
-    (file, epoch). The first list's result object wins ties for identity."""
-    fused: dict[tuple, list] = {}  # key -> [result, fused_score]
-    for ranked in ranked_lists:
+
+def _rrf_fuse(lexical: list[SearchResult], semantic: list[SearchResult], limit: int) -> list[SearchResult]:
+    """Fuse the lexical and semantic channels, deduped by (file, epoch).
+
+    Ordering is reciprocal-rank fusion over both channels. The reported
+    `score` is NOT the RRF sum (see _VECTOR_SCORE_SCALE): a result BM25 saw
+    keeps its BM25 score untouched, a vector-only result gets its cosine
+    mapped onto the same scale. `source` names the channel that contributed
+    the most rank weight, so a result that owes its position to the vector
+    channel is not mislabeled "bm25".
+    """
+    fused: dict[tuple, dict] = {}
+    for channel, ranked in (("bm25", lexical), ("vector", semantic)):
         for rank, r in enumerate(ranked):
             key = (r.entry.file_name, r.entry.epoch)
             contribution = 1.0 / (_RRF_K + rank + 1)
-            if key in fused:
-                fused[key][1] += contribution
-            else:
-                fused[key] = [r, contribution]
-    ordered = sorted(fused.values(), key=lambda pair: pair[1], reverse=True)[:limit]
-    return [SearchResult(entry=pair[0].entry, score=pair[1], source=pair[0].source) for pair in ordered]
+            slot = fused.get(key)
+            if slot is None:
+                fused[key] = {
+                    "entry": r.entry,
+                    "rrf": contribution,
+                    "best": contribution,
+                    "source": channel,
+                    "score": (r.score if channel == "bm25" else max(0.0, r.score) * _VECTOR_SCORE_SCALE),
+                }
+                continue
+            slot["rrf"] += contribution
+            if channel == "bm25":
+                slot["score"] = r.score  # lexical score always wins the scale
+            if contribution > slot["best"]:
+                slot["best"] = contribution
+                slot["source"] = channel
+    ordered = sorted(fused.values(), key=lambda s: s["rrf"], reverse=True)[:limit]
+    return [SearchResult(entry=s["entry"], score=s["score"], source=s["source"]) for s in ordered]
 
 
 def search_hybrid(conn, query: str, limit: int = 5, after_epoch: int | None = None) -> list[SearchResult]:
     """Multi-signal search: BM25 ∪ vector (RRF-fused when embeddings are
-    enabled), recent entries pad remaining slots, ripgrep fallback when all
-    come back empty. Deduped by (file, epoch).
+    enabled), recent entries pad remaining slots. Deduped by (file, epoch).
+    Scores stay on the BM25 scale throughout — see _rrf_fuse.
     """
     # Signal 1: BM25 keyword search — dedupe keeping highest score
     seen: dict[tuple, SearchResult] = {}
@@ -395,7 +361,7 @@ def search_hybrid(conn, query: str, limit: int = 5, after_epoch: int | None = No
         if query_vec:
             vector_ranked = search_vector(conn, query_vec, limit=limit)
             if vector_ranked:
-                final = _rrf_fuse([bm25_ranked, vector_ranked], limit)
+                final = _rrf_fuse(bm25_ranked, vector_ranked, limit)
 
     # Signal 2: Recent entries (last 24h) fill remaining slots only — their
     # flat score is relevance-blind, so they must not displace a weak-but-
@@ -409,16 +375,6 @@ def search_hybrid(conn, query: str, limit: int = 5, after_epoch: int | None = No
             if key not in included:
                 included.add(key)
                 final.append(r)
-
-    # Signal 3: ripgrep fallback — only when FTS5 + temporal both returned nothing.
-    # Handles stale/out-of-sync index without waiting for snooze reconciliation.
-    if not final:
-        from config import settings as _s
-
-        fallback = _ripgrep_fallback(query, _s.memory_dir, limit)
-        if fallback:
-            logger.debug("Hybrid search empty; ripgrep fallback returned %d result(s)", len(fallback))
-        final = fallback
 
     return final
 

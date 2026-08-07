@@ -79,7 +79,16 @@ class FakeLLMClient:
         session_created_at=float("inf"),
         session_priority=2,
     ):
-        self.calls.append({"messages": messages, "tools": tools, "model": model})
+        self.calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "model": model,
+                "session_id": session_id,
+                "session_created_at": session_created_at,
+                "session_priority": session_priority,
+            }
+        )
         if self.responses:
             resp = self.responses[self.call_count % len(self.responses)]
             self.call_count += 1

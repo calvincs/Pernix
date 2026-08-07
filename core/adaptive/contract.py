@@ -47,7 +47,7 @@ routes to human review with the conflict flagged."""
 
 def queue_producer_edits(edits: list, producer: str, session_id: str = "", rationale: str = "") -> dict:
     """Normalize LLM-emitted edits and queue them. Never raises."""
-    empty = {"batch_id": None, "queued": 0, "proposal_id": None, "gated": 0, "rejected": []}
+    empty = {"batch_id": None, "queued": 0, "proposal_id": None, "proposal_ids": [], "gated": 0, "rejected": []}
     if not settings.adaptive_enabled or not edits:
         return empty
     try:

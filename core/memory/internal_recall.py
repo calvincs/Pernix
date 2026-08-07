@@ -56,7 +56,9 @@ class InternalRecall:
 # "> 3.0 strong · 1.0–3.0 weak · < 1.0 noise"
 # Scores are length-normalized (per query token) by search_bm25, so this
 # absolute threshold holds across query lengths — un-normalized, a long
-# query crossed 3.0 on summed token noise alone.
+# query crossed 3.0 on summed token noise alone. Hybrid search keeps the
+# same scale when embeddings are on (RRF orders, it does not score — see
+# core.memory.search._rrf_fuse), so this comparison stays meaningful.
 _MEMORY_STRONG_SCORE = 3.0
 
 # Per-entry character cap when formatting memory hits. Mirrors the cap

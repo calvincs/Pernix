@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -58,7 +59,21 @@ GOAL_KINDS = ("root", "dream", "milestone", "task")
 GOAL_STATES = ("active", "suspended", "completed", "vapor")
 ALARM_TYPES = ("binding", "hevel", "divergence", "acedia")
 
+# An alarm is *live* while its signature is still on the books. Operator
+# acknowledgement silences the notification, it does not retire the evidence:
+# an acked alarm stays the same alarm so the escalation ladder keeps its
+# place instead of minting a fresh L1 on the next monitor pass.
+LIVE_ALARM_STATES = ("open", "acknowledged")
+
 _SLUG_RE = re.compile(r"[^a-z0-9_]+")
+
+# mint_id derives its sequence from a directory listing, and both TELOS loops
+# (fast-loop snooze, slow-loop cron) mint inside one process — without this
+# two threads read the same listing, mint the same c_NNNN, and the second
+# write silently overwrites the first. A same-process lock plus a reservation
+# set is sufficient: nothing outside this process mints ids for the store.
+_MINT_LOCK = threading.Lock()
+_MINT_RESERVED: set[str] = set()
 
 
 def _now_iso() -> str:
@@ -134,10 +149,19 @@ class TelosStore:
         d = self._dir_for(kind)
         if kind == "question":
             stamp = datetime.now(timezone.utc).strftime("%Y_%m%d")
-            existing = len(list(d.glob(f"q_{stamp}_*.md")))
-            return f"q_{stamp}_{existing + 1:03d}"
-        existing = len(list(d.glob(f"{prefix}_*.md")))
-        return f"{prefix}_{existing + 1:04d}"
+            stem, width = f"q_{stamp}_", 3
+        else:
+            stem, width = f"{prefix}_", 4
+        # The listing count is only a starting guess: increment past anything
+        # already on disk or reserved by a concurrent mint, then reserve.
+        with _MINT_LOCK:
+            n = len(list(d.glob(f"{stem}*.md"))) + 1
+            while True:
+                path = d / f"{stem}{n:0{width}d}.md"
+                if not path.exists() and str(path) not in _MINT_RESERVED:
+                    _MINT_RESERVED.add(str(path))
+                    return f"{stem}{n:0{width}d}"
+                n += 1
 
     def write(self, obj: TelosObject) -> Path:
         """Atomic write of one object (mkstemp + os.replace, config.py pattern)."""
@@ -160,6 +184,8 @@ class TelosStore:
             except OSError:
                 pass
             raise
+        with _MINT_LOCK:
+            _MINT_RESERVED.discard(str(path))
         obj.path = path
         return path
 
@@ -221,9 +247,12 @@ class TelosStore:
         return self.list("goal", **filters)
 
     def list_alarms(self, open_only: bool = True) -> list[TelosObject]:
+        """open_only keeps the *live* alarms — open and acknowledged both.
+        Acknowledgement is an operator note, not a resolution; only 'cleared'
+        (the signature stopped holding) takes an alarm off the books."""
         alarms = self.list("alarm")
         if open_only:
-            alarms = [a for a in alarms if a.get("state", "open") == "open"]
+            alarms = [a for a in alarms if a.get("state", "open") in LIVE_ALARM_STATES]
         return alarms
 
     # ------------------------------------------------------------------

@@ -130,8 +130,9 @@ packages. `exec`/`eval`/`input` are blocked as a guardrail; an in-cell
 traceback aborts only the cell, never the kernel — iterative debugging is
 normal REPL use, not a tool failure.
 
-**Result binding** is the kernel's quiet superpower. When a binding-eligible
-tool (`file_read`, `http_get`, `browse_web`, `session_read`) returns more
+**Result binding** is the kernel's quiet superpower. When any tool (all of
+them except `repl`, `rlm_process`, and the conversational ones — binding is
+an exclusion list, so new tools get it by default) returns more
 than `large_result_bind_threshold` chars (default 20,000), the full payload
 is loaded into the kernel as `tool_result_<n>` and spilled to a sidecar file,
 while the model sees only a head/tail stub plus

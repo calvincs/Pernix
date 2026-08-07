@@ -195,6 +195,39 @@ async def test_compact_with_llm_success(mock_llm_client):
     assert len(compaction_msgs) == 1
 
 
+async def test_compact_with_llm_uses_session_sched_identity(mock_llm_client):
+    """The agent loop awaits compaction mid-turn, so the LLM call must carry
+    the session's own scheduling identity — the default background identity
+    (created_at=inf) sorts last in the fair queue (priority inversion)."""
+    from core.llm.semaphore import PRIORITY_ORCHESTRATOR
+    from core.llm.types import ChatResponse, TokenUsage
+    from db import models as db
+
+    sid = db.create_session(title="Sched Identity Test")
+    for i in range(10):
+        db.add_message(sid, "user", f"Message {i} with some content " * 10)
+        db.add_message(sid, "assistant", f"Response {i} with analysis " * 10)
+
+    mock_llm_client.responses = [
+        ChatResponse(
+            content='```json\n{"goal": "testing", "progress": ["msg sent"]}\n```\nGood summary.',
+            tool_calls=None,
+            usage=TokenUsage(prompt_tokens=100, completion_tokens=50, total_tokens=150),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+    messages = db.get_messages(sid)
+    msg_dicts = [{"role": m["role"], "content": m["content"], "id": m["id"]} for m in messages]
+    assert await compact_with_llm(sid, msg_dicts) is True
+
+    call = mock_llm_client.calls[-1]
+    assert call["session_id"] == sid
+    assert call["session_created_at"] != float("inf")
+    assert call["session_priority"] == PRIORITY_ORCHESTRATOR
+
+
 async def test_compact_with_llm_too_few_messages(mock_llm_client):
     """Rejects compaction if fewer than 4 messages."""
     from db import models as db

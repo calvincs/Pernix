@@ -2657,21 +2657,28 @@ Output valid JSON only. No markdown fences. /no_think"""
             return
 
         # Candor producer (plan 4d): calibrated reliability regressions →
-        # routing_hint edits. Deduped by slug — an existing hint for the
-        # same tool is left alone (updates would churn the cooldown; the
-        # ledger ref lets a reviewer pull the full audit chain on demand).
+        # routing_hint edits. Deduped by slug — a live hint for the same tool
+        # is left alone (updates would churn the cooldown; the ledger ref lets
+        # a reviewer pull the full audit chain on demand). The pass is
+        # symmetric: it retires hints as well as minting them, so a recovered
+        # tool releases its slot instead of wedging the per-kind cap.
         if settings.adaptive_enabled and not self._is_cancelled():
             try:
                 from core.adaptive.contract import queue_producer_edits
                 from core.extensions.candor.bridge import get_candor_bridge
                 from db import models as db
 
-                edits = []
-                for d in await get_candor_bridge().degraded_tools():
+                degraded = await get_candor_bridge().degraded_tools()
+                degraded_ids = {f"tool-{d['tool']}-degraded" for d in degraded}
+                mints = []
+                for d in degraded:
                     entry_id = f"tool-{d['tool']}-degraded"
-                    if db.adaptive_get_entry(entry_id):
+                    existing = db.adaptive_get_entry(entry_id)
+                    # Only a LIVE hint dedupes: a retired one must be able to
+                    # come back if the tool degrades again.
+                    if existing and existing.get("status") == "active":
                         continue
-                    edits.append(
+                    mints.append(
                         {
                             "action": "create",
                             "kind": "routing_hint",
@@ -2686,10 +2693,38 @@ Output valid JSON only. No markdown fences. /no_think"""
                             "evidence": [f"candor:tool_ok({d['tool']})"],
                         }
                     )
+                # Retirement: a hint whose tool has RECOVERED (calibrated p
+                # back above threshold, so it fell out of the degraded set) is
+                # stale advice AND holds a slot against the per-kind cap
+                # forever. Candor deleting its own entry is same-producer, so
+                # it stays low-risk (the 4b escalation is cross-producer).
+                retires = []
+                for row in db.adaptive_list_entries(kind="routing_hint"):
+                    eid = row["id"]
+                    if row.get("source") != "candor" or eid in degraded_ids:
+                        continue
+                    if not (eid.startswith("tool-") and eid.endswith("-degraded")):
+                        continue
+                    retires.append(
+                        {
+                            "action": "delete",
+                            "kind": "routing_hint",
+                            "scope": "global",
+                            "entry_id": eid,
+                            "baseline_version": row["version"],
+                            "evidence": [f"candor:tool_ok recovered ({eid})"],
+                        }
+                    )
+                edits = mints[:2] + retires[:2]
                 if edits:
-                    q = queue_producer_edits(edits[:2], "candor", rationale="candor reliability regression")
+                    q = queue_producer_edits(edits, "candor", rationale="candor reliability regression")
                     if q["queued"] or q["gated"]:
-                        logger.info("Candor adaptive hints queued: %d, gated: %d", q["queued"], q["gated"])
+                        logger.info(
+                            "Candor adaptive hints queued: %d (%d retirement), gated: %d",
+                            q["queued"],
+                            len(retires[:2]),
+                            q["gated"],
+                        )
             except Exception as e:
                 logger.warning("Candor adaptive producer failed: %s", e)
 
@@ -2706,16 +2741,19 @@ Output valid JSON only. No markdown fences. /no_think"""
             from core.adaptive import drain_pending
 
             out = await _asyncio.to_thread(drain_pending)
-            applied = out.get("applied_batches") or []
-            if applied:
-                edits_n = sum(len(r.get("applied") or []) for r in out.get("results") or [])
+            # A batch whose edits were ALL refused lands terminal-'rejected'
+            # and changed nothing: nothing to announce, and no state change
+            # for a post-batch sweep to measure against.
+            landed = [r for r in (out.get("results") or []) if r.get("applied")]
+            if landed:
+                edits_n = sum(len(r["applied"]) for r in landed)
                 self._stats.setdefault("adaptive_batches_applied", 0)
-                self._stats["adaptive_batches_applied"] += len(applied)
+                self._stats["adaptive_batches_applied"] += len(landed)
                 from db import models as db
 
                 db.add_notification(
                     title="Adaptive layer: edits auto-applied",
-                    body=f"{edits_n} edit(s) across {len(applied)} batch(es) applied at idle — review in the Adaptive panel.",
+                    body=f"{edits_n} edit(s) across {len(landed)} batch(es) applied at idle — review in the Adaptive panel.",
                     urgency="normal",
                 )
                 # Post-batch sweeps: batch-tagged canary data for the
@@ -2724,8 +2762,8 @@ Output valid JSON only. No markdown fences. /no_think"""
                 if settings.canary_enabled:
                     from core.extensions.scheduling import enqueue_post_batch_sweep
 
-                    for bid in applied:
-                        enqueue_post_batch_sweep(bid)
+                    for r in landed:
+                        enqueue_post_batch_sweep(r["batch_id"])
         except Exception as e:
             logger.warning("Adaptive drain failed: %s", e)
 

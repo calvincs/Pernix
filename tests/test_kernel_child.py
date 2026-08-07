@@ -12,7 +12,7 @@ import time
 import dill
 import pytest
 
-from core.extensions.rlm.child_env import ChildREPL
+from core.extensions.rlm.child_env import ChildBusy, ChildREPL
 
 
 def _cell(c: ChildREPL, code: str):
@@ -137,3 +137,42 @@ def test_snapshot_waits_for_running_cell(tmp_path, plain_child):
     t.join()
     assert reply["ok"]
     assert "late_var" in reply["stored"]
+
+
+def test_roundtrip_deadline_starts_after_the_lock_wait(tmp_path, plain_child):
+    """Time spent waiting for the round-trip lock must not count against the
+    frame's own budget. Before the fix, a frame queued behind a long cell was
+    sent with an already-expired deadline and _roundtrip_locked killed a
+    perfectly healthy kernel on the very first loop iteration."""
+    plain_child._rt_lock.acquire()
+
+    def _hold():
+        time.sleep(1.5)
+        plain_child._rt_lock.release()
+
+    t = threading.Thread(target=_hold)
+    t.start()
+    try:
+        # A budget far shorter than the lock wait: only correct if the clock
+        # restarts once the lock is actually held.
+        reply = plain_child._roundtrip(
+            {"type": "snapshot", "path": str(tmp_path / "late.dill"), "max_bytes": 1_000_000},
+            deadline=time.monotonic() + 1.0,
+        )
+    finally:
+        t.join()
+    assert reply["type"] == "snapshot_result"
+    assert plain_child.popen.poll() is None  # alive — never killed mid-cell
+
+
+def test_lock_timeout_reports_busy_and_leaves_the_child_alone(plain_child):
+    """Giving up on the lock is a ChildBusy report, not a kill."""
+    plain_child._rt_lock.acquire()
+    try:
+        with pytest.raises(ChildBusy):
+            plain_child._acquire_rt("snapshot", timeout=0.2)
+        assert plain_child.popen.poll() is None
+    finally:
+        plain_child._rt_lock.release()
+    # And the child still works afterwards.
+    assert "ok" in _cell(plain_child, "print('ok')").stdout

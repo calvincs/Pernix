@@ -49,8 +49,29 @@ def workspace() -> Path:
     return Path(settings.workspace_dir).resolve()
 
 
+def kernel_state_root() -> Path | None:
+    """Root of the session kernels' state trees (data/kernels), or None when
+    the kernel is off. Read-only by intent: bound tool results are spilled to
+    data/kernels/<sid>/payloads/, and the stub the model is shown advertises
+    that exact path — without it as a read root, every binding pointer is
+    dead on arrival. Never a write root."""
+    if not getattr(settings, "session_kernel_enabled", False):
+        return None
+    try:
+        from core.kernel import KERNEL_STATE_ROOT  # module attr: tests repoint it
+
+        return Path(KERNEL_STATE_ROOT).resolve()
+    except Exception:
+        return None
+
+
 def allowed_read_roots() -> list[Path]:
-    """Directories that file_read may access (workspace + skills + workflows)."""
+    """Directories that file_read may access (workspace + skills + workflows,
+    plus the kernel payload spill tree when the session kernel is on).
+
+    Order matters: workspace first, so a bare relative name still resolves
+    against the workspace rather than being captured by a later root.
+    """
     roots = [workspace()]
     skills = Path(settings.skills_dir).resolve()
     if skills not in roots:
@@ -58,6 +79,9 @@ def allowed_read_roots() -> list[Path]:
     workflows = Path(settings.workflows_dir).resolve()
     if workflows not in roots:
         roots.append(workflows)
+    kernels = kernel_state_root()
+    if kernels is not None and kernels not in roots:
+        roots.append(kernels)
     return roots
 
 

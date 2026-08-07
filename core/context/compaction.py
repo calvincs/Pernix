@@ -192,9 +192,18 @@ async def compact_with_llm(
     else:
         prompt = COMPACTION_PROMPT + "\n\nCONVERSATION:\n" + _serialize_messages(to_summarize)
 
-    # Call LLM
+    # Call LLM. The agent loop synchronously awaits this call mid-turn, so it
+    # must queue with the session's own scheduling identity — the default
+    # background identity sorts last in the fair queue (priority inversion).
+    from core.llm.client import ensure_session_budget, sched_identity
+
     client = get_llm_client()
     model = settings.background_model or settings.llm_model
+    sched_created_at, sched_priority = sched_identity(session_id)
+    # Carrying the session_id subjects this call to the session's wall-clock
+    # budget; guarantee headroom so a budget-exhausted turn can still compact
+    # instead of dying with compaction_failed.
+    ensure_session_budget(session_id, 120)
     try:
         response = await client.chat(
             messages=[
@@ -203,6 +212,9 @@ async def compact_with_llm(
             ],
             model=model,
             max_tokens=2000,
+            session_id=session_id,
+            session_created_at=sched_created_at,
+            session_priority=sched_priority,
         )
         summary = response.content.strip()
     except Exception as e:

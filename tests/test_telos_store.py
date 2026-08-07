@@ -44,6 +44,59 @@ def test_question_ids_are_dated_and_sequential(store):
     assert q2.id.endswith("_002")
 
 
+def test_mint_id_is_unique_under_concurrent_threads(store):
+    """The fast loop (snooze) and the slow loop (cron) mint in one process:
+    without locking both read the same directory listing, mint the same
+    c_NNNN, and the second write silently overwrites the first."""
+    import threading
+
+    minted: list[str] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    def claim():
+        barrier.wait()
+        for _ in range(5):
+            c = store.commit_claim("concurrent claim", "observation", confidence=0.5)
+            with lock:
+                minted.append(c.id)
+
+    threads = [threading.Thread(target=claim) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(minted) == 40
+    assert len(set(minted)) == 40  # no duplicate ids handed out
+    assert len(store.list("claim")) == 40  # and none silently overwritten
+
+
+def test_mint_id_skips_gaps_rather_than_colliding(store):
+    """The listing count is a guess, not an authority: a deleted mid-sequence
+    file must not make the next mint reuse a live id."""
+    ids = [store.mint_id("alarm") for _ in range(3)]
+    assert ids == ["a_0001", "a_0002", "a_0003"]
+    for i in ids:
+        store.write(TelosObject(id=i, kind="alarm", meta={"type": "binding"}))
+    (store.root / "alarms" / "a_0002.md").unlink()  # count now 2, a_0003 lives
+    assert store.mint_id("alarm") == "a_0004"
+
+
+def test_acknowledged_alarms_stay_live(store):
+    """Ack silences the notification; only 'cleared' retires an alarm. The
+    escalation ladder reads this list, so an acked alarm must remain."""
+    for state in ("open", "acknowledged", "cleared"):
+        store.write(
+            TelosObject(
+                id=store.mint_id("alarm"), kind="alarm", meta={"type": "binding", "target": "g_x", "state": state}
+            )
+        )
+    live = {a.get("state") for a in store.list_alarms(open_only=True)}
+    assert live == {"open", "acknowledged"}
+    assert len(store.list_alarms(open_only=False)) == 3
+
+
 def test_list_filters_by_frontmatter(store):
     store.add_question("An open question about behavior?")
     q = store.add_question("A soon-closed question about behavior?")

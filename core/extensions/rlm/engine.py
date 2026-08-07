@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from core.extensions.rlm.broker import LLMBroker, SubcallLedger, SubChatFn
+from core.extensions.rlm.broker import LLMBroker, SubcallLedger, SubcallLimiter, SubChatFn
 from core.extensions.rlm.child_env import ChildREPL, StagedContext
 from core.extensions.rlm.parsing import find_code_blocks, format_iteration
 from core.extensions.rlm.prompts import (
@@ -85,6 +85,7 @@ class RLMEngine:
         cancel_check: Callable[[], bool] | None = None,
         depth: int = 0,
         ledger: SubcallLedger | None = None,
+        limiter: SubcallLimiter | None = None,
         deadline: float | None = None,
         on_child_spawn: Callable | None = None,
         rlm_fn: Callable[[str, str | None], str] | None = None,
@@ -103,6 +104,10 @@ class RLMEngine:
         self._cancel_check = cancel_check
         self.depth = depth
         self.ledger = ledger if ledger is not None else SubcallLedger(caps.max_subcalls)
+        # Concurrency budget. Like the ledger it is minted once by the ROOT
+        # engine and passed down, so all depths share ONE pool of
+        # max_concurrent_subcalls in-flight sub-calls.
+        self.limiter = limiter if limiter is not None else SubcallLimiter(caps.max_concurrent_subcalls)
         self._deadline = deadline
         # Called with the child Popen right after spawn — the tool uses it to
         # register session._active_process so cancel/dispatch-timeout kill paths work.
@@ -111,6 +116,7 @@ class RLMEngine:
         # engine on the broker handler thread. None -> rlm_query degrades to
         # llm_query (the broker's fallback). Settable after construction so the
         # tool glue can close over this engine when building the callback.
+        # Honoured only while depth + 1 < caps.max_depth (_recursion_allowed).
         self.rlm_fn = rlm_fn
         # Live-progress seam: called (best-effort, any thread) with every trace
         # event plus periodic {"type": "heartbeat"} pulses. The tool glue uses
@@ -159,11 +165,12 @@ class RLMEngine:
             sub_chat=self._sub_chat,
             caps=self.caps,
             ledger=self.ledger,
+            limiter=self.limiter,
             allowed_models=self._allowed_models,
             deadline=deadline,
             trace_fn=self._trace,
             payload_fn=self._payload,
-            rlm_fn=self.rlm_fn,
+            rlm_fn=self.rlm_fn if self._recursion_allowed() else None,
         )
 
         result: RLMRunResult | None = None
@@ -212,6 +219,7 @@ class RLMEngine:
             self.staged.total_chars,
             self.staged.file_names,
             continuation=self._continuation_note,
+            max_concurrent_subcalls=self.caps.max_concurrent_subcalls,
         )
         budget_notified = False
         iterations = 0
@@ -302,6 +310,26 @@ class RLMEngine:
         )
 
     # ---- helpers ----
+
+    def _recursion_allowed(self) -> bool:
+        """caps.max_depth is the authority on how deep rlm_query may nest.
+
+        max_depth counts engine levels: 1 = root only (rlm_query degrades to
+        llm_query), so an engine at depth d may spawn children only while
+        d + 1 < max_depth. The tool glue applies the same test when it builds
+        the callback chain; enforcing it here too means a mis-wired caller
+        cannot recurse past the run's cap.
+        """
+        if self.rlm_fn is None:
+            return False
+        if self.depth + 1 < self.caps.max_depth:
+            return True
+        logger.debug(
+            "RLM engine at depth %d: rlm_fn dropped, caps.max_depth=%d",
+            self.depth,
+            self.caps.max_depth,
+        )
+        return False
 
     def _call_root(self, messages: list[dict], timeout: float) -> str:
         try:

@@ -17,6 +17,9 @@ class RLMCaps:
     max_subcalls: int = 50
     max_concurrent_subcalls: int = 3
     timeout_seconds: float = 900.0
+    # Engine levels allowed, counting the root: 1 = no recursion (rlm_query
+    # degrades to llm_query). Read by RLMEngine._recursion_allowed and by the
+    # tool glue when it builds the nested-callback chain.
     max_depth: int = 1
 
 

@@ -14,7 +14,12 @@ logger = logging.getLogger("pernix.tools.truncation")
 
 MAX_OUTPUT = 50_000  # 50KB preview cap
 TOOL_OUTPUT_DIR = Path("data/.tool_output")
-CLEANUP_MAX_AGE_SECS = 3600  # 1 hour
+# 24h, not 1h: the truncation pointer (`file_read(path=...)`) is quoted in the
+# transcript and can be followed many turns later — a long-running goal or a
+# session resumed after a break would otherwise find a dead path. Matches the
+# lifetime callers already assume from kernel-bound payload pointers, which
+# live as long as the session's kernel state.
+CLEANUP_MAX_AGE_SECS = 86_400  # 24 hours
 
 
 def _ensure_output_dir() -> Path:

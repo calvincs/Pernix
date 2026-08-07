@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 
 import pytest
@@ -138,9 +139,98 @@ def test_binding_full_signature_escalates(store, monkeypatch):
     assert r2["alarms"][0]["level"] == 2
     assert store.read("goal", "g_shiny").get("state") == "suspended"  # L2 freeze
 
+    # The freeze is a hold, not an exit: the frozen goal stays monitored at
+    # its current level until a window elapses.
     r3 = run_binding_monitor(store)
-    # frozen goal is no longer active, so it drops out of monitoring
-    assert r3["alarms"] == []
+    assert r3["alarms"] == [{"target": "g_shiny", "level": 2}]
+    assert store.read("goal", "g_shiny").get("state") == "suspended"
+
+    # Another window with the signature still holding climbs to L3.
+    store.update(store.read("alarm", alarm.id), window_advanced_at="2026-01-01T00:00:00Z")
+    r4 = run_binding_monitor(store)
+    assert r4["alarms"] == [{"target": "g_shiny", "level": 3}]
+    assert store.read("alarm", alarm.id).get("level") == 3
+
+
+def test_binding_l2_freeze_lifts_when_signature_clears(store, monkeypatch):
+    """L2 must not be a dead end: a frozen goal whose signature stops holding
+    is un-suspended and its alarm cleared."""
+    monkeypatch.setattr(settings, "telos_budget_share_max", 0.35)
+    g = _goal(store, "g_frozen")
+    q = store.add_question("Is the frozen goal still bound?", parent_goal="g_frozen")
+    now = int(time.time() * 1000)
+    _spend(store, "g_frozen", 5000, epoch_ms=now - 3 * 86400_000)
+    _spend(store, "g_frozen", 9000, epoch_ms=now - 1000)
+    p = store.trace_path()
+    with p.open("a") as f:
+        f.write(json.dumps({"type": "hypothesis", "question": q.id, "epoch_ms": now - 3 * 86400_000}) + "\n")
+        f.write(json.dumps({"type": "hypothesis", "question": q.id, "epoch_ms": now - 1000}) + "\n")
+        f.write(json.dumps({"type": "hypothesis", "question": q.id, "epoch_ms": now - 900}) + "\n")
+
+    run_binding_monitor(store)
+    alarm = next(a for a in store.list_alarms() if a.get("type") == "binding")
+    store.update(alarm, window_advanced_at="2026-01-01T00:00:00Z")
+    run_binding_monitor(store)
+    assert store.read("goal", "g_frozen").get("state") == "suspended"
+
+    # The parent question moves — signature broken while the goal is frozen.
+    with p.open("a") as f:
+        f.write(json.dumps({"type": "question_narrowed", "id": q.id, "epoch_ms": now - 100}) + "\n")
+    r = run_binding_monitor(store)
+    assert r["alarms"] == []
+    assert store.read("goal", "g_frozen").get("state") == "active"
+    assert store.read("goal", "g_frozen").get("suspended_reason") is None
+    assert store.read("alarm", alarm.id).get("state") == "cleared"
+
+
+def test_binding_freeze_does_not_lift_someone_elses_suspension(store, monkeypatch):
+    """Only the binding monitor's own freeze is released — a goal suspended
+    by ordo (orphan) that happens to carry a cleared alarm stays suspended."""
+    monkeypatch.setattr(settings, "telos_budget_share_max", 0.35)
+    g = _goal(store, "g_orphaned_too")
+    alarm = TelosObject(
+        id=store.mint_id("alarm"),
+        kind="alarm",
+        meta={"type": "binding", "target": g.id, "level": 2, "state": "open", "windows": 2},
+    )
+    store.write(alarm)
+    store.update(g, state="suspended", suspended_reason="orphan: parent g_ghost missing")
+    r = run_binding_monitor(store)
+    assert r["alarms"] == []
+    assert store.read("alarm", alarm.id).get("state") == "cleared"
+    assert store.read("goal", "g_orphaned_too").get("state") == "suspended"
+
+
+def test_binding_ack_does_not_reset_the_ladder(store, monkeypatch):
+    """Acknowledgement silences the notification, not the evidence: the next
+    pass must continue the same alarm, not mint a fresh L1."""
+    monkeypatch.setattr(settings, "telos_budget_share_max", 0.35)
+    g = _goal(store, "g_acked")
+    q = store.add_question("Does acking reset the ladder?", parent_goal="g_acked")
+    now = int(time.time() * 1000)
+    _spend(store, "g_acked", 5000, epoch_ms=now - 3 * 86400_000)
+    _spend(store, "g_acked", 9000, epoch_ms=now - 1000)
+    p = store.trace_path()
+    with p.open("a") as f:
+        f.write(json.dumps({"type": "hypothesis", "question": q.id, "epoch_ms": now - 3 * 86400_000}) + "\n")
+        f.write(json.dumps({"type": "hypothesis", "question": q.id, "epoch_ms": now - 1000}) + "\n")
+        f.write(json.dumps({"type": "hypothesis", "question": q.id, "epoch_ms": now - 900}) + "\n")
+
+    run_binding_monitor(store)
+    alarm = next(a for a in store.list_alarms() if a.get("type") == "binding")
+    store.update(alarm, state="acknowledged")  # what /alarms/{id}/ack does
+
+    r = run_binding_monitor(store)
+    assert len([a for a in store.list_alarms(open_only=False) if a.get("type") == "binding"]) == 1
+    assert r["alarms"] == [{"target": "g_acked", "level": 1}]
+    assert store.read("alarm", alarm.id).get("state") == "acknowledged"  # still silenced
+
+    # A window elapses: the ladder climbs from where it was, and the climb
+    # reopens the alarm (a new level is new information).
+    store.update(alarm, window_advanced_at="2026-01-01T00:00:00Z")
+    r = run_binding_monitor(store)
+    assert r["alarms"] == [{"target": "g_acked", "level": 2}]
+    assert store.read("alarm", alarm.id).get("state") == "open"
 
 
 def test_binding_clears_when_question_moves(store):
@@ -207,7 +297,7 @@ def test_entropy_raises_temperature_when_cold(store):
                 meta={"band": "near", "status": "gated", "mapping": {"source_domain": "same"}, "question": "q"},
             )
         )
-        store.trace_append("hypothesis", {"band": "near", "question": "q"})
+        store.trace_append("hypothesis_resolved", {"band": "near", "question": "q"})
     assert novelty_entropy(store) == 0.0
     result = run_entropy_control(store)
     assert result["starving"] and result["adjusted"]
@@ -228,11 +318,53 @@ def test_entropy_decays_back_when_healthy(store):
                 meta={"band": band, "status": "supported", "mapping": {"source_domain": dom}, "question": "q"},
             )
         )
-        store.trace_append("hypothesis", {"band": band, "question": "q"})
+        store.trace_append("hypothesis_resolved", {"band": band, "question": "q"})
     result = run_entropy_control(store)
     assert not result["starving"] and result["adjusted"]
     assert store.band_mix()["far"] < 0.35
     assert store.serendipity_budget() < 0.3
+
+
+def _hypothesis(store, band, dom, status="supported", updated_at=None):
+    obj = TelosObject(
+        id=store.mint_id("hypothesis"),
+        kind="hypothesis",
+        meta={"band": band, "status": status, "mapping": {"source_domain": dom}, "question": "q"},
+    )
+    store.write(obj)
+    if updated_at is not None:
+        # write() always re-stamps updated_at, so backdate the file on disk.
+        text = re.sub(r"^updated_at: .*$", f"updated_at: '{updated_at}'", obj.path.read_text(), flags=re.M)
+        obj.path.write_text(text)
+    return obj
+
+
+def test_novelty_entropy_honours_its_window(store):
+    """Old variety must not mask a drive that went flat this week — the days
+    argument was accepted and ignored, desensitizing the acedia detector as
+    history grew."""
+    for band, dom in [("near", "a"), ("mid", "b"), ("far", "c"), ("far", "d")]:
+        _hypothesis(store, band, dom, updated_at="2020-01-01T00:00:00Z")
+    # All-time the spread is wide; the last 7 days are one collapsed bucket.
+    assert novelty_entropy(store, days=4000) == 1.0
+    for _ in range(4):
+        _hypothesis(store, "near", "same")
+    assert novelty_entropy(store, days=7) == 0.0
+    assert novelty_entropy(store, days=4000) > 0.0
+
+
+def test_realized_band_shares_counts_executed_not_generated(store):
+    from core.telos.entropy import realized_band_shares
+
+    # Generation events are candidates, not executions: they must not count.
+    for _ in range(9):
+        store.trace_append("hypothesis", {"band": "far", "question": "q"})
+    assert realized_band_shares(store)["total"] == 0
+    for band in ("near", "near", "far"):
+        store.trace_append("hypothesis_resolved", {"band": band, "question": "q"})
+    shares = realized_band_shares(store)
+    assert shares["total"] == 3
+    assert shares["far"] == round(1 / 3, 3)
 
 
 # --- reconciliation (mechanical part) --------------------------------------

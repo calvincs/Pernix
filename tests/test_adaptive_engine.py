@@ -107,10 +107,43 @@ def test_queue_all_gated_when_auto_apply_off(monkeypatch):
     assert result["batch_id"] is None and result["gated"] == 1
 
 
+def test_auto_apply_off_mints_one_proposal_per_tier(monkeypatch):
+    """Approval must not be all-or-nothing across risk tiers."""
+    monkeypatch.setattr("config.settings.adaptive_auto_apply", False)
+    result = queue_edits(
+        [_edit(title="safe hint"), _edit(kind="policy", title="gate deploys", content="rule text")],
+        "refine",
+    )
+    assert result["batch_id"] is None and result["gated"] == 2
+    assert len(result["proposal_ids"]) == 2
+    assert result["proposal_id"] == result["proposal_ids"][0]
+
+    payloads = {pid: json.loads(db.adaptive_get_proposal(pid)["payload_json"]) for pid in result["proposal_ids"]}
+    # Each proposal is single-tier and the two tiers are separated.
+    assert all(len({e["risk"] for e in pl}) == 1 for pl in payloads.values())
+    assert sorted(e["kind"] for pl in payloads.values() for e in pl) == ["policy", "routing_hint"]
+    low_pid = next(pid for pid, pl in payloads.items() if pl[0]["risk"] == "low")
+
+    # Taking the low-risk one leaves the high-risk one untouched and pending.
+    approve_proposal(low_pid)
+    assert db.adaptive_get_entry("safe-hint")["status"] == "active"
+    assert db.adaptive_get_entry("gate-deploys") is None
+    assert [p["id"] for p in db.adaptive_list_proposals(status="pending")] == [
+        pid for pid in result["proposal_ids"] if pid != low_pid
+    ]
+
+
 def test_queue_noop_when_disabled(monkeypatch):
     monkeypatch.setattr("config.settings.adaptive_enabled", False)
     result = queue_edits([_edit()], "refine")
-    assert result == {"batch_id": None, "queued": 0, "proposal_id": None, "gated": 0, "rejected": []}
+    assert result == {
+        "batch_id": None,
+        "queued": 0,
+        "proposal_id": None,
+        "proposal_ids": [],
+        "gated": 0,
+        "rejected": [],
+    }
     assert db.adaptive_list_batches() == []
 
 
@@ -174,6 +207,51 @@ def test_per_kind_cap(monkeypatch):
     result = apply_batch(b)
     assert len(result["applied"]) == 2
     assert "max entries" in result["rejected"][0]["reason"]
+
+
+def test_all_rejected_batch_is_not_applied(monkeypatch):
+    """Nothing landed → terminal 'rejected', never 'applied'."""
+    monkeypatch.setattr("config.settings.adaptive_max_entries_per_kind", 0)
+    b = queue_edits([_edit(title="never lands")], "refine")["batch_id"]
+    result = apply_batch(b)
+    assert result["applied"] == [] and result["status"] == "rejected"
+    assert db.adaptive_get_batch(b)["status"] == "rejected"
+
+    # 'rejected' is inert: the tripwire sweep only considers applied/suspect,
+    # so a batch that changed nothing can never be flagged for a regression.
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    assert evaluate_tripwire() == []
+
+
+def test_delete_entry_frees_cap_and_journals(monkeypatch):
+    from core.adaptive import delete_entry
+
+    monkeypatch.setattr("config.settings.adaptive_max_entries_per_kind", 1)
+    apply_batch(queue_edits([_edit(title="occupier")], "refine")["batch_id"])
+    blocked = apply_batch(queue_edits([_edit(title="newcomer")], "refine")["batch_id"], actor="user")
+    assert "max entries" in blocked["rejected"][0]["reason"]
+
+    out = delete_entry("occupier")
+    assert out["status"] == "deleted" and out["version"] == 2
+    # Soft delete: live count and the default listing both drop it.
+    assert db.adaptive_entry_count("routing_hint") == 0
+    assert db.adaptive_list_entries(kind="routing_hint") == []
+
+    ev = db.adaptive_list_events(entry_id="occupier")[0]
+    assert ev["action"] == "delete" and ev["actor"] == "human"
+    assert json.loads(ev["before_json"])["status"] == "active"
+
+    # Slot freed — the create that was capped out now lands.
+    assert apply_batch(queue_edits([_edit(title="newcomer")], "refine")["batch_id"], actor="user")["applied"] == [
+        "newcomer"
+    ]
+    with pytest.raises(AdaptiveError, match="not active"):
+        delete_entry("occupier")
+    # The delete is journaled, so it is rollback-able like any other edit.
+    rollback(event_id=ev["id"])
+    assert db.adaptive_get_entry("occupier")["status"] == "active"
 
 
 def test_auto_cooldown_blocks_rapid_updates():

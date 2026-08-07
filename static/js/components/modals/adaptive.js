@@ -4,7 +4,7 @@
 // dismiss tripwire flags.
 
 import { el, text, clear } from '../../render.js';
-import { get, post } from '../../api.js';
+import { del, get, post } from '../../api.js';
 
 function relTime(isoStr) {
     if (!isoStr) return '';
@@ -103,12 +103,19 @@ export async function renderAdaptiveTab(container) {
     for (const kind of Object.keys(byKind).sort()) {
         container.appendChild(el('div', { class: 'adaptive-kind-head' }, [text(kind)]));
         for (const e of byKind[kind]) {
+            // Release valve: a soft delete frees the per-kind cap that
+            // producers can only ever fill. Journaled, so it rolls back.
+            const rm = await actionBtn('Delete', async () => {
+                if (!confirm(`Delete adaptive entry "${e.title}"? It is journaled and can be rolled back.`)) return;
+                await del(`/api/adaptive/entries/${encodeURIComponent(e.id)}`);
+            }, refresh);
             container.appendChild(el('div', { class: 'adaptive-card entry' }, [
                 el('div', { class: 'adaptive-card-head' }, [
                     badge(`v${e.version}`), badge(e.risk, e.risk === 'high' ? 'warn' : ''), badge(e.source),
                     text(` ${e.title}`),
                 ]),
                 el('div', { class: 'adaptive-entry-content' }, [text(e.content)]),
+                el('div', { class: 'adaptive-card-actions' }, [rm]),
             ]));
         }
     }
@@ -121,7 +128,7 @@ export async function renderAdaptiveTab(container) {
     for (const b of batches.slice(0, 20)) {
         const row = el('div', { class: `adaptive-card batch ${b.status}` });
         row.appendChild(el('div', { class: 'adaptive-card-head' }, [
-            badge(b.status, b.status === 'suspect' ? 'warn' : b.status === 'rolled_back' ? 'off' : 'ok'),
+            badge(b.status, b.status === 'suspect' ? 'warn' : (b.status === 'rolled_back' || b.status === 'rejected') ? 'off' : 'ok'),
             badge(b.producer),
             text(` ${b.batch_id} · ${relTime(b.created_at)}`),
         ]));

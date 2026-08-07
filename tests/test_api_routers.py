@@ -67,6 +67,44 @@ async def test_update_settings():
     assert "updated" in data or "status" in data
 
 
+async def test_kernel_settings_are_bounded():
+    """The four kernel knobs are bounds-checked like the RLM caps: an
+    out-of-range value reverts instead of, say, reaping every kernel between
+    tool rounds or letting one snapshot eat the disk."""
+    from api.routers import health
+    from config import settings
+
+    app = _make_app(health.router)
+    before = {
+        k: getattr(settings, k)
+        for k in (
+            "kernel_idle_seconds",
+            "kernel_snapshot_max_bytes",
+            "kernel_max_concurrent",
+            "large_result_bind_threshold",
+        )
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/settings",
+            json={
+                "kernel_idle_seconds": 5,  # below the 60s floor
+                "kernel_snapshot_max_bytes": 1024,  # below the 1MB floor
+                "kernel_max_concurrent": 0,  # below the 1 floor
+                "large_result_bind_threshold": 50_000_000,  # above the ceiling
+            },
+        )
+    assert resp.status_code == 200
+    for key, original in before.items():
+        assert getattr(settings, key) == original  # every one reverted
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/settings", json={"kernel_max_concurrent": 8})
+    assert resp.status_code == 200
+    assert settings.kernel_max_concurrent == 8
+    settings.kernel_max_concurrent = before["kernel_max_concurrent"]
+
+
 # ---------------------------------------------------------------------------
 # Sessions router
 # ---------------------------------------------------------------------------

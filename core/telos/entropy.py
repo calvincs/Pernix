@@ -27,8 +27,26 @@ _FAR_STEP = 0.05
 _SERENDIPITY_STEP = 0.05
 
 
+def _within_days(iso_ts, days: int) -> bool:
+    """Window filter for object timestamps. A missing or unparseable stamp
+    counts as in-window: a corrupt timestamp must not silently shrink the
+    sample and manufacture an acedia alarm."""
+    from datetime import datetime, timezone
+
+    if not iso_ts:
+        return True
+    try:
+        dt = datetime.strptime(str(iso_ts), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return True
+    return (datetime.now(timezone.utc) - dt).total_seconds() <= max(1, int(days)) * 86400
+
+
 def realized_band_shares(store: TelosStore, days: int = 7) -> dict:
-    events = store.trace_events(days=days, types={"hypothesis"})
+    # 'hypothesis' is the generation event — every candidate the soup emits,
+    # including those that never run. The band mix we actuate on is the mix
+    # actually *executed*, so count resolutions instead (spec §5.5).
+    events = store.trace_events(days=days, types={"hypothesis_resolved"})
     counts = {"near": 0, "mid": 0, "far": 0}
     for e in events:
         band = str(e.get("band", ""))
@@ -41,9 +59,17 @@ def realized_band_shares(store: TelosStore, days: int = 7) -> dict:
 
 
 def novelty_entropy(store: TelosStore, days: int = 7) -> float:
-    """Normalized Shannon entropy over (band, source_domain) of executed
-    hypotheses — collapse to one band/domain reads as 0, an even spread as 1."""
-    executed = [h for h in store.list_hypotheses() if h.get("status") in ("running", "supported", "refuted", "gated")]
+    """Normalized Shannon entropy over (band, source_domain) of hypotheses
+    executed in the last `days` — collapse to one band/domain reads as 0, an
+    even spread as 1. The window is load-bearing: measured over all time the
+    detector desensitizes as history accumulates, and a drive that went flat
+    last week stays hidden behind years of past variety."""
+    executed = [
+        h
+        for h in store.list_hypotheses()
+        if h.get("status") in ("running", "supported", "refuted", "gated")
+        and _within_days(h.get("updated_at") or h.get("created_at"), days)
+    ]
     if len(executed) < 2:
         return 1.0  # too little signal to call the drive extinguished
     buckets: dict[str, int] = {}
