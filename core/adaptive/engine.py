@@ -398,8 +398,35 @@ def approve_proposal(proposal_id: int, actor: str = "user") -> dict:
             logger.warning("Vetting run enqueue failed for canary '%s': %s", name, e)
         return {"batch_id": None, "applied": [], "rejected": [], "canary_written": name}
 
-    # Review-only proposals (Dream memory reviews) carry no engine payload:
-    # approving acknowledges — nothing to apply, no batch, no sweep.
+    # Memory-correction proposals (audit P5): validated dream contradiction/
+    # stale findings used to dead-end in an empty payload — 72 of 75 pending
+    # proposals on the live box had no effector. Approving now writes a
+    # corrective entry into each cited memory file: mechanical, additive,
+    # non-destructive — recall surfaces the correction alongside the disputed
+    # entries, which is what actually changes downstream behavior.
+    if (
+        isinstance(payload_edits, list)
+        and payload_edits
+        and all(isinstance(e, dict) and e.get("action") == "memory_correction" for e in payload_edits)
+    ):
+        written = []
+        for e in payload_edits:
+            try:
+                from core.memory.ingest import apply_memory_correction
+
+                written += apply_memory_correction(
+                    files=list(e.get("files") or [])[:3],
+                    statement=str(e.get("statement") or ""),
+                    source_ref=f"dream:{e.get('hypothesis_id', '')[:12]}",
+                    kind=str(e.get("kind") or "contradiction"),
+                )
+            except Exception as ce:
+                logger.warning("memory correction failed for proposal %s: %s", proposal_id, ce)
+        db.adaptive_resolve_proposal(proposal_id, "approved")
+        return {"batch_id": None, "applied": [], "rejected": [], "corrections_written": written}
+
+    # Review-only proposals (legacy Dream memory reviews) carry no engine
+    # payload: approving acknowledges — nothing to apply, no batch, no sweep.
     if not payload_edits:
         db.adaptive_resolve_proposal(proposal_id, "approved")
         return {"batch_id": None, "applied": [], "rejected": [], "review_only": True}

@@ -105,18 +105,57 @@ def _promote_edit(row: dict, target_kind: str) -> str | None:
     return None  # rejected (e.g. duplicate slug) — leave unpromoted for review
 
 
+def _memory_files_from_evidence(row: dict) -> list[str]:
+    """Memory file names cited by the hypothesis's pinned evidence."""
+    files: list[str] = []
+    try:
+        for item in json.loads(row.get("evidence_json") or "[]"):
+            if isinstance(item, dict) and item.get("type") in ("memory", "memory_entry"):
+                f = item.get("file") or item.get("id") or ""
+                if f and f not in files:
+                    files.append(str(f))
+    except (TypeError, ValueError):
+        pass
+    return files[:3]
+
+
 def _promote_memory_review(row: dict) -> str | None:
-    """contradiction/memory_stale: a human-review proposal with NO engine
-    payload — approving acknowledges; memory edits stay human (I3)."""
+    """contradiction/memory_stale → an approvable memory correction
+    (audit P5). The old empty-payload proposal dead-ended: 72/75 pending
+    proposals on the live box had no effector. Approving now writes a
+    corrective entry into each cited file — additive and non-destructive,
+    the human approval is the gate."""
+    files = _memory_files_from_evidence(row)
+    payload = (
+        [
+            {
+                "action": "memory_correction",
+                "kind": row.get("kind"),
+                "statement": (row.get("statement") or "").strip()[:1200],
+                "files": files,
+                "hypothesis_id": row["id"],
+            }
+        ]
+        if files
+        else []
+    )
     pid = db.adaptive_add_proposal(
         producer="dream",
-        payload_json="[]",
+        payload_json=json.dumps(payload),
         evidence_json=json.dumps(_evidence_refs(row)),
         rationale=(
-            f"[memory review — no automatic apply] Dream {row.get('kind')} "
-            f"hypothesis (validated): {(row.get('statement') or '').strip()[:500]} "
-            f"— review the cited memory entries and correct them via "
-            f"update_memory/forget if the claim holds."
+            (
+                f"[memory correction — approving writes a corrective entry into "
+                f"{', '.join(files)}] Dream {row.get('kind')} hypothesis (validated): "
+                f"{(row.get('statement') or '').strip()[:500]}"
+            )
+            if files
+            else (
+                f"[memory review — no automatic apply] Dream {row.get('kind')} "
+                f"hypothesis (validated): {(row.get('statement') or '').strip()[:500]} "
+                f"— review the cited memory entries and correct them via "
+                f"update_memory/forget if the claim holds."
+            )
         ),
     )
     return f"proposal:{pid}"
