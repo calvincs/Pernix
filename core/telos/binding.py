@@ -60,9 +60,28 @@ def _window_signals(store: TelosStore, goal_id: str) -> dict:
     half = _split_epoch(events)
 
     spend = [e for e in events if e.get("type") == "spend"]
-    total = sum(int(e.get("tokens", 0)) for e in spend) or 1
+    total = sum(int(e.get("tokens", 0)) for e in spend)
     goal_tokens = sum(int(e.get("tokens", 0)) for e in spend if e.get("goal") == goal_id)
-    share = goal_tokens / total
+
+    # Real budget attribution (audit P5 port 1): the spec's centerpiece is
+    # "Binding Monitor on Pernix budget accounting", but the trace only ever
+    # carried TELOS's own soup/evaluate spend — the detector was structurally
+    # unfireable against real work. Mirrored db goals (g_db_<id>) blend in
+    # the executing system's token_usage over the same window.
+    goal = store.read("goal", goal_id)
+    db_goal_id = int((goal.get("db_goal_id") or 0) if goal else 0)
+    if db_goal_id:
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            from db import models as _db
+
+            since_iso = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            goal_tokens += _db.goal_token_usage_since(db_goal_id, since_iso)
+            total += _db.total_token_usage_since(since_iso)
+        except Exception:
+            pass
+    share = goal_tokens / (total or 1)
 
     goal_questions = {q.id for q in store.list_questions() if q.get("parent_goal") == goal_id}
 

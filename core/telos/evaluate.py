@@ -177,6 +177,34 @@ async def evaluate_one(store: TelosStore, gated: list[TelosObject], is_cancelled
         {"id": h.id, "verdict": verdict, "claim": claim.id, "band": h.get("band"), "question": h.get("question")},
     )
 
+    # Output port into the adaptive layer (audit P5 port 2): a supported,
+    # evidence-backed claim is a routing-hint candidate. This is the
+    # difference between "telos noticed" and "telos changed behavior" — the
+    # engine's existing risk gating and caps apply unchanged.
+    if verdict == "supported" and evidence and parsed["confidence"] >= 0.65:
+        try:
+            from core.adaptive.contract import queue_producer_edits
+
+            queue_producer_edits(
+                [
+                    {
+                        "kind": "routing_hint",
+                        "scope": "global",
+                        "title": f"telos: {str(h.get('statement') or '')[:70]}",
+                        "content": (
+                            f"Supported hypothesis ({claim.id}, confidence "
+                            f"{parsed['confidence']:.2f}): {str(h.get('statement') or '')[:280]} "
+                            f"— {parsed['note'][:120]}"
+                        ),
+                        "evidence": [claim.id, h.id, str(h.get("question", ""))],
+                    }
+                ],
+                producer="telos",
+                rationale=f"TELOS supported claim {claim.id} (falsifier-gated, judge-confirmed)",
+            )
+        except Exception as e:
+            logger.debug("telos: adaptive port skipped: %s", e)
+
     # Closing the loop (spec §3): committed knowledge changes what counts as
     # an anomaly — a resolved hypothesis narrows its parent question.
     q = store.read("question", str(h.get("question", "")))

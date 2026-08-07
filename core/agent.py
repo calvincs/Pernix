@@ -331,6 +331,25 @@ class StuckDetector:
                 self.file_failure_counts.pop(key, None)
 
 
+def _goal_budget_exceeded(session_id: str, goal_id: int) -> str | None:
+    """Synchronous mid-turn budget check (runs in a thread). Returns a short
+    reason string when the active goal's token or time budget is spent."""
+    from datetime import datetime, timezone
+
+    goal = db.get_active_goal(session_id)
+    if not goal or int(goal.get("id", 0)) != int(goal_id):
+        return None
+    if goal.get("token_budget"):
+        used = db.goal_token_usage(goal["id"])
+        if used >= int(goal["token_budget"]):
+            return f"token budget spent ({used:,}/{int(goal['token_budget']):,})"
+    if goal.get("time_budget_s") and goal.get("started_at"):
+        elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(goal["started_at"])).total_seconds()
+        if elapsed >= int(goal["time_budget_s"]):
+            return f"time budget spent ({int(elapsed)}s/{int(goal['time_budget_s'])}s)"
+    return None
+
+
 def _hash_args(args) -> str:
     if isinstance(args, dict):
         args = json.dumps(args, sort_keys=True)
@@ -627,6 +646,22 @@ async def run_agent(
             logger.info("Session %s: cancel requested, exiting agent loop", session_id)
             session.termination_reason = "cancelled"
             return
+
+        # In-turn goal budget checkpoint (audit P5): budgets used to be
+        # checked only BETWEEN turns, so a single turn could overshoot
+        # token/time budgets without bound. Every third round is enough —
+        # the between-turns check remains the authoritative settlement.
+        if settings.goals_enabled and session.active_goal_id and tool_round > 0 and tool_round % 3 == 0:
+            try:
+                _exceeded = await asyncio.to_thread(_goal_budget_exceeded, session_id, session.active_goal_id)
+            except Exception as _e:
+                logger.debug("In-turn goal budget check failed: %s", _e)
+                _exceeded = None
+            if _exceeded:
+                logger.info("Session %s: goal budget exceeded mid-turn (%s), ending turn", session_id, _exceeded)
+                session.emit_event({"type": "goal.budget_exceeded", "reason": _exceeded})
+                session.termination_reason = "budget_exhausted"
+                break
 
         # Pause checkpoint (for workers). The pause/resume round-trip is
         # modelled explicitly in the state machine: PROCESSING→PAUSE_REQUESTED

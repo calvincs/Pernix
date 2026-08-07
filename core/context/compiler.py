@@ -658,7 +658,37 @@ def _build_goal_burn(session_id: str) -> str:
         return ""
 
 
-def _build_volatile_tail(resource_status: str, goal_burn: str = "") -> str:
+def _build_telos_drive_block() -> str:
+    """Open telos questions + live alarms for the volatile tail (audit P5
+    port 3). The agent used to be unaware of its own drive state unless it
+    voluntarily called telos_status. Byte-identical output (empty string)
+    when telos is disabled; capped to three questions to bound tail churn."""
+    if not settings.telos_enabled:
+        return ""
+    try:
+        from core.telos.store import TelosStore
+
+        store = TelosStore.open()
+        qs = sorted(
+            store.list_questions(state="open"),
+            key=lambda q: (-float(q.get("surprise") or 0.0), q.get("created_at") or ""),
+        )[:3]
+        alarms = store.list_alarms(open_only=True)
+        if not qs and not alarms:
+            return ""
+        lines = [
+            "[TELOS] Open questions the idle loop is working on (FYI — answer opportunistically if your task touches one):"
+        ]
+        for q in qs:
+            lines.append(f"- ({q.id}, surprise {float(q.get('surprise') or 0):.2f}) {str(q.get('text') or '')[:180]}")
+        if alarms:
+            lines.append(f"Open telos alarms: {len(alarms)} (see telos_status)")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _build_volatile_tail(resource_status: str, goal_burn: str = "", telos_block: str = "") -> str:
     """Per-call state that goes in a trailing system message, NOT the head.
 
     Everything here changes between LLM calls (clock, tool rounds remaining).
@@ -679,6 +709,8 @@ def _build_volatile_tail(resource_status: str, goal_burn: str = "") -> str:
         lines.append(resource_status)
     if goal_burn:
         lines.append(goal_burn)
+    if telos_block:
+        lines.append(telos_block)
     return "\n".join(lines)
 
 
@@ -851,7 +883,11 @@ def compile_context(
     # trailing system message after trim — keeping it out of the head
     # preserves the provider's prompt-prefix cache. Its tokens still count
     # against the system share of the budget.
-    volatile_tail = _build_volatile_tail(resource_status, goal_burn=_build_goal_burn(session_id) if goal_block else "")
+    volatile_tail = _build_volatile_tail(
+        resource_status,
+        goal_burn=_build_goal_burn(session_id) if goal_block else "",
+        telos_block=_build_telos_drive_block(),
+    )
     # Head is stable across the rounds of a turn — cached count. The tail is
     # tiny and changes per call, so it's counted raw.
     system_tokens = _count_text_cached(system_prompt, estimator) + estimator.count(volatile_tail)

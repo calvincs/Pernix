@@ -1085,6 +1085,26 @@ def goal_token_usage(goal_id: int) -> int:
         return int(row["t"]) if row else 0
 
 
+def goal_token_usage_since(goal_id: int, since_iso: str) -> int:
+    """Windowed goal spend — the telos binding monitor's real-budget input."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(total_tokens), 0) AS t FROM token_usage WHERE goal_id = ? AND created_at >= ?",
+            (goal_id, since_iso),
+        ).fetchone()
+        return int(row["t"]) if row else 0
+
+
+def total_token_usage_since(since_iso: str) -> int:
+    """Windowed total spend across every session and goal."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(total_tokens), 0) AS t FROM token_usage WHERE created_at >= ?",
+            (since_iso,),
+        ).fetchone()
+        return int(row["t"]) if row else 0
+
+
 def reconcile_orphan_goals() -> int:
     """Goals whose session row no longer exists -> error (startup sweep)."""
     with connect_sessions() as conn:

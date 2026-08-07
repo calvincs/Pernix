@@ -134,6 +134,22 @@ async def on_post_task(session_id: str, session: dict, session_obj) -> None:
     failing_tools = [t for t, s in tool_summary.items() if int(s.get("calls", 0)) > 0 and int(s.get("failures", 0)) > 0]
     priors = await _candor_priors(failing_tools)
 
+    # Goal attribution (audit P5 port 1): bind minted questions to the goal
+    # the session is actually executing instead of hardcoding g_root.
+    goal_id = getattr(session_obj, "active_goal_id", None)
+    goal_objective = ""
+    if goal_id:
+        try:
+            from db import models as _db
+
+            row = await asyncio.to_thread(_db.get_active_goal, session_id)
+            if row and int(row.get("id", 0)) == int(goal_id):
+                goal_objective = str(row.get("objective") or "")
+            else:
+                goal_id = None
+        except Exception:
+            goal_id = None
+
     await asyncio.to_thread(
         _post_task_store_work,
         session_id,
@@ -143,6 +159,8 @@ async def on_post_task(session_id: str, session: dict, session_obj) -> None:
         termination,
         reflect_retry,
         priors,
+        goal_id,
+        goal_objective,
     )
 
 
@@ -154,11 +172,19 @@ def _post_task_store_work(
     termination,
     reflect_retry: bool,
     priors: dict[str, float],
+    goal_id: int | None = None,
+    goal_objective: str = "",
 ) -> None:
     """Synchronous store side of the post-task hook (runs in a thread)."""
     from core.telos.store import TelosStore
 
     store = TelosStore.open()
+    parent_goal = "g_root"
+    if goal_id:
+        try:
+            parent_goal = store.ensure_db_goal(goal_id, goal_objective).id
+        except Exception as e:
+            logger.debug("telos: db-goal mirror failed for %s: %s", goal_id, e)
 
     # 1) Trace: every turn lands in the record ("the story that is told of us").
     store.trace_append(
@@ -187,14 +213,16 @@ def _post_task_store_work(
         if store.question_is_duplicate(a["text"]):
             continue
         origin = "anomaly"
+        q_parent = parent_goal
         if serendipity_due and a["surprise"] >= 0.8:
             # High-surprise, deliberately unbound from any active goal.
             origin, serendipity_due = "serendipity", False
+            q_parent = "g_root"
         store.add_question(
             text=a["text"],
             surprise=a["surprise"],
             derived_from=a["derived_from"] + [f"session:{session_id}"],
-            parent_goal="g_root",
+            parent_goal=q_parent,
             origin=origin,
         )
         minted += 1

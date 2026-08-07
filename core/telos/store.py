@@ -374,6 +374,38 @@ class TelosStore:
         self.trace_append("root_seeded", {"text": settings.telos_root_text})
         return root
 
+    def ensure_db_goal(self, goal_id: int, objective: str) -> TelosObject:
+        """Mirror a live session_goals row as a telos goal (audit P5 port 1).
+
+        Anomaly-minted questions used to hardcode parent_goal="g_root", which
+        collapsed the goal DAG: the binding monitor iterates non-root goals,
+        so it was structurally unfireable. Binding questions and spend to the
+        goal the system is actually executing makes ordo/binding/hevel operate
+        on real objectives. Naming: g_db_<id> ties back to session_goals.id.
+        """
+        gid = f"g_db_{int(goal_id)}"
+        existing = self.read("goal", gid)
+        if existing is not None:
+            return existing
+        self.ensure_root()
+        obj = TelosObject(
+            id=gid,
+            kind="goal",
+            meta={
+                "kind": "task",
+                "text": str(objective or "")[:500],
+                "state": "active",
+                "completable": True,
+                "parent": "g_root",
+                "db_goal_id": int(goal_id),
+            },
+            body=f"Mirror of session_goals row #{int(goal_id)}. Spend attribution "
+            "spans telos trace events and db token_usage.goal_id.",
+        )
+        self.write(obj)
+        self.trace_append("goal_mirrored", {"id": gid, "db_goal_id": int(goal_id)})
+        return obj
+
     def _write_config_provenance(self) -> None:
         """config/telos.yaml — the readable provenance tier (spec §6). The
         agent can inspect who installed its drive and what it is aimed at;
