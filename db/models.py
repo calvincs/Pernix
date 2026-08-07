@@ -1705,42 +1705,10 @@ def mark_session_reviewed(session_id: str) -> None:
         )
 
 
-def get_unproposed_sessions(min_age_minutes: int = 10, limit: int = 5) -> list[dict]:
-    """Sessions eligible for snooze improvement-reflection.
-
-    Like get_unreviewed_sessions but tracks via snooze_state (not the
-    snooze_reviewed_at column), so the improvement pass and the distillation
-    pass operate on independent watermarks. Excludes worker sessions
-    (workflows already self-improve via core/workflows/reflect.py).
-    """
-    from datetime import timedelta
-
-    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes)).isoformat()
-    with connect_sessions() as conn:
-        rows = conn.execute(
-            """SELECT s.* FROM sessions s
-               WHERE s.state = 'idle'
-                 AND s.updated_at < ?
-                 AND s.session_type NOT IN ('worker', 'canary')
-                 AND NOT EXISTS (
-                     SELECT 1 FROM snooze_state ss
-                     WHERE ss.key = 'proposal_reviewed:' || s.id
-                 )
-                 AND EXISTS (
-                     SELECT 1 FROM messages m
-                     WHERE m.session_id = s.id AND m.role = 'reflect'
-                 )
-               ORDER BY s.updated_at ASC
-               LIMIT ?""",
-            (cutoff, limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
 def get_unrefined_sessions(min_idle_minutes: int = 10, limit: int = 1) -> list[dict]:
     """Sessions eligible for the snooze tail-end refine pass.
 
-    Broader gate than :func:`get_unproposed_sessions`: no reflect verdict
+    Broader gate than the removed Activity-2b selector: no reflect verdict
     required. Refine looks at the whole transcript, so a smooth-running
     session (no reflect) or a 'pass with no deviation' session still
     qualifies. Watermark lives in ``snooze_state`` under

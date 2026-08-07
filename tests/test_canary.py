@@ -106,7 +106,6 @@ def test_sweep_queries_exclude_canary():
     db.add_message(canary, "reflect", "verdict")
     db.update_session(canary, state="idle")
     assert canary not in {s["id"] for s in db.get_unreviewed_sessions(min_age_minutes=0)}
-    assert canary not in {s["id"] for s in db.get_unproposed_sessions(min_age_minutes=0)}
     assert canary not in {s["id"] for s in db.get_unrefined_sessions(min_idle_minutes=0)}
 
 
