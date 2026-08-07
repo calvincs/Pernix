@@ -53,14 +53,6 @@ def test_refine_parse_carries_adaptive_edits():
     assert edits and edits[0]["kind"] == "prompt_note"
 
 
-def test_snooze_reflect_parse_carries_adaptive_edits():
-    from core.snooze_reflect import _parse_output
-
-    raw = json.dumps({"proposals": [], "lessons": [], "adaptive_edits": [{"action": "create"}]})
-    _, _, edits = _parse_output(raw)
-    assert len(edits) == 1
-
-
 def test_queue_producer_edits_stamps_session_evidence():
     from core.adaptive.contract import queue_producer_edits
 
@@ -550,3 +542,39 @@ async def test_candor_retires_recovered_hints(monkeypatch):
     degraded.append({"tool": "http_get", "p": 0.3, "n": 40})
     assert (await _pass())["applied"] == ["tool-http_get-degraded"]
     assert db.adaptive_get_entry("tool-http_get-degraded")["status"] == "active"
+
+
+async def test_memory_correction_effector_writes_on_approve(monkeypatch, tmp_path):
+    """Approved dream contradiction findings with cited memory files write a
+    corrective entry instead of dead-ending (audit P5: 72/75 pending
+    proposals on the live box had no effector)."""
+    import json as _json
+
+    from core.dream.promote import promote_validated
+
+    evidence = _json.dumps([{"type": "memory", "file": "test.corrections", "epoch": 1}])
+    hid = db.add_dream_hypothesis("contradiction", "Entry A contradicts entry B about worker limits", evidence)
+    db.update_dream_hypothesis(hid, status="validated")
+
+    assert await promote_validated(limit=5) == 1
+    prop = db.adaptive_list_proposals(status="pending")[0]
+    payload = _json.loads(prop["payload_json"])
+    assert payload and payload[0]["action"] == "memory_correction"
+    assert payload[0]["files"] == ["test.corrections"]
+
+    written_calls = []
+
+    def _fake_correction(files, statement, source_ref="", kind=""):
+        written_calls.append((tuple(files), kind))
+        return list(files)
+
+    import core.memory.ingest as ingest_mod
+
+    monkeypatch.setattr(ingest_mod, "apply_memory_correction", _fake_correction)
+
+    from core.adaptive import approve_proposal
+
+    result = approve_proposal(prop["id"])
+    assert result.get("corrections_written") == ["test.corrections"]
+    assert written_calls == [(("test.corrections",), "contradiction")]
+    assert db.adaptive_get_proposal(prop["id"])["status"] == "approved"

@@ -376,3 +376,49 @@ def ingest_document_sync(
     except RuntimeError:
         # No running loop — safe to use asyncio.run
         return asyncio.run(ingest_document(text, source_name, min_section_length, use_llm))
+
+
+def apply_memory_correction(
+    files: list[str],
+    statement: str,
+    source_ref: str = "",
+    kind: str = "contradiction",
+) -> list[str]:
+    """Write a corrective entry into each cited memory file (audit P5).
+
+    The mechanical effector for approved dream contradiction/stale findings:
+    additive and non-destructive — the disputed entries stay, and recall now
+    surfaces the correction next to them, which is what changes behavior.
+    Returns "file:epoch" refs for the entries written.
+    """
+    from core.memory.store import get_memory_store
+
+    statement = (statement or "").strip()
+    if not statement:
+        return []
+    label = "STALE-INFO CORRECTION" if kind == "memory_stale" else "CONTRADICTION RESOLVED"
+    store = get_memory_store()
+    written: list[str] = []
+    for fname in files:
+        if not fname:
+            continue
+        try:
+            result = store.add_entry(
+                content=(
+                    f"{label} (human-approved via adaptive review"
+                    f"{', ' + source_ref if source_ref else ''}): {statement[:1200]} "
+                    f"— treat this note as overriding any conflicting older entries in this file."
+                ),
+                file_name=fname,
+                entry_type="note",
+                tags=f"correction,{kind}",
+                weight="high",
+                source="dream_fix",
+            )
+            if isinstance(result, str) and result.startswith("Error"):
+                logger.warning("memory correction rejected for %s: %s", fname, result)
+                continue
+            written.append(fname)
+        except Exception as e:
+            logger.warning("memory correction write failed for %s: %s", fname, e)
+    return written
