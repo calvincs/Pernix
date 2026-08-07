@@ -64,3 +64,28 @@ Claims commit through `TelosStore.commit_claim` with hard confidence caps by epi
 - The post-task hook is delta-tracked per turn (reflect retries never double-trace) and bounded by a 10s wait.
 - Open questions are capped (120) and per-turn minting is capped (2), with near-duplicate rejection.
 - The root cannot be completed, the trace cannot be rewritten, and the agent cannot clear alarms — three invariants that hold by construction, not policy.
+
+## Actuation ports (2026-08 refactor)
+
+TELOS is wired into the executing system in four places — the difference
+between "telos noticed" and "telos changed behavior":
+
+1. **Goal attribution** — anomaly-minted questions bind to the session's
+   active `session_goals` row, mirrored into the store as `g_db_<id>`
+   (`store.ensure_db_goal`). The binding monitor blends the goal's real
+   `token_usage` (7-day window) into budget share, so the Goodhart detector
+   measures actual spend, not just TELOS's own soup/evaluate tokens.
+   Serendipity questions stay bound to `g_root` by design.
+2. **Adaptive output** — a `supported` claim with recorded evidence and
+   judge confidence ≥ 0.65 queues a `routing_hint` through
+   `queue_producer_edits("telos", …)`; the adaptive engine's risk gating,
+   caps, and rollback apply unchanged.
+3. **Context port** — up to three open questions (by surprise) plus a live
+   alarm count render into the volatile tail of every compile
+   (`_build_telos_drive_block`). Byte-identical output when `telos_enabled`
+   is off.
+4. **Escalation that terminates** — the binding ladder monitors suspended
+   goals too: a persisting signature climbs L2 → L3 (operator notification);
+   a cleared signature un-suspends the goal and closes the alarm.
+   Acknowledging an alarm silences notifications without resetting the
+   ladder.
