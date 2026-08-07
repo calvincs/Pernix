@@ -596,7 +596,6 @@ class SessionManager:
                 logger.warning("Session budget extension failed for goal continuation: %s", _e)
 
         ordinal = used_cont + 1
-        session.goal_continuation_active = True  # snooze-transparent while auto-driven
         await asyncio.to_thread(db.update_goal, goal["id"], continuations_used=ordinal)
         prompt = (
             f"[goal continuation {ordinal}/{budget}] The goal is still active:\n"
@@ -605,7 +604,7 @@ class SessionManager:
             f"evidence — do not end the goal yourself. Use goal_complete only when "
             f"the objective is met and its gates pass."
         )
-        session.pending_messages.append(PendingMessage(prompt, None, False))
+        session.pending_messages.append(PendingMessage(prompt, None, False, is_goal_continuation=True))
         session.emit_event({"type": "goal.continuation", "goal_id": goal["id"], "ordinal": ordinal, "budget": budget})
         logger.info(
             "Goal #%d: auto-continuation %d/%d enqueued for %s (termination=%s)",
@@ -2017,6 +2016,11 @@ class SessionManager:
                 return
             entry = PendingMessage.coerce(session.pending_messages.popleft())
 
+            # Per-turn transparency: only a goal auto-continuation turn is
+            # snooze-transparent. A real user message dispatched from the
+            # queue clears the flag (audit polish review — it used to stick).
+            session.goal_continuation_active = bool(entry.is_goal_continuation)
+
             # Lock in this turn's user msg id from the queue entry (the
             # manager pre-saved it at queue-add time and stored its id on
             # the entry). compile_context and reflect scope to this id.
@@ -2254,8 +2258,14 @@ class SessionManager:
     def active_count(self) -> int:
         return len(self._sessions)
 
-    def has_active_work(self) -> bool:
+    def has_active_work(self, strict: bool = False) -> bool:
         """Return True if any in-memory session is non-idle.
+
+        strict=True ignores goal-continuation transparency: only canary
+        sessions stay invisible. Mutating snooze work (adaptive applies,
+        memory-store surgery) uses this so it never runs while a goal turn
+        is mid-flight — a mid-turn prompt/memory mutation changes the very
+        turn the tripwire would then attribute it to.
 
         Uses the v2 state machine directly. AWAITING_USER and AWAITING_WORKERS
         are excluded (agent genuinely suspended); FINALIZING is caught by the
@@ -2270,10 +2280,13 @@ class SessionManager:
         # Snapshot — a tool thread can insert into _sessions (spawn_worker ->
         # create_session) while this runs on the event loop. Snooze-transparent
         # types (canary) never count as active work (plan §5).
-        from core.snooze import snooze_transparent
+        from core.snooze import SNOOZE_TRANSPARENT_TYPES, snooze_transparent
 
         for session in list(self._sessions.values()):
-            if snooze_transparent(session):
+            if strict:
+                if session.session_type in SNOOZE_TRANSPARENT_TYPES:
+                    continue
+            elif snooze_transparent(session):
                 continue
             if sv2._current_state(session) not in _idle_v2:
                 return True

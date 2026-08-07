@@ -374,6 +374,11 @@ class Settings:
     # watermark resume). This bound only kills a genuinely wedged cycle.
     # 15 min accommodates slow local models; bump it for very large ones.
     snooze_max_cycle_seconds: int = 900
+    # Wall-clock ceiling on one scheduled dispatch (cron fire / heartbeat idle
+    # tick). Replaces the old implicit tool_timeout × max_tool_rounds product,
+    # which silently quintupled to ~4.2h when max_tool_rounds went 10→50 — a
+    # wedged job should fail and notify within the hour.
+    cron_dispatch_timeout: int = 3600
     snooze_cooldown_minutes: int = 5  # Min idle time before Snooze starts
     snooze_dedup_interval_days: int = 7  # Days between dedup sweeps per file
     snooze_consolidation_interval_hours: int = 24  # Hours between consolidation scans

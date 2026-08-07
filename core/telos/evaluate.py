@@ -188,6 +188,7 @@ async def evaluate_one(store: TelosStore, gated: list[TelosObject], is_cancelled
             queue_producer_edits(
                 [
                     {
+                        "action": "create",
                         "kind": "routing_hint",
                         "scope": "global",
                         "title": f"telos: {str(h.get('statement') or '')[:70]}",

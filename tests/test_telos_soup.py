@@ -136,3 +136,21 @@ async def test_generation_no_questions_is_noop(store, mock_llm_client):
     result = await generate_for_next_question(store, lambda: False)
     assert result["ran"] is False
     assert mock_llm_client.call_count == 0
+
+
+def test_supported_claim_edit_passes_adaptive_validation():
+    """The telos→adaptive port's edit shape must clear validate_edit — it
+    shipped without an 'action' key and with an unregistered source, which
+    rejected every edit silently (polish review)."""
+    from core.adaptive.engine import SOURCES, validate_edit
+
+    assert "telos" in SOURCES
+    edit = {
+        "action": "create",
+        "kind": "routing_hint",
+        "scope": "global",
+        "title": "telos: test claim",
+        "content": "Supported hypothesis (c_0001, confidence 0.80): test statement",
+        "evidence": ["c_0001", "h_0001", "q_0001"],
+    }
+    assert validate_edit(edit, "telos") is None

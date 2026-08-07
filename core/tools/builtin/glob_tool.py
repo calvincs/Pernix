@@ -17,7 +17,7 @@ def glob_search(pattern: str, path: str = "") -> str:
 
     Uses git ls-files when in a git repo (respects .gitignore),
     falls back to pathlib.glob otherwise. Results sorted by
-    modification time (newest first), limited to 100.
+    modification time (newest first), limited to 300.
 
     Args:
         pattern: Glob pattern (e.g. '**/*.py', 'src/**/*.ts', '*.md').
@@ -75,7 +75,7 @@ def glob_search(pattern: str, path: str = "") -> str:
     except OSError:
         pass
 
-    # Limit to 100 results
+    # Limit results (raised 100->300, audit P2)
     total = len(matches)
     matches = matches[:300]
 
@@ -109,7 +109,7 @@ def register(reg) -> None:
         func=glob_search,
         description=(
             "Find files by name pattern using glob syntax (e.g. '**/*.py', 'src/**/*.ts'). "
-            "Respects .gitignore when in a git repo. Results sorted by modification time, limited to 100."
+            "Respects .gitignore when in a git repo. Results sorted by modification time, limited to 300."
         ),
         parameters={
             "type": "object",

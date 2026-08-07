@@ -213,7 +213,7 @@ async def compact_with_llm(
     # Criticality tier (audit P3): the summary becomes the session's
     # permanent memory for the primary model — never author it on a
     # silently-weaker background model.
-    model = settings.llm_model
+    model = settings.llm_model or settings.background_model
     sched_created_at, sched_priority = sched_identity(session_id)
     # Carrying the session_id subjects this call to the session's wall-clock
     # budget; guarantee headroom so a budget-exhausted turn can still compact

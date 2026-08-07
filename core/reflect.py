@@ -1056,7 +1056,10 @@ async def reflect_on_session(
     # Three-role scheme: the verifier runs on Primary — its verdicts gate
     # retries, worker trust, and routing; it must never be weaker than the
     # model it judges.
-    model = settings.llm_model
+    # Primary, with the Background model as a safety net for degenerate
+    # configs where llm_model is unset (per-session overrides carrying the
+    # agent turns) — chat(model="") would otherwise reach the provider.
+    model = settings.llm_model or settings.background_model
     start = time.monotonic()
 
     # Inner retry budget for the reflect LLM call itself. A parse failure here
