@@ -12,6 +12,7 @@ router = APIRouter(tags=["health"])
 
 @router.get("/api/health")
 async def health():
+    from api.app import BUILD_ID
     from maintenance import get_maintenance
     from sessions.manager import get_manager
 
@@ -22,6 +23,7 @@ async def health():
         "status": "healthy",
         "model": settings.llm_model or "(not set)",
         "version": "2.9.0",
+        "build": BUILD_ID,
         "sessions_active": manager.active_count(),
         "maintenance": maint.get_stats(),
     }

@@ -674,3 +674,26 @@ async def test_skills_patch_toggle_round_trips_through_registry(tmp_path, monkey
         resp = await client.patch("/api/skills/togg", json={"enabled": True})
         assert resp.status_code == 200
         assert not get_skill_registry().is_disabled("togg")
+
+
+async def test_sw_js_route_stamps_build_id():
+    """/sw.js is served with the deploy build id substituted for __BUILD__
+    and no-cache headers, so PWA clients detect new builds automatically."""
+    from api.app import BUILD_ID, service_worker
+
+    resp = await service_worker()
+    body = resp.body.decode()
+    assert "__BUILD__" not in body
+    assert BUILD_ID and len(BUILD_ID) == 12
+    assert f"pernix-shell-{BUILD_ID}" in body
+    assert "no-cache" in resp.headers.get("cache-control", "")
+    # The SW must not intercept its own script fetches.
+    assert "url.pathname === '/sw.js'" in body
+
+
+async def test_health_reports_build_id():
+    from api.app import BUILD_ID
+    from api.routers.health import health
+
+    data = await health()
+    assert data.get("build") == BUILD_ID

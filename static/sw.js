@@ -1,12 +1,17 @@
 // Pernix — Service worker (PWA installability + Web Push + notification click handling)
 
-// App-shell precache. Bump CACHE_VERSION whenever shell assets change so
-// clients pick up new builds on the next SW activate. Strategy:
+// App-shell precache. CACHE_VERSION is stamped by the server at serve time
+// (__BUILD__ → a hash of the shipped static assets), so every deploy is a
+// new SW byte-wise: install → activate purges old caches → clients get a
+// controllerchange and refresh (see index.html). Auth tokens live in
+// localStorage and are untouched by cache purges. If served without the
+// stamp (static hosting), the literal placeholder still works as a manual
+// version. Strategy:
 //   - static assets (/static/*): cache-first with background revalidate —
 //     instant loads, survives server downtime, refreshes itself when online
 //   - navigation (/): network-first, cached shell as offline fallback
-//   - API/SSE requests: never intercepted (pass through)
-const CACHE_VERSION = 'pernix-shell-v8';
+//   - API/SSE requests and /sw.js itself: never intercepted (pass through)
+const CACHE_VERSION = 'pernix-shell-__BUILD__';
 const SHELL_ASSETS = [
     '/',
     '/static/css/tokens.css',
@@ -54,8 +59,12 @@ self.addEventListener('fetch', (event) => {
     // Never intercept API or SSE traffic.
     if (url.pathname.startsWith('/api/')) return;
 
+    // /sw.js must always hit the network — a SW serving its own script from
+    // cache blocks every future update.
+    if (url.pathname === '/sw.js') return;
+
     // Static assets: cache-first + background revalidate.
-    if (url.pathname.startsWith('/static/') || url.pathname === '/sw.js') {
+    if (url.pathname.startsWith('/static/')) {
         event.respondWith(
             caches.open(CACHE_VERSION).then(async (cache) => {
                 const cached = await cache.match(event.request);
