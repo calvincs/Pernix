@@ -1461,7 +1461,10 @@ class SessionManager:
         # retry loop broke, while still FINALIZING, before pending dispatch.
         # An earlier enqueue would suppress reflect (_run_post_hooks early-
         # returns on pending) or cancel a requested retry.
-        if settings.goals_enabled and session.session_type == "normal":
+        # Cron sessions may carry goals too (audit P5): the "overnight
+        # unattended" story previously required a human to start a normal
+        # session — a scheduled job could never auto-continue its goal.
+        if settings.goals_enabled and session.session_type in ("normal", "cron"):
             try:
                 await self._maybe_enqueue_goal_continuation(session)
             except Exception as _e:
