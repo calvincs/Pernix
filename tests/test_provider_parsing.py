@@ -240,15 +240,11 @@ async def test_run_agent_multiple_tool_rounds(monkeypatch):
 # ===========================================================================
 
 
-def test_llm_router_is_openrouter_model(monkeypatch):
-    import os
-
+def test_llm_router_resolve_provider_no_crash(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     from core.llm.router import ProviderRouter
 
     router = ProviderRouter()
-    # "openai/gpt-4" has a "/" → should be openrouter if API key set
-    # Actually depends on registry; just verify no crash
     provider = router.resolve_provider("some/model")
     assert isinstance(provider, str)
 

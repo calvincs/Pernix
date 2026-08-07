@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 
 import httpx
 
@@ -12,7 +11,7 @@ from core.llm.errors import FALLBACK_REASONS, FailoverError, classify_http_error
 from core.llm.providers.ollama import OllamaProvider
 from core.llm.providers.openrouter import OpenRouterProvider
 from core.llm.registry import ModelRegistry
-from core.llm.semaphore import FairLLMSemaphore, SessionAwareLLMScheduler
+from core.llm.semaphore import SessionAwareLLMScheduler
 from core.llm.types import ChatResponse, HealthStatus, ModelInfo, StreamEvent, StreamEventType, extract_tool_call_fields
 
 logger = logging.getLogger("pernix.llm.router")
@@ -21,11 +20,6 @@ logger = logging.getLogger("pernix.llm.router")
 # normalize_for_openrouter() applied to compiled messages. Ollama is more
 # permissive and gets the raw compile output.
 OPENAI_FORMAT_PROVIDERS = frozenset({"openrouter", "openai"})
-
-
-def is_openrouter_model(model: str) -> bool:
-    """OpenRouter models use org/model format and require an API key."""
-    return "/" in model and bool(os.environ.get("OPENROUTER_API_KEY"))
 
 
 def sanitize_for_fallback(messages: list[dict]) -> list[dict]:
@@ -136,7 +130,7 @@ class ProviderRouter:
             return provider
         return self._ollama
 
-    def get_semaphore(self, provider=None) -> FairLLMSemaphore:
+    def get_semaphore(self, provider=None) -> SessionAwareLLMScheduler:
         """Return the semaphore for a provider instance."""
         return self._semaphores.get(getattr(provider, "name", "ollama"), self._ollama_semaphore)
 
