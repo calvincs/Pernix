@@ -532,6 +532,12 @@ async def run_agent(
         # Pull in co-occurring siblings so e.g. spawn_worker brings
         # get_worker_result / check_workers / await_workers into the schema.
         active_tools_set = registry.expand_cooccurrence(active_tools_set)
+        # Retry effector (audit P1f): tools reflect disabled for this retry
+        # attempt are removed from the schema entirely — overriding builtins
+        # and the monotonic allowlist. The executor enforces this too.
+        _retry_excluded = getattr(session, "retry_excluded_tools", None) or set()
+        if _retry_excluded:
+            active_tools_set -= _retry_excluded
         active_tools = sorted(active_tools_set)  # deterministic order for prompt cache
     else:
         # No scout report available. Nothing to substitute: SOUL/RULES/SESSIONS
@@ -1656,9 +1662,7 @@ async def run_agent(
         # re-attempting the known-bad primary for the final response just
         # burns the backoff ladder again before landing on the same fallback.
         _final_tried_fallback = _tried_fallback and settings.fallback_model != ""
-        _final_model = (
-            settings.fallback_model if _final_tried_fallback and settings.fallback_model else effective_model
-        )
+        _final_model = settings.fallback_model if _final_tried_fallback and settings.fallback_model else effective_model
         while True:  # final response retry loop
             final_content = ""
             _final_err: str | None = None

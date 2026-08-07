@@ -380,6 +380,49 @@ async def _run_turn_gates(session_id: str, session_obj, emit=None) -> list:
     return results
 
 
+def _same_failure_repeating(session_id: str) -> str | None:
+    """Cross-retry circuit breaker predicate (audit P1f).
+
+    Returns a short human-readable signature when the two most recent
+    post-mortems for this session are both 'retry' verdicts with the same
+    failure_cause and near-identical reasoning — i.e. the retry mechanism is
+    reproducing the failure rather than correcting it. Callers only invoke
+    this once reflect_count >= 2, so both rows belong to the current turn.
+    Field case 2072ab68cfd4: ten consecutive retries, byte-similar reasoning
+    ("spawned workers against explicit scout instruction") every time.
+    """
+    import json as _json
+    from difflib import SequenceMatcher
+
+    from db import models as db
+
+    try:
+        pms = db.list_post_mortems(session_id=session_id, limit=2)
+    except Exception:
+        return None
+    if len(pms) < 2:
+        return None
+    a, b = pms[0], pms[1]
+    if a.get("verdict") != "retry" or b.get("verdict") != "retry":
+        return None
+    if a.get("failure_cause") != b.get("failure_cause"):
+        return None
+
+    def _txt(pm: dict) -> str:
+        try:
+            p = _json.loads(pm.get("payload_json") or "{}")
+        except Exception:
+            p = {}
+        return ((p.get("reasoning") or "") + " " + (p.get("diagnostic") or "")).strip().lower()
+
+    ta, tb = _txt(a), _txt(b)
+    if not ta or not tb:
+        return None
+    if SequenceMatcher(None, ta, tb).ratio() < 0.7:
+        return None
+    return f"cause={a.get('failure_cause')}: {ta[:160]}"
+
+
 def _apply_gate_retry_fallback(session_id: str, session: dict, session_obj, gate_results, emit=None) -> None:
     """When Reflect doesn't run (disabled, or skipped for a short turn), a
     failing gate still requests the retry — subject to the same cap Reflect
@@ -746,6 +789,70 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                 # Don't request retry; let the turn end. session_obj.reflect_count
                 # has already been incremented so the next run will see it.
                 return
+
+            # Cross-retry circuit breaker (audit P1f): when the last two
+            # attempts of THIS turn failed with the same signature, a third
+            # identical attempt is spend without a plan-change. Stop retrying
+            # and surface the repeat instead of amplifying it.
+            if session_obj.reflect_count >= 2:
+                repeat_sig = await asyncio.to_thread(_same_failure_repeating, session_id)
+                if repeat_sig:
+                    logger.warning(
+                        "Reflect circuit breaker tripped for session %s after %d attempts: %s",
+                        session_id,
+                        session_obj.reflect_count,
+                        repeat_sig,
+                    )
+                    if emit:
+                        emit(
+                            {
+                                "type": "reflect.circuit_breaker",
+                                "attempts": session_obj.reflect_count,
+                                "signature": repeat_sig,
+                                "reasoning": result.reasoning,
+                            }
+                        )
+                    _broadcast_reflect_notification(
+                        session_id,
+                        session,
+                        title="Retry stopped — same failure repeating",
+                        body=(
+                            f"Reflect requested another retry, but the last two attempts "
+                            f"failed identically ({repeat_sig[:180]}). Stopping after "
+                            f"{session_obj.reflect_count} attempts — this needs a different "
+                            f"plan or your input."
+                        ),
+                    )
+                    try:
+                        db.add_message(
+                            session_id,
+                            "notice",
+                            f"[reflect circuit breaker: last two attempts failed identically "
+                            f"({repeat_sig[:180]}) — retries stopped after "
+                            f"{session_obj.reflect_count} attempts]",
+                        )
+                    except Exception as _e:
+                        logger.debug("Circuit-breaker notice insert skipped: %s", _e)
+                    return
+
+            # Mechanical lesson effector: reflect may name tools to disable on
+            # the retry attempt (retry_without_tools). Validate against the
+            # registry so a hallucinated name can't silently no-op the filter.
+            if result.retry_without_tools:
+                try:
+                    from core.tools.registry import get_registry
+
+                    reg = get_registry()
+                    excluded = {t for t in result.retry_without_tools if reg.exists(t)}
+                except Exception:
+                    excluded = set(result.retry_without_tools)
+                if excluded:
+                    session_obj.retry_excluded_tools = excluded
+                    logger.info(
+                        "Retry for session %s will run without tools: %s",
+                        session_id,
+                        ", ".join(sorted(excluded)),
+                    )
 
             # Only request a retry if the outer loop's gate will honor it.
             # The gate in manager._run_agent_safe is `reflect_count < cap`; with

@@ -167,6 +167,22 @@ async def _execute_single(
         s = get_manager().get(sid)
         session_type = (s.session_type or "") if s else ""
         workspace_override = getattr(s, "workspace_override", None) if s else None
+    # Retry effector (audit P1f): reflect can mechanically disable tools for
+    # the current retry attempt; the schema filter removes them, this guard
+    # catches a model that calls one anyway.
+    _retry_excluded = getattr(s, "retry_excluded_tools", None) if sid and s else None
+    if _retry_excluded and name in _retry_excluded:
+        return ToolExecutionResult(
+            tool_name=name,
+            content=(
+                f"Error: Tool '{name}' is disabled for this retry attempt — the previous "
+                "attempt failed because of how it was used. Follow the retry strategy "
+                "without it."
+            ),
+            was_error=True,
+            latency_ms=0,
+        )
+
     if session_type and session_type in tool.denied_session_types:
         return ToolExecutionResult(
             tool_name=name,
