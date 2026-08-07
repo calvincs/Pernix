@@ -16,7 +16,7 @@ If a setting that gates an extension changes (e.g., turning `browser_enabled`, `
 
 ---
 
-## The eleven extensions
+## The twelve extensions
 
 ### `web`
 
@@ -169,6 +169,19 @@ Operational-memory add-on (off by default): calibrated reliability tracking with
 
 Recursive long-input processing (off by default): analyzes inputs far beyond the context window in a sandboxed child REPL with brokered, budgeted sub-LLM calls. Same restart-gated registration pattern as candor; the `rlm_*` caps and model roles apply hot. Run residue at `data/workspace/rlm/<run_id>/` (purged by snooze retention); audit rows in the `rlm_runs` table (migration v18). Architecture and security posture: [rlm.md](rlm.md).
 
+### `telos`
+
+`core/extensions/telos/__init__.py`
+
+| Tool | Safety | Gated on |
+|---|---|---|
+| `telos_status` | safe | `telos_enabled` |
+| `telos_ask` | safe | `telos_enabled` |
+| `telos_goal_add` | safe | `telos_enabled` |
+| `telos_goal_complete` | safe | `telos_enabled` |
+
+The teleological layer's agent surface (off by default): read the drive state, mint Questions, grow the goal DAG, complete completable goals (which runs the Hevel discharge audit). Deliberately absent: trace-ledger writes, root re-expression, alarm clearing — see [telos.md](telos.md). Same restart-gated registration pattern as candor; the engine itself (snooze Activity 16, daily cron, post-task hook) gates hot on `telos_enabled`.
+
 ---
 
 ## Gating summary table
@@ -188,6 +201,7 @@ Recursive long-input processing (off by default): analyzes inputs far beyond the
 | model_mgmt | on | none |
 | candor | off | `candor_enabled` (tool registration restart-gated) |
 | rlm — `rlm_process` | off | `rlm_enabled` (tool registration restart-gated) |
+| telos | off | `telos_enabled` (tool registration restart-gated) |
 
 The total number of registered tools varies by configuration. With a minimal install (no Tavily key, no Chromium binary), the web extension contributes only `http_get`; with a fully-loaded install, it adds `search_web` and `browse_web`.
 

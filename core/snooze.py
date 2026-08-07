@@ -613,6 +613,23 @@ class SnoozeRunner:
                 await journal_append(f"→ {detail}")
                 await self._dream_step()
 
+        # Activity 16 (runs before 15's store work so its LLM call sits in
+        # the same cancellation window as dream's): TELOS fast loop — one
+        # bounded unit per cycle: evaluate a gated hypothesis OR generate
+        # SOUP hypotheses for the next scheduled question (85% goal-linked /
+        # 15% serendipity). Gated on telos_enabled — fully absent when off.
+        if not self._is_cancelled() and settings.telos_enabled:
+            can_llm = self._llm_available() and bool(settings.background_model or settings.llm_model)
+            if can_llm:
+                bus.emit(
+                    {
+                        "type": "snooze.activity",
+                        "activity": "telos",
+                        "detail": "TELOS: generating or evaluating hypotheses for open questions",
+                    }
+                )
+                await self._telos_step()
+
         # Activity 15: Adaptive layer — drain pending auto-applies, enqueue
         # post-batch canary sweeps, evaluate the tripwire (plan §6c). Runs
         # inside the idle window by construction, which is what makes
@@ -2726,6 +2743,25 @@ Output valid JSON only. No markdown fences. /no_think"""
     # ------------------------------------------------------------------
     # Activity 14: Dream step (idle-time introspection — core/dream)
     # ------------------------------------------------------------------
+
+    async def _telos_step(self) -> None:
+        """One bounded TELOS fast-loop unit (core/telos). Never raises."""
+        try:
+            from core.telos import run_step
+
+            result = await run_step(self._is_cancelled)
+            for key in (
+                "telos_hypotheses",
+                "telos_gated",
+                "telos_souped",
+                "telos_evaluated",
+                "telos_claims",
+            ):
+                if result.get(key):
+                    self._stats.setdefault(key, 0)
+                    self._stats[key] += result[key]
+        except Exception as e:
+            logger.warning("Snooze TELOS step failed: %s", e)
 
     async def _dream_step(self) -> None:
         """One bounded dream unit: validate a pending hypothesis or generate

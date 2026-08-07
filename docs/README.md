@@ -51,13 +51,14 @@ Beyond the localhost-only default. Read these before exposing Pernix to anything
 - [architecture.md](architecture.md) — guided walkthrough of the agent loop, scout, reflect, snooze
 - [configuration.md](configuration.md) — every setting explained, with defaults
 - [internals/state-machine.md](internals/state-machine.md) — formal session state machine with file:line citations
-- [internals/extensions.md](internals/extensions.md) — the eleven extension modules and their gates
+- [internals/extensions.md](internals/extensions.md) — the twelve extension modules and their gates
 - [internals/reflect-and-snooze.md](internals/reflect-and-snooze.md) — quality-gate retry and idle-time consolidation
 - [internals/rlm.md](internals/rlm.md) — recursive long-input processing (sandboxed REPL + sub-LLM broker)
 - [internals/candor.md](internals/candor.md) — calibrated operational memory: earned tool reliability from recorded outcomes
 - [internals/dream.md](internals/dream.md) — idle-time introspection: hypotheses about itself, falsified against the record
 - [internals/autonomy.md](internals/autonomy.md) — long-running autonomy: gates, goals, heartbeats, and the persistent session kernel
 - [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md) — the self-improvement loop: golden-task canaries and the governed adaptive policy store
+- [internals/telos.md](internals/telos.md) — the teleological layer: a non-convergent drive with correction machinery (questions, SOUP, ordo, binding, hevel, dual ledgers)
 
 ## I want to contribute
 
