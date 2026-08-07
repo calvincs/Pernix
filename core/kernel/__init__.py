@@ -282,6 +282,17 @@ class KernelRegistry:
         self._kernels: dict[str, SessionKernel] = {}
         self._lock = threading.Lock()
 
+    # A kernel whose child holds the round-trip lock is mid-cell: evicting
+    # or idle-reaping it would block up to RT_LOCK_TIMEOUT and then kill the
+    # child WITHOUT a snapshot — irrecoverable namespace loss (audit polish
+    # review). Busy kernels are never reap/evict candidates; the cap becomes
+    # a soft cap while cells run (bounded by the number of active sessions).
+    @staticmethod
+    def _is_busy(kernel: "SessionKernel") -> bool:
+        repl = getattr(kernel, "_repl", None)
+        lock = getattr(repl, "_rt_lock", None)
+        return bool(lock is not None and lock.locked())
+
     def get_or_create(self, session_id: str) -> SessionKernel:
         with self._lock:
             kernel = self._kernels.get(session_id)
@@ -302,8 +313,14 @@ class KernelRegistry:
         overflow = len(live) + 1 - cap  # +1 for the kernel about to start
         if overflow <= 0:
             return []
-        live.sort(key=lambda k: k.last_used)
-        return live[:overflow]
+        idle_lru = sorted((k for k in live if not self._is_busy(k)), key=lambda k: k.last_used)
+        picked = idle_lru[:overflow]
+        if len(picked) < overflow:
+            logger.info(
+                "Kernel cap exceeded but %d kernel(s) are mid-cell — deferring their eviction",
+                overflow - len(picked),
+            )
+        return picked
 
     def get(self, session_id: str) -> SessionKernel | None:
         with self._lock:
@@ -315,7 +332,9 @@ class KernelRegistry:
         max_idle = max_idle if max_idle is not None else float(settings.kernel_idle_seconds)
         now = time.monotonic()
         with self._lock:
-            candidates = [k for k in self._kernels.values() if k.alive and now - k.last_used > max_idle]
+            candidates = [
+                k for k in self._kernels.values() if k.alive and now - k.last_used > max_idle and not self._is_busy(k)
+            ]
         for kernel in candidates:
             logger.info("Reaping idle kernel %s (idle %.0fs)", kernel.session_id[:12], now - kernel.last_used)
             kernel.shutdown(snapshot=True)

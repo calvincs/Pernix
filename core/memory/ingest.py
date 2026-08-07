@@ -389,7 +389,7 @@ def apply_memory_correction(
     The mechanical effector for approved dream contradiction/stale findings:
     additive and non-destructive — the disputed entries stay, and recall now
     surfaces the correction next to them, which is what changes behavior.
-    Returns "file:epoch" refs for the entries written.
+    Returns the file names that received a corrective entry.
     """
     from core.memory.store import get_memory_store
 

@@ -64,6 +64,22 @@ def snooze_transparent(session) -> bool:
     )
 
 
+def _mutation_blocked() -> bool:
+    """True while any non-canary session (including a goal-continuation
+    turn) is mid-flight. Read-only/LLM review activities run fine alongside
+    an autonomous goal — the semaphore's background priority handles
+    contention — but activities that MUTATE shared state the live turn
+    depends on (global adaptive applies, memory-store surgery) must wait
+    for genuine idle: a mid-turn prompt or memory mutation changes the very
+    turn the tripwire would then attribute the batch to."""
+    try:
+        from sessions.manager import get_manager
+
+        return get_manager().has_active_work(strict=True)
+    except Exception:
+        return False
+
+
 def _announce(bus, activity: str, detail: str) -> None:
     """Emit the ladder's per-activity progress event."""
     bus.emit({"type": "snooze.activity", "activity": activity, "detail": detail})
@@ -919,6 +935,8 @@ Output valid JSON only. No markdown fences. /no_think"""
 
     async def _dedup_sweep(self) -> None:
         """Activity 3 — near-duplicate archival on one due memory file."""
+        if _mutation_blocked():
+            return
         from core.memory import sweeps
         from db import models as db
 
@@ -929,6 +947,8 @@ Output valid JSON only. No markdown fences. /no_think"""
 
     async def _consolidate_files(self, did_llm_already: bool) -> bool:
         """Activity 3b — merge one overlapping cluster. True if LLM was used."""
+        if _mutation_blocked():
+            return did_llm_already
         from core.memory import sweeps
         from db import models as db
 
@@ -945,6 +965,8 @@ Output valid JSON only. No markdown fences. /no_think"""
 
     async def _reroute_misplaced_entries(self, did_llm_already: bool) -> bool:
         """Activity 3c — move misfiled entries. True if LLM was used."""
+        if _mutation_blocked():
+            return did_llm_already
         from core.memory import sweeps
         from db import models as db
 
@@ -974,6 +996,8 @@ Output valid JSON only. No markdown fences. /no_think"""
 
     async def _split_file(self) -> bool:
         """Activity 6 — split a bloated file. True if the LLM was called."""
+        if _mutation_blocked():
+            return False
         from core.memory import sweeps
 
         used_llm, moved = await sweeps.split_file(self._store(), self._is_cancelled)
@@ -982,6 +1006,8 @@ Output valid JSON only. No markdown fences. /no_think"""
 
     async def _prune_stale_entries(self) -> None:
         """Activity 8 — archive low-recall entries past the LLM gatekeeper."""
+        if _mutation_blocked():
+            return
         from core.memory import sweeps
         from db import models as db
 
@@ -1289,6 +1315,8 @@ Output valid JSON only. No markdown fences. /no_think"""
     async def _adaptive_step(self) -> None:
         """Drain pending auto-applies → enqueue post-batch sweeps → evaluate
         the tripwire. Each stage guarded; a failure never kills the cycle."""
+        if _mutation_blocked():
+            return  # global prompt/policy mutations wait for genuine idle
         try:
             from core.adaptive import drain_pending
 

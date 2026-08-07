@@ -460,6 +460,16 @@ _BINDING_EXCLUDED = frozenset(
         "ask_user",
         "notify_user",
         "notify_parent",
+        # Instruction-shaped outputs: the model must READ these whole, in
+        # order — a head/tail stub of a 20K SKILL.md silently drops the
+        # middle 90% of the procedure. Data-shaped outputs (bash, grep,
+        # file_read, http_get, …) stay binding-eligible.
+        "load_skill",
+        "read_skill_instructions",
+        "read_skill_resource",
+        "discover_tools",
+        "get_worker_result",
+        "get_worker_transcript",
     }
 )
 

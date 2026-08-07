@@ -194,7 +194,7 @@ def _run_engine_blocking(bundle: str, file_count: int, loop: asyncio.AbstractEve
 
     Returns the RLMRunResult, or None if the run could not start.
 
-    Root model resolves like rlm_process (rlm_root_model or llm_model) — the
+    Root model resolves like rlm_process (Primary / llm_model) — the
     REPL protocol needs a model proven to follow it; the first live probe
     failed outright with the background model as root (5 iterations of prose,
     zero REPL blocks). Sub-calls stay on the background model: bulk chunk

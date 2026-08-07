@@ -594,8 +594,12 @@ async def run_agent(
         try:
             _mb_info = client.router.registry.get_model_info(model)
             _mb_len = int(getattr(_mb_info, "context_length", 0) or 0) if _mb_info else 0
-            if _mb_len > 0:
-                return max(32_000, int(_mb_len * 0.9))
+            # No artificial floor: a floor above a small model's real window
+            # (e.g. 8K) would stop the compiler trimming and overflow the
+            # model. Windows the registry doesn't know, or absurdly small
+            # ones, fall back to settings.context_budget.
+            if _mb_len >= 2048:
+                return int(_mb_len * 0.9)
         except Exception as _e:
             logger.debug("Model context budget lookup failed for %s: %s", model, _e)
         return None

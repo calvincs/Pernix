@@ -38,6 +38,10 @@ class PendingMessage(NamedTuple):
     pre_saved: bool = False
     queued_at: float = 0.0
     msg_id: int | None = None
+    # True only for goal auto-continuation prompts: the dispatch path uses
+    # this to set/clear session.goal_continuation_active per turn, so a real
+    # user message queued behind a continuation never runs snooze-transparent.
+    is_goal_continuation: bool = False
 
     @classmethod
     def coerce(cls, entry) -> "PendingMessage":

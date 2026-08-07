@@ -150,3 +150,23 @@ async def test_excluded_tool_removed_from_schema(monkeypatch):
     for tool_list in captured_tools:
         assert "noop_tool" not in tool_list, f"excluded tool leaked into schema: {tool_list}"
         assert "other_tool" in tool_list
+
+
+def test_breaker_ignores_previous_turn_post_mortems():
+    """Gate-fallback retries bump reflect_count without writing post-mortems,
+    so the second row can be a PREVIOUS turn's — the turn anchor must keep
+    the breaker from comparing across turns (polish review)."""
+    sid = db.create_session(title="breaker-turn-scope")
+    text = "spawned workers against explicit scout instruction and stalled"
+    _pm(sid, 2, "retry", "agent", text)  # previous turn's last attempt
+    _pm(sid, 3, "retry", "agent", text)  # current turn's first real reflect
+
+    # Without an anchor both rows match (legacy behavior)…
+    assert _same_failure_repeating(sid) is not None
+    # …but an anchor after the first row's creation excludes it.
+    from db import models as dbm
+
+    rows = dbm.list_post_mortems(session_id=sid, limit=2)
+    older_created = rows[1]["created_at"]
+    anchor_after_older = older_created + "z"  # lexically after the older row
+    assert _same_failure_repeating(sid, anchor_after_older) is None

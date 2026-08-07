@@ -383,7 +383,7 @@ async def _run_turn_gates(session_id: str, session_obj, emit=None) -> list:
     return results
 
 
-def _same_failure_repeating(session_id: str) -> str | None:
+def _same_failure_repeating(session_id: str, turn_started_iso: str | None = None) -> str | None:
     """Cross-retry circuit breaker predicate (audit P1f).
 
     Returns a short human-readable signature when the two most recent
@@ -406,6 +406,12 @@ def _same_failure_repeating(session_id: str) -> str | None:
     if len(pms) < 2:
         return None
     a, b = pms[0], pms[1]
+    # Turn scoping: gate-fallback retries bump reflect_count WITHOUT writing
+    # post-mortems, so the second row can belong to a previous turn — and
+    # gate-failure texts are templated enough to false-trip the breaker.
+    # Both rows must postdate this turn's user message.
+    if turn_started_iso and (a.get("created_at", "") < turn_started_iso or b.get("created_at", "") < turn_started_iso):
+        return None
     if a.get("verdict") != "retry" or b.get("verdict") != "retry":
         return None
     if a.get("failure_cause") != b.get("failure_cause"):
@@ -798,7 +804,15 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             # identical attempt is spend without a plan-change. Stop retrying
             # and surface the repeat instead of amplifying it.
             if session_obj.reflect_count >= 2:
-                repeat_sig = await asyncio.to_thread(_same_failure_repeating, session_id)
+                _turn_started = None
+                try:
+                    _turn_msg_id = getattr(session_obj, "current_turn_user_msg_id", None)
+                    if _turn_msg_id:
+                        _turn_row = await asyncio.to_thread(db.get_message, _turn_msg_id)
+                        _turn_started = (_turn_row or {}).get("created_at")
+                except Exception:
+                    _turn_started = None
+                repeat_sig = await asyncio.to_thread(_same_failure_repeating, session_id, _turn_started)
                 if repeat_sig:
                     logger.warning(
                         "Reflect circuit breaker tripped for session %s after %d attempts: %s",

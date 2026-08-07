@@ -587,26 +587,34 @@ def _notify_job_failure(manager, bus, job_name: str, session_id: str | None, err
     bus.emit({**notification, "session_id": session_id or ""})
 
 
+def _ensure_dispatch_session(session_id: str | None, title: str = "") -> str:
+    """Resolve or create the session a scheduled dispatch will run in.
+
+    session_type="cron" is what _is_unattended_session() keys off — without
+    it scheduled jobs hit the dangerous-tool approval gate, call ask_user
+    into the void, and wedge in AWAITING_USER forever. Jobs reusing an
+    explicit session_id keep that session's type: a user-attended session
+    shouldn't lose its gate just because a job also runs in it.
+    """
+    from sessions.manager import get_manager
+
+    if session_id:
+        return session_id
+    return get_manager().create_session(title=title, session_type="cron")
+
+
 async def _dispatch_prompt(session_id: str | None, prompt: str, title: str = "", model: str = "") -> str:
     """Open-or-reuse a session and send it one prompt under the cron bound.
 
     The single dispatch path for scheduled work: cron fires and heartbeat
     ticks into an idle session are the same operation (a scheduled prompt IS
     the turn), so they share the session handling, the model override, and the
-    tool_timeout × max_tool_rounds ceiling. Returns the session id used.
+    cron_dispatch_timeout ceiling. Returns the session id used.
     """
     from sessions.manager import get_manager
 
     manager = get_manager()
-    if not session_id:
-        # session_type="cron" is what _is_unattended_session() keys off —
-        # without it scheduled jobs hit the dangerous-tool approval gate,
-        # call ask_user into the void, and wedge in AWAITING_USER forever.
-        # Jobs reusing an explicit session_id keep that session's type:
-        # a user-attended session shouldn't lose its gate just because a
-        # job also runs in it.
-        session_id = manager.create_session(title=title, session_type="cron")
-
+    session_id = _ensure_dispatch_session(session_id, title)
     session = manager.get(session_id)
     if session and model:
         session.model_override = model
@@ -614,7 +622,7 @@ async def _dispatch_prompt(session_id: str | None, prompt: str, title: str = "",
     try:
         await asyncio.wait_for(
             manager.prompt(session_id, prompt),
-            timeout=settings.tool_timeout * settings.max_tool_rounds,
+            timeout=settings.cron_dispatch_timeout,
         )
     finally:
         # Clear the model override for reused sessions
@@ -658,7 +666,10 @@ async def _execute_cron_job(meta: dict):
 
     try:
         db.update_cron_run(run_id, "running")
-        session_id = await _dispatch_prompt(session_id, prompt, title=f"Cron: {name}", model=model)
+        # Bind the session id BEFORE dispatch: a timeout/error must still
+        # reference the session that holds the partial transcript.
+        session_id = _ensure_dispatch_session(session_id, title=f"Cron: {name}")
+        await _dispatch_prompt(session_id, prompt, model=model)
 
         duration_ms = int((time.time() - start_time) * 1000)
         db.update_cron_run(run_id, "completed")
