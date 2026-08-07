@@ -572,8 +572,16 @@ class SessionManager:
 
         budget = int(goal.get("continuation_budget") or 0)
         used_cont = int(goal.get("continuations_used") or 0)
+        if budget <= 0:
+            return  # auto-continuation never granted — goal stays live, user drives
         if used_cont >= budget:
-            return  # opt-in exhausted (or never granted) — goal stays live, user drives
+            # Exhaustion is a budget event like token/time exhaustion — docs
+            # promise "nothing fails silently", and continuations are the
+            # budget most likely to run out. _limit_goal is one-shot by
+            # construction: status flips to budget_limited, so the active-goal
+            # gate above short-circuits on every later turn.
+            await self._limit_goal(session, goal, f"continuation budget spent ({used_cont}/{budget})")
+            return
 
         # A budget_exhausted turn's continuation would inherit the exhausted
         # LLM session clock and die immediately — synthetic messages don't

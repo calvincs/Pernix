@@ -455,8 +455,7 @@ async def test_fallback_sticky_across_rounds(monkeypatch):
     from db import models as db
     from tests.conftest import FakeLLMClient
 
-    # Make is_openrouter_model("vendor/primary") return True and
-    # is_openrouter_model("local-fallback") return False.
+    # "vendor/primary" resolves to openrouter; "local-fallback" to ollama.
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-for-fallback-test")
     monkeypatch.setattr("config.settings.llm_model", "vendor/primary-model")
     monkeypatch.setattr("config.settings.fallback_model", "local-fallback")

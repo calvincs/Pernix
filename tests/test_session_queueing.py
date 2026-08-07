@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.llm.semaphore import FairLLMSemaphore, LLMConcurrencyError, LLMSessionTimeoutError
+from core.llm.semaphore import SessionAwareLLMScheduler, LLMConcurrencyError, LLMSessionTimeoutError
 from core.llm.types import ChatResponse, StreamEvent, StreamEventType, TokenUsage
 from sessions import state_v2 as sv2
 from sessions.state import AgentSession, PendingMessage, SessionState
@@ -37,15 +37,15 @@ class TestSemaphoreTimeout:
         instance's _session_timeout is 1800."""
         import inspect
 
-        sig = inspect.signature(FairLLMSemaphore.acquire)
+        sig = inspect.signature(SessionAwareLLMScheduler.acquire)
         assert sig.parameters["timeout"].default is None
-        sem = FairLLMSemaphore(max_concurrent=1)
+        sem = SessionAwareLLMScheduler(max_concurrent=1)
         assert sem._session_timeout == 1800.0, f"Expected 1800s instance timeout, got {sem._session_timeout}"
 
     @pytest.mark.asyncio
     async def test_queued_session_waits_and_succeeds(self):
         """A second acquire should wait until the first releases, not fail."""
-        sem = FairLLMSemaphore(max_concurrent=1)
+        sem = SessionAwareLLMScheduler(max_concurrent=1)
 
         await sem.acquire()
         assert sem.available == 0
@@ -65,7 +65,7 @@ class TestSemaphoreTimeout:
     @pytest.mark.asyncio
     async def test_fifo_ordering(self):
         """Waiters should be served in FIFO order."""
-        sem = FairLLMSemaphore(max_concurrent=1)
+        sem = SessionAwareLLMScheduler(max_concurrent=1)
         order = []
 
         await sem.acquire()
@@ -98,12 +98,12 @@ class TestSessionSecondsRemaining:
 
     @pytest.mark.asyncio
     async def test_returns_inf_before_first_acquire(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         assert sem.session_seconds_remaining("never-acquired") == float("inf")
 
     @pytest.mark.asyncio
     async def test_returns_remaining_after_acquire(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         await sem.acquire(session_id="s1")
         remaining = sem.session_seconds_remaining("s1")
         # Just acquired; nearly the full budget should be available.
@@ -112,7 +112,7 @@ class TestSessionSecondsRemaining:
 
     @pytest.mark.asyncio
     async def test_returns_zero_when_budget_exceeded(self, monkeypatch):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1.0)
         await sem.acquire(session_id="s1")
         sem.release()
         # Pretend an hour has passed.
@@ -136,7 +136,7 @@ class TestExtendSessionBudget:
 
     @pytest.mark.asyncio
     async def test_extension_grows_remaining_budget(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         await sem.acquire(session_id="orch")
         baseline = sem.session_seconds_remaining("orch")
         new_cap = sem.extend_session_budget("orch", 1800.0 * 4)
@@ -148,7 +148,7 @@ class TestExtendSessionBudget:
 
     @pytest.mark.asyncio
     async def test_extension_is_idempotent_and_never_shrinks(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         sem.extend_session_budget("orch", 5000.0)
         # Smaller extension must NOT shrink the granted budget.
         result = sem.extend_session_budget("orch", 100.0)
@@ -156,7 +156,7 @@ class TestExtendSessionBudget:
 
     @pytest.mark.asyncio
     async def test_extension_applies_even_before_first_acquire(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         sem.extend_session_budget("orch", 1800.0 * 3)
         # No acquire yet — remaining is inf because clock hasn't started.
         assert sem.session_seconds_remaining("orch") == float("inf")
@@ -167,7 +167,7 @@ class TestExtendSessionBudget:
 
     @pytest.mark.asyncio
     async def test_extension_blocks_acquire_only_past_extended_cap(self, monkeypatch):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=10.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=10.0)
         sem.extend_session_budget("orch", 100.0)  # effective: 110s
         await sem.acquire(session_id="orch")
         sem.release()
@@ -190,7 +190,7 @@ class TestExtendSessionBudget:
 
     @pytest.mark.asyncio
     async def test_purge_clears_extension(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         sem.extend_session_budget("orch", 5000.0)
         sem.purge_session("orch")
         # After purge, a fresh acquire sees the base timeout, not the extension.
@@ -212,7 +212,7 @@ class TestEnsureSessionBudget:
 
     @pytest.mark.asyncio
     async def test_noop_when_remaining_already_sufficient(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         await sem.acquire(session_id="rlm")
         sem.release()
         sem.ensure_session_budget("rlm", 1000.0)
@@ -221,7 +221,7 @@ class TestEnsureSessionBudget:
 
     @pytest.mark.asyncio
     async def test_tops_up_relative_to_elapsed_clock(self, monkeypatch):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         await sem.acquire(session_id="rlm")
         sem.release()
 
@@ -248,14 +248,14 @@ class TestEnsureSessionBudget:
 
     @pytest.mark.asyncio
     async def test_never_shrinks_a_granted_cap(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         sem.extend_session_budget("rlm", 9000.0)  # effective 10800
         sem.ensure_session_budget("rlm", 60.0)
         assert sem._session_timeout_override["rlm"] == 1800.0 + 9000.0
 
     @pytest.mark.asyncio
     async def test_before_first_acquire_counts_elapsed_as_zero(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=300.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=300.0)
         sem.ensure_session_budget("rlm", 1020.0)
         # Clock not started: remaining is inf, but the first acquire must
         # open a window of at least min_remaining.
@@ -265,7 +265,7 @@ class TestEnsureSessionBudget:
         assert sem.session_seconds_remaining("rlm") > 300.0
 
     def test_empty_session_id_is_noop(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         assert sem.ensure_session_budget("", 5000.0) == 1800.0
         assert not sem._session_timeout_override
 
@@ -283,7 +283,7 @@ class TestResetSessionBudget:
 
     @pytest.mark.asyncio
     async def test_reset_clears_first_active(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         await sem.acquire(session_id="chat")
         sem.release()
         assert sem._session_first_active.get("chat") is not None
@@ -294,7 +294,7 @@ class TestResetSessionBudget:
     async def test_reset_clears_extension_override(self):
         """A workflow run on this session may have installed an override.
         Reset clears it so the next user turn starts at base timeout."""
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         sem.extend_session_budget("chat", 5000.0)
         assert sem._session_timeout_override.get("chat") is not None
         sem.reset_session_budget("chat")
@@ -304,7 +304,7 @@ class TestResetSessionBudget:
     async def test_acquire_after_near_exhaustion_succeeds_after_reset(self, monkeypatch):
         """The whole point: a session at 0 remaining budget can acquire
         again after reset, with a fresh full window."""
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=10.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=10.0)
         await sem.acquire(session_id="chat")
         sem.release()
 
@@ -327,7 +327,7 @@ class TestResetSessionBudget:
         assert remaining > 9.0, f"reset should restore full budget; got {remaining}s remaining"
 
     def test_reset_empty_session_id_is_noop(self):
-        sem = FairLLMSemaphore(max_concurrent=1, session_timeout=1800.0)
+        sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         # Should not raise, should not affect any session.
         sem.reset_session_budget("")
         sem.reset_session_budget("nonexistent")  # also fine — it's a pop()
@@ -350,7 +350,7 @@ class TestHasCapacity:
             client = LLMClient()
 
         client.router = MagicMock()
-        sem = FairLLMSemaphore(max_concurrent=2)
+        sem = SessionAwareLLMScheduler(max_concurrent=2)
         client.router.get_provider.return_value = "ollama"
         client.router.get_semaphore.return_value = sem
 
@@ -365,7 +365,7 @@ class TestHasCapacity:
             client = LLMClient()
 
         client.router = MagicMock()
-        sem = FairLLMSemaphore(max_concurrent=1)
+        sem = SessionAwareLLMScheduler(max_concurrent=1)
         await sem.acquire()
         client.router.get_provider.return_value = "ollama"
         client.router.get_semaphore.return_value = sem
@@ -538,7 +538,7 @@ class TestConcurrentSessions:
     @pytest.mark.asyncio
     async def test_second_session_completes_after_first(self):
         """Session B should wait for session A's LLM call, then succeed."""
-        sem = FairLLMSemaphore(max_concurrent=1)
+        sem = SessionAwareLLMScheduler(max_concurrent=1)
 
         results = []
         gate = asyncio.Event()

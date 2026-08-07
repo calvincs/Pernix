@@ -13,20 +13,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.llm.semaphore import FairLLMSemaphore, LLMConcurrencyError
+from core.llm.semaphore import SessionAwareLLMScheduler, LLMConcurrencyError
 from core.llm.types import ChatResponse, StreamEvent, StreamEventType, TokenUsage
 
 # ---------------------------------------------------------------------------
-# FairLLMSemaphore unit tests
+# SessionAwareLLMScheduler unit tests
 # ---------------------------------------------------------------------------
 
 
-class TestFairLLMSemaphore:
+class TestSessionAwareLLMScheduler:
     """Unit tests for the semaphore itself."""
 
     @pytest.mark.asyncio
     async def test_basic_acquire_release(self):
-        sem = FairLLMSemaphore(max_concurrent=2)
+        sem = SessionAwareLLMScheduler(max_concurrent=2)
         assert sem.available == 2
         assert sem.capacity == 2
 
@@ -44,7 +44,7 @@ class TestFairLLMSemaphore:
 
     @pytest.mark.asyncio
     async def test_timeout_raises(self):
-        sem = FairLLMSemaphore(max_concurrent=1)
+        sem = SessionAwareLLMScheduler(max_concurrent=1)
         await sem.acquire()
 
         with pytest.raises(LLMConcurrencyError):
@@ -54,7 +54,7 @@ class TestFairLLMSemaphore:
 
     @pytest.mark.asyncio
     async def test_stats(self):
-        sem = FairLLMSemaphore(max_concurrent=3)
+        sem = SessionAwareLLMScheduler(max_concurrent=3)
         stats = sem.stats
         assert stats == {"available": 3, "waiting": 0, "capacity": 3}
 
@@ -103,8 +103,8 @@ class TestRouterSemaphores:
         router._openrouter.available = True
 
         router.registry = MagicMock()
-        router._ollama_semaphore = FairLLMSemaphore(max_concurrent=ollama_max)
-        router._openrouter_semaphore = FairLLMSemaphore(max_concurrent=openrouter_max)
+        router._ollama_semaphore = SessionAwareLLMScheduler(max_concurrent=ollama_max)
+        router._openrouter_semaphore = SessionAwareLLMScheduler(max_concurrent=openrouter_max)
         # Name-keyed maps are the canonical router structure (1a); the
         # attribute aliases above are kept for direct assertions.
         router._providers = {"ollama": router._ollama, "openrouter": router._openrouter}

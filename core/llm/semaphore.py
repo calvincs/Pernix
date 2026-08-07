@@ -150,7 +150,7 @@ class SessionAwareLLMScheduler:
             if session_id and session_id not in self._session_first_active:
                 self._session_first_active[session_id] = time.monotonic()
 
-    def release(self, session_id: str = "") -> None:
+    def release(self) -> None:
         """Release a held slot; grant it to the highest-priority queued waiter."""
         self._wake_next_or_free()
 
@@ -306,7 +306,3 @@ class SessionAwareLLMScheduler:
             "waiting": self._waiting,
             "capacity": self._capacity,
         }
-
-
-# Keep the old name as an alias so any stale imports don't break at runtime.
-FairLLMSemaphore = SessionAwareLLMScheduler
