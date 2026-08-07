@@ -42,7 +42,7 @@ ollama pull qwen3:32b
 ollama list                          # see what's installed
 ```
 
-Then in Pernix Settings, set `llm_model` (or `scout_model`) to the exact name from `ollama list`.
+Then in Pernix Settings, set `llm_model` (or `background_model`) to the exact name from `ollama list`.
 
 ### Concurrency
 
@@ -118,11 +118,11 @@ Pernix uses **four model roles**. You can assign a different model to each, or u
 | Role | Setting | What it does | Typical choice |
 |---|---|---|---|
 | Primary | `llm_model` | Main agent turns, streaming, tool calls | Your strongest model — `qwen3:32b` locally, `anthropic/claude-sonnet-4.6` on OpenRouter |
-| Scout | `scout_model` | Planning phase: memory recall, tool selection, skill discovery. Runs in fresh context | A fast smaller model — `qwen3:8b`, `anthropic/claude-haiku-4.5` |
-| Fallback | `fallback_model` | Used when OpenRouter rate-limits or errors out. Should be a locally-available Ollama model | Any decent Ollama model — `qwen3:8b` works |
+| Background | `background_model` | Fast/offline tier: scout planning, titles, memory work, idle activities, RLM sub-calls | A fast smaller model — `qwen3:8b`, `anthropic/claude-haiku-4.5` |
+| Backup | `fallback_model` | Used whenever a Primary or Background call fails (rate limits, provider errors, stream failures). Any provider works — same-provider different-model failover is supported | Any reliable model — a local `qwen3:8b`, or a second cloud model |
 | Background | `background_model` | Auto-titling sessions, message distillation, reflect re-analysis (fire-and-forget) | A small fast model — `qwen3:8b`, `anthropic/claude-haiku-4.5` |
 
-You don't have to fill all four. If `background_model` is empty, Pernix falls back to the primary `llm_model` for background tasks. If `fallback_model` is empty, rate-limit failover is disabled.
+You don't have to fill all three. If `background_model` is empty, Pernix uses the primary `llm_model` for background work. If `fallback_model` is empty, failover is disabled.
 
 There is also a fifth, optional role: `embedding_model` — a local Ollama embedding model (e.g. `nomic-embed-text`) that turns memory search hybrid (BM25 + vector). Setting it is the switch; empty keeps search purely lexical. See [memory-and-recall.md](../guides/memory-and-recall.md#semantic-retrieval).
 

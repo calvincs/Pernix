@@ -105,7 +105,7 @@ Before you can have a conversation, you need to tell Pernix which model to use:
 2. Set **`llm_model`** to a model you have available:
    - For Ollama: the name of a model you've already pulled (e.g. `qwen3:32b`, `qwen2.5-coder:32b`, or `qwen3:8b` if you have less VRAM). Older models like Llama 3.2 work but tend to be weaker at tool use and multi-step reasoning — agentic workloads do much better on current Qwen 3.x or comparable frontier-tier local models
    - For OpenRouter: the full model ID (e.g. `anthropic/claude-sonnet-4.6`, `x-ai/grok-4.1-fast`, or any current frontier model from your account)
-3. Set **`scout_model`** — this is used for the planning phase. A small, fast model works well (e.g. `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter). You can use the same model as `llm_model` while getting started.
+3. Set **`background_model`** — the fast/offline tier (scout planning, titles, memory work). A small, fast model works well (e.g. `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter). You can leave it empty to use the Primary model while getting started.
 4. Click **Save**
 
 > **Verify:** Navigate to `http://localhost:8090/api/health` — it should return `{"status": "ok", ...}`.
@@ -221,7 +221,7 @@ Use only when you fully trust the current session context. Disable by restarting
 Before your first conversation, verify:
 
 - [ ] `llm_model` is set in Settings
-- [ ] `scout_model` is set (can be the same model to start)
+- [ ] `background_model` is set (or left empty to use Primary)
 - [ ] `http://localhost:8090/api/health` returns `{"status": "ok"}`
 - [ ] If using Ollama: `ollama list` shows the model you configured
 - [ ] If using OpenRouter: `OPENROUTER_API_KEY` is in `.env`

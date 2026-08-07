@@ -596,6 +596,7 @@ class SessionManager:
                 logger.warning("Session budget extension failed for goal continuation: %s", _e)
 
         ordinal = used_cont + 1
+        session.goal_continuation_active = True  # snooze-transparent while auto-driven
         await asyncio.to_thread(db.update_goal, goal["id"], continuations_used=ordinal)
         prompt = (
             f"[goal continuation {ordinal}/{budget}] The goal is still active:\n"
@@ -882,6 +883,7 @@ class SessionManager:
             session.reflect_lessons = ""
             session.reflect_retry_requested = False
             session.retry_excluded_tools = set()
+            session.goal_continuation_active = False
             session.last_tool_summary = {}
             session.eval_count = 0
             session.eval_retry_requested = False
@@ -2268,10 +2270,10 @@ class SessionManager:
         # Snapshot — a tool thread can insert into _sessions (spawn_worker ->
         # create_session) while this runs on the event loop. Snooze-transparent
         # types (canary) never count as active work (plan §5).
-        from core.snooze import SNOOZE_TRANSPARENT_TYPES
+        from core.snooze import snooze_transparent
 
         for session in list(self._sessions.values()):
-            if session.session_type in SNOOZE_TRANSPARENT_TYPES:
+            if snooze_transparent(session):
                 continue
             if sv2._current_state(session) not in _idle_v2:
                 return True

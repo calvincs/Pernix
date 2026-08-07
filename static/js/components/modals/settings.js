@@ -258,26 +258,17 @@ const SECTIONS = [
 ];
 
 const MODEL_SELECT_FIELDS = [
+    // Three chat-model roles (2026-08 consolidation), any provider:
+    // Primary = agent turns + quality-critical calls (compaction/reflect/eval);
+    // Background = fast/offline tier (scout, titles, distill, snooze, dream,
+    // telos, RLM sub-calls); Backup = used when Primary or Background fail.
     { key: 'llm_model', label: 'Primary Model', type: 'model-select' },
-    { key: 'scout_model', label: 'Scout Model', type: 'model-select', allowEmpty: true },
-    { key: 'background_model', label: 'Background Model', type: 'model-select', allowEmpty: true },
-    { key: 'critical_model', label: 'Critical Model (compaction/reflect/eval; empty = Primary)', type: 'model-select', allowEmpty: true },
-    { key: 'reflect_model', label: 'Reflect Model', type: 'model-select', allowEmpty: true },
-    { key: 'fallback_model', label: 'Fallback Model', type: 'model-select', allowEmpty: true },
-    { key: 'rlm_root_model', label: 'RLM Root Model', type: 'model-select', allowEmpty: true },
-    { key: 'rlm_sub_model', label: 'RLM Sub-call Model', type: 'model-select', allowEmpty: true },
+    { key: 'background_model', label: 'Background Model (scout/titles/idle work; empty = Primary)', type: 'model-select', allowEmpty: true },
+    { key: 'fallback_model', label: 'Backup Model (used when Primary or Background fail)', type: 'model-select', allowEmpty: true },
     // Free text, not model-select: embedding models (nomic-embed-text, ...)
     // don't appear in the chat-model dropdown. Empty = lexical search only.
     { key: 'embedding_model', label: 'Embedding Model (Ollama; empty = lexical search only)', type: 'text' },
 ];
-
-// Resolve the effective reflect model given the configured fallback chain:
-// reflect_model -> critical_model -> llm_model (audit P3: the verifier never
-// silently lands on the background/scout tier).
-// Mirrors core/reflect.py so the UI warning matches runtime behavior.
-function _effectiveReflectModel({ reflect_model, critical_model, llm_model }) {
-    return reflect_model || critical_model || llm_model || '';
-}
 
 // ---------------------------------------------------------------------------
 // Help tooltip
@@ -882,7 +873,7 @@ function buildModelsTab() {
 
     const container = el('div', { class: 'settings-section' }, [
         el('h3', {}, [text('OpenRouter Models')]),
-        el('p', { class: 'or-hint' }, [text('Add OpenRouter model IDs to make them available as primary/scout/background models.')]),
+        el('p', { class: 'or-hint' }, [text('Add OpenRouter model IDs to make them available for any model role.')]),
         listEl,
         el('div', { class: 'or-model-add' }, [addInput, addBtn]),
     ]);
@@ -891,51 +882,13 @@ function buildModelsTab() {
 
     // Model role selects
     const selectFields = MODEL_SELECT_FIELDS.map(f => buildField(f, _original[f.key]));
-    const reflectWarning = el('div', {
-        id: 'reflect-model-warning',
-        style: 'display:none; background:var(--surface-hover, #2a1f10); '
-             + 'border-left:3px solid var(--warning, #fa3); padding:0.6rem 0.8rem; '
-             + 'margin-top:0.5rem; border-radius:4px; font-size:0.85rem; line-height:1.4;',
-    }, []);
     const selectSection = el('div', { class: 'settings-section' }, [
         el('h3', {}, [text('Model Roles')]),
-        el('p', { class: 'or-hint' }, [text('Primary handles conversations; scout runs parallel research; background handles titles/memory; reflect diagnoses failures and plans retries; fallback activates during rate limits. RLM root orchestrates recursive long-input runs (falls back to primary); RLM sub-call handles the chunk work those runs delegate (falls back to background, then primary).')]),
+        el('p', { class: 'or-hint' }, [text('Primary handles conversations and every quality-critical call (compaction summaries, reflect verdicts, eval). Background is the fast/offline tier: scout planning, titles, memory distillation, idle-time work, and RLM sub-calls. Backup is used whenever a Primary or Background call fails. Any configured provider works for any role.')]),
         ...selectFields,
-        reflectWarning,
     ]);
 
-    const wrapper = el('div', {}, [selectSection, buildOllamaSection(), container]);
-    // Wire warning now that the selects exist in the subtree.
-    setTimeout(_updateReflectWarning, 0);
-    for (const key of ['reflect_model', 'background_model', 'scout_model', 'llm_model']) {
-        const sel = selectSection.querySelector(`#setting-${key}`);
-        if (sel) sel.addEventListener('change', _updateReflectWarning);
-    }
-    return wrapper;
-}
-
-function _updateReflectWarning() {
-    const warning = document.getElementById('reflect-model-warning');
-    if (!warning) return;
-    const read = (k) => document.getElementById(`setting-${k}`)?.value ?? '';
-    const effective = _effectiveReflectModel({
-        reflect_model: read('reflect_model'),
-        critical_model: read('critical_model'),
-        llm_model: read('llm_model'),
-    });
-    const primary = read('llm_model');
-    if (effective && primary && effective === primary) {
-        clear(warning);
-        warning.append(
-            el('strong', {}, [text('Reflect will diagnose its own output. ')]),
-            text(`Reflect resolves to "${effective}", the same model as Primary. `),
-            text('A weak model critiquing itself tends to produce retry strategies it cannot execute. '),
-            text('Consider setting Reflect Model to a stronger model (e.g. an OpenRouter Claude or GPT) for higher-quality failure analysis.'),
-        );
-        warning.style.display = '';
-    } else {
-        warning.style.display = 'none';
-    }
+    return el('div', {}, [selectSection, buildOllamaSection(), container]);
 }
 
 function renderModelList(listEl) {

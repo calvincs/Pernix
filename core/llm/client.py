@@ -151,6 +151,24 @@ def sched_identity(session_id: str) -> tuple[float, int]:
     return created_at, priority
 
 
+async def chat_with_backup(client: "LLMClient", *, model: str, **kwargs) -> "ChatResponse":
+    """One-shot chat with Backup-role failover (three-role scheme).
+
+    Tries `model`; on failure retries once on settings.fallback_model when it
+    is set and different. This gives every one-shot call site (compaction,
+    reflect, titles, eval, distill) the same resilience the streaming agent
+    loop already has — Backup is used whenever Primary or Background fail.
+    """
+    try:
+        return await client.chat(model=model, **kwargs)
+    except Exception as first_err:
+        backup = settings.fallback_model
+        if not backup or backup == model:
+            raise
+        logger.warning("chat failed on %s (%s); retrying once on backup %s", model, first_err, backup)
+        return await client.chat(model=backup, **kwargs)
+
+
 class LLMClient:
     """High-level LLM client used by agent, evaluator, scout, etc.
 

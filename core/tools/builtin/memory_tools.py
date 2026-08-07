@@ -125,7 +125,7 @@ async def _deep_recall_async(query: str, context: str) -> str:
     from core.llm.client import get_llm_client
 
     client = get_llm_client()
-    model = settings.background_model or settings.scout_model or settings.llm_model
+    model = settings.background_model or settings.llm_model
     memory_dir = settings.memory_dir
 
     user_msg = f"Search for: {query}"

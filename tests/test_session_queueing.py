@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.llm.semaphore import SessionAwareLLMScheduler, LLMConcurrencyError, LLMSessionTimeoutError
+from core.llm.semaphore import LLMConcurrencyError, LLMSessionTimeoutError, SessionAwareLLMScheduler
 from core.llm.types import ChatResponse, StreamEvent, StreamEventType, TokenUsage
 from sessions import state_v2 as sv2
 from sessions.state import AgentSession, PendingMessage, SessionState
@@ -483,7 +483,7 @@ class TestScoutWaiting:
             patch("core.llm.client.get_llm_client", return_value=fake),
             patch("core.scout.runner.settings") as mock_settings,
         ):
-            mock_settings.scout_model = ""
+            mock_settings.background_model = ""
             mock_settings.background_model = ""
             mock_settings.llm_model = "test-model"
             mock_settings.workspace_dir = "/tmp/nonexistent"
@@ -516,7 +516,7 @@ class TestScoutWaiting:
             patch("core.llm.client.get_llm_client", return_value=fake),
             patch("core.scout.runner.settings") as mock_settings,
         ):
-            mock_settings.scout_model = ""
+            mock_settings.background_model = ""
             mock_settings.background_model = ""
             mock_settings.llm_model = "test-model"
             mock_settings.workspace_dir = "/tmp/nonexistent"

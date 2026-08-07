@@ -48,7 +48,7 @@ Sessions live in `data/sessions.db` (SQLite). They survive restarts. You can hav
 
 ### 2. Scout — the planner
 
-Before the main agent runs, a **scout** runs first. Scout is a smaller, faster model (you configure it via `scout_model`) running in a fresh context window. Its job is to plan.
+Before the main agent runs, a **scout** runs first. Scout runs on the Background role (`background_model` — a smaller, faster model) in a fresh context window. Its job is to plan.
 
 What scout does:
 

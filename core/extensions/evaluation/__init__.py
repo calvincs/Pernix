@@ -117,7 +117,7 @@ def _evaluate_single(feat: dict, session_id: str, loop=None) -> dict:
         from core.llm.client import get_llm_client
 
         client = get_llm_client()
-        model = settings.critical_model or settings.llm_model
+        model = settings.llm_model
 
         if loop is None:
             # Defensive fallback for callers that don't thread the loop —
@@ -168,7 +168,7 @@ async def evaluate_single_async(feat: dict, session_id: str) -> dict:
         from core.llm.client import get_llm_client
 
         client = get_llm_client()
-        model = settings.critical_model or settings.llm_model
+        model = settings.llm_model
         return await _eval_llm(client, model, prompt)
     except Exception as e:
         logger.error("Evaluation failed: %s", e)
