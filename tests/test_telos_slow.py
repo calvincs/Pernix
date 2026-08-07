@@ -124,6 +124,16 @@ def test_binding_full_signature_escalates(store, monkeypatch):
     assert r1["alarms"] == [{"target": "g_shiny", "level": 1}]
     assert store.read("goal", "g_shiny").get("state") == "active"  # L1 keeps budget
 
+    # Time-anchored ladder: an immediate re-run (as a 4-hourly cron would
+    # produce) must NOT escalate — the window hasn't elapsed.
+    r1b = run_binding_monitor(store)
+    assert r1b["alarms"] == [{"target": "g_shiny", "level": 1}]
+    assert store.read("goal", "g_shiny").get("state") == "active"
+
+    # Backdate the alarm's window stamp past the advance threshold: now the
+    # signature has genuinely persisted a window, so the ladder climbs.
+    alarm = next(a for a in store.list_alarms() if a.get("type") == "binding")
+    store.update(alarm, window_advanced_at="2026-01-01T00:00:00Z")
     r2 = run_binding_monitor(store)
     assert r2["alarms"][0]["level"] == 2
     assert store.read("goal", "g_shiny").get("state") == "suspended"  # L2 freeze

@@ -25,6 +25,30 @@ from core.telos.store import TelosObject, TelosStore
 
 logger = logging.getLogger("pernix.telos.binding")
 
+# A binding "window" advances after ~a day of the signature holding, so the
+# escalation ladder is anchored to elapsed time regardless of cron cadence.
+# 20h (not 24) so a daily cron with normal jitter still advances each run.
+_WINDOW_ADVANCE_HOURS = 20
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _hours_since(iso_ts) -> float:
+    """Hours elapsed since an ISO timestamp; 0.0 when unparseable (which
+    keeps an alarm with corrupt timestamps at its current level rather
+    than fast-tracking it up the ladder)."""
+    from datetime import datetime, timezone
+
+    try:
+        dt = datetime.strptime(str(iso_ts), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return 0.0
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
+
 
 def _window_signals(store: TelosStore, goal_id: str) -> dict:
     """The four signature signals for one goal over the current and prior
@@ -108,13 +132,22 @@ def run_binding_monitor(store: TelosStore) -> dict:
                     "state": "open",
                     "evidence": sig,
                     "windows": 1,
+                    "window_advanced_at": _now_iso(),
                 },
             )
             store.write(alarm)
         else:
-            windows = int(prior.get("windows", 1)) + 1
-            level = 3 if windows > 2 else 2
-            alarm = store.update(prior, level=level, windows=windows, evidence=sig)
+            # Time-anchored escalation: the ladder climbs per ~day the
+            # signature persists, NOT per monitor run — a faster cron
+            # (e.g. every 4h) must not turn "persists 2 windows" from
+            # ~2 days into ~8 hours (§8's deep-push false positive).
+            if _hours_since(prior.get("window_advanced_at") or prior.get("created_at")) >= _WINDOW_ADVANCE_HOURS:
+                windows = int(prior.get("windows", 1)) + 1
+                level = 3 if windows > 2 else 2
+                alarm = store.update(prior, level=level, windows=windows, evidence=sig, window_advanced_at=_now_iso())
+            else:
+                level = int(prior.get("level", 1))
+                alarm = store.update(prior, evidence=sig)
 
         store.trace_append(
             "alarm", {"id": alarm.id, "type": "binding", "target": g.id, "level": level, "evidence": sig}
