@@ -182,6 +182,10 @@ class AgentSession:
     # Tools mechanically disabled for the current retry attempt (reflect's
     # retry_without_tools effector). Cleared at each fresh user turn.
     retry_excluded_tools: set = field(default_factory=set)
+    # True while the session's turns are driven by goal auto-continuations.
+    # Makes the session snooze-transparent (audit P5); cleared on a real
+    # user prompt.
+    goal_continuation_active: bool = False
 
     # Worker watch-set: worker IDs this session is waiting on (Gap 1+2+5)
     _watched_worker_ids: set = field(default_factory=set)

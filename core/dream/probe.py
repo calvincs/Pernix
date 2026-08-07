@@ -208,7 +208,7 @@ def _run_engine_blocking(bundle: str, file_count: int, loop: asyncio.AbstractEve
     from core.llm.client import get_llm_client
 
     client = get_llm_client()
-    root_model = settings.rlm_root_model or settings.llm_model
+    root_model = settings.llm_model
     sub_model = settings.background_model or settings.llm_model
 
     def _chat(messages: list[dict], use_model: str, timeout: float) -> str:

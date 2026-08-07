@@ -68,7 +68,7 @@ In the UI, click the gear icon → **Settings**. The two settings you must set:
 | Setting | What to put |
 |---|---|
 | `llm_model` | The primary model. Either an Ollama model you've pulled (e.g. `qwen3:32b`) or an OpenRouter model ID (e.g. `anthropic/claude-sonnet-4.6`). |
-| `scout_model` | A fast, smaller model for the planning phase. Something like `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter. Can be the same as `llm_model` to start. |
+| `background_model` | A fast, smaller model for the offline tier (scout planning, titles, memory work). Something like `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter. Empty uses `llm_model`. |
 
 Click **Save**. You're done with setup.
 

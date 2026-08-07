@@ -1267,7 +1267,7 @@ async def run_scout(
     # stub. Same knob as the main agent's rate-limit failover so operators
     # configure it in one place.
     fallback_model = (settings.fallback_model or "").strip()
-    primary_model = (settings.scout_model or "").strip()
+    primary_model = (settings.background_model or "").strip()
     if fallback_model and fallback_model != primary_model:
         logger.info(
             "Scout exhausted primary attempts for session %s — trying " "fallback_model=%s (last error: %s)",
@@ -1600,7 +1600,7 @@ async def _run_scout_llm(
     # --- Phase 2: Multi-turn tool-calling loop ---
     _step("thinking", "Scout analyzing context")
     client = get_llm_client()
-    model = model_override or settings.scout_model or settings.background_model or settings.llm_model
+    model = model_override or settings.background_model or settings.llm_model
 
     if not client.has_capacity(model):
         _step("waiting", "Waiting for LLM capacity")

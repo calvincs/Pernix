@@ -58,16 +58,22 @@ class Settings:
 
     # --- LLM Providers ---
     llm_base_url: str = "http://localhost:11434/v1"
+    # Three chat-model roles, any provider (2026-08 consolidation):
+    #   llm_model        — PRIMARY: agent turns AND every quality-critical
+    #                      call (compaction summaries, reflect verdicts,
+    #                      eval). Anything the primary must trust runs here.
+    #   background_model — BACKGROUND: the fast/offline tier — scout, titles,
+    #                      distill/ingest, snooze activities, dream, telos,
+    #                      RLM sub-calls. Empty = llm_model.
+    #   fallback_model   — BACKUP: used when a Primary or Background call
+    #                      fails (stream failover, provider failover, scout
+    #                      last resort, one-shot retry). Empty = no backup.
+    # Per-request overrides (switch_model, spawn_worker(model=), worker
+    # specs, workflow steps) remain the task-scoped axis.
     llm_model: str = ""
     fallback_model: str = ""
     background_model: str = ""
-    scout_model: str = ""
-    # Criticality tier (audit P3): model for calls whose output the primary
-    # model must trust or that can force an expensive retry — compaction
-    # summaries (the session's permanent memory), reflect verdicts, and eval.
-    # Empty = llm_model. The fast/offline tier stays on scout/background.
-    critical_model: str = ""
-    # Fifth model role (adaptation plan 1f): local embedding model served by
+    # Embedding model (not a chat role): local embedding model served by
     # Ollama (e.g. "nomic-embed-text"). Setting it IS the switch — empty
     # keeps every search purely lexical. Vectors live in a rebuildable
     # sidecar next to the FTS index; embedding happens during snooze, never
@@ -142,10 +148,9 @@ class Settings:
     # approach_guidance — this pattern indicates the LLM gave up, not that the
     # task needed no planning.
     scout_retry_on_empty_approach: bool = True
-    # When primary scout_model exhausts its retries, scout falls through to
-    # settings.fallback_model for one more attempt before the deterministic
-    # stub report. No dedicated scout_fallback_model — the unified
-    # Settings → Models → Fallback Model is the single source of truth.
+    # When scout (Background role) exhausts its retries, it falls through to
+    # settings.fallback_model (Backup) for one more attempt before the
+    # deterministic stub report.
 
     # --- Tools / Shell ---
     tool_timeout: int = 300
@@ -305,8 +310,6 @@ class Settings:
     # follows the Candor pattern (restart). The rlm_* caps exist to prevent
     # runaway recursion/spend; model roles fall back per resolve_*_model().
     rlm_enabled: bool = False
-    rlm_root_model: str = ""  # or llm_model
-    rlm_sub_model: str = ""  # or background_model or llm_model
     rlm_max_iterations: int = 20  # root REPL turns per run
     rlm_max_depth: int = 1  # 1 = llm_query only; 2+ enables rlm_query recursion
     rlm_max_subcalls: int = 50  # sub-LLM call ledger, shared across depths
@@ -427,7 +430,6 @@ class Settings:
     reflect_full_transcript: bool = (
         False  # DEPRECATED: reflect now always sees the per-attempt transcript; kept as a no-op for backwards compat
     )
-    reflect_model: str = ""  # Model for failure analysis (empty = use background_model)
     reflect_emit_digest_on_pass: bool = (
         False  # Have reflect emit a turn_digest even on pass verdicts (debug/audit; default off saves tokens)
     )

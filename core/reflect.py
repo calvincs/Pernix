@@ -153,7 +153,6 @@ SIDE_EFFECT_TOOLS: frozenset[str] = frozenset(
     {
         "notify_user",
         "schedule_job",
-        "schedule_workflow",
         "update_scheduled_job",
         "remove_scheduled_job",
         "spawn_worker",
@@ -1054,7 +1053,10 @@ async def reflect_on_session(
     if emit:
         emit({"type": "reflect.start"})
 
-    model = settings.reflect_model or settings.critical_model or settings.llm_model
+    # Three-role scheme: the verifier runs on Primary — its verdicts gate
+    # retries, worker trust, and routing; it must never be weaker than the
+    # model it judges.
+    model = settings.llm_model
     start = time.monotonic()
 
     # Inner retry budget for the reflect LLM call itself. A parse failure here
@@ -1111,7 +1113,10 @@ async def reflect_on_session(
 
             ensure_session_budget(session_id, 120)
             _created_at, _priority = _sched_identity(session_id)
-            response = await client.chat(
+            from core.llm.client import chat_with_backup
+
+            response = await chat_with_backup(
+                client,
                 messages=messages,
                 model=model,
                 max_tokens=8192,

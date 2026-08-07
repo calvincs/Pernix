@@ -374,7 +374,7 @@ _DB_GUARDED_PATHS = ("sessions/hooks.py", "core/context/compaction.py", "core/ag
 # ratchet, not an amnesty: the count may drop, never grow. Concentrated in
 # sessions/manager.py (7, mostly notice/divider writes in _finalize_turn and
 # transcript reads in _finalize_worker) and api/routers/chat.py (3).
-_KNOWN_ON_LOOP_DB_CALLS = 16
+_KNOWN_ON_LOOP_DB_CALLS = 15
 
 
 def test_no_new_on_loop_db_calls_are_introduced():
@@ -505,7 +505,7 @@ def test_guard_ignores_nested_sync_helpers():
     assert "list_files" not in names, "nested sync helper must not count as on-loop"
 
 
-def test_snooze_archives_markdown_and_index_atomically():
+def test_sweeps_archive_markdown_and_index_atomically():
     """The markdown archive-tag and the FTS removal were two separate sync
     calls from async code. A cancel between them left the index serving
     entries whose markdown said archived. They are now one helper dispatched
@@ -514,20 +514,23 @@ def test_snooze_archives_markdown_and_index_atomically():
     import inspect
     import pathlib
 
-    import core.snooze as snooze_mod
+    import core.memory.sweeps as sweeps_mod
 
-    assert hasattr(snooze_mod.SnoozeRunner, "_archive_entries")
-    body = inspect.getsource(snooze_mod.SnoozeRunner._archive_entries)
+    body = inspect.getsource(sweeps_mod.archive_entries)
     assert "_archive_entries_in_file" in body and "_remove_from_index" in body
 
     # No async caller may invoke either half on its own any more.
-    tree = ast.parse(pathlib.Path(snooze_mod.__file__).read_text())
     halves = {"_archive_entries_in_file", "_remove_from_index"}
     stray = []
-    for fn in ast.walk(tree):
-        if not isinstance(fn, ast.AsyncFunctionDef):
-            continue
-        for node in _own_body(fn):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in halves:
-                stray.append(f"{fn.name}():{node.lineno} calls {node.func.attr} directly")
-    assert not stray, "archive halves must be paired via _archive_entries:\n  " + "\n  ".join(stray)
+    for mod in (sweeps_mod, __import__("core.snooze", fromlist=["x"])):
+        tree = ast.parse(pathlib.Path(mod.__file__).read_text())
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.AsyncFunctionDef):
+                continue
+            for node in _own_body(fn):
+                called = ""
+                if isinstance(node, ast.Call):
+                    called = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+                if called in halves:
+                    stray.append(f"{mod.__name__}.{fn.name}():{node.lineno} calls {called} directly")
+    assert not stray, "archive halves must be paired via archive_entries:\n  " + "\n  ".join(stray)

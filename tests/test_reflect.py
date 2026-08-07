@@ -335,69 +335,32 @@ async def test_reflect_llm_error(mock_llm_client):
 # ---------------------------------------------------------------------------
 
 
-async def test_reflect_model_priority(monkeypatch, mock_llm_client):
-    """reflect_model takes priority over background_model."""
+async def test_reflect_runs_on_primary_model(monkeypatch, mock_llm_client):
+    """Three-role scheme: reflect (a quality-critical call) runs on Primary —
+    the verifier is never weaker than the model it judges."""
     from db import models as db
 
-    monkeypatch.setattr("config.settings.reflect_model", "reflect-special")
+    monkeypatch.setattr("config.settings.llm_model", "primary-model")
     monkeypatch.setattr("config.settings.background_model", "bg-model")
-    monkeypatch.setattr("config.settings.scout_model", "scout-model")
 
     sid = db.create_session(title="Model Priority")
     db.add_message(sid, "user", "Build a widget")
     db.add_message(sid, "assistant", "Done building the widget")
     db.add_message(sid, "tool", "file_write succeeded")
 
-    # Configure fake to return valid reflect JSON
     mock_llm_client.responses = [
         ChatResponse(
             content=json.dumps({"verdict": "pass", "reasoning": "looks good"}),
             tool_calls=None,
             usage=TokenUsage(10, 5, 15),
-            model="reflect-special",
+            model="primary-model",
             provider="fake",
             finish_reason="stop",
         )
     ]
 
     await reflect_on_session(sid)
-    assert mock_llm_client.calls[-1]["model"] == "reflect-special"
-
-
-async def test_reflect_model_fallback_to_critical(monkeypatch, mock_llm_client):
-    """When reflect_model is empty, falls back to critical_model (audit P3:
-    the verifier must never silently land on the smallest model — the old
-    chain fell through background and even scout)."""
-    from db import models as db
-
-    monkeypatch.setattr("config.settings.reflect_model", "")
-    monkeypatch.setattr("config.settings.critical_model", "bg-model")
-    monkeypatch.setattr("config.settings.background_model", "tiny-model")
-    monkeypatch.setattr("config.settings.scout_model", "scout-model")
-
-    sid = db.create_session(title="Model Fallback")
-    db.add_message(sid, "user", "Build a widget")
-    db.add_message(sid, "assistant", "Done building the widget")
-    db.add_message(sid, "tool", "file_write succeeded")
-
-    mock_llm_client.responses = [
-        ChatResponse(
-            content=json.dumps({"verdict": "pass", "reasoning": "ok"}),
-            tool_calls=None,
-            usage=TokenUsage(10, 5, 15),
-            model="bg-model",
-            provider="fake",
-            finish_reason="stop",
-        )
-    ]
-
-    await reflect_on_session(sid)
-    assert mock_llm_client.calls[-1]["model"] == "bg-model"
-
-
-# ---------------------------------------------------------------------------
-# Termination-history awareness + ceiling-loop guard
-# ---------------------------------------------------------------------------
+    assert mock_llm_client.calls[-1]["model"] == "primary-model"
 
 
 async def test_reflect_evidence_includes_termination_history(mock_llm_client):

@@ -165,7 +165,10 @@ async def _auto_title(session_id: str, emit=None) -> None:
             "SUBTITLE: <subtitle>"
         )
 
-        response = await client.chat(
+        from core.llm.client import chat_with_backup
+
+        response = await chat_with_backup(
+            client,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": context},
@@ -625,7 +628,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
 
     if is_stuck:
         try:
-            from core.snooze_reflect import _identify_active_skill
+            from core.refine import _identify_active_skill
 
             active_skill = _identify_active_skill(messages)
             if active_skill:

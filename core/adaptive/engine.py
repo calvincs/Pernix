@@ -29,7 +29,7 @@ logger = logging.getLogger("pernix.adaptive")
 
 KINDS = frozenset({"prompt_note", "routing_hint", "policy", "worker_spec"})
 ACTIONS = frozenset({"create", "update", "delete"})
-SOURCES = frozenset({"refine", "snooze_reflect", "dream", "candor", "user", "agent"})
+SOURCES = frozenset({"refine", "dream", "candor", "user", "agent"})
 HIGH_RISK_KINDS = frozenset({"policy", "worker_spec"})
 
 PROMPT_NOTE_MAX_CHARS = 400

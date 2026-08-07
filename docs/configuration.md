@@ -14,7 +14,7 @@ Some settings (marked **requires restart**) only take effect when the server is 
 ```bash
 curl -X POST http://localhost:8090/api/settings \
   -H "Content-Type: application/json" \
-  -d '{"llm_model": "qwen3:32b", "scout_model": "qwen3:8b"}'
+  -d '{"llm_model": "qwen3:32b", "background_model": "qwen3:8b"}'
 ```
 
 **Via direct file edit:** Edit `data/settings.json` while the server is stopped. Unknown keys are silently ignored on load.
@@ -31,10 +31,8 @@ These are the most important settings to configure before first use.
 |---|---|---|
 | `llm_base_url` | `http://localhost:11434/v1` | Base URL for the primary LLM provider. Points to Ollama by default. Change to any OpenAI-compatible endpoint. |
 | `llm_model` | *(empty)* | **Required.** The primary model used for agent turns. Set this before your first session. |
-| `scout_model` | *(empty)* | Fast, small model used in the planning phase. Can be the same as `llm_model` to start. A lightweight model (3–8B) works well here. |
 | `fallback_model` | *(empty)* | Ollama model to use when OpenRouter hits a rate limit or quota. Should be a locally-available Ollama model. |
-| `background_model` | *(empty)* | Model for the fast/offline tier: session auto-titling, memory distillation and ingest, scout fallback, workflow reflect, refine input prep, LLM-backed Snooze activities, Dream, Telos, and RLM sub-calls (via `rlm_sub_model` fallback). Quality-critical calls (compaction, reflect, eval) now live on `critical_model` instead. Empty falls back to `llm_model`. |
-| `critical_model` | *(empty)* | Criticality tier: compaction summaries (the session's permanent memory), reflect verdict fallback, and evaluation. Anything whose output the primary model must trust, or that can force an expensive retry. Empty falls back to `llm_model` — deliberately NOT `background_model`, so these calls are never silently authored by a weaker model. |
+| `background_model` | *(empty)* | **Background** role — the fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, workflow reflect, refine input prep, LLM-backed Snooze activities, Dream, Telos, and RLM sub-calls. Quality-critical calls (compaction, reflect, eval) run on Primary instead. Empty falls back to `llm_model`. |
 | `llm_max_concurrent` | `1` | Maximum simultaneous requests to Ollama. Increase only if your hardware supports parallel inference. |
 | `llm_session_timeout` | `1800` | Maximum wall-clock seconds a session may hold an LLM slot. Prevents hung sessions from blocking others. Set to `0` for unlimited. |
 
@@ -148,8 +146,8 @@ Recursive Language Models (arXiv 2512.24601): the agent processes inputs far bey
 | Setting | Default | Description |
 |---|---|---|
 | `rlm_enabled` | `false` | Master switch. Caps and model roles apply hot; the `rlm_process` tool registers at startup only, so enabling/disabling needs a restart. |
-| `rlm_root_model` | *(empty)* | Root orchestrator model. Falls back to `llm_model`. |
-| `rlm_sub_model` | *(empty)* | Sub-call model for chunk work (the bulk of spend). Falls back to `background_model`, then `llm_model`. |
+| *(RLM root)* | — | Runs on Primary (`llm_model`). |
+| *(RLM sub-calls)* | — | Run on Background (`background_model`), falling back to Primary. |
 | `rlm_max_iterations` | `20` | Root REPL turns per run before best-effort synthesis. |
 | `rlm_max_depth` | `1` | `1` = sub-calls only; `2`–`3` lets `rlm_query()` spawn nested RLM runs. |
 | `rlm_max_subcalls` | `50` | Total sub-LLM calls per run (one ledger shared across recursion depths). |
@@ -386,7 +384,6 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `reflect_emit_digest_on_pass` | `false` | Have reflect emit a turn digest even on `pass` verdicts. Default off; the digest is always emitted on `retry`/`escalate` so the next scout can plan around real evidence. |
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Enforced at parse time. |
 | `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op kept for back-compat. |
-| `reflect_model` | *(empty)* | Override model for reflect; empty uses `critical_model`, then `llm_model`. |
 | `post_mortem_retention_days` | `90` | Days to keep synthesized post-mortem records before snooze cleans them. |
 | `notify_webhook_timeout` | `10` | HTTP timeout for `notify_webhook_url` POST (seconds). |
 | `snooze_max_cycle_seconds` | `900` | Hang backstop per Snooze cycle — runaway protection, not a budget. Cycles run until the activity ladder completes; user activity cancels them instantly. Local (Ollama) background models get 4x headroom. |

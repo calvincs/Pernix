@@ -207,20 +207,21 @@ async def compact_with_llm(
     # Call LLM. The agent loop synchronously awaits this call mid-turn, so it
     # must queue with the session's own scheduling identity — the default
     # background identity sorts last in the fair queue (priority inversion).
-    from core.llm.client import ensure_session_budget, sched_identity
+    from core.llm.client import chat_with_backup, ensure_session_budget, sched_identity
 
     client = get_llm_client()
     # Criticality tier (audit P3): the summary becomes the session's
     # permanent memory for the primary model — never author it on a
     # silently-weaker background model.
-    model = settings.critical_model or settings.llm_model
+    model = settings.llm_model
     sched_created_at, sched_priority = sched_identity(session_id)
     # Carrying the session_id subjects this call to the session's wall-clock
     # budget; guarantee headroom so a budget-exhausted turn can still compact
     # instead of dying with compaction_failed.
     ensure_session_budget(session_id, 120)
     try:
-        response = await client.chat(
+        response = await chat_with_backup(
+            client,
             messages=[
                 {"role": "system", "content": "You are a conversation summarizer."},
                 {"role": "user", "content": prompt},

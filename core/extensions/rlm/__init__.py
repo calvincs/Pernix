@@ -55,11 +55,11 @@ _NESTED_TASK = "Answer the query contained in the context."
 
 
 def _resolve_root_model() -> str:
-    return settings.rlm_root_model or settings.llm_model
+    return settings.llm_model
 
 
 def _resolve_sub_model() -> str:
-    return settings.rlm_sub_model or settings.background_model or settings.llm_model
+    return settings.background_model or settings.llm_model
 
 
 def _session_identity(context: dict | None):
