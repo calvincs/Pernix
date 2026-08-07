@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.llm.semaphore import SessionAwareLLMScheduler, LLMConcurrencyError
+from core.llm.semaphore import LLMConcurrencyError, SessionAwareLLMScheduler
 from core.llm.types import ChatResponse, StreamEvent, StreamEventType, TokenUsage
 
 # ---------------------------------------------------------------------------

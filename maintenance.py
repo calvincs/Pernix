@@ -179,9 +179,13 @@ class MaintenanceRunner:
                 if cron_path.exists():
                     jobs = json.loads(cron_path.read_text())
                     for job in jobs:
-                        sid = job.get("session_id")
-                        if sid:
-                            protected.add(sid)
+                        # Heartbeat jobs park session_id=None and carry the real
+                        # id under heartbeat_session_id — without it their host
+                        # session gets reaped out from under the heartbeat.
+                        for key in ("session_id", "heartbeat_session_id"):
+                            sid = job.get(key)
+                            if sid:
+                                protected.add(sid)
             except Exception as e:
                 logger.warning("Failed to read cron protection list: %s", e)
 

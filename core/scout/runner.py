@@ -1657,7 +1657,8 @@ async def _run_scout_llm(
         # of calling submit_report again. That is a recoverable model
         # confusion — append a stricter format reminder and retry the round
         # rather than restarting the entire scout from scratch (the previous
-        # behavior, which cost ~70-180s per occurrence on real workflow runs).
+        # behavior, which burned a whole fresh attempt — up to settings.
+        # scout_timeout of wall clock — per occurrence on real workflow runs).
         if not response.tool_calls:
             just_sent_revision = (
                 revisions_used > 0

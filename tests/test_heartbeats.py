@@ -216,3 +216,48 @@ def test_load_jobs_routes_heartbeats(monkeypatch, tmp_path, fake_sched):
     assert restored and restored[0][0] == "hb_user_abc123def456"
     assert restored[0][1]["instruction"] == "stay focused"
     assert captured_normal == ["normal-job"]  # heartbeat never hit CronTrigger path
+
+
+@pytest.mark.asyncio
+async def test_maintenance_protects_heartbeat_sessions(monkeypatch, tmp_path):
+    """A heartbeat's host session must survive the idle reaper. Heartbeat jobs
+    park session_id=None and carry the real id under heartbeat_session_id, so
+    reading only session_id leaves them unprotected."""
+    import json as _json
+
+    import maintenance
+
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "cron_jobs.json").write_text(
+        _json.dumps(
+            [
+                {
+                    "name": "hb_user_abc",
+                    "kind": "heartbeat",
+                    "session_id": None,
+                    "heartbeat_session_id": "hb-host-session",
+                },
+                {"name": "normal-job", "cron_expr": "0 9 * * *", "session_id": "cron-session"},
+            ]
+        )
+    )
+    monkeypatch.chdir(tmp_path)
+
+    seen: dict = {}
+
+    class _FakeManager:
+        def reap_dead_subscribers(self):
+            return 0
+
+        def reap_idle_sessions(self, max_idle=1800, protected_ids=None):
+            seen["protected"] = set(protected_ids or ())
+            return 0
+
+    monkeypatch.setattr("sessions.manager.get_manager", lambda: _FakeManager())
+
+    runner = maintenance.MaintenanceRunner()
+    runner._tick_count = 5
+    await runner._tick()
+
+    assert seen["protected"] == {"cron-session", "hb-host-session"}

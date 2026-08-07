@@ -215,6 +215,7 @@ def add_gate(
     command: str,
     watch_paths: str = "",
     cwd: str = "",
+    scope: str = "session",
     _context: dict | None = None,
 ) -> str:
     """Register a deterministic gate for this session."""
@@ -227,17 +228,27 @@ def add_gate(
         return "Error: add_gate requires a session context."
     if not name or not command:
         return "Error: both name and command are required."
+    scope = (scope or "session").strip().lower()
+    if scope not in ("session", "goal"):
+        return "Error: scope must be 'session' or 'goal'."
     from db import models as db
 
     paths = [p.strip() for p in watch_paths.split(",") if p.strip()] if watch_paths else []
-    db.add_gate(session_id, name.strip(), command.strip(), watch_paths=paths, cwd=cwd.strip() or None)
+    db.add_gate(
+        session_id,
+        name.strip(),
+        command.strip(),
+        watch_paths=paths,
+        cwd=cwd.strip() or None,
+        scope=scope,
+    )
     guard = (
         f" watch_paths={paths} (unchanged paths reuse a prior failure on later retries)"
         if paths
         else " (no watch_paths — the gate re-runs every attempt)"
     )
     return (
-        f"Gate '{name}' registered: `{command}`.{guard} "
+        f"Gate '{name}' registered (scope={scope}): `{command}`.{guard} "
         f"It runs before Reflect at every turn end; a non-zero exit blocks a pass verdict. "
         f"A passing gate verifies only what it checks."
     )
@@ -286,7 +297,10 @@ def register(reg) -> None:
                 "before Reflect. A non-zero exit mechanically blocks a pass verdict — use for "
                 "tests, builds, linters, or any host-observable completion check. Optional "
                 "watch_paths (comma-separated, relative to the workspace) scope an unchanged-"
-                "files guard so a stale failure isn't pointlessly re-run on later retries."
+                "files guard so a stale failure isn't pointlessly re-run on later retries. "
+                "scope='goal' marks the gate as a completion criterion for the session's goal "
+                "(goal_complete is refused while it fails); scope='session' (default) is a "
+                "plain per-turn check."
             ),
             parameters={
                 "type": "object",
@@ -298,6 +312,11 @@ def register(reg) -> None:
                         "description": "Optional comma-separated files/dirs the gate depends on",
                     },
                     "cwd": {"type": "string", "description": "Optional working directory (default: workspace)"},
+                    "scope": {
+                        "type": "string",
+                        "enum": ["session", "goal"],
+                        "description": "'session' (default) or 'goal' — a goal-scoped gate also blocks goal_complete",
+                    },
                 },
                 "required": ["name", "command"],
             },

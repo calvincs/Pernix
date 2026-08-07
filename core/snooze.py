@@ -1,12 +1,25 @@
-"""Pernix — Snooze: idle-time memory consolidation and optimization.
+"""Pernix — Snooze: the idle-time self-maintenance ladder.
 
-Runs during idle periods to:
-1. Catch-up distillation for un-reviewed sessions
-2. User insight extraction (profile facts, preferences, behavioral patterns)
-3. Memory deduplication sweeps
-4. Tag enrichment for sparse entries
-5. FTS5 index reconciliation
-6. Memory file splitting (rare, for bloated files)
+One cycle walks a fixed priority ladder of ~20 activities (see _do_cycle for
+the authoritative order). They fall into a few clusters:
+
+- Memory hygiene — catch-up distillation of un-reviewed sessions, user-insight
+  extraction, dedup, consolidation, rerouting entries to better files, tag
+  enrichment, FTS5 index reconciliation, splitting bloated files, pruning
+  stale entries.
+- Skill learning — proposing skill improvements, extracting skill
+  requirements, mining skill co-occurrence.
+- Signal synthesis — folding operational signals (and, when Candor is on, the
+  candor gate) into durable memory.
+- Retention sweeps — expiring post-mortems, workflow runs, RLM runs, canary
+  runs, and old cron runs/sessions.
+- Self-modification — refine (authoring improvements) and applying approved
+  adaptive-policy edits.
+- Introspection add-ons — dream and the telos slow loop.
+
+Add-on activities are gated by their own settings flags, so a default install
+runs only the memory/skill/retention core. The ladder runs to completion
+unless preempted; every activity polls for cancellation at its own boundaries.
 
 Interruptible via cooperative cancellation. Uses background_model only.
 """

@@ -967,9 +967,7 @@ def compile_context(
             last_user_idx = idx
             break
 
-    attach_budget = int(
-        getattr(settings, "max_inline_attach_bytes", MAX_INLINE_ATTACH_BYTES) or MAX_INLINE_ATTACH_BYTES
-    )
+    attach_budget = int(settings.max_inline_attach_bytes or MAX_INLINE_ATTACH_BYTES)
 
     # Convert DB rows to chat format
     for idx, msg in enumerate(history):

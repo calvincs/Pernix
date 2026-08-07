@@ -213,8 +213,12 @@ def _schedule_coalesced_catchup(job_entries: list[dict]) -> None:
         job = scheduler.get_job(name) if name else None
         if job is None or not expr or entry.get("paused"):
             continue
-        # Only plain prompt jobs — workflow jobs run a different callable and
-        # coalescing them through _execute_cron_job would misroute them.
+        # Only jobs whose callable IS _execute_cron_job. That covers plain
+        # prompt jobs and workflow jobs alike (schedule_workflow goes through
+        # _add_job_internal, which always registers _execute_cron_job) —
+        # what it excludes are the jobs on other callables: heartbeats, canary
+        # sweeps/batches, telos slow ticks. Those own their own cadence and
+        # must not be catch-up dispatched through the prompt path.
         if job.func is not _execute_cron_job:
             continue
         meta = job.kwargs.get("meta", {})
@@ -1082,8 +1086,12 @@ def schedule_workflow(
 ) -> str:
     """Schedule a workflow to run on a cron schedule.
 
-    Creates a cron job that fires `run_workflow(workflow_name, inputs)` on each
-    tick via a fresh session. Uses the existing scheduler infrastructure.
+    Creates an ordinary cron job on the existing scheduler infrastructure: each
+    tick opens a fresh session and sends it the English prompt "Run workflow
+    <name> with inputs: ..." — it does NOT call run_workflow() directly. The
+    workflow name/inputs are also stamped into the job meta
+    (workflow_name/workflow_inputs) for bookkeeping. Whether the agent actually
+    invokes the workflow is therefore a model decision, not a mechanical one.
     """
     from apscheduler.triggers.cron import CronTrigger
 

@@ -99,6 +99,55 @@ def test_goal_complete_refused_on_failing_gate(monkeypatch):
     assert "completed" in goal_complete(_context=ctx)
 
 
+def test_goal_complete_gates_honor_workspace_override(monkeypatch, tmp_path):
+    """goal_complete must resolve the workspace the way core.gates does: a
+    session with a workspace_override (canary run, isolated task) runs its
+    gates there, not in the shared global workspace."""
+    import core.tools.builtin.goal_tools as gt
+    from core.tools.paths import workspace
+
+    monkeypatch.setattr("config.settings.gates_enabled", True)
+    workspace().mkdir(parents=True, exist_ok=True)
+    ws = tmp_path / "override-ws"
+    ws.mkdir()
+    (ws / "override-marker.txt").write_text("here")
+
+    sid = db.create_session(title="override")
+    ctx = {"session_id": sid}
+    gt.goal_create("goal whose gates must run in the overridden workspace", _context=ctx)
+    # Passes only when the gate's cwd is the override workspace.
+    db.add_gate(sid, "cwd-check", "test -f override-marker.txt", scope="goal")
+
+    # No override anywhere -> global workspace -> the gate fails.
+    monkeypatch.setattr(gt, "_session", lambda _c: None)
+    out = gt.goal_complete(_context=ctx)
+    assert out.startswith("Error:") and "cwd-check" in out
+
+    # Override carried on the tool context is honored.
+    assert "completed" in gt.goal_complete(_context={**ctx, "workspace_override": str(ws)})
+
+
+def test_goal_complete_prefers_live_session_workspace_override(monkeypatch, tmp_path):
+    import core.tools.builtin.goal_tools as gt
+    from core.tools.paths import workspace
+
+    monkeypatch.setattr("config.settings.gates_enabled", True)
+    workspace().mkdir(parents=True, exist_ok=True)
+    ws = tmp_path / "live-ws"
+    ws.mkdir()
+    (ws / "override-marker.txt").write_text("here")
+
+    sid = db.create_session(title="live-override")
+    ctx = {"session_id": sid}
+    gt.goal_create("goal completed from a session with a live override", _context=ctx)
+    db.add_gate(sid, "cwd-check", "test -f override-marker.txt", scope="goal")
+
+    live = SimpleNamespace(workspace_override=str(ws), active_goal_id=1)
+    monkeypatch.setattr(gt, "_session", lambda _c: live)
+    assert "completed" in gt.goal_complete(_context=ctx)
+    assert live.active_goal_id is None
+
+
 # ---------------------------------------------------------------------------
 # Continuations (manager logic, exercised directly)
 # ---------------------------------------------------------------------------
