@@ -1,16 +1,17 @@
 """Pernix — Whole-session refine pass.
 
-Sibling of ``core/snooze_reflect.py`` with a broader gate. Where snooze_reflect
-only fires when the reflect verdict's failure_cause is actionable and
-confidence >= 0.5, refine looks at any idle session for any worth-saving
-signal — including ones the reflect pass deemed "pass with no deviation",
-and sessions with no reflect verdict at all.
+The system's one session-improvement pass. It is not gated on the reflect
+verdict: refine looks at any idle session for any worth-saving signal —
+including ones the reflect pass deemed "pass with no deviation", and sessions
+with no reflect verdict at all. (It replaced a narrower reflect-gated sibling,
+`snooze_reflect`, whose selection overlapped this one's — two LLM calls over
+the same sessions for the same artifacts.)
 
 Triggered as the tail-end activity of snooze (Activity 13). Watermarks via
 ``snooze_state['refined:{sid}']`` so each session is processed at most once.
 
-Hard rule (same as snooze_reflect): never auto-applies skill edits. All
-SKILL.md changes flow through the existing proposals UI for human approve/deny.
+Hard rule: never auto-applies skill edits. All SKILL.md changes flow through
+the existing proposals UI for human approve/deny.
 """
 
 from __future__ import annotations
@@ -21,14 +22,13 @@ import logging
 from typing import Any
 
 from config import settings
-from core.snooze_reflect import _build_tool_summary, _identify_active_skill
 from db import models as db
 
 logger = logging.getLogger("pernix.refine")
 
 
-# Mirrors snooze_reflect.PROPOSAL_CONFIDENCE_FLOOR — same bar for a paste-ready
-# SKILL.md change. Lessons use no floor (advisory; scout already gates on hits).
+# Bar for a paste-ready SKILL.md change. Lessons use no floor (advisory; scout
+# already gates on hits).
 PROPOSAL_CONFIDENCE_FLOOR: float = 0.6
 
 
@@ -113,12 +113,89 @@ RULES:
 - Output valid JSON only. No markdown fences, no commentary. /no_think"""
 
 
+def _identify_active_skill(messages: list[dict]) -> str | None:
+    """Best-effort: find the skill the session was operating under.
+
+    Scans assistant tool_calls in reverse for the most recent successful
+    `load_skill` invocation. Returns the skill name, or None.
+    """
+    for m in reversed(messages):
+        if m.get("role") != "assistant":
+            continue
+        raw = m.get("tool_calls")
+        if not raw:
+            continue
+        try:
+            calls = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            fn = (call or {}).get("function") or {}
+            if fn.get("name") != "load_skill":
+                continue
+            args_raw = fn.get("arguments")
+            if isinstance(args_raw, str):
+                try:
+                    args = json.loads(args_raw)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            elif isinstance(args_raw, dict):
+                args = args_raw
+            else:
+                continue
+            name = args.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    return None
+
+
+def _build_tool_summary(messages: list[dict]) -> dict[str, dict[str, Any]]:
+    """Reconstruct {tool_name -> {calls, failures}} from session messages.
+
+    Reflect already builds this for live sessions but doesn't persist it, so
+    we rebuild it from the message log. Failures = tool messages whose
+    content starts with "Error" or contains a known failure marker.
+    """
+    summary: dict[str, dict[str, Any]] = {}
+    pending_calls: dict[str, str] = {}
+
+    for m in messages:
+        role = m.get("role")
+        if role == "assistant" and m.get("tool_calls"):
+            try:
+                calls = json.loads(m["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(calls, list):
+                continue
+            for call in calls:
+                fn = (call or {}).get("function") or {}
+                tname = fn.get("name")
+                tid = (call or {}).get("id")
+                if not tname:
+                    continue
+                bucket = summary.setdefault(tname, {"calls": 0, "failures": 0})
+                bucket["calls"] += 1
+                if tid:
+                    pending_calls[tid] = tname
+        elif role == "tool":
+            tid = m.get("tool_call_id")
+            tname = pending_calls.pop(tid, None) if tid else None
+            if not tname:
+                continue
+            content = m.get("content") or ""
+            if content.startswith("Error") or "\nError" in content[:200]:
+                summary[tname]["failures"] = summary[tname].get("failures", 0) + 1
+
+    return summary
+
+
 def _latest_reflect_verdict(messages: list[dict]) -> dict | None:
     """Return the most recent reflect message parsed as a dict, or None.
 
-    Local copy rather than importing snooze_reflect's: refine treats the
-    verdict as optional context, not a precondition, so keeping the helper
-    here makes the call site read straightforwardly.
+    Refine treats the verdict as optional context, not a precondition.
     """
     for m in reversed(messages):
         if m.get("role") != "reflect":
@@ -172,9 +249,8 @@ def _build_user_content(
 ) -> str:
     """Assemble the user-content blob fed to the LLM.
 
-    Like snooze_reflect._build_user_content but reflect_data is optional —
-    refine sees the whole transcript regardless of whether a reflect verdict
-    was ever written.
+    reflect_data is optional — refine sees the whole transcript regardless of
+    whether a reflect verdict was ever written.
     """
     transcript_lines: list[str] = []
     for m in messages:

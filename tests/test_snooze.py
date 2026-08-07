@@ -234,45 +234,6 @@ def test_parse_insight_entries_empty():
 
 
 # ---------------------------------------------------------------------------
-# _extract_tags (pure logic)
-# ---------------------------------------------------------------------------
-
-
-def test_extract_tags_technical_terms():
-    runner = SnoozeRunner()
-    content = "Use file_read and file_write tools in the agent_loop context"
-    tags = runner._extract_tags(content, [])
-    assert any("file" in t or "agent" in t or "_" in t for t in tags)
-
-
-def test_extract_tags_proper_nouns():
-    runner = SnoozeRunner()
-    content = "The SQLite database and PostgreSQL adapter both support WAL mode"
-    tags = runner._extract_tags(content, [])
-    # Should find some proper nouns
-    assert isinstance(tags, list)
-
-
-def test_extract_tags_dedup_existing():
-    runner = SnoozeRunner()
-    content = "database config settings"
-    existing = ["database", "config"]
-    tags = runner._extract_tags(content, existing)
-    # Should not include already-existing tags
-    existing_lower = {t.lower() for t in existing}
-    for t in tags:
-        assert t.lower() not in existing_lower
-
-
-def test_extract_tags_max_five():
-    runner = SnoozeRunner()
-    # Content with many technical terms
-    content = "file_read file_write file_edit file_search file_list file_delete file_move file_copy"
-    tags = runner._extract_tags(content, [])
-    assert len(tags) <= 5
-
-
-# ---------------------------------------------------------------------------
 # _cleanup_cron
 # ---------------------------------------------------------------------------
 

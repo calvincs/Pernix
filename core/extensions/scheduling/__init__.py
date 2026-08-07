@@ -1,4 +1,8 @@
-"""Pernix — Scheduling extension: cron job management via APScheduler."""
+"""Pernix — Scheduling extension: cron job management via APScheduler.
+
+Scheduled workflows are expressed as ordinary cron prompts that call
+`run_workflow` — there is no separate workflow-scheduling tool.
+"""
 
 from __future__ import annotations
 
@@ -213,12 +217,11 @@ def _schedule_coalesced_catchup(job_entries: list[dict]) -> None:
         job = scheduler.get_job(name) if name else None
         if job is None or not expr or entry.get("paused"):
             continue
-        # Only jobs whose callable IS _execute_cron_job. That covers plain
-        # prompt jobs and workflow jobs alike (schedule_workflow goes through
-        # _add_job_internal, which always registers _execute_cron_job) —
-        # what it excludes are the jobs on other callables: heartbeats, canary
-        # sweeps/batches, telos slow ticks. Those own their own cadence and
-        # must not be catch-up dispatched through the prompt path.
+        # Only jobs whose callable IS _execute_cron_job — every job added
+        # through _add_job_internal. What this excludes are the jobs on other
+        # callables: heartbeats, canary sweeps/batches, telos slow ticks.
+        # Those own their own cadence and must not be catch-up dispatched
+        # through the prompt path.
         if job.func is not _execute_cron_job:
             continue
         meta = job.kwargs.get("meta", {})
@@ -311,7 +314,13 @@ async def _execute_heartbeat_job(meta: dict):
     """Deliver one heartbeat tick. Steer = a role=system row the next round's
     compile picks up; follow_up = queued for the next idle dispatch. Parked
     states (AWAITING_WORKERS/AWAITING_USER) degrade steer to follow_up —
-    they reach no round boundary."""
+    they reach no round boundary.
+
+    A cron_runs row is written only for ticks that actually deliver (steer,
+    queue, or dispatch). Coalesced no-op ticks write nothing: a 30s heartbeat
+    recorded ~2,880 rows/day, almost all of them "nothing happened", which
+    buried real job history and defeated the run-stats readout.
+    """
     from sessions import state_v2 as sv2
     from sessions.manager import get_manager
     from sessions.state import PendingMessage
@@ -324,50 +333,49 @@ async def _execute_heartbeat_job(meta: dict):
     if not sid or not instruction:
         return
 
-    run_id = db.add_cron_run(job_id, sid, status="claimed", fire_time=datetime.now(timezone.utc).isoformat())
-    manager = get_manager()
-    session = manager.get(sid)
+    session = get_manager().get(sid)
     text = f"[heartbeat:{hb_name}] {instruction}"
 
+    state = sv2._current_state(session) if session is not None else None
+    mid_turn = state in (
+        sv2.SessionStateV2.SCOUTING,
+        sv2.SessionStateV2.PROCESSING,
+        sv2.SessionStateV2.COMPACTING,
+    )
+    parked = state in (
+        sv2.SessionStateV2.AWAITING_WORKERS,
+        sv2.SessionStateV2.AWAITING_USER,
+        sv2.SessionStateV2.PAUSED,
+        sv2.SessionStateV2.PAUSE_REQUESTED,
+        sv2.SessionStateV2.CANCELLING,
+        sv2.SessionStateV2.FINALIZING,
+    )
+    steering = mid_turn and delivery == "steer"
+    # follow_up (explicit, or steer degraded in a parked state): queue for the
+    # next idle dispatch; coalesce with any undelivered copy of the same
+    # heartbeat.
+    queueing = not steering and session is not None and (parked or mid_turn)
+
+    turn = getattr(session, "current_turn_user_msg_id", None) if session is not None else None
+    if steering and turn is not None and _heartbeat_last_turn.get(job_id) == turn:
+        return  # coalesced: already steered this turn
+    if queueing and any(f"[heartbeat:{hb_name}]" in getattr(p, "message", "") for p in session.pending_messages):
+        return  # coalesced: prior tick still queued
+
+    run_id = db.add_cron_run(job_id, sid, status="claimed", fire_time=datetime.now(timezone.utc).isoformat())
     try:
         db.update_cron_run(run_id, "running")
-        state = sv2._current_state(session) if session is not None else None
-        mid_turn = state in (
-            sv2.SessionStateV2.SCOUTING,
-            sv2.SessionStateV2.PROCESSING,
-            sv2.SessionStateV2.COMPACTING,
-        )
-        parked = state in (
-            sv2.SessionStateV2.AWAITING_WORKERS,
-            sv2.SessionStateV2.AWAITING_USER,
-            sv2.SessionStateV2.PAUSED,
-            sv2.SessionStateV2.PAUSE_REQUESTED,
-            sv2.SessionStateV2.CANCELLING,
-            sv2.SessionStateV2.FINALIZING,
-        )
-
-        if mid_turn and delivery == "steer":
-            turn = getattr(session, "current_turn_user_msg_id", None)
-            if _heartbeat_last_turn.get(job_id) == turn and turn is not None:
-                db.update_cron_run(run_id, "completed", "coalesced: already steered this turn")
-                return
+        if steering:
             await asyncio.to_thread(db.add_message, sid, "system", text, metadata=json.dumps({"heartbeat": hb_name}))
             _heartbeat_last_turn[job_id] = turn
             logger.info("Heartbeat %s steered into running turn of %s", job_id, sid[:12])
-        elif session is not None and (parked or mid_turn):
-            # follow_up (explicit, or steer degraded in a parked state):
-            # queue for the next idle dispatch; coalesce with any undelivered
-            # copy of the same heartbeat.
-            prefix = f"[heartbeat:{hb_name}]"
-            already = any(prefix in getattr(p, "message", "") for p in session.pending_messages)
-            if already:
-                db.update_cron_run(run_id, "completed", "coalesced: prior tick still queued")
-                return
+        elif queueing:
             session.pending_messages.append(PendingMessage(text, None, False))
             logger.info("Heartbeat %s queued as follow-up for %s (state=%s)", job_id, sid[:12], state)
         else:
-            # Idle (or non-resident) session: a heartbeat tick IS the turn.
-            await manager.prompt(sid, text)
+            # Idle (or non-resident) session: a heartbeat tick IS the turn —
+            # same dispatch, same bound, as a cron fire.
+            await _dispatch_prompt(sid, text)
         db.update_cron_run(run_id, "completed")
     except Exception as e:
         logger.warning("Heartbeat %s delivery failed: %s", job_id, e)
@@ -579,6 +587,44 @@ def _notify_job_failure(manager, bus, job_name: str, session_id: str | None, err
     bus.emit({**notification, "session_id": session_id or ""})
 
 
+async def _dispatch_prompt(session_id: str | None, prompt: str, title: str = "", model: str = "") -> str:
+    """Open-or-reuse a session and send it one prompt under the cron bound.
+
+    The single dispatch path for scheduled work: cron fires and heartbeat
+    ticks into an idle session are the same operation (a scheduled prompt IS
+    the turn), so they share the session handling, the model override, and the
+    tool_timeout × max_tool_rounds ceiling. Returns the session id used.
+    """
+    from sessions.manager import get_manager
+
+    manager = get_manager()
+    if not session_id:
+        # session_type="cron" is what _is_unattended_session() keys off —
+        # without it scheduled jobs hit the dangerous-tool approval gate,
+        # call ask_user into the void, and wedge in AWAITING_USER forever.
+        # Jobs reusing an explicit session_id keep that session's type:
+        # a user-attended session shouldn't lose its gate just because a
+        # job also runs in it.
+        session_id = manager.create_session(title=title, session_type="cron")
+
+    session = manager.get(session_id)
+    if session and model:
+        session.model_override = model
+
+    try:
+        await asyncio.wait_for(
+            manager.prompt(session_id, prompt),
+            timeout=settings.tool_timeout * settings.max_tool_rounds,
+        )
+    finally:
+        # Clear the model override for reused sessions
+        if model:
+            session = manager.get(session_id)
+            if session:
+                session.model_override = None
+    return session_id
+
+
 async def _execute_cron_job(meta: dict):
     """Execute a cron job by creating/reusing a session and sending the prompt."""
     from core.events import get_event_bus
@@ -611,26 +657,8 @@ async def _execute_cron_job(meta: dict):
     bus.emit({"type": "job.started", "job_name": name, "session_id": session_id, "run_id": run_id})
 
     try:
-        if not session_id:
-            # session_type="cron" is what _is_unattended_session() keys off —
-            # without it scheduled jobs hit the dangerous-tool approval gate,
-            # call ask_user into the void, and wedge in AWAITING_USER forever.
-            # Jobs reusing an explicit session_id keep that session's type:
-            # a user-attended session shouldn't lose its gate just because a
-            # job also runs in it.
-            session_id = manager.create_session(title=f"Cron: {name}", session_type="cron")
-
-        # Set model override if specified
-        session = manager.get(session_id)
-        if session and model:
-            session.model_override = model
-
         db.update_cron_run(run_id, "running")
-        cron_timeout = settings.tool_timeout * settings.max_tool_rounds
-        await asyncio.wait_for(
-            manager.prompt(session_id, prompt),
-            timeout=cron_timeout,
-        )
+        session_id = await _dispatch_prompt(session_id, prompt, title=f"Cron: {name}", model=model)
 
         duration_ms = int((time.time() - start_time) * 1000)
         db.update_cron_run(run_id, "completed")
@@ -650,11 +678,6 @@ async def _execute_cron_job(meta: dict):
         # Notify user about the failure via push/webhook
         _notify_job_failure(manager, bus, name, session_id, str(e))
     finally:
-        # Clear model override for reused sessions
-        if session_id and model:
-            session = manager.get(session_id)
-            if session:
-                session.model_override = None
         get_snooze().notify_activity()
 
 
@@ -1077,63 +1100,6 @@ def get_all_jobs_with_status() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def schedule_workflow(
-    workflow_name: str,
-    cron_expr: str,
-    inputs: str = "",
-    title: str = "",
-    _context: dict | None = None,
-) -> str:
-    """Schedule a workflow to run on a cron schedule.
-
-    Creates an ordinary cron job on the existing scheduler infrastructure: each
-    tick opens a fresh session and sends it the English prompt "Run workflow
-    <name> with inputs: ..." — it does NOT call run_workflow() directly. The
-    workflow name/inputs are also stamped into the job meta
-    (workflow_name/workflow_inputs) for bookkeeping. Whether the agent actually
-    invokes the workflow is therefore a model decision, not a mechanical one.
-    """
-    from apscheduler.triggers.cron import CronTrigger
-
-    try:
-        CronTrigger.from_crontab(cron_expr)
-    except (ValueError, KeyError) as e:
-        return f"Error: Invalid cron expression '{cron_expr}': {e}"
-
-    from core.workflows.registry import get_workflow_registry
-
-    reg = get_workflow_registry()
-    if not reg.exists(workflow_name):
-        return f"Error: Workflow '{workflow_name}' not found in registry"
-
-    job_name = title or f"workflow:{workflow_name}"
-    prompt = f"Run workflow {workflow_name}" + (f" with inputs: {inputs}" if inputs else "")
-
-    ctx = _context or {}
-    loop = ctx.get("_loop")
-
-    try:
-        import asyncio
-
-        if loop and not _scheduler:
-            future = asyncio.run_coroutine_threadsafe(_init_scheduler_async(), loop)
-            future.result(timeout=10)
-
-        _add_job_internal(
-            job_name,
-            cron_expr,
-            prompt,
-            session_id=None,
-            model="",
-            extra_meta={"workflow_name": workflow_name, "workflow_inputs": inputs},
-        )
-        _save_jobs()
-
-        return f"Workflow '{workflow_name}' scheduled as '{job_name}': {cron_expr}"
-    except Exception as e:
-        return f"Error scheduling workflow: {e}"
-
-
 def register(reg) -> None:
     common = {"category": "scheduling", "source": "extension"}
     tags = ["schedule", "cron", "recurring", "automated", "periodic", "timer", "job"]
@@ -1198,7 +1164,10 @@ def register(reg) -> None:
     reg.register(
         name="schedule_job",
         func=schedule_job,
-        description="Schedule a recurring job with 5-field cron expression. Job sends a prompt to a session on schedule.",
+        description=(
+            "Schedule a recurring job with 5-field cron expression. Job sends a prompt to a session on "
+            "schedule. To schedule a workflow, make the prompt instruct run_workflow('<name>', ...)."
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -1272,36 +1241,6 @@ def register(reg) -> None:
             "required": ["name"],
         },
         tags=tags + ["update", "edit", "modify", "change"],
-        timeout=15,
-        parallel_safe=False,
-        safety_level="safe",
-        **common,
-    )
-    reg.register(
-        name="schedule_workflow",
-        func=schedule_workflow,
-        description=(
-            "Schedule a named workflow to run automatically on a cron schedule. "
-            "The workflow fires run_workflow() on each tick via a fresh session. "
-            "Use list_scheduled_jobs / remove_scheduled_job / set_job_state to manage it."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "workflow_name": {"type": "string", "description": "Name of the workflow to schedule"},
-                "cron_expr": {
-                    "type": "string",
-                    "description": "5-field cron expression (e.g. '0 9 * * 1' = every Monday at 9am UTC)",
-                },
-                "inputs": {
-                    "type": "string",
-                    "description": "Optional free-form inputs passed to the workflow on each run",
-                },
-                "title": {"type": "string", "description": "Optional job name (defaults to 'workflow:{name}')"},
-            },
-            "required": ["workflow_name", "cron_expr"],
-        },
-        tags=tags + ["workflow", "automate", "pipeline"],
         timeout=15,
         parallel_safe=False,
         safety_level="safe",

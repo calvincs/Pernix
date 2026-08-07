@@ -50,7 +50,7 @@ The agent calls `create_workflow` with the name, description, and step list. Onc
 | `create_workflow` | Author a new workflow |
 | `validate_workflow` | Check a WORKFLOW.md's frontmatter and step DAG without saving |
 | `run_workflow` | Execute a workflow (steps run as workers, in dependency order) |
-| `schedule_workflow` / `cancel_workflow` | Put a workflow on a cron schedule / cancel a run |
+| `cancel_workflow` | Cancel a running workflow |
 | `delete_workflow` | Delete a workflow (dangerous — gated) |
 
 The corresponding REST endpoints under `/api/workflows` cover list/read/create/update/delete and run history.
