@@ -111,32 +111,37 @@ This is a deliberate "prefer the cheap and offline option" stance.
 
 ---
 
-## The four model roles
+## The three model roles
 
-Pernix uses **four model roles**. You can assign a different model to each, or use the same one across all four to start.
+Pernix uses **three chat-model roles**. You can assign a different model to each, or set only `llm_model` and let the other two default to it.
 
 | Role | Setting | What it does | Typical choice |
 |---|---|---|---|
-| Primary | `llm_model` | Main agent turns, streaming, tool calls | Your strongest model — `qwen3:32b` locally, `anthropic/claude-sonnet-4.6` on OpenRouter |
-| Background | `background_model` | Fast/offline tier: scout planning, titles, memory work, idle activities, RLM sub-calls | A fast smaller model — `qwen3:8b`, `anthropic/claude-haiku-4.5` |
-| Backup | `fallback_model` | Used whenever a Primary or Background call fails (rate limits, provider errors, stream failures). Any provider works — same-provider different-model failover is supported | Any reliable model — a local `qwen3:8b`, or a second cloud model |
-| Background | `background_model` | Auto-titling sessions, message distillation, reflect re-analysis (fire-and-forget) | A small fast model — `qwen3:8b`, `anthropic/claude-haiku-4.5` |
+| Primary | `llm_model` | Main agent turns, streaming, tool calls — plus every quality-critical call: compaction summaries, reflect verdicts, eval, and the RLM root | Your strongest model — `qwen3:32b` locally, `anthropic/claude-sonnet-4.6` on OpenRouter |
+| Background | `background_model` | Fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, Snooze activities, Dream, Telos, RLM sub-calls | A fast smaller model — `qwen3:8b`, `anthropic/claude-haiku-4.5` |
+| Backup | `fallback_model` | Used whenever a Primary **or** Background call fails (rate limits, provider errors, stream failures, scout's last resort). Any provider works — same-provider different-model failover is supported | Any reliable model — a local `qwen3:8b`, or a second cloud model |
 
 You don't have to fill all three. If `background_model` is empty, Pernix uses the primary `llm_model` for background work. If `fallback_model` is empty, failover is disabled.
 
-There is also a fifth, optional role: `embedding_model` — a local Ollama embedding model (e.g. `nomic-embed-text`) that turns memory search hybrid (BM25 + vector). Setting it is the switch; empty keeps search purely lexical. See [memory-and-recall.md](../guides/memory-and-recall.md#semantic-retrieval).
+> Earlier releases exposed `scout_model`, `reflect_model`, `critical_model`, `rlm_root_model` and `rlm_sub_model`. These were consolidated away in the 2026-08 refactor; each is now covered by one of the three roles above. Stale keys left in `data/settings.json` are ignored.
 
-### Why a separate scout model?
+There is also an optional non-chat role: `embedding_model` — a local Ollama embedding model (e.g. `nomic-embed-text`) that turns memory search hybrid (BM25 + vector). Setting it is the switch; empty keeps search purely lexical. See [memory-and-recall.md](../guides/memory-and-recall.md#semantic-retrieval).
+
+### Why run scout on the Background role?
 
 Scout runs in a fresh context window every turn. Its job is fast and structured: read the user message, search memory, pick tools/skills, draft a plan. A small model is fine — sometimes better, since it tends to follow the structured-output instructions more reliably.
 
-Running scout on the same heavy model as the main agent is wasteful — you'd pay the slow model's latency for a job a fast model handles in 2 seconds.
+Running scout on the same heavy model as the main agent is wasteful — you'd pay the slow model's latency for a job a fast model handles in 2 seconds. If scout exhausts its retries on Background it makes one final attempt on Backup before falling through to a deterministic stub report.
+
+### Task-scoped overrides are a separate axis
+
+The three roles are global. Per-request overrides — `switch_model` mid-turn, `spawn_worker(model=…)`, worker specs, and workflow step models — pick a model for one unit of work and are unaffected by the role slots.
 
 ---
 
 ## Per-session model override
 
-The four roles above are global. To change just the primary model for one session:
+The three roles above are global. To change just the primary model for one session:
 
 ```bash
 curl -X PATCH http://localhost:8090/api/sessions/{id} \
@@ -144,7 +149,7 @@ curl -X PATCH http://localhost:8090/api/sessions/{id} \
   -d '{"model_override": "anthropic/claude-haiku-4.5"}'
 ```
 
-Or via the session menu in the UI. The override only affects the primary; scout/fallback/background still follow the global setting.
+Or via the session menu in the UI. The override only affects the Primary role; Background and Backup still follow the global setting.
 
 Common pattern: most sessions use a heavy model, but a "quick lookup" session uses a fast cheap model. The override lets you do that without changing global settings.
 
@@ -152,16 +157,22 @@ Common pattern: most sessions use a heavy model, but a "quick lookup" session us
 
 ## Failover semantics
 
-When OpenRouter returns a rate-limit, quota-exceeded, or context-overflow error, the router attempts failover:
+There are three layers, all of them landing on the Backup role.
+
+**1. Router-level provider failover.** When a cloud provider returns a rate-limit, quota-exceeded, or overload error, the router attempts failover:
 
 1. The original failure is logged (`FailoverError` with classified reason).
-2. If `fallback_model` is set and the failure is one of the failover-eligible classes, the request is retransmitted to the fallback Ollama model.
+2. If `fallback_model` is set and the failure is one of the failover-eligible classes, the request is retransmitted to the local Ollama provider running `fallback_model`. Eligibility is simply "the failing provider was not already Ollama".
 3. The message stream is **sanitized for the fallback** — `core/llm/router.py:sanitize_for_fallback()` strips vision content blocks and converts tool messages to text, since most local models don't support those formats.
 4. The user-facing response continues without interruption. The UI may show a small badge indicating which provider answered.
 
-Failover is **not** triggered for transient network errors or for OpenRouter being down entirely (those bubble up as errors). It's specifically targeted at rate limits.
+Router-level failover is **not** triggered for transient network errors or for the provider being down entirely (those bubble up as errors), and `CONTEXT_OVERFLOW` deliberately does not fail over — it triggers a compaction retry instead.
 
-If `fallback_model` is empty, failover is skipped and the user sees the OpenRouter error.
+**2. Agent-loop model failover.** Above the router, the streaming agent loop retries with backoff and then switches to `fallback_model` outright, emitting a `stream.fallback` event. The only requirement is that the backup differs from the model currently in flight — **a different model on the same provider counts**, so an Ollama-primary / Ollama-backup setup has real failover. (Requiring a *different provider* used to mean such a configuration silently had none.)
+
+**3. One-shot Backup retry.** Every non-streaming call site — compaction, reflect, titles, eval, distill — goes through `chat_with_backup()`: try the role's model, and on any exception retry exactly once on `fallback_model`. Because that retry is re-routed by the model registry, it can land on a different provider or the same one.
+
+If `fallback_model` is empty, all three layers are skipped and the caller sees the original error.
 
 ---
 
@@ -170,8 +181,8 @@ If `fallback_model` is empty, failover is skipped and the user sees the OpenRout
 Each provider has its own concurrency limit, enforced via async semaphores:
 
 - `llm_max_concurrent` (default 1) — Ollama
-- `openrouter_max_concurrent` (default 2) — OpenRouter
-- `openai_max_concurrent` (default 2) — OpenAI provider
+- `openrouter_max_concurrent` (default 4) — OpenRouter
+- `openai_max_concurrent` (default 4) — OpenAI provider
 
 Workers and the main session share the semaphore. If you spawn 5 parallel workers all using the same provider, they queue against this limit.
 

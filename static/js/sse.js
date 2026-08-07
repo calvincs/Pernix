@@ -30,13 +30,17 @@ const EVENT_TYPES = [
     // Tools / context / scout
     'tool.start', 'tool.call',
     'context.compacting', 'context.compacted', 'context.reset',
+    'context.view_pruned',
     'scout.start', 'scout.step', 'scout.done',
     // Session lifecycle
     'session.queued', 'session.title', 'session.cancelled',
     'session.state_changed', 'session.prompt_rejected',
     'session.waiting_llm', 'session.message_combined',
+    'session.message_combine_skipped',
     'session.queue_dropped', 'session.queue_full',
     'session.queue_removed',
+    // Goals (budget checkpoints + auto-continuation)
+    'goal.budget_exceeded', 'goal.continuation',
     // Injected mid-turn messages
     'message.injected',
     // Workers
@@ -53,9 +57,10 @@ const EVENT_TYPES = [
     // Reflect (post-turn verification)
     'reflect.start', 'reflect.done', 'reflect.skipped',
     'reflect.retry', 'reflect.exhausted', 'reflect.escalate',
-    'reflect.budget_exhausted',
-    // Eval (autonomous evaluation pass)
+    'reflect.budget_exhausted', 'reflect.circuit_breaker',
+    // Eval (autonomous evaluation pass) + goal gates
     'eval.start', 'eval.pass', 'eval.done', 'eval.retry', 'eval.exhausted',
+    'gates.done',
     // Snooze (idle-time consolidation)
     'snooze.start', 'snooze.activity', 'snooze.done',
     // Model switches (mid-turn override + scout-routed pill)

@@ -39,7 +39,7 @@ Beyond the localhost-only default. Read these before exposing Pernix to anything
 - [security.md](security.md) — full security model, threat surface, mitigations
 - [deployment/network-mode.md](deployment/network-mode.md) — HTTPS, Bearer auth, SSRF lockdown
 - [deployment/mkcert.md](deployment/mkcert.md) — trusted TLS for LAN access without browser warnings
-- [deployment/llm-providers.md](deployment/llm-providers.md) — Ollama and OpenRouter setup, the four model roles, failover
+- [deployment/llm-providers.md](deployment/llm-providers.md) — Ollama and OpenRouter setup, the three model roles, failover
 
 ## I'm building integrations / scripting Pernix
 

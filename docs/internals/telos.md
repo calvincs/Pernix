@@ -81,11 +81,24 @@ between "telos noticed" and "telos changed behavior":
    `queue_producer_edits("telos", …)`; the adaptive engine's risk gating,
    caps, and rollback apply unchanged.
 3. **Context port** — up to three open questions (by surprise) plus a live
-   alarm count render into the volatile tail of every compile
-   (`_build_telos_drive_block`). Byte-identical output when `telos_enabled`
-   is off.
+   alarm count render into the **volatile tail**: a single pinned system
+   message appended as the *last* message of every compile
+   (`_build_telos_drive_block`, composed into `_build_volatile_tail`
+   alongside the to-the-second clock, resource status and goal burn). Keeping
+   all per-call churn in the suffix is what lets the provider's prompt-prefix
+   cache stay valid across turns — a clock in the system head would
+   invalidate it on every single call. The block is the empty string when
+   `telos_enabled` is off, so the compiled output is byte-identical.
 4. **Escalation that terminates** — the binding ladder monitors suspended
-   goals too: a persisting signature climbs L2 → L3 (operator notification);
-   a cleared signature un-suspends the goal and closes the alarm.
-   Acknowledging an alarm silences notifications without resetting the
-   ladder.
+   goals too, so L2 is not a terminal state: a persisting signature climbs
+   L2 → L3 (operator notification at `high` urgency; L2 notifies at
+   `normal`), and a signature that stops holding clears the alarm and
+   un-suspends the goal — but **only if this monitor was what suspended it**
+   (the alarm id is matched inside `suspended_reason`). Suspensions imposed
+   by the ordo pass or by the operator survive.
+
+   Acknowledging an alarm silences its notification but leaves it live
+   (`open` and `acknowledged` are both live states), so the ladder keeps its
+   place instead of minting a fresh L1 on the next pass and restarting the
+   climb from zero. An acked alarm is forced back to `open` when the ladder
+   actually climbs, because a climb is new evidence.

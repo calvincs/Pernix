@@ -67,7 +67,7 @@ Table: `session_state_log` (append-only). Columns: `session_id, turn_id, parent_
 - `turn_id` increments on `prompt-arrived` and `answer-received`. An answer turn gets `parent_turn_id = <previous turn_id>` so the UI can group multi-round dialogs.
 - `retry_index` increments on `reflect-retry` and `eval-retry`; all rows in a retry share the same `turn_id`.
 - `compaction_count` increments each time PROCESSING → COMPACTING happens within a retry.
-- Retention: snooze's cron cleanup prunes rows older than 30 days while keeping the most recent 500 per session (`core/snooze.py`).
+- Retention: `retention.prune_cron()` (`core/retention.py:33-54`) prunes rows older than 30 days while keeping the most recent 500 per session, so the last turn of every session stays inspectable regardless of age. Snooze's Activity 7 (`cron_cleanup`) and maintenance's 24h fallback own the cadence; the sweep itself lives in `core/retention.py`, not `core/snooze.py`.
 
 ### 0.4 SSE events
 
@@ -75,7 +75,16 @@ Table: `session_state_log` (append-only). Columns: `session_id, turn_id, parent_
 - `session.prompt_rejected {reason: "awaiting_user" | "cancelling" | "queue_full"}` — emitted when a prompt is refused.
 - `worker.done {worker_id, termination_reason, error}` — emitted on parent session when a worker's full turn settles.
 
-Existing payload-detail events (`scout.start`, `stream.token`, `tool.call.*`, `context.compacting`, `reflect.*`, `turn.complete`, `worker.started`) remain and continue to fire.
+Existing payload-detail events (`scout.start`, `stream.token`, `tool.call.*`, `context.compacting`, `reflect.*`, `turn.complete`, `worker.started`) remain and continue to fire. Later additions on the same stream:
+
+- `reflect.circuit_breaker {attempts, signature, reasoning}` (`sessions/hooks.py:806-817`) — a reflect `retry` was refused because the last two attempts failed identically.
+- `goal.budget_exceeded {reason}` (`core/agent.py:662`) — the in-turn budget checkpoint tripped mid-round; the loop breaks with `termination_reason="budget_exhausted"`.
+- `goal.continuation {goal_id, ordinal, budget}` (`sessions/manager.py:609`) — an auto-continuation turn was enqueued for the active goal.
+- `context.view_pruned {stubbed}` (`core/context/compiler.py:1005`) — budget-gated view pruning stubbed N oversized tool results out of the compiled view.
+- `session.message_combine_skipped {message_id, reason}` (`sessions/manager.py:1021`) — a rapid-fire message could not be folded into the in-flight turn and was queued instead.
+- `gates.done {attempt, total, failed, names_failed}` (`sessions/hooks.py:376`) — deterministic goal gates finished.
+
+Every one of these must also appear in `EVENT_TYPES` in `static/js/sse.js`: `EventSource` only dispatches to listeners registered by exact name, so an unlisted event is silently dropped, `_lastSeq` never advances for it, and the client's gap detection fires a spurious soft reload on the next subscribed event.
 
 ### 0.5 Flag disposition
 
@@ -351,7 +360,7 @@ Not part of a normal turn, but part of the lifecycle:
 
 ### 2.1 The loop (`core/agent.py:256-514`)
 
-Iterates while `tool_round < settings.max_tool_rounds` (default 10):
+Iterates while `tool_round < settings.max_tool_rounds` (default 50):
 
 1. **Pre-round gates** (`agent.py:333-341`) — check `session.cancel_requested`, await `session.pause_event` (for worker pause/resume)
 2. **Compile context** (`agent.py:347-355`) — `compile_context()` in `core/context/compiler.py` returns compacted messages + active tool schemas + scout-report section + resource header (rounds left, token budget). Compaction runs as a view transform; stored messages are never mutated.
@@ -376,7 +385,7 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 10):
 
 ### 2.2 Scout agent (`core/scout/runner.py`)
 
-- **Model** — `settings.scout_model` (fast, cheap), **fresh context** (no main convo history — session brief only)
+- **Model** — the Background role, `settings.background_model` (fast, cheap; empty ⇒ `llm_model`), **fresh context** (no main convo history — session brief only). When scout exhausts its retries it makes one last attempt on the Backup role, `settings.fallback_model` (`runner.py:1265-1290`), before falling through to a deterministic stub report
 - **Tools** — read-only discovery: `search_memory`, `search_skills`, `search_tools`, `read_skill_instructions`, `submit_report`
 - **Budget** — 5 rounds max; must call `submit_report` by round 4 (`runner.py:104`)
 - **Output** — `ScoutReport` with `recommended_tools`, `recommended_skills` (0-3), `approach_guidance`, `deliverables_plan` (used by Reflect), optional `recommended_model`. SOUL.md/RULES.md/SESSIONS.md are NOT part of the report: the context compiler injects those files whole into the fixed prefix of every system prompt (`_build_agent_directives_block`) — scout reads them to shape its plan but never retypes them
@@ -417,7 +426,7 @@ Compaction is the context-budget management layer. Full details live in `core/co
   - **Critical** (`agent.py:359-375`) — utilization exceeds `settings.context_critical_threshold` (default 0.85); last-resort compaction before breaking the turn; one-retry budget per turn
   - **API overflow** (`agent.py:465-471`) — `FailoverError(reason=CONTEXT_OVERFLOW)` returned from an actual LLM call; retries the same `tool_round` after compaction
 - **Non-destructive** — stored messages are never mutated. Three-phase view:
-  1. `apply_view_pruning()` (`compaction.py:56-76`) — stubs tool results >300 chars **in a new list**
+  1. `apply_view_pruning()` — stubs oversized tool results **in a new list**. Budget-gated: it engages only when history chars exceed `view_prune_pressure` (0.5) of the char-equivalent budget, keeps the last `view_prune_keep_recent` (30) messages intact, and only stubs results larger than `view_prune_min_chars` (2000). Emits `context.view_pruned {stubbed}`
   2. `exclude_orphans()` (`compaction.py:83-110`) — filters tool messages whose `tool_call_id` has no matching assistant call, view only
   3. `compact_with_llm()` (`compaction.py:117-216`) — **appends** a new `role="compaction"` marker message containing the summary; originals stay in the DB
 - **Boundary** (`compaction.py:130-139`) — token count accumulates newest-to-oldest until exceeding `settings.compaction_keep_tokens` (default 51k); everything **before** that boundary is summarized. Recent turns are preserved in full.
@@ -429,22 +438,29 @@ Compaction is the context-budget management layer. Full details live in `core/co
 
 The LLM layer is abstracted by `ProviderRouter` (`core/llm/router.py`) sitting behind `core/llm/client.py`. Essentials:
 
-- **Providers** — two: `OllamaProvider` (local, always available, `settings.llm_base_url`) and `OpenRouterProvider` (remote, opt-in, requires `OPENROUTER_API_KEY`). Selection is model-driven: `router.registry.resolve_provider(model)` (`router.py:123-126`) returns OpenRouter if the model is registered there and the key exists, else Ollama.
-- **Per-provider semaphores** (`router.py:89-94`) — independent `FairLLMSemaphore` instances:
+- **Providers** — three: `OllamaProvider` (local, always available, `settings.llm_base_url`), `OpenRouterProvider` (remote, opt-in, requires `OPENROUTER_API_KEY`) and `OpenAIProvider` (native OpenAI-compatible, `settings.openai_base_url`, key via `OPENAI_API_KEY`). Held in the name-keyed `self._providers` map (`router.py:108-113`); selection is model-driven via `router.registry.resolve_provider(model)` (`router.py:149-152`), which returns `"ollama" | "openrouter" | "openai"`. `get_provider()` falls back to Ollama when the resolved remote provider is unavailable (`router.py:124-131`).
+- **Per-provider semaphores** (`router.py:94-106`, `self._semaphores` at `:114-118`) — independent `SessionAwareLLMScheduler` instances, each constructed with `session_timeout = settings.llm_session_timeout` (default 1800s; `0` means unlimited):
   - Ollama capacity = `settings.llm_max_concurrent` (default 1)
-  - OpenRouter capacity = `settings.openrouter_max_concurrent` (default 2)
-  - `_get_semaphore_stats()` (`client.py:25-27`, `router.py:111-121`) is what `spawn_worker`'s saturation check consults
-- **Role slots** (`config.py:46-49`, `:154`):
-  - `llm_model` — primary (required)
-  - `scout_model` — scout loop; falls back to `background_model` or `llm_model`
-  - `background_model` — compaction summaries, auto-title, reflect, distillation
-  - `fallback_model` — Ollama destination when OpenRouter fails over
-- **Per-session override** — `session.model_override` is read at turn start (`agent.py:313-318`); registry resolves bare names to provider-qualified IDs. Enables workers (or `switch_model`) to swap models without touching global config. Paired with `context_budget_override` so concurrent sessions on different-sized models don't clobber each other.
+  - OpenRouter capacity = `settings.openrouter_max_concurrent` (default 4)
+  - OpenAI capacity = `settings.openai_max_concurrent` (default 4)
+  - The `semaphore_stats` property (`router.py:137-147`) sums `available`/`waiting`/`capacity` across all three and nests per-provider stats under the provider name; this is what `spawn_worker`'s saturation check consults
+- **Role slots** — three chat-model roles since the 2026-08 consolidation (`config.py:61-75`). `scout_model`, `reflect_model`, `critical_model`, `rlm_root_model` and `rlm_sub_model` no longer exist:
+
+  | Setting | Role | Consumers |
+  |---|---|---|
+  | `llm_model` | **Primary** (required) | agent turns; every quality-critical call — compaction summaries, reflect verdicts, eval; RLM root |
+  | `background_model` | **Background** (empty ⇒ Primary) | scout, auto-title, distill/ingest, snooze activities, dream, telos, RLM sub-calls |
+  | `fallback_model` | **Backup** (empty ⇒ no backup) | used whenever a Primary *or* Background call fails: stream failover, provider failover, scout's last resort, one-shot retry |
+
+  `embedding_model` is not a chat role — it names a local Ollama embedding model and setting it is what switches memory search from lexical to hybrid.
+- **Per-session override** — `session.model_override` is read at turn start; registry resolves bare names to provider-qualified IDs. Enables workers (or `switch_model`) to swap models without touching global config. Paired with `context_budget_override` so concurrent sessions on different-sized models don't clobber each other. Per-request overrides (`switch_model`, `spawn_worker(model=)`, worker specs, workflow steps) are the task-scoped axis and are orthogonal to the three role slots.
 - **Typed failover** — `FailoverReason` enum (`core/llm/errors.py:8-18`): `RATE_LIMIT`, `OVERLOADED`, `TIMEOUT`, `CONTEXT_OVERFLOW`, `AUTH`, `MODEL_NOT_FOUND`, `FORMAT_ERROR`, `UNKNOWN`. Classification via `classify_http_error()` (`errors.py:43-64`): 429/402 → `RATE_LIMIT`, 502/503 → `OVERLOADED`, 408 → `TIMEOUT`, 400 + context-keyword → `CONTEXT_OVERFLOW`.
 - **Behavior by reason**:
-  - `RATE_LIMIT` / `OVERLOADED` (on OpenRouter) → automatic fallback to Ollama via `_fallback_chat()` / `_fallback_stream()` (`router.py:146-151, 181-187, 213-243`). Fallback **sanitizes messages** first: strips vision blocks, converts tool→user messages (`router.py:27-79`) since Ollama may not support them
+  - `RATE_LIMIT` / `OVERLOADED` on a remote provider → automatic fallback to Ollama running `settings.fallback_model`, via `_fallback_chat()` / `_fallback_stream()` (`router.py:253-305`). Eligibility is `_fallback_eligible()` (`router.py:120-122`): any provider that is not already Ollama. Fallback **sanitizes messages** first: strips vision blocks, converts tool→user messages (`router.py:25-81`) since Ollama may not support them
   - `CONTEXT_OVERFLOW` → no fallback; surfaces to agent loop which runs compaction-retry (see §2.6)
   - `TIMEOUT` / `AUTH` / `MODEL_NOT_FOUND` / `FORMAT_ERROR` / `UNKNOWN` → no fallback; surfaces as hard error → `termination_reason="error"`
+- **Same-provider Backup failover** — above the router, the streaming agent loop switches to `settings.fallback_model` once its retry budget is spent and emits `stream.fallback` (`agent.py:1005-1022` for the tool loop, `:1772-1790` for the final response). The only requirement is that the backup differs from the model currently in flight — **a different model on the same provider counts**, so an Ollama-primary/Ollama-backup configuration has real failover. The switch re-runs `attach_cache_breakpoints()` for the new model so stale Anthropic cache parts are flattened when the backup is not `anthropic/*`.
+- **One-shot Backup retry** — `chat_with_backup()` (`core/llm/client.py:154-169`) wraps every non-streaming call site (compaction, reflect, titles, eval, distill): try `model`, and on any exception retry exactly once on `settings.fallback_model` when it is set and different. Because it goes back through `client.chat()`, the backup is routed by the registry — it can land on a different provider or the same one.
 
 ### 2.8 Events / SSE (`core/events.py`, `sessions/state.py:153-173`)
 

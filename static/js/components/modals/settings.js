@@ -52,18 +52,21 @@ const SECTIONS = [
     },
     {
         title: 'Context',
-        description: 'Token budget for conversations. Compaction automatically summarizes older messages when context fills up. Critical threshold triggers a hard reset if compaction can\'t free enough space.',
+        description: 'Token budget for conversations. The budget is normally derived per session from the active model\'s context length — Context Budget is only the fallback used when the model registry reports none. Compaction automatically summarizes older messages when context fills up; critical threshold triggers a hard reset if compaction can\'t free enough space. View pruning is the cheaper step before compaction: under budget pressure it stubs oversized tool results out of the compiled view only — stored messages are never touched.',
         fields: [
-            { key: 'context_budget', label: 'Context Budget', type: 'number' },
+            { key: 'context_budget', label: 'Context Budget (fallback when the model reports none)', type: 'number' },
             { key: 'max_tokens', label: 'Max Output Tokens', type: 'number' },
             { key: 'compaction_threshold', label: 'Compaction Threshold', type: 'number', step: 0.05 },
             { key: 'compaction_keep_tokens', label: 'Compaction Keep Tokens', type: 'number' },
             { key: 'context_critical_threshold', label: 'Critical Reset Threshold', type: 'number', step: 0.05 },
+            { key: 'view_prune_pressure', label: 'View Prune Pressure (fraction of budget)', type: 'number', step: 0.05 },
+            { key: 'view_prune_keep_recent', label: 'View Prune Keep Recent (messages)', type: 'number' },
+            { key: 'view_prune_min_chars', label: 'View Prune Min Chars', type: 'number' },
         ],
     },
     {
         title: 'Agent',
-        description: 'Limits on the agent loop. Tool rounds caps tool calls per turn; continuations caps self-continue cycles. Scout sends a lightweight model ahead to discover relevant tools and context before the primary model responds.',
+        description: 'Limits on the agent loop. Max Tool Rounds is a backstop against a runaway loop, not a spend cap — goal token/time budgets and the stuck detector are the real guards, so a high value is fine. Scout sends a lightweight model (the Background role) ahead to discover relevant tools and context before the Primary model responds.',
         fields: [
             { key: 'max_tool_rounds', label: 'Max Tool Rounds', type: 'number' },
             { key: 'scout_enabled', label: 'Scout Enabled', type: 'bool' },
@@ -156,7 +159,7 @@ const SECTIONS = [
     },
     {
         title: 'RLM (Recursive Processing)',
-        description: 'Recursive Language Models: the agent processes inputs far beyond the context window (huge files, corpora, transcripts) by writing code in a sandboxed REPL that holds the input as a variable and delegates chunks to sub-LLM calls. The caps guard against runaway runs: iterations bounds root turns, sub-calls bounds total LLM spend per run, depth 2+ allows recursive child RLMs. Caps and models apply immediately; the rlm_process tool registers at startup, so enabling/disabling takes a restart. Root and sub-call models are chosen under Models → Model Roles.',
+        description: 'Recursive Language Models: the agent processes inputs far beyond the context window (huge files, corpora, transcripts) by writing code in a sandboxed REPL that holds the input as a variable and delegates chunks to sub-LLM calls. The caps guard against runaway runs: iterations bounds root turns, sub-calls bounds total LLM spend per run, depth 2+ allows recursive child RLMs. Caps apply immediately; the rlm_process tool registers at startup, so enabling/disabling takes a restart. RLM adds no model roles of its own: the root runs on your Primary model and sub-calls run on Background (both set under Models → Model Roles).',
         fields: [
             { key: 'rlm_enabled', label: 'RLM Enabled', type: 'bool' },
             { key: 'rlm_max_iterations', label: 'Max Iterations', type: 'number' },

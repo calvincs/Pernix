@@ -134,7 +134,7 @@ You can give a single session a different primary model than your global setting
 
 The override lives in `session.model_override` (not in global Settings). Set it by clicking the **model badge** in the status bar, via the UI session menu, or via `PATCH /api/sessions/{id}` with `{"model_override": "..."}`.
 
-The other model roles (scout, fallback, background) follow the global setting; only the primary is overridable per session.
+The other two model roles (Background and Backup) follow the global setting; only Primary is overridable per session.
 
 ---
 

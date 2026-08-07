@@ -1983,6 +1983,17 @@ function handleEvent(event) {
         state.streaming = false;
         _showSendButton();
     }
+    else if (type === 'reflect.circuit_breaker') {
+        // Cross-retry breaker: reflect asked for another retry, but the last
+        // two attempts failed identically. Retrying is refused rather than
+        // burning the remaining budget on the same failure.
+        appendMessage('system',
+            `Reflect: retry stopped \u2014 the same failure repeated across `
+            + `${event.attempts || '?'} attempt(s). ${event.reasoning || ''}`);
+        updateStatus('');
+        state.streaming = false;
+        _showSendButton();
+    }
 
     else if (type === 'model.divider') {
         // Mid-turn switch — insert a visible pill-with-rules row in the chat
@@ -2088,6 +2099,32 @@ function handleEvent(event) {
             `Reflect skipped (time budget exhausted, ${event.remaining_s}s remaining < ${event.needed_s}s needed).`);
     }
 
+    else if (type === 'gates.done') {
+        const failed = event.failed || 0;
+        if (failed) {
+            appendMessage('system',
+                `Gates: ${failed}/${event.total} failed — ${(event.names_failed || []).join(', ')}`);
+        } else if (event.total) {
+            updateStatus(`Gates: ${event.total} passed`);
+        }
+    }
+
+    else if (type === 'goal.budget_exceeded') {
+        appendMessage('system', `Goal budget exceeded (${event.reason || 'budget'}) — ending turn.`);
+    }
+
+    else if (type === 'goal.continuation') {
+        const gbudget = event.budget ? `/${event.budget}` : '';
+        updateStatus(`Goal continuation ${event.ordinal || '?'}${gbudget}…`);
+        if (state.sid) updateSessionActivity(state.sid, `goal continuation ${event.ordinal || ''}`);
+    }
+
+    else if (type === 'context.view_pruned') {
+        // Budget-gated view pruning stubbed oversized tool results out of the
+        // compiled view (the stored transcript is untouched).
+        updateStatus(`Pruned ${event.stubbed} large tool result(s) from view`);
+    }
+
     else if (type === 'workflow.started') {
         appendMessage('system', `Workflow started: ${event.workflow} (${event.step_count} step${event.step_count === 1 ? '' : 's'})`);
         if (state.sid) updateSessionActivity(state.sid, `workflow: ${event.workflow}`);
@@ -2129,10 +2166,10 @@ function handleEvent(event) {
         updateStatus('');
     }
 
-    // Snooze (background idle-time consolidation) and session.message_combined
-    // are intentionally silent — they're informational only, but listing them
-    // in sse.js EVENT_TYPES keeps _lastSeq advancing so gap detection stays
-    // honest.
+    // Snooze (background idle-time consolidation), session.message_combined
+    // and session.message_combine_skipped are intentionally silent — they're
+    // informational only, but listing them in sse.js EVENT_TYPES keeps
+    // _lastSeq advancing so gap detection stays honest.
 
     else if (type === 'turn.complete') {
         // Safety net: ensure button is always reset when turn finishes
