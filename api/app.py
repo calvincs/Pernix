@@ -548,14 +548,45 @@ async def favicon():
     return FileResponse(png_path, media_type="image/png")
 
 
+def _compute_build_id() -> str:
+    """Deploy fingerprint for PWA cache-busting: a hash over the shipped
+    static assets' identity (path, size, mtime). Any rebuild that changes an
+    asset changes the id; restarts of the same image keep it stable. Served
+    into sw.js so clients detect new builds without manual version bumps."""
+    import hashlib
+    from pathlib import Path as _Path
+
+    h = hashlib.sha256()
+    static_root = _Path(__file__).resolve().parent.parent / "static"
+    try:
+        for p in sorted(static_root.rglob("*")):
+            if p.is_file():
+                st = p.stat()
+                h.update(f"{p.relative_to(static_root)}:{st.st_size}:{int(st.st_mtime)}".encode())
+    except OSError:
+        pass
+    return h.hexdigest()[:12]
+
+
+BUILD_ID = _compute_build_id()
+
+
 @app.get("/sw.js")
 async def service_worker():
     import os
 
-    from fastapi.responses import FileResponse
+    from fastapi.responses import Response
 
     sw_path = os.path.join(os.path.dirname(__file__), "..", "static", "sw.js")
-    return FileResponse(sw_path, media_type="application/javascript", headers={"Service-Worker-Allowed": "/"})
+    with open(sw_path, encoding="utf-8") as f:
+        body = f.read().replace("__BUILD__", BUILD_ID)
+    # no-cache: the SW script itself must never be HTTP-stale, or clients
+    # keep running the previous build's precache for up to 24h.
+    return Response(
+        body,
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+    )
 
 
 # Mount static files
