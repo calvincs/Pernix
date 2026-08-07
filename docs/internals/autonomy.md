@@ -22,9 +22,10 @@ either passes or it doesn't.
 With `gates_enabled`, the agent (or a canary, or a worker spec) registers
 gates via three tools:
 
-- `add_gate(name, command, watch_paths?, cwd?)` — register a check on this
-  session. Creating one is a `caution`-level action: a gate is shell you
-  authored that will run automatically from now on.
+- `add_gate(name, command, watch_paths?, cwd?, scope?)` — register a check on
+  this session. Creating one is a `caution`-level action: a gate is shell you
+  authored that will run automatically from now on. `scope` is `session`
+  (default) or `goal`; a goal-scoped gate additionally blocks `goal_complete`.
 - `list_gates` / `remove_gate` — inspect and retire them.
 
 Gates run in the post-turn hook chain, immediately before Reflect, and their

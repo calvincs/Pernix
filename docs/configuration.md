@@ -33,7 +33,7 @@ These are the most important settings to configure before first use.
 | `llm_model` | *(empty)* | **Required.** The primary model used for agent turns. Set this before your first session. |
 | `scout_model` | *(empty)* | Fast, small model used in the planning phase. Can be the same as `llm_model` to start. A lightweight model (3–8B) works well here. |
 | `fallback_model` | *(empty)* | Ollama model to use when OpenRouter hits a rate limit or quota. Should be a locally-available Ollama model. |
-| `background_model` | *(empty)* | Model used for background tasks: auto-titling sessions and memory distillation. Usually a smaller/faster model. |
+| `background_model` | *(empty)* | Model used for **every** non-agent-turn LLM call. Large blast radius — roughly 20 call sites: session auto-titling, memory distillation and ingest, compaction summaries, reflect (via `reflect_model` fallback), scout (fallback after `scout_model`), evaluation, workflow reflect, refine and adaptive-policy authoring, every LLM-backed Snooze activity, Dream, Telos, and RLM sub-calls (via `rlm_sub_model` fallback). Usually a smaller/faster model — but note that anything too weak degrades reflect verdicts, compaction fidelity, and memory quality across the whole system, not just titles. Empty falls back to `llm_model` everywhere. |
 | `llm_max_concurrent` | `1` | Maximum simultaneous requests to Ollama. Increase only if your hardware supports parallel inference. |
 | `llm_session_timeout` | `1800` | Maximum wall-clock seconds a session may hold an LLM slot. Prevents hung sessions from blocking others. Set to `0` for unlimited. |
 
@@ -76,6 +76,7 @@ Pernix tracks how many tokens are in the active conversation and automatically c
 | `compaction_threshold` | `0.75` | Compact when the conversation reaches this fraction of `context_budget`. At 75%, older messages are summarized and replaced with a compact representation. |
 | `compaction_keep_tokens` | `51000` | How many tokens to preserve verbatim after compaction. Recent messages and tool results are kept. |
 | `context_critical_threshold` | `0.85` | Show a visual warning in the UI when context fills to this fraction. |
+| `max_inline_attach_bytes` | `33554432` (32 MB) | Ceiling on the total base64 attachment bytes inlined into a single compile. Past it, the oldest attachments fall back to text markers. 32 MB fits audio (a 19 MB WAV expands to ~25 MB base64). |
 
 > **Tip:** If you are using a model with a small context window (e.g. 8K or 16K tokens), reduce `context_budget` and `compaction_keep_tokens` accordingly.
 

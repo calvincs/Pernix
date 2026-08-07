@@ -572,8 +572,7 @@ async def test_fallback_fires_on_same_provider(monkeypatch):
     await run_agent(sid, "go", session)
 
     assert "local-fallback" in models_called, (
-        f"Same-provider fallback must be attempted after the primary fails; "
-        f"call sequence: {models_called}"
+        f"Same-provider fallback must be attempted after the primary fails; " f"call sequence: {models_called}"
     )
     msgs = db.get_messages(sid)
     assert any(

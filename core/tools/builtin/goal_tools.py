@@ -123,10 +123,10 @@ def goal_complete(summary: str = "", _context: dict | None = None) -> str:
 
     if settings.gates_enabled:
         from core.gates import _run_one, failing
-        from core.tools.paths import workspace
 
         rows = [g for g in db.get_gates(session_id) if g.get("scope") in ("goal", "session")]
-        results = [_run_one(row, workspace(), "") for row in rows]
+        ws = _gate_workspace(_context)
+        results = [_run_one(row, ws, "") for row in rows]
         bad = failing(results)
         if bad:
             details = "; ".join(f"{r.name} (exit {r.exit_code}): {r.output_tail[-200:] or r.error}" for r in bad)
@@ -141,6 +141,24 @@ def goal_complete(summary: str = "", _context: dict | None = None) -> str:
         session.active_goal_id = None
     note = f" Summary: {summary.strip()}" if summary.strip() else ""
     return f"Goal #{goal['id']} completed.{note}"
+
+
+def _gate_workspace(_context: dict | None):
+    """Workspace the goal's gates run in — same resolution core.gates uses.
+
+    A session with a workspace_override (canary runs, isolated tasks) must
+    have its gates run there, not in the shared global workspace. The live
+    session object is authoritative; fall back to the override carried on the
+    tool context, then to the global workspace.
+    """
+    from pathlib import Path
+
+    from core.tools.paths import workspace
+
+    override = getattr(_session(_context), "workspace_override", None)
+    if not override:
+        override = (_context or {}).get("workspace_override")
+    return Path(override).resolve() if override else workspace()
 
 
 def _session(_context: dict | None):

@@ -101,6 +101,10 @@ class Settings:
     compaction_threshold: float = 0.75
     compaction_keep_tokens: int = 51_000
     context_critical_threshold: float = 0.85
+    # Ceiling on the total bytes of attachment data inlined into one compile
+    # (core/context/compiler.py). Past it, the oldest attachments are dropped
+    # back to text markers. 32MB fits audio (a 19MB WAV → ~25MB base64).
+    max_inline_attach_bytes: int = 32 * 1024 * 1024
 
     # --- Agent Loop ---
     max_tool_rounds: int = 10
@@ -239,9 +243,11 @@ class Settings:
     # Governed machine-editable policy store. While off: zero rows, compiler
     # output byte-identical, no producer emits edits.
     adaptive_enabled: bool = False
-    # Auto-apply low-risk kinds (routing_hint, prompt_note) at idle; high-
-    # risk always proposal-gated. Per Calvin: on when enabled — but the plan
-    # ships the first week with this OFF to build canary baselines first.
+    # ON by default (takes effect only once adaptive_enabled): low-risk kinds
+    # (routing_hint, prompt_note) auto-apply at idle, subject to the per-day
+    # and cooldown caps below; high-risk kinds are always proposal-gated.
+    # Set False to route every edit — low-risk included — through proposals,
+    # e.g. while building canary baselines.
     adaptive_auto_apply: bool = True
     # Promote a canary-regression tripwire hit to automatic rollback. Off
     # until the metric earns trust; a hit only flags the batch 'suspect'.
@@ -395,9 +401,7 @@ class Settings:
     # --- Reflect (post-execution verification) ---
     reflect_enabled: bool = True  # Run Reflect after agent turns
     reflect_max_retries: int = 2  # Max retry attempts before giving up
-    reflect_max_retries_worker: int = (
-        2  # Separate (lower) cap for worker sessions — bounds fan-out cost (1 retry allowed)
-    )
+    reflect_max_retries_worker: int = 2  # Separate cap for worker sessions — bounds fan-out cost (2 retries allowed)
     reflect_min_messages: int = 3  # Min messages to trigger (skip trivial exchanges)
     reflect_full_transcript: bool = (
         False  # DEPRECATED: reflect now always sees the per-attempt transcript; kept as a no-op for backwards compat
