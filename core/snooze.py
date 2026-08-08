@@ -519,6 +519,15 @@ class SnoozeRunner:
             _announce(bus, "cleanup_canary_runs", "Pruning old canary runs and sessions")
             await self._cleanup_canary_runs()
 
+        # Activity 12d: Canary suite auto-maintenance (no LLM). Promotes
+        # vetted auto-admitted canaries, tags flapping ones flaky, retires
+        # long-green ones to quarantine, purges the quarantine. The Goodhart
+        # lock lives in core/canary/maintain.py: a failing canary is never
+        # auto-mutated.
+        if not self._is_cancelled() and settings.canary_enabled and settings.canary_auto_maintain:
+            _announce(bus, "canary_maintain", "Maintaining the canary suite (promote/flaky/retire/purge)")
+            await self._canary_maintain()
+
         # Activity 13: Refine pass — the single session-improvement rung.
         # Runs independent of did_llm: refine has its own budget, bounded to
         # one session per cycle, watermarked refined:{sid}.
@@ -1071,6 +1080,17 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         await retention.prune_canary_runs()
         await retention.nudge_stale_canaries()
+
+    async def _canary_maintain(self) -> None:
+        """Activity 12d — one canary auto-maintenance sweep. Never raises."""
+        try:
+            from core.canary.maintain import run_maintenance
+
+            stats = await asyncio.to_thread(run_maintenance, self._is_cancelled)
+            for key in ("promoted", "settled_flaky", "flaky_tagged", "retired", "purged"):
+                self._bump(f"canaries_{key}", len(stats.get(key) or []))
+        except Exception as e:
+            logger.warning("Snooze canary maintenance failed: %s", e)
 
     async def _cleanup_workflow_runs(self) -> None:
         """Activity 12 — workflow run dirs beyond keep-10-per-name or 30 days."""
