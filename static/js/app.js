@@ -2261,6 +2261,19 @@ function _isRlmView() {
     return (state.sessions || []).find(s => s.id === state.sid)?.session_type === 'rlm';
 }
 
+// Transient status-bar note that clears itself. Used for recoveries the user
+// should know happened but must not have to dismiss.
+let _noticeTimer = null;
+function _showNotice(msg, ms = 6000) {
+    updateStatus(msg);
+    if (_noticeTimer) clearTimeout(_noticeTimer);
+    _noticeTimer = setTimeout(() => {
+        _noticeTimer = null;
+        const infoEl = document.getElementById('status-info');
+        if (infoEl && infoEl.textContent === msg) infoEl.textContent = '';
+    }, ms);
+}
+
 async function _softReload() {
     if (!state.sid || _isRlmView()) return;
     console.info('SSE: soft reload triggered (gap detected or reconciliation)');
@@ -2288,6 +2301,13 @@ async function _softReload() {
             updateStatus('');
         }
     } catch {}
+    // Say so. The transcript is re-read from the database, so no *message* is
+    // lost — but the live events that were dropped (tool chips, scout steps,
+    // partial tokens) are gone for good, and the view visibly jumping without
+    // explanation reads as a glitch. The server's replay buffer holds 2000
+    // events and a reaped session comes back with an empty one, so this path
+    // is reachable in normal operation, not just after an outage.
+    _showNotice('reconnected — transcript refreshed');
 }
 
 async function _reconcile() {

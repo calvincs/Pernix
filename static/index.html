@@ -12,13 +12,45 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Pernix">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Newsreader:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
-    <!-- marked is vendored: markdown rendering must work on LAN deployments
-         with no internet (the CDN version silently degraded chat to <pre>).
-         Monaco stays CDN-loaded (it's tens of MB) with a textarea fallback. -->
+    <!-- Everything this page loads is served from this origin. The page holds
+         a long-lived auth token (localStorage + a non-HttpOnly cookie), so any
+         third-party script here would be able to read it — a CDN compromise or
+         DNS hijack would be full account takeover, and the assets would be
+         unavailable on the offline/LAN deployments this app targets anyway.
+         The CSP below is what enforces that rather than leaving it to
+         convention: a stray CDN <script> fails to execute instead of silently
+         reintroducing the surface.
+         'unsafe-inline' is required for style-src only — the el() helper sets
+         style attributes at runtime and Monaco injects its own stylesheets.
+         script-src carries no such escape hatch.
+         connect-src and img-src are the second half of the story: the auth
+         token is readable by JS, so these are what stop a hypothetical XSS
+         from posting it to an attacker's host or smuggling it out in an
+         image URL.
+         frame-ancestors is deliberately absent — browsers ignore it (along
+         with sandbox and report-uri) in a meta-tag policy, so listing it here
+         would only look like clickjacking protection. That one has to be a
+         real response header from the server. -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'self';
+        style-src 'self' 'unsafe-inline';
+        font-src 'self';
+        img-src 'self' data: blob:;
+        connect-src 'self';
+        worker-src 'self' blob:;
+        object-src 'none';
+        base-uri 'self';
+        form-action 'none'">
+    <link rel="stylesheet" href="/static/vendor/fonts/fonts.css">
+    <!-- Vendored, not CDN-loaded: this app must work fully offline on a LAN.
+         marked has no sanitizer of its own, so DOMPurify must be present
+         before any markdown is rendered — render.js fails closed to plain text
+         if it is missing. Monaco is served from /static/vendor/monaco (13MB);
+         file-panel.js still falls back to a plain textarea if it fails. -->
     <script src="/static/vendor/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+    <script src="/static/vendor/purify.min.js"></script>
+    <script src="/static/vendor/monaco/vs/loader.js"></script>
     <link rel="stylesheet" href="/static/css/tokens.css">
     <link rel="stylesheet" href="/static/css/layout.css">
     <link rel="stylesheet" href="/static/css/modals.css">
@@ -108,48 +140,7 @@
         <div id="file-panel"></div>
     </div>
 
-    <script>
-        // PWA lifecycle: register the SW, check for new builds whenever the
-        // app is foregrounded (mobile PWAs otherwise poll at most daily), and
-        // refresh the UI when a new build takes control. Auth tokens and
-        // drafts live in localStorage — a refresh never touches them.
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').then(function(reg) {
-                document.addEventListener('visibilitychange', function() {
-                    if (document.visibilityState === 'visible') {
-                        reg.update().catch(function() { /* offline is fine */ });
-                    }
-                });
-            }).catch(function(e) {
-                console.warn('SW registration failed:', e);
-            });
-
-            var hadController = !!navigator.serviceWorker.controller;
-            var reloaded = false;
-            navigator.serviceWorker.addEventListener('controllerchange', function() {
-                // First controller on a fresh install is not an update.
-                if (!hadController) { hadController = true; return; }
-                if (reloaded) return;
-                if (document.visibilityState === 'hidden') {
-                    // Backgrounded (typical mobile PWA): refresh silently.
-                    reloaded = true;
-                    location.reload();
-                    return;
-                }
-                // Visible: never yank the page mid-interaction — offer a tap.
-                if (document.getElementById('sw-update-banner')) return;
-                var banner = document.createElement('button');
-                banner.id = 'sw-update-banner';
-                banner.textContent = 'Pernix updated — tap to refresh';
-                banner.style.cssText = 'position:fixed;bottom:calc(16px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:10000;padding:10px 18px;border-radius:999px;border:1px solid var(--border,#444);background:var(--surface,#1c1c1e);color:var(--text,#eee);font:inherit;box-shadow:0 4px 16px rgba(0,0,0,.35);cursor:pointer;';
-                banner.addEventListener('click', function() {
-                    reloaded = true;
-                    location.reload();
-                });
-                document.body.appendChild(banner);
-            });
-        }
-    </script>
+    <script src="/static/js/pwa.js"></script>
     <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>

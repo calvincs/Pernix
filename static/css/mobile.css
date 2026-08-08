@@ -17,9 +17,36 @@
    Touch accessibility — devices without hover (size-independent)
    ====================================================================== */
 @media (hover: none) {
-    /* Session delete — always visible on touch */
-    .session-item .session-delete {
+    /* Hover-revealed controls are invisible AND still tappable on touch —
+       the worst of both worlds. Everything the desktop reveals on
+       :hover must be revealed unconditionally here, or the feature
+       simply does not exist on a phone. */
+    .session-item .session-delete,
+    .session-item .session-rename,
+    .session-item .session-pin {
         opacity: 0.7;
+    }
+
+    /* The copy-session-id badge is the one exception: it is a debugging
+       affordance, and a fourth control would squeeze the session title —
+       the only thing distinguishing rows — past readability. Hidden
+       outright rather than left invisible-but-tappable. */
+    .session-item .session-id-badge {
+        display: none;
+    }
+
+    /* De-emphasised auto-created rows: hover can't restore them on touch. */
+    .session-item.cron-session:not(.active),
+    .session-item.snooze-session:not(.active) {
+        opacity: 0.8;
+    }
+
+    /* Per-message actions (copy/retry/edit) and timestamps. */
+    .message .msg-actions {
+        opacity: 1;
+    }
+    .message .msg-time {
+        opacity: 0.55;
     }
 
     /* File tree actions — hidden on touch; swipe-to-delete is used instead */
@@ -134,13 +161,22 @@
         background: var(--bg-raised);
         padding: var(--sp-2) var(--sp-3);
         padding-top: calc(var(--sp-2) + var(--safe-top));
+        /* Landscape puts the notch on one side; the hamburger and the
+           settings gear are the first/last children and would sit under it. */
+        padding-left: max(var(--sp-3), var(--safe-left));
+        padding-right: max(var(--sp-3), var(--safe-right));
         flex-wrap: nowrap;
         gap: var(--sp-2);
         min-height: 44px;
         overflow: hidden;
     }
+    /* The model name is also the model-switcher button, so it must stay
+       visible and tappable. It keeps min-width:0 deliberately: the row is
+       overflow:hidden and every button is flex-shrink:0, so any floor here
+       pushes the settings gear out of the row on a 360px phone. Room is
+       bought by dropping the transcript buttons at ≤480px instead. */
     #status-bar .model {
-        flex: 1;
+        flex: 1 1 auto;
         min-width: 0;
         white-space: nowrap;
         overflow: hidden;
@@ -240,6 +276,10 @@
         transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
         box-shadow: none;
         padding-top: var(--safe-top);
+        /* The drawer spans the full height, so its last row (the legend)
+           lands under the home indicator without this. */
+        padding-bottom: var(--safe-bottom);
+        padding-left: var(--safe-left);
     }
     #sidebar.collapsed {
         width: 280px !important;
@@ -269,9 +309,16 @@
         padding: var(--sp-2) var(--sp-3);
         min-height: 40px;
     }
-    .session-delete {
-        min-width: 44px;
-        min-height: 44px;
+    /* Three row actions have to share a 280px drawer with the title, which
+       is the only thing that tells two sessions apart. 32x36 is the widest
+       these can get before the title stops being readable — narrower than
+       the 44px guidance, but they sit in a 40px-tall row with clear
+       separation, and the alternative (44px each) eats half the row. */
+    .session-delete,
+    .session-rename,
+    .session-pin {
+        min-width: 32px;
+        min-height: 36px;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -286,6 +333,23 @@
     }
     #new-session-btn {
         padding: var(--sp-2) var(--sp-3);
+    }
+    /* Search field: 16px is the threshold below which iOS zooms the page
+       on focus and never zooms back out. */
+    #session-search {
+        font-size: 16px;
+        min-height: 44px;
+        padding: var(--sp-2) var(--sp-3);
+    }
+    /* Session-type filters were 9px text in a 15px-tall row — unhittable. */
+    .legend-item {
+        font-size: var(--text-xxs);
+        min-height: 32px;
+        padding: var(--sp-1) var(--sp-2);
+    }
+    #sidebar-legend {
+        gap: var(--sp-1);
+        row-gap: var(--sp-1);
     }
 
     /* ------------------------------------------------------------------
@@ -305,6 +369,14 @@
     }
     .fp-header {
         padding-top: calc(var(--sp-3) + var(--safe-top));
+    }
+    /* Full-screen overlay: its last row would otherwise sit under the home
+       indicator, and its edges under the landscape notch. Insets go on the
+       container so every tab's content inherits them exactly once. */
+    #file-panel.open {
+        padding-bottom: var(--safe-bottom);
+        padding-left: var(--safe-left);
+        padding-right: var(--safe-right);
     }
     .fp-tab-btn {
         min-height: 44px;
@@ -348,6 +420,39 @@
         min-height: 36px;
         padding: var(--sp-2) var(--sp-3);
     }
+    /* Tools tab: the per-tool safety dropdown and the skill on/off pill were
+       11px text in a 16px-tall box — under the touch floor, and any <select>
+       below 16px makes iOS zoom the page in on tap and never zoom back. */
+    .fp-tool-safety,
+    .fp-ws-sort {
+        font-size: 16px;
+        min-height: 36px;
+        padding: var(--sp-1) 22px var(--sp-1) var(--sp-2);
+        background-position: right 7px center;
+        background-size: 9px 9px;
+    }
+    .fp-skill-toggle {
+        font-size: var(--text-xs);
+        min-height: 36px;
+        padding: var(--sp-1) var(--sp-3);
+    }
+    /* Tool/skill rows put a name, metadata and a fixed-size action cluster on
+       one nowrap line. The actions are flex-shrink:0, so on a phone they run
+       off the right edge (measured out to 409px in a 360px viewport). Let the
+       row wrap so the cluster drops to its own line instead. */
+    .fp-skill-header {
+        flex-wrap: wrap;
+        row-gap: var(--sp-1);
+    }
+    .fp-skill-actions {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        margin-left: auto;
+    }
+    .fp-tab-desc-toggle {
+        min-height: 32px;
+        padding: var(--sp-1) var(--sp-2);
+    }
     .fp-memory-item {
         padding: var(--sp-3);
     }
@@ -367,7 +472,8 @@
         min-height: 0;
     }
     .messages-inner {
-        padding: 0 var(--sp-3);
+        padding-left: max(var(--sp-3), var(--safe-left));
+        padding-right: max(var(--sp-3), var(--safe-right));
     }
     .message {
         margin-bottom: var(--sp-2);
@@ -388,6 +494,13 @@
         display: flex;
         align-items: center;
         justify-content: center;
+    }
+    /* 32px circle is below the touch floor, and its fixed 110px offset was
+       tuned against the taller desktop composer. */
+    #jump-to-bottom {
+        width: 40px;
+        height: 40px;
+        bottom: calc(96px + var(--safe-bottom));
     }
     .tool-group-header {
         min-height: 44px;
@@ -412,6 +525,8 @@
     #input-wrapper {
         padding: var(--sp-1) var(--sp-3);
         padding-bottom: max(var(--sp-2), var(--safe-bottom));
+        padding-left: max(var(--sp-3), var(--safe-left));
+        padding-right: max(var(--sp-3), var(--safe-right));
         background: var(--bg);
     }
     #input-bar {
@@ -427,11 +542,14 @@
         line-height: 1.4;
         max-height: 120px;
     }
+    /* Send is the most-tapped control in the app; 40px keeps it close to
+       the 44px guidance without making the composer bar taller. */
     #send-btn,
     #attach-btn,
     #voice-btn {
-        width: 36px;  /* keep ≥36px touch target */
-        height: 36px;
+        width: 40px;
+        height: 40px;
+        flex-shrink: 0;
     }
     #attach-btn svg,
     #voice-btn svg {
@@ -444,6 +562,10 @@
        ------------------------------------------------------------------ */
     .modal-overlay {
         align-items: flex-end;
+        /* Landscape notch — insets go on the overlay so the sheet keeps
+           width:100% of the remaining space instead of overflowing it. */
+        padding-left: var(--safe-left);
+        padding-right: var(--safe-right);
     }
     .modal-card {
         width: 100%;
@@ -452,6 +574,14 @@
         max-height: 92dvh;
         border-radius: var(--radius-lg) var(--radius-lg) 0 0;
         animation: slideUpMobile 0.25s ease;
+        /* Sheets sit flush against the bottom edge. A footer supplies its
+           own inset (below); footer-less sheets (timeline, signals) would
+           otherwise run their last row under the home indicator. */
+        padding-bottom: var(--safe-bottom);
+    }
+    /* A footer already pads for the home indicator — don't inset twice. */
+    .modal-card:has(.modal-footer) {
+        padding-bottom: 0;
     }
     /* Grab handle indicator for bottom sheets */
     .modal-card::before {
@@ -514,11 +644,20 @@
     .setting-row label {
         min-width: auto;
     }
+    /* The label column is the full row width once stacked, so nothing gets
+       squeezed into a two-character column. */
+    .setting-label-cell {
+        min-width: 0;
+        max-width: 100%;
+        width: 100%;
+    }
     .setting-row input[type="text"],
     .setting-row input[type="number"],
     .setting-row input[type="password"],
+    .setting-row input[type="search"],
     .setting-row select {
         width: 100%;
+        /* 16px exactly — anything smaller makes iOS Safari zoom on focus. */
         font-size: 16px;
         min-height: 44px;
         padding: var(--sp-2) var(--sp-3);
@@ -526,6 +665,62 @@
     .setting-row input[type="checkbox"] {
         width: 24px;
         height: 24px;
+    }
+    /* A 24px checkbox is well under the 44px touch minimum. Toggles therefore
+       stay on one line and the (for=)-bound label supplies a full-width,
+       44px-tall hit area — tapping anywhere on the caption flips the box. */
+    .setting-row.setting-row-bool {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--sp-3);
+    }
+    .setting-row.setting-row-bool .setting-label-cell {
+        width: auto;
+        flex: 1;
+        justify-content: center;
+        min-height: 44px;
+    }
+    .setting-row.setting-row-bool label {
+        cursor: pointer;
+    }
+    .setting-row.setting-row-bool input[type="checkbox"] {
+        width: 28px;
+        height: 28px;
+        flex-shrink: 0;
+    }
+    /* Badges are the touch target for their own explanation. */
+    .setting-badge {
+        padding: 3px 7px;
+        font-size: var(--text-xs);
+    }
+
+    /* Settings search — the primary way to find anything on a phone, so it
+       gets a full-width field and never triggers the iOS zoom. */
+    /* Horizontal notch insets live on .modal-overlay (above), so the sheet's
+       own chrome only needs its normal padding here. */
+    .settings-search {
+        padding: var(--sp-2) var(--sp-5);
+        flex-wrap: wrap;
+    }
+    .settings-search-input {
+        font-size: 16px;
+        min-height: 44px;
+        padding: var(--sp-2) var(--sp-3);
+    }
+    .settings-search-count {
+        white-space: normal;
+    }
+
+    /* Save/Cancel stay reachable; a long status message (rejected values,
+       restart notices) wraps above them instead of shoving them off-screen. */
+    .modal-footer {
+        flex-wrap: wrap;
+    }
+    .save-status {
+        flex-basis: 100%;
+        margin-right: 0;
+        margin-bottom: var(--sp-1);
     }
 
     /* Section help tooltip — flow-relative instead of fixed */
@@ -548,13 +743,25 @@
         padding: var(--sp-3) var(--sp-5);
         font-size: var(--text-md);
     }
+    /* Five tabs wrapped onto two rows at 390px, costing ~45px of a sheet that
+       is already short. Keep them on one line and let the strip scroll if a
+       narrower phone still can't fit them. */
     .tab-bar {
         padding: 0;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+    .tab-bar::-webkit-scrollbar {
+        display: none;
     }
     .tab-btn {
-        flex: 1 1 auto;
+        flex: 1 0 auto;
         min-height: 44px;
         text-align: center;
+        white-space: nowrap;
+        padding-left: var(--sp-2);
+        padding-right: var(--sp-2);
     }
 
     /* OpenRouter model list */
@@ -700,7 +907,11 @@
    Small phones (portrait)
    ====================================================================== */
 @media (max-width: 480px) {
-    #copy-transcript-btn {
+    /* Both transcript-export controls go: they are the least-used buttons in
+       the row and the space buys back a readable model name. Copy/export
+       remain available from the desktop layout. */
+    #copy-transcript-btn,
+    #export-transcript-btn {
         display: none !important;
     }
     #session-tooltip {
@@ -708,7 +919,8 @@
         max-width: calc(100vw - 16px);
     }
     .messages-inner {
-        padding: 0 var(--sp-2);
+        padding-left: max(var(--sp-2), var(--safe-left));
+        padding-right: max(var(--sp-2), var(--safe-right));
     }
     .message.user .content {
         padding: var(--sp-2) var(--sp-3);
@@ -717,15 +929,24 @@
 
 /* ======================================================================
    Landscape phones
+
+   Keyed on viewport HEIGHT, not width. The previous `max-width: 768px and
+   (orientation: landscape)` could never match a landscape phone — an
+   iPhone 14 on its side is 844px wide, a Pro Max 932px — so none of these
+   rules had ever applied. Short-and-wide is the condition that actually
+   describes the problem (very little vertical room), and 500px also keeps
+   iPad landscape (768px tall) out.
    ====================================================================== */
-@media (max-width: 768px) and (orientation: landscape) {
+@media (orientation: landscape) and (max-height: 500px) {
     #status-bar {
         padding-top: max(var(--sp-1), var(--safe-top));
         padding-bottom: var(--sp-1);
         min-height: 36px;
     }
+    /* Longhand only: the shorthand here would wipe the horizontal
+       safe-area insets set at the main breakpoint. */
     #input-wrapper {
-        padding: var(--sp-1) var(--sp-3);
+        padding-top: var(--sp-1);
         padding-bottom: max(var(--sp-2), var(--safe-bottom));
     }
     #sidebar.mobile-open {
@@ -734,5 +955,34 @@
     .modal-card {
         max-height: 95vh;
         max-height: 95dvh;
+    }
+
+    /* With ~260px of usable height the ornament pushed the "no model
+       configured" CTA — the only first-run path to a working app — entirely
+       below the fold. Drop the decorative sigil and the etymology kicker and
+       keep the wordmark plus everything actionable. */
+    .empty-state {
+        padding: var(--sp-3);
+    }
+    .empty-state-figure {
+        width: auto;
+        height: auto;
+        margin-bottom: var(--sp-2);
+    }
+    .empty-state-sigil {
+        display: none;
+    }
+    .empty-state-title {
+        font-size: 30px;
+    }
+    .empty-state-kicker {
+        display: none;
+    }
+    /* First run only (the setup card is present): the general "what you can
+       do" prose outranks nothing here — getting a model configured is the
+       whole job — and dropping it is what brings the CTA above the fold.
+       Once a model exists the card is gone and the prose comes back. */
+    .empty-state:has(.empty-state-setup) .empty-state-help {
+        display: none;
     }
 }

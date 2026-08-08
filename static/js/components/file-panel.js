@@ -15,7 +15,7 @@ import { renderCanaryTab } from './modals/canary.js';
 import { renderTelosTab } from './modals/telos.js';
 
 // ---------------------------------------------------------------------------
-// Monaco Editor (CDN) with lightweight textarea fallback
+// Monaco Editor (vendored) with lightweight textarea fallback
 // ---------------------------------------------------------------------------
 
 const MONACO_LANG = {
@@ -35,18 +35,19 @@ function loadMonaco() {
     _monacoReady = new Promise((resolve, reject) => {
         if (window.monaco) { resolve(window.monaco); return; }
         if (!window.require) { reject(new Error('Monaco loader not available')); return; }
-        // On a LAN without internet the AMD module fetch can hang (rather
-        // than fail), which left createCodeEditor awaiting forever and the
-        // file panel without any editor. Time out to the textarea fallback,
-        // and clear the memoized promise so a later attempt can retry.
+        // Monaco is served from this origin now, so the old offline hang is
+        // gone — but the timeout stays as the fallback's trigger for any
+        // AMD load that stalls (a partially-populated SW cache, a half-open
+        // connection), since a hung require() otherwise leaves createCodeEditor
+        // awaiting forever and the file panel without any editor.
         const timer = setTimeout(() => {
             _monacoReady = null;
-            reject(new Error('Monaco load timed out (offline/LAN?)'));
+            reject(new Error('Monaco load timed out'));
         }, 8000);
         const _resolve = resolve;
         resolve = (m) => { clearTimeout(timer); _resolve(m); };
         window.require.config({
-            paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' },
+            paths: { vs: '/static/vendor/monaco/vs' },
         });
         window.require(['vs/editor/editor.main'], () => {
             // Define Pernix dark theme once

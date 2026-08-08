@@ -283,19 +283,31 @@ function _setupFilePanelSwipe() {
 // Virtual keyboard handling
 // ---------------------------------------------------------------------------
 
+// How close to the bottom still counts as "following the conversation".
+const PIN_SLACK_PX = 48;
+
 function _setupKeyboardHandler() {
     if (!window.visualViewport) return;
 
+    const messages = document.getElementById('messages');
+    if (!messages) return;
+
+    // Track the pin continuously: once the keyboard opens, the viewport has
+    // already shrunk and the pre-resize position is no longer recoverable.
+    let pinned = true;
+    messages.addEventListener('scroll', () => {
+        pinned = messages.scrollHeight - messages.clientHeight - messages.scrollTop <= PIN_SLACK_PX;
+    }, { passive: true });
+
+    // interactive-widget=resizes-content shrinks the layout viewport when the
+    // keyboard opens, which keeps the composer on screen but leaves #messages
+    // scrolled where it was — the newest message ends up hidden behind the
+    // keyboard for a reader who was at the bottom. Re-pin only in that case,
+    // so someone scrolled back in history keeps their place.
     window.visualViewport.addEventListener('resize', () => {
-        if (!_mobile) return;
-        const active = document.activeElement;
-        if (active?.tagName === 'TEXTAREA' || active?.tagName === 'INPUT') {
-            requestAnimationFrame(() => {
-                document.getElementById('input-wrapper')?.scrollIntoView({
-                    block: 'end',
-                    behavior: 'smooth',
-                });
-            });
-        }
+        if (!_mobile || !pinned) return;
+        requestAnimationFrame(() => {
+            messages.scrollTop = messages.scrollHeight;
+        });
     });
 }

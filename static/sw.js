@@ -12,6 +12,15 @@
 //   - navigation (/): network-first, cached shell as offline fallback
 //   - API/SSE requests and /sw.js itself: never intercepted (pass through)
 const CACHE_VERSION = 'pernix-shell-__BUILD__';
+
+// What the app needs to boot and render a transcript offline. Deliberately
+// excludes the two heavyweight vendored libraries — Monaco (~13MB across 103
+// AMD modules) and Mermaid (~3.3MB) — which would turn every install into a
+// multi-megabyte download for features most sessions never open. Both live
+// under /static/ and so are picked up by the cache-first fetch handler the
+// first time they are actually used, which is also the only point at which
+// precaching them was ever possible: while they were CDN-loaded they sat on
+// a cross-origin URL that this worker never intercepts and cannot cache.
 const SHELL_ASSETS = [
     '/',
     '/static/css/tokens.css',
@@ -20,7 +29,10 @@ const SHELL_ASSETS = [
     '/static/css/jobs.css',
     '/static/css/file-panel.css',
     '/static/css/mobile.css',
+    '/static/vendor/fonts/fonts.css',
     '/static/vendor/marked.min.js',
+    '/static/vendor/purify.min.js',
+    '/static/js/pwa.js',
     '/static/js/app.js',
     '/static/js/store.js',
     '/static/js/render.js',
@@ -30,6 +42,18 @@ const SHELL_ASSETS = [
     '/static/js/mobile.js',
     '/static/js/sigil.js',
     '/static/js/notifications.js',
+    '/static/js/components/sidebar.js',
+    '/static/js/components/file-panel.js',
+    '/static/js/components/jobs-indicator.js',
+    '/static/js/components/notification-bell.js',
+    '/static/js/components/rlm-viewer.js',
+    '/static/js/components/modals/settings.js',
+    '/static/js/components/modals/timeline.js',
+    '/static/js/components/modals/jobs.js',
+    '/static/js/components/modals/question.js',
+    '/static/js/components/modals/adaptive.js',
+    '/static/js/components/modals/canary.js',
+    '/static/js/components/modals/telos.js',
     '/static/img/favicon.png',
     '/static/img/app-icon-192.png',
     '/static/manifest.json',
@@ -38,8 +62,15 @@ const SHELL_ASSETS = [
 self.addEventListener('install', (e) => {
     e.waitUntil(
         caches.open(CACHE_VERSION)
-            .then((cache) => cache.addAll(SHELL_ASSETS))
-            .catch(() => { /* partial precache is fine — fetch handler fills in */ })
+            // Per-asset rather than cache.addAll: addAll is all-or-nothing, so
+            // a single 404 (a renamed module, a half-deployed build) would
+            // discard the entire precache and leave the app with no offline
+            // shell at all. Missing entries just fall through to the fetch
+            // handler on first use.
+            .then((cache) => Promise.all(
+                SHELL_ASSETS.map((url) => cache.add(url).catch(() => {}))
+            ))
+            .catch(() => { /* precache is best-effort — fetch handler fills in */ })
             .then(() => self.skipWaiting())
     );
 });

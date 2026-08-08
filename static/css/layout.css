@@ -778,6 +778,11 @@
     line-height: 1.65;
     color: var(--text);
     padding: var(--sp-2) 0;
+    /* Prose wraps rather than widening the column. Without this a single
+       long token (a URL, a file path) makes the whole transcript scroll
+       sideways — every message shifts, not just the offending line. */
+    overflow-wrap: break-word;
+    min-width: 0;
 }
 .message.assistant .content p { margin-bottom: 0.75em; }
 .message.assistant .content p:last-child { margin-bottom: 0; }
@@ -791,6 +796,9 @@
     color: var(--accent);
     text-decoration: none;
     border-bottom: 1px solid var(--accent-dim);
+    /* URLs have no spaces to break at — allow a break at any character
+       so a long link wraps instead of overflowing the column. */
+    overflow-wrap: anywhere;
 }
 .message.assistant .content a:hover {
     color: var(--text-bright);
@@ -818,6 +826,8 @@
     border-radius: 3px;
     padding: 1px 5px;
     color: var(--accent);
+    /* Inline code is usually a path or identifier with no break opportunity. */
+    overflow-wrap: anywhere;
 }
 .message.assistant .content pre code {
     background: none;
@@ -825,6 +835,8 @@
     border-radius: 0;
     font-size: var(--text-sm);
     color: var(--text-bright);
+    /* Fenced blocks keep their formatting and scroll inside the <pre>. */
+    overflow-wrap: normal;
 }
 .message.assistant .content blockquote {
     border-left: 3px solid var(--accent-dim);

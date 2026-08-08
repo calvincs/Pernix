@@ -119,6 +119,9 @@ async def get_settings():
     data["ssl_cert_path_set"] = bool(settings.ssl_cert_path)
     data["ssl_key_path_set"] = bool(settings.ssl_key_path)
     data["auth_token_set"] = bool(settings.auth_token)
+    # Redacted, so the value never leaves the server; the flag is what lets the
+    # UI distinguish "no webhook configured" from "configured but hidden".
+    data["notify_webhook_url_set"] = bool(settings.notify_webhook_url)
     return data
 
 
@@ -179,6 +182,9 @@ _SETTING_BOUNDS = {
     "canary_regression_delta": (0.01, 1.0),
     "canary_max_concurrent": (1, 4),
     "adaptive_max_entries_per_kind": (1, 100),
+    # Mirrors scripts/backup.py's KEEP_MIN/KEEP_MAX so the API rejects what the
+    # backup run would have clamped anyway. 0 disables scheduled backups.
+    "backup_keep_count": (0, 90),
     "adaptive_max_auto_applies_per_day": (0, 50),
     "adaptive_edit_cooldown_hours": (0, 720),
     "adaptive_tripwire_window_turns": (5, 200),
@@ -196,6 +202,11 @@ _SETTING_BOUNDS = {
 
 
 _RESTART_FIELDS = {"network_enabled", "ssl_mode", "ssl_cert_path", "ssl_key_path", "cors_origins"}
+
+# URL settings whose default is empty, so "" is a real value (feature off) rather
+# than a truncated write. Every other *_url with a non-empty current value keeps
+# the empty-string guard.
+_CLEARABLE_URL_FIELDS = {"voice_remote_url", "notify_webhook_url"}
 
 
 @router.post("/api/settings")
@@ -236,14 +247,15 @@ async def update_settings(body: dict):
         current = getattr(settings, key)
         try:
             # Reject empty strings for URL fields that have non-empty defaults.
-            # voice_remote_url is exempt: its default is empty and clearing it
-            # (to turn remote transcription off) is a legitimate edit.
+            # The exempt set defaults to empty, so clearing one (turning remote
+            # transcription or webhook delivery off) is a legitimate edit rather
+            # than a truncated write.
             if (
                 isinstance(current, str)
                 and current
                 and value == ""
                 and key.endswith("_url")
-                and key != "voice_remote_url"
+                and key not in _CLEARABLE_URL_FIELDS
             ):
                 continue
             if isinstance(current, bool):

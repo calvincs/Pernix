@@ -1,24 +1,28 @@
 // Pernix — Settings modal with tabs
 
-import { el, text, clear } from '../../render.js';
+import { el, text, clear, setSanitizedSvg } from '../../render.js';
 import { get, post } from '../../api.js';
 import { getPermission, requestPermission } from '../../notifications.js';
 import { runVoiceTest } from '../../voice.js';
 
 function _showToast(message, type = 'info') {
-    const colors = { success: 'var(--success, #4c8)', error: 'var(--error, #e55)', info: 'var(--text-dim)' };
+    const colors = { success: 'var(--success)', error: 'var(--error)', info: 'var(--text-dim)' };
+    // Wraps rather than clipping, and clears the iOS home indicator — a
+    // nowrap toast ran off the side of a phone screen.
     const toast = el('div', {
-        style: `position:fixed; bottom:1.5rem; left:50%; transform:translateX(-50%);`
+        style: `position:fixed; bottom:max(1.5rem, calc(env(safe-area-inset-bottom, 0px) + 0.75rem));`
+             + `left:50%; transform:translateX(-50%); max-width:min(92vw, 420px);`
              + `background:var(--bg-surface); border:1px solid ${colors[type] || colors.info};`
              + `color:${colors[type] || colors.info}; font-family:var(--mono); font-size:var(--text-sm);`
-             + `padding:0.6rem 1.2rem; border-radius:var(--radius); z-index:9999;`
-             + `box-shadow:var(--shadow-md); pointer-events:none; white-space:nowrap;`,
+             + `padding:0.6rem 1.2rem; border-radius:var(--radius); z-index:9999; text-align:center;`
+             + `box-shadow:var(--shadow-md); pointer-events:none; line-height:1.4;`,
     }, [text(message)]);
     document.body.append(toast);
     setTimeout(() => toast.remove(), 3500);
 }
 
 let _overlay = null;
+let _statusTimer = null;  // pending auto-clear of the footer status line
 let _original = {};  // snapshot of settings when modal opened
 let _models = [];    // [{id, valid: null|true|false, info: {}}]
 let _availableModels = [];  // [{id, provider, ...}] from GET /api/models
@@ -26,11 +30,50 @@ let _ollamaModels = [];     // [{name, size, family, parameter_size, quantizatio
 let _ollamaError = '';
 let _ollamaLoading = false;
 
+// Settings the server refuses to change over the API (api/routers/health.py
+// _LOCKED_FIELDS). A POST carrying them is dropped without a word, so the
+// controls render read-only instead of pretending the edit took.
+const LOCKED_KEYS = new Set([
+    'shell_security_mode',
+    'shell_allowlist',
+    'shell_env_mode',
+    'shell_env_denylist',
+    'shell_env_allowlist',
+    'auto_approve_dangerous',
+    'auth_token',
+]);
+
+const LOCKED_NOTE = 'Edit-locked. The settings API rejects changes to this field so a prompt-injected '
+    + 'agent cannot widen its own sandbox through it. Change it in data/settings.json and restart.';
+
+// The server only reports restart_required for the network group, but several
+// other values are read exactly once — when the LLM router is constructed —
+// so a live save persists them while the running process keeps the old ones.
+const RESTART_ON_SAVE = new Set([
+    'network_enabled', 'ssl_mode', 'ssl_cert_path', 'ssl_key_path', 'cors_origins',
+    'llm_max_concurrent', 'openrouter_max_concurrent', 'openai_max_concurrent',
+    'llm_session_timeout',
+]);
+
+const RESTART_ROUTER = 'Sizes a provider semaphore when the LLM router is built. Saving stores the '
+    + 'value; the running process keeps its current slot count until the server restarts.';
+const RESTART_TOOLS = 'Tool registration happens at startup. The runtime checks honour this '
+    + 'immediately, but the agent-facing tools only appear or disappear after a restart.';
+
 const NETWORK_FIELDS = [
-    { key: 'network_enabled', label: 'Network Access', type: 'bool' },
-    { key: 'ssl_mode', label: 'SSL Certificate', type: 'select', options: ['self_signed', 'custom'] },
-    { key: 'ssl_cert_path', label: 'Certificate PEM Path', type: 'certpath' },
-    { key: 'ssl_key_path', label: 'Key PEM Path', type: 'certpath' },
+    { key: 'network_enabled', label: 'Network Access', type: 'bool', risk: 'security', restart: 'Changes the bind address and TLS setup — applied at startup.' },
+    { key: 'ssl_mode', label: 'SSL Certificate', type: 'select', options: ['self_signed', 'custom'], restart: 'Applied at startup.' },
+    { key: 'ssl_cert_path', label: 'Certificate PEM Path', type: 'certpath', restart: 'Applied at startup.' },
+    { key: 'ssl_key_path', label: 'Key PEM Path', type: 'certpath', restart: 'Applied at startup.' },
+    {
+        key: 'trust_local_requests',
+        label: 'Trust Loopback Requests',
+        type: 'bool',
+        risk: 'security',
+        hint: 'On: requests from 127.0.0.1/::1 skip the Bearer token — correct for a single-host box. '
+            + 'Turn OFF when nginx, Caddy, Cloudflared or any other reverse proxy fronts Pernix: proxied '
+            + 'requests arrive from loopback, so every remote visitor would bypass auth entirely.',
+    },
 ];
 
 const SECTIONS = [
@@ -39,13 +82,13 @@ const SECTIONS = [
         description: 'Configure endpoints and concurrency for LLM providers. Max Concurrent limits parallel requests per provider. Session LLM Timeout caps how long a single session may hold LLM slots — prevents a hung or runaway session from blocking others indefinitely (0 = unlimited). Model selection is on the Models tab.',
         fields: [
             { key: 'llm_base_url', label: 'Ollama Base URL', type: 'text' },
-            { key: 'llm_max_concurrent', label: 'Ollama Max Concurrent', type: 'number' },
+            { key: 'llm_max_concurrent', label: 'Ollama Max Concurrent', type: 'number', min: 1, max: 20, restart: RESTART_ROUTER },
             { key: 'openrouter_base_url', label: 'OpenRouter URL', type: 'text' },
-            { key: 'openrouter_max_concurrent', label: 'OpenRouter Max Concurrent', type: 'number' },
+            { key: 'openrouter_max_concurrent', label: 'OpenRouter Max Concurrent', type: 'number', min: 1, max: 20, restart: RESTART_ROUTER },
             { key: 'openrouter_cache_control', label: 'Anthropic Cache Breakpoints (via OpenRouter)', type: 'bool' },
             { key: 'openai_base_url', label: 'OpenAI URL (or any OpenAI-compatible server)', type: 'text' },
-            { key: 'openai_max_concurrent', label: 'OpenAI Max Concurrent', type: 'number' },
-            { key: 'llm_session_timeout', label: 'Session LLM Timeout (s)', type: 'number' },
+            { key: 'openai_max_concurrent', label: 'OpenAI Max Concurrent', type: 'number', min: 1, restart: RESTART_ROUTER },
+            { key: 'llm_session_timeout', label: 'Session LLM Timeout (s)', type: 'number', min: 0, restart: RESTART_ROUTER },
             { key: 'openrouter_api_key', label: 'OpenRouter API Key', type: 'apikey', envKey: 'OPENROUTER_API_KEY' },
             { key: 'openai_api_key', label: 'OpenAI API Key', type: 'apikey', envKey: 'OPENAI_API_KEY' },
         ],
@@ -81,22 +124,23 @@ const SECTIONS = [
         fields: [
             { key: 'tool_timeout', label: 'Tool Timeout (s)', type: 'number' },
             { key: 'shell_timeout', label: 'Shell Timeout (s)', type: 'number' },
-            { key: 'shell_security_mode', label: 'Shell Security', type: 'select', options: ['permissive', 'strict'] },
-            { key: 'shell_address_space_limit_bytes', label: 'Bash RLIMIT_AS (bytes, 0 = no cap)', type: 'number' },
-            { key: 'shell_fsize_limit_bytes', label: 'Bash RLIMIT_FSIZE (bytes, 0 = no cap)', type: 'number' },
-            { key: 'max_file_write_size', label: 'Max file_write Size (bytes, 0 = no cap)', type: 'number' },
-            { key: 'max_edit_read_size', label: 'Max file_edit Read Size (bytes, 0 = no cap)', type: 'number' },
+            { key: 'shell_security_mode', label: 'Shell Security', type: 'select', options: ['permissive', 'strict'], risk: 'security' },
+            { key: 'shell_address_space_limit_bytes', label: 'Bash RLIMIT_AS (bytes, 0 = no cap)', type: 'number', min: 0 },
+            { key: 'shell_fsize_limit_bytes', label: 'Bash RLIMIT_FSIZE (bytes, 0 = no cap)', type: 'number', min: 0 },
+            { key: 'max_file_write_size', label: 'Max file_write Size (bytes, 0 = no cap)', type: 'number', min: 0 },
+            { key: 'max_edit_read_size', label: 'Max file_edit Read Size (bytes, 0 = no cap)', type: 'number', min: 0 },
+            { key: 'max_fetch_size', label: 'Max fetch_url Size (bytes)', type: 'number', min: 1024, max: 10000000 },
         ],
     },
     {
         title: 'Web',
         description: 'Web search uses Tavily (requires API key — free tier at tavily.com). Browser uses Playwright for JS-rendered page extraction. Disable headless for login flows or visual debugging.',
         fields: [
-            { key: 'web_search_enabled', label: 'Web Search', type: 'bool' },
+            { key: 'web_search_enabled', label: 'Web Search', type: 'bool', restart: RESTART_TOOLS },
             { key: 'tavily_api_key', label: 'Tavily API Key', type: 'apikey', envKey: 'TAVILY_API_KEY' },
-            { key: 'browser_enabled', label: 'Enable Browser (Playwright)', type: 'bool' },
+            { key: 'browser_enabled', label: 'Enable Browser (Playwright)', type: 'bool', restart: RESTART_TOOLS },
             { key: 'browser_headless', label: 'Headless Mode', type: 'bool' },
-            { key: 'browser_timeout', label: 'Page Load Timeout (s)', type: 'number' },
+            { key: 'browser_timeout', label: 'Page Load Timeout (s)', type: 'number', min: 5, max: 120 },
         ],
     },
     {
@@ -145,16 +189,46 @@ const SECTIONS = [
     },
     {
         title: 'Memory',
-        description: 'Automatic memory recall surfaces relevant past conversations at the start of each turn.',
+        description: 'Automatic memory recall surfaces relevant past conversations at the start of each turn. The distillation audit is the feedback loop on memory quality: during snooze it re-derives the durable facts of an already-distilled session with the Background model and repairs anything the first pass missed. It costs a couple of background LLM calls per day — set the per-day count to 0 to keep the audit off without disabling the machinery.',
         fields: [
             { key: 'memory_recall', label: 'Auto-Recall', type: 'bool' },
+            { key: 'distill_audit_enabled', label: 'Distillation Coverage Audit', type: 'bool' },
+            {
+                key: 'distill_audit_per_day',
+                label: 'Audited Sessions / Day',
+                type: 'number',
+                min: 0,
+                hint: 'Background LLM calls per day. 0 disables the audit.',
+            },
+        ],
+    },
+    {
+        title: 'Background Work (Snooze)',
+        description: 'The master switch for everything the agent does while you are idle: memory maintenance and distillation, dreaming, telos loops, canary sweeps, adaptive edits and embedding sweeps all run inside a snooze cycle. Turning Background Work off stops all of it and is the one control that reliably ends idle-time LLM spend, whatever the individual feature toggles say. Cooldown is how long the machine must be quiet before a cycle may start; the tick interval paces how often the scheduler even looks. The cycle time limit is a hang backstop, not a scheduler — a cycle normally ends when its activity ladder finishes or you start typing; raise it for slow local models.',
+        fields: [
+            {
+                key: 'snooze_enabled',
+                label: 'Background Work Enabled',
+                type: 'bool',
+                risk: 'autonomy',
+                hint: 'Off = no idle-time LLM spend at all: memory maintenance, dream, telos, canary, adaptive and embedding sweeps are all skipped.',
+            },
+            { key: 'snooze_cooldown_minutes', label: 'Idle Cooldown (min)', type: 'number', min: 0 },
+            {
+                key: 'snooze_interval_ticks',
+                label: 'Check Interval (ticks)',
+                type: 'number',
+                min: 1,
+                hint: 'One tick is 60s of maintenance loop, so 10 = a check roughly every 10 minutes.',
+            },
+            { key: 'snooze_max_cycle_seconds', label: 'Cycle Time Limit (s)', type: 'number', min: 60 },
         ],
     },
     {
         title: 'Candor (Operational Memory)',
         description: 'Calibrated reliability tracking: tool outcomes and reflect verdicts feed an auditable evidence ledger, and scout receives an operational-intel brief flagging degraded tools, discovered conditions, and open questions. Observation capture, snooze maintenance, and the scout brief toggle immediately; the agent-facing tools (predict_reliability, why_reliability, reliability_questions) register at startup, so they appear/disappear after a restart.',
         fields: [
-            { key: 'candor_enabled', label: 'Candor Enabled', type: 'bool' },
+            { key: 'candor_enabled', label: 'Candor Enabled', type: 'bool', restart: RESTART_TOOLS },
             { key: 'candor_scout_brief', label: 'Scout Intel Brief', type: 'bool' },
             { key: 'candor_max_obs_per_turn', label: 'Max Observations / Turn', type: 'number' },
         ],
@@ -163,7 +237,7 @@ const SECTIONS = [
         title: 'RLM (Recursive Processing)',
         description: 'Recursive Language Models: the agent processes inputs far beyond the context window (huge files, corpora, transcripts) by writing code in a sandboxed REPL that holds the input as a variable and delegates chunks to sub-LLM calls. The caps guard against runaway runs: iterations bounds root turns, sub-calls bounds total LLM spend per run, depth 2+ allows recursive child RLMs. Caps apply immediately; the rlm_process tool registers at startup, so enabling/disabling takes a restart. RLM adds no model roles of its own: the root runs on your Primary model and sub-calls run on Background (both set under Models → Model Roles).',
         fields: [
-            { key: 'rlm_enabled', label: 'RLM Enabled', type: 'bool' },
+            { key: 'rlm_enabled', label: 'RLM Enabled', type: 'bool', restart: RESTART_TOOLS },
             { key: 'rlm_max_iterations', label: 'Max Iterations', type: 'number' },
             { key: 'rlm_max_subcalls', label: 'Max Sub-calls / Run', type: 'number' },
             { key: 'rlm_max_concurrent_subcalls', label: 'Sub-call Concurrency', type: 'number' },
@@ -221,27 +295,43 @@ const SECTIONS = [
             { key: 'gates_enabled', label: 'Deterministic Gates', type: 'bool' },
             { key: 'goals_enabled', label: 'Persistent Goals', type: 'bool' },
             { key: 'heartbeats_enabled', label: 'Heartbeats', type: 'bool' },
-            { key: 'session_kernel_enabled', label: 'Session Kernel (REPL)', type: 'bool' },
+            { key: 'session_kernel_enabled', label: 'Session Kernel (REPL)', type: 'bool', risk: 'autonomy', restart: RESTART_TOOLS },
         ],
     },
     {
         title: 'Canary Suite',
         description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline on a nightly schedule. Measures whether the agent is getting better or worse — the Adaptive Layer\'s tripwire reads these results. Canary sessions are isolated: no memory writes, no FTS, no reflect-signal contamination.',
         fields: [
-            { key: 'canary_enabled', label: 'Canary Suite Enabled', type: 'bool' },
+            { key: 'canary_enabled', label: 'Canary Suite Enabled', type: 'bool', restart: RESTART_TOOLS },
             { key: 'canary_schedule', label: 'Sweep Schedule (cron)', type: 'text' },
-            { key: 'canary_retention_days', label: 'Run Retention (days)', type: 'number' },
-            { key: 'canary_baseline_runs', label: 'Baseline Sweeps', type: 'number' },
+            { key: 'canary_retention_days', label: 'Run Retention (days)', type: 'number', min: 1, max: 365 },
+            { key: 'canary_baseline_runs', label: 'Baseline Sweeps', type: 'number', min: 1, max: 20 },
             { key: 'canary_regression_delta', label: 'Regression Delta', type: 'number', step: 0.05 },
+            {
+                key: 'canary_auto_admit',
+                label: 'Auto-admit New Canaries',
+                type: 'bool',
+                risk: 'autonomy',
+                hint: 'Lets the agent write new canary specs into data/canaries/ without asking, once their gate '
+                    + 'commands pass an allowlist proof and vetting runs. Off routes every new canary through you.',
+            },
+            {
+                key: 'canary_auto_maintain',
+                label: 'Auto-maintain Suite',
+                type: 'bool',
+                risk: 'autonomy',
+                hint: 'The nightly sweep promotes vetted canaries, tags flapping ones flaky, retires long-green '
+                    + 'ones to quarantine and eventually deletes them. A canary whose latest run failed is never auto-moved.',
+            },
         ],
     },
     {
         title: 'Adaptive Layer',
         description: 'Governed machine-editable policy: routing hints and prompt notes the agent may auto-apply at idle (with full history and one-click rollback), and policies/worker specs that always wait for your approval. The canary tripwire flags any batch that makes the agent measurably worse. Run the canary suite for at least a week before enabling auto-apply.',
         fields: [
-            { key: 'adaptive_enabled', label: 'Adaptive Layer Enabled', type: 'bool' },
-            { key: 'adaptive_auto_apply', label: 'Auto-apply Low-risk Edits', type: 'bool' },
-            { key: 'adaptive_auto_rollback', label: 'Auto-rollback on Canary Regression', type: 'bool' },
+            { key: 'adaptive_enabled', label: 'Adaptive Layer Enabled', type: 'bool', risk: 'autonomy' },
+            { key: 'adaptive_auto_apply', label: 'Auto-apply Low-risk Edits', type: 'bool', risk: 'autonomy' },
+            { key: 'adaptive_auto_rollback', label: 'Auto-rollback on Canary Regression', type: 'bool', risk: 'autonomy' },
             { key: 'adaptive_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number' },
             { key: 'adaptive_max_entries_per_kind', label: 'Max Entries / Kind', type: 'number' },
             { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (h)', type: 'number' },
@@ -251,13 +341,42 @@ const SECTIONS = [
         title: 'Telos (Teleological Layer)',
         description: 'A non-convergent drive with correction machinery: turn anomalies mint questions, the SOUP generates cross-domain hypotheses at idle (only falsifiable ones execute), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (ordo), detecting Goodhart binding, measuring goal discharge (hevel), reconciling the agent\'s self-story against its append-only trace, and keeping exploration entropy above floor. State lives in data/telos/ as markdown. Enabling the agent tools needs a restart; everything else applies immediately.',
         fields: [
-            { key: 'telos_enabled', label: 'Telos Enabled', type: 'bool' },
+            { key: 'telos_enabled', label: 'Telos Enabled', type: 'bool', restart: RESTART_TOOLS },
             { key: 'telos_schedule', label: 'Slow-loop Schedule (cron)', type: 'text' },
             { key: 'telos_serendipity_budget', label: 'Serendipity Budget', type: 'number', step: 0.05 },
             { key: 'telos_eig_floor', label: 'Gate EIG Floor', type: 'number', step: 0.05 },
             { key: 'telos_hypotheses_per_question', label: 'Hypotheses / Question', type: 'number' },
             { key: 'telos_budget_share_max', label: 'Binding Budget-share Max', type: 'number', step: 0.05 },
             { key: 'telos_divergence_max', label: 'Ledger Divergence Alarm', type: 'number', step: 0.05 },
+        ],
+    },
+    {
+        title: 'Backups',
+        description: 'The 24-hour maintenance tier writes a timestamped snapshot of the session database (SQLite VACUUM INTO, so it is consistent without stopping writes) plus a copy of the memory corpus into data/backups. Rotation is per-artifact — database snapshots and memory corpora rotate independently — so a restore always finds a matching pair. Snapshots are roughly the size of your live database, so the count is a disk-space decision.',
+        fields: [
+            {
+                key: 'backup_keep_count',
+                label: 'Snapshots to Keep',
+                type: 'number',
+                min: 0,
+                max: 90,
+                hint: '0 disables scheduled backups entirely. Values are clamped to 0–90 when the backup runs.',
+            },
+        ],
+    },
+    {
+        title: 'Webhook Notifications',
+        description: 'Pernix POSTs a JSON body to this URL whenever the agent calls ask_user and needs a human — the escape hatch for long autonomous runs you are not watching in the browser. Pair it with ntfy, Pushover, Slack, Discord or a home-automation hook. Leave the URL empty to disable.',
+        fields: [
+            {
+                key: 'notify_webhook_url',
+                label: 'Webhook URL',
+                type: 'writeonly',
+                hint: 'Write-only: the server redacts this value from the settings API, so the current URL is '
+                    + 'never shown here. Type a new URL to replace it. Removing one entirely means editing '
+                    + 'notify_webhook_url in data/settings.json — the API refuses to blank a URL field.',
+            },
+            { key: 'notify_webhook_timeout', label: 'Webhook Timeout (s)', type: 'number', min: 1, max: 60 },
         ],
     },
 ];
@@ -526,9 +645,9 @@ async function _runVoiceTestClick(btn, resultEl) {
     }
 }
 
-function _showRestartButton() {
+function _showRestartButton(reason = 'network changes') {
     const footer = document.querySelector('.modal-footer');
-    if (!footer || document.getElementById('restart-server-btn')) return;
+    if (!footer) return;
 
     const statusEl = footer.querySelector('.save-status');
 
@@ -538,27 +657,27 @@ function _showRestartButton() {
     const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname);
     if (!isLoopback) {
         if (statusEl) {
-            statusEl.style.color = 'var(--warning, #fa3)';
+            statusEl.className = 'save-status status-warn';
             statusEl.textContent =
-                'Restart required to apply network changes — restart from the server console (or from a localhost browser).';
+                `Saved, but a restart is needed to apply ${reason} — restart from the server console (or from a localhost browser).`;
         }
         return;
     }
 
     if (statusEl) {
-        statusEl.style.color = 'var(--warning, #fa3)';
-        statusEl.textContent = 'Restart required to apply network changes';
+        statusEl.className = 'save-status status-warn';
+        statusEl.textContent = `Saved, but a restart is needed to apply ${reason}`;
     }
+    if (document.getElementById('restart-server-btn')) return;
 
     const restartBtn = el('button', {
-        class: 'btn btn-primary',
+        class: 'btn btn-primary btn-danger',
         id: 'restart-server-btn',
-        style: 'background: var(--error, #e55);',
         onClick: async () => {
             restartBtn.disabled = true;
             restartBtn.textContent = 'Restarting\u2026';
             if (statusEl) {
-                statusEl.style.color = '';
+                statusEl.className = 'save-status';
                 statusEl.textContent = 'Server restarting\u2026';
             }
             try {
@@ -573,7 +692,7 @@ function _showRestartButton() {
                 restartBtn.disabled = false;
                 restartBtn.textContent = 'Restart Server';
                 if (statusEl) {
-                    statusEl.style.color = 'var(--error)';
+                    statusEl.className = 'save-status status-error';
                     statusEl.textContent = `Restart failed: ${e.message}`;
                 }
             }
@@ -635,8 +754,48 @@ function buildModelSelect(key, value, allowEmpty) {
     return el('select', { id: `setting-${key}` }, opts);
 }
 
+// Write-only fields whose value the server redacts. Some report a companion
+// <key>_set flag; notify_webhook_url does not, so we must not claim "Not set"
+// for a webhook that may well be configured.
+function _writeOnlyPlaceholder(key) {
+    const flag = _original[key + '_set'];
+    if (flag === undefined) return 'Hidden — type a value to replace it';
+    return flag ? 'Set (hidden for security)' : 'Not set';
+}
+
+function _buildBadge(cls, label, tip) {
+    return el('span', { class: `setting-badge ${cls}`, title: tip, tabindex: '0' }, [text(label)]);
+}
+
+// Label column: the name, any risk/restart/locked badges, and an optional
+// plain-language hint. Badges carry their explanation in `title` so the row
+// stays scannable and the detail is one hover/focus away.
+function _buildLabelCell(field) {
+    const { key, label, risk, restart, hint } = field;
+    const badges = [];
+    if (risk === 'security') {
+        badges.push(_buildBadge('badge-security', 'security',
+            'Security-relevant: a wrong value here changes who can reach this server or what the agent may touch.'));
+    } else if (risk === 'autonomy') {
+        badges.push(_buildBadge('badge-autonomy', 'autonomy',
+            'Autonomy/spend: this lets the agent act or spend tokens without a human in the loop.'));
+    }
+    if (LOCKED_KEYS.has(key)) badges.push(_buildBadge('badge-locked', 'locked', LOCKED_NOTE));
+    if (restart) badges.push(_buildBadge('badge-restart', 'restart', restart));
+
+    const children = [
+        el('span', { class: 'setting-label-line' }, [
+            el('label', { for: `setting-${key}` }, [text(label)]),
+            ...badges,
+        ]),
+    ];
+    if (hint) children.push(el('span', { class: 'setting-hint' }, [text(hint)]));
+    return el('div', { class: 'setting-label-cell' }, children);
+}
+
 function buildField(field, value) {
-    const { key, label, type, step, options, allowEmpty } = field;
+    const { key, label, type, step, options, allowEmpty, min, max } = field;
+    const locked = LOCKED_KEYS.has(key);
 
     let input;
     if (type === 'apikey') {
@@ -649,24 +808,16 @@ function buildField(field, value) {
             value: '',
             autocomplete: 'off',
         });
-        return el('div', { class: 'setting-row' }, [
-            el('label', { for: `setting-${key}` }, [text(label)]),
-            input,
-        ]);
-    } else if (type === 'certpath') {
-        // Write-only path field — never shows stored value
-        const isSet = !!_original[key + '_set'];
+    } else if (type === 'certpath' || type === 'writeonly') {
+        // Write-only field — the server redacts the stored value, so the input
+        // starts empty and only a typed value is ever sent.
         input = el('input', {
             type: 'text',
             id: `setting-${key}`,
-            placeholder: isSet ? 'Set (hidden for security)' : 'Not set',
+            placeholder: _writeOnlyPlaceholder(key),
             value: '',
             autocomplete: 'off',
         });
-        return el('div', { class: 'setting-row', id: `row-${key}` }, [
-            el('label', { for: `setting-${key}` }, [text(label)]),
-            input,
-        ]);
     } else if (type === 'bool') {
         input = el('input', { type: 'checkbox', id: `setting-${key}` });
         input.checked = !!value;
@@ -688,15 +839,33 @@ function buildField(field, value) {
             id: `setting-${key}`,
             value: String(value ?? ''),
             step: String(step || (Number.isInteger(value) ? 1 : 0.01)),
+            ...(min === undefined ? {} : { min: String(min) }),
+            ...(max === undefined ? {} : { max: String(max) }),
         });
     } else {
         input = el('input', { type: 'text', id: `setting-${key}`, value: String(value ?? '') });
     }
 
-    return el('div', { class: 'setting-row' }, [
-        el('label', { for: `setting-${key}` }, [text(label)]),
-        input,
-    ]);
+    if (locked) {
+        input.disabled = true;
+        input.setAttribute('aria-describedby', `locked-${key}`);
+    }
+
+    const rowChildren = [_buildLabelCell(field), input];
+    const row = el('div', {
+        // Toggles keep the label and the box on one line even on a phone: the
+        // label is the real tap target (for=), so a full-width label beats a
+        // 24px checkbox stacked under its own caption.
+        class: `setting-row${type === 'bool' ? ' setting-row-bool' : ''}`
+             + `${locked ? ' setting-locked' : ''}${field.risk ? ' setting-risk-' + field.risk : ''}`,
+        id: `row-${key}`,
+        'data-key': key,
+    }, rowChildren);
+
+    if (locked) {
+        row.append(el('span', { class: 'setting-locked-note', id: `locked-${key}` }, [text(LOCKED_NOTE)]));
+    }
+    return row;
 }
 
 function _rebuildModelSelects() {
@@ -713,6 +882,39 @@ function _rebuildModelSelects() {
     }
 }
 
+function allSettingFields() {
+    return [...SECTIONS.flatMap(s => s.fields), ...NETWORK_FIELDS, ...MODEL_SELECT_FIELDS];
+}
+
+function _labelFor(key) {
+    return allSettingFields().find(f => f.key === key)?.label || key;
+}
+
+// Put a control back to the value the server actually holds. Used when a save
+// comes back without the key we asked for, so the UI never keeps displaying a
+// value the server refused.
+function _revertField(key) {
+    const field = allSettingFields().find(f => f.key === key);
+    const input = document.getElementById(`setting-${key}`);
+    if (field && input) {
+        const prev = _original[key];
+        if (field.type === 'bool') input.checked = !!prev;
+        else if (field.type === 'certpath' || field.type === 'writeonly') {
+            input.value = '';
+            input.placeholder = _writeOnlyPlaceholder(key);
+        } else input.value = prev === undefined || prev === null ? '' : String(prev);
+        return;
+    }
+    // List-valued editors keep their state outside the DOM.
+    if (key === 'openrouter_models') {
+        _models = (_original.openrouter_models || []).map(id => ({ id, valid: null, info: null }));
+        renderModelList();
+    } else if (key === 'cors_origins') {
+        const editor = document.getElementById('origins-editor');
+        if (editor) editor.replaceWith(_buildOriginsEditor(_original.cors_origins || []));
+    }
+}
+
 function collectChanges() {
     const changes = {};
     const allFields = [...SECTIONS.flatMap(s => s.fields), ...NETWORK_FIELDS];
@@ -721,8 +923,13 @@ function collectChanges() {
         if (!input) continue;
 
         if (field.type === 'apikey') continue;  // handled separately
-        if (field.type === 'certpath') {
-            // Write-only: only include if user typed a new value
+        // Locked fields render disabled; sending them would be a no-op the
+        // server drops silently, which is exactly the lie we're removing.
+        if (LOCKED_KEYS.has(field.key)) continue;
+        if (field.type === 'certpath' || field.type === 'writeonly') {
+            // Write-only: only a typed value is ever sent. There is no "clear"
+            // path — update_settings rejects an empty string for any *_url
+            // field that currently holds a value.
             const val = input.value.trim();
             if (val) changes[field.key] = val;
             continue;
@@ -758,19 +965,9 @@ function collectChanges() {
         changes.openrouter_models = currentIds;
     }
 
-    // Include env mode if changed
-    const modeInput = document.getElementById('setting-shell_env_mode');
-    if (modeInput && modeInput.value !== _original.shell_env_mode) {
-        changes.shell_env_mode = modeInput.value;
-    }
-
-    // Include env lists if changed
-    if (JSON.stringify(_envDenylist) !== JSON.stringify(_original.shell_env_denylist || [])) {
-        changes.shell_env_denylist = _envDenylist;
-    }
-    if (JSON.stringify(_envAllowlist) !== JSON.stringify(_original.shell_env_allowlist || [])) {
-        changes.shell_env_allowlist = _envAllowlist;
-    }
+    // shell_env_mode / shell_env_denylist / shell_env_allowlist are deliberately
+    // absent: the settings API locks them, so posting them changed nothing and
+    // reported success anyway. The Environment tab now renders them read-only.
 
     // Include CORS origins if changed
     if (JSON.stringify(_corsOrigins) !== JSON.stringify(_original.cors_origins || [])) {
@@ -1003,70 +1200,70 @@ let _envVarNames = [];  // host env var names from GET /api/env-vars
 let _envDenylist = [];
 let _envAllowlist = [];
 
+// What each mode hands to a bash child. Wording is deliberately blunt about
+// the blast radius: the server process holds every provider API key, so
+// "passthrough" copies all of them into every command the agent runs, and into
+// anything that command spawns.
+const _ENV_MODE_HINTS = {
+    passthrough: 'Every host environment variable — including OPENROUTER_API_KEY, OPENAI_API_KEY, '
+        + 'TAVILY_API_KEY and anything else this process holds — is copied into every shell command '
+        + 'and into whatever those commands spawn. Any command that exfiltrates its own environment '
+        + 'exfiltrates your keys.',
+    denylist: 'Every host variable is passed EXCEPT the ones listed below. Safer than passthrough, '
+        + 'but it fails open: a key added to the environment later is passed until someone remembers '
+        + 'to deny it.',
+    allowlist: 'Only the variables listed below are passed. PATH, HOME and VIRTUAL_ENV are then set '
+        + 'explicitly to the workspace venv, so the sandbox still works. Fails closed — a new API key '
+        + 'in the environment is not handed out unless you add it here. This is the default.',
+};
+
 function buildEnvTab(settings) {
     _envDenylist = [...(settings.shell_env_denylist || [])];
     _envAllowlist = [...(settings.shell_env_allowlist || [])];
 
-    const mode = settings.shell_env_mode || 'passthrough';
+    // Matches the config.py default. It changed passthrough -> allowlist when
+    // passthrough was found to hand every provider key to every shell child.
+    const mode = settings.shell_env_mode || 'allowlist';
 
-    // Mode selector
     const modeSelect = el('select', { id: 'setting-shell_env_mode' },
         ['passthrough', 'denylist', 'allowlist'].map(opt =>
             el('option', { value: opt, ...(opt === mode ? { selected: '' } : {}) }, [text(opt)])
         )
     );
+    modeSelect.disabled = true;
 
-    const modeHints = {
-        passthrough: 'All host environment variables are passed to shell commands.',
-        denylist: 'All host vars are passed EXCEPT those listed below.',
-        allowlist: 'Only the vars listed below are passed (plus PATH and HOME).',
-    };
+    const hintEl = el('p', {
+        class: `or-hint env-mode-hint${mode === 'passthrough' ? ' env-mode-unsafe' : ''}`,
+        id: 'env-mode-hint',
+    }, [text(_ENV_MODE_HINTS[mode] || '')]);
 
-    const hintEl = el('p', { class: 'or-hint', id: 'env-mode-hint' }, [text(modeHints[mode])]);
-
-    // List container
     const listEl = el('div', { class: 'or-model-list', id: 'env-var-list' });
-
-    // Add input
-    const addInput = el('input', {
-        type: 'text',
-        class: 'or-model-input',
-        placeholder: 'e.g. MY_VARIABLE',
-        id: 'env-var-input',
-    });
-    const addBtn = el('button', { class: 'btn btn-primary btn-sm' }, [text('Add')]);
-    addBtn.addEventListener('click', () => _addEnvVar(addInput, listEl, modeSelect.value));
-    addInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') _addEnvVar(addInput, listEl, modeSelect.value);
-    });
-    const addRow = el('div', { class: 'or-model-add', id: 'env-add-row' }, [addInput, addBtn]);
-
-    // Mode change handler
-    modeSelect.addEventListener('change', () => {
-        const m = modeSelect.value;
-        hintEl.textContent = modeHints[m];
-        _renderEnvList(listEl, m);
-        // Show/hide add row and list based on mode
-        const isPassthrough = m === 'passthrough';
-        addRow.style.display = isPassthrough ? 'none' : '';
-    });
-
-    // Initial render
     _renderEnvList(listEl, mode);
-    addRow.style.display = mode === 'passthrough' ? 'none' : '';
 
-    const container = el('div', { class: 'settings-section' }, [
-        el('h3', {}, [text('Shell Environment')]),
-        el('div', { class: 'setting-row' }, [
-            el('label', {}, [text('Env Mode')]),
-            modeSelect,
-        ]),
-        hintEl,
-        listEl,
-        addRow,
+    const modeRow = el('div', {
+        class: 'setting-row setting-locked setting-risk-security',
+        id: 'row-shell_env_mode',
+        'data-key': 'shell_env_mode',
+    }, [
+        _buildLabelCell({ key: 'shell_env_mode', label: 'Env Mode', risk: 'security' }),
+        modeSelect,
+        el('span', { class: 'setting-locked-note' }, [text(LOCKED_NOTE)]),
     ]);
 
-    return container;
+    return el('div', { class: 'settings-section' }, [
+        el('h3', {}, [
+            text('Shell Environment'),
+            buildHelpIcon(
+                'Which host environment variables a bash tool call can see. This whole group is '
+                + 'edit-locked in the settings API — a prompt-injected agent must not be able to POST '
+                + 'itself back to passthrough and read every API key. Change shell_env_mode, '
+                + 'shell_env_allowlist and shell_env_denylist in data/settings.json, then restart.'
+            ),
+        ]),
+        modeRow,
+        hintEl,
+        listEl,
+    ]);
 }
 
 function _getActiveEnvList(mode) {
@@ -1077,62 +1274,43 @@ function _renderEnvList(listEl, mode) {
     clear(listEl);
 
     if (mode === 'passthrough') {
-        // Show info about host vars
-        if (_envVarNames.length > 0) {
-            listEl.appendChild(el('div', { class: 'or-empty' },
-                [text(`${_envVarNames.length} host vars available (all passed through)`)]
-            ));
-        } else {
-            listEl.appendChild(el('div', { class: 'or-empty' }, [text('All host environment variables will be passed through')]));
-        }
+        const known = _envVarNames.length;
+        listEl.appendChild(el('div', { class: 'or-empty' }, [text(
+            known
+                ? `Every host variable is passed, including ${known} provider API key(s) this server holds.`
+                : 'Every host variable is passed to shell commands.'
+        )]));
         return;
     }
 
     const list = _getActiveEnvList(mode);
-    const label = mode === 'denylist' ? 'blocked' : 'allowed';
 
     if (list.length === 0) {
-        listEl.appendChild(el('div', { class: 'or-empty' }, [text(`No vars ${label} — use input below to add`)]));
+        listEl.appendChild(el('div', { class: 'or-empty' }, [text(
+            mode === 'denylist'
+                ? 'No variables blocked — every host variable is passed.'
+                : 'No variables allowed — shell commands get only PATH, HOME and VIRTUAL_ENV.'
+        )]));
         return;
     }
 
-    for (let i = 0; i < list.length; i++) {
-        const varName = list[i];
-        const idx = i;
-        const removeBtn = el('button', { class: 'or-remove' }, [text('\u00d7')]);
-        removeBtn.addEventListener('click', () => {
-            list.splice(idx, 1);
-            _renderEnvList(listEl, mode);
-        });
-
-        const exists = _envVarNames.length === 0 || _envVarNames.includes(varName);
-        const statusEl = el('span', { class: `or-status ${exists ? 'valid' : 'invalid'}` },
-            [text(exists ? '\u2713' : '\u2717')]
-        );
-
-        const item = el('div', { class: 'or-model-item' }, [
-            statusEl,
-            el('span', { class: 'or-model-id' }, [text(varName)]),
-            removeBtn,
-        ]);
-        listEl.appendChild(item);
+    // /api/env-vars only probes for provider API keys, so the one honest status
+    // we can render is "this entry is a live API key" — which is also the
+    // reading that matters: allowlisted means handed out, denylisted means withheld.
+    for (const varName of list) {
+        const children = [];
+        if (_envVarNames.includes(varName)) {
+            const blocked = mode === 'denylist';
+            children.push(el('span', {
+                class: `or-status ${blocked ? 'valid' : 'invalid'}`,
+                title: blocked
+                    ? 'A provider API key this server holds — blocked from shell commands.'
+                    : 'A provider API key this server holds — passed to every shell command.',
+            }, [text(blocked ? '\u2713' : '\u2717')]));
+        }
+        children.push(el('span', { class: 'or-model-id' }, [text(varName)]));
+        listEl.appendChild(el('div', { class: 'or-model-item' }, children));
     }
-}
-
-function _addEnvVar(inputEl, listEl, mode) {
-    const name = inputEl.value.trim().toUpperCase();
-    if (!name) return;
-
-    const list = _getActiveEnvList(mode);
-    if (list.includes(name)) {
-        inputEl.style.borderColor = 'var(--error)';
-        setTimeout(() => { inputEl.style.borderColor = ''; }, 1500);
-        return;
-    }
-
-    list.push(name);
-    inputEl.value = '';
-    _renderEnvList(listEl, mode);
 }
 
 // ---------------------------------------------------------------------------
@@ -1230,7 +1408,9 @@ function _buildQRButton() {
             const qrContainer = el('div', {
                 style: 'background:#fff; border-radius:8px; padding:12px; display:inline-block; margin:0.75rem 0;',
             });
-            qrContainer.innerHTML = svg;
+            // Raw SVG markup off an HTTP response — inline SVG is a scripting
+            // context, so sanitize rather than assigning innerHTML directly.
+            setSanitizedSvg(qrContainer, svg);
             // Make SVG responsive
             const svgEl = qrContainer.querySelector('svg');
             if (svgEl) {
@@ -1420,9 +1600,11 @@ function buildNotificationsSection() {
     const statusColor = perm === 'granted' ? 'var(--success, #4c8)' : perm === 'denied' ? 'var(--error, #e55)' : 'var(--text-dim)';
 
     const statusEl = el('span', { style: `color:${statusColor}; font-size:var(--text-sm);` }, [text(statusText)]);
-    const row = el('div', { class: 'settings-row' }, [
-        el('label', { class: 'settings-label' }, [text('Browser Notifications')]),
-        el('div', { class: 'settings-control', style: 'display:flex; align-items:center; gap:0.75rem;' }, [statusEl]),
+    const row = el('div', { class: 'setting-row', 'data-key': 'browser_notifications' }, [
+        el('div', { class: 'setting-label-cell' }, [
+            el('span', { class: 'setting-label-line' }, [el('label', {}, [text('Browser Notifications')])]),
+        ]),
+        el('div', { style: 'display:flex; align-items:center; gap:0.75rem;' }, [statusEl]),
     ]);
 
     const children = [el('h3', {}, [text('Notifications'), buildHelpIcon('System notifications let the agent alert you even when this tab is not in focus. Click a notification to jump to the originating session.')]), row];
@@ -1645,6 +1827,120 @@ async function buildSecurityTab(settings) {
     return el('div', {}, [warningBlock, toggleSection, scopesContainer]);
 }
 
+// ---------------------------------------------------------------------------
+// Search / filter
+//
+// With 100+ controls spread over five tabs, "where is that setting" is the
+// dominant cost of this modal. Typing a query drops the tab boundary and
+// filters every section at once; clearing it restores the tab you were on.
+// ---------------------------------------------------------------------------
+
+let _searchQuery = '';
+
+function _sectionTitle(section) {
+    const h3 = section.querySelector('h3');
+    if (!h3) return '';
+    // Direct text nodes only. The section help tooltip lives inside the
+    // heading, and its paragraph-long description would match almost anything.
+    return Array.from(h3.childNodes)
+        .filter(n => n.nodeType === Node.TEXT_NODE)
+        .map(n => n.textContent)
+        .join(' ');
+}
+
+// Blocks that are not settings sections — the Security tab's Danger Zone
+// banner, the tab wrappers' loose children — have no rows to match, so they
+// would sit in the results under every query. Hide them while filtering.
+function _filterStrayBlocks(body, active) {
+    const walk = (parent) => {
+        for (const child of parent.children) {
+            if (child.classList.contains('settings-section')) continue;
+            if (child.querySelector('.settings-section')) {
+                child.classList.remove('filtered-out');
+                walk(child);
+                continue;
+            }
+            child.classList.toggle('filtered-out', active);
+        }
+    };
+    for (const tab of body.querySelectorAll('.tab-content')) walk(tab);
+}
+
+function _applySettingsFilter(query) {
+    const changed = query !== _searchQuery;
+    _searchQuery = query;
+    const card = _overlay?.querySelector('.modal-card');
+    const body = _overlay?.querySelector('.modal-body');
+    if (!card || !body) return;
+
+    const q = query.trim().toLowerCase();
+    card.classList.toggle('settings-search-active', !!q);
+    // The result set is a different document; keeping the old offset lands the
+    // user in the middle of it (or past its end) with no visible matches.
+    if (changed) body.scrollTop = 0;
+
+    const countEl = document.getElementById('settings-search-count');
+    const sections = body.querySelectorAll('.settings-section');
+    _filterStrayBlocks(body, !!q);
+
+    if (!q) {
+        for (const section of sections) {
+            section.classList.remove('filtered-out');
+            for (const row of section.querySelectorAll('.setting-row')) row.classList.remove('filtered-out');
+        }
+        if (countEl) countEl.textContent = '';
+        return;
+    }
+
+    let rowHits = 0;
+    let sectionHits = 0;
+    for (const section of sections) {
+        const titleHit = _sectionTitle(section).toLowerCase().includes(q);
+        let hitsHere = 0;
+        for (const row of section.querySelectorAll('.setting-row')) {
+            // Rows a conditional already hid (voice engine, SSL mode, network
+            // off) stay hidden — the filter must not resurrect them.
+            if (row.style.display === 'none') continue;
+            const hit = titleHit || `${row.dataset.key || ''} ${row.textContent}`.toLowerCase().includes(q);
+            row.classList.toggle('filtered-out', !hit);
+            if (hit) hitsHere++;
+        }
+        const show = titleHit || hitsHere > 0;
+        section.classList.toggle('filtered-out', !show);
+        if (show) sectionHits++;
+        rowHits += hitsHere;
+    }
+
+    if (countEl) {
+        countEl.textContent = rowHits
+            ? `${rowHits} setting${rowHits === 1 ? '' : 's'}`
+            : sectionHits
+                ? `${sectionHits} section${sectionHits === 1 ? '' : 's'}`
+                : 'No matches';
+    }
+}
+
+function buildSearchBar() {
+    const input = el('input', {
+        type: 'search',
+        id: 'settings-search',
+        class: 'settings-search-input',
+        placeholder: 'Search settings…',
+        'aria-label': 'Search all settings',
+        autocomplete: 'off',
+        title: 'Searches every tab at once. Matches setting names, hints, and the '
+             + 'security / autonomy / restart / locked markers.',
+    });
+    const count = el('span', {
+        id: 'settings-search-count',
+        class: 'settings-search-count',
+        role: 'status',
+        'aria-live': 'polite',
+    });
+    input.addEventListener('input', () => _applySettingsFilter(input.value));
+    return el('div', { class: 'settings-search' }, [input, count]);
+}
+
 function buildTabs(settings) {
     // Tab buttons
     const generalTab = el('button', { class: 'tab-btn active', 'data-tab': 'general' }, [text('General')]);
@@ -1682,8 +1978,10 @@ function buildTabs(settings) {
         el('div', { style: 'padding:var(--sp-4); color:var(--text-faint); font-size:var(--text-sm);' }, [text('Loading…')]),
     ]);
     buildSecurityTab(settings).then(content => {
-        securityPlaceholder.innerHTML = '';
+        clear(securityPlaceholder);
         securityPlaceholder.appendChild(content);
+        // The tab arrives after the user may already be searching.
+        if (_searchQuery) _applySettingsFilter(_searchQuery);
     });
 
     // Tab switching
@@ -1695,6 +1993,10 @@ function buildTabs(settings) {
             contents.forEach(c => c.classList.remove('active'));
             tab.classList.add('active');
             contents[i].classList.add('active');
+            // The body is one shared scroller. Without this, switching tabs
+            // lands you partway down (or past the end of) the new one.
+            const body = _overlay?.querySelector('.modal-body');
+            if (body) body.scrollTop = 0;
         });
     });
 
@@ -1747,6 +2049,7 @@ export async function openSettings(opts = {}) {
             el('button', { class: 'modal-close', onClick: closeSettings }, [text('\u00d7')]),
         ]),
         tabBar,
+        buildSearchBar(),
         el('div', { class: 'modal-body' }, contents),
         el('div', { class: 'modal-footer' }, [
             statusEl,
@@ -1755,6 +2058,9 @@ export async function openSettings(opts = {}) {
                 class: 'btn btn-primary',
                 id: 'settings-save-btn',
                 onClick: async () => {
+                    // A pending auto-clear from the previous save would wipe
+                    // whatever this one has to say a couple of seconds later.
+                    clearTimeout(_statusTimer);
                     const changes = collectChanges();
 
                     // Handle API keys separately — never part of normal settings
@@ -1767,6 +2073,7 @@ export async function openSettings(opts = {}) {
                     }
 
                     if (Object.keys(changes).length === 0 && apikeyChanges.length === 0) {
+                        statusEl.className = 'save-status status-muted';
                         statusEl.textContent = 'No changes';
                         return;
                     }
@@ -1783,39 +2090,53 @@ export async function openSettings(opts = {}) {
                         }
 
                         let result = {};
-                        if (Object.keys(changes).length > 0) {
+                        const requested = Object.keys(changes);
+                        if (requested.length > 0) {
                             result = await post('/api/settings', changes);
                             saved.push(...(result.updated || []));
                         }
 
                         // Handle SSL validation errors
                         if (result.ssl_errors && result.ssl_errors.length > 0) {
-                            statusEl.style.color = 'var(--error)';
+                            statusEl.className = 'save-status status-error';
                             statusEl.textContent = result.ssl_errors.join('; ');
                             return;
                         }
 
-                        // Clear certpath inputs after save (write-only)
-                        for (const f of NETWORK_FIELDS) {
-                            if (f.type !== 'certpath') continue;
+                        // The server drops rejected values (unknown key, locked
+                        // field, bad enum, out of bounds, coercion failure) and
+                        // reports only what it accepted. Anything we asked for
+                        // and did not get back never happened — say so, and put
+                        // the control back to the value the server actually holds
+                        // instead of leaving a number on screen that isn't real.
+                        const accepted = new Set(result.updated || []);
+                        const rejected = requested.filter(k => !accepted.has(k));
+                        for (const key of rejected) _revertField(key);
+
+                        // Blank write-only inputs whose value the server took.
+                        for (const f of allSettingFields()) {
+                            if (f.type !== 'certpath' && f.type !== 'writeonly') continue;
+                            if (!accepted.has(f.key)) continue;
                             const inp = document.getElementById(`setting-${f.key}`);
-                            if (inp && inp.value) {
-                                inp.value = '';
-                                inp.placeholder = 'Set (hidden for security)';
-                                _original[f.key + '_set'] = true;
-                            }
+                            if (!inp) continue;
+                            _original[f.key + '_set'] = true;
+                            inp.value = '';
+                            inp.placeholder = _writeOnlyPlaceholder(f.key);
                         }
 
-                        statusEl.style.color = '';
-                        statusEl.textContent = `Saved: ${saved.join(', ')}`;
-                        _original = { ..._original, ...changes };
+                        // Only accepted keys become the new baseline; merging the
+                        // whole request would make the next diff think a rejected
+                        // value had stuck.
+                        for (const key of accepted) {
+                            if (key in changes) _original[key] = changes[key];
+                        }
 
                         // Live features (voice mic button) re-check their
                         // config on this instead of holding stale state.
                         window.dispatchEvent(new CustomEvent('pernix:settings-saved', { detail: { saved } }));
 
                         // If openrouter_models changed, refresh model dropdowns
-                        if (changes.openrouter_models) {
+                        if (accepted.has('openrouter_models')) {
                             try {
                                 const m = await get('/api/models');
                                 _availableModels = (m.models || []).sort((a, b) => a.id.localeCompare(b.id));
@@ -1825,16 +2146,28 @@ export async function openSettings(opts = {}) {
                             }
                         }
 
-                        // Show restart button if network settings changed
-                        if (result.restart_required) {
+                        if (rejected.length > 0) {
+                            statusEl.className = 'save-status status-error';
+                            statusEl.textContent =
+                                `Rejected by the server and reverted: ${rejected.map(_labelFor).join(', ')}. `
+                                + 'The value was out of range or the field is edit-locked.';
+                            return;
+                        }
+
+                        // restart_required only covers the network group; the
+                        // provider semaphores are sized once at router build.
+                        const needsRestart = [...accepted].filter(k => RESTART_ON_SAVE.has(k));
+                        if (result.restart_required || needsRestart.length > 0) {
                             _restartRequired = true;
-                            _showRestartButton();
+                            _showRestartButton(needsRestart.map(_labelFor).join(', ') || 'network changes');
                         } else {
-                            setTimeout(() => { statusEl.textContent = ''; }, 3000);
+                            statusEl.className = 'save-status';
+                            statusEl.textContent = `Saved: ${saved.join(', ')}`;
+                            _statusTimer = setTimeout(() => { statusEl.textContent = ''; }, 3000);
                         }
                     } catch (e) {
+                        statusEl.className = 'save-status status-error';
                         statusEl.textContent = `Error: ${e.message}`;
-                        statusEl.style.color = 'var(--error)';
                     }
                 },
             }, [text('Save')]),
@@ -1882,9 +2215,20 @@ export function closeSettings() {
     _envAllowlist = [];
     _corsOrigins = [];
     _restartRequired = false;
+    _searchQuery = '';
+    clearTimeout(_statusTimer);
     document.removeEventListener('keydown', _onEsc);
 }
 
 function _onEsc(e) {
-    if (e.key === 'Escape') closeSettings();
+    if (e.key !== 'Escape') return;
+    // Escape backs out of the search first — closing the whole modal because
+    // the user wanted to clear a filter loses every unsaved edit.
+    const search = document.getElementById('settings-search');
+    if (search && search.value) {
+        search.value = '';
+        _applySettingsFilter('');
+        return;
+    }
+    closeSettings();
 }
