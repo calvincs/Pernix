@@ -409,7 +409,7 @@ async def test_maybe_evaluate_no_registry(monkeypatch):
 
     # No registry.json → should skip silently
     await _maybe_evaluate(sid, session, session_obj=session_obj)
-    assert not session_obj.eval_retry_requested
+    assert not session_obj.turn.eval_retry_requested
 
 
 # ===========================================================================
@@ -461,7 +461,7 @@ async def test_maybe_evaluate_ignores_other_sessions_features(monkeypatch, tmp_p
     await _maybe_evaluate(sid, session, session_obj=session_obj)
 
     assert called == [], "must not evaluate another session's feature"
-    assert not session_obj.eval_retry_requested
+    assert not session_obj.turn.eval_retry_requested
 
 
 async def test_maybe_evaluate_runs_own_and_legacy_features(monkeypatch, tmp_path):

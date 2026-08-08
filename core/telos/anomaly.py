@@ -122,14 +122,17 @@ async def on_post_task(session_id: str, session: dict, session_obj) -> None:
     if session.get("session_type") == "canary":
         return  # canary isolation: synthetic turns must not mint questions
 
-    turn_id = getattr(session_obj, "current_turn_user_msg_id", None)
-    if getattr(session_obj, "_telos_turn_traced", None) == turn_id and turn_id is not None:
-        return
-    session_obj._telos_turn_traced = turn_id
+    from sessions.state import turn_state
 
-    tool_summary = getattr(session_obj, "last_tool_summary", None) or {}
+    turn = turn_state(session_obj)
+    turn_id = getattr(session_obj, "current_turn_user_msg_id", None)
+    if turn.telos_turn_traced == turn_id and turn_id is not None:
+        return
+    turn.telos_turn_traced = turn_id
+
+    tool_summary = turn.tool_summary or {}
     termination = getattr(session_obj, "termination_reason", None)
-    reflect_retry = bool(getattr(session_obj, "reflect_count", 0))
+    reflect_retry = bool(turn.reflect_count)
 
     failing_tools = [t for t, s in tool_summary.items() if int(s.get("calls", 0)) > 0 and int(s.get("failures", 0)) > 0]
     priors = await _candor_priors(failing_tools)

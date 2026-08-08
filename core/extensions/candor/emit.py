@@ -1,7 +1,7 @@
 """Pernix — Candor emission: map turn-end state to observation dicts.
 
 Purely mechanical (no LLM). Everything here derives from state the session
-already tracks: last_tool_summary, termination_reason, and the reflect
+already tracks: session.turn.tool_summary, termination_reason, and the reflect
 verdict. Emission is delta-tracked against what earlier reflect-retry
 attempts of the same turn already emitted, so a retry never double-observes
 the first attempt's tool calls.

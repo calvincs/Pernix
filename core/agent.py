@@ -22,10 +22,10 @@ from core.context.compiler import attach_cache_breakpoints, compile_context, nor
 from core.context.tokens import get_estimator
 from core.llm.budget import derive_max_output, derive_model_budget
 from core.llm.client import get_llm_client
-from core.llm.errors import FailoverError, FailoverReason
+from core.llm.providers.salvage import salvage_tool_calls
 from core.llm.router import OPENAI_FORMAT_PROVIDERS
 from core.llm.semaphore import PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
-from core.llm.types import StreamEventType
+from core.llm.stream_ladder import stream_with_failover
 from core.tools.executor import execute_tool_round
 from core.tools.registry import get_registry
 from db import models as db
@@ -39,25 +39,6 @@ logger = logging.getLogger("pernix.agent")
 # ---------------------------------------------------------------------------
 
 _FILE_TOOLS = {"file_edit", "file_write", "file_read", "file_append"}
-
-_STREAM_BACKOFFS = (5, 10, 15)
-
-
-def _is_stream_retryable(error: str) -> bool:
-    return any(
-        k in error
-        for k in (
-            "500",
-            "502",
-            "503",
-            "504",
-            "ConnectError",
-            "ReadTimeout",
-            "ConnectTimeout",
-            "Connection refused",
-        )
-    )
-
 
 # Empirically-verified tool-name hallucinations with compatible argument schemas.
 # Rewrite silently (logged) instead of burning a round on the difflib hint path.
@@ -100,30 +81,6 @@ def _prior_turn_tool_names(session_id: str, lookback: int = 40) -> set[str]:
 
 
 _WEB_TOOLS = frozenset({"browse_web", "http_get", "search_web"})
-
-# Kimi K2.6 emits its native special-token tool-call format as plain text when
-# it degrades under loop pressure instead of using the structured API format.
-# These patterns let us recover those calls rather than discarding them.
-_KIMI_SECTION_RE = re.compile(
-    r"<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>",
-    re.DOTALL,
-)
-_KIMI_CALL_RE = re.compile(
-    r"<\|tool_call_begin\|>\s*(\S+?)(?::(\w+))?\s*<\|tool_call_argument_begin\|>(.*?)<\|tool_call_end\|>",
-    re.DOTALL,
-)
-
-# Generic XML-style tool-call salvage. Catches model-emitted markup that
-# leaks as text when the provider's chat-template parser fails to match the
-# real special tokens. Covers DeepSeek's DSML format and any future
-# Anthropic-XML-shaped degradation. The captured prefix group (\1) lets the
-# closing tag's decoration match the opening tag's. Parameters are matched
-# with a re.escape'd prefix at call time to avoid regex-injection.
-_GENERIC_INVOKE_RE = re.compile(
-    r'<([^\s<>/]*?)invoke\s+name="([^"]+)"\s*>(.*?)</\1invoke>',
-    re.DOTALL,
-)
-_GENERIC_PARAM_RE_TMPL = r'<{prefix}parameter\s+name="([^"]+)"(?:\s+[^>]*)?\s*>(.*?)</{prefix}parameter>'
 
 # Tool-result substrings that indicate "no useful info came back". Matched
 # case-insensitively against the tool result body. Kept narrow on purpose so
@@ -445,6 +402,328 @@ def _is_meta_commentary(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Tool-call admission
+# ---------------------------------------------------------------------------
+
+
+class _ToolCallGate:
+    """Everything that stands between a model's tool calls and the executor.
+
+    One turn, one gate. Four filters run in order, and the order matters:
+
+      1. intra-round exact dedup — the same call twice in one response
+      2. cross-round exact dedup — a call this turn already answered
+      3. semantic dedup — near-identical args on expensive tools
+      4. correction + validation — alias known hallucinations, reject unknown
+         names, parse the JSON arguments, check required parameters
+
+    Dedup precedes validation because a duplicate of a *bad* call should be
+    answered by the dedup stub, not produce two identical error messages.
+
+    Every rejection writes a tool-role message (the model's only channel back
+    — a role=system note gets stripped by normalize_for_openrouter and by
+    Ollama's one-system rule), emits the matching tool.call event so the UI
+    shows what the agent was told, records the failure for stuck detection,
+    and drops the call. Nothing reaches the executor unvalidated, and the
+    assistant message the caller persists carries only what survived, so the
+    transcript never gains an orphaned tool_call id.
+    """
+
+    def __init__(self, *, registry, session: AgentSession, save_turn_msg, stuck, tool_failures: dict[str, list[str]]):
+        self._registry = registry
+        self._session = session
+        self._save = save_turn_msg
+        self._stuck = stuck
+        self._tool_failures = tool_failures
+        # hash → (round_num, truncated_result) for the cross-round hard dedup.
+        self._cross_round: dict[str, tuple[int, str]] = {}
+
+    async def admit(self, calls: list[dict], active_tools: list[str]) -> tuple[list[dict], dict[str, tuple[str, str]]]:
+        """Return (executable calls, alias notes keyed by tool_call id).
+
+        Each executable entry is {"tc": <raw call>, "parsed_args": <dict>}.
+        """
+        unique = await self._dedup(calls)
+        unique = await self._semantic_dedup(unique)
+        valid, aliased_by_id = await self._correct_names(unique, active_tools)
+        return await self._parse_and_validate(valid), aliased_by_id
+
+    def remember_success(self, tool_name: str, raw_args, round_num: int, content: str) -> None:
+        """Cache a successful call so an identical one next round short-circuits.
+
+        Only successes are cached — a failed call stays eligible for retry.
+        """
+        if tool_name not in _CROSS_ROUND_DEDUP_EXCLUDED:
+            self._cross_round[f"{tool_name}:{_hash_args(raw_args)}"] = (round_num, content[:200])
+        # A successful file mutation invalidates cached bash results: the same
+        # command can now yield a different outcome (e.g. re-running a script
+        # the agent just fixed). Without this, "edit → re-run same command"
+        # loops short-circuit to the stale pre-edit failure.
+        if tool_name in _STATE_MUTATING_TOOLS:
+            purged = _invalidate_bash_dedup(self._cross_round)
+            if purged:
+                logger.info("Cross-round dedup: cleared %d cached bash result(s) after %s", purged, tool_name)
+
+    # -- filters ------------------------------------------------------------
+
+    async def _dedup(self, calls: list[dict]) -> list[dict]:
+        seen: set[str] = set()
+        kept: list[dict] = []
+        for tc in calls:
+            key = f"{tc['name']}:{_hash_args(tc.get('arguments', ''))}"
+            if key in seen:
+                await self._save("tool", "(duplicate call — see previous result)", tool_call_id=tc.get("id", ""))
+                continue
+            seen.add(key)
+            # Non-idempotent tools (repl — a repeated `next(pages)` MUST run
+            # twice; the mutated state lives in the kernel namespace, invisible
+            # to the file-based invalidators) always re-execute.
+            tool_def = self._registry.get(tc["name"])
+            idempotent = getattr(tool_def, "idempotent", True) if tool_def else True
+            if key in self._cross_round and tc["name"] not in _CROSS_ROUND_DEDUP_EXCLUDED and idempotent:
+                prior_round, prior_result = self._cross_round[key]
+                await self._save(
+                    "tool",
+                    (
+                        f"(already executed in round {prior_round} with identical arguments — "
+                        f"prior result: {prior_result}. "
+                        "Use this result and do not call again. "
+                        "If you believe the state has changed, verify with file_read or glob instead.)"
+                    ),
+                    tool_call_id=tc.get("id", ""),
+                )
+                continue
+            kept.append(tc)
+        return kept
+
+    async def _semantic_dedup(self, calls: list[dict]) -> list[dict]:
+        """Drop near-identical calls to expensive tools (same model + images,
+        different prompt wording)."""
+        if len(calls) <= 1:
+            return calls
+        by_name: dict[str, list[dict]] = {}
+        for tc in calls:
+            by_name.setdefault(tc["name"], []).append(tc)
+        out: list[dict] = []
+        for name, group in by_name.items():
+            if name not in _SEMANTIC_DEDUP_TOOLS or len(group) <= 1:
+                out.extend(group)
+                continue
+            kept = [group[0]]
+            for tc in group[1:]:
+                if any(_is_near_duplicate_call(tc, k, name) for k in kept):
+                    logger.info("Semantic dedup: skipping near-duplicate %s call", name)
+                    await self._save(
+                        "tool", "(near-duplicate call — see previous result)", tool_call_id=tc.get("id", "")
+                    )
+                else:
+                    kept.append(tc)
+            out.extend(kept)
+        return out
+
+    async def _correct_names(
+        self, calls: list[dict], active_tools: list[str]
+    ) -> tuple[list[dict], dict[str, tuple[str, str]]]:
+        """H1: rewrite known hallucinated names, reject unknown ones.
+
+        Aliases are tracked by call id so the caller can prefix the correction
+        onto the eventual tool result — a role=system mid-conversation note is
+        stripped by normalize_for_openrouter (and Ollama's one-system rule),
+        so the correction has to travel back on the tool-role message that the
+        provider keeps verbatim.
+        """
+        aliased_by_id: dict[str, tuple[str, str]] = {}
+        valid: list[dict] = []
+        for tc in calls:
+            tc["name"] = tc["name"].strip()
+            aliased = _TOOL_ALIASES.get(tc["name"])
+            # Only apply the alias if the target is registered, NOT disabled,
+            # AND in the session's active_tools. Without the active-tools check,
+            # an alias silently promotes a tool past the active-set gate (e.g.
+            # scout didn't pick it, but the model hallucinated a matching name).
+            # The is_disabled gate is defense-in-depth: the monotonic allowlist
+            # already filters disabled, but an alias is exactly the kind of
+            # back-channel that could resurrect one if a future refactor forgets.
+            if (
+                aliased
+                and self._registry.exists(aliased)
+                and not self._registry.is_disabled(aliased)
+                and aliased in active_tools
+            ):
+                original_name = tc["name"]
+                logger.info("tool.aliased: %s -> %s", original_name, aliased)
+                tc["name"] = aliased
+                aliased_by_id[tc.get("id", "")] = (original_name, aliased)
+            if not self._registry.exists(tc["name"]):
+                logger.warning("Hallucinated tool '%s' — not in registry", tc["name"])
+                hint = _build_hallucinated_tool_hint(tc["name"], self._registry)
+                full_error = f"Error: Tool '{tc['name']}' does not exist. {hint}"
+                # The user benefits from seeing the full hint the agent was
+                # given, not just "does not exist" — so the event carries it too.
+                await self._reject(tc, transcript_msg=full_error, event_msg=full_error, event_args={})
+                continue
+            valid.append(tc)
+        return valid, aliased_by_id
+
+    async def _parse_and_validate(self, calls: list[dict]) -> list[dict]:
+        """C3 (JSON arguments parse) + H4 (required parameters present)."""
+        parsed_calls: list[dict] = []
+        for tc in calls:
+            raw_args = tc["arguments"]
+            if isinstance(raw_args, str):
+                try:
+                    parsed_args = json.loads(raw_args) if raw_args else {}
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.warning("Malformed tool arguments for '%s': %s", tc["name"], e)
+                    await self._reject(
+                        tc,
+                        transcript_msg=(
+                            f"Error: Could not parse arguments for tool '{tc['name']}'. "
+                            f"JSON decode error: {e}. Please provide valid JSON arguments."
+                        ),
+                        event_msg=f"Error: Malformed JSON arguments: {e}",
+                        event_args={},
+                    )
+                    continue
+            else:
+                parsed_args = raw_args if raw_args else {}
+
+            tool_def = self._registry.get(tc["name"])
+            if tool_def and tool_def.parameters:
+                missing = [p for p in tool_def.parameters.get("required", []) if p not in parsed_args]
+                if missing:
+                    logger.warning("Tool '%s' missing required params: %s", tc["name"], missing)
+                    schema_props = tool_def.parameters.get("properties", {})
+                    param_hints = {
+                        p: schema_props[p].get("description", schema_props[p].get("type", "unknown"))
+                        for p in missing
+                        if p in schema_props
+                    }
+                    await self._reject(
+                        tc,
+                        transcript_msg=(
+                            f"Error: Tool '{tc['name']}' is missing required parameters: "
+                            f"{', '.join(missing)}. "
+                            f"Parameter details: {json.dumps(param_hints)}. "
+                            f"You MUST retry this tool call with all required parameters included."
+                        ),
+                        event_msg=f"Error: Missing required parameters: {', '.join(missing)}",
+                        event_args=_summarize_args(parsed_args),
+                    )
+                    continue
+
+            parsed_calls.append({"tc": tc, "parsed_args": parsed_args})
+        return parsed_calls
+
+    async def _reject(self, tc: dict, *, transcript_msg: str, event_msg: str, event_args: dict) -> None:
+        """Refuse one call: tell the model, tell the UI, count it as a failure."""
+        await self._save("tool", transcript_msg, tool_call_id=tc.get("id", ""))
+        self._session.emit_event(
+            {
+                "type": "tool.call",
+                "name": tc["name"],
+                "arguments": event_args,
+                "result": event_msg,
+                "full_result": event_msg,
+                "truncated": False,
+                "was_error": True,
+                "latency_ms": 0,
+            }
+        )
+        self._tool_failures.setdefault(tc["name"], []).append(_hash_args(tc.get("arguments", "")))
+        self._stuck.mark_failure()
+
+
+# ---------------------------------------------------------------------------
+# Compaction
+# ---------------------------------------------------------------------------
+
+
+class _CompactionController:
+    """One turn's compaction budget, and the three ways a turn spends it.
+
+    The state machine explicitly models repeated PROCESSING↔COMPACTING
+    round-trips per turn (compaction_count in the state log); the old
+    single-shot boolean meant a long turn that needed a second compaction died
+    with compaction_failed even when the deliverable was one round away. Allow
+    up to ATTEMPT_LIMIT, but require each compaction to actually shrink the
+    context — `stalled()` — so a no-op compactor can't burn all attempts in a
+    tight loop.
+
+    The three callers differ only in why they fired and whether a failed
+    compaction should leave the session parked in COMPACTING:
+
+      critical   — utilization over the critical threshold before the call.
+                   Stays in COMPACTING on failure; the caller breaks the turn
+                   with compaction_failed and _finalize_turn reads the state.
+      proactive  — the compiler's needs_compaction flag, fired once per turn
+                   before anything is wrong. Always returns to PROCESSING: no
+                   one downstream is going to classify this as a failure.
+      overflow   — the provider itself rejected the request as too long.
+                   Same parking rule as critical.
+    """
+
+    ATTEMPT_LIMIT = 3
+
+    def __init__(self, session: AgentSession, session_id: str):
+        self._session = session
+        self._session_id = session_id
+        self.attempts = 0
+        self._tokens_before_last: int | None = None
+
+    @property
+    def exhausted(self) -> bool:
+        return self.attempts >= self.ATTEMPT_LIMIT
+
+    def stalled(self, token_count: int) -> bool:
+        """True when the last compaction failed to shrink the context.
+
+        Retrying the compactor after it moved nothing is wishful; the caller
+        bails to compaction_failed rather than burning the remaining attempts.
+        """
+        return self._tokens_before_last is not None and token_count >= self._tokens_before_last * 0.95
+
+    async def run(
+        self,
+        payload,
+        *,
+        transition_reason: str,
+        event_reason: str | None = None,
+        restore_state_on_failure: bool = False,
+    ) -> bool:
+        """Compact once. Returns whether the compactor actually ran."""
+        from sessions import state_v2 as _sv2
+
+        event: dict = {"type": "context.compacting"}
+        if event_reason:
+            event["reason"] = event_reason
+        self._session.emit_event(event)
+        try:
+            _sv2.transition(self._session, _sv2.SessionStateV2.COMPACTING, transition_reason)
+        except Exception as _e:
+            logger.error("%s transition failed: %s", transition_reason, _e)
+
+        self._tokens_before_last = payload.token_count
+        # history_budget is what the compiler actually reserved for history
+        # after the fixed prefix and the output reservation. Without it the
+        # compactor falls back to a fraction-of-budget heuristic and keeps a
+        # different amount than the compiler will accept on the next compile.
+        compacted = await compact_with_llm(
+            self._session_id,
+            payload.messages,
+            history_budget=payload.history_budget,
+        )
+        self.attempts += 1
+        self._session.touch()  # keep the reaper honest — COMPACTING can take seconds
+        if compacted or restore_state_on_failure:
+            try:
+                _sv2.transition(self._session, _sv2.SessionStateV2.PROCESSING, "compact-done")
+            except Exception as _e:
+                logger.error("compact-done (%s) transition failed: %s", transition_reason, _e)
+        return compacted
+
+
+# ---------------------------------------------------------------------------
 # Agent loop
 # ---------------------------------------------------------------------------
 
@@ -458,40 +737,26 @@ async def run_agent(
 ) -> None:
     """Main agent execution loop.
 
-    1. Save user message (skipped on Reflect retries — already in DB)
-    2. Build context (base prompt + fallback SOUL/RULES loading)
-    3. Tool loop with stuck detection
-    4. Stream final response
-    5. Post-response: checkpoint, continuation
+    Per turn: persist the user message, resolve the tool surface, then drive
+    the tool loop — compile context, stream, salvage/validate/execute tool
+    calls, repeat — until the model answers, suspends, or runs out of rounds.
+    A loop that ended on tool results gets one final tools=None call so the
+    turn closes with text addressed to the user.
+
+    The loop body stays readable by delegating each concern to a collaborator
+    that owns its own rules: `_ToolCallGate` (what may execute),
+    `_CompactionController` (the turn's compaction budget), `StuckDetector`
+    (are we going in circles), and `core.llm.stream_ladder` (retry/fallback,
+    shared with the final-answer call). What remains here is the control flow
+    those pieces hang off, and the exit classification —
+    session.termination_reason — that every downstream hook reads.
     """
     registry = get_registry()
     client = get_llm_client()
     estimator = get_estimator()
 
-    # Derive LLM scheduling context for this session once.
-    # Workers get lower priority than their orchestrating parent.
-    _sched_priority = PRIORITY_WORKER if session.session_type == "worker" else PRIORITY_ORCHESTRATOR
-    try:
-        from datetime import datetime as _dt
-
-        # created_at lives on the DB row, not the in-memory AgentSession —
-        # the old `session.created_at` raised AttributeError on every turn,
-        # was swallowed, and age-based scheduling fairness never worked
-        # (every session ranked float("inf")).
-        _row = await asyncio.to_thread(db.get_session, session_id)
-        _sched_created_at = _dt.fromisoformat((_row or {}).get("created_at", "").replace("Z", "+00:00")).timestamp()
-    except Exception:
-        _sched_created_at = float("inf")
-
-    # Resolve the live goal id once per turn for token_usage stamping
-    # (plan 3b). Workers keep an inherited id from spawn; everyone else
-    # re-resolves so a goal created/completed between turns is respected.
-    if settings.goals_enabled and session.session_type != "worker":
-        try:
-            _goal_row = await asyncio.to_thread(db.get_active_goal, session_id)
-            session.active_goal_id = (_goal_row or {}).get("id")
-        except Exception:
-            session.active_goal_id = None
+    _sched_priority, _sched_created_at = await _scheduling_identity(session, session_id)
+    await _resolve_active_goal(session, session_id)
 
     # Save user message (skip on retry or when already persisted by the caller).
     # The manager locks current_turn_user_msg_id in at pre-save time so it
@@ -524,48 +789,9 @@ async def run_agent(
             meta = json.dumps(base)
         return await asyncio.to_thread(db.add_message, session_id, role, content, metadata=meta, **kwargs)
 
-    # Get scout report (prepared by session manager before agent runs)
-    scout_report = session.last_scout_report
-    if scout_report:
-        scout_text = scout_report.to_system_prompt_section()
-        recommended = scout_report.get_tool_names()
-        active_tools_set = set(recommended)
-        # Always ensure core tools are available
-        for t in registry.enabled_tools():
-            if t.source == "builtin":
-                active_tools_set.add(t.name)
-        # Monotonic allowlist: if the agent successfully used an extension tool
-        # in a prior turn of this session, keep it in the schema. Prevents
-        # scout from silently narrowing the surface between turns (e.g.
-        # dropping install_package after a successful pip install), forcing
-        # the agent to re-discover tools it has already proven it needs.
-        try:
-            prior_tools = _prior_turn_tool_names(session_id)
-            for tname in prior_tools:
-                # Skip disabled — a tool the user toggled off between turns
-                # must NOT be re-promoted by the monotonic allowlist; otherwise
-                # disabling a previously-used tool has no effect on the next turn.
-                if registry.exists(tname) and not registry.is_disabled(tname):
-                    active_tools_set.add(tname)
-        except Exception as _e:
-            logger.debug("Monotonic allowlist lookup failed for %s: %s", session_id, _e)
-        # Pull in co-occurring siblings so e.g. spawn_worker brings
-        # get_worker_result / check_workers / await_workers into the schema.
-        active_tools_set = registry.expand_cooccurrence(active_tools_set)
-        # Retry effector (audit P1f): tools reflect disabled for this retry
-        # attempt are removed from the schema entirely — overriding builtins
-        # and the monotonic allowlist. The executor enforces this too.
-        _retry_excluded = getattr(session, "retry_excluded_tools", None) or set()
-        if _retry_excluded:
-            active_tools_set -= _retry_excluded
-        active_tools = sorted(active_tools_set)  # deterministic order for prompt cache
-    else:
-        # No scout report available. Nothing to substitute: SOUL/RULES/SESSIONS
-        # arrive via the compiler's fixed-prefix directives block on every
-        # turn, so there is no identity to recover here — only the per-task
-        # curation is missing, and no deterministic text can stand in for that.
-        scout_text = ""
-        active_tools = sorted(t.name for t in registry.enabled_tools())
+    # Tool surface for this turn: scout's picks, widened and then narrowed by
+    # rules the scout does not get to overrule.
+    scout_text, active_tools = _resolve_tool_surface(session, session_id, registry)
 
     # Effective model: per-session override (for workers) or global default.
     # Resolved per-round inside the loop so an in-turn switch_model call
@@ -601,18 +827,15 @@ async def run_agent(
     stuck = StuckDetector()
     tool_failures: dict[str, list[str]] = {}
     nudges_fired: set[str] = set()  # one harness nudge per pattern per turn
-    _cross_round_calls: dict[str, tuple[int, str]] = {}  # hash → (round_num, truncated_result)
+    gate = _ToolCallGate(
+        registry=registry,
+        session=session,
+        save_turn_msg=_save_turn_msg,
+        stuck=stuck,
+        tool_failures=tool_failures,
+    )
     did_tool_calls = False
-    # Compaction-retry accounting. The state machine explicitly models repeated
-    # PROCESSING↔COMPACTING round-trips per turn (compaction_count in the state
-    # log); the old single-shot boolean here meant a long turn that needed a
-    # second compaction died with compaction_failed even when the deliverable
-    # was one round away. Allow up to _COMPACTION_ATTEMPT_LIMIT, but require
-    # each compaction to actually shrink the context (progress guard below) so
-    # a no-op compactor can't burn all attempts in a tight loop.
-    _compaction_attempts = 0
-    _COMPACTION_ATTEMPT_LIMIT = 3
-    _tokens_before_last_compaction: int | None = None
+    compaction = _CompactionController(session, session_id)
     _tried_fallback = False  # sticky per-turn: once we fail over, stay on fallback for all remaining rounds
     _last_usage = None  # local tracker — avoids reading shared client.last_usage across sessions
     # Counter for "stuck + told to call ask_user but did not" consecutive rounds.
@@ -636,106 +859,20 @@ async def run_agent(
     tool_round = 0
     while tool_round < settings.max_tool_rounds:
         # --- Pre-round checks ---
-        # Cooperative cancellation checkpoint
-        if session.cancel_requested:
-            logger.info("Session %s: cancel requested, exiting agent loop", session_id)
-            session.termination_reason = "cancelled"
+        _gate_action = await _pre_round_gate(session, session_id, tool_round)
+        if _gate_action == "return":
             return
+        if _gate_action == "break":
+            break
 
-        # In-turn goal budget checkpoint (audit P5): budgets used to be
-        # checked only BETWEEN turns, so a single turn could overshoot
-        # token/time budgets without bound. Every third round is enough —
-        # the between-turns check remains the authoritative settlement.
-        if settings.goals_enabled and session.active_goal_id and tool_round > 0 and tool_round % 3 == 0:
-            try:
-                _exceeded = await asyncio.to_thread(_goal_budget_exceeded, session_id, session.active_goal_id)
-            except Exception as _e:
-                logger.debug("In-turn goal budget check failed: %s", _e)
-                _exceeded = None
-            if _exceeded:
-                logger.info("Session %s: goal budget exceeded mid-turn (%s), ending turn", session_id, _exceeded)
-                session.emit_event({"type": "goal.budget_exceeded", "reason": _exceeded})
-                session.termination_reason = "budget_exhausted"
-                break
-
-        # Pause checkpoint (for workers). The pause/resume round-trip is
-        # modelled explicitly in the state machine: PROCESSING→PAUSE_REQUESTED
-        # (set by pause_worker HTTP/tool) → PAUSED (observed here) → PROCESSING
-        # (on resume). A cancel during pause wakes the loop and triggers the
-        # CancelledError → CANCELLING path in _run_agent_safe.
-        if not session.pause_event.is_set():
-            from sessions import state_v2 as _sv2
-
-            if _sv2._current_state(session) is _sv2.SessionStateV2.PAUSE_REQUESTED:
-                try:
-                    _sv2.transition(session, _sv2.SessionStateV2.PAUSED, "pause-observed")
-                except Exception as _e:
-                    logger.error("pause-observed transition failed: %s", _e)
-            await session.pause_event.wait()
-            if _sv2._current_state(session) is _sv2.SessionStateV2.PAUSED:
-                try:
-                    _sv2.transition(session, _sv2.SessionStateV2.PROCESSING, "resume")
-                except Exception as _e:
-                    logger.error("resume transition failed: %s", _e)
-            # Re-check cancel after resume (cancel_worker may have fired
-            # while we were paused).
-            if session.cancel_requested:
-                logger.info("Session %s: cancel observed after resume", session_id)
-                session.termination_reason = "cancelled"
-                return
-
-        # Re-resolve effective model each round so an in-turn switch_model
+        # Re-resolve the effective model each round so an in-turn switch_model
         # call (which writes session.model_override) actually moves the next
-        # round's LLM call to the new provider/model. Emit an event the UI
-        # can render as an "<orig> ⇄ <override>" indicator while active, and
-        # persist a model_divider message so the chat shows the switch even
-        # after a page reload (live SSE events aren't replayed from DB).
+        # round's LLM call to the new provider/model.
         effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
         if effective_model != _last_effective_model:
             _model_budget = derive_model_budget(effective_model)
             _max_output = derive_max_output(effective_model)
-            override_active = session.model_override is not None
-            session.emit_event(
-                {
-                    "type": "model.override",
-                    "from": _baseline_model,
-                    "to": effective_model if override_active else None,
-                    "active": override_active,
-                }
-            )
-            logger.info(
-                "Session %s: effective model changed mid-turn '%s' -> '%s' (override_active=%s)",
-                session_id,
-                _last_effective_model,
-                effective_model,
-                override_active,
-            )
-            try:
-                await asyncio.to_thread(
-                    db.add_message,
-                    session_id,
-                    "model_divider",
-                    "",
-                    metadata=json.dumps(
-                        {
-                            "from": _last_effective_model,
-                            "to": effective_model,
-                            "active": override_active,
-                            "baseline": _baseline_model,
-                        }
-                    ),
-                )
-            except Exception as _e:
-                logger.debug("model_divider persist failed: %s", _e)
-            session.emit_event(
-                {
-                    "type": "model.divider",
-                    "from": _last_effective_model,
-                    "to": effective_model,
-                    "active": override_active,
-                    "baseline": _baseline_model,
-                }
-            )
+            await _announce_model_switch(session, session_id, _last_effective_model, effective_model, _baseline_model)
             _last_effective_model = effective_model
 
         # Build context (resource status is dynamic — includes remaining tool rounds).
@@ -763,36 +900,16 @@ async def run_agent(
         # Context health check
         utilization = payload.token_count / max(effective_budget, 1)
         if utilization > settings.context_critical_threshold:
-            # Progress guard: a prior compaction this turn must have shrunk the
-            # context measurably, else retrying the compactor is wishful — bail
-            # to compaction_failed instead of burning the remaining attempts.
-            _no_progress = (
-                _tokens_before_last_compaction is not None
-                and payload.token_count >= _tokens_before_last_compaction * 0.95
-            )
-            if _compaction_attempts < _COMPACTION_ATTEMPT_LIMIT and not _no_progress:
+            if not compaction.exhausted and not compaction.stalled(payload.token_count):
                 logger.warning(
                     "Context critical (%.0f%%), attempting compaction-retry %d/%d",
                     utilization * 100,
-                    _compaction_attempts + 1,
-                    _COMPACTION_ATTEMPT_LIMIT,
+                    compaction.attempts + 1,
+                    compaction.ATTEMPT_LIMIT,
                 )
-                session.emit_event({"type": "context.compacting", "reason": "critical_threshold"})
-                from sessions import state_v2 as _sv2
-
-                try:
-                    _sv2.transition(session, _sv2.SessionStateV2.COMPACTING, "compact-critical")
-                except Exception as _e:
-                    logger.error("compact-critical transition failed: %s", _e)
-                _tokens_before_last_compaction = payload.token_count
-                compacted = await compact_with_llm(session_id, payload.messages)
-                _compaction_attempts += 1
-                session.touch()  # keep reaper honest — COMPACTING can take seconds
-                if compacted:
-                    try:
-                        _sv2.transition(session, _sv2.SessionStateV2.PROCESSING, "compact-done")
-                    except Exception as _e:
-                        logger.error("compact-done transition failed: %s", _e)
+                if await compaction.run(
+                    payload, transition_reason="compact-critical", event_reason="critical_threshold"
+                ):
                     continue  # re-compile context, retry same round
             # Compaction failed, made no progress, or attempts exhausted — break with error
             logger.warning("Context critical (%.0f%%) after compaction, breaking", utilization * 100)
@@ -809,28 +926,15 @@ async def run_agent(
         # Proactive compaction stays single-shot relative to the critical/
         # overflow paths: once a forced compaction has run this turn, the
         # critical path above owns further attempts.
-        if payload.needs_compaction and _compaction_attempts == 0:
-            from sessions import state_v2 as _sv2
-
-            session.emit_event({"type": "context.compacting"})
-            try:
-                _sv2.transition(session, _sv2.SessionStateV2.COMPACTING, "compact-proactive")
-            except Exception as _e:
-                logger.error("compact-proactive transition failed: %s", _e)
-            # Count this against the per-turn attempt budget and record the
-            # pre-compaction size. Without this, a compactor that fails to
-            # shrink the context (e.g. the historical compacted_up_to=0 bug)
-            # re-fires every tool round for the whole turn. Incrementing hands
-            # any further attempts to the critical path above, which enforces
-            # the _no_progress guard and the attempt limit.
-            _tokens_before_last_compaction = payload.token_count
-            await compact_with_llm(session_id, payload.messages)
-            _compaction_attempts += 1
-            session.touch()
-            try:
-                _sv2.transition(session, _sv2.SessionStateV2.PROCESSING, "compact-done")
-            except Exception as _e:
-                logger.error("compact-done (proactive) transition failed: %s", _e)
+        #
+        # It still counts against the per-turn attempt budget and still records
+        # the pre-compaction size. Without that, a compactor that fails to
+        # shrink the context (e.g. the historical compacted_up_to=0 bug)
+        # re-fires every tool round for the whole turn; counting it hands any
+        # further attempts to the critical path above, which enforces the
+        # stalled() guard and the attempt limit.
+        if payload.needs_compaction and compaction.attempts == 0:
+            await compaction.run(payload, transition_reason="compact-proactive", restore_state_on_failure=True)
 
         # Normalize for provider
         messages = payload.messages
@@ -852,236 +956,60 @@ async def run_agent(
             stream_tools = None
 
         # --- Stream with retry/fallback ---
-        _stream_retries = 0
         # _tried_fallback is declared before the outer loop (per-turn sticky).
         # If we already fell back this turn, skip straight to the fallback model
         # rather than re-attempting the rate-limited primary on every round.
-        _stream_current_model = settings.fallback_model if _tried_fallback else model
-        _compaction_triggered = False
-        collected_content = ""
-        collected_tool_calls: list[dict] = []
-        # Track per-round assistant latency. Reset inside the retry loop
-        # so the value reflects the *successful* attempt's wall clock, not
-        # the cumulative time across retries.
-        _round_started_at = time.monotonic()
+        outcome = await stream_with_failover(
+            client=client,
+            session_id=session_id,
+            emit=session.emit_event,
+            messages=messages,
+            base_messages=payload.messages,
+            static_prefix_chars=payload.static_prefix_chars,
+            tools=stream_tools,
+            model=settings.fallback_model if _tried_fallback else model,
+            max_output_cap=payload.effective_max_output,
+            goal_id=session.active_goal_id,
+            sched_created_at=_sched_created_at,
+            sched_priority=_sched_priority,
+            tried_fallback=_tried_fallback,
+            # Only worth surfacing while we can still act on it; once the
+            # budget is spent an overflow is just another fatal stream error.
+            surface_context_overflow=not compaction.exhausted,
+        )
+        _tried_fallback = outcome.tried_fallback
+        _stream_current_model = outcome.model
+        collected_content = outcome.content
+        collected_tool_calls = outcome.tool_calls
+        _stream_finish_reason = outcome.finish_reason
+        # Per-round assistant latency measured from the attempt that actually
+        # answered, not the cumulative time across retries.
+        _round_started_at = outcome.started_at
+        _last_usage = outcome.usage or _last_usage
 
-        while True:  # stream retry loop
-            collected_content = ""
-            collected_tool_calls = []
-            _stream_err: str | None = None
-            _compaction_triggered = False
-            _round_started_at = time.monotonic()
-            _stream_finish_reason: str | None = None  # captured from DONE event
-
-            if not client.has_capacity(_stream_current_model):
-                session.emit_event({"type": "session.waiting_llm"})
-
-            try:
-                async for event in client.chat_stream(
-                    messages,
-                    tools=stream_tools,
-                    model=_stream_current_model,
-                    max_tokens=derive_max_output(_stream_current_model),
-                    session_id=session_id,
-                    session_created_at=_sched_created_at,
-                    session_priority=_sched_priority,
-                ):
-                    if event.type == StreamEventType.TOKEN and event.content:
-                        collected_content += event.content
-                        session.emit_event(
-                            {
-                                "type": "stream.token",
-                                "content": event.content,
-                            }
-                        )
-
-                    elif event.type == StreamEventType.TOOL_CALL and event.tool_calls:
-                        for tc in event.tool_calls:
-                            # Merge by ID if we already have a partial with this ID
-                            existing = next(
-                                (c for c in collected_tool_calls if c["id"] == tc.id and tc.id),
-                                None,
-                            )
-                            if existing:
-                                if tc.name:
-                                    existing["name"] = tc.name
-                                existing["arguments"] += tc.arguments
-                            else:
-                                collected_tool_calls.append(
-                                    {
-                                        "id": tc.id,
-                                        "name": tc.name,
-                                        "arguments": tc.arguments,
-                                    }
-                                )
-
-                    elif event.type == StreamEventType.USAGE and event.usage:
-                        _last_usage = event.usage
-                        await asyncio.to_thread(
-                            db.add_token_usage,
-                            session_id=session_id,
-                            model=_stream_current_model,
-                            prompt_tokens=event.usage.prompt_tokens,
-                            completion_tokens=event.usage.completion_tokens,
-                            total_tokens=event.usage.total_tokens,
-                            cache_read_tokens=event.usage.cache_read_tokens,
-                            cache_write_tokens=event.usage.cache_write_tokens,
-                            source="provider",
-                            provider=client.resolve_provider(_stream_current_model),
-                            goal_id=session.active_goal_id,
-                        )
-
-                    elif event.type == StreamEventType.ERROR and event.error:
-                        _stream_err = event.error
-                        break
-
-                    elif event.type == StreamEventType.DONE:
-                        # Capture the provider's finish_reason so the agent
-                        # loop can detect max_tokens truncation and trigger an
-                        # in-turn continuation (vs. a full reflect-retry).
-                        _stream_finish_reason = event.finish_reason
-
-            except FailoverError as fe:
-                # Context overflow: trigger compaction and restart the tool round
-                if fe.reason == FailoverReason.CONTEXT_OVERFLOW and _compaction_attempts < _COMPACTION_ATTEMPT_LIMIT:
-                    logger.warning(
-                        "API context overflow in session %s, attempting compaction-retry %d/%d",
-                        session_id,
-                        _compaction_attempts + 1,
-                        _COMPACTION_ATTEMPT_LIMIT,
-                    )
-                    from sessions import state_v2 as _sv2
-
-                    session.emit_event({"type": "context.compacting", "reason": "api_overflow"})
-                    try:
-                        _sv2.transition(session, _sv2.SessionStateV2.COMPACTING, "compact-overflow")
-                    except Exception as _e:
-                        logger.error("compact-overflow transition failed: %s", _e)
-                    _tokens_before_last_compaction = payload.token_count
-                    compacted = await compact_with_llm(session_id, payload.messages)
-                    _compaction_attempts += 1
-                    session.touch()
-                    if compacted:
-                        try:
-                            _sv2.transition(session, _sv2.SessionStateV2.PROCESSING, "compact-done")
-                        except Exception as _e:
-                            logger.error("compact-done (overflow) transition failed: %s", _e)
-                    _compaction_triggered = True
-                    break  # exit stream retry loop; continue tool_round loop below
-                _stream_err = fe.message
-
-            except Exception as e:
-                _stream_err = str(e)
-
-            if _compaction_triggered:
-                break  # exit stream retry loop
-
-            if _stream_err is None:
-                break  # stream completed successfully
-
-            # --- Retry / fallback decision ---
-            if _stream_retries < len(_STREAM_BACKOFFS) and _is_stream_retryable(_stream_err):
-                wait = _STREAM_BACKOFFS[_stream_retries]
-                _stream_retries += 1
-                logger.warning(
-                    "LLM stream error (attempt %d/3) in session %s, retrying in %ds: %s",
-                    _stream_retries,
-                    session_id,
-                    wait,
-                    _stream_err,
-                )
-                session.emit_event(
-                    {"type": "stream.retry", "attempt": _stream_retries, "wait": wait, "error": _stream_err}
-                )
-                await asyncio.sleep(wait)
-                continue
-
-            # A different model is a viable fallback even on the same provider
-            # (model-specific failures, per-model rate buckets). Requiring a
-            # different provider meant an Ollama-primary/Ollama-fallback
-            # config silently had no failover at all.
-            fallback = settings.fallback_model
-            if fallback and not _tried_fallback and fallback != _stream_current_model:
-                _tried_fallback = True
-                _stream_retries = 0
-                _stream_current_model = fallback
-                logger.warning(
-                    "LLM retries exhausted for session %s, switching to fallback model: %s",
-                    session_id,
-                    fallback,
-                )
-                session.emit_event({"type": "stream.fallback", "model": fallback})
-                _fb_provider = client.resolve_provider(fallback)
-                if _fb_provider in OPENAI_FORMAT_PROVIDERS:
-                    messages = normalize_for_openrouter(payload.messages)
-                    messages = attach_cache_breakpoints(messages, fallback, _fb_provider, payload.static_prefix_chars)
-                else:
-                    messages = payload.messages
-                continue
-
-            # No viable path — save partial and report failure.
-            #
-            # SOFT-LAND for LLM budget exhaustion: when the per-session LLM
-            # time budget (settings.llm_session_timeout, default 1800s) trips
-            # mid-turn, the agent has typically already produced visible work
-            # in this turn (prior assistant rounds, tool calls, files). Hard-
-            # erroring the turn means reflect runs against a transcript that
-            # looks broken, even when the actual deliverable is fine. Detect
-            # the LLMSessionTimeoutError specifically and route to a clean
-            # termination (BUDGET_EXHAUSTED) so reflect grades the partial
-            # output as a near-pass instead of "session crashed."
-            _is_budget_exhausted = "exceeded the" in (_stream_err or "") and "LLM time limit" in (_stream_err or "")
-            if collected_content:
-                mid = await _save_turn_msg("assistant", collected_content, partial=1)
-                session.emit_event(
-                    {
-                        "type": "partial.saved",
-                        "content_preview": collected_content[:100],
-                        "message_id": mid,
-                    }
-                )
-            if _is_budget_exhausted:
-                # Inject a system message documenting the soft-land so the
-                # reflect evidence shows it AND the user-visible transcript
-                # explains the truncation point. We do NOT set session.error
-                # here — that's reserved for genuine failures.
-                await asyncio.to_thread(
-                    db.add_message,
-                    session_id,
-                    "system",
-                    "Turn ended early: per-session LLM time budget exhausted. "
-                    "Any content the agent produced before this point is the "
-                    "best result available for this turn. Reflect should grade "
-                    "the existing transcript on its merits.",
-                )
-                logger.warning(
-                    "LLM budget exhausted in session %s — soft-landing as " "BUDGET_EXHAUSTED instead of error: %s",
-                    session_id,
-                    _stream_err,
-                )
-                session.termination_reason = "budget_exhausted"
-                session.emit_event(
-                    {
-                        "type": "stream.budget_exhausted",
-                        "message": _stream_err,
-                    }
-                )
-                return
-            logger.error("LLM stream error in session %s: %s", session_id, _stream_err)
-            session.error = _stream_err
-            session.termination_reason = "error"
-            session.emit_event({"type": "stream.error", "error": _stream_err})
-            return
-
-        if _compaction_triggered:
+        if outcome.context_overflow is not None:
+            # The provider rejected the request as too long. Compact and
+            # restart this tool round against a re-compiled context.
+            logger.warning(
+                "API context overflow in session %s, attempting compaction-retry %d/%d",
+                session_id,
+                compaction.attempts + 1,
+                compaction.ATTEMPT_LIMIT,
+            )
+            await compaction.run(payload, transition_reason="compact-overflow", event_reason="api_overflow")
             continue  # restart tool_round loop with compacted context
 
+        if outcome.error:
+            await _end_turn_on_stream_error(
+                session=session,
+                session_id=session_id,
+                error=outcome.error,
+                partial_content=collected_content,
+                save_turn_msg=_save_turn_msg,
+            )
+            return
+
         # --- Length-truncation continuation ---
-        # If the provider reports finish_reason="length" with content and no
-        # tool calls, the model hit max_tokens mid-thought. Save the partial,
-        # inject a system reminder, and continue the loop so the next round
-        # can finish. Much cheaper than a full reflect-retry (one extra agent
-        # round vs. ~50s of reflect+scout+agent re-execution).
         if (
             _stream_finish_reason == "length"
             and not collected_tool_calls
@@ -1089,114 +1017,29 @@ async def run_agent(
             and _length_continuation_count < LENGTH_CONTINUATION_LIMIT
         ):
             _length_continuation_count += 1
-            logger.info(
-                "Session %s: LLM hit max_tokens (finish_reason=length) " "round=%d, continuing (attempt %d/%d)",
-                session_id,
-                tool_round,
-                _length_continuation_count,
-                LENGTH_CONTINUATION_LIMIT,
+            await _continue_after_length_truncation(
+                session=session,
+                session_id=session_id,
+                content=collected_content,
+                tool_round=tool_round,
+                attempt=_length_continuation_count,
+                limit=LENGTH_CONTINUATION_LIMIT,
+                save_turn_msg=_save_turn_msg,
             )
-            # Save the partial as the assistant message (no partial=1 flag —
-            # this isn't an error path, the response IS valid, just unfinished).
-            await _save_turn_msg("assistant", collected_content)
-            # Inject a system message instructing the model to continue. The
-            # next round will see its own truncated assistant message in the
-            # transcript and pick up from where it stopped.
-            await asyncio.to_thread(
-                db.add_message,
-                session_id,
-                "system",
-                "Your previous response was cut off because it hit the "
-                "max_tokens limit. Continue from exactly where you stopped — "
-                "do not repeat what you already wrote.",
-            )
-            session.emit_event(
-                {
-                    "type": "stream.length_continuation",
-                    "attempt": _length_continuation_count,
-                    "max": LENGTH_CONTINUATION_LIMIT,
-                }
-            )
-            session.touch()
             tool_round += 1  # this counts as a round consumed
             continue  # back to top of tool_round loop
 
-        # --- Kimi native-format tool-call recovery ---
-        # kimi-k2.6 sometimes falls back to its special-token format as plain
-        # text (e.g. under loop pressure) instead of structured API tool calls.
-        # Parse and promote them so the normal execution path handles them.
-        if not collected_tool_calls and collected_content and "<|tool_call_begin|>" in collected_content:
-            recovered = []
-            for m in _KIMI_CALL_RE.finditer(collected_content):
-                name_raw, call_id, args_raw = m.group(1), m.group(2), m.group(3).strip()
-                recovered.append(
-                    {
-                        "id": f"kimi_{call_id}" if call_id else f"kimi_{len(recovered)}",
-                        "name": name_raw.strip(),
-                        "arguments": args_raw,
-                    }
-                )
-            if recovered:
-                logger.warning(
-                    "Session %s: recovered %d Kimi native-format tool call(s) from text content",
-                    session_id,
-                    len(recovered),
-                )
-                collected_content = _KIMI_SECTION_RE.sub("", collected_content).strip()
-                collected_tool_calls = recovered
-
-        # --- Generic XML-style native tool-call recovery ---
-        # Some models (DeepSeek-V series, etc.) emit their tool-call markup
-        # as literal text when the served model's template parser fails to
-        # match the real special tokens. Detect the invoke/parameter XML
-        # shape, validate the tool name against the live registry, and
-        # promote structurally well-formed calls into collected_tool_calls.
-        if not collected_tool_calls and collected_content and "invoke" in collected_content:
-            recovered: list[dict] = []
-            spans_to_strip: list[tuple[int, int]] = []
-            first_prefix: str | None = None
-            for inv in _GENERIC_INVOKE_RE.finditer(collected_content):
-                prefix, name, body = inv.group(1), inv.group(2).strip(), inv.group(3)
-                if not registry.exists(name):
-                    continue
-                param_re = re.compile(
-                    _GENERIC_PARAM_RE_TMPL.format(prefix=re.escape(prefix)),
-                    re.DOTALL,
-                )
-                param_matches = list(param_re.finditer(body))
-                if not param_matches:
-                    # Structural minimum: at least one matched-prefix parameter.
-                    continue
-                params: dict[str, str] = {}
-                for p in param_matches:
-                    params[p.group(1)] = p.group(2).strip()
-                recovered.append(
-                    {
-                        "id": f"salvage_{len(recovered)}",
-                        "name": name,
-                        "arguments": json.dumps(params),
-                    }
-                )
-                spans_to_strip.append(inv.span())
-                if first_prefix is None:
-                    first_prefix = prefix
-            if recovered:
-                logger.warning(
-                    "Session %s: recovered %d native-format tool call(s) from "
-                    "text content (markup leaked as text; first prefix=%r)",
-                    session_id,
-                    len(recovered),
-                    first_prefix,
-                )
-                for start, end in reversed(spans_to_strip):
-                    collected_content = collected_content[:start] + collected_content[end:]
-                # Drop a now-empty outer container like <…tool_calls></…tool_calls>.
-                collected_content = re.sub(
-                    r"<[^\s<>/]*?tool_calls>\s*</[^\s<>/]*?tool_calls>",
-                    "",
-                    collected_content,
-                ).strip()
-                collected_tool_calls = recovered
+        # --- Native-format tool-call salvage ---
+        # A model that wrote its tool call into the text stream instead of the
+        # structured field still made the call; the provider layer knows the
+        # wire formats and turns it back into one. Only consulted when the
+        # structured field came back empty — a correctly framed call wins.
+        if not collected_tool_calls and collected_content:
+            salvaged = salvage_tool_calls(collected_content, registry.exists)
+            if salvaged:
+                logger.warning("Session %s: %s", session_id, salvaged.summary)
+                collected_content = salvaged.content
+                collected_tool_calls = salvaged.tool_calls
 
         # --- Response analysis ---
         if not collected_tool_calls:
@@ -1232,252 +1075,26 @@ async def run_agent(
 
         # Stuck detection
         score, repeats = stuck.evaluate(collected_content, collected_tool_calls, tool_failures, registry)
-        if repeats >= 3:
-            logger.warning("Session %s stuck (score=%.1f, repeats=%d)", session_id, score, repeats)
-            # Prefer asking the user over silent exhaustion. If ask_user is
-            # active, direct the agent to call it with a concrete question;
-            # otherwise fall back to the historical "summarize and stop".
-            # If the LLM ignored the ask_user nudge for STUCK_ASK_USER_LIMIT
-            # consecutive rounds, fall through to the break path — without
-            # this cap the loop spins on each new round, emitting another
-            # nudge and burning more LLM time.
-            ask_user_available = "ask_user" in (active_tools or [])
-            if ask_user_available and _stuck_ask_user_continues < STUCK_ASK_USER_LIMIT:
-                _stuck_ask_user_continues += 1
-                recent_tool_names = sorted({tc.get("name", "") for tc in (collected_tool_calls or [])})
-                hint = (
-                    "You appear to be stuck in a loop "
-                    f"(recently used: {', '.join(recent_tool_names) or 'n/a'}). "
-                    "Do NOT retry the same approach. Call ask_user with a specific "
-                    "clarifying question that names what you tried, what failed, and "
-                    "what you need from the user to proceed. After ask_user returns, "
-                    "use the answer to pick a new strategy."
-                )
-                await asyncio.to_thread(db.add_message, session_id, "system", hint)
-                # Don't break — let one more round run so the agent can ask.
-                collected_content = ""
-                collected_tool_calls = []
-                continue
-            if ask_user_available:
-                # Hit the cap. Emit a final, distinct system message so the
-                # transcript records why we gave up nudging, then break.
-                logger.warning(
-                    "Session %s stuck cap reached (%d consecutive nudges ignored), " "force-breaking loop",
-                    session_id,
-                    _stuck_ask_user_continues,
-                )
-                await asyncio.to_thread(
-                    db.add_message,
-                    session_id,
-                    "system",
-                    f"Stuck-detection nudged you {_stuck_ask_user_continues} "
-                    "times to call ask_user and you did not. Summarize what "
-                    "you have so far and stop.",
-                )
-            else:
-                await asyncio.to_thread(
-                    db.add_message,
-                    session_id,
-                    "system",
-                    "You appear to be stuck in a loop. Summarize your progress and stop.",
-                )
+        _stuck_action, _stuck_ask_user_continues = await _handle_stuck_signals(
+            session_id=session_id,
+            score=score,
+            repeats=repeats,
+            tool_calls=collected_tool_calls,
+            active_tools=active_tools,
+            nudges_used=_stuck_ask_user_continues,
+            nudge_limit=STUCK_ASK_USER_LIMIT,
+        )
+        if _stuck_action == "nudge-and-retry":
+            # Don't break — let one more round run so the agent can ask.
+            collected_content = ""
+            collected_tool_calls = []
+            continue
+        if _stuck_action == "stop":
             session.termination_reason = "round_ceiling"
             break
-        else:
-            # Not stuck this round — reset the consecutive-nudge counter so a
-            # later separate stuck episode gets the full nudge budget.
-            _stuck_ask_user_continues = 0
-            if repeats >= 1 and score > 0.3:
-                _nudge_tool_names = sorted({tc.get("name", "") for tc in (collected_tool_calls or [])})
-                _nudge_tool_str = ", ".join(_nudge_tool_names) if _nudge_tool_names else "unknown"
-                await asyncio.to_thread(
-                    db.add_message,
-                    session_id,
-                    "system",
-                    f"You are repeating tool calls ({_nudge_tool_str}). "
-                    "Do NOT retry the same operation. "
-                    "Review what you have already accomplished and proceed to the next unfinished step.",
-                )
 
-        # Deduplicate tool calls (exact hash)
-        seen_calls: set[str] = set()
-        unique_calls = []
-        for tc in collected_tool_calls:
-            key = f"{tc['name']}:{_hash_args(tc.get('arguments', ''))}"
-            if key in seen_calls:
-                # Return stub for intra-round duplicate
-                await _save_turn_msg("tool", "(duplicate call — see previous result)", tool_call_id=tc.get("id", ""))
-                continue
-            seen_calls.add(key)
-            # Cross-round hard dedup: if this exact call already succeeded in a prior round,
-            # return an informative stub so the model can use the known result without re-executing.
-            # Non-idempotent tools (repl — a repeated `next(pages)` MUST run
-            # twice; the mutated state lives in the kernel namespace, invisible
-            # to the file-based invalidators) always re-execute.
-            _dedup_tool = registry.get(tc["name"])
-            _tool_idempotent = getattr(_dedup_tool, "idempotent", True) if _dedup_tool else True
-            if key in _cross_round_calls and tc["name"] not in _CROSS_ROUND_DEDUP_EXCLUDED and _tool_idempotent:
-                prior_round, prior_result = _cross_round_calls[key]
-                stub = (
-                    f"(already executed in round {prior_round} with identical arguments — "
-                    f"prior result: {prior_result}. "
-                    "Use this result and do not call again. "
-                    "If you believe the state has changed, verify with file_read or glob instead.)"
-                )
-                await _save_turn_msg("tool", stub, tool_call_id=tc.get("id", ""))
-                continue
-            unique_calls.append(tc)
-
-        # Semantic dedup for expensive tools (near-identical arguments)
-        if len(unique_calls) > 1:
-            by_name: dict[str, list[dict]] = {}
-            for tc in unique_calls:
-                by_name.setdefault(tc["name"], []).append(tc)
-            final_calls: list[dict] = []
-            for name, group in by_name.items():
-                if name in _SEMANTIC_DEDUP_TOOLS and len(group) > 1:
-                    kept = [group[0]]
-                    for tc in group[1:]:
-                        if any(_is_near_duplicate_call(tc, k, name) for k in kept):
-                            logger.info("Semantic dedup: skipping near-duplicate %s call", name)
-                            await _save_turn_msg(
-                                "tool", "(near-duplicate call — see previous result)", tool_call_id=tc.get("id", "")
-                            )
-                        else:
-                            kept.append(tc)
-                    final_calls.extend(kept)
-                else:
-                    final_calls.extend(group)
-            unique_calls = final_calls
-
-        # --- H1: Filter out hallucinated tools (not in registry) ---
-        # Track which call IDs got aliased so we can prefix the note onto the
-        # eventual tool result below. A role=system mid-conversation note is
-        # stripped by normalize_for_openrouter (and Ollama's one-system rule),
-        # so the correction has to travel back on the tool-role message that
-        # the provider keeps verbatim.
-        aliased_by_id: dict[str, tuple[str, str]] = {}
-        valid_calls = []
-        for tc in unique_calls:
-            tc["name"] = tc["name"].strip()
-            aliased = _TOOL_ALIASES.get(tc["name"])
-            # Only apply the alias if the target is registered, NOT disabled,
-            # AND in the session's active_tools. Without the active-tools check,
-            # an alias silently promotes a tool past the active-set gate (e.g.
-            # scout didn't pick it, but the model hallucinated a matching name).
-            # The is_disabled gate is defense-in-depth: the monotonic allowlist
-            # already filters disabled, but an alias is exactly the kind of
-            # back-channel that could resurrect one if a future refactor forgets.
-            if aliased and registry.exists(aliased) and not registry.is_disabled(aliased) and aliased in active_tools:
-                original_name = tc["name"]
-                logger.info("tool.aliased: %s -> %s", original_name, aliased)
-                tc["name"] = aliased
-                aliased_by_id[tc.get("id", "")] = (original_name, aliased)
-            if not registry.exists(tc["name"]):
-                logger.warning("Hallucinated tool '%s' — not in registry", tc["name"])
-                hint = _build_hallucinated_tool_hint(tc["name"], registry)
-                full_error = f"Error: Tool '{tc['name']}' does not exist. {hint}"
-                await _save_turn_msg(
-                    "tool",
-                    full_error,
-                    tool_call_id=tc.get("id", ""),
-                )
-                # Mirror the full hint into the UI event — the user benefits
-                # from seeing what the agent was told, not just "does not exist".
-                session.emit_event(
-                    {
-                        "type": "tool.call",
-                        "name": tc["name"],
-                        "arguments": {},
-                        "result": full_error,
-                        "full_result": full_error,
-                        "truncated": False,
-                        "was_error": True,
-                        "latency_ms": 0,
-                    }
-                )
-                tool_failures.setdefault(tc["name"], []).append(_hash_args(tc.get("arguments", "")))
-                stuck.mark_failure()
-                continue
-            valid_calls.append(tc)
-
-        # --- C3: Safe JSON parsing for tool arguments ---
-        parsed_calls = []
-        for tc in valid_calls:
-            raw_args = tc["arguments"]
-            if isinstance(raw_args, str):
-                try:
-                    parsed_args = json.loads(raw_args) if raw_args else {}
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.warning("Malformed tool arguments for '%s': %s", tc["name"], e)
-                    await _save_turn_msg(
-                        "tool",
-                        (
-                            f"Error: Could not parse arguments for tool '{tc['name']}'. "
-                            f"JSON decode error: {e}. Please provide valid JSON arguments."
-                        ),
-                        tool_call_id=tc.get("id", ""),
-                    )
-                    err_msg = f"Error: Malformed JSON arguments: {e}"
-                    session.emit_event(
-                        {
-                            "type": "tool.call",
-                            "name": tc["name"],
-                            "arguments": {},
-                            "result": err_msg,
-                            "full_result": err_msg,
-                            "truncated": False,
-                            "was_error": True,
-                            "latency_ms": 0,
-                        }
-                    )
-                    tool_failures.setdefault(tc["name"], []).append(_hash_args(raw_args))
-                    stuck.mark_failure()
-                    continue
-            else:
-                parsed_args = raw_args if raw_args else {}
-
-            # --- H4: Validate required parameters against tool schema ---
-            tool_def = registry.get(tc["name"])
-            if tool_def and tool_def.parameters:
-                required_params = tool_def.parameters.get("required", [])
-                missing = [p for p in required_params if p not in parsed_args]
-                if missing:
-                    logger.warning("Tool '%s' missing required params: %s", tc["name"], missing)
-                    schema_props = tool_def.parameters.get("properties", {})
-                    param_hints = {
-                        p: schema_props[p].get("description", schema_props[p].get("type", "unknown"))
-                        for p in missing
-                        if p in schema_props
-                    }
-                    await _save_turn_msg(
-                        "tool",
-                        (
-                            f"Error: Tool '{tc['name']}' is missing required parameters: "
-                            f"{', '.join(missing)}. "
-                            f"Parameter details: {json.dumps(param_hints)}. "
-                            f"You MUST retry this tool call with all required parameters included."
-                        ),
-                        tool_call_id=tc.get("id", ""),
-                    )
-                    err_msg = f"Error: Missing required parameters: {', '.join(missing)}"
-                    session.emit_event(
-                        {
-                            "type": "tool.call",
-                            "name": tc["name"],
-                            "arguments": _summarize_args(parsed_args),
-                            "result": err_msg,
-                            "full_result": err_msg,
-                            "truncated": False,
-                            "was_error": True,
-                            "latency_ms": 0,
-                        }
-                    )
-                    tool_failures.setdefault(tc["name"], []).append(_hash_args(tc.get("arguments", "")))
-                    stuck.mark_failure()
-                    continue
-
-            parsed_calls.append({"tc": tc, "parsed_args": parsed_args})
+        # Filter, correct and validate before anything executes.
+        parsed_calls, aliased_by_id = await gate.admit(collected_tool_calls, active_tools)
 
         # Save assistant message with ONLY validated tool_calls (prevents DB orphans).
         # Persist round latency so post-hoc diagnosis (which model is slow,
@@ -1501,177 +1118,35 @@ async def run_agent(
             len(collected_content or ""),
         )
 
-        # Execute tools (only valid, parsed, and validated calls)
-        context = {"session_id": session_id}
-        if parsed_calls:
-            # Announce before execution — tool.call below is emitted only
-            # AFTER the tool returns (it carries the result), so without
-            # this the user stares at a static badge for the entire
-            # runtime of a slow bash/search call wondering if it's stuck.
-            for item in parsed_calls:
-                session.emit_event(
-                    {
-                        "type": "tool.start",
-                        "name": item["tc"]["name"],
-                        "arguments": _summarize_args(item["parsed_args"]),
-                    }
-                )
-            results = await execute_tool_round(
-                [{"name": item["tc"]["name"], "arguments": item["parsed_args"]} for item in parsed_calls],
-                context=context,
-                registry=registry,
-            )
-        else:
-            results = []
-
-        # Save results and emit events
-        for item, result in zip(parsed_calls, results):
-            tc = item["tc"]
-            tool_meta = json.dumps(
-                {
-                    "was_error": result.was_error,
-                    "latency_ms": result.latency_ms,
-                }
-            )
-            # If this call had its name aliased, prefix the correction onto
-            # the tool result so the model sees the rewrite on its next turn.
-            # (A separate role=system note would be stripped by
-            # normalize_for_openrouter; tool-role messages are preserved.)
-            stored_content = result.content
-            alias_pair = aliased_by_id.get(tc.get("id", ""))
-            if alias_pair is not None:
-                _orig, _new = alias_pair
-                stored_content = f"[note: tool name aliased {_orig} → {_new}]\n" + stored_content
-            # Harness-side mid-turn nudge: if this tool result matches a known
-            # failure signature (bot detection, 4xx/5xx from public web,
-            # SSRF block on a public-looking domain), append a one-shot hint
-            # pointing at the skill that solves it. The hint piggybacks on the
-            # tool-role message because role=system mid-conversation gets
-            # stripped by provider normalization.
-            from core.harness.nudges import evaluate as _nudge_eval
-
-            nudge = _nudge_eval(result.tool_name, stored_content, nudges_fired)
-            if nudge:
-                stored_content = stored_content + "\n\n" + nudge
-                logger.info("harness.nudge fired tool=%s pattern hint appended", result.tool_name)
-            await _save_turn_msg(
-                "tool",
-                stored_content,
-                tool_call_id=tc.get("id", ""),
-                latency_ms=result.latency_ms,
-                metadata=tool_meta,
-            )
-            event_data = {
-                "type": "tool.call",
-                "name": result.tool_name,
-                "arguments": _summarize_args(item["parsed_args"]),
-                "result": result.content[:500],
-                "full_result": result.content[:5000],
-                "truncated": len(result.content) > 500 or result.metadata.get("truncated", False),
-                "was_error": result.was_error,
-                "latency_ms": result.latency_ms,
-            }
-            if result.metadata:
-                event_data["metadata"] = result.metadata
-            session.emit_event(event_data)
-
-            # Track failures and update stuck detector
-            if result.was_error:
-                tool_failures.setdefault(result.tool_name, []).append(_hash_args(tc.get("arguments", "")))
-                stuck.mark_failure(tool_name=result.tool_name, args=item["parsed_args"])
-            else:
-                stuck.mark_success(tool_name=result.tool_name, args=item["parsed_args"])
-                # Cache successful call for cross-round hard dedup.
-                # Only successful results are cached — failed calls stay eligible for retry.
-                if result.tool_name not in _CROSS_ROUND_DEDUP_EXCLUDED:
-                    _cr_key = f"{result.tool_name}:{_hash_args(tc.get('arguments', ''))}"
-                    _cross_round_calls[_cr_key] = (tool_round, result.content[:200])
-                # A successful file mutation invalidates cached bash results: the
-                # same command can now yield a different outcome (e.g. re-running a
-                # script the agent just fixed). Without this, "edit → re-run same
-                # command" loops short-circuit to the stale pre-edit failure.
-                if result.tool_name in _STATE_MUTATING_TOOLS:
-                    _purged = _invalidate_bash_dedup(_cross_round_calls)
-                    if _purged:
-                        logger.info(
-                            "Cross-round dedup: cleared %d cached bash result(s) after %s",
-                            _purged,
-                            result.tool_name,
-                        )
-            # Semantic-streak observation (signals 8-10): records the result
-            # body's "low info" status and hostname for the new search-spiral
-            # / bot-wall / same-domain-grind signals. Cheap bookkeeping only.
-            stuck.observe_result(
-                tool_name=result.tool_name,
-                args=item["parsed_args"],
-                content=result.content,
-                was_error=result.was_error,
-            )
-
-            # Build cumulative tool execution summary for reflect diagnostic
-            ts = session.last_tool_summary
-            entry = ts.setdefault(
-                result.tool_name,
-                {
-                    "calls": 0,
-                    "failures": 0,
-                    "errors": [],
-                    "total_latency_ms": 0,
-                },
-            )
-            entry["calls"] += 1
-            entry["total_latency_ms"] += result.latency_ms
-            if result.was_error:
-                entry["failures"] += 1
-                err_preview = result.content[:500] if result.content else "unknown"
-                if err_preview not in entry["errors"]:
-                    entry["errors"].append(err_preview)
-
-            # Dynamic tool expansion via discover_tools
-            if result.tool_name == "discover_tools" and not result.was_error:
-                _expand_tools_from_discovery(result.content, active_tools)
-
-            # Inject a newly created/updated custom tool directly into active_tools
-            # so it appears in the LLM schema on the next round without requiring
-            # a separate discover_tools call.
-            if result.tool_name in ("create_tool", "update_tool") and not result.was_error:
-                _inject_created_tool(item["parsed_args"].get("name", ""), active_tools)
+        # Execute the surviving calls, then persist, emit and account for
+        # every result in one pass.
+        results = await _execute_round(parsed_calls, session=session, session_id=session_id, registry=registry)
+        await _record_round_results(
+            parsed_calls,
+            results,
+            session=session,
+            aliased_by_id=aliased_by_id,
+            save_turn_msg=_save_turn_msg,
+            nudges_fired=nudges_fired,
+            tool_failures=tool_failures,
+            stuck=stuck,
+            gate=gate,
+            tool_round=tool_round,
+            active_tools=active_tools,
+        )
 
         session.touch()
 
-        # Post-round cancellation checkpoint
-        if session.cancel_requested:
-            logger.info("Session %s: cancel requested after tool round %d", session_id, tool_round)
-            session.termination_reason = "cancelled"
-            return
-
-        # ask_user pause: if this round called ask_user, stop the loop and wait.
-        # The user's answer arrives as a new manager.prompt() call which starts a fresh turn.
-        if session.waiting_for_input:
-            logger.info("Session %s: ask_user posted — suspending agent loop", session_id)
-            await _save_turn_msg("assistant", "I've asked you a question and am waiting for your response.")
-            session.emit_event(
-                {
-                    "type": "stream.done",
-                    "usage": _last_usage.__dict__ if _last_usage else {},
-                    "model": effective_model,
-                }
-            )
-            session.termination_reason = "complete"
-            return
-
-        # await_workers(suspend=True) pause: loop exits and parent suspends until
-        # watched workers complete. Resume is automatic via _resume_from_workers().
-        if session.waiting_for_workers:
-            logger.info("Session %s: workers-dispatched — suspending agent loop", session_id)
-            session.emit_event(
-                {
-                    "type": "stream.done",
-                    "usage": _last_usage.__dict__ if _last_usage else {},
-                    "model": effective_model,
-                }
-            )
-            session.termination_reason = "complete"
+        # A round can end the turn without the loop deciding to: cancelled,
+        # or suspended on ask_user / await_workers.
+        if await _post_round_gate(
+            session,
+            session_id,
+            tool_round=tool_round,
+            model=effective_model,
+            usage=_last_usage,
+            save_turn_msg=_save_turn_msg,
+        ):
             return
 
         collected_content = ""
@@ -1684,136 +1159,676 @@ async def run_agent(
     # classify it now so downstream hooks can tell "round ceiling" from "complete".
     if session.termination_reason is None:
         session.termination_reason = "round_ceiling"
-    done_sent = False
     if did_tool_calls:
-        logger.info("Tool loop ended, generating final response (tools=None)")
-        payload = await asyncio.to_thread(
-            compile_context,
+        _last_usage = await _stream_final_answer(
+            session=session,
             session_id=session_id,
-            tool_schemas=None,  # no tools — force text response
-            scout_report_text=scout_text,
+            client=client,
+            scout_text=scout_text,
             resource_status=resource_status,
             supports_vision=model_supports_vision,
             supports_audio=model_supports_audio,
             context_budget=session.context_budget_override or _model_budget or settings.context_budget,
-            max_output_tokens=_max_output,
-            model_name=effective_model,
+            max_output=_max_output,
+            model=effective_model,
             turn_user_msg_id=_turn_user_msg_id,
+            save_turn_msg=_save_turn_msg,
+            sched_created_at=_sched_created_at,
+            sched_priority=_sched_priority,
+            tried_fallback=_tried_fallback,
+            last_usage=_last_usage,
         )
-        messages = payload.messages
-        _final_provider = client.resolve_provider(effective_model)
-        if _final_provider in OPENAI_FORMAT_PROVIDERS:
-            messages = normalize_for_openrouter(messages)
-            messages = attach_cache_breakpoints(messages, effective_model, _final_provider, payload.static_prefix_chars)
+        return
 
-        final_content = ""
-        _final_retries = 0
-        # Honor the tool loop's sticky failover: once a turn has failed over,
-        # re-attempting the known-bad primary for the final response just
-        # burns the backoff ladder again before landing on the same fallback.
-        _final_tried_fallback = _tried_fallback and settings.fallback_model != ""
-        _final_model = settings.fallback_model if _final_tried_fallback and settings.fallback_model else effective_model
-        while True:  # final response retry loop
-            final_content = ""
-            _final_err: str | None = None
+    session.emit_event(
+        {
+            "type": "stream.done",
+            "usage": _last_usage.__dict__ if _last_usage else {},
+            "model": effective_model,
+        }
+    )
+
+
+async def _scheduling_identity(session: AgentSession, session_id: str) -> tuple[int, float]:
+    """(priority, created_at) for the LLM semaphore's fairness ordering.
+
+    Workers rank below their orchestrating parent. created_at lives on the DB
+    row, not the in-memory AgentSession — the old `session.created_at` raised
+    AttributeError on every turn, was swallowed, and age-based scheduling
+    fairness never worked (every session ranked float("inf")).
+    """
+    priority = PRIORITY_WORKER if session.session_type == "worker" else PRIORITY_ORCHESTRATOR
+    try:
+        from datetime import datetime as _dt
+
+        row = await asyncio.to_thread(db.get_session, session_id)
+        created_at = _dt.fromisoformat((row or {}).get("created_at", "").replace("Z", "+00:00")).timestamp()
+    except Exception:
+        created_at = float("inf")
+    return priority, created_at
+
+
+async def _resolve_active_goal(session: AgentSession, session_id: str) -> None:
+    """Stamp the live goal id on the session for token_usage attribution.
+
+    Once per turn (plan 3b). Workers keep the id they inherited at spawn so a
+    fan-out's spend lands on the parent's goal; everyone else re-resolves, so a
+    goal created or completed between turns is respected.
+    """
+    if not settings.goals_enabled or session.session_type == "worker":
+        return
+    try:
+        goal_row = await asyncio.to_thread(db.get_active_goal, session_id)
+        session.active_goal_id = (goal_row or {}).get("id")
+    except Exception:
+        session.active_goal_id = None
+
+
+async def _pre_round_gate(session: AgentSession, session_id: str, tool_round: int) -> str:
+    """Decide whether the next tool round may start. "run" | "break" | "return".
+
+    "break" leaves the loop through the final-answer path (the turn has work
+    worth summarizing); "return" abandons it outright.
+    """
+    # Cooperative cancellation checkpoint
+    if session.cancel_requested:
+        logger.info("Session %s: cancel requested, exiting agent loop", session_id)
+        session.termination_reason = "cancelled"
+        return "return"
+
+    # In-turn goal budget checkpoint (audit P5): budgets used to be checked
+    # only BETWEEN turns, so a single turn could overshoot token/time budgets
+    # without bound. Every third round is enough — the between-turns check
+    # remains the authoritative settlement.
+    if settings.goals_enabled and session.active_goal_id and tool_round > 0 and tool_round % 3 == 0:
+        try:
+            exceeded = await asyncio.to_thread(_goal_budget_exceeded, session_id, session.active_goal_id)
+        except Exception as _e:
+            logger.debug("In-turn goal budget check failed: %s", _e)
+            exceeded = None
+        if exceeded:
+            logger.info("Session %s: goal budget exceeded mid-turn (%s), ending turn", session_id, exceeded)
+            session.emit_event({"type": "goal.budget_exceeded", "reason": exceeded})
+            session.termination_reason = "budget_exhausted"
+            return "break"
+
+    # Pause checkpoint (for workers). The pause/resume round-trip is modelled
+    # explicitly in the state machine: PROCESSING→PAUSE_REQUESTED (set by
+    # pause_worker HTTP/tool) → PAUSED (observed here) → PROCESSING (on
+    # resume). A cancel during pause wakes the loop and triggers the
+    # CancelledError → CANCELLING path in _run_agent_safe.
+    if not session.pause_event.is_set():
+        from sessions import state_v2 as _sv2
+
+        if _sv2._current_state(session) is _sv2.SessionStateV2.PAUSE_REQUESTED:
             try:
-                async for event in client.chat_stream(
-                    messages,
-                    tools=None,
-                    model=_final_model,
-                    max_tokens=derive_max_output(_final_model),
-                    session_id=session_id,
-                    session_created_at=_sched_created_at,
-                    session_priority=_sched_priority,
-                ):
-                    if event.type == StreamEventType.TOKEN and event.content:
-                        final_content += event.content
-                        session.emit_event({"type": "stream.token", "content": event.content})
-                    elif event.type == StreamEventType.USAGE and event.usage:
-                        _last_usage = event.usage
-                        await asyncio.to_thread(
-                            db.add_token_usage,
-                            session_id=session_id,
-                            model=_final_model,
-                            prompt_tokens=event.usage.prompt_tokens,
-                            completion_tokens=event.usage.completion_tokens,
-                            total_tokens=event.usage.total_tokens,
-                            source="provider",
-                            provider=client.resolve_provider(_final_model),
-                            goal_id=session.active_goal_id,
-                        )
-                    elif event.type == StreamEventType.ERROR and event.error:
-                        _final_err = event.error
-                        break
-            except Exception as e:
-                _final_err = str(e)
+                _sv2.transition(session, _sv2.SessionStateV2.PAUSED, "pause-observed")
+            except Exception as _e:
+                logger.error("pause-observed transition failed: %s", _e)
+        await session.pause_event.wait()
+        if _sv2._current_state(session) is _sv2.SessionStateV2.PAUSED:
+            try:
+                _sv2.transition(session, _sv2.SessionStateV2.PROCESSING, "resume")
+            except Exception as _e:
+                logger.error("resume transition failed: %s", _e)
+        # Re-check cancel after resume (cancel_worker may have fired while we
+        # were paused).
+        if session.cancel_requested:
+            logger.info("Session %s: cancel observed after resume", session_id)
+            session.termination_reason = "cancelled"
+            return "return"
 
-            if _final_err is None:
-                break  # success
+    return "run"
 
-            if _final_retries < len(_STREAM_BACKOFFS) and _is_stream_retryable(_final_err):
-                wait = _STREAM_BACKOFFS[_final_retries]
-                _final_retries += 1
-                logger.warning(
-                    "Final response stream error (attempt %d/3) in session %s, retrying in %ds: %s",
-                    _final_retries,
-                    session_id,
-                    wait,
-                    _final_err,
-                )
-                session.emit_event(
-                    {"type": "stream.retry", "attempt": _final_retries, "wait": wait, "error": _final_err}
-                )
-                await asyncio.sleep(wait)
-                continue
 
-            # Same-provider different-model fallback is allowed here for the
-            # same reason as the tool loop (see above).
-            fallback = settings.fallback_model
-            if fallback and not _final_tried_fallback and fallback != _final_model:
-                _final_tried_fallback = True
-                _final_retries = 0
-                _final_model = fallback
-                logger.warning(
-                    "Final response retries exhausted for session %s, switching to fallback: %s",
-                    session_id,
-                    fallback,
-                )
-                session.emit_event({"type": "stream.fallback", "model": fallback})
-                _fb2_provider = client.resolve_provider(fallback)
-                if _fb2_provider in OPENAI_FORMAT_PROVIDERS:
-                    messages = normalize_for_openrouter(messages)
-                    # Re-run for the NEW model: flattens stale anthropic
-                    # cache parts when the fallback isn't anthropic/*.
-                    messages = attach_cache_breakpoints(messages, fallback, _fb2_provider, payload.static_prefix_chars)
-                continue
+async def _post_round_gate(
+    session: AgentSession,
+    session_id: str,
+    *,
+    tool_round: int,
+    model: str,
+    usage,
+    save_turn_msg,
+) -> bool:
+    """True when this round ended the turn. The caller returns immediately.
 
-            logger.error("Final response error: %s", _final_err)
-            if final_content:
-                await _save_turn_msg("assistant", final_content)
-            session.emit_event({"type": "stream.error", "error": _final_err})
-            break
+    Suspension (ask_user / await_workers) terminates as "complete", not as an
+    error: the work is paused, not failed, and something outside the agent
+    loop resumes it — a fresh prompt() for an answer, _resume_from_workers for
+    workers.
+    """
+    if session.cancel_requested:
+        logger.info("Session %s: cancel requested after tool round %d", session_id, tool_round)
+        session.termination_reason = "cancelled"
+        return True
 
-        if _final_err is None:
-            if final_content:
-                await _save_turn_msg("assistant", final_content)
-            session.emit_event(
-                {
-                    "type": "stream.done",
-                    "usage": _last_usage.__dict__ if _last_usage else {},
-                    "model": _final_model,
-                }
+    # ask_user pause: the user's answer arrives as a new manager.prompt() call
+    # which continues this turn.
+    if session.waiting_for_input:
+        logger.info("Session %s: ask_user posted — suspending agent loop", session_id)
+        await save_turn_msg("assistant", "I've asked you a question and am waiting for your response.")
+    elif session.waiting_for_workers:
+        # await_workers(suspend=True): the parent suspends until the watched
+        # workers complete; resume is automatic via _resume_from_workers().
+        logger.info("Session %s: workers-dispatched — suspending agent loop", session_id)
+    else:
+        return False
+
+    session.emit_event({"type": "stream.done", "usage": usage.__dict__ if usage else {}, "model": model})
+    session.termination_reason = "complete"
+    return True
+
+
+async def _announce_model_switch(
+    session: AgentSession,
+    session_id: str,
+    previous: str,
+    current: str,
+    baseline: str,
+) -> None:
+    """Record a mid-turn model change everywhere the UI reads from.
+
+    The SSE event drives a live "<orig> ⇄ <override>" indicator; the persisted
+    model_divider row is what makes the switch still visible after a page
+    reload, since live events are never replayed from the DB.
+    """
+    override_active = session.model_override is not None
+    session.emit_event(
+        {
+            "type": "model.override",
+            "from": baseline,
+            "to": current if override_active else None,
+            "active": override_active,
+        }
+    )
+    logger.info(
+        "Session %s: effective model changed mid-turn '%s' -> '%s' (override_active=%s)",
+        session_id,
+        previous,
+        current,
+        override_active,
+    )
+    try:
+        await asyncio.to_thread(
+            db.add_message,
+            session_id,
+            "model_divider",
+            "",
+            metadata=json.dumps({"from": previous, "to": current, "active": override_active, "baseline": baseline}),
+        )
+    except Exception as _e:
+        logger.debug("model_divider persist failed: %s", _e)
+    session.emit_event(
+        {
+            "type": "model.divider",
+            "from": previous,
+            "to": current,
+            "active": override_active,
+            "baseline": baseline,
+        }
+    )
+
+
+def _resolve_tool_surface(session: AgentSession, session_id: str, registry) -> tuple[str, list[str]]:
+    """Decide which tools this turn may call, and the scout text to prepend.
+
+    Scout proposes; four rules dispose, in order: builtins are always present,
+    the monotonic allowlist re-adds anything this session already used
+    successfully, co-occurrence pulls in siblings, and reflect's retry
+    exclusions are subtracted last so they beat all three.
+    """
+    scout_report = session.last_scout_report
+    if not scout_report:
+        # No scout report available. Nothing to substitute: SOUL/RULES/SESSIONS
+        # arrive via the compiler's fixed-prefix directives block on every
+        # turn, so there is no identity to recover here — only the per-task
+        # curation is missing, and no deterministic text can stand in for that.
+        return "", sorted(t.name for t in registry.enabled_tools())
+
+    active: set[str] = set(scout_report.get_tool_names())
+    # Always ensure core tools are available
+    for t in registry.enabled_tools():
+        if t.source == "builtin":
+            active.add(t.name)
+    # Monotonic allowlist: if the agent successfully used an extension tool in
+    # a prior turn of this session, keep it in the schema. Prevents scout from
+    # silently narrowing the surface between turns (e.g. dropping
+    # install_package after a successful pip install), forcing the agent to
+    # re-discover tools it has already proven it needs.
+    try:
+        for tname in _prior_turn_tool_names(session_id):
+            # Skip disabled — a tool the user toggled off between turns must
+            # NOT be re-promoted by the monotonic allowlist; otherwise
+            # disabling a previously-used tool has no effect on the next turn.
+            if registry.exists(tname) and not registry.is_disabled(tname):
+                active.add(tname)
+    except Exception as _e:
+        logger.debug("Monotonic allowlist lookup failed for %s: %s", session_id, _e)
+    # Pull in co-occurring siblings so e.g. spawn_worker brings
+    # get_worker_result / check_workers / await_workers into the schema.
+    active = registry.expand_cooccurrence(active)
+    # Retry effector (audit P1f): tools reflect disabled for this retry attempt
+    # are removed from the schema entirely — overriding builtins and the
+    # monotonic allowlist. The executor enforces this too.
+    excluded = session.turn.retry_excluded_tools or set()
+    if excluded:
+        active -= excluded
+    # Deterministic order for prompt cache
+    return scout_report.to_system_prompt_section(), sorted(active)
+
+
+async def _execute_round(parsed_calls: list[dict], *, session: AgentSession, session_id: str, registry) -> list:
+    """Run one round's validated tool calls."""
+    if not parsed_calls:
+        return []
+    # Announce before execution — tool.call is emitted only AFTER a tool
+    # returns (it carries the result), so without this the user stares at a
+    # static badge for the entire runtime of a slow bash/search call
+    # wondering if it's stuck.
+    for item in parsed_calls:
+        session.emit_event(
+            {
+                "type": "tool.start",
+                "name": item["tc"]["name"],
+                "arguments": _summarize_args(item["parsed_args"]),
+            }
+        )
+    return await execute_tool_round(
+        [{"name": item["tc"]["name"], "arguments": item["parsed_args"]} for item in parsed_calls],
+        context={"session_id": session_id},
+        registry=registry,
+    )
+
+
+async def _record_round_results(
+    parsed_calls: list[dict],
+    results: list,
+    *,
+    session: AgentSession,
+    aliased_by_id: dict[str, tuple[str, str]],
+    save_turn_msg,
+    nudges_fired: set[str],
+    tool_failures: dict[str, list[str]],
+    stuck: StuckDetector,
+    gate: _ToolCallGate,
+    tool_round: int,
+    active_tools: list[str],
+) -> None:
+    """Persist, emit and account for one round's tool results.
+
+    Five consumers read from the same pass: the transcript (what the model
+    sees next round), the UI event stream, the stuck detector, the cross-round
+    dedup cache, and the turn's tool summary that reflect grades against.
+    Two results also feed back into the schema — discover_tools and
+    create_tool/update_tool widen active_tools in place so a newly found or
+    newly written tool is callable on the very next round.
+    """
+    from core.harness.nudges import evaluate as _nudge_eval
+
+    for item, result in zip(parsed_calls, results):
+        tc = item["tc"]
+        tool_meta = json.dumps({"was_error": result.was_error, "latency_ms": result.latency_ms})
+
+        # If this call had its name aliased, prefix the correction onto the
+        # tool result so the model sees the rewrite on its next turn. (A
+        # separate role=system note would be stripped by
+        # normalize_for_openrouter; tool-role messages are preserved.)
+        stored_content = result.content
+        alias_pair = aliased_by_id.get(tc.get("id", ""))
+        if alias_pair is not None:
+            _orig, _new = alias_pair
+            stored_content = f"[note: tool name aliased {_orig} → {_new}]\n" + stored_content
+
+        # Harness-side mid-turn nudge: if this tool result matches a known
+        # failure signature (bot detection, 4xx/5xx from public web, SSRF block
+        # on a public-looking domain), append a one-shot hint pointing at the
+        # skill that solves it. The hint piggybacks on the tool-role message
+        # because role=system mid-conversation gets stripped by provider
+        # normalization.
+        nudge = _nudge_eval(result.tool_name, stored_content, nudges_fired)
+        if nudge:
+            stored_content = stored_content + "\n\n" + nudge
+            logger.info("harness.nudge fired tool=%s pattern hint appended", result.tool_name)
+
+        await save_turn_msg(
+            "tool",
+            stored_content,
+            tool_call_id=tc.get("id", ""),
+            latency_ms=result.latency_ms,
+            metadata=tool_meta,
+        )
+        event_data = {
+            "type": "tool.call",
+            "name": result.tool_name,
+            "arguments": _summarize_args(item["parsed_args"]),
+            "result": result.content[:500],
+            "full_result": result.content[:5000],
+            "truncated": len(result.content) > 500 or result.metadata.get("truncated", False),
+            "was_error": result.was_error,
+            "latency_ms": result.latency_ms,
+        }
+        if result.metadata:
+            event_data["metadata"] = result.metadata
+        session.emit_event(event_data)
+
+        # Track failures and update stuck detector
+        if result.was_error:
+            tool_failures.setdefault(result.tool_name, []).append(_hash_args(tc.get("arguments", "")))
+            stuck.mark_failure(tool_name=result.tool_name, args=item["parsed_args"])
+        else:
+            stuck.mark_success(tool_name=result.tool_name, args=item["parsed_args"])
+            gate.remember_success(result.tool_name, tc.get("arguments", ""), tool_round, result.content)
+        # Semantic-streak observation (signals 8-10): records the result body's
+        # "low info" status and hostname for the search-spiral / bot-wall /
+        # same-domain-grind signals. Cheap bookkeeping only.
+        stuck.observe_result(
+            tool_name=result.tool_name,
+            args=item["parsed_args"],
+            content=result.content,
+            was_error=result.was_error,
+        )
+
+        # Cumulative tool execution summary for reflect diagnostics
+        entry = session.turn.tool_summary.setdefault(
+            result.tool_name,
+            {"calls": 0, "failures": 0, "errors": [], "total_latency_ms": 0},
+        )
+        entry["calls"] += 1
+        entry["total_latency_ms"] += result.latency_ms
+        if result.was_error:
+            entry["failures"] += 1
+            err_preview = result.content[:500] if result.content else "unknown"
+            if err_preview not in entry["errors"]:
+                entry["errors"].append(err_preview)
+
+        # Dynamic tool expansion via discover_tools
+        if result.tool_name == "discover_tools" and not result.was_error:
+            _expand_tools_from_discovery(result.content, active_tools)
+
+        # A newly created/updated custom tool goes straight into active_tools
+        # so it appears in the LLM schema on the next round without requiring
+        # a separate discover_tools call.
+        if result.tool_name in ("create_tool", "update_tool") and not result.was_error:
+            _inject_created_tool(item["parsed_args"].get("name", ""), active_tools)
+
+
+async def _handle_stuck_signals(
+    *,
+    session_id: str,
+    score: float,
+    repeats: int,
+    tool_calls: list[dict],
+    active_tools: list[str],
+    nudges_used: int,
+    nudge_limit: int,
+) -> tuple[str, int]:
+    """Decide what a stuck score means for this round, and tell the model.
+
+    Returns (action, nudges_used) where action is one of:
+      "proceed"         — run the round normally (a mild-repetition nudge may
+                          still have been written to the transcript)
+      "nudge-and-retry" — asked the agent to call ask_user; discard this
+                          round's calls and give it another round to comply
+      "stop"            — end the tool loop
+
+    Prefer asking the user over silent exhaustion: when ask_user is active,
+    direct the agent to call it with a concrete question. But cap the nudging
+    — an LLM that ignores the ask_user hint keeps the loop spinning, emitting
+    another nudge and burning more LLM time each round (observed: 16 in a row
+    before the agent self-corrected). Past the cap, fall through to the same
+    "summarize and stop" path used when ask_user isn't available at all.
+    """
+    if repeats < 3:
+        # Not stuck this round — reset the consecutive-nudge counter so a
+        # later separate stuck episode gets the full nudge budget.
+        if repeats >= 1 and score > 0.3:
+            names = sorted({tc.get("name", "") for tc in (tool_calls or [])})
+            await asyncio.to_thread(
+                db.add_message,
+                session_id,
+                "system",
+                f"You are repeating tool calls ({', '.join(names) if names else 'unknown'}). "
+                "Do NOT retry the same operation. "
+                "Review what you have already accomplished and proceed to the next unfinished step.",
             )
-            done_sent = True
+        return "proceed", 0
 
-    if not done_sent:
+    logger.warning("Session %s stuck (score=%.1f, repeats=%d)", session_id, score, repeats)
+    ask_user_available = "ask_user" in (active_tools or [])
+    if ask_user_available and nudges_used < nudge_limit:
+        nudges_used += 1
+        recent_tool_names = sorted({tc.get("name", "") for tc in (tool_calls or [])})
+        await asyncio.to_thread(
+            db.add_message,
+            session_id,
+            "system",
+            "You appear to be stuck in a loop "
+            f"(recently used: {', '.join(recent_tool_names) or 'n/a'}). "
+            "Do NOT retry the same approach. Call ask_user with a specific "
+            "clarifying question that names what you tried, what failed, and "
+            "what you need from the user to proceed. After ask_user returns, "
+            "use the answer to pick a new strategy.",
+        )
+        return "nudge-and-retry", nudges_used
+
+    if ask_user_available:
+        # Hit the cap. Emit a final, distinct system message so the transcript
+        # records why we gave up nudging, then stop.
+        logger.warning(
+            "Session %s stuck cap reached (%d consecutive nudges ignored), force-breaking loop",
+            session_id,
+            nudges_used,
+        )
+        await asyncio.to_thread(
+            db.add_message,
+            session_id,
+            "system",
+            f"Stuck-detection nudged you {nudges_used} "
+            "times to call ask_user and you did not. Summarize what "
+            "you have so far and stop.",
+        )
+    else:
+        await asyncio.to_thread(
+            db.add_message,
+            session_id,
+            "system",
+            "You appear to be stuck in a loop. Summarize your progress and stop.",
+        )
+    return "stop", nudges_used
+
+
+async def _end_turn_on_stream_error(
+    *,
+    session: AgentSession,
+    session_id: str,
+    error: str,
+    partial_content: str,
+    save_turn_msg,
+) -> None:
+    """Terminate the turn after the retry/fallback ladder ran out of options.
+
+    SOFT-LAND for LLM budget exhaustion: when the per-session LLM time budget
+    (settings.llm_session_timeout, default 1800s) trips mid-turn, the agent has
+    typically already produced visible work in this turn (prior assistant
+    rounds, tool calls, files). Hard-erroring the turn means reflect runs
+    against a transcript that looks broken, even when the actual deliverable is
+    fine. Detect the LLMSessionTimeoutError specifically and route to a clean
+    termination (BUDGET_EXHAUSTED) so reflect grades the partial output as a
+    near-pass instead of "session crashed."
+    """
+    budget_exhausted = "exceeded the" in error and "LLM time limit" in error
+    if partial_content:
+        mid = await save_turn_msg("assistant", partial_content, partial=1)
+        session.emit_event(
+            {
+                "type": "partial.saved",
+                "content_preview": partial_content[:100],
+                "message_id": mid,
+            }
+        )
+    if budget_exhausted:
+        # Inject a system message documenting the soft-land so the reflect
+        # evidence shows it AND the user-visible transcript explains the
+        # truncation point. We do NOT set session.error here — that's reserved
+        # for genuine failures.
+        await asyncio.to_thread(
+            db.add_message,
+            session_id,
+            "system",
+            "Turn ended early: per-session LLM time budget exhausted. "
+            "Any content the agent produced before this point is the "
+            "best result available for this turn. Reflect should grade "
+            "the existing transcript on its merits.",
+        )
+        logger.warning(
+            "LLM budget exhausted in session %s — soft-landing as BUDGET_EXHAUSTED instead of error: %s",
+            session_id,
+            error,
+        )
+        session.termination_reason = "budget_exhausted"
+        session.emit_event({"type": "stream.budget_exhausted", "message": error})
+        return
+    logger.error("LLM stream error in session %s: %s", session_id, error)
+    session.error = error
+    session.termination_reason = "error"
+    session.emit_event({"type": "stream.error", "error": error})
+
+
+async def _continue_after_length_truncation(
+    *,
+    session: AgentSession,
+    session_id: str,
+    content: str,
+    tool_round: int,
+    attempt: int,
+    limit: int,
+    save_turn_msg,
+) -> None:
+    """Let the model finish a response the max_tokens cap cut off.
+
+    finish_reason="length" with content and no tool calls means it stopped
+    mid-thought. Saving the partial and asking it to continue costs one extra
+    agent round; letting reflect notice the truncation instead costs a full
+    reflect + scout + agent re-execution (~50s) for the same text.
+    """
+    logger.info(
+        "Session %s: LLM hit max_tokens (finish_reason=length) round=%d, continuing (attempt %d/%d)",
+        session_id,
+        tool_round,
+        attempt,
+        limit,
+    )
+    # Save the partial as the assistant message (no partial=1 flag — this
+    # isn't an error path, the response IS valid, just unfinished).
+    await save_turn_msg("assistant", content)
+    # The next round sees its own truncated assistant message in the
+    # transcript and picks up from where it stopped.
+    await asyncio.to_thread(
+        db.add_message,
+        session_id,
+        "system",
+        "Your previous response was cut off because it hit the "
+        "max_tokens limit. Continue from exactly where you stopped — "
+        "do not repeat what you already wrote.",
+    )
+    session.emit_event({"type": "stream.length_continuation", "attempt": attempt, "max": limit})
+    session.touch()
+
+
+async def _stream_final_answer(
+    *,
+    session: AgentSession,
+    session_id: str,
+    client,
+    scout_text: str,
+    resource_status: str,
+    supports_vision: bool,
+    supports_audio: bool,
+    context_budget: int,
+    max_output: int,
+    model: str,
+    turn_user_msg_id: int | None,
+    save_turn_msg,
+    sched_created_at: float,
+    sched_priority,
+    tried_fallback: bool,
+    last_usage,
+):
+    """One tools=None call to turn a finished tool loop into a text answer.
+
+    Reached when the loop ran tools and then stopped — round ceiling, stuck
+    break, or budget — so the transcript ends on tool results with nothing
+    addressed to the user. Recompiling without schemas is what forces text:
+    a model handed tools at the end will keep calling them.
+
+    Returns the usage to report; emits stream.done either way (an errored
+    final response still ends the turn, and the UI has to stop streaming).
+    """
+    logger.info("Tool loop ended, generating final response (tools=None)")
+    payload = await asyncio.to_thread(
+        compile_context,
+        session_id=session_id,
+        tool_schemas=None,  # no tools — force text response
+        scout_report_text=scout_text,
+        resource_status=resource_status,
+        supports_vision=supports_vision,
+        supports_audio=supports_audio,
+        context_budget=context_budget,
+        max_output_tokens=max_output,
+        model_name=model,
+        turn_user_msg_id=turn_user_msg_id,
+    )
+    messages = payload.messages
+    provider = client.resolve_provider(model)
+    if provider in OPENAI_FORMAT_PROVIDERS:
+        messages = normalize_for_openrouter(messages)
+        messages = attach_cache_breakpoints(messages, model, provider, payload.static_prefix_chars)
+
+    # Honor the tool loop's sticky failover: once a turn has failed over,
+    # re-attempting the known-bad primary for the final response just burns
+    # the backoff ladder again before landing on the same fallback.
+    started_on_fallback = tried_fallback and settings.fallback_model != ""
+    final = await stream_with_failover(
+        client=client,
+        session_id=session_id,
+        emit=session.emit_event,
+        messages=messages,
+        base_messages=payload.messages,
+        static_prefix_chars=payload.static_prefix_chars,
+        tools=None,  # no tools — force a text response
+        model=settings.fallback_model if started_on_fallback and settings.fallback_model else model,
+        max_output_cap=payload.effective_max_output,
+        goal_id=session.active_goal_id,
+        sched_created_at=sched_created_at,
+        sched_priority=sched_priority,
+        tried_fallback=started_on_fallback,
+        label="Final response stream",
+    )
+    usage = final.usage or last_usage
+    if final.content:
+        await save_turn_msg("assistant", final.content)
+    if final.error is not None:
+        logger.error("Final response error: %s", final.error)
+        session.emit_event({"type": "stream.error", "error": final.error})
+        # The turn is over either way; the caller's model attribution is the
+        # one it started with, since the ladder never produced an answer.
         session.emit_event(
             {
                 "type": "stream.done",
-                "usage": _last_usage.__dict__ if _last_usage else {},
-                "model": effective_model,
+                "usage": usage.__dict__ if usage else {},
+                "model": model,
             }
         )
+        return usage
+
+    session.emit_event(
+        {
+            "type": "stream.done",
+            "usage": usage.__dict__ if usage else {},
+            "model": final.model,
+        }
+    )
+    return usage
 
 
 def _expand_tools_from_discovery(discovery_result: str, active_tools: list[str]) -> None:

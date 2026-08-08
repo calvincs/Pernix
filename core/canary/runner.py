@@ -96,6 +96,7 @@ async def run_canary(
     from core.gates import run_gates
     from db import models as db
     from sessions.manager import get_manager
+    from sessions.state import turn_state
 
     if isinstance(canary, str):
         loaded = load_canary(canary)
@@ -140,7 +141,7 @@ async def run_canary(
         gate_results = await asyncio.to_thread(run_gates, sid, {}, 1)
         result.gate_results = [g.to_payload() for g in gate_results]
         result.passed = bool(gate_results) and all(g.passed for g in gate_results) and not result.error
-        result.retries = int(getattr(session, "reflect_count", 0) or 0)
+        result.retries = int(turn_state(session).reflect_count or 0)
         try:
             result.tokens = int((db.get_session_usage(sid) or {}).get("total", 0))
         except Exception:

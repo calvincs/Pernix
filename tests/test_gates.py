@@ -16,6 +16,7 @@ import pytest
 from core import gates as gates_mod
 from core.gates import GateResult, format_evidence, format_retry_guidance, run_gates_for_turn
 from db import models as db
+from sessions.state import TurnState
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +28,10 @@ def _gates_on(monkeypatch):
 
 
 def _session_obj(turn=1, reflect_count=0):
-    return SimpleNamespace(current_turn_user_msg_id=turn, reflect_count=reflect_count, reflect_lessons="")
+    return SimpleNamespace(
+        current_turn_user_msg_id=turn,
+        turn=TurnState(reflect_count=reflect_count),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -214,22 +218,22 @@ def test_gate_retry_fallback_sets_retry_and_lessons(monkeypatch):
     from sessions.hooks import _apply_gate_retry_fallback
 
     monkeypatch.setattr("config.settings.reflect_max_retries", 2)
-    obj = SimpleNamespace(reflect_count=0, reflect_lessons="", reflect_retry_requested=False)
+    obj = SimpleNamespace(turn=TurnState())
     bad = GateResult(name="build", command="make", passed=False, exit_code=2, output_tail="link error")
     _apply_gate_retry_fallback("sid", {"session_type": "normal"}, obj, [bad])
-    assert obj.reflect_retry_requested
-    assert obj.reflect_count == 1
-    assert "build" in obj.reflect_lessons and "link error" in obj.reflect_lessons
+    assert obj.turn.reflect_retry_requested
+    assert obj.turn.reflect_count == 1
+    assert "build" in obj.turn.reflect_lessons and "link error" in obj.turn.reflect_lessons
 
     # At the cap: no further retry requested.
-    obj2 = SimpleNamespace(reflect_count=2, reflect_lessons="", reflect_retry_requested=False)
+    obj2 = SimpleNamespace(turn=TurnState(reflect_count=2))
     _apply_gate_retry_fallback("sid", {"session_type": "normal"}, obj2, [bad])
-    assert not obj2.reflect_retry_requested
+    assert not obj2.turn.reflect_retry_requested
 
     # All passing: untouched.
-    obj3 = SimpleNamespace(reflect_count=0, reflect_lessons="", reflect_retry_requested=False)
+    obj3 = SimpleNamespace(turn=TurnState())
     _apply_gate_retry_fallback("sid", {"session_type": "normal"}, obj3, [GateResult("t", "true", True, 0)])
-    assert not obj3.reflect_retry_requested
+    assert not obj3.turn.reflect_retry_requested
 
 
 def test_evidence_and_guidance_formatting():

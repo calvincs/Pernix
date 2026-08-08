@@ -7,14 +7,14 @@ import pytest
 from config import settings
 from core.telos.anomaly import extract_turn_anomalies, on_post_task
 from core.telos.store import TelosStore
+from sessions.state import TurnState
 
 
 class _FakeSession:
     def __init__(self, turn_id="m1", tools=None, termination="complete", reflect_count=0):
         self.current_turn_user_msg_id = turn_id
-        self.last_tool_summary = tools or {}
         self.termination_reason = termination
-        self.reflect_count = reflect_count
+        self.turn = TurnState(tool_summary=tools or {}, reflect_count=reflect_count)
 
 
 @pytest.fixture

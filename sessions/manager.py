@@ -11,7 +11,7 @@ from typing import Awaitable, Callable
 from config import settings
 from db import models as db
 from sessions import state_v2 as sv2
-from sessions.state import AgentSession, PendingMessage
+from sessions.state import AgentSession, PendingMessage, TurnState
 
 logger = logging.getLogger("pernix.sessions")
 
@@ -45,18 +45,18 @@ def _build_retry_directive(session) -> str:
     """Collect this turn's corrective signal — the text a retry must react to.
 
     Two producers, one channel: reflect writes prose lessons to
-    session.reflect_lessons, and the eval harness writes per-feature judge
-    feedback to session.eval_feedback. Eval's used to exist only inside an
+    session.turn.reflect_lessons, and the eval harness writes per-feature judge
+    feedback to session.turn.eval_feedback. Eval's used to exist only inside an
     `eval.retry` SSE event, so an eval retry re-ran a byte-identical turn and
     failed the same features again up to eval_max_retries times.
 
     Returns "" for a normal (non-retry) turn.
     """
     parts = []
-    lessons = getattr(session, "reflect_lessons", "") or ""
+    lessons = session.turn.reflect_lessons or ""
     if lessons:
         parts.append(lessons)
-    feedback = getattr(session, "eval_feedback", "") or ""
+    feedback = session.turn.eval_feedback or ""
     if feedback:
         parts.append(
             "[EVAL — registered features did not pass]\n"
@@ -976,15 +976,10 @@ class SessionManager:
             # _run_agent_safe will auto-flip them.
             session.touch()
             session.cancel_requested = False
-            session.reflect_count = 0
-            session.reflect_lessons = ""
-            session.reflect_retry_requested = False
-            session.retry_excluded_tools = set()
+            # One assignment retires the whole per-turn scratchpad (reflect,
+            # eval, gate history, tool summary, hook delta-markers).
+            session.turn = TurnState()
             session.goal_continuation_active = False
-            session.last_tool_summary = {}
-            session.eval_count = 0
-            session.eval_retry_requested = False
-            session.eval_feedback = ""
             # Clear stale error / termination_reason from a prior turn —
             # otherwise _finalize_worker's fallback branch can mis-classify
             # a clean turn as errored based on last-turn state.
@@ -1139,6 +1134,10 @@ class SessionManager:
         every transition."""
         _was_cancelled = False
         try:
+            # The single turn boundary. Every path into a turn passes through
+            # here — immediate prompt, queued-popped, answer-resumed and
+            # worker-resumed — so this is the one place per-turn state dies.
+            #
             # Defense in depth: a turn launched directly by
             # _resume_from_workers (synthesis turn after AWAITING_WORKERS)
             # can race with the suspended turn's finally block that's
@@ -1146,25 +1145,23 @@ class SessionManager:
             # the suspended truncated transcript sets reflect_retry_requested
             # AFTER _resume_from_workers' lock-protected reset, the stale
             # True leaks into this fresh turn and causes a spurious retry
-            # despite reflect=pass. Reset here at the start of every turn
-            # so no flag can survive across turn boundaries.
-            session.reflect_retry_requested = False
-            session.eval_retry_requested = False
-            # Also clear reflect_lessons / reflect_count so a verdict=retry
-            # from the prior turn that the gate refused (because a queued user
-            # message was waiting) cannot leak its "previous attempt failed"
-            # lessons into the queued-popped turn's scout. submit_message
-            # already clears these for the immediate-acceptance path; queued-
-            # popped turns enter via _process_pending → _run_agent_safe and
-            # bypass submit_message, so without this reset the next turn's
-            # scout sees stale [REFLECT — Retry] context appended to a fresh
-            # user message.
-            session.reflect_lessons = ""
-            session.reflect_count = 0
-            session.retry_excluded_tools = set()
-            # Same rule for eval's feedback — it rides the same retry channel
-            # into the agent's scout report and must not outlive its turn.
-            session.eval_feedback = ""
+            # despite reflect=pass.
+            #
+            # It also catches the queued-popped path: a verdict=retry from the
+            # prior turn that the gate refused (because a queued user message
+            # was waiting) must not leak its "previous attempt failed" lessons
+            # into the popped turn's scout. prompt() already clears state for
+            # the immediate-acceptance path; queued-popped turns enter via
+            # _process_pending → _run_agent_safe and bypass it entirely.
+            #
+            # Deliberately NOT reset here: session.error,
+            # session.termination_reason and session.cancel_requested. In the
+            # racing case above, the previous turn's _finalize_turn is still
+            # reading all three to classify its own completion; clearing them
+            # from the incoming turn would make a failed turn look clean.
+            # prompt() and _resume_from_workers clear them under the session
+            # lock instead, where no prior turn can still be in flight.
+            session.turn = TurnState()
 
             # --- Scout phase ---
             # Distinguish an answer-resumed turn from a fresh user prompt and
@@ -1419,10 +1416,11 @@ class SessionManager:
                 # vanish silently: drop the retry here with a transcript-
                 # visible notice ("notice" rows are filtered from LLM context
                 # by the compiler, so nothing leaks into the next turn).
-                if (session.reflect_retry_requested or session.eval_retry_requested) and session.pending_messages:
-                    dropped_kind = "reflect" if session.reflect_retry_requested else "eval"
-                    session.reflect_retry_requested = False
-                    session.eval_retry_requested = False
+                _turn = session.turn
+                if (_turn.reflect_retry_requested or _turn.eval_retry_requested) and session.pending_messages:
+                    dropped_kind = "reflect" if _turn.reflect_retry_requested else "eval"
+                    _turn.reflect_retry_requested = False
+                    _turn.eval_retry_requested = False
                     try:
                         db.add_message(
                             session.session_id,
@@ -1440,26 +1438,26 @@ class SessionManager:
 
                 in_finalizing = sv2._current_state(session) == sv2.SessionStateV2.FINALIZING
                 if (
-                    session.reflect_retry_requested
-                    and session.reflect_count < reflect_retry_cap
+                    _turn.reflect_retry_requested
+                    and _turn.reflect_count < reflect_retry_cap
                     and not session.pending_messages
                     and in_finalizing
                 ):
-                    session.reflect_retry_requested = False
-                    logger.info("Reflect retry #%d for session %s", session.reflect_count, session.session_id)
+                    _turn.reflect_retry_requested = False
+                    logger.info("Reflect retry #%d for session %s", _turn.reflect_count, session.session_id)
                     await self._run_agent_retry(session, message, system_prompt, retry_kind="reflect-retry")
                     continue
 
                 # Eval retry (only if reflect didn't retry)
                 in_finalizing = sv2._current_state(session) == sv2.SessionStateV2.FINALIZING
                 if (
-                    session.eval_retry_requested
-                    and session.eval_count < settings.eval_max_retries
+                    _turn.eval_retry_requested
+                    and _turn.eval_count < settings.eval_max_retries
                     and not session.pending_messages
                     and in_finalizing
                 ):
-                    session.eval_retry_requested = False
-                    logger.info("Eval retry #%d for session %s", session.eval_count, session.session_id)
+                    _turn.eval_retry_requested = False
+                    logger.info("Eval retry #%d for session %s", _turn.eval_count, session.session_id)
                     await self._run_agent_retry(session, message, system_prompt, retry_kind="eval-retry")
                     continue
                 break
@@ -2101,12 +2099,7 @@ class SessionManager:
                 # Parent is suspended waiting — start a new agent turn directly.
                 # _run_agent_safe detects AWAITING_WORKERS and uses reason="workers-complete".
                 parent.cancel_requested = False
-                parent.reflect_count = 0
-                parent.reflect_lessons = ""
-                parent.reflect_retry_requested = False
-                parent.eval_count = 0
-                parent.eval_retry_requested = False
-                parent.eval_feedback = ""
+                parent.turn = TurnState()
                 parent.error = None
                 parent.termination_reason = None
                 parent.task = asyncio.create_task(self._run_agent_safe(parent, resume_msg, None))

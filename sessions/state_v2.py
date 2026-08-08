@@ -354,6 +354,9 @@ def transition(
         compaction_count += 1
 
     # 4. Log row (durable; synchronous INSERT)
+    from sessions.state import turn_state
+
+    _turn = turn_state(session)
     try:
         db.add_state_log(
             session.session_id,
@@ -365,8 +368,8 @@ def transition(
             to_state=to.value,
             reason=reason if edge_ok else f"invariant-violation:{reason}",
             termination_reason=termination_reason.value if termination_reason else None,
-            reflect_count=int(getattr(session, "reflect_count", 0) or 0),
-            eval_count=int(getattr(session, "eval_count", 0) or 0),
+            reflect_count=int(_turn.reflect_count or 0),
+            eval_count=int(_turn.eval_count or 0),
             timestamp_ms=int(time.time() * 1000),
             elapsed_ms=elapsed,
         )

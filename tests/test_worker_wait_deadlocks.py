@@ -540,8 +540,8 @@ async def test_run_agent_safe_resets_retry_flags_at_turn_start(mgr, monkeypatch)
     parent = mgr.get(sid)
     # Simulate the race: suspended-turn reflect set retry=True after the
     # resume's lock-protected reset cleared it.
-    parent.reflect_retry_requested = True
-    parent.eval_retry_requested = True
+    parent.turn.reflect_retry_requested = True
+    parent.turn.eval_retry_requested = True
 
     captured_flags: list[tuple[bool, bool]] = []
 
@@ -549,8 +549,8 @@ async def test_run_agent_safe_resets_retry_flags_at_turn_start(mgr, monkeypatch)
     async def fake_runner(*, session_id, message, session, **kwargs):
         captured_flags.append(
             (
-                session.reflect_retry_requested,
-                session.eval_retry_requested,
+                session.turn.reflect_retry_requested,
+                session.turn.eval_retry_requested,
             )
         )
 

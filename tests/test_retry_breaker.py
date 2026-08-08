@@ -142,7 +142,7 @@ async def test_excluded_tool_removed_from_schema(monkeypatch):
     sid = db.create_session(title="Excluded Tool Test")
     session = AgentSession(session_id=sid)
     session.last_scout_report = ScoutReport(recommended_tools=["noop_tool", "other_tool"])
-    session.retry_excluded_tools = {"noop_tool"}
+    session.turn.retry_excluded_tools = {"noop_tool"}
 
     await run_agent(sid, "go", session)
 

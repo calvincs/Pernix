@@ -241,7 +241,7 @@ async def _maybe_distill(session_id: str, session: dict) -> None:
 async def _maybe_candor(session_id: str, session: dict, session_obj=None) -> None:
     """Emit this turn's operational outcomes to the Candor add-on store.
 
-    Delta-tracked against session_obj._candor_emitted (keyed by turn id) so a
+    Delta-tracked against session_obj.turn.candor_emitted (keyed by turn id) so a
     reflect-retry re-entry — post-hooks run once per attempt — never
     double-observes the earlier attempt's tool calls. Failure is never fatal:
     a Candor problem logs a warning and the turn completes normally.
@@ -259,13 +259,13 @@ async def _maybe_candor(session_id: str, session: dict, session_obj=None) -> Non
         from core.extensions.candor.emit import build_turn_observations
 
         turn_id = getattr(session_obj, "current_turn_user_msg_id", None)
-        prev = getattr(session_obj, "_candor_emitted", None)
+        prev = session_obj.turn.candor_emitted
         if not isinstance(prev, dict) or prev.get("turn") != turn_id:
             prev = {"turn": turn_id, "tools": {}}
 
         verdict = failure_cause = None
         experience: dict = {}
-        stash = getattr(session_obj, "_candor_reflect", None)
+        stash = session_obj.turn.candor_reflect
         if stash and stash[0] == turn_id:
             verdict, failure_cause = stash[1], stash[2]
             if len(stash) > 3 and isinstance(stash[3], dict):
@@ -273,18 +273,18 @@ async def _maybe_candor(session_id: str, session: dict, session_obj=None) -> Non
 
         model = getattr(session_obj, "model_override", None) or settings.llm_model or "default"
         observations, emitted = build_turn_observations(
-            tool_summary=session_obj.last_tool_summary or {},
+            tool_summary=session_obj.turn.tool_summary or {},
             already_emitted=prev["tools"],
             termination_reason=getattr(session_obj, "termination_reason", None),
             reflect_verdict=verdict,
             failure_cause=failure_cause,
             model=model,
             session_kind=session.get("session_type") or "normal",
-            is_retry=bool(session_obj.reflect_count),
+            is_retry=bool(session_obj.turn.reflect_count),
             ts_ms=int(_time.time() * 1000),
             max_obs=settings.candor_max_obs_per_turn,
         )
-        session_obj._candor_emitted = {"turn": turn_id, "tools": emitted}
+        session_obj.turn.candor_emitted = {"turn": turn_id, "tools": emitted}
         if len(observations) >= settings.candor_max_obs_per_turn:
             logger.warning(
                 "Candor emission hit the per-turn cap (%d) — excess dropped", settings.candor_max_obs_per_turn
@@ -300,7 +300,7 @@ async def _maybe_candor(session_id: str, session: dict, session_obj=None) -> Non
                     experience=experience,
                     model=model,
                     session_kind=session.get("session_type") or "normal",
-                    is_retry=bool(session_obj.reflect_count),
+                    is_retry=bool(session_obj.turn.reflect_count),
                     ts_ms=int(_time.time() * 1000),
                 )
             )
@@ -372,7 +372,7 @@ async def _run_turn_gates(session_id: str, session_obj, emit=None) -> list:
     from core.gates import run_gates_for_turn
 
     try:
-        attempt = session_obj.reflect_count + 1
+        attempt = session_obj.turn.reflect_count + 1
         results = await asyncio.to_thread(run_gates_for_turn, session_id, session_obj, attempt)
     except Exception as e:
         logger.warning("Gate execution failed for %s: %s", session_id, e)
@@ -465,16 +465,16 @@ def _apply_gate_retry_fallback(session_id: str, session: dict, session_obj, gate
     max_retries = (
         settings.reflect_max_retries_worker if session.get("session_type") == "worker" else settings.reflect_max_retries
     )
-    if session_obj.reflect_count >= max_retries:
-        logger.info("Gates failing for %s but retry cap reached (%d)", session_id, session_obj.reflect_count)
+    if session_obj.turn.reflect_count >= max_retries:
+        logger.info("Gates failing for %s but retry cap reached (%d)", session_id, session_obj.turn.reflect_count)
         return
-    session_obj.reflect_count += 1
+    session_obj.turn.reflect_count += 1
     guidance = format_retry_guidance(gate_results)
-    session_obj.reflect_lessons = ((session_obj.reflect_lessons or "") + "\n\n" + guidance).strip()
-    session_obj.reflect_retry_requested = True
+    session_obj.turn.reflect_lessons = ((session_obj.turn.reflect_lessons or "") + "\n\n" + guidance).strip()
+    session_obj.turn.reflect_retry_requested = True
     logger.info(
         "Gate retry fallback: requesting retry #%d for %s (%s failing, reflect skipped)",
-        session_obj.reflect_count,
+        session_obj.turn.reflect_count,
         session_id,
         ", ".join(g.name for g in bad),
     )
@@ -482,7 +482,7 @@ def _apply_gate_retry_fallback(session_id: str, session: dict, session_obj, gate
         emit(
             {
                 "type": "reflect.retry",
-                "attempt": session_obj.reflect_count,
+                "attempt": session_obj.turn.reflect_count,
                 "max": max_retries,
                 "reasoning": f"deterministic gate failure ({', '.join(g.name for g in bad)}); reflect skipped",
                 "strategy": "",
@@ -519,7 +519,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
     )
 
     # Skip if already at max retries
-    if session_obj.reflect_count >= max_retries:
+    if session_obj.turn.reflect_count >= max_retries:
         if emit:
             # Notify user that reflect retries are exhausted
             last_reflect = None
@@ -535,7 +535,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             emit(
                 {
                     "type": "reflect.exhausted",
-                    "attempts": session_obj.reflect_count,
+                    "attempts": session_obj.turn.reflect_count,
                     "max": max_retries,
                     "last_result": last_reflect or "",
                 }
@@ -545,7 +545,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             session_id,
             session,
             title="Retries exhausted",
-            body=f"Reflect gave up after {session_obj.reflect_count} attempt(s).",
+            body=f"Reflect gave up after {session_obj.turn.reflect_count} attempt(s).",
         )
         return
 
@@ -625,7 +625,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
     # least once on this turn (reflect_count >= 1).
     extra_evidence_parts: list[str] = []
     injected_trial_proposals: list[str] = []
-    is_stuck = session_obj.reflect_count >= 1
+    is_stuck = session_obj.turn.reflect_count >= 1
 
     try:
         last_user_msg = next(
@@ -680,7 +680,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
 
     extra_evidence = "\n\n".join(extra_evidence_parts)
     # Track on session_obj so the post-verdict success bump can find them.
-    session_obj._injected_trial_proposals = injected_trial_proposals
+    session_obj.turn.injected_trial_proposals = injected_trial_proposals
 
     try:
         from core.reflect import build_retry_context, reflect_on_session
@@ -700,8 +700,8 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
         result = await reflect_on_session(
             session_id,
             emit=emit,
-            attempt=session_obj.reflect_count + 1,
-            tool_summary=session_obj.last_tool_summary or None,
+            attempt=session_obj.turn.reflect_count + 1,
+            tool_summary=session_obj.turn.tool_summary or None,
             scout_report=session_obj.last_scout_report,
             extra_evidence=extra_evidence,
             turn_user_msg_id=session_obj.current_turn_user_msg_id,
@@ -714,7 +714,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
         # Keyed by turn id so a turn where reflect is skipped can't inherit a
         # stale verdict from an earlier turn. The experience dict rides along
         # so interaction-quality observations share the same staleness rule.
-        session_obj._candor_reflect = (
+        session_obj.turn.candor_reflect = (
             session_obj.current_turn_user_msg_id,
             result.verdict,
             result.failure_cause,
@@ -750,20 +750,20 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
         await asyncio.to_thread(db.add_message, session_id, "reflect", json.dumps(reflect_event))
 
         if result.verdict == "retry":
-            session_obj.reflect_count += 1
-            session_obj.reflect_lessons = build_retry_context(
+            session_obj.turn.reflect_count += 1
+            session_obj.turn.reflect_lessons = build_retry_context(
                 result,
-                session_obj.reflect_count,
+                session_obj.turn.reflect_count,
                 max_retries,
-                tool_summary=session_obj.last_tool_summary or None,
+                tool_summary=session_obj.turn.tool_summary or None,
             )
             # Failed-gate output rides the lessons channel — the only path
             # the retry attempt's scout message actually reads (plan 3a).
             if gate_results and any(not g.passed for g in gate_results):
                 from core.gates import format_retry_guidance
 
-                session_obj.reflect_lessons = (
-                    session_obj.reflect_lessons + "\n\n" + format_retry_guidance(gate_results)
+                session_obj.turn.reflect_lessons = (
+                    session_obj.turn.reflect_lessons + "\n\n" + format_retry_guidance(gate_results)
                 ).strip()
             # Budget guard: refuse a retry if the LLM session-time budget
             # cannot accommodate at least one scout + one agent turn floor.
@@ -816,7 +816,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                     title="Retry skipped — budget exhausted",
                     body=f"Reflect wanted to retry but only {int(remaining)}s " f"of LLM session time remain.",
                 )
-                # Don't request retry; let the turn end. session_obj.reflect_count
+                # Don't request retry; let the turn end. session_obj.turn.reflect_count
                 # has already been incremented so the next run will see it.
                 return
 
@@ -824,7 +824,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             # attempts of THIS turn failed with the same signature, a third
             # identical attempt is spend without a plan-change. Stop retrying
             # and surface the repeat instead of amplifying it.
-            if session_obj.reflect_count >= 2:
+            if session_obj.turn.reflect_count >= 2:
                 _turn_started = None
                 try:
                     _turn_msg_id = getattr(session_obj, "current_turn_user_msg_id", None)
@@ -838,14 +838,14 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                     logger.warning(
                         "Reflect circuit breaker tripped for session %s after %d attempts: %s",
                         session_id,
-                        session_obj.reflect_count,
+                        session_obj.turn.reflect_count,
                         repeat_sig,
                     )
                     if emit:
                         emit(
                             {
                                 "type": "reflect.circuit_breaker",
-                                "attempts": session_obj.reflect_count,
+                                "attempts": session_obj.turn.reflect_count,
                                 "signature": repeat_sig,
                                 "reasoning": result.reasoning,
                             }
@@ -857,7 +857,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                         body=(
                             f"Reflect requested another retry, but the last two attempts "
                             f"failed identically ({repeat_sig[:180]}). Stopping after "
-                            f"{session_obj.reflect_count} attempts — this needs a different "
+                            f"{session_obj.turn.reflect_count} attempts — this needs a different "
                             f"plan or your input."
                         ),
                     )
@@ -868,7 +868,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                             "notice",
                             f"[reflect circuit breaker: last two attempts failed identically "
                             f"({repeat_sig[:180]}) — retries stopped after "
-                            f"{session_obj.reflect_count} attempts]",
+                            f"{session_obj.turn.reflect_count} attempts]",
                         )
                     except Exception as _e:
                         logger.debug("Circuit-breaker notice insert skipped: %s", _e)
@@ -882,7 +882,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             # between retries, so a tool excluded by retry #1's verdict stayed
             # excluded for retry #2 even when that verdict named nothing. Each
             # retry runs with exactly the exclusions its own verdict asked for.
-            session_obj.retry_excluded_tools = set()
+            session_obj.turn.retry_excluded_tools = set()
             if result.retry_without_tools:
                 try:
                     from core.tools.registry import get_registry
@@ -892,7 +892,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                 except Exception:
                     excluded = set(result.retry_without_tools)
                 if excluded:
-                    session_obj.retry_excluded_tools = excluded
+                    session_obj.turn.retry_excluded_tools = excluded
                     logger.info(
                         "Retry for session %s will run without tools: %s",
                         session_id,
@@ -905,13 +905,13 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             # holds. Otherwise this was the terminal verdict — emit exhausted
             # (matching the top-of-function branch shape) and leave retry_requested
             # False so the outer loop drops cleanly.
-            if session_obj.reflect_count < max_retries:
-                session_obj.reflect_retry_requested = True
+            if session_obj.turn.reflect_count < max_retries:
+                session_obj.turn.reflect_retry_requested = True
                 if emit:
                     emit(
                         {
                             "type": "reflect.retry",
-                            "attempt": session_obj.reflect_count,
+                            "attempt": session_obj.turn.reflect_count,
                             "max": max_retries,
                             "reasoning": result.reasoning,
                             "strategy": result.strategy,
@@ -919,7 +919,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                     )
                 logger.info(
                     "Reflect requesting retry #%d for session %s: %s",
-                    session_obj.reflect_count,
+                    session_obj.turn.reflect_count,
                     session_id,
                     result.reasoning,
                 )
@@ -928,7 +928,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                     emit(
                         {
                             "type": "reflect.exhausted",
-                            "attempts": session_obj.reflect_count,
+                            "attempts": session_obj.turn.reflect_count,
                             "max": max_retries,
                             "last_result": json.dumps(reflect_event),
                         }
@@ -937,12 +937,12 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                     session_id,
                     session,
                     title="Retries exhausted",
-                    body=f"Reflect gave up after {session_obj.reflect_count} attempt(s).",
+                    body=f"Reflect gave up after {session_obj.turn.reflect_count} attempt(s).",
                 )
                 logger.info(
                     "Reflect retry requested but cap reached for session %s " "(count=%d, max=%d): %s",
                     session_id,
-                    session_obj.reflect_count,
+                    session_obj.turn.reflect_count,
                     max_retries,
                     result.reasoning,
                 )
@@ -1019,12 +1019,12 @@ async def _maybe_evaluate(session_id: str, session: dict, emit=None, session_obj
         return
 
     # Skip if already at max retries
-    if session_obj.eval_count >= settings.eval_max_retries:
+    if session_obj.turn.eval_count >= settings.eval_max_retries:
         if emit:
             emit(
                 {
                     "type": "eval.exhausted",
-                    "attempts": session_obj.eval_count,
+                    "attempts": session_obj.turn.eval_count,
                     "max": settings.eval_max_retries,
                 }
             )
@@ -1113,28 +1113,28 @@ async def _maybe_evaluate(session_id: str, session: dict, emit=None, session_obj
             except Exception as _mark_err:
                 logger.debug("Auto-mark-passed skipped: %s", _mark_err)
 
-        if any_failed and session_obj.eval_count < settings.eval_max_retries:
-            session_obj.eval_count += 1
-            session_obj.eval_retry_requested = True
+        if any_failed and session_obj.turn.eval_count < settings.eval_max_retries:
+            session_obj.turn.eval_count += 1
+            session_obj.turn.eval_retry_requested = True
             # Carry the judge's feedback into the retry itself. It used to
             # exist only inside this SSE event, so the eval retry re-ran a
             # byte-identical turn and failed the same features again, up to
             # eval_max_retries times. _run_scout_and_process reads this
             # alongside reflect_lessons and stamps both onto the scout report
             # the agent actually sees.
-            session_obj.eval_feedback = "\n".join(feedback_parts)
+            session_obj.turn.eval_feedback = "\n".join(feedback_parts)
             if emit:
                 emit(
                     {
                         "type": "eval.retry",
-                        "attempt": session_obj.eval_count,
+                        "attempt": session_obj.turn.eval_count,
                         "max": settings.eval_max_retries,
-                        "feedback": session_obj.eval_feedback,
+                        "feedback": session_obj.turn.eval_feedback,
                     }
                 )
-            logger.info("Eval requesting retry #%d for session %s", session_obj.eval_count, session_id)
+            logger.info("Eval requesting retry #%d for session %s", session_obj.turn.eval_count, session_id)
         elif not any_failed:
-            session_obj.eval_feedback = ""
+            session_obj.turn.eval_feedback = ""
             if emit:
                 emit({"type": "eval.pass", "features": len(results)})
             logger.info("All %d features passed evaluation for session %s", len(results), session_id)

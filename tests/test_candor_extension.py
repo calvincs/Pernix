@@ -12,6 +12,7 @@ import pytest
 from config import settings
 from core.extensions.candor.bridge import CandorBridge
 from core.extensions.candor.emit import build_turn_observations, classify_error
+from sessions.state import TurnState
 
 NOW_MS = int(time.time() * 1000)
 
@@ -347,9 +348,8 @@ class _FakeBridge:
 def _session_obj(turn_id="turn-1"):
     return SimpleNamespace(
         current_turn_user_msg_id=turn_id,
-        last_tool_summary=_summary(),
+        turn=TurnState(tool_summary=_summary()),
         termination_reason="complete",
-        reflect_count=0,
         model_override=None,
     )
 
@@ -386,7 +386,7 @@ class TestMaybeCandorHook:
         monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: fake)
 
         so = _session_obj(turn_id="turn-2")
-        so._candor_reflect = ("turn-1", "retry", "tool")  # from a previous turn
+        so.turn.candor_reflect = ("turn-1", "retry", "tool")  # from a previous turn
         await hooks._maybe_candor("sid", {"session_type": "normal"}, session_obj=so)
         assert all(o["pred"] != "reflect_verdict" for o in fake.recorded[0])
 
