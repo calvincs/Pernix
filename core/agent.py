@@ -20,6 +20,7 @@ from config import settings
 from core.context.compaction import compact_with_llm
 from core.context.compiler import attach_cache_breakpoints, compile_context, normalize_for_openrouter
 from core.context.tokens import get_estimator
+from core.llm.budget import derive_max_output, derive_model_budget
 from core.llm.client import get_llm_client
 from core.llm.errors import FailoverError, FailoverReason
 from core.llm.router import OPENAI_FORMAT_PROVIDERS
@@ -587,24 +588,14 @@ async def run_agent(
     effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
     _last_effective_model = effective_model
 
-    # Model-derived context budget (audit P2): settings.context_budget is a
-    # fallback, not a global truth — a 1M-context model should not silently
-    # run at the fallback size. Registry catalog lookup, no network.
-    def _derive_model_budget(model: str) -> int | None:
-        try:
-            _mb_info = client.router.registry.get_model_info(model)
-            _mb_len = int(getattr(_mb_info, "context_length", 0) or 0) if _mb_info else 0
-            # No artificial floor: a floor above a small model's real window
-            # (e.g. 8K) would stop the compiler trimming and overflow the
-            # model. Windows the registry doesn't know, or absurdly small
-            # ones, fall back to settings.context_budget.
-            if _mb_len >= 2048:
-                return int(_mb_len * 0.9)
-        except Exception as _e:
-            logger.debug("Model context budget lookup failed for %s: %s", model, _e)
-        return None
-
-    _model_budget: int | None = _derive_model_budget(effective_model)
+    # Model-derived context budget (audit P2) and output cap: settings values
+    # are fallbacks, not global truths — a 1M-context model should not
+    # silently run at the fallback size. Derivation lives in
+    # core/llm/budget.py (shared with the context introspection endpoint so
+    # the status bar and the agent agree). Registry catalog lookup, no
+    # network; both honor settings.context_auto.
+    _model_budget: int | None = derive_model_budget(effective_model)
+    _max_output: int = derive_max_output(effective_model)
 
     # Tool loop state
     stuck = StuckDetector()
@@ -701,7 +692,8 @@ async def run_agent(
         # after a page reload (live SSE events aren't replayed from DB).
         effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
         if effective_model != _last_effective_model:
-            _model_budget = _derive_model_budget(effective_model)
+            _model_budget = derive_model_budget(effective_model)
+            _max_output = derive_max_output(effective_model)
             override_active = session.model_override is not None
             session.emit_event(
                 {
@@ -763,6 +755,7 @@ async def run_agent(
             supports_vision=model_supports_vision,
             supports_audio=model_supports_audio,
             context_budget=effective_budget,
+            max_output_tokens=_max_output,
             model_name=effective_model,
             turn_user_msg_id=_turn_user_msg_id,
         )
@@ -888,6 +881,7 @@ async def run_agent(
                     messages,
                     tools=stream_tools,
                     model=_stream_current_model,
+                    max_tokens=derive_max_output(_stream_current_model),
                     session_id=session_id,
                     session_created_at=_sched_created_at,
                     session_priority=_sched_priority,
@@ -1702,6 +1696,7 @@ async def run_agent(
             supports_vision=model_supports_vision,
             supports_audio=model_supports_audio,
             context_budget=session.context_budget_override or _model_budget or settings.context_budget,
+            max_output_tokens=_max_output,
             model_name=effective_model,
             turn_user_msg_id=_turn_user_msg_id,
         )
@@ -1726,6 +1721,7 @@ async def run_agent(
                     messages,
                     tools=None,
                     model=_final_model,
+                    max_tokens=derive_max_output(_final_model),
                     session_id=session_id,
                     session_created_at=_sched_created_at,
                     session_priority=_sched_priority,

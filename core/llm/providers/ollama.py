@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
+from dataclasses import replace
 from typing import AsyncGenerator
 
 import httpx
@@ -37,6 +39,12 @@ class OllamaProvider:
         self._client: httpx.AsyncClient | None = None
         self._quick_client: httpx.AsyncClient | None = None
         self._vision_cache: dict[str, bool] = {}
+        # Authoritative per-model metadata from /api/show (context_length is
+        # the model's trained max, uncapped). Only successful fetches are
+        # cached — the 128K fallback guess is never stored, so a transient
+        # /api/show failure is retried on the next lookup and a guess is
+        # never sent to the server as num_ctx.
+        self._info_cache: dict[str, ModelInfo] = {}
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -62,6 +70,37 @@ class OllamaProvider:
 
     def _model(self, model: str) -> str:
         return model or settings.llm_model
+
+    def _capped(self, info: ModelInfo) -> ModelInfo:
+        """Apply the ollama_num_ctx_cap VRAM guard to a model's window.
+
+        The cap is applied at read time (not cached) so a settings change
+        takes effect without a registry refresh.
+        """
+        cap = settings.ollama_num_ctx_cap
+        if cap and info.context_length > cap:
+            return replace(info, context_length=cap)
+        return info
+
+    async def _effective_num_ctx(self, model: str) -> int | None:
+        """Window to request from the server, or None to leave the server default.
+
+        Only authoritative /api/show data is used: the server allocates KV
+        cache for whatever num_ctx we send, so a guessed value could exhaust
+        VRAM. No data (or context_auto off) → send nothing and let Ollama's
+        own hardware-aware default rule.
+        """
+        if not settings.context_auto:
+            return None
+        if model not in self._info_cache:
+            try:
+                await self.get_model_info(model)
+            except Exception:
+                return None
+        info = self._info_cache.get(model)
+        if info is None or info.context_length < 2048:
+            return None
+        return self._capped(info).context_length
 
     # ------------------------------------------------------------------
     # Chat (non-streaming)
@@ -101,6 +140,12 @@ class OllamaProvider:
             "think": False,
             "options": {"num_predict": max_tokens},
         }
+        # Pin the server-side window to the harness budget. Without num_ctx
+        # Ollama uses its own default (possibly 4K) and silently truncates
+        # the prompt while the harness budgets against the full model window.
+        num_ctx = await self._effective_num_ctx(model)
+        if num_ctx:
+            payload["options"]["num_ctx"] = num_ctx
         if tools:
             payload["tools"] = tools
         if temperature is not None:
@@ -175,6 +220,10 @@ class OllamaProvider:
             "think": False,  # Disable reasoning/thinking mode
             "options": {"num_predict": max_tokens},
         }
+        # See _chat_native: pin the server window to the harness budget.
+        num_ctx = await self._effective_num_ctx(model)
+        if num_ctx:
+            payload["options"]["num_ctx"] = num_ctx
         if tools:
             payload["tools"] = tools
         if temperature is not None:
@@ -310,6 +359,9 @@ class OllamaProvider:
 
     async def get_model_info(self, model: str) -> ModelInfo:
         model = self._model(model)
+        cached = self._info_cache.get(model)
+        if cached is not None:
+            return self._capped(cached)
         client = self._get_quick_client()
         # Use Ollama native API for model details
         base = self._config.base_url.replace("/v1", "")
@@ -361,13 +413,15 @@ class OllamaProvider:
                 k for k in model_info if any(v in k.lower() for v in ("audio", "whisper", "speech", "modalit"))
             )
 
-        return ModelInfo(
+        info = ModelInfo(
             id=model,
             provider=self.name,
             context_length=ctx,
             supports_vision=supports_vision,
             supports_audio=supports_audio,
         )
+        self._info_cache[model] = info
+        return self._capped(info)
 
     async def list_models(self) -> list[ModelInfo]:
         client = self._get_quick_client()
@@ -380,17 +434,24 @@ class OllamaProvider:
             logger.warning("Failed to list Ollama models: %s", e)
             return []
 
-        models = []
-        for m in data.get("models", []):
-            name = m.get("name", "")
-            models.append(
-                ModelInfo(
-                    id=name,
-                    provider=self.name,
-                    context_length=128_000,  # default; actual requires /api/show per model
-                )
-            )
+        # Enrich each tag with /api/show metadata so the registry holds the
+        # model's REAL window (and vision/audio capability) — previously this
+        # hardcoded context_length=128_000 for every model, so the harness
+        # budgeted against a fictional window. /api/show is a fast local
+        # call; results are cached in _info_cache for the process lifetime.
+        names = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+        infos = await asyncio.gather(*(self.get_model_info(n) for n in names), return_exceptions=True)
+        models: list[ModelInfo] = []
+        for name, info in zip(names, infos):
+            if isinstance(info, BaseException):
+                info = ModelInfo(id=name, provider=self.name, context_length=128_000)
+            models.append(info)
         return models
+
+    def clear_models_cache(self) -> None:
+        """Invalidate cached /api/show metadata so the next lookup refetches."""
+        self._info_cache.clear()
+        self._vision_cache.clear()
 
     # ------------------------------------------------------------------
     # Health

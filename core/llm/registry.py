@@ -131,7 +131,7 @@ class ModelRegistry:
 
     async def refresh(self, ollama_provider, *remote_providers) -> None:
         """Re-populate from providers. Called after model switch, etc."""
-        for provider in remote_providers:
+        for provider in (ollama_provider, *remote_providers):
             if hasattr(provider, "clear_models_cache"):
                 provider.clear_models_cache()
         await self.populate(ollama_provider, *remote_providers)

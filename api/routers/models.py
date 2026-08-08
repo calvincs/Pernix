@@ -108,7 +108,12 @@ async def switch_model(body: dict):
 
     client = get_llm_client()
 
-    # Get model info for context length
+    # Derived for the response only — the budget itself is computed
+    # per-session at turn start (core/llm/budget.derive_model_budget), so
+    # switching the global model must NOT mutate settings.context_budget:
+    # that value is the manual fallback, and clobbering it here silently
+    # rewrote user configuration on every switch (and diverged from the
+    # session-scoped switch_model tool).
     try:
         info = await client.get_model_info(model)
         new_budget = int(info.context_length * 0.9)
@@ -117,7 +122,6 @@ async def switch_model(body: dict):
 
     old_model = settings.llm_model
     settings.llm_model = model
-    settings.context_budget = new_budget
     settings.save()
 
     # Refresh model registry so the new model is properly indexed

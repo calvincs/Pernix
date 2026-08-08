@@ -107,6 +107,20 @@ class Settings:
     audio_model_overrides: list = field(default_factory=list)
 
     # --- Context ---
+    # Context-auto (2026-08): the harness derives per-model limits from live
+    # provider metadata instead of manual configuration. When True (default):
+    # the context budget is the active model's real window × 0.9 (Ollama
+    # /api/show, OpenRouter /models), the output request is capped by the
+    # provider-reported completion limit, and Ollama requests carry an
+    # explicit num_ctx so the server window matches the harness budget
+    # (without it Ollama silently truncates at its own default). When False:
+    # context_budget / max_tokens below rule unconditionally.
+    context_auto: bool = True
+    # VRAM guard for context_auto on Ollama: KV-cache size scales with
+    # num_ctx, so running a 256K-window model at full width can exhaust GPU
+    # memory or crawl. Effective Ollama window = min(model max, this cap).
+    # 0 = uncapped (trust the model max).
+    ollama_num_ctx_cap: int = 65_536
     # Fallback context budget when the model registry does not report a
     # context_length for the active model (audit P2: the budget is otherwise
     # derived per-session from the registry at turn start).

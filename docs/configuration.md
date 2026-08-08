@@ -68,10 +68,14 @@ Pernix can use Ollama, OpenRouter, and the OpenAI provider at the same time. Sla
 
 Pernix tracks how many tokens are in the active conversation and automatically compacts old messages to stay within the limit.
 
+Context is **auto-managed by default** (`context_auto`): the harness reads each model's real limits from the provider — Ollama `/api/show` for the trained context window, OpenRouter `/models` for `context_length` and the per-model completion cap — budgets against them, and pins `num_ctx` on every native Ollama request so the server-side window matches the harness budget (without it, Ollama applies its own default and silently truncates the prompt). Manual values below act as overrides/fallbacks.
+
 | Setting | Default | Description |
 |---|---|---|
-| `context_budget` | `192000` | **Fallback only.** The budget is normally derived per session at turn start from the active model's registry `context_length` (`max(32000, context_length × 0.9)`). This value is used only when the registry reports no context length for that model. |
-| `max_tokens` | `32000` | Maximum tokens the model can generate per request (one response turn). |
+| `context_auto` | `true` | Derive per-model context and output limits from live provider metadata. Off = `context_budget`/`max_tokens` rule unconditionally, and `num_ctx` is never sent to Ollama. |
+| `ollama_num_ctx_cap` | `65536` | VRAM guard: effective Ollama window = `min(model max, cap)`. KV-cache size scales with `num_ctx`, so running a 256K-window model at full width can exhaust GPU memory. `0` = uncapped. |
+| `context_budget` | `192000` | **Fallback only.** The budget is normally derived per session at turn start from the active model's registry `context_length` (`context_length × 0.9`). Used when the registry reports no context length for the model, or when `context_auto` is off. |
+| `max_tokens` | `32000` | Ceiling on tokens the model may generate per request. With `context_auto` on, the effective request is `min(max_tokens, provider-reported completion cap)` — e.g. OpenRouter's `top_provider.max_completion_tokens`. |
 | `compaction_threshold` | `0.75` | Compact when the conversation reaches this fraction of `context_budget`. At 75%, older messages are summarized and replaced with a compact representation. |
 | `compaction_keep_tokens` | `51000` | How many tokens to preserve verbatim after compaction. Recent messages and tool results are kept. |
 | `context_critical_threshold` | `0.85` | Show a visual warning in the UI when context fills to this fraction. |

@@ -6,6 +6,7 @@ import logging
 from typing import AsyncGenerator
 
 from config import settings
+from core.llm.budget import derive_max_output
 from core.llm.router import ProviderRouter
 from core.llm.semaphore import PRIORITY_BACKGROUND, PRIORITY_ORCHESTRATOR, PRIORITY_WORKER
 from core.llm.types import ChatResponse, HealthStatus, ModelInfo, StreamEvent
@@ -191,7 +192,7 @@ class LLMClient:
     ) -> ChatResponse:
         """Non-streaming chat. Semaphore managed per-provider by router."""
         model = model or settings.llm_model
-        max_tokens = max_tokens or settings.max_tokens
+        max_tokens = max_tokens or derive_max_output(model)
 
         response = await self.router.chat(
             messages,
@@ -218,7 +219,7 @@ class LLMClient:
     ) -> AsyncGenerator[StreamEvent, None]:
         """Streaming chat. Semaphore managed per-provider by router."""
         model = model or settings.llm_model
-        max_tokens = max_tokens or settings.max_tokens
+        max_tokens = max_tokens or derive_max_output(model)
 
         stream = None
         try:

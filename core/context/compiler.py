@@ -803,6 +803,7 @@ def compile_context(
     supports_vision: bool = True,
     supports_audio: bool = False,
     context_budget: int | None = None,
+    max_output_tokens: int | None = None,
     model_name: str = "",
     turn_user_msg_id: int | None = None,
 ) -> ContextPayload:
@@ -897,7 +898,10 @@ def compile_context(
 
     # --- Calculate history budget ---
     budget = context_budget if context_budget is not None else settings.context_budget
-    max_output = settings.max_tokens
+    # The output reservation mirrors what the LLM call will actually request
+    # (core/llm/budget.derive_max_output) — reserving the raw settings value
+    # when the provider caps completions lower just wastes history space.
+    max_output = max_output_tokens if max_output_tokens is not None else settings.max_tokens
     safety_margin = 2000
     history_budget = max(
         budget - max_output - system_tokens - tool_tokens - safety_margin,
