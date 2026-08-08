@@ -6,7 +6,8 @@ the authoritative order). They fall into a few clusters:
 - Memory hygiene — catch-up distillation of un-reviewed sessions, user-insight
   extraction, dedup, consolidation, rerouting entries to better files, tag
   enrichment, FTS5 index reconciliation, splitting bloated files, pruning
-  stale entries.
+  stale entries, and the distillation coverage audit (the lens's own
+  feedback loop).
 - Skill learning — extracting skill requirements, mining skill co-occurrence.
 - Signal synthesis — folding operational signals (and, when Candor is on, the
   candor gate) into durable memory.
@@ -541,6 +542,15 @@ class SnoozeRunner:
 
             await journal_append(f"→ {detail}")
             await self._dream_step()
+
+        # Activity 14b: Distillation coverage audit — the feedback loop on
+        # the memory lens itself (core/memory/audit.py). One sampled session
+        # per run under a daily budget; misses land in Candor and are written
+        # back to memory. Own budget like refine/dream — independent of
+        # did_llm.
+        if not self._is_cancelled() and settings.distill_audit_enabled and self._llm_ready():
+            _announce(bus, "distill_audit", "Auditing distillation coverage against a raw transcript")
+            await self._distill_audit()
 
         # Activity 16 (runs before 15's store work so its LLM call sits in
         # the same cancellation window as dream's): TELOS fast loop — one
@@ -1377,6 +1387,18 @@ Output valid JSON only. No markdown fences. /no_think"""
                 self._bump(key, result.get(key, 0))
         except Exception as e:
             logger.warning("Snooze TELOS step failed: %s", e)
+
+    async def _distill_audit(self) -> None:
+        """Activity 14b — one distillation-coverage audit unit. Never raises."""
+        try:
+            from core.memory.audit import run_audit
+
+            result = await run_audit(self._store(), self._is_cancelled)
+            self._bump("distill_audit_sessions", result.get("audited", 0))
+            self._bump("distill_audit_missed", result.get("missed", 0))
+            self._bump("distill_audit_recovered", result.get("recovered", 0))
+        except Exception as e:
+            logger.warning("Snooze distill audit failed: %s", e)
 
     async def _dream_step(self) -> None:
         """One bounded dream unit: validate a pending hypothesis or generate

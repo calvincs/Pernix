@@ -84,6 +84,82 @@ def build_memory_observations(
     return observations
 
 
+def build_experience_observations(
+    *,
+    experience: dict,
+    model: str,
+    session_kind: str,
+    is_retry: bool,
+    ts_ms: int,
+) -> list[dict]:
+    """Map reflect's experience read to interaction-quality observations.
+
+    Purely mechanical over the already-sanitized experience dict (reflect's
+    _sanitize_experience enforces the schema). The ledger carries labels and
+    booleans only — user_observations prose and the free-form note stay in
+    the post-mortem, never the append-only chain (same PII rule as
+    build_memory_observations).
+
+    Semantics mirror turn_ok: one observation per reflect attempt, with the
+    retry flag in ctx so calibration can separate first tries from retries.
+    """
+    if not experience:
+        return []
+    base_ctx = {"model": model or "default", "kind": session_kind or "normal", "retry": "yes" if is_retry else "no"}
+    observations: list[dict] = []
+
+    sentiment = experience.get("user_sentiment")
+    if sentiment and sentiment != "unknown":
+        observations.append(
+            {
+                "pred": "user_sentiment",
+                "args": ["*"],
+                "stmt_type": "categorical",
+                "value": str(sentiment)[:40],
+                "ctx": dict(base_ctx),
+                "actor": "verifier:reflect",
+                "ts": ts_ms,
+            }
+        )
+
+    # Booleans absent from the dict were never answered — no observation.
+    # Polarity: frequency preds must read True = healthy, because the intel
+    # brief surfaces LOW p as degradation. clarification_loop=True is the bad
+    # outcome, so it inverts into no_clarification_needed at this boundary.
+    for key, pred, invert in (
+        ("clarification_loop", "no_clarification_needed", True),
+        ("first_response_sufficient", "first_response_sufficient", False),
+    ):
+        val = experience.get(key)
+        if isinstance(val, bool):
+            observations.append(
+                {
+                    "pred": pred,
+                    "args": ["*"],
+                    "stmt_type": "frequency",
+                    "outcome": (not val) if invert else val,
+                    "ctx": dict(base_ctx),
+                    "actor": "verifier:reflect",
+                    "ts": ts_ms,
+                }
+            )
+
+    # Open vocabulary, like tool_failure_mode — new friction labels are safe.
+    for label in (experience.get("friction") or [])[:6]:
+        observations.append(
+            {
+                "pred": "friction_mode",
+                "args": ["*"],
+                "stmt_type": "categorical",
+                "value": str(label)[:40],
+                "ctx": dict(base_ctx),
+                "actor": "verifier:reflect",
+                "ts": ts_ms,
+            }
+        )
+    return observations
+
+
 def build_turn_observations(
     *,
     tool_summary: dict,

@@ -49,6 +49,23 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
       "what_was_tried": "1-3 sentences on the approach taken"
     }
   Include only tool calls that produced evidence informing your verdict — skip pure bookkeeping calls (memory writes, task admin, switch_*, approve_*). On retry, the next scout will read this digest as the carry-forward record of what was tried. result_excerpt MUST be verbatim text from the actual tool result so the next scout sees real evidence, not your interpretation. If a result was very long, take the most relevant ~2000 chars and note "[+N chars truncated]" at the end. Note: some large results appear as a head/tail stub with a "[full result bound as `tool_result_N` in the session kernel …]" pointer — the stub IS the verbatim record in that case; quote from it and mention the binding.
+- experience: REQUIRED on every verdict, pass included — the intangible record of how this interaction went for the USER, which no other field captures. Structure exactly as:
+    {
+      "user_sentiment": "satisfied" | "neutral" | "frustrated" | "unknown",
+      "clarification_loop": true|false,
+      "first_response_sufficient": true|false,
+      "friction": ["short_snake_case_labels"],
+      "user_observations": ["self-contained fact about the user evident from THIS turn"],
+      "note": "1-2 sentences explaining the experience"
+    }
+  Field semantics:
+  - user_sentiment: how the user visibly reacted (their words, tone shifts, corrections) — "unknown" when they haven't reacted yet. Never infer satisfaction from task success alone.
+  - clarification_loop: true if the user had to rephrase, repeat themselves, or correct the agent's understanding of what they wanted.
+  - first_response_sufficient: true if the first substantive response would have satisfied the request without further prodding from the user.
+  - friction: what degraded the experience, as reusable labels — e.g. "misread_intent", "over_delivered", "under_delivered", "tone_mismatch", "slow_progress", "tool_noise", "excessive_questions", "ignored_constraint". Empty array when the interaction was smooth. Coin a new label when none fits.
+  - user_observations: max 3 durable facts about the user this turn actually revealed — a stated preference, an expertise signal, a communication-style pattern, a correction they made. Each must be self-contained (readable without the transcript). Empty array when the turn revealed nothing new about them.
+  - note: why the interaction went well or poorly FOR THE USER and what would have made it better. This is about the interaction, not task completion — do not restate the verdict or diagnostic.
+  Ground every field in transcript evidence: the user's actual words and reactions, not your judgment of the work's quality.
 
 RULES:
 - Be strict: if the user asked for a file/deliverable and none was created, that's a retry.
@@ -143,6 +160,12 @@ class ReflectResult:
     # each spawning workers against explicit instructions); this is enforced by
     # the executor and the active-tool filter instead.
     retry_without_tools: list = field(default_factory=list)
+
+    # Experience read — the intangibles of the interaction (sentiment,
+    # friction, per-turn user observations). Emitted on EVERY verdict: pass
+    # turns are exactly where no other signal captures how the exchange went.
+    # Schema documented in REFLECT_PROMPT; sanitized by _sanitize_experience.
+    experience: dict = field(default_factory=dict)
 
 
 # Tools whose successful execution has one-shot, externally visible effects —
@@ -836,7 +859,54 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
     if result.verdict == "retry" and isinstance(raw_excl, list):
         result.retry_without_tools = [str(t)[:80] for t in raw_excl if isinstance(t, str) and t.strip()][:5]
 
+    raw_exp = data.get("experience")
+    if settings.reflect_experience and isinstance(raw_exp, dict) and raw_exp:
+        result.experience = _sanitize_experience(raw_exp)
+
     return result
+
+
+_SENTIMENTS = frozenset({"satisfied", "neutral", "frustrated", "unknown"})
+_FRICTION_LABEL_RE = __import__("re").compile(r"[^a-z0-9_]+")
+
+
+def _sanitize_experience(raw: dict) -> dict:
+    """Enforce the experience schema regardless of what the model emitted.
+
+    Booleans absent or non-boolean are dropped (not coerced to False — an
+    unanswered question is not a "no", and Candor frequency observations must
+    only count real reads). Friction labels are normalized to snake_case so
+    the same failure mode can't split into a dozen categorical values on
+    casing alone.
+    """
+    cleaned: dict = {}
+    sentiment = str(raw.get("user_sentiment", "") or "").strip().lower()
+    cleaned["user_sentiment"] = sentiment if sentiment in _SENTIMENTS else "unknown"
+
+    for key in ("clarification_loop", "first_response_sufficient"):
+        val = raw.get(key)
+        if isinstance(val, bool):
+            cleaned[key] = val
+
+    friction = raw.get("friction") or []
+    if isinstance(friction, list):
+        labels = []
+        for f in friction:
+            label = _FRICTION_LABEL_RE.sub("_", str(f).strip().lower()).strip("_")[:40]
+            if label and label not in labels:
+                labels.append(label)
+        cleaned["friction"] = labels[:6]
+    else:
+        cleaned["friction"] = []
+
+    observations = raw.get("user_observations") or []
+    if isinstance(observations, list):
+        cleaned["user_observations"] = [str(o).strip()[:400] for o in observations if str(o).strip()][:3]
+    else:
+        cleaned["user_observations"] = []
+
+    cleaned["note"] = str(raw.get("note", "") or "").strip()[:500]
+    return cleaned
 
 
 def _sanitize_turn_digest(digest: dict) -> dict:
@@ -930,6 +1000,8 @@ def _write_post_mortem(
         # Older readers use .get(), so adding the key is back-compat-safe.
         if result.turn_digest:
             payload["turn_digest"] = result.turn_digest
+        if result.experience:
+            payload["experience"] = result.experience
         if extra_payload:
             payload.update(extra_payload)
         # Canary isolation (plan §5): stamp the payload so downstream
@@ -992,6 +1064,44 @@ def _write_post_mortem(
         result.artifact_id = pm_id
     except Exception as e:
         logger.warning("Failed to persist post-mortem for session %s: %s", session_id, e)
+
+
+async def _save_user_observations(session_id: str, result: ReflectResult) -> None:
+    """Route reflect's per-turn user observations into the user model.
+
+    Reflect reads every full transcript anyway; this makes it a sensor for
+    the user model instead of only a verdict machine. Writes go through the
+    normal store path — add_entry's dedup gate absorbs repeats, and user.*
+    writes flow into Candor's user_fact attestations via the store hook.
+    Never raises; a memory problem must not affect the verdict.
+    """
+    observations = (result.experience or {}).get("user_observations") or []
+    if not observations or not (settings.reflect_experience and settings.memory_recall):
+        return
+    try:
+        # Canary sessions never write memory (plan §5) — same rule as distill.
+        session = db.get_session(session_id) or {}
+        if session.get("session_type") == "canary":
+            return
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if not store:
+            return
+        for content in observations:
+            if len(content) < 20:
+                continue  # too short for the dedup gate to score reliably
+            await asyncio.to_thread(
+                store.add_entry,
+                content=content,
+                file_name="user.profile",
+                entry_type="profile",
+                tags=f"user,profile,reflect,{time.strftime('%Y-%m-%d')}",
+                weight="normal",
+                source="reflect",
+            )
+    except Exception as e:
+        logger.debug("Reflect user-observation save failed for %s: %s", session_id, e)
 
 
 async def reflect_on_session(
@@ -1243,6 +1353,7 @@ async def reflect_on_session(
             if gate_results:
                 extra_payload["gates"] = [g.to_payload() for g in gate_results]
             _write_post_mortem(session_id, attempt, result, scout_report, tool_summary, extra_payload=extra_payload)
+            await _save_user_observations(session_id, result)
             return result
 
         # Loop fell through without returning — defensive only; should be unreachable.

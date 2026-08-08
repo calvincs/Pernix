@@ -96,15 +96,27 @@ def register(reg: ToolRegistry) -> None:
             "reflect_verdict ('*'), user_fact (target=user-model area, e.g. 'profile' or "
             "'professional_background', from the user.* memory file names; p = share of attested "
             "facts in that area that have stood unrevised — the stability of that part of the user "
-            "model, NOT the truth of any single fact). Returns p, credible interval, observation "
-            "count, and caveats (e.g. 'unstable', 'under_specified' = a missing variable is suspected)."
+            "model, NOT the truth of any single fact). Interaction quality, from reflect's "
+            "per-turn experience read: user_sentiment ('*'; sentiment distribution), "
+            "no_clarification_needed ('*'; p = share of turns understood without the user "
+            "re-asking), first_response_sufficient ('*'), friction_mode ('*'; distribution of "
+            "what degraded the experience). Memory-lens quality, from the distillation audit: "
+            "distill_coverage ('*'; p = share of re-derived durable facts found in memory), "
+            "distill_miss_kind ('*'; distribution of what kinds get missed). Returns p, credible "
+            "interval, observation count, and caveats (e.g. 'unstable', 'under_specified' = a "
+            "missing variable is suspected)."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "pred": {
                     "type": "string",
-                    "description": "Predicate: tool_ok | tool_failure_mode | turn_ok | reflect_verdict",
+                    "description": (
+                        "Predicate: tool_ok | tool_failure_mode | turn_ok | reflect_verdict | "
+                        "user_fact | user_sentiment | no_clarification_needed | "
+                        "first_response_sufficient | friction_mode | distill_coverage | "
+                        "distill_miss_kind"
+                    ),
                 },
                 "target": {"type": "string", "description": "Tool name, or '*' for the aggregate fact"},
             },

@@ -91,6 +91,19 @@ async def build_pack(store) -> EvidencePack:
             )
             if detail:
                 render += f" — {detail[:220]}"
+            # Reflect's experience read: interaction intangibles (sentiment,
+            # friction, why it felt that way) — evidence a pass verdict alone
+            # never carries, so pass turns become dreamable too.
+            exp = payload.get("experience") or {}
+            exp_bits = []
+            if exp.get("user_sentiment") and exp["user_sentiment"] != "unknown":
+                exp_bits.append(f"user {exp['user_sentiment']}")
+            if exp.get("friction"):
+                exp_bits.append("friction: " + ", ".join(str(f) for f in exp["friction"][:3]))
+            if exp.get("note"):
+                exp_bits.append(str(exp["note"])[:160])
+            if exp_bits:
+                render += " — experience: " + "; ".join(exp_bits)
             pack.items.append(
                 EvidenceItem(
                     ref_id=f"P{i}",

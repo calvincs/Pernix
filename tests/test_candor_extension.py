@@ -448,3 +448,76 @@ class TestExtension:
         assert payload["observations"] == 3
         assert 0.0 <= payload["p"] <= 1.0
         await b.close()
+
+
+# ---------------------------------------------------------------------------
+# emit.py — experience observations (reflect's intangibles read)
+# ---------------------------------------------------------------------------
+
+
+class TestExperienceObservations:
+    @staticmethod
+    def _build_exp(**overrides):
+        from core.extensions.candor.emit import build_experience_observations
+
+        kwargs = dict(
+            experience={
+                "user_sentiment": "frustrated",
+                "clarification_loop": True,
+                "first_response_sufficient": False,
+                "friction": ["misread_intent", "tool_noise"],
+                "user_observations": ["Prefers terse answers"],
+                "note": "User re-asked twice.",
+            },
+            model="test-model",
+            session_kind="chat",
+            is_retry=False,
+            ts_ms=NOW_MS,
+        )
+        kwargs.update(overrides)
+        return build_experience_observations(**kwargs)
+
+    def test_full_experience_maps_to_observations(self):
+        obs = self._build_exp()
+        by_pred = {}
+        for o in obs:
+            by_pred.setdefault(o["pred"], []).append(o)
+        assert by_pred["user_sentiment"][0]["value"] == "frustrated"
+        assert by_pred["user_sentiment"][0]["stmt_type"] == "categorical"
+        # Polarity: clarification_loop=True (bad) inverts to a False outcome
+        # on no_clarification_needed, so low p = degraded in the brief.
+        assert by_pred["no_clarification_needed"][0]["outcome"] is False
+        assert by_pred["first_response_sufficient"][0]["outcome"] is False
+        assert [o["value"] for o in by_pred["friction_mode"]] == ["misread_intent", "tool_noise"]
+        assert all(o["actor"] == "verifier:reflect" for o in obs)
+        assert all(o["args"] == ["*"] for o in obs)
+
+    def test_prose_never_enters_ledger(self):
+        obs = self._build_exp()
+        blob = json.dumps(obs)
+        assert "Prefers terse answers" not in blob
+        assert "re-asked twice" not in blob
+
+    def test_unknown_sentiment_and_missing_booleans_skipped(self):
+        obs = self._build_exp(experience={"user_sentiment": "unknown", "friction": []})
+        assert obs == []
+
+    def test_empty_experience_is_empty(self):
+        obs = self._build_exp(experience={})
+        assert obs == []
+
+    def test_smooth_turn_emits_positive_signals(self):
+        obs = self._build_exp(
+            experience={
+                "user_sentiment": "satisfied",
+                "clarification_loop": False,
+                "first_response_sufficient": True,
+                "friction": [],
+            }
+        )
+        outcomes = {o["pred"]: o.get("outcome") for o in obs if o["stmt_type"] == "frequency"}
+        assert outcomes == {"no_clarification_needed": True, "first_response_sufficient": True}
+
+    def test_retry_flag_in_ctx(self):
+        obs = self._build_exp(is_retry=True)
+        assert all(o["ctx"]["retry"] == "yes" for o in obs)
