@@ -52,10 +52,12 @@ const SECTIONS = [
     },
     {
         title: 'Context',
-        description: 'Token budget for conversations. The budget is normally derived per session from the active model\'s context length — Context Budget is only the fallback used when the model registry reports none. Compaction automatically summarizes older messages when context fills up; critical threshold triggers a hard reset if compaction can\'t free enough space. View pruning is the cheaper step before compaction: under budget pressure it stubs oversized tool results out of the compiled view only — stored messages are never touched.',
+        description: 'Context is auto-managed by default: the harness reads each model\'s real window and completion cap from the provider (Ollama /api/show, OpenRouter /models), budgets against it, and pins Ollama\'s num_ctx so the server window matches — turn Auto off to force the manual Context Budget / Max Output Tokens instead. The Ollama Context Cap bounds KV-cache VRAM use on big-window models (0 = model max). Compaction automatically summarizes older messages when context fills up; critical threshold triggers a hard reset if compaction can\'t free enough space. View pruning is the cheaper step before compaction: under budget pressure it stubs oversized tool results out of the compiled view only — stored messages are never touched.',
         fields: [
-            { key: 'context_budget', label: 'Context Budget (fallback when the model reports none)', type: 'number' },
-            { key: 'max_tokens', label: 'Max Output Tokens', type: 'number' },
+            { key: 'context_auto', label: 'Auto (use model-reported limits)', type: 'bool' },
+            { key: 'ollama_num_ctx_cap', label: 'Ollama Context Cap (tokens, 0 = model max)', type: 'number' },
+            { key: 'context_budget', label: 'Context Budget (manual/fallback)', type: 'number' },
+            { key: 'max_tokens', label: 'Max Output Tokens (ceiling)', type: 'number' },
             { key: 'compaction_threshold', label: 'Compaction Threshold', type: 'number', step: 0.05 },
             { key: 'compaction_keep_tokens', label: 'Compaction Keep Tokens', type: 'number' },
             { key: 'context_critical_threshold', label: 'Critical Reset Threshold', type: 'number', step: 0.05 },

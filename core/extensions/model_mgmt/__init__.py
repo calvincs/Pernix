@@ -233,8 +233,10 @@ def switch_model(model: str, reason: str = "", scope: str = "turn", _context: di
 
     if session is not None:
         session.context_budget_override = new_budget
-    else:
-        settings.context_budget = new_budget
+    # No-session fallback: deliberately no global settings.context_budget
+    # mutation — per-session derivation at turn start (core/llm/budget)
+    # already picks up the new model's window, and the setting is the
+    # user's manual fallback, not a scratch variable.
 
     if session is not None and scope == "session":
         durability = "persists for the rest of this session"

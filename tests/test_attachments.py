@@ -455,6 +455,7 @@ def test_vision_model_overrides_forces_supports_vision(monkeypatch):
     provider = OllamaProvider.__new__(OllamaProvider)
     provider.name = "ollama"
     provider._vision_cache = {}
+    provider._info_cache = {}
 
     class _Cfg:
         base_url = "http://localhost:11434/v1"
@@ -491,6 +492,7 @@ def test_vision_key_scan_without_override(monkeypatch):
     provider = OllamaProvider.__new__(OllamaProvider)
     provider.name = "ollama"
     provider._vision_cache = {}
+    provider._info_cache = {}
 
     class _Cfg:
         base_url = "http://localhost:11434/v1"

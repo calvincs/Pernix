@@ -138,6 +138,9 @@ _SETTING_BOUNDS = {
     "tool_timeout": (1, 3600),
     "context_budget": (1000, 2_000_000),
     "max_tokens": (100, 200_000),
+    # 0 = uncapped; otherwise must be a plausible window.
+    "ollama_num_ctx_cap": (0, 2_000_000),
+    "compaction_keep_tokens": (1000, 500_000),
     "max_tool_rounds": (1, 100),
     "llm_max_concurrent": (1, 20),
     "openrouter_max_concurrent": (1, 20),
@@ -275,9 +278,10 @@ async def update_settings(body: dict):
         except Exception:
             pass  # Non-critical — restart will always recover
 
-    # If openrouter_models changed, refresh the model registry so
-    # GET /api/models returns the updated list immediately.
-    if "openrouter_models" in updated:
+    # If the curated model lists or the Ollama window cap changed, refresh
+    # the model registry so GET /api/models and per-session budget
+    # derivation reflect it immediately.
+    if {"openrouter_models", "openai_models", "ollama_num_ctx_cap"} & set(updated):
         try:
             from core.llm.client import get_llm_client
 

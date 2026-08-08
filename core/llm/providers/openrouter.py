@@ -93,7 +93,7 @@ class OpenRouterProvider:
         payload: dict = {
             "model": model,
             "messages": messages,
-            "max_tokens": min(max_tokens, 16000),  # OpenRouter cap
+            "max_tokens": min(max_tokens, self._output_cap(model)),
             "stream": False,
         }
         if tools:
@@ -172,7 +172,7 @@ class OpenRouterProvider:
         payload: dict = {
             "model": model,
             "messages": messages,
-            "max_tokens": min(max_tokens, 16000),
+            "max_tokens": min(max_tokens, self._output_cap(model)),
             "stream": True,
         }
         if tools:
@@ -347,6 +347,23 @@ class OpenRouterProvider:
         """Invalidate the cached model list so next fetch hits the API."""
         self._models_cache = None
 
+    def _output_cap(self, model: str) -> int:
+        """Per-model completion cap from the cached /models catalog.
+
+        Replaces the old blanket 16K clamp — OpenRouter has no global cap;
+        the real limit is per-model (top_provider.max_completion_tokens).
+        The conservative 16K survives only as the fallback when the catalog
+        hasn't been fetched yet or doesn't know the model: better to
+        under-ask than 400 on an oversized max_tokens.
+        """
+        for m in self._models_cache or []:
+            if m.get("id") == model:
+                cap = (m.get("top_provider") or {}).get("max_completion_tokens")
+                if cap:
+                    return int(cap)
+                break
+        return 16_000
+
     async def get_model_info(self, model: str) -> ModelInfo:
         model = self._model(model)
         models = await self._fetch_models()
@@ -380,6 +397,10 @@ class OpenRouterProvider:
                     provider=self.name,
                     context_length=m.get("context_length", 128_000),
                     supports_vision="image" in arch.get("modality", ""),
+                    # Registry consumers (core/llm/budget.derive_max_output)
+                    # need the completion cap; get_model_info already carried
+                    # it but list_models — the registry's populate path — did not.
+                    max_output_tokens=m.get("top_provider", {}).get("max_completion_tokens"),
                 )
             )
         return results
