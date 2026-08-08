@@ -16,12 +16,16 @@ let _lastSeq = 0;
 
 // Single source of truth for every event type the server may emit on the
 // per-session SSE stream. EventSource only dispatches to listeners registered
-// by exact `event:` name, so an event missing from this list is silently
-// dropped on the client — _lastSeq never advances for it, which then causes
-// gap-detection in app.js to fire a spurious soft reload whenever the next
-// subscribed event arrives. Keep this list synced with the emitters in
-// core/, sessions/, api/ — verify with:
-//   grep -rEho '"type":\s*"[a-z][a-z_.]+"' core/ sessions/ api/ | sort -u
+// by exact `event:` name — the API has no wildcard listener, so the client
+// cannot fail open here. An event missing from this list is dropped before JS
+// ever sees it, and because `seq` rides on the payload, _lastSeq never
+// advances for it either; gap-detection in app.js then fires a spurious soft
+// reload when the next subscribed event arrives. The symptom (a transcript
+// that reloads itself) points nowhere near the cause (a name added in Python).
+//
+// tests/test_sse_event_sync.py enforces this list against the emitters in
+// core/, sessions/, api/ in both directions, so drift fails the suite instead
+// of shipping. Add the name here when that test tells you to.
 const EVENT_TYPES = [
     // Stream lifecycle
     'stream.token', 'stream.done', 'stream.error',
@@ -90,7 +94,15 @@ window.addEventListener('pernix:online', () => {
 let _connectionState = 'disconnected';
 
 const HEALTH_CHECK_INTERVAL = 15000;  // Check every 15s
-const STALE_THRESHOLD = 45000;        // Consider dead after 45s without any event/heartbeat
+// Consider the stream suspect after 45s without an event. Note "event", not
+// "event or heartbeat": the server's keepalive is an SSE *comment* line
+// (": heartbeat"), and the EventSource parser discards comments without
+// dispatching anything, so heartbeats are invisible to this file by
+// construction. Silence here therefore means one of three things — the agent
+// is simply idle, the connection died, or the server dropped us as a slow
+// subscriber (queue full) and is now writing heartbeats into a stream nobody
+// is subscribed to. _checkStale() tells them apart before acting.
+const STALE_THRESHOLD = 45000;
 
 function _attachListeners(source, handler) {
     EVENT_TYPES.forEach(type => {
@@ -193,40 +205,89 @@ function _startHealthCheck() {
     _healthTimer = setInterval(_checkStale, HEALTH_CHECK_INTERVAL);
 }
 
-function _checkStale() {
-    if (!_source) return;
+let _staleProbeInFlight = false;
+
+async function _checkStale() {
+    if (!_source || _staleProbeInFlight) return;
 
     const elapsed = Date.now() - _lastEventTime;
-    if (elapsed > STALE_THRESHOLD) {
-        // Connection appears dead — force reconnect
-        console.warn(`SSE: no events for ${Math.round(elapsed / 1000)}s, forcing reconnect`);
+    if (elapsed <= STALE_THRESHOLD) return;
+
+    // Silence alone is not evidence of a dead stream — most sessions spend
+    // most of their time idle. Blindly reconnecting here tore down and rebuilt
+    // a perfectly healthy connection every 45s for any open-but-idle session,
+    // flickering the health dot and firing a status round-trip each time.
+    // Ask the server where its event counter is instead: if it has not moved
+    // past us, we have missed nothing and the stream is merely quiet.
+    _staleProbeInFlight = true;
+    let behind;
+    try {
+        const resp = await fetch(`/api/sessions/${_sessionId}/status`);
+        if (resp.status === 404) {
+            // Session deleted elsewhere — same terminal case _probeSessionExists
+            // handles for hard errors. Stop pretending it might come back.
+            const sid = _sessionId;
+            const handler = _onEvent;
+            console.warn(`SSE: session ${sid} no longer exists — stopping reconnect attempts`);
+            disconnectSSE();
+            if (handler) handler({ type: 'sse.session_gone', session_id: sid });
+            return;
+        }
+        if (!resp.ok) throw new Error(String(resp.status));
+        const status = await resp.json();
+        // _lastSeq is 0 until a live event arrives on THIS connection, so it
+        // cannot be compared against the server's counter yet — a session with
+        // history would always look "behind" and reconnect forever. Nothing has
+        // been received, so nothing has been missed; app.js's own reconciler
+        // owns the "transcript is behind the server" case.
+        behind = _lastSeq > 0 && (status.event_seq || 0) > _lastSeq;
+    } catch {
+        // Server unreachable or the probe failed — treat as a dead stream and
+        // rebuild, which is the pre-existing behaviour for genuine outages.
+        behind = true;
+    } finally {
+        _staleProbeInFlight = false;
+    }
+
+    if (!_source) return;  // disconnected while the probe was in flight
+
+    if (!behind) {
+        // Alive and quiet. Reset the clock so the probe backs off to one
+        // request per STALE_THRESHOLD rather than one per health tick.
+        _lastEventTime = Date.now();
+        return;
+    }
+
+    // The server has events we never received: either the connection died or
+    // we were dropped as a slow subscriber (queue full), in which case the
+    // socket stays open and heartbeats keep arriving forever. Rebuild it.
+    console.warn(`SSE: no events for ${Math.round(elapsed / 1000)}s and the server has moved ahead — reconnecting`);
+    _connectionState = 'reconnecting';
+    _updateHealthIndicator('reconnecting');
+    // Close and reopen. Pass last seen seq as a query param so the
+    // server replays anything we missed — EventSource won't let us
+    // set the Last-Event-ID header on a JS-instantiated reconnect.
+    const sid = _sessionId;
+    const handler = _onEvent;
+    _source.close();
+    const replayQuery = _lastSeq > 0 ? `?last_event_id=${_lastSeq}` : '';
+    _source = new EventSource(`/api/sessions/${sid}/events${replayQuery}`);
+    _lastEventTime = Date.now();
+
+    _source.onopen = () => {
+        _connectionState = 'connected';
+        _lastEventTime = Date.now();
+        _updateHealthIndicator('connected');
+        console.debug('SSE reconnected');
+        // Notify app to check session status (button state recovery)
+        handler({ type: 'sse.reconnected' });
+    };
+    _source.onerror = () => {
         _connectionState = 'reconnecting';
         _updateHealthIndicator('reconnecting');
-        // Close and reopen. Pass last seen seq as a query param so the
-        // server replays anything we missed — EventSource won't let us
-        // set the Last-Event-ID header on a JS-instantiated reconnect.
-        const sid = _sessionId;
-        const handler = _onEvent;
-        _source.close();
-        const replayQuery = _lastSeq > 0 ? `?last_event_id=${_lastSeq}` : '';
-        _source = new EventSource(`/api/sessions/${sid}/events${replayQuery}`);
-        _lastEventTime = Date.now();
+    };
 
-        _source.onopen = () => {
-            _connectionState = 'connected';
-            _lastEventTime = Date.now();
-            _updateHealthIndicator('connected');
-            console.debug('SSE reconnected');
-            // Notify app to check session status (button state recovery)
-            handler({ type: 'sse.reconnected' });
-        };
-        _source.onerror = () => {
-            _connectionState = 'reconnecting';
-            _updateHealthIndicator('reconnecting');
-        };
-
-        _attachListeners(_source, handler);
-    }
+    _attachListeners(_source, handler);
 }
 
 function _updateHealthIndicator(state) {

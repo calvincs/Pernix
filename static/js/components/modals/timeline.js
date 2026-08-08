@@ -16,14 +16,17 @@
 //   GET /api/sessions/{sid}                                 (messages → tool calls)
 // Merge key: state row `timestamp_ms` vs message `created_at` (ISO) → ms.
 //
-// Mermaid is lazy-loaded from CDN on first open.
+// Mermaid is vendored and lazy-loaded from disk on first open.
 
-import { el, text } from '../../render.js';
+import { el, text, setSanitizedSvg } from '../../render.js';
 import { get } from '../../api.js';
 import { state } from '../../store.js';
 
-// Mermaid 10 only ships an ESM build — use dynamic import, not a UMD <script>.
-const MERMAID_SRC = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+// Vendored rather than CDN-loaded: the page ships a `script-src 'self'` CSP
+// (see index.html) and has to work offline on a LAN. Mermaid 10's ESM build
+// is code-split across ~120 chunks, so the single-file UMD bundle is what is
+// vendored — hence a <script> tag and window.mermaid rather than import().
+const MERMAID_SRC = '/static/vendor/mermaid.min.js';
 
 const PAGE_LIMIT = 500;
 const GAP_MS = 30_000; // idle gap worth flagging between adjacent rows
@@ -484,7 +487,11 @@ async function _renderGraph(pane) {
         // Unique id per render so Mermaid doesn't collide on re-entry.
         const id = `timeline-diagram-${Date.now()}`;
         const { svg } = await mermaid.render(id, source);
-        container.innerHTML = svg;
+        // Node and edge labels come from server-supplied state-log rows
+        // (to_state, reason, termination_reason), so this markup is not
+        // developer-controlled. Inline SVG is a scripting context — sanitize
+        // rather than assigning innerHTML directly.
+        setSanitizedSvg(container, svg);
     } catch (e) {
         statusEl.textContent = 'Diagram render error: ' + e.message;
         console.error('Mermaid render failed:', e, '\nSource:\n', source);
@@ -734,8 +741,32 @@ function _buildToolTallyEl(entries) {
 async function _ensureMermaid() {
     if (_mermaid) return _mermaid;
     if (!_mermaidPromise) {
-        _mermaidPromise = import(/* @vite-ignore */ MERMAID_SRC).then(mod => {
-            _mermaid = mod.default;
+        _mermaidPromise = new Promise((resolve, reject) => {
+            if (window.mermaid) { resolve(window.mermaid); return; }
+            // index.html loads Monaco's AMD loader, which installs a global
+            // define() with define.amd set. Mermaid's UMD wrapper checks for
+            // that first and registers itself as an anonymous AMD module
+            // instead of assigning window.mermaid — which nothing ever
+            // require()s, so the global stays undefined and the graph tab dies
+            // with "Failed to load diagram library". Hide define() for the
+            // duration of the load so the UMD wrapper takes its browser-global
+            // branch, then put it back for Monaco.
+            const prevDefine = window.define;
+            const restore = () => { if (prevDefine !== undefined) window.define = prevDefine; };
+            if (prevDefine && prevDefine.amd) window.define = undefined;
+
+            const tag = document.createElement('script');
+            tag.src = MERMAID_SRC;
+            tag.onload = () => { restore(); resolve(window.mermaid); };
+            tag.onerror = () => {
+                restore();
+                _mermaidPromise = null;  // let a later open retry
+                reject(new Error('Failed to load diagram library'));
+            };
+            document.head.appendChild(tag);
+        }).then(m => {
+            if (!m) throw new Error('Diagram library loaded but exported nothing');
+            _mermaid = m;
             _mermaid.initialize({
                 startOnLoad: false,
                 theme: 'dark',
