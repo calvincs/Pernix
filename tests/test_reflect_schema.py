@@ -118,3 +118,67 @@ def test_missing_verdict_defaults_to_pass():
     default — only out-of-schema VALUES coerce to retry."""
     r = _result_from_data({"reasoning": "no verdict in the JSON"}, "m", 0)
     assert r.verdict == "pass"
+
+
+# ---------------------------------------------------------------------------
+# Experience read (intangibles) — schema pinned for Candor emission, the
+# post-mortem payload, and dream evidence packs.
+# ---------------------------------------------------------------------------
+
+from core.reflect import _sanitize_experience  # noqa: E402
+
+
+def test_experience_absent_defaults_empty():
+    r = _result_from_data({"verdict": "pass"}, "m", 0)
+    assert r.experience == {}
+
+
+def test_experience_parses_and_sanitizes():
+    data = {
+        "verdict": "pass",
+        "experience": {
+            "user_sentiment": "Frustrated",
+            "clarification_loop": True,
+            "first_response_sufficient": False,
+            "friction": ["Misread Intent!", "misread intent", "tool_noise"],
+            "user_observations": ["  Prefers terse answers  ", ""],
+            "note": "User had to re-ask twice.",
+        },
+    }
+    r = _result_from_data(data, "m", 0)
+    assert r.experience["user_sentiment"] == "frustrated"
+    assert r.experience["clarification_loop"] is True
+    assert r.experience["first_response_sufficient"] is False
+    # Normalized to snake_case and deduped
+    assert r.experience["friction"] == ["misread_intent", "tool_noise"]
+    assert r.experience["user_observations"] == ["Prefers terse answers"]
+    assert r.experience["note"] == "User had to re-ask twice."
+
+
+def test_experience_unknown_sentiment_and_missing_booleans():
+    exp = _sanitize_experience({"user_sentiment": "elated", "clarification_loop": "yes"})
+    assert exp["user_sentiment"] == "unknown"
+    # Non-boolean answers are dropped, never coerced — an unanswered question
+    # must not become a frequency observation.
+    assert "clarification_loop" not in exp
+    assert exp["friction"] == [] and exp["user_observations"] == []
+
+
+def test_experience_caps_enforced():
+    exp = _sanitize_experience(
+        {
+            "friction": [f"label_{i}" for i in range(10)],
+            "user_observations": ["x" * 900] * 5,
+            "note": "n" * 900,
+        }
+    )
+    assert len(exp["friction"]) == 6
+    assert len(exp["user_observations"]) == 3
+    assert all(len(o) <= 400 for o in exp["user_observations"])
+    assert len(exp["note"]) == 500
+
+
+def test_experience_disabled_by_setting(monkeypatch):
+    monkeypatch.setattr("config.settings.reflect_experience", False)
+    r = _result_from_data({"verdict": "pass", "experience": {"user_sentiment": "satisfied"}}, "m", 0)
+    assert r.experience == {}

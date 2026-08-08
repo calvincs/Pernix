@@ -264,9 +264,12 @@ async def _maybe_candor(session_id: str, session: dict, session_obj=None) -> Non
             prev = {"turn": turn_id, "tools": {}}
 
         verdict = failure_cause = None
+        experience: dict = {}
         stash = getattr(session_obj, "_candor_reflect", None)
         if stash and stash[0] == turn_id:
-            _, verdict, failure_cause = stash
+            verdict, failure_cause = stash[1], stash[2]
+            if len(stash) > 3 and isinstance(stash[3], dict):
+                experience = stash[3]
 
         model = getattr(session_obj, "model_override", None) or settings.llm_model or "default"
         observations, emitted = build_turn_observations(
@@ -286,6 +289,22 @@ async def _maybe_candor(session_id: str, session: dict, session_obj=None) -> Non
             logger.warning(
                 "Candor emission hit the per-turn cap (%d) — excess dropped", settings.candor_max_obs_per_turn
             )
+
+        # Interaction-quality observations from reflect's experience read.
+        # A handful per turn; they share the same per-turn cap as tool obs.
+        if experience and settings.reflect_experience:
+            from core.extensions.candor.emit import build_experience_observations
+
+            observations.extend(
+                build_experience_observations(
+                    experience=experience,
+                    model=model,
+                    session_kind=session.get("session_type") or "normal",
+                    is_retry=bool(session_obj.reflect_count),
+                    ts_ms=int(_time.time() * 1000),
+                )
+            )
+            observations = observations[: settings.candor_max_obs_per_turn]
         if observations:
             # Bounded wait: post-hooks block turn completion. If the bridge
             # executor is busy (e.g. a gate sweep is finishing), the job still
@@ -693,11 +712,13 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
 
         # Stash the verdict for _maybe_candor (which runs after reflect).
         # Keyed by turn id so a turn where reflect is skipped can't inherit a
-        # stale verdict from an earlier turn.
+        # stale verdict from an earlier turn. The experience dict rides along
+        # so interaction-quality observations share the same staleness rule.
         session_obj._candor_reflect = (
             session_obj.current_turn_user_msg_id,
             result.verdict,
             result.failure_cause,
+            result.experience,
         )
 
         # If trial hints were injected and reflect now reports pass, count

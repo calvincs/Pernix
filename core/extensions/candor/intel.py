@@ -80,6 +80,7 @@ def build_brief(system) -> str | None:
 
     lines: list[str] = []
     degraded_tools: list[str] = []
+    interaction_degraded = False
     for r, args in binary_rows:
         if len(lines) >= _MAX_LINES or time.monotonic() - t0 > _TIME_BUDGET_S:
             break
@@ -107,6 +108,8 @@ def build_brief(system) -> str | None:
         lines.append(seg)
         if r["pred"] == "tool_ok" and args and args[0] != "*" and p.p < _DEGRADED_P:
             degraded_tools.append(str(args[0]))
+        if r["pred"] in ("no_clarification_needed", "first_response_sufficient") and p.p < _DEGRADED_P:
+            interaction_degraded = True
 
     # For degraded tools, say WHICH failure dominates (open vocabulary — the
     # unknown mass is a real probability, reported as "unseen").
@@ -124,6 +127,21 @@ def build_brief(system) -> str | None:
         parts = [f"{name} {slice_.p:.0%}" for name, slice_ in top]
         parts.append(f"unseen {c.unknown.p:.0%}")
         lines.append(f"  ↳ {tool} failure modes: {', '.join(parts)}")
+
+    # Degraded interaction quality → say WHICH friction dominates, same
+    # open-vocabulary treatment as tool failure modes.
+    if interaction_degraded and time.monotonic() - t0 <= _TIME_BUDGET_S:
+        cat = categorical_by_key.get(("friction_mode", ("*",)))
+        if cat:
+            try:
+                c = system.predict({"pred": "friction_mode", "args": ["*"]}, budget=_PREDICT_BUDGET)
+                top = sorted(c.values.items(), key=lambda kv: kv[1].p, reverse=True)[:2]
+                if top:
+                    parts = [f"{name} {slice_.p:.0%}" for name, slice_ in top]
+                    parts.append(f"unseen {c.unknown.p:.0%}")
+                    lines.append(f"  ↳ dominant interaction friction: {', '.join(parts)}")
+            except Exception:
+                pass
 
     q_lines: list[str] = []
     try:

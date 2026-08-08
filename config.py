@@ -244,6 +244,12 @@ class Settings:
 
     # --- Memory ---
     memory_recall: bool = True
+    # Distillation coverage audit (snooze Activity 14b): sampled re-derivation
+    # of a distilled session's durable facts, checked against the store. The
+    # feedback loop on the distillation lens itself — misses are recorded (and
+    # repaired) instead of staying invisible to every downstream consumer.
+    distill_audit_enabled: bool = True
+    distill_audit_per_day: int = 2  # sampled sessions per UTC day (0 disables)
 
     # --- Candor (operational-memory add-on, off by default) ---
     # Calibrated reliability tracking via the external `candor` package.
@@ -451,6 +457,10 @@ class Settings:
     )
     reflect_emit_digest_on_pass: bool = (
         False  # Have reflect emit a turn_digest even on pass verdicts (debug/audit; default off saves tokens)
+    )
+    reflect_experience: bool = (
+        True  # Parse reflect's per-turn experience read (sentiment, friction, user observations)
+        # and feed it to Candor / post-mortems / user-profile memory. Prompt always asks for it.
     )
     reflect_digest_max_chars_per_excerpt: int = (
         2000  # Per-call result_excerpt cap inside the turn_digest (defensive trim at parse time)
