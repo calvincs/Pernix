@@ -284,6 +284,21 @@ class Settings:
     # a drop larger than the delta is a tripwire signal.
     canary_baseline_runs: int = 3
     canary_regression_delta: float = 0.15
+    # Graduated autonomy (suite self-management, active only under
+    # canary_enabled). Auto-admission replaces the human approval click with
+    # mechanical gates: an allowlist proof over the gate commands plus vetting
+    # runs; specs the machine can't prove safe still queue for human review.
+    # The maintenance sweep promotes vetted canaries, tags flapping ones
+    # flaky, retires long-green ones to .retired/ quarantine, and purges the
+    # quarantine after a retention window. Hard invariant (enforced in
+    # core/canary/maintain.py): a canary whose latest run failed is never
+    # auto-mutated — only a pass streak or a human moves it.
+    canary_auto_admit: bool = True
+    canary_auto_maintain: bool = True
+    canary_vetting_runs: int = 3  # consistent runs required to promote out of vetting
+    canary_retire_after_passes: int = 25  # consecutive passes before auto-retirement
+    canary_purge_after_days: int = 30  # quarantined canaries older than this are deleted
+    canary_max_suite: int = 24  # auto-admission stops at this suite size (human path stays open)
 
     # --- Adaptive Layer (plan §6, off by default) ---
     # Governed machine-editable policy store. While off: zero rows, compiler
