@@ -877,6 +877,12 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             # Mechanical lesson effector: reflect may name tools to disable on
             # the retry attempt (retry_without_tools). Validate against the
             # registry so a hallucinated name can't silently no-op the filter.
+            #
+            # Cleared first: the manager resets this at turn start but never
+            # between retries, so a tool excluded by retry #1's verdict stayed
+            # excluded for retry #2 even when that verdict named nothing. Each
+            # retry runs with exactly the exclusions its own verdict asked for.
+            session_obj.retry_excluded_tools = set()
             if result.retry_without_tools:
                 try:
                     from core.tools.registry import get_registry
@@ -1110,17 +1116,25 @@ async def _maybe_evaluate(session_id: str, session: dict, emit=None, session_obj
         if any_failed and session_obj.eval_count < settings.eval_max_retries:
             session_obj.eval_count += 1
             session_obj.eval_retry_requested = True
+            # Carry the judge's feedback into the retry itself. It used to
+            # exist only inside this SSE event, so the eval retry re-ran a
+            # byte-identical turn and failed the same features again, up to
+            # eval_max_retries times. _run_scout_and_process reads this
+            # alongside reflect_lessons and stamps both onto the scout report
+            # the agent actually sees.
+            session_obj.eval_feedback = "\n".join(feedback_parts)
             if emit:
                 emit(
                     {
                         "type": "eval.retry",
                         "attempt": session_obj.eval_count,
                         "max": settings.eval_max_retries,
-                        "feedback": "\n".join(feedback_parts),
+                        "feedback": session_obj.eval_feedback,
                     }
                 )
             logger.info("Eval requesting retry #%d for session %s", session_obj.eval_count, session_id)
         elif not any_failed:
+            session_obj.eval_feedback = ""
             if emit:
                 emit({"type": "eval.pass", "features": len(results)})
             logger.info("All %d features passed evaluation for session %s", len(results), session_id)

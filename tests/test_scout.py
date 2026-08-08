@@ -41,7 +41,10 @@ def test_scout_report_to_prompt():
 def test_bypass_logic():
     assert should_bypass_scout("ok", turn_count=5) is True
     assert should_bypass_scout("/help", turn_count=0) is True
-    assert should_bypass_scout("## Evaluation Feedback", turn_count=0) is True
+    # An eval retry no longer re-prompts with "## Evaluation Feedback" as the
+    # message — the feedback rides the retry directive on the scout report, so
+    # the bypass branch that matched that prefix was removed with the design.
+    assert should_bypass_scout("## Evaluation Feedback", turn_count=0) is False
     assert should_bypass_scout("[Context was reset...", turn_count=0) is True
     assert should_bypass_scout("Build me a todo app", turn_count=0) is False
     assert should_bypass_scout("Search the web for Python docs", turn_count=0) is False

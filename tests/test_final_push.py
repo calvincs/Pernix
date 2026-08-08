@@ -165,8 +165,8 @@ async def test_workspace_missing_dir(tmp_path, monkeypatch):
 
 async def test_session_manager_full_flow(monkeypatch, mock_scout):
     """Full _run_agent_safe path including scout phase."""
+    from sessions import state_v2 as sv2
     from sessions.manager import SessionManager
-    from sessions.state import SessionState
 
     completed = asyncio.Event()
 
@@ -187,8 +187,8 @@ async def test_session_manager_full_flow(monkeypatch, mock_scout):
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             pass
 
-    # Session should have returned to IDLE
-    assert session.state in (SessionState.IDLE, SessionState.ERROR)
+    # Session should have returned home
+    assert sv2._current_state(session) is sv2.SessionStateV2.IDLE_READY
 
 
 # ===========================================================================

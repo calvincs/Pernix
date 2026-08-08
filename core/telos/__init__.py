@@ -117,6 +117,17 @@ async def run_slow_loops(force_weekly: bool = False) -> dict:
     except Exception as e:
         logger.warning("telos: binding monitor failed: %s", e)
 
+    # Daily: release adaptive slots this layer no longer has evidence for.
+    # Minting without retiring wedges the per-kind cap, at which point every
+    # further supported claim is rejected and the loop looks like a loop with
+    # nothing to say (see core/telos/retire.py).
+    try:
+        from core.telos.retire import retire_stale_hints
+
+        stats["adaptive_retire"] = retire_stale_hints(store)
+    except Exception as e:
+        logger.warning("telos: adaptive hint retirement failed: %s", e)
+
     # Weekly block, watermarked so cron cadence changes can't double-run it.
     week = datetime.now(timezone.utc).strftime("%G-W%V")
     if force_weekly or db.get_snooze_state("telos_weekly") != week:

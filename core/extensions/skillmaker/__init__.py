@@ -14,7 +14,18 @@ logger = logging.getLogger("pernix.ext.skillmaker")
 
 
 def _request_approval(action: str, details: str, _context: dict | None = None) -> str:
-    """Post an approval question via ask_user. Returns the pending message."""
+    """Post an approval question via ask_user. Returns the pending message.
+
+    NOT an authorization mechanism: the caller re-invokes with a model-supplied
+    `approved=true`, which nothing correlates with an actual user response. The
+    two tools whose blast radius makes that unacceptable — create_skill (a new
+    L2 instruction package the agent will later follow) and add_skill_script (a
+    file load_skill then tells the agent to run under bash) — no longer take an
+    `approved` argument at all; they are registered safety_level="dangerous" so
+    the executor's server-side gate decides, from state only
+    approve_dangerous_tool can write. The remaining users of this helper keep
+    the prompt as a speed bump over markdown edits. See docs/security.md.
+    """
     from core.tools.builtin.dialog_tools import ask_user
 
     ask_user(
@@ -77,21 +88,14 @@ def create_skill(
     description: str,
     instructions: str,
     tags: str = "",
-    approved: bool = False,
     _context: dict | None = None,
 ) -> str:
     """Create a new skill package with SKILL.md.
 
     The skill will be immediately available for discovery and loading.
-    Requires user approval (set approved=true after user approves).
+    Authorization is the executor's dangerous-tool gate (ask_user +
+    approve_dangerous_tool), not an argument on this call.
     """
-    if not approved:
-        return _request_approval(
-            f"Create skill '{name}'",
-            f"Description: {description[:100]}...\nInstructions: {len(instructions)} chars",
-            _context,
-        )
-
     # Validate name
     err = _validate_name(name)
     if err:
@@ -241,7 +245,6 @@ def add_skill_script(
     executable: bool = True,
     purpose: str = "",
     usage: str = "",
-    approved: bool = False,
     _context: dict | None = None,
 ) -> str:
     """Add or update a standalone CLI script in a skill's scripts/ directory.
@@ -250,15 +253,9 @@ def add_skill_script(
     (one line: what it does) and `usage` (invocation example) so the contract
     is recorded in SKILL.md frontmatter and future sessions know how to call
     the script without reading it.
-    Requires user approval (set approved=true after user approves).
+    Authorization is the executor's dangerous-tool gate (ask_user +
+    approve_dangerous_tool), not an argument on this call.
     """
-    if not approved:
-        return _request_approval(
-            f"Add/update script '{script_name}' in skill '{name}'",
-            f"Content: {len(content)} chars, executable={executable}",
-            _context,
-        )
-
     skill_path = _get_skill_path(name)
     if not (skill_path / "SKILL.md").exists():
         return f"Error: Skill '{name}' not found"
@@ -476,6 +473,9 @@ def register(reg) -> None:
     common = {"category": "skills", "source": "extension"}
     tags_base = ["skill", "create", "manage", "author"]
 
+    # Confirmation prompt, not authorization — see _request_approval. Kept on
+    # the markdown-editing tools only; create_skill and add_skill_script use
+    # the executor's server-side dangerous gate instead.
     _approved_param = {
         "type": "boolean",
         "description": "Set to true after user approves the change. First call without this posts an approval request.",
@@ -487,7 +487,8 @@ def register(reg) -> None:
         description=(
             "Create a new skill package. Skills provide domain expertise as instruction "
             "packages with optional scripts and references. Provide a name, description, "
-            "and procedural instructions. Requires user approval."
+            "and procedural instructions. Requires user approval via ask_user + "
+            "approve_dangerous_tool before the call will execute."
         ),
         parameters={
             "type": "object",
@@ -508,14 +509,18 @@ def register(reg) -> None:
                     "type": "string",
                     "description": "Comma-separated discovery tags",
                 },
-                "approved": _approved_param,
             },
             "required": ["name", "description", "instructions"],
         },
         tags=tags_base + ["new", "build"],
         timeout=30,
         parallel_safe=False,
-        safety_level="safe",
+        # A skill is an instruction package the agent will later load and
+        # follow, so authoring one is authoring the agent's own future
+        # behaviour. The old `approved` boolean was model-supplied and could
+        # simply be set to true; the executor's gate keeps approval state on
+        # the session where no argument can reach it.
+        safety_level="dangerous",
         **common,
     )
 
@@ -557,7 +562,8 @@ def register(reg) -> None:
         func=add_skill_script,
         description=(
             "Add a standalone CLI script to a skill's scripts/ directory. "
-            "Scripts should be self-contained and callable via bash. Requires user approval."
+            "Scripts should be self-contained and callable via bash. Requires user approval "
+            "via ask_user + approve_dangerous_tool before the call will execute."
         ),
         parameters={
             "type": "object",
@@ -574,14 +580,16 @@ def register(reg) -> None:
                     "type": "string",
                     "description": "Invocation example, e.g. 'bash scripts/check.sh <url>'",
                 },
-                "approved": _approved_param,
             },
             "required": ["name", "script_name", "content"],
         },
         tags=["skill", "script", "add", "bash", "cli"],
         timeout=30,
         parallel_safe=False,
-        safety_level="safe",
+        # Writes an executable file that load_skill then advertises to the
+        # agent as `bash <skill>/scripts/<file>` — write-then-run arbitrary
+        # code, previously ungated at every step.
+        safety_level="dangerous",
         **common,
     )
 

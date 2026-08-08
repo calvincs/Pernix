@@ -74,6 +74,11 @@ def test_audit_budget(monkeypatch):
 
 
 class FakeStore:
+    """Empty store: the coverage gate is dialled by `covered`, and the repair
+    gate's wider-net scan finds nothing, so misses are genuinely absent. The
+    two gates disagreeing is covered in
+    tests/regressions/test_2026-08-07_audit_repair_and_containment.py."""
+
     def __init__(self, covered: bool):
         self.covered = covered
         self.added: list[dict] = []
@@ -81,9 +86,12 @@ class FakeStore:
     def is_duplicate(self, content: str) -> bool:
         return self.covered
 
+    def search(self, query: str, **kwargs) -> list:
+        return []
+
     def add_entry(self, **kwargs) -> str:
         self.added.append(kwargs)
-        return f"Saved to {kwargs.get('file_name') or 'auto'}"
+        return f"Saved to {kwargs.get('file_name') or 'auto'} (epoch=1)"
 
 
 def _make_distilled_session() -> str:
@@ -120,7 +128,7 @@ async def test_run_audit_misses_are_recovered(mock_llm_client):
 
     out = await run_audit(store, lambda: False)
 
-    assert out == {"audited": 1, "facts": 2, "missed": 2, "recovered": 2}
+    assert out == {"audited": 1, "facts": 2, "missed": 2, "recovered": 2, "repair_blocked": 0}
     assert len(store.added) == 2
     assert all(e["source"] == "audit" for e in store.added)
     # Watermark stamped — the session is never audited twice.
@@ -136,7 +144,7 @@ async def test_run_audit_full_coverage_repairs_nothing(mock_llm_client):
 
     out = await run_audit(store, lambda: False)
 
-    assert out == {"audited": 1, "facts": 3, "missed": 0, "recovered": 0}
+    assert out == {"audited": 1, "facts": 3, "missed": 0, "recovered": 0, "repair_blocked": 0}
     assert store.added == []
 
 
@@ -154,7 +162,7 @@ async def test_run_audit_skip_response(mock_llm_client):
     ]
     store = FakeStore(covered=False)
     out = await run_audit(store, lambda: False)
-    assert out == {"audited": 1, "facts": 0, "missed": 0, "recovered": 0}
+    assert out == {"audited": 1, "facts": 0, "missed": 0, "recovered": 0, "repair_blocked": 0}
     assert db.get_snooze_state(f"distill_audit:{sid}")
 
 
@@ -172,4 +180,4 @@ async def test_run_audit_nothing_due(mock_llm_client):
     # No distilled sessions at all.
     store = FakeStore(covered=False)
     out = await run_audit(store, lambda: False)
-    assert out == {"audited": 0, "facts": 0, "missed": 0, "recovered": 0}
+    assert out == {"audited": 0, "facts": 0, "missed": 0, "recovered": 0, "repair_blocked": 0}

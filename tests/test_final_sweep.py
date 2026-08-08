@@ -209,11 +209,12 @@ def test_create_skill_clears_stale_disabled_flag(tmp_path, monkeypatch):
     monkeypatch.setattr("core.skills.registry._skill_registry", reg)
     from core.extensions.skillmaker import create_skill
 
+    # No `approved` argument: authorization moved to the executor's
+    # server-side dangerous gate, which the direct function call bypasses.
     result = create_skill(
         name="ghost",
         description="brand new skill, totally different",
         instructions="# fresh body\nDo new things, in detail and with care.",
-        approved=True,
     )
     assert "created" in result.lower()
     assert not reg.is_disabled("ghost")  # stale disabled flag cleared
@@ -504,20 +505,6 @@ async def test_maybe_evaluate_runs_own_and_legacy_features(monkeypatch, tmp_path
 # ===========================================================================
 # More session state machine coverage
 # ===========================================================================
-
-
-def test_session_force_state_for_tests():
-    """The test-only escape hatch lets fixtures prepare any legacy-enum
-    state without routing through a full turn. Production code uses
-    sessions.state_v2.transition() instead (enforced by
-    tests/test_state_machine_invariants.py)."""
-    from sessions.state import AgentSession, SessionState
-
-    session = AgentSession(session_id="test")
-    session._force_state_for_tests(SessionState.ERROR, reason="test error")
-    assert session.state == SessionState.ERROR
-    session._force_state_for_tests(SessionState.IDLE, reason="recovery")
-    assert session.state == SessionState.IDLE
 
 
 def test_session_event_system_seq():

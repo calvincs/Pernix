@@ -51,17 +51,24 @@ def _resolve_timeout(tool, arguments: dict | None) -> int:
     A tool whose schema exposes a `timeout` parameter must also declare
     `max_timeout` at registration; otherwise asyncio.wait_for below caps the
     call at the tool's default and the caller's override does nothing at all.
+
+    The grace is added on EVERY path, not just the caller-override one. A
+    default `bash` call gives dispatch and the tool the same budget
+    (shell_timeout), but the dispatch clock starts before setup the tool does
+    not count — cold workspace-venv creation alone has a 60s budget — so the
+    dispatcher wins the race and the model gets the executor's generic timeout
+    instead of bash's own diagnostic, with the worker thread still blocked.
     """
     base = tool.timeout
     ceiling = tool.max_timeout
     if ceiling <= 0:
-        return base
+        return base + _DISPATCH_TIMEOUT_GRACE_S
     try:
         requested = int((arguments or {}).get("timeout") or 0)
     except (TypeError, ValueError):
         requested = 0
     if requested <= 0:
-        return base
+        return base + _DISPATCH_TIMEOUT_GRACE_S
     return min(max(requested, base), ceiling) + _DISPATCH_TIMEOUT_GRACE_S
 
 

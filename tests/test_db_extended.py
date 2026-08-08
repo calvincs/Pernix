@@ -55,18 +55,6 @@ def test_update_session_ignores_unknown():
 
 
 # ---------------------------------------------------------------------------
-# set_session_state
-# ---------------------------------------------------------------------------
-
-
-def test_set_session_state():
-    sid = db.create_session()
-    db.set_session_state(sid, "processing")
-    s = db.get_session(sid)
-    assert s["state"] == "processing"
-
-
-# ---------------------------------------------------------------------------
 # Message operations
 # ---------------------------------------------------------------------------
 

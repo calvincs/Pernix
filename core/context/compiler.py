@@ -22,6 +22,23 @@ from db import models as db
 
 logger = logging.getLogger("pernix.context.compiler")
 
+
+class ContextBudgetError(RuntimeError):
+    """The model's window cannot hold the system prompt, tools and a reply.
+
+    Raised instead of assembling a request that is guaranteed to overflow —
+    the old `max(remainder, 4000)` floor handed back headroom that did not
+    exist and dispatched anyway.
+    """
+
+
+# Smallest history share worth compiling for; below it the trim phases have
+# nothing to work with.
+_HISTORY_BUDGET_FLOOR = 4_000
+# Smallest completion worth requesting. Reserving less is indistinguishable
+# from not calling the model at all.
+_MIN_OUTPUT_TOKENS = 1_024
+
 # --- Attachment expansion (compile-time, per-turn) ---------------------------
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
@@ -782,6 +799,11 @@ class ContextPayload:
     # original messages[0] string; anything that re-derives it must not
     # reuse them.
     static_prefix_chars: int = 0
+    # Output reservation the history budget was actually computed against.
+    # Equals the caller's max_output_tokens except when the window was too
+    # tight to hold it — callers that dispatch with their own max_tokens
+    # should clamp to this or the request overflows.
+    effective_max_output: int = 0
 
 
 @dataclass
@@ -903,10 +925,31 @@ def compile_context(
     # when the provider caps completions lower just wastes history space.
     max_output = max_output_tokens if max_output_tokens is not None else settings.max_tokens
     safety_margin = 2000
-    history_budget = max(
-        budget - max_output - system_tokens - tool_tokens - safety_margin,
-        4000,
-    )
+    fixed_cost = system_tokens + tool_tokens + safety_margin
+    history_budget = budget - max_output - fixed_cost
+    effective_max_output = max_output
+    if history_budget < _HISTORY_BUDGET_FLOOR:
+        # The floor used to be applied with max(), which manufactured up to
+        # 4k of headroom the model does not have and then dispatched a request
+        # that overflowed anyway. Buy the floor back out of the output
+        # reservation — that is real headroom — and fail loudly when even a
+        # minimal completion no longer fits.
+        effective_max_output = budget - fixed_cost - _HISTORY_BUDGET_FLOOR
+        if effective_max_output < _MIN_OUTPUT_TOKENS:
+            raise ContextBudgetError(
+                f"Context budget {budget} cannot hold system ({system_tokens}) + tools ({tool_tokens}) "
+                f"+ margin ({safety_margin}) + {_HISTORY_BUDGET_FLOOR} history + {_MIN_OUTPUT_TOKENS} output; "
+                "switch to a larger-window model or reduce the tool set"
+            )
+        logger.warning(
+            "Context budget %d is tight for %s: output reservation cut %d -> %d to keep a %d-token history floor",
+            budget,
+            model_name or settings.llm_model,
+            max_output,
+            effective_max_output,
+            _HISTORY_BUDGET_FLOOR,
+        )
+        history_budget = _HISTORY_BUDGET_FLOOR
 
     # --- Load messages from DB ---
     raw_messages = db.get_messages(session_id)
@@ -987,7 +1030,10 @@ def compile_context(
     # View pruning engages only under budget pressure (audit P2). It used to
     # run unconditionally, silently stubbing every tool result >300 chars
     # beyond the last 10 messages even in a 5%-full context.
-    _budget_tokens = context_budget or settings.context_budget
+    # Reuse the same `budget` the history share was derived from. This used to
+    # recompute it as `context_budget or settings.context_budget`, which
+    # disagreed with the `is not None` form above for context_budget=0.
+    _budget_tokens = budget
     _history_chars = sum(len(str(m.get("content") or "")) for m in history)
     _pressure_chars = _budget_tokens * 4 * float(getattr(settings, "view_prune_pressure", 0.5))
     if _history_chars > _pressure_chars:
@@ -1157,6 +1203,7 @@ def compile_context(
             messages_trimmed=messages_trimmed,
         ),
         static_prefix_chars=static_prefix_chars,
+        effective_max_output=effective_max_output,
     )
 
 

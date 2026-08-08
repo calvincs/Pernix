@@ -33,7 +33,6 @@ def _make_parent_in_awaiting_workers(mgr: SessionManager, watched_ids: list[str]
     # the full PROCESSING entry path. We bypass invariant checks because the
     # tests don't run a real agent task.
     parent._state_v2 = sv2.SessionStateV2.AWAITING_WORKERS
-    parent.state = parent.state.IDLE  # legacy mirror
     return parent_id
 
 
@@ -561,7 +560,7 @@ async def test_run_agent_safe_resets_retry_flags_at_turn_start(mgr, monkeypatch)
     from core.llm.types import TokenUsage
     from core.scout.runner import ScoutReport
 
-    async def fake_scout(session_id, message, brief, emit=None):
+    async def fake_scout(session_id, message, brief, emit=None, is_retry=False):
         return ScoutReport(
             recommended_tools=[],
             tool_rationale="",
@@ -772,7 +771,6 @@ async def test_post_hooks_only_run_in_finalizing(mgr, monkeypatch):
         session = mgr.get(sid)
         # Force the v2 state directly (bypassing invariant checks — test only).
         session._state_v2 = state
-        session.state = session.state.IDLE  # keep legacy mirror quiet
 
         await mgr._run_post_hooks(session)
 

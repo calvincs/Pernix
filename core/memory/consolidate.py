@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
 from config import settings
+from core.memory.dedup import loses_no_unique_token
 from core.memory.format import MemoryEntry
 from core.memory.routing import name_tokens, normalize_file_name
 
@@ -320,6 +321,12 @@ def plan_trivial_merge(
                 if (len(entry_i.content) < len(entry_j.content)) or (
                     len(entry_i.content) == len(entry_j.content) and entry_i.epoch > entry_j.epoch
                 ):
+                    # Same operation the dedup sweep performs, so it needs the
+                    # same guard: 0.82 similarity alone marks structured facts
+                    # differing in one key value as duplicates, and this merge
+                    # would archive one of them for good.
+                    if not loses_no_unique_token(entry_i.content, entry_j.content):
+                        continue
                     entries_to_archive.append((file_i, entry_i.epoch))
                     is_dup = True
                     break

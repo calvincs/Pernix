@@ -18,17 +18,87 @@ python run.py
 
 That's it for most upgrades. The DB migrates forward automatically. Settings, memory, sessions, skills, and certs are preserved.
 
-If you want to be cautious, **back up `data/` first.** It's a directory tree of SQLite, markdown, and JSON — `cp -r data data.backup` works fine.
+**Take a backup first** — see below. It takes a second and it is the only thing standing between a bad upgrade and losing everything the agent has accumulated.
+
+---
+
+## Backups
+
+### Do not `cp` the database
+
+`data/sessions.db` runs in **WAL mode**. The newest committed transactions live in `data/sessions.db-wal` until a checkpoint folds them back into the main file, which happens on its own schedule (`wal_autocheckpoint=1000`, roughly every 4 MB of writes, plus an hourly checkpoint from the maintenance heartbeat). So while the server is running:
+
+- `cp data/sessions.db backup.db` gives you a snapshot that is **missing every write since the last checkpoint**. It will open cleanly and look fine. That is the dangerous part.
+- `cp -r data data.backup` is no better: it copies `sessions.db`, `-wal` and `-shm` at three different instants, and the checkpointer can rewrite all three in between. The result can be torn — a `-wal` that no longer matches its database.
+
+Earlier versions of this page recommended `cp -r data data.backup`. That advice was wrong for a running server, and is corrected here.
+
+Copying the whole `data/` tree **is** fine when Pernix is stopped. If the server is up, use the backup script.
+
+### The backup script
+
+```bash
+python scripts/backup.py           # snapshot + rotate
+python scripts/backup.py --keep 30 # retain more generations
+python scripts/backup.py --json    # machine-readable, for your own cron
+```
+
+Snapshots land in `data/backups/`:
+
+```
+data/backups/sessions-20260807-031500.db     # the database
+data/backups/memories-20260807-031500/       # the markdown corpus
+```
+
+The database snapshot is taken with SQLite's `VACUUM INTO`, which runs inside a read transaction and writes a fresh, fully-checkpointed database file. It is consistent by construction and safe to take while the server is serving traffic. The result is an ordinary SQLite file: open it with `sqlite3`, copy it anywhere, restore it by putting it back.
+
+Pernix also runs this automatically. `maintenance.py`'s 24-hour tier calls the same function, **first** in that tier — before the memory health check and the retention prunes, so the snapshot is the one that can undo a bad sweep. Retention is `backup_keep_count` (Settings, default **7**, clamped to 0–90). Setting it to `0` disables the scheduled backup; the CLI still works.
+
+### What is and isn't in a backup
+
+| Path | Backed up | Why |
+|---|---|---|
+| `data/sessions.db` | ✅ | Sessions, messages, goals, cron, adaptive/canary state. Irreplaceable. |
+| `data/memories/**/*.md` | ✅ | The memory corpus. Markdown is the source of truth. |
+| `data/memories/_index.db` | ❌ | FTS5 + vector index, derived from the markdown. The memory store's health check rebuilds it. |
+| `data/workspace/` | ❌ | Agent scratch space, reproducible, and potentially huge (it can hold a venv). |
+| `data/settings.json`, `.env`, `data/certs/` | ❌ | Configuration, not accumulated state — and the files holding your auth token and API keys. A rotating plaintext copy of your secrets next to the database is a liability. Back these up deliberately, wherever you keep secrets. |
+
+`data/skills/`, `data/agent/` and `data/workflows/` are also not included: they are hand-authored files you should be keeping in version control alongside your other configuration.
+
+### Restoring
+
+With the server **stopped**:
+
+```bash
+# 1. Move the live database aside rather than deleting it.
+mv data/sessions.db data/sessions.db.broken
+rm -f data/sessions.db-wal data/sessions.db-shm   # they belong to the old DB
+
+# 2. Put the snapshot in place.
+cp data/backups/sessions-20260807-031500.db data/sessions.db
+
+# 3. Restore the matching memory corpus (same timestamp — they are a pair).
+rm -rf data/memories && mkdir -p data/memories
+cp -r data/backups/memories-20260807-031500/. data/memories/
+
+# 4. Start. The FTS index rebuilds itself; migrations run if the snapshot is older.
+python run.py
+```
+
+Deleting the stale `-wal`/`-shm` files in step 1 matters: leaving them next to a *different* database is how a restore turns into corruption.
+
+Restoring a snapshot taken by an **older** Pernix is fine — migrations run forward on startup. Restoring one taken by a **newer** Pernix into older code is not; see the downgrade note below.
 
 ---
 
 ## DB migrations
 
-The schema is at v25. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
+The schema is at v26. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
 
 If you ever need to downgrade Pernix to an older version (and therefore an older schema), the safe path is:
 
-1. Back up `data/sessions.db`.
+1. Take a snapshot: `python scripts/backup.py`.
 2. Check out the older Pernix code.
 3. **Use a fresh `data/` directory** with the older code, or restore from a backup taken at that version. Don't try to run an older Pernix against a newer DB.
 
@@ -39,6 +109,12 @@ Running newer Pernix against an older DB is fine — that's just a normal upgrad
 ## Breaking changes worth knowing about
 
 These are the upgrade points where something the user might have set up needs attention. Each is dated.
+
+### 2026-08-07 — Scheduled backups; one-active-goal index (migration v26)
+
+**Backups now happen on their own.** The 24-hour maintenance tier takes a `VACUUM INTO` snapshot plus a copy of the memory corpus into `data/backups/`, keeping `backup_keep_count` generations (default 7). Nothing to do on upgrade; set `backup_keep_count = 0` to turn it off. `python scripts/backup.py` does the same on demand. See [Backups](#backups) above — in particular, stop using `cp` on a running server.
+
+**Migration v26 makes "one active goal per session" real.** v23 documented the invariant but shipped a non-unique index, and the accessor's check could be raced. v26 adds a partial unique index on `session_goals(session_id)` over the live statuses. If your database somehow accumulated duplicate active goals for one session, the migration retires the older ones to `status='error'` (the highest id per session — the one `get_active_goal` was already returning — is kept) before creating the index. Nothing to do; goal budgets that were split across duplicate rows will now read from one goal.
 
 ### 2026-08-07 — Three model roles; `schedule_workflow` removed
 
@@ -138,8 +214,8 @@ After any upgrade, a couple of things are worth checking:
 If something genuinely broke and you can't proceed, the nuclear option:
 
 ```bash
-# Back up first!
-cp -r data data.backup
+# Back up first! (see Backups above — do NOT cp a live WAL database)
+python scripts/backup.py
 
 # Wipe runtime state, keep settings + .env + skills + agent identity + certs
 python run.py --rebuild

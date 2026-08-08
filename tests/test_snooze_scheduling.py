@@ -5,8 +5,8 @@ import time
 import pytest
 
 from core.snooze import SnoozeRunner
+from sessions import state_v2 as sv2
 from sessions.manager import SessionManager
-from sessions.state import SessionState
 
 
 @pytest.mark.asyncio
@@ -14,7 +14,7 @@ async def test_active_session_blocks_snooze(monkeypatch):
     monkeypatch.setattr("config.settings.snooze_enabled", True)
     mgr = SessionManager()
     sid = mgr.create_session(title="Active")
-    mgr.get(sid)._force_state_for_tests(SessionState.PROCESSING)
+    mgr.get(sid)._state_v2 = sv2.SessionStateV2.PROCESSING
     monkeypatch.setattr("sessions.manager._manager", mgr)
 
     runner = SnoozeRunner()
@@ -35,7 +35,7 @@ async def test_idle_session_allows_snooze(monkeypatch):
     monkeypatch.setattr("config.settings.snooze_max_cycle_seconds", 5)
     mgr = SessionManager()
     sid = mgr.create_session(title="Idle")
-    mgr.get(sid)._force_state_for_tests(SessionState.IDLE)
+    mgr.get(sid)._state_v2 = sv2.SessionStateV2.IDLE_READY
     monkeypatch.setattr("sessions.manager._manager", mgr)
 
     runner = SnoozeRunner()
@@ -53,18 +53,16 @@ def test_has_active_work_detects_scouting_and_processing():
     sid = mgr.create_session(title="Busy")
     sess = mgr.get(sid)
 
-    sess._force_state_for_tests(SessionState.IDLE)
+    sess._state_v2 = sv2.SessionStateV2.IDLE_READY
     assert mgr.has_active_work() is False
 
-    sess._force_state_for_tests(SessionState.SCOUTING)
+    sess._state_v2 = sv2.SessionStateV2.SCOUTING
     assert mgr.has_active_work() is True
 
-    sess._force_state_for_tests(SessionState.PROCESSING)
+    sess._state_v2 = sv2.SessionStateV2.PROCESSING
     assert mgr.has_active_work() is True
 
-    # ERROR maps to FINALIZING via the v2 bridge (correctly treated as active).
-    # Use IDLE to assert the "not active" case.
-    sess._force_state_for_tests(SessionState.IDLE)
+    sess._state_v2 = sv2.SessionStateV2.IDLE_READY
     assert mgr.has_active_work() is False
 
 

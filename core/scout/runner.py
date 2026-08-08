@@ -876,6 +876,11 @@ CACHE_TTL = 300  # 5 minutes
 # Known model IDs (populated during scout LLM run for validation)
 _known_model_ids: set[str] = set()
 
+# Cap on the auto-injected skill body, in CHARACTERS (~1.25k tokens, not the
+# ~5k an earlier comment here claimed). Anything longer is cut with a marker
+# pointing at load_skill.
+SKILL_INJECT_MAX_CHARS = 5000
+
 # Max tool rounds for the scout's internal loop.
 # IMPORTANT: keep the round counts in SCOUT_SYSTEM_PROMPT (line ~104) in sync
 # with this constant — the prompt is hardcoded and will drift if this changes.
@@ -1055,9 +1060,6 @@ def should_bypass_scout(message: str, turn_count: int) -> bool:
     # Slash commands
     if message.startswith("/"):
         return True
-    # Evaluation feedback
-    if message.startswith("## Evaluation Feedback"):
-        return True
     # Context reset resumption
     if message.startswith("[Context was reset"):
         return True
@@ -1123,6 +1125,7 @@ async def run_scout(
     message: str,
     session_brief: SessionBrief | None = None,
     emit: Callable[[dict], None] | None = None,
+    is_retry: bool = False,
 ) -> ScoutReport:
     """Run the scout agent. Returns ScoutReport (from cache, LLM, or fallback).
 
@@ -1130,12 +1133,18 @@ async def run_scout(
     1. Reads SOUL.md, RULES.md, SESSIONS.md (if they exist)
     2. Iteratively searches memory, tools, skills via tool calls
     3. Submits a curated ScoutReport via submit_report tool
+
+    is_retry: this turn repeats one that failed verification. Cache reads are
+    skipped — the key is coarse (message + session + phase + utilization
+    bucket) with a 5-minute TTL, so a reflect retry of the same user message
+    would otherwise be handed back the very plan that just failed. Writes are
+    unaffected: the fresh plan is still worth caching.
     """
     brief = session_brief or build_session_brief(session_id)
 
     # Check bypass
     if should_bypass_scout(message, brief.turn_count):
-        cached = _get_cached(message, brief)
+        cached = None if is_retry else _get_cached(message, brief)
         if cached:
             logger.debug("Scout bypassed, using cached report for session %s", session_id)
             return cached
@@ -1143,7 +1152,7 @@ async def run_scout(
         return _build_fallback_report(message, brief, reason="bypass")
 
     # Check cache
-    cached = _get_cached(message, brief)
+    cached = None if is_retry else _get_cached(message, brief)
     if cached:
         logger.debug("Scout cache hit for session %s", session_id)
         return cached
@@ -1963,7 +1972,16 @@ def _validate_report(report: ScoutReport) -> ScoutReport:
                 report.injected_skill_name = top_skill
                 instructions = skill_reg.load_instructions(top_skill)
                 if instructions:
-                    report.injected_skill = instructions[:5000]  # Cap at ~5k tokens
+                    if len(instructions) > SKILL_INJECT_MAX_CHARS:
+                        # The cut is silent to the agent otherwise: it reads a
+                        # procedure that stops mid-step and follows it as if
+                        # complete. Name the escape hatch at the cut point.
+                        report.injected_skill = (
+                            instructions[:SKILL_INJECT_MAX_CHARS]
+                            + f"\n[skill truncated — call load_skill('{top_skill}') for the full procedure]"
+                        )
+                    else:
+                        report.injected_skill = instructions
                     logger.info("Auto-injected skill '%s' (%d chars)", top_skill, len(report.injected_skill))
                 else:
                     logger.warning(

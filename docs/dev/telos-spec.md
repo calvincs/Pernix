@@ -151,6 +151,8 @@ A hypothesis is admitted to execution iff:
 
 Rejected hypotheses are **not deleted**. They go to `soup/` as the speculation pool: searchable, recombinable by future SOUP passes, revisited when new evidence lands — but holding zero execution rights. Three without one is mysticism; the pool is where the mysticism waits to become science.
 
+> **Implementation status (2026-08-07):** the pool is written but never read. No SOUP pass queries `status == "soup"`, so recombination and revisit-on-new-evidence do not exist — only retention does. Treat the paragraph above as design intent, not shipped behaviour.
+
 ---
 
 ## 4. The goal hierarchy and the Root
@@ -205,6 +207,8 @@ D(G) = α·(parent question entropy reduction)
      − γ·(re-open rate of G's class)
 ```
 
+> **Implementation status (2026-08-07):** the γ term is **not implemented** and was removed from `core/telos/hevel.py`. It counted `goal_reopened` trace events, and TELOS has no goal-reopen path to emit them — `telos_goal_complete` refuses an already-completed goal, the Ordo Pass skips completed goals, the Binding Monitor only suspends active ones, and `GOAL_STATES` has no reopened state. The penalty was structurally always zero, which made `D ≥ 0` unconditional and the brake decorative. Restore the term together with a real re-open path, not before.
+
 If `D ≈ 0` (below **0.1**) across **n ≥ 3** completions of the same class, the class is marked **vapor**: future instances take a 0.5 budget discount and require stronger justification at the gate. Vapor goods are *not banned* — Qoheleth still ate and drank. They are re-ranked. The audit measures information flow, not felt satisfaction; see §9.
 
 ### 5.4 Dual ledger + Reconciliation (weekly)
@@ -247,7 +251,7 @@ All thresholds tunable in `telos.yaml`; these are starting points, not conclusio
 | gate admission rate | gated / generated hypotheses | healthy band 0.2–0.4 |
 | serendipity share | non-goal questions executed | 0.15 |
 | soup band mix | near/mid/far realized | 0.50 / 0.30 / 0.20 |
-| EIG calibration | realized vs. expected info gain | Brier, trend-watched |
+| EIG calibration | realized vs. expected info gain | Brier, trend-watched; over-claim discounts the gate |
 | budget share max | any subgoal, 7d | 0.35 |
 | discharge D | §5.3 formula | vapor if < 0.1 × 3 |
 | divergence | unsupported autobiography claims | alarm > 0.15 |
@@ -281,6 +285,8 @@ telos:
 - **Phase 3 — audits.** Hevel Audit, reconciliation job + divergence metric, Dream Register with capability test, Entropy Control.
 
 **Trade-offs made explicit:** markdown-as-database keeps everything greppable and Provenas-linkable at the cost of query sophistication — acceptable at single-operator scale, revisit if question volume exceeds ~10³/week. The 0.35 binding threshold will false-positive during legitimate deep pushes (e.g., a launch sprint); the L1 response is deliberately just "log + ordo," so a justified push survives one re-ranking with its budget intact. EIG estimation is the weakest link (it's a model guess about a model guess); the EIG-calibration metric exists specifically to detect when the gate is being gamed by optimistic estimates.
+
+> **Implementation status (2026-08-07):** the EIG-calibration metric is implemented in `core/telos/calibration.py` and actuates — it does not merely trend-watch. Predicted `eig` is paired with realized resolution over a rolling trace window; the Brier is reported (and surfaced in `telos_status`), and the gate multiplies the model's `eig` by `resolve_rate / mean_eig` whenever the generator systematically over-claims. One correction to §7 learned in the building: the Brier *total* cannot see the failure this was commissioned for — a constant 0.4 against all-inconclusive outcomes scores 0.16, better than an honest 0.5. The actuator therefore keys on the reliability component (calibration-in-the-large), with the Brier kept as the trend-watched headline.
 
 ---
 

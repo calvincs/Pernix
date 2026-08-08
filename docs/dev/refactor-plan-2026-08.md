@@ -62,8 +62,9 @@ defect, removes code, or wires an existing organ to an existing artery.
   trigger) — replaced by direct `run_workflow` dispatch from cron.
 - Delete snooze Activity 2b + `core/snooze_reflect.py` (superseded by `core/refine.py`).
 - Heartbeat idle branch delegates to the cron dispatch path (dedupe).
-- Legacy state remnants: `SessionState.DELETED`, `is_openrouter_model`,
-  `FairLLMSemaphore` alias, ignored `release(session_id=)` param, dead coalesce guard.
+- Legacy state remnants: `is_openrouter_model`, `FairLLMSemaphore` alias, ignored
+  `release(session_id=)` param, dead coalesce guard. (The pre-v2 session-state enum
+  went with the whole v1 layer on 2026-08-07 — see `docs/internals/state-machine.md`.)
 - Split `core/snooze.py` (2,792 lines): memory-store surgery → `core/memory/sweeps.py`,
   retention pruners → `core/retention.py`; snooze keeps lifecycle + ladder.
 - Remove tests that only exercise deleted code.

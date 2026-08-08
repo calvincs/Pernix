@@ -2,9 +2,11 @@
 
 Complete walkthrough of how requests flow through the harness: session lifecycle, the agent turn loop, sub-agent workers, and the workflow inside workers. File:line citations reference the repo at the time of writing.
 
-> **2026-04-20 AMENDMENT — True state machine (v2)**
+> **True state machine (v2)** — amended 2026-04-20, legacy layer deleted 2026-08-07
 >
-> The "five states + orthogonal flags" model previously documented below has been replaced with a ten-state true state machine. The authoritative enum is now `sessions.state_v2.SessionStateV2`, the mutator is `sessions.state_v2.transition()`, and every transition is persisted to the `session_state_log` table (migration v13) and emitted as a `session.state_changed` SSE event. See [§0 State Machine v2 (current)](#0-state-machine-v2-current) below for the current architecture. Sections 1.2–1.13 describe the legacy model and are kept as historical reference.
+> The "five states + orthogonal flags" model this document originally described is **gone from the code**, not merely superseded. The only state machine is `sessions.state_v2`: a ten-state enum, one mutator (`transition()`), one persisted column (`sessions.state_v2`, migration v16), one log table (`session_state_log`, migration v13), and one `session.state_changed` SSE event per transition. The old 5-value enum, the `session.state` mirror field it lived in, and the bridge tables that translated between them were deleted along with the redundant per-transition write to the legacy `sessions.state` column (which still exists in the schema — see the note in `db/database.py` — but is no longer maintained).
+>
+> §0 below is the current specification. §§1–5 are retained for the parts of the turn pipeline that did not change (scout, reflect, snooze, cancel, workers); the subsections that documented the deleted enum and its orthogonal flags have been removed.
 
 ---
 
@@ -18,8 +20,8 @@ Complete walkthrough of how requests flow through the harness: session lifecycle
 | `SCOUTING` | Scout agent running (fresh context, fast model) | Queued |
 | `PROCESSING` | Main agent loop running | Queued |
 | `COMPACTING` | Context compaction in-flight (proactive / critical / API overflow) | Queued |
-| `PAUSE_REQUESTED` | `pause_worker` called; agent hasn't hit next pre-round gate yet | Queued |
-| `PAUSED` | Worker parked at `await session.pause_event.wait()` | Queued |
+| `PAUSE_REQUESTED` | Pause asked for; the agent hasn't reached its next pre-round gate yet | Queued |
+| `PAUSED` | Session parked at `await session.pause_event.wait()` | Queued |
 | `CANCELLING` | `cancel_requested` observed; post-hooks skipped, transient | **Rejected** |
 | `FINALIZING` | Post-hooks running (title, distill, reflect, eval, worker finalize) | Queued |
 | `AWAITING_USER` | `ask_user` posted a question; turn terminated cleanly | Rejected (answer via `/api/questions/{id}/answer`) |
@@ -36,9 +38,10 @@ SCOUTING         → FINALIZING        reason=scout-error       (term=scout_erro
 SCOUTING         → CANCELLING        reason=cancel-requested
 PROCESSING       → COMPACTING        reason=compact-{proactive|critical|overflow}
 COMPACTING       → PROCESSING        reason=compact-done
-COMPACTING       → FINALIZING        reason=compaction-failed (term=compaction_failed)
+COMPACTING       → FINALIZING        reason=compaction-failed|agent-error
+COMPACTING       → CANCELLING        reason=cancel-requested
 PROCESSING       → AWAITING_USER     reason=ask-user
-PROCESSING       → PAUSE_REQUESTED   reason=pause-requested   (worker only)
+PROCESSING       → PAUSE_REQUESTED   reason=pause-requested   (workers and main sessions)
 PROCESSING       → CANCELLING        reason=cancel-requested
 PROCESSING       → FINALIZING        reason=loop-complete|round-ceiling|agent-error
 PAUSE_REQUESTED  → PAUSED            reason=pause-observed
@@ -56,7 +59,10 @@ AWAITING_WORKERS → SCOUTING          reason=workers-complete
 AWAITING_WORKERS → IDLE_READY        reason=worker-timeout
 AWAITING_WORKERS → CANCELLING        reason=cancel-requested
 (any)            → IDLE_READY        reason=reaper-unstick     (explicit escape hatch, logged)
+(any active)     → IDLE_READY        reason=cancel-timeout     (cancel raced the turn's own exit)
 ```
+
+The escape-hatch rows are shorthand: `TRANSITIONS` in `sessions/state_v2.py` spells out one edge per source state rather than a wildcard, so an unexpected `(from, reason)` pair is still detected and logged as an invariant violation.
 
 No more `force_state()`. If a situation needs to "force," the edge is in the graph with an explicit reason (e.g. `reaper-unstick`, `cancel-timeout`, `finalize-error`).
 
@@ -139,7 +145,7 @@ Sessions/manager.py `reap_idle_sessions()`:
 4. [Workflow Inside a Worker](#4-workflow-inside-a-worker)
 5. [Summary Table](#5-summary-table)
 
-> The remainder of this document (sections 1-5) describes the **legacy** 5-state model. The current architecture is above in §0. The legacy sections are kept for historical reference; some concepts (scout phase, reflect, snooze, worker orchestration) still apply, but any statement about state transitions, flag semantics, or the `post_hooks_complete`/`waiting_for_input` gates should be read against §0.
+> **Archive.** Sections 1-5 predate the v2 state machine. Their descriptions of the turn pipeline — scout, reflect, ask_user, cancel, snooze, worker orchestration — still hold, and the file:line citations are a useful map even where they have drifted. Their descriptions of *state* do not: read every mention of a state name, a transition, or the `post_hooks_complete` / `waiting_for_input` gates against §0, which is authoritative.
 
 ---
 
@@ -153,59 +159,19 @@ Three ways a request lands in a session:
 - **Cron / snooze** — idle-time scheduler creates sessions with `session_type="cron"` for memory consolidation/distillation
 - **Worker spawn** — a parent session calls `spawn_worker` (`core/extensions/orchestration/__init__.py:27-182`) which creates a child session with `session_type="worker"` and `parent_session_id` set
 
-### 1.2 State enum
-
-The formal state machine (`sessions/state.py:14-38`) has **five** values:
-
-```
-IDLE, SCOUTING, PROCESSING, ERROR, DELETED
-```
-
-Legal transitions (`state.py:28-34`):
-- `idle → {scouting, deleted}`
-- `scouting → {processing, error}`
-- `processing → {idle, error}`
-- `error → {idle, deleted}`
-
-Transitions are enforced by `SessionState.can_transition_to()` (`state.py:36-38`); recovery paths use `force_state()` (`state.py:138-151`).
-
-### 1.3 The five-state enum is NOT the whole story
-
-**Reflect, snooze, ask_user, worker-pause, and cancel are NOT states.** They ride on orthogonal flags on the `AgentSession` dataclass. This means `state == IDLE` alone is ambiguous — there are at least three functionally distinct "IDLEs":
-
-| Sub-state                          | `state` | `post_hooks_complete` | `waiting_for_input` | `has_background_tasks` |
-| ---------------------------------- | ------- | --------------------- | ------------------- | ---------------------- |
-| **Truly done** (reapable, snooze eligible) | `IDLE`  | `True`                | `False`             | `False`                |
-| **Post-hooks running** (reflect/title/distill) | `IDLE`  | `False`               | `False`             | `True`                 |
-| **Awaiting user answer** (ask_user)        | `IDLE`  | `True`                | `True`              | `False`                |
-| **Snoozing** (background distillation)     | `IDLE`  | `True`                | `False`             | `True`                 |
-
-All orthogonal flags (`state.py:54-128`):
-
-- `post_hooks_complete` — gate for "turn fully done" including reflect and retries
-- `waiting_for_input` — set by `ask_user` tool, signals the turn terminated awaiting an answer
-- `cancel_requested` — cooperative cancellation checked per tool round
-- `pause_event` — worker pause/resume (asyncio.Event)
-- `reflect_count` / `reflect_lessons` / `reflect_retry_requested` — reflect retry loop
-- `eval_count` / `eval_retry_requested` — eval retry loop
-- `_background_refs` → `has_background_tasks` — ref-counted, blocks reaping and signals `has_active_work` to snooze
-- `termination_reason` ∈ `{complete, round_ceiling, compaction_failed, cancelled, error}` — survives the post-turn force-reset so downstream hooks can classify honestly
-- `model_override` / `context_budget_override` — per-session model switch
-- `last_scout_report` — cached scout report for the current turn
-
-### 1.4 The lock and the queue (`manager.py:107-176`)
+### 1.2 The lock and the queue (`manager.py:107-176`)
 
 `Manager.prompt()` acquires `session.lock` (asyncio.Lock at `state.py:80`), then:
 
-- **IDLE or ERROR** → clear reflect/eval retry flags, clear `error`/`termination_reason`, set `post_hooks_complete=False`, launch `_run_agent_safe()` (`manager.py:147-176`)
-- **busy (SCOUTING or PROCESSING)** → append to `session.pending_messages` deque, emit `session.queued` (`manager.py:137-145`)
+- **ready** → clear reflect/eval retry flags, clear `error`/`termination_reason`, launch `_run_agent_safe()` (`manager.py:147-176`). Which states count as ready, and which reject rather than queue, is §0.6.
+- **busy** → append to `session.pending_messages` deque, emit `session.queued` (`manager.py:137-145`)
 - **queue full** (`len >= max_pending_messages`) → reject with `session.queue_full` event (`manager.py:127-135`)
 
 When the turn finishes, `_process_pending()` (`manager.py:503-517`) drains the next queued message under the same lock.
 
 Note: `manager.prompt()` also **cancels snooze** unconditionally (`manager.py:118-121`: `get_snooze().request_cancel()`) — user work always preempts background consolidation.
 
-### 1.5 Full turn timeline (with every phase)
+### 1.3 Full turn timeline (with every phase)
 
 ```
 prompt() arrives
@@ -255,11 +221,11 @@ _run_agent_safe:                                  (manager.py:178-331)
     _process_pending()                             (manager.py:330-331)
 ```
 
-### 1.6 Reflect: a retry-loop INSIDE the turn
+### 1.4 Reflect: a retry-loop INSIDE the turn
 
 When reflect returns `retry`, `_run_agent_retry()` (`manager.py:434-501`) re-enters `SCOUTING → PROCESSING → IDLE` **within the same user turn**, re-feeding `reflect_lessons` into the scout (`manager.py:452-454`). Bounded by `reflect_max_retries` (or `reflect_max_retries_worker` — tighter — for workers: `manager.py:265-269`). Eval retries have their own independent budget (`settings.eval_max_retries`) with the same mechanic. So a single user turn can cycle `IDLE → SCOUTING → PROCESSING → IDLE` up to `1 + reflect_retries + eval_retries` times before settling.
 
-### 1.7 Reflect verdicts and how they manifest
+### 1.5 Reflect verdicts and how they manifest
 
 Reflect emits `{verdict, reasoning, failure_cause, confidence, strategy}` (`core/reflect.py:78-101`). Consequences:
 
@@ -274,24 +240,19 @@ Non-reflect terminal conditions also get distinct headers:
 - `cancelled` → `# CANCELLED` (`manager.py:392-393`)
 - `error` → `# ERROR (worker exited with error: …)` (`manager.py:394-396`)
 
-### 1.8 ERROR is entered AND exited cleanly
-
-Entered when an exception escapes the agent loop (`manager.py:241-248`). The `finally` block then force-transitions ERROR → IDLE (`manager.py:255-260`) so the session is immediately ready to accept the next prompt. Note `manager.py:126` explicitly accepts new prompts from **both** `IDLE` and `ERROR`. So ERROR is almost always transient; the reaper only catches sessions stuck there because their `_run_agent_safe` task died without reaching `finally` (`manager.py:678-682` reaps SCOUTING/ERROR that have been idle `>= 2×max_idle`).
-
-### 1.9 `ask_user` is a turn terminator, not a pause
+### 1.6 `ask_user` is a turn terminator, not a pause
 
 When the agent calls `ask_user`:
 
-1. `dialog_tools.py:78` sets `session.waiting_for_input=True`
-2. Agent loop spots the flag **after the round completes** (`agent.py:815-825`): writes a placeholder assistant message, emits `stream.done`, sets `termination_reason="complete"`, returns
+1. `dialog_tools.py` records the question and transitions the session to `AWAITING_USER` (`ask-user`)
+2. Agent loop notices **after the round completes**: writes a placeholder assistant message, emits `stream.done`, sets `termination_reason="complete"`, returns
 3. Post-hooks run normally (reflect treats it as a complete turn)
-4. Session goes truly IDLE with `post_hooks_complete=True`, `waiting_for_input=True`
-5. When the user answers: `POST /api/questions/{id}/answer` calls `manager.prompt()` with the answer (`api/routers/questions.py:52`) — **a brand-new turn**
-6. After the new prompt is queued, the flag is cleared (`questions.py:57`)
+4. The session parks in `AWAITING_USER` — a real state, not a flag on an idle session
+5. When the user answers: `POST /api/questions/{id}/answer` calls `manager.prompt()` with the answer (`api/routers/questions.py:52`) — **a brand-new turn**, entered via `answer-received` and chained to the previous one by `parent_turn_id`
 
-There is no `WAITING` state in the enum. The flag + a cleanly-terminated turn is the whole mechanism. This also means `check_workers` will report the worker as "done" while it waits — consumers needing to distinguish "done" from "paused on question" must inspect `waiting_for_input` directly.
+The turn genuinely terminates; nothing is blocked waiting. `waiting_for_input` survives only as a read-only property meaning `state == AWAITING_USER`, so consumers that need to tell "done" from "parked on a question" have an honest signal.
 
-### 1.10 Snooze is process-global, not session-local
+### 1.7 Snooze is process-global, not session-local
 
 Snooze (`core/snooze.py`) is a singleton background runner doing memory consolidation, user-insight extraction, dedup, and FTS5 reconciliation. It is NOT a session state. Interaction points:
 
@@ -300,7 +261,7 @@ Snooze (`core/snooze.py`) is a singleton background runner doing memory consolid
 - When snooze is distilling a specific session it acquires `session.add_background_ref()` (`manager.py:527`) so the reaper won't sweep the session out from under it
 - Uses `settings.background_model` exclusively — no primary-model cost
 
-### 1.11 Cooperative cancel
+### 1.8 Cooperative cancel
 
 `session.cancel_requested` is checked at several points inside the agent loop (`agent.py:808`, and at round boundaries). On trip:
 
@@ -308,7 +269,7 @@ Snooze (`core/snooze.py`) is a singleton background runner doing memory consolid
 - `finally` block **skips post-hooks entirely** (`manager.py:263`: `if not _was_cancelled and not session.cancel_requested`)
 - skips `_process_pending()` too (`manager.py:330`) — queued messages don't auto-run after a cancel
 
-### 1.12 Reaper (background correction, `manager.py:645-698`)
+### 1.9 Reaper (background correction, `manager.py:645-698`)
 
 Not part of a normal turn, but part of the lifecycle:
 
@@ -317,7 +278,7 @@ Not part of a normal turn, but part of the lifecycle:
 - **Truly IDLE** (no subscribers, no background tasks, idle ≥ `max_idle`) → reaped from memory
 - Protected IDs (`protected_ids` set) are never reaped
 
-### 1.13 Visual: what a session looks like
+### 1.10 Visual: what a session looks like
 
 ```
                  ┌────────────────────────────────────────────────────┐
@@ -413,7 +374,7 @@ After the agent loop exits, `_run_post_hooks()` (`manager.py:519-537`) runs — 
    - `escalate` → sets termination reason, worker gets escalation header stamped
    - `pass` → done
 4. **Evaluation** (optional QA) (`hooks.py:55-56`)
-5. **Worker auto-stamp** (`_finalize_worker`, `manager.py:339-432`) — if worker didn't write `.worker_{id[:12]}_summary.md`, generate one; header encodes reflect verdict as described in §1.7
+5. **Worker auto-stamp** (`_finalize_worker`, `manager.py:339-432`) — if worker didn't write `.worker_{id[:12]}_summary.md`, generate one; header encodes reflect verdict as described in §1.5
 6. **Restore model override** if `switch_model` was called mid-turn (`manager.py:300-308`) — done AFTER all retries so retries run on the switched model
 7. Set `session.post_hooks_complete=True`, emit `turn.complete`, then `_process_pending()`
 
@@ -523,7 +484,7 @@ All orchestration tools are registered with `worker_allowed=False` (`:695`) so a
 | `spawn_worker` | `:27-182` | Create a new worker session. Returns worker ID. Safety: `caution`. |
 | `check_workers` | `:191-260` | Status of all workers. A worker is "done" only when `state ∈ {idle, unknown} AND post_hooks_complete=True` (`:224`). Annotates "finalizing (reflect/post-hooks)" when `state==idle` but `post_hooks_complete==False` (`:230-231`). Triggers cross-pollination (§3.6) if some workers are done and others still running. |
 | `await_workers` | `:435-507` | Block up to 30 min (hardcoded `max_wait=1800`, `:457`). Polls every 3 s using `asyncio.run_coroutine_threadsafe(asyncio.sleep(3), loop).result(3.5)` — never blocks the event loop (`:500-505`). Snapshots `worker_ids` per iteration (`:463`) to avoid `RuntimeError` if the loop appends while iterating. Returns early if any worker is stalled past `stale_threshold` (default 120 s). |
-| `get_worker_result` | `:283-358` | Final summary with quality-gate header (see §1.7). Lookup order: per-worker summary file → legacy `summary.md` → last assistant message. Max 3000 chars read. If the summary file already starts with `#` (sentinel from `_finalize_worker`), returned as-is — avoids double-stamping. |
+| `get_worker_result` | `:283-358` | Final summary with quality-gate header (see §1.5). Lookup order: per-worker summary file → legacy `summary.md` → last assistant message. Max 3000 chars read. If the summary file already starts with `#` (sentinel from `_finalize_worker`), returned as-is — avoids double-stamping. |
 | `get_worker_transcript` | `:361-432` | Full message stream, one line per message: `[role] content`, truncated to `max_chars` (default 30k). Role-aware formatting for `assistant:tool_calls`, `tool`, `reflect` (parses verdict), `scout` (parses approach), `system`, `user`. |
 | `message_worker` | `:510-524` | Fire-and-forget follow-up message into a running worker — internally just `manager.prompt(worker_id, message)` so the worker either picks it up on its current turn (queued) or starts a new turn. Safety: `caution`. |
 | `cancel_worker` | `:527-537` | Calls `session.task.cancel()` which raises `CancelledError` in the worker's `_run_agent_safe`. Worker's post-hooks are **skipped entirely** (`manager.py:263`) — no reflect, no auto-stamp, `termination_reason="cancelled"`. Safety: `caution`. |
@@ -554,7 +515,7 @@ Mechanics:
 
 ### 3.8 Session deletion cascades
 
-`manager.delete_session()` (`manager.py:83-101`) recursively deletes all `worker_ids` before removing itself, cancels their tasks, and deletes their auto-summary files (`manager.py:95-97`). The `DELETED` enum value on `SessionState` is effectively vestigial — `delete_session` does not transition through it; it just cancels the task, pops the session from the in-memory dict, and removes the DB row. The enum value is still listed as a legal transition target from IDLE and ERROR for completeness but no code path actually sets `state=DELETED`.
+`manager.delete_session()` (`manager.py:83-101`) recursively deletes all `worker_ids` before removing itself, cancels their tasks, and deletes their auto-summary files (`manager.py:95-97`). Deletion is not a state: `delete_session` cancels the task, pops the session from the in-memory dict, and removes the DB row. (The pre-v2 enum carried a `DELETED` value that no code path ever set; it was deleted with the rest of that enum.)
 
 ### 3.9 Same safety gate, no privilege escalation
 
@@ -609,8 +570,8 @@ Workers are typically single-turn (spawn → complete). But nothing stops a pare
 
 | Area                   | Primary files                                    | Key mechanism                                                                  |
 | ---------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------ |
-| Session lifecycle      | `sessions/state.py`, `sessions/manager.py`       | 5-state enum + asyncio.Lock + `pending_messages` deque + orthogonal flags      |
-| Orthogonal flags       | `sessions/state.py:54-128`                       | `post_hooks_complete`, `waiting_for_input`, `cancel_requested`, `pause_event`, retry counters |
+| Session lifecycle      | `sessions/state_v2.py`, `sessions/manager.py`    | 10-state machine + asyncio.Lock + `pending_messages` deque (see §0)            |
+| Session data           | `sessions/state.py`                              | `AgentSession`: event plumbing, cooperative-cancel bool, pause event, retry counters; state itself lives in `_state_v2` |
 | Agent loop             | `core/agent.py:256-514`                          | compile_context → stream → dedup/stuck → execute → cancel/ask_user checks      |
 | Stuck detection        | `core/agent.py:78-186`                           | Seven weighted signals; score > 0.3 with repeat_count ≥ 3 triggers help/break |
 | Compaction             | `core/context/compaction.py`, `core/context/compiler.py` | Non-destructive 3-phase view: prune → orphan-filter → `role="compaction"` summary marker; metadata in `messages.metadata` (v5+) |
@@ -620,14 +581,14 @@ Workers are typically single-turn (spawn → complete). But nothing stops a pare
 | Safety gate            | `core/tools/executor.py:65-81`                   | `safety_level` check; workers not exempt; `worker_allowed` gates flat hierarchy |
 | Reflect                | `core/reflect.py`, `sessions/hooks.py`           | verdict ∈ {pass, retry, escalate}; retry bounded by `reflect_max_retries[_worker]` |
 | Reflect retry loop     | `sessions/manager.py:272-295`                    | re-enters SCOUTING→PROCESSING within one user turn until verdict passes or cap |
-| ask_user               | `core/tools/builtin/dialog_tools.py`, `api/routers/questions.py` | Sets `waiting_for_input`, terminates turn; answer = new prompt                 |
+| ask_user               | `core/tools/builtin/dialog_tools.py`, `api/routers/questions.py` | Transitions to `AWAITING_USER`, terminates turn; answer = new prompt           |
 | Snooze                 | `core/snooze.py`                                 | Process-global; cancelled by user msg; gates on every session being IDLE       |
-| Reaper                 | `sessions/manager.py:645-698`                    | Unsticks stuck PROCESSING; reaps SCOUTING/ERROR after `2×max_idle`             |
+| Reaper                 | `sessions/manager.py` `reap_idle_sessions`       | Per-state timeouts (§0.7); unsticks stuck PROCESSING, reaps idle SCOUTING      |
 | Workers — spawn        | `orchestration:27-182`                           | `_spawn_lock` atomic slot; LLM-slot warning; attachment-visibility hint         |
 | Workers — lifecycle    | `orchestration:191-589`                          | `check_workers`, `await_workers`, `get_worker_result`, `get_worker_transcript`, `message_worker`, `cancel_worker`, `pause_worker`, `resume_worker`, `retry_worker` |
 | Cross-pollination      | `orchestration:592-690`                          | Reflect=pass findings from completed workers injected as `system` msg into running siblings; dedup via `session_messages` table |
 | Events                 | `core/events.py`, `sessions/state.py:153-173`    | Single SSE stream with `_seq` gap detection                                    |
-| Deletion               | `sessions/manager.py:83-101`                     | `delete_session` cancels task, cascades workers, removes summary files; `DELETED` enum value is vestigial |
+| Deletion               | `sessions/manager.py:83-101`                     | `delete_session` cancels task, cascades workers, removes summary files         |
 
 ---
 
@@ -635,9 +596,10 @@ Workers are typically single-turn (spawn → complete). But nothing stops a pare
 
 Every claim above cites the file and line range it was drawn from. When these drift out of date, the reliable sources of truth are, in order:
 
-1. `sessions/state.py` — the enum, all flags, and the lock/event plumbing
-2. `sessions/manager.py` — the turn driver, including the retry loop and post-hooks gating
-3. `core/agent.py` — the tool-round loop, cancel/ask_user/pause interactions
-4. `core/extensions/orchestration/__init__.py` — worker spawn, check, await, get_worker_result
+1. `sessions/state_v2.py` — the state enum, the transition graph, and the one mutator
+2. `sessions/state.py` — the `AgentSession` fields and the lock/event plumbing
+3. `sessions/manager.py` — the turn driver, including the retry loop and post-hooks gating
+4. `core/agent.py` — the tool-round loop, cancel/ask_user/pause interactions
+5. `core/extensions/orchestration/__init__.py` — worker spawn, check, await, get_worker_result
 
 If you find a mismatch between this doc and the code, the code wins — please update this doc in the same change.

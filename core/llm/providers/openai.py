@@ -28,6 +28,8 @@ from typing import AsyncGenerator
 import httpx
 
 from config import settings
+from core.llm.errors import FailoverError, FailoverReason, classify_http_error
+from core.llm.providers._shared import http_status_failover, parse_usage, stream_failover
 from core.llm.types import (
     ChatResponse,
     HealthStatus,
@@ -35,7 +37,6 @@ from core.llm.types import (
     ProviderConfig,
     StreamEvent,
     StreamEventType,
-    TokenUsage,
     ToolCall,
 )
 
@@ -57,17 +58,10 @@ _CONTEXT_HINTS: dict[str, int] = {
 _VISION_PREFIXES = ("gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4", "chatgpt-4o")
 
 
-def _parse_usage(usage_data: dict) -> TokenUsage:
-    details = usage_data.get("prompt_tokens_details") or {}
-    return TokenUsage(
-        prompt_tokens=usage_data.get("prompt_tokens", 0),
-        completion_tokens=usage_data.get("completion_tokens", 0),
-        total_tokens=usage_data.get("total_tokens", 0),
-        # OpenAI shape first; Anthropic-style key as a fallback for
-        # OpenAI-compatible gateways that use it.
-        cache_read_tokens=details.get("cached_tokens", 0) or usage_data.get("cache_read_input_tokens", 0),
-        cache_write_tokens=usage_data.get("cache_creation_input_tokens", 0),
-    )
+# Both cache-token dialects now live in providers/_shared so the OpenRouter
+# adapter reads the OpenAI shape too; kept as a module-level name because it
+# is part of this module's tested surface.
+_parse_usage = parse_usage
 
 
 class OpenAIProvider:
@@ -187,10 +181,7 @@ class OpenAIProvider:
         # Guard against 200-with-error bodies (some compatible gateways do this)
         if "choices" not in data:
             error_msg = data.get("error", {}).get("message", str(data)[:500])
-            from core.llm.errors import FailoverError, classify_http_error
-
-            reason = classify_http_error(400, error_msg)
-            raise FailoverError(reason, f"OpenAI error: {error_msg}")
+            raise FailoverError(classify_http_error(400, error_msg), f"OpenAI error: {error_msg}")
 
         return self._parse_response(data, model)
 
@@ -215,7 +206,7 @@ class OpenAIProvider:
         return ChatResponse(
             content=content,
             tool_calls=tool_calls,
-            usage=_parse_usage(data.get("usage", {})),
+            usage=parse_usage(data.get("usage")),
             model=model,
             provider=self.name,
             finish_reason=finish,
@@ -239,6 +230,12 @@ class OpenAIProvider:
 
         client = self._get_client()
         done_sent = False
+        # See the OpenRouter adapter for the full rationale: `emitted_output`
+        # is the pre-stream/mid-stream fence for failover, `failing_over`
+        # suppresses the finally-block DONE so a raised failure reaches the
+        # router as an exception (architecture review, Appendix C §2).
+        emitted_output = False
+        failing_over = False
         last_finish_reason: str | None = None
         # Index-based accumulator for streaming tool_call deltas (same
         # contract as the OpenRouter adapter: flush on finish_reason,
@@ -279,11 +276,16 @@ class OpenAIProvider:
                             temperature=temperature,
                             _retried=True,
                         ):
+                            if event.type in (StreamEventType.TOKEN, StreamEventType.TOOL_CALL):
+                                emitted_output = True
                             yield event
                         done_sent = True
                         return
                     logger.error("OpenAI %d error body: %s", resp.status_code, body[:500])
-                resp.raise_for_status()
+                    # Typed rather than raise_for_status(): only the body says
+                    # whether this is a context overflow, an auth failure, or a
+                    # transient the router should fail over on.
+                    raise http_status_failover("OpenAI", resp.status_code, body)
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
                         continue
@@ -309,8 +311,6 @@ class OpenAIProvider:
                             else str(chunk_error)
                         )
                         logger.error("OpenAI stream error in chunk: %s", err_msg)
-                        from core.llm.errors import FailoverError, FailoverReason, classify_http_error
-
                         reason = classify_http_error(400, err_msg)
                         if reason == FailoverReason.CONTEXT_OVERFLOW:
                             raise FailoverError(reason, err_msg)
@@ -319,7 +319,7 @@ class OpenAIProvider:
 
                     usage_data = chunk.get("usage")
                     if usage_data:
-                        yield StreamEvent(type=StreamEventType.USAGE, usage=_parse_usage(usage_data))
+                        yield StreamEvent(type=StreamEventType.USAGE, usage=parse_usage(usage_data))
 
                     choices = chunk.get("choices", [])
                     if not choices:
@@ -347,26 +347,41 @@ class OpenAIProvider:
                     if finish_reason in ("tool_calls", "stop") and tc_accumulator:
                         flushed = _flush_tool_calls()
                         if flushed:
+                            emitted_output = True
                             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
 
                     content = delta.get("content")
                     if content:
+                        emitted_output = True
                         yield StreamEvent(type=StreamEventType.TOKEN, content=content)
         except GeneratorExit:
             return
+        except FailoverError as fe:
+            if not emitted_output:
+                failing_over = True
+                raise
+            logger.error("OpenAI mid-stream failure after partial output (%s); terminating", fe.reason.value)
+            yield StreamEvent(type=StreamEventType.ERROR, error=fe.message)
+        except (httpx.HTTPStatusError, httpx.TransportError) as e:
+            logger.error("OpenAI stream transport error: %s", e)
+            if not emitted_output:
+                failing_over = True
+                raise stream_failover("OpenAI", e) from e
+            yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
         except Exception as e:
             logger.error("OpenAI stream error: %s", e)
             yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
         finally:
-            try:
-                flushed = _flush_tool_calls()
-                if flushed:
-                    yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
-                if not done_sent:
-                    done_sent = True
-                    yield StreamEvent(type=StreamEventType.DONE, finish_reason=last_finish_reason)
-            except GeneratorExit:
-                return
+            if not failing_over:
+                try:
+                    flushed = _flush_tool_calls()
+                    if flushed:
+                        yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
+                    if not done_sent:
+                        done_sent = True
+                        yield StreamEvent(type=StreamEventType.DONE, finish_reason=last_finish_reason)
+                except GeneratorExit:
+                    return
 
     # ------------------------------------------------------------------
     # Model info

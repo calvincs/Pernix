@@ -4,7 +4,16 @@ Qoheleth's control experiment, run functionally: on completing goal G,
 
     D(G) = alpha * (parent question entropy reduction)
          + beta  * (quality-weighted new questions spawned)
-         - gamma * (re-open rate of G's class)
+
+The spec's third term — a gamma-weighted re-open rate of G's class — is
+deliberately absent. It counted `goal_reopened` trace events, and TELOS has
+no goal-reopen path to emit them: `telos_goal_complete` refuses an already
+completed goal, the ordo pass skips completed goals entirely, the binding
+monitor only suspends active ones, and `GOAL_STATES` has no reopened state.
+The term was structurally always zero, so D could only ever be >= 0 and the
+penalty half of the formula did nothing. Carrying a dead coefficient is
+worse than dropping it: it reads as a working brake. If a re-open path is
+ever built, emit `goal_reopened` there and restore the term with it.
 
 If D stays below the floor (0.1) across n >= 3 completions of a class, the
 class is marked VAPOR: future instances take a 0.5 budget discount at the
@@ -25,15 +34,12 @@ logger = logging.getLogger("pernix.telos.hevel")
 
 _ALPHA = 1.0
 _BETA = 0.5
-_GAMMA = 0.5
 _DISCHARGE_FLOOR = 0.10
 _MIN_SAMPLES = 3
 
 
 def score_discharge(store: TelosStore, goal: TelosObject) -> float:
     """Compute D(G) at completion time from the trace and question ledger."""
-    from core.telos.ordo import _goal_class
-
     parent_id = str(goal.get("parent") or "g_root")
     events = store.trace_events(days=14)
 
@@ -55,14 +61,7 @@ def score_discharge(store: TelosStore, goal: TelosObject) -> float:
     ]
     new_questions = min(1.0, sum(float(q.get("surprise", 0.5)) for q in spawned) / 3.0)
 
-    # gamma term: re-open rate of the class — completed goals of this class
-    # that came back (state flipped away from completed after completion).
-    cls = _goal_class(goal)
-    class_events = [e for e in events if e.get("type") == "goal_reopened" and e.get("class") == cls]
-    same_class_done = [g for g in store.list_goals() if _goal_class(g) == cls and g.get("state") == "completed"]
-    reopen_rate = min(1.0, len(class_events) / max(1, len(same_class_done)))
-
-    d = _ALPHA * entropy_reduction + _BETA * new_questions - _GAMMA * reopen_rate
+    d = _ALPHA * entropy_reduction + _BETA * new_questions
     return round(max(-1.0, min(2.0, d)), 3)
 
 

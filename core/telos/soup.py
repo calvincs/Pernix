@@ -4,11 +4,17 @@ Spec §3.3/§3.4: given a question, sample source domains from memory at three
 analogical distances (near/mid/far, default 50/30/20 — the layer's
 temperature knob, actuated by Entropy Control), run a structure-mapping
 template per candidate, then gate: a hypothesis executes iff it names a
-falsifier (observable + decision rule), its cost fits, and eig >= floor.
-Rejected hypotheses are NOT deleted — they land in the speculation pool
-(status='soup'): searchable, recombinable, zero execution rights. Three
-without one is mysticism; the pool is where the mysticism waits to become
-science.
+falsifier (observable + decision rule), its cost fits, and eig >= floor —
+where eig is first discounted by the generator's realized calibration
+(core/telos/calibration.py), so a constant optimistic estimate stops
+clearing the floor. Rejected hypotheses are NOT deleted — they land in the speculation pool
+(status='soup'): searchable, zero execution rights. Three without one is
+mysticism; the pool is where the mysticism waits to become science.
+
+Not yet implemented: the spec's recombination of pooled hypotheses by
+future SOUP passes. Nothing reads status == 'soup' — the pool is a retained
+record, not a feedstock. Said here rather than in a docstring that promises
+otherwise.
 
 Scheduler (§3.1/§3.2): 85% of throughput goes to goal-linked questions by
 surprise x recency; a serendipity budget (default 15%) is reserved for
@@ -116,15 +122,28 @@ def parse_soup_output(raw: str) -> list[dict]:
     return out
 
 
-def gate(h: dict) -> tuple[bool, str]:
+def gate(h: dict, eig_discount: float = 1.0) -> tuple[bool, str]:
     """Testability gate (spec §3.4). Admitted iff falsifier defined, cost
-    fits budget, and eig clears the floor. Returns (admitted, reason)."""
+    fits budget, and eig clears the floor. Returns (admitted, reason).
+
+    `eig_discount` is the mean-recalibration factor from
+    core.telos.calibration: without it the eig condition is a self-graded
+    number checked against a fixed floor, which a constant optimistic
+    estimate clears forever. The discount makes the floor answer to the
+    generator's realized track record instead.
+    """
     if not h.get("falsifier"):
         return False, "no falsifier"
     if h.get("cost_est_tokens", 0) > settings.telos_max_eval_tokens:
         return False, f"cost {h['cost_est_tokens']} exceeds budget {settings.telos_max_eval_tokens}"
-    if h.get("eig", 0.0) < settings.telos_eig_floor:
-        return False, f"eig {h.get('eig', 0.0)} below floor {settings.telos_eig_floor}"
+    claimed = float(h.get("eig", 0.0) or 0.0)
+    effective = round(claimed * max(0.0, min(1.0, eig_discount)), 3)
+    if effective < settings.telos_eig_floor:
+        if eig_discount < 1.0:
+            return False, (
+                f"eig {claimed} discounted to {effective} by calibration, below floor {settings.telos_eig_floor}"
+            )
+        return False, f"eig {claimed} below floor {settings.telos_eig_floor}"
     return True, "admitted"
 
 
@@ -155,15 +174,22 @@ def next_question(store: TelosStore) -> TelosObject | None:
     return max(pool, key=score)
 
 
-def _band_context(store: TelosStore, question_text: str) -> str:
+def _band_context(store: TelosStore, question_text: str) -> tuple[str, dict[str, list[str]]]:
     """Sample memory at analogical distances. Near = direct hits on the
     question; mid = hits on extracted key terms; far = a rotating slice of
-    unrelated files (the recombination feedstock)."""
+    unrelated files (the recombination feedstock).
+
+    Returns (context_text, files_by_band). The file list is the only part of
+    a hypothesis's provenance the generating model cannot rename: Entropy
+    Control buckets on it so novelty is measured over the corpus regions
+    actually drawn from, not over model-authored domain labels.
+    """
     from core.memory.store import get_memory_store
 
+    files_by_band: dict[str, list[str]] = {"near": [], "mid": [], "far": []}
     mem = get_memory_store()
     if mem is None:
-        return ""
+        return "", files_by_band
     mix = store.band_mix()
     total = max(4, settings.telos_soup_context_entries)
     n_near = max(1, round(total * mix["near"]))
@@ -180,6 +206,8 @@ def _band_context(store: TelosStore, question_text: str) -> str:
                 continue
             seen.add(key)
             lines.append(f"[{label}] ({r.file_name}) {r.content[:300]}")
+            if r.file_name not in files_by_band[label]:
+                files_by_band[label].append(r.file_name)
 
     try:
         add(mem.search(question_text, limit=n_near), "near")
@@ -207,7 +235,7 @@ def _band_context(store: TelosStore, question_text: str) -> str:
             add(mem.search(far_file.name.replace(".", " "), mode="bm25", limit=n_far), "far")
     except Exception as e:
         logger.debug("telos: far-band sampling failed: %s", e)
-    return "\n".join(lines[: total + 4])
+    return "\n".join(lines[: total + 4]), files_by_band
 
 
 async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
@@ -219,7 +247,7 @@ async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
         return result
 
     mix = store.band_mix()
-    context = _band_context(store, str(q.get("text", "")))
+    context, band_files = _band_context(store, str(q.get("text", "")))
     user_content = (
         f"QUESTION ({q.id}, surprise {q.get('surprise')}):\n{q.get('text')}\n\n"
         f"Band mix to target: near {mix['near']:.2f} / mid {mix['mid']:.2f} / far {mix['far']:.2f}\n\n"
@@ -252,11 +280,21 @@ async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
     )
     candidates = parse_soup_output(response.content or "")[: max(1, settings.telos_hypotheses_per_question)]
 
+    # Calibration-corrected gate (spec §8): one lookup per pass, applied to
+    # every candidate. When it engages the trace says so — a gate that
+    # silently tightened would be as unauditable as one that never did.
+    from core.telos.calibration import eig_discount
+
+    discount, calib = eig_discount(store)
+    if discount < 1.0:
+        logger.info("telos: eig gate discount %.3f engaged (%s)", discount, calib)
+        store.trace_append("eig_calibration", {"question": q.id, **calib})
+
     spawned = list(q.get("spawned") or [])
     for h in candidates:
         if is_cancelled():
             break
-        admitted, reason = gate(h)
+        admitted, reason = gate(h, eig_discount=discount)
         obj = TelosObject(
             id=store.mint_id("hypothesis"),
             kind="hypothesis",
@@ -275,6 +313,9 @@ async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
                 "status": "gated" if admitted else "soup",
                 "gate_reason": reason,
                 "attempts": 0,
+                # Which memory files this band actually drew on — the
+                # rename-proof half of the hypothesis's provenance.
+                "context_files": sorted(band_files.get(h["band"], [])),
             },
         )
         store.write(obj)
@@ -284,9 +325,19 @@ async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
             result["gated"] += 1
         else:
             result["souped"] += 1
+        # eig rides the generation event so the calibration metric can pair
+        # the prediction with the outcome without re-parsing the corpus.
         store.trace_append(
             "hypothesis",
-            {"id": obj.id, "question": q.id, "band": h["band"], "status": obj.get("status"), "reason": reason},
+            {
+                "id": obj.id,
+                "question": q.id,
+                "band": h["band"],
+                "status": obj.get("status"),
+                "reason": reason,
+                "eig": h["eig"],
+                "eig_discount": discount,
+            },
         )
 
     # The question advances regardless of yield: attempts feed abandonment,

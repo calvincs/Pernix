@@ -34,6 +34,14 @@ _DEGRADED_P = 0.55  # mirrors candor intel._DEGRADED_P
 _MIN_OBSERVATIONS = 5
 _MAX_UNUSABLE_ATTEMPTS = 2
 
+# A FIXED HEURISTIC PRIOR, not a measurement. Nothing here estimates how
+# often a validated hypothesis turns out to be right — there is no outcome
+# feedback on a promotion — so every validation stamps the same number.
+# Named rather than repeated inline so it cannot be mistaken for three
+# independently-derived figures, and rendered with its provenance attached
+# in report.py rather than as a bare score.
+VALIDATION_PRIOR = 0.75
+
 
 def _today_key() -> str:
     return f"dream_replays:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
@@ -238,7 +246,7 @@ async def _validate_tool_pattern(row: dict) -> str:
         # claim as stated.
         return _finish(row, "refuted", "candor_predict_degradation", "degradation gone — " + "; ".join(recovered))
     if degraded:
-        return _finish(row, "validated", "candor_predict_degradation", "; ".join(degraded), confidence=0.75)
+        return _finish(row, "validated", "candor_predict_degradation", "; ".join(degraded), confidence=VALIDATION_PRIOR)
     if thin:
         return _bump_attempts(row, "insufficient observations — " + "; ".join(thin))
     return _bump_attempts(row, "no checkable candor fact (inert bridge or categorical only)")
@@ -281,7 +289,7 @@ async def _validate_memory_claim(store, row: dict) -> str:
         return _bump_attempts(row, "judge output unparseable")
     note = str(verdict.get("note", ""))[:300]
     if verdict.get("verdict") == "holds":
-        return _finish(row, "validated", "evidence_judge", note, confidence=0.75)
+        return _finish(row, "validated", "evidence_judge", note, confidence=VALIDATION_PRIOR)
     return _finish(row, "refuted", "evidence_judge", note)
 
 
@@ -340,7 +348,9 @@ async def _validate_lesson_ineffective(row: dict) -> str:
         # Planning has absorbed the lesson — the "lesson is ineffective"
         # hypothesis is refuted.
         return _finish(row, "refuted", "scout_replay", f"plan now addresses failure — {note}")
-    return _finish(row, "validated", "scout_replay", f"plan unchanged on failure axis — {note}", confidence=0.75)
+    return _finish(
+        row, "validated", "scout_replay", f"plan unchanged on failure axis — {note}", confidence=VALIDATION_PRIOR
+    )
 
 
 _VERDICT_ICONS = {"validated": "✔", "refuted": "✘", "expired": "◌", "skipped": "…"}

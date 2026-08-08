@@ -8,11 +8,15 @@ One idle-time sweep over the suite, all mechanical (no LLM):
             as established-flaky instead (informs forever, never trips).
   flaky   — an established canary flapping across recent runs (>= _MIN_FLIPS
             outcome changes in the last _FLAP_WINDOW) is tagged flaky.
-  retire  — a canary green for canary_retire_after_passes consecutive runs
-            has stopped carrying information; it moves to .retired/
-            quarantine (never straight to deletion) with a dated marker.
+  demote  — a canary green for canary_retire_after_passes consecutive runs
+            gets its scheduled cadence doubled (run every Nth sweep) instead
+            of being retired. It stays in the scheduled pool because the
+            adaptive tripwire's baseline is computed from scheduled runs of
+            these same tasks; removing the stable ones shrinks the
+            denominator of the only signal allowed to auto-rollback.
   purge   — quarantined canaries older than canary_purge_after_days are
-            deleted for good.
+            deleted for good. Nothing in this sweep quarantines any more;
+            the pass drains what earlier versions (and humans) left behind.
   review  — a healthy canary's last_reviewed is bumped (semantics under
             auto-maintenance: "last verified healthy by this sweep"), which
             keeps the retention staleness nudge quiet without a human.
@@ -36,7 +40,7 @@ from pathlib import Path
 import yaml
 
 from config import settings
-from core.canary.parser import CanaryDef, CanaryParseError, canaries_dir, parse_canary_md
+from core.canary.parser import MAX_CADENCE, CanaryDef, CanaryParseError, canaries_dir, parse_canary_md
 from core.skills.parser import parse_frontmatter_md
 from db import models as db
 
@@ -102,32 +106,21 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _retire(c: CanaryDef, reason: str, base: Path) -> bool:
-    """Quarantine, never delete: move the directory under .retired/ with a
-    dated marker so purge (and a human un-retiring) has the full story."""
-    src = c.path.parent if c.path else None
-    if src is None or not src.is_dir():
-        return False
-    dest_root = retired_dir(base)
-    dest = dest_root / c.name
-    if dest.exists():
-        logger.warning("Retire skipped: %s already exists in quarantine", c.name)
-        return False
-    try:
-        dest_root.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest))
-        (dest / _RETIRED_MARKER).write_text(
-            json.dumps({"retired_at": datetime.now(timezone.utc).isoformat(), "reason": reason}),
-            encoding="utf-8",
-        )
-        return True
-    except Exception as e:
-        logger.warning("Canary retire failed for %s: %s", c.name, e)
-        return False
+def _describe(item) -> str:
+    """Render one stats entry — demotions carry their new cadence."""
+    if isinstance(item, dict):
+        return f"{item.get('name')} (cadence {item.get('cadence')})"
+    return str(item)
 
 
 def _purge_quarantine(base: Path) -> list[str]:
-    """Delete quarantined canaries past canary_purge_after_days."""
+    """Delete quarantined canaries past canary_purge_after_days.
+
+    Auto-maintenance no longer quarantines anything (long-green canaries are
+    demoted to a reduced cadence instead), so this drains what earlier
+    versions of the sweep — and any human moving a directory into
+    `.retired/` — left behind.
+    """
     purged: list[str] = []
     root = retired_dir(base)
     if not root.is_dir():
@@ -185,11 +178,23 @@ def _maintain_one(c: CanaryDef, base: Path, stats: dict) -> None:
             stats["flaky_tagged"].append(c.name)
         return
 
-    # Retirement: a long-green canary carries no information anymore.
+    # Demotion: a long-green canary is cheap to keep and expensive to lose.
+    #
+    # It used to be retired here, on the reasoning that a canary green for 25
+    # consecutive runs carries no information. That is true of a test suite
+    # under active development and false of a regression tripwire, whose
+    # entire value is that green stays green: the adaptive tripwire computes
+    # its baseline from SCHEDULED runs of these same tasks
+    # (core/adaptive/tripwire.py), so retiring the stable ones shrinks the
+    # denominator of the only signal allowed to auto-rollback. Demoting to a
+    # reduced cadence keeps the canary in the scheduled pool — still
+    # producing baseline rows, still run in full by every post-batch sweep —
+    # at a fraction of the cost.
     retire_after = max(1, settings.canary_retire_after_passes)
     if len(runs) >= retire_after and all(r.get("passed") for r in runs[:retire_after]):
-        if _retire(c, f"passed {retire_after} consecutive runs", base):
-            stats["retired"].append(c.name)
+        target = min(MAX_CADENCE, max(2, c.cadence * 2))
+        if target > c.cadence and _rewrite_frontmatter(md, {"cadence": target, "last_reviewed": _today()}):
+            stats["demoted"].append({"name": c.name, "cadence": target})
         return
 
     # Healthy and quiet: keep the review clock current so the staleness
@@ -206,7 +211,7 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
         "promoted": [],
         "settled_flaky": [],
         "flaky_tagged": [],
-        "retired": [],
+        "demoted": [],
         "purged": [],
         "reviewed": [],
     }
@@ -229,13 +234,13 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
 
     changed = {k: v for k, v in stats.items() if v}
     if changed:
-        summary = "; ".join(f"{k}: {', '.join(v)}" for k, v in changed.items())
+        summary = "; ".join(f"{k}: {', '.join(_describe(i) for i in v)}" for k, v in changed.items())
         logger.info("Canary maintenance: %s", summary)
         try:
             db.add_notification(
                 title="Canary suite auto-maintenance",
-                body=f"{summary}. Retired canaries sit in {_RETIRED_DIRNAME}/ for "
-                f"{settings.canary_purge_after_days}d before purge.",
+                body=f"{summary}. Demoted canaries stay in the scheduled sweep at a "
+                f"reduced cadence so the tripwire keeps its baseline.",
                 urgency="normal",
             )
         except Exception:

@@ -109,10 +109,33 @@ Start with a small hand-written seed covering your daily-driver categories.
 From there the suite grows the way a regression-test suite does — from real
 failures: while `canary_enabled` is on, the refine pass may **propose** a new
 canary distilled from a genuinely failed turn (name, prompt, gates,
-fixtures, rationale). Proposals wait in the Adaptive tab for a human;
-**nothing writes `data/canaries/` without your approval**. Approving
-materializes the `CANARY.md` (validated by a parse round-trip) and queues a
-manual vetting run so you see it pass before it counts.
+fixtures, rationale). Proposals wait in the Adaptive tab for a human.
+Approving materializes the `CANARY.md` (validated by a parse round-trip) and
+queues a manual vetting run so you see it pass before it counts.
+
+**Auto-admission.** `canary_auto_admit` defaults to **true**, so a proposal
+that clears the allowlist proof (`core/canary/propose.py`) is materialized
+into `data/canaries/` immediately, without waiting for you. The proof is
+what makes that safe, and it is deliberately narrow: every gate command must
+parse, resolve to a closed set of known-safe binaries, run
+`python -m pytest` / `python -m unittest` only, carry no shell metacharacters
+(no pipes, redirects, substitution, chaining), and reference only
+workspace-relative paths — plus no model override, a timeout under the auto
+cap, and room left under `canary_max_suite`. Anything outside that set falls
+back to human approval, and you get a notification either way.
+Auto-admitted canaries land tagged `vetting` + `flaky: true`, so
+they inform but cannot trip the tripwire until `canary_vetting_runs`
+consistent passes promote them. Set `canary_auto_admit=false` if you want
+every canary to pass under your eye first.
+
+**Long-green canaries are demoted, not retired.** After
+`canary_retire_after_passes` consecutive passes a canary's `cadence` doubles
+(capped at 12), so it runs on every Nth *scheduled* sweep instead of every
+one. It stays in the suite deliberately: the tripwire's baseline pass rate is
+computed from scheduled runs of these same tasks, so deleting the stable
+canaries would shrink the denominator of the only signal allowed to
+auto-roll-back a batch. Post-batch and manual sweeps ignore `cadence` and run
+everything.
 
 Staleness is curated, not automated away: 90 days past a canary's
 `last_reviewed` date, Snooze nudges you with a notification. Bump the date
@@ -159,7 +182,9 @@ evidence is refused:
   [dream.md](dream.md) now ships here: mechanically-validated tool patterns
   → `routing_hint`; counterfactually-validated ineffective lessons →
   `policy` proposals; contradiction/stale-memory findings → proposals
-  carrying the **memory-correction effector** (below).
+  carrying the **memory-correction effector** (below). Every dream edit is
+  global-scope and every global-scope dream edit escalates to high risk, so
+  all of them are proposal-gated — none auto-applies.
 - **Candor** — calibrated reliability regressions → `routing_hint` with the
   ledger's audit chain as evidence (queued during Snooze's Candor
   maintenance activity). The same activity also **retires** hints it no
@@ -169,11 +194,28 @@ evidence is refused:
   so a validated claim about how the agent should work actually reaches
   scout instead of dying in the journal.
 
-#### Candor hint retirement
+#### Hint retirement — every producer, not just Candor
 
-Minting alone is a ratchet: every degraded tool consumes a slot in the
-per-kind cap and nothing ever gives one back. So the Candor maintenance pass
-also proposes deletes. A `routing_hint` is retired when all three hold: its
+Minting alone is a ratchet: every entry consumes a slot in the per-kind cap
+and nothing ever gives one back. Once a kind fills, every further edit is
+rejected at apply time — a failure mode indistinguishable from a producer
+with nothing to report. All three programmatic producers now retire:
+
+| Producer | Retires when | Where |
+|---|---|---|
+| Candor | the tool recovered above the degradation threshold | `core/snooze.py` (Candor maintenance) |
+| Dream | the originating hypothesis is gone or unpromoted, its cited Candor facts recovered, or the entry passed a 90-day TTL | `core/dream/retire.py` (per dream step) |
+| Telos | the cited hypothesis is missing or no longer `supported`, its question was abandoned, or the entry passed a 90-day TTL | `core/telos/retire.py` (daily slow loop) |
+
+The TTLs are the honest part: Dream and Telos verdicts are terminal by
+construction, so the evidence-withdrawn criteria rarely fire on their own.
+Without a TTL those passes would be decorative. A still-true claim re-mints
+cheaply; a slot held forever cannot.
+
+A cap rejection also raises an **operator notification** now, so "the shelf
+is full" is visibly different from "the loop had nothing to say".
+
+Candor's rule in detail: a `routing_hint` is retired when all three hold: its
 `source` is `candor` (a producer deleting its own entry stays low-risk, so
 the cross-producer escalation doesn't fire), its id has the
 `tool-<name>-degraded` shape, and the tool has **recovered** — it no longer
@@ -217,7 +259,8 @@ is a payload action, not one of the three entry actions.
   `adaptive_max_auto_applies_per_day` (6), `adaptive_edit_cooldown_hours`
   (24) per entry.
 - **Notification** — auto-applies are never silent ("adaptive: 2 routing
-  hints applied — review").
+  hints applied — review"), and neither is a cap rejection ("Adaptive layer:
+  entry cap reached").
 - **Structural immutability** — the apply path writes only `adaptive_*`
   rows; it has no file-write capability. `SOUL.md`/`RULES.md` and the base
   prompt stay machine-untouchable.

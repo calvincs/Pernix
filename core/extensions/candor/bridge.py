@@ -8,7 +8,10 @@ asyncio.to_thread is NOT safe here — it rotates threads.
 
 Failure is never fatal: every entry point is gated on settings.candor_enabled,
 wrapped against exceptions, and a circuit breaker turns the bridge inert for
-the rest of the process after repeated store failures.
+the rest of the process after repeated store failures. Inert is not silent on
+the read path: once the breaker is open the scout brief carries an explicit
+DEGRADED banner, because its exception-report contract otherwise renders a
+dead oracle as an all-clear.
 
 Two write paths feed the store:
 - record() — turn-end observations for already-admitted facts (sub-ms each).
@@ -371,8 +374,29 @@ class CandorBridge:
     # Read path — intel
     # ------------------------------------------------------------------
 
+    def _degraded_brief(self) -> str | None:
+        """The explicit degraded banner, once the breaker has actually opened.
+
+        Only `_broken` qualifies. `candor_enabled=False` is an operator
+        decision, not a malfunction, and `_closed` is process teardown —
+        neither should tell the scout its reliability oracle failed.
+        """
+        if not (self._broken and settings.candor_enabled):
+            return None
+        from core.extensions.candor.intel import build_degraded_brief
+
+        return build_degraded_brief()
+
     async def intel_brief(self) -> str | None:
-        """Build the scout-facing operational brief (live reads, executor thread)."""
+        """Build the scout-facing operational brief (live reads, executor thread).
+
+        A tripped breaker returns the degraded banner rather than None: the
+        brief's contract is an exception report, so returning nothing would
+        tell the scout that everything is fine.
+        """
+        degraded = self._degraded_brief()
+        if degraded is not None:
+            return degraded
         brief = await self._submit(self._brief_impl)
         if brief is not None:
             self._brief_cache = brief or None
@@ -384,8 +408,13 @@ class CandorBridge:
         return build_brief(system) or ""
 
     def cached_brief(self) -> str | None:
-        """Last successfully built brief — safe from any thread, never blocks."""
-        return self._brief_cache
+        """Last successfully built brief — safe from any thread, never blocks.
+
+        A stale cached brief from before the breaker tripped would be the
+        worst of both worlds (confident, unmaintained), so the degraded
+        banner wins here too.
+        """
+        return self._degraded_brief() or self._brief_cache
 
     # ------------------------------------------------------------------
     # Async reads for the dream add-on (loop-safe; core/dream only)

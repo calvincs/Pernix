@@ -36,7 +36,7 @@ At the start of each turn, scout searches the memory store and injects the most 
 4. Each entry is truncated to `scout_preload_memory_char_limit` chars (default 600) in the auto-injected baseline to control prompt budget. When the agent actively calls `recall()` or `search_memory`, it receives the full entry content.
 5. Top matches go into the scout report; from there, the main agent's prompt.
 
-You can disable recall entirely with `memory_recall = false`, or tighten the threshold if you find too many irrelevant entries leaking in.
+You can disable recall entirely with `memory_recall = false`. There is no relevance-threshold setting — the baseline injects the top matches unconditionally, and the only budget levers are `memory_recall` (off entirely) and `scout_preload_memory_char_limit` (how much of each entry). If too many irrelevant entries leak in, the fix is on the store side: prune or consolidate the entries that keep matching, or let Snooze's dedup and staleness sweeps do it.
 
 ### Semantic retrieval
 
@@ -73,7 +73,7 @@ The agent writes and mutates entries via memory tools:
 Writes happen at three points:
 
 - **Inside a turn** — when the agent learns something it explicitly wants to remember, or when it discovers a stored entry is wrong and needs correcting.
-- **Reflect's distillation** — after a successful turn, a background hook may distill 1–3 entries from the turn into long-term memory.
+- **Reflect's distillation** — after a successful turn, a background hook may distill the session's durable findings, decisions and lessons into long-term memory. How many entries that produces is the model's call; there's no fixed cap, and the prompt pushes for "fewer, sharper" over coverage. Each one passes the duplicate gate, and a distilled entry that reads as a correction of one already stored rewrites it in place (original epoch kept, correction date stamped) rather than being dropped for resembling it.
 - **Snooze consolidation** — during idle periods, similar entries get clustered and merged.
 
 You don't typically have to do anything to keep memory healthy — Snooze deduplicates, consolidates, and archives in the background.

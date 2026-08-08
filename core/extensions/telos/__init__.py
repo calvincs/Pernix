@@ -32,6 +32,7 @@ def telos_status(_context: dict | None = None) -> str:
     """Layer overview: question/hypothesis/goal/alarm counts and health."""
     if not settings.telos_enabled:
         return "TELOS is disabled (settings.telos_enabled)."
+    from core.telos.calibration import describe, eig_calibration
     from core.telos.store import TelosStore
 
     store = TelosStore.open()
@@ -61,6 +62,7 @@ def telos_status(_context: dict | None = None) -> str:
         f"Band mix: near {mix['near']:.2f} / mid {mix['mid']:.2f} / far {mix['far']:.2f}; "
         f"serendipity budget {store.serendipity_budget():.2f}",
         f"Vapor classes: {', '.join(state.get('vapor_classes') or []) or 'none'}",
+        describe(eig_calibration(store)),
     ]
     if alarms:
         lines.append(

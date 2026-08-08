@@ -224,7 +224,13 @@ class Settings:
             "xargs",
         ]
     )
-    shell_env_mode: str = "passthrough"  # "passthrough" | "denylist" | "allowlist"
+    # "passthrough" | "denylist" | "allowlist". Defaults to allowlist: the
+    # server process holds every provider API key, and "passthrough" handed a
+    # copy of os.environ to every bash child (and anything it spawned). The
+    # allowlist builds a minimal env from shell_env_allowlist below; PATH, HOME
+    # and VIRTUAL_ENV are then set explicitly to the workspace venv, so the
+    # sandbox still works. Same posture the RLM child already takes.
+    shell_env_mode: str = "allowlist"
     shell_env_denylist: list = field(default_factory=list)
     shell_env_allowlist: list = field(
         default_factory=lambda: [
@@ -431,6 +437,14 @@ class Settings:
 
     # --- Storage ---
     max_fetch_size: int = 100_000
+
+    # --- Backups (maintenance.py 24h tier; scripts/backup.py on demand) ---
+    # How many timestamped snapshots to keep in data/backups. Rotation is
+    # per-artifact (DB snapshots and memory corpora rotate independently), so
+    # a restore always has a matching pair. 0 disables scheduled backups;
+    # values are clamped to 0..90 at use time because a typo here fills the
+    # disk on a machine nobody is watching.
+    backup_keep_count: int = 7
 
     # --- Browser (Playwright) ---
     browser_enabled: bool = True  # browse_web tool only registered when True

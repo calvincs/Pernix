@@ -95,29 +95,47 @@ def test_flap_detection_tags_established_canary():
     assert load_canary("pin", base=_base()).flaky is True
 
 
-def test_retirement_moves_to_quarantine():
+def test_long_green_demotes_cadence_and_stays_in_the_suite():
+    """A long-green canary is the tripwire's baseline, not dead weight: it
+    must stay scannable and keep producing scheduled runs, just fewer."""
     _mk(vetting=False)
     for _ in range(5):
         _run("pin", True)
     stats = run_maintenance()
-    assert stats["retired"] == ["pin"]
-    assert load_canary("pin", base=_base()) is None  # out of the live suite
-    marker = retired_dir(_base()) / "pin" / "retired.json"
-    assert marker.is_file()
-    assert "consecutive" in json.loads(marker.read_text())["reason"]
-    # Quarantined canaries are invisible to scan (one level deep only).
-    from core.canary.parser import scan_canaries
+    assert stats["demoted"] == [{"name": "pin", "cadence": 2}]
+    c = load_canary("pin", base=_base())
+    assert c is not None and c.cadence == 2
+    assert not (retired_dir(_base()) / "pin").exists()
 
-    assert scan_canaries(_base()) == []
+    # Still green after more runs: cadence backs off further, still present.
+    for _ in range(5):
+        _run("pin", True)
+    stats = run_maintenance()
+    assert stats["demoted"] == [{"name": "pin", "cadence": 4}]
+    assert load_canary("pin", base=_base()).cadence == 4
+
+
+def test_demotion_capped_so_a_canary_never_leaves_the_baseline():
+    from core.canary.parser import MAX_CADENCE
+
+    _mk(vetting=False)
+    md = _base() / "pin" / "CANARY.md"
+    md.write_text(md.read_text().replace("flaky: false", f"flaky: false\ncadence: {MAX_CADENCE}", 1))
+    for _ in range(5):
+        _run("pin", True)
+    stats = run_maintenance()
+    assert stats["demoted"] == []  # already at the ceiling — no further backoff
+    assert load_canary("pin", base=_base()).cadence == MAX_CADENCE
 
 
 def test_purge_after_retention_window(monkeypatch):
+    """Auto-maintenance no longer quarantines; the purge still drains what
+    earlier versions (or a human) left in .retired/."""
     monkeypatch.setattr("config.settings.canary_purge_after_days", 30)
-    _mk(vetting=False)
-    for _ in range(5):
-        _run("pin", True)
-    run_maintenance()
-    marker = retired_dir(_base()) / "pin" / "retired.json"
+    quarantine = retired_dir(_base()) / "pin"
+    quarantine.mkdir(parents=True)
+    marker = quarantine / "retired.json"
+    marker.write_text(json.dumps({"retired_at": datetime.now(timezone.utc).isoformat(), "reason": "r"}))
 
     # Fresh quarantine: not purged.
     stats = run_maintenance()
@@ -129,7 +147,7 @@ def test_purge_after_retention_window(monkeypatch):
     marker.write_text(json.dumps({"retired_at": old, "reason": "r"}))
     stats = run_maintenance()
     assert stats["purged"] == ["pin"]
-    assert not (retired_dir(_base()) / "pin").exists()
+    assert not quarantine.exists()
 
 
 def test_review_bump_on_stale_healthy_canary():

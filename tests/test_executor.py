@@ -46,9 +46,10 @@ def _tool(timeout: int, max_timeout: int = 0) -> ToolDef:
 
 
 def test_resolve_timeout_without_ceiling_ignores_caller_override():
-    """A tool that never declared max_timeout is not overridable."""
-    assert _resolve_timeout(_tool(30), {"timeout": 1800}) == 30
-    assert _resolve_timeout(_tool(30), None) == 30
+    """A tool that never declared max_timeout is not overridable — but still
+    gets the dispatch grace, so the tool's own timeout fires first."""
+    assert _resolve_timeout(_tool(30), {"timeout": 1800}) == 35
+    assert _resolve_timeout(_tool(30), None) == 35
 
 
 def test_resolve_timeout_honors_override_up_to_ceiling():
@@ -65,11 +66,14 @@ def test_resolve_timeout_clamps_to_ceiling():
 
 
 def test_resolve_timeout_ignores_junk_and_below_default_values():
+    """Junk falls back to the tool default — with grace, like every other
+    path: the dispatcher must never win the race against the tool's own
+    timeout, and the default path is the one that runs most often."""
     t = _tool(30, max_timeout=1800)
-    assert _resolve_timeout(t, {"timeout": 0}) == 30
-    assert _resolve_timeout(t, {"timeout": -5}) == 30
-    assert _resolve_timeout(t, {"timeout": "nonsense"}) == 30
-    assert _resolve_timeout(t, {}) == 30
+    assert _resolve_timeout(t, {"timeout": 0}) == 35
+    assert _resolve_timeout(t, {"timeout": -5}) == 35
+    assert _resolve_timeout(t, {"timeout": "nonsense"}) == 35
+    assert _resolve_timeout(t, {}) == 35
     # Below the tool default: never shrink under it, but still grant grace.
     assert _resolve_timeout(t, {"timeout": 5}) == 35
 

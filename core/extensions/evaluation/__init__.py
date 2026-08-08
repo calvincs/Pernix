@@ -231,15 +231,32 @@ def add_gate(
     scope = (scope or "session").strip().lower()
     if scope not in ("session", "goal"):
         return "Error: scope must be 'session' or 'goal'."
+
+    # A gate is shell that runs unattended at every turn end, so it is held to
+    # the same policy as the bash tool — checked here so the agent gets the
+    # rejection while it can still fix the command, and again in gates._run_one
+    # so a row that reached the table by any other route is still checked.
+    from core.gates import check_gate_command, check_gate_cwd
+    from core.tools.paths import workspace as _workspace
+
+    command = command.strip()
+    blocked = check_gate_command(command)
+    if blocked:
+        return f"{blocked} (gate '{name}' not registered)"
+    cwd = cwd.strip()
+    bad_cwd = check_gate_cwd(cwd, _workspace())
+    if bad_cwd:
+        return f"{bad_cwd} (gate '{name}' not registered)"
+
     from db import models as db
 
     paths = [p.strip() for p in watch_paths.split(",") if p.strip()] if watch_paths else []
     db.add_gate(
         session_id,
         name.strip(),
-        command.strip(),
+        command,
         watch_paths=paths,
-        cwd=cwd.strip() or None,
+        cwd=cwd or None,
         scope=scope,
     )
     guard = (
@@ -311,7 +328,10 @@ def register(reg) -> None:
                         "type": "string",
                         "description": "Optional comma-separated files/dirs the gate depends on",
                     },
-                    "cwd": {"type": "string", "description": "Optional working directory (default: workspace)"},
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory, must be inside the workspace (default: workspace)",
+                    },
                     "scope": {
                         "type": "string",
                         "enum": ["session", "goal"],
@@ -323,7 +343,11 @@ def register(reg) -> None:
             tags=tags + ["gate", "deterministic", "ci", "build"],
             timeout=30,
             parallel_safe=False,
-            safety_level="caution",  # user-authored shell run automatically at every turn end
+            # Registers shell that then runs unattended at EVERY turn end, for
+            # the life of the session — a single approved call buys repeated
+            # execution the user never sees again. That persistence is what
+            # separates it from a one-shot `bash` call.
+            safety_level="dangerous",
             **common,
         )
         reg.register(

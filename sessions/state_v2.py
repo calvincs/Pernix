@@ -1,18 +1,20 @@
 """Pernix — True session state machine (v2, successor to state.py).
 
-Migration status: Stage 1 complete. All state mutations in
-sessions/manager.py, core/agent.py, and core/extensions/ go through
-transition() — the legacy 5-state SessionState enum in state.py is now
-a read-only mirror updated by _set_state(). Remaining work (stages 2-5):
-retire the legacy mirror entirely, remove _persist_legacy_state() call
-sites, and delete the _LEGACY_TO_V2/_V2_TO_LEGACY bridge tables.
+Migration status: COMPLETE. This module is the only state machine. The
+pre-v2 5-state enum, its in-memory mirror field, the legacy↔v2 bridge
+tables and the per-transition UPDATE of the legacy `sessions.state`
+column are all deleted. Every state
+mutation in sessions/manager.py, core/agent.py and core/extensions/ goes
+through transition(); reads go through _current_state(). The legacy DB
+column still exists (dropping it would mean a table rebuild for no gain)
+but nothing here writes it — see db/database.py's migration v16 note.
 
 Design summary:
 
-- 10 named states replace the old 5-state enum + orthogonal boolean flags.
+- 10 named states replaced the old 5-state enum + orthogonal boolean flags.
 - Every transition has an explicit edge in TRANSITIONS with a bounded
-  vocabulary of reasons. force_state() is gone; if you need to "force,"
-  add the edge and give the reason a name (e.g. cancel-timeout).
+  vocabulary of reasons. There is no force-state escape hatch; if you need
+  to "force," add the edge and give the reason a name (e.g. cancel-timeout).
 - Every transition is persisted to session_state_log (migration v13) and
   emits a session.state_changed SSE event. The log is the forensic record;
   the event is the live signal.
@@ -45,7 +47,7 @@ logger = logging.getLogger("pernix.session.state_v2")
 
 
 class SessionStateV2(str, Enum):
-    """10-state machine. Replaces sessions.state.SessionState in stages 1-5."""
+    """The session state machine. 10 states, no orthogonal flags."""
 
     IDLE_READY = "idle_ready"
     SCOUTING = "scouting"
@@ -183,10 +185,12 @@ _COMPACT_ENTER_REASONS: frozenset[str] = frozenset(
 
 
 # ---------------------------------------------------------------------------
-# Reason → compat-status mapping
+# State → compat-status mapping
 # ---------------------------------------------------------------------------
-# Until external consumers migrate, get_status() will keep returning the old
-# 5-value set as `compat_status`. See plan §API compat shim.
+# The one surviving piece of API compatibility: get_status() reports a
+# coarse 3-value `compat_status` (idle | scouting | processing) alongside
+# the real v2 `state`, so external consumers written against the pre-v2
+# vocabulary keep working. Nothing reads it back into the state machine.
 
 COMPAT_STATUS: dict[S, str] = {
     S.IDLE_READY: "idle",
@@ -305,7 +309,7 @@ def transition(
       2. Compute elapsed_ms since previous state entry.
       3. INSERT session_state_log row (WAL <1ms — see bench_state_transition.py).
       4. Emit `session.state_changed` SSE event.
-      5. Mutate `session.state` + `session._state_entered_ms` + termination_reason.
+      5. Mutate `session._state_v2` + `session._state_entered_ms` + termination_reason.
     """
     # 1. Edge lookup
     current = _current_state(session)
@@ -400,95 +404,36 @@ def transition(
 
 
 # ---------------------------------------------------------------------------
-# Bridge helpers (Stage 0): translate between legacy state.py and v2
+# State accessors
 # ---------------------------------------------------------------------------
-# Stage 0 leaves AgentSession unchanged — the legacy 5-state enum is still
-# authoritative. These helpers let us read/write the in-memory state as if
-# it were v2, by mapping through a compatibility table.  Stages 1-5 replace
-# session.state's type wholesale, at which point these helpers become
-# identity functions and can be deleted.
-
-_LEGACY_TO_V2: dict[str, S] = {
-    "idle": S.IDLE_READY,
-    "scouting": S.SCOUTING,
-    "processing": S.PROCESSING,
-    "error": S.FINALIZING,  # transient — collapsed into FINALIZING in v2
-    "deleted": S.IDLE_READY,  # vestigial; never hit in practice
-}
-
-# Internal mirror: keep session.state (legacy enum) coherent with v2 during
-# the migration so remaining consumers (api/routers/sessions.py,
-# core/extensions/orchestration) that still read session.state directly
-# don't break. FINALIZING/CANCELLING/AWAITING_* map to "idle" because the
-# legacy enum has no equivalents; has_active_work() and snooze._is_idle()
-# now read v2 state directly and are no longer fooled by this collapse.
-# Stage 2 retires this map entirely.
-_V2_TO_LEGACY: dict[S, str] = {
-    S.IDLE_READY: "idle",
-    S.SCOUTING: "scouting",
-    S.PROCESSING: "processing",
-    S.COMPACTING: "processing",
-    S.PAUSE_REQUESTED: "processing",
-    S.PAUSED: "processing",
-    S.CANCELLING: "idle",  # cancel path currently runs under state=IDLE
-    S.FINALIZING: "idle",  # post-hooks run under state=IDLE today
-    S.AWAITING_USER: "idle",
-    S.AWAITING_WORKERS: "idle",
-}
 
 
 def _current_state(session: "AgentSession") -> S:
-    """Read the session's state as v2 (translating through legacy if needed)."""
-    # Prefer v2 field if the session has been upgraded already.
+    """Read the session's state.
+
+    IDLE_READY is the default for a session object that has never
+    transitioned (a freshly constructed AgentSession, or one rehydrated
+    from a DB row predating migration v16's state_v2 column)."""
     v2 = getattr(session, "_state_v2", None)
-    if isinstance(v2, S):
-        return v2
-    # Fallback: translate from legacy enum.
-    legacy_value = session.state.value if hasattr(session.state, "value") else str(session.state)
-    return _LEGACY_TO_V2.get(legacy_value, S.IDLE_READY)
+    return v2 if isinstance(v2, S) else S.IDLE_READY
 
 
 def _set_state(session: "AgentSession", to: S) -> None:
-    """Write the session's v2 state, and mirror back to the legacy enum.
-
-    During Stage 0 the legacy enum is still authoritative for all existing
-    readers (manager.py, reaper, check_workers, etc.). We keep it coherent
-    with v2 via the _V2_TO_LEGACY map so nothing breaks while the migration
-    proceeds. Stage 1+ will invert this (v2 authoritative, legacy derived).
+    """Write the session's state, in memory and in the DB.
 
     Persists `state_v2` to the sessions table so a restart can restore the
-    true v2 state (the legacy column collapses AWAITING_WORKERS / FINALIZING
-    / CANCELLING / AWAITING_USER all to "idle", which loses crucial info).
-
-    Also persists the legacy `state` column. This used to be the caller's
-    job (manager._persist_legacy_state after every transition); doing it
-    here closes the "forgot a call site → stale DB row" bug class that
-    reconcile_processing_sessions carries recovery code for.
+    true state. Failure to persist is non-fatal — the in-memory mutation
+    has already succeeded and the state_log row is the forensic record.
     """
-    from sessions.state import SessionState  # local import to avoid cycles
-
     session._state_v2 = to
-    legacy_value = _V2_TO_LEGACY[to]
-    try:
-        session.state = SessionState(legacy_value)
-    except ValueError:
-        # Legacy enum doesn't have a matching value — tolerate it, the v2
-        # field is authoritative anyway.
-        pass
-    # Persist the v2 value so restart can restore it. Failure to persist
-    # is non-fatal — in-memory mutation has already succeeded.
     try:
         db.set_session_state_v2(session.session_id, to.value)
     except Exception as e:
         logger.error("state_v2 persist failed for %s (%s): %s", session.session_id, to.value, e)
-    try:
-        db.set_session_state(session.session_id, session.state.value)
-    except Exception as e:
-        logger.error("legacy state persist failed for %s (%s): %s", session.session_id, to.value, e)
 
 
 def compat_status(to: S | str) -> str:
-    """Map a v2 state to the legacy 3-value status set for API compat."""
+    """Map a state to the coarse 3-value status set for API compat."""
     if isinstance(to, str):
         try:
             to = S(to)

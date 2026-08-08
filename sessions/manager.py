@@ -41,6 +41,31 @@ def _combine_rapid_fire(existing: str, addition: str) -> str:
     return f"{_COMBINED_PREFIX}\n\n1. {existing}\n\n2. {addition}"
 
 
+def _build_retry_directive(session) -> str:
+    """Collect this turn's corrective signal — the text a retry must react to.
+
+    Two producers, one channel: reflect writes prose lessons to
+    session.reflect_lessons, and the eval harness writes per-feature judge
+    feedback to session.eval_feedback. Eval's used to exist only inside an
+    `eval.retry` SSE event, so an eval retry re-ran a byte-identical turn and
+    failed the same features again up to eval_max_retries times.
+
+    Returns "" for a normal (non-retry) turn.
+    """
+    parts = []
+    lessons = getattr(session, "reflect_lessons", "") or ""
+    if lessons:
+        parts.append(lessons)
+    feedback = getattr(session, "eval_feedback", "") or ""
+    if feedback:
+        parts.append(
+            "[EVAL — registered features did not pass]\n"
+            "Fix these before reporting completion; the same judge re-runs at "
+            "turn end.\n" + feedback
+        )
+    return "\n\n".join(parts).strip()
+
+
 def _check_session_budget_or_raise(session_id: str) -> None:
     """Raise LLMSessionTimeoutError if the session's LLM time budget is gone.
 
@@ -204,6 +229,49 @@ class SessionManager:
         task.add_done_callback(_done)
         return task
 
+    def _turn_in_flight(self, session: AgentSession) -> bool:
+        """True when a live turn other than the caller's own owns this session.
+
+        One turn per session is enforced nowhere by the state value alone:
+        _finalize_turn transitions to IDLE_READY and then awaits several times
+        before draining the queue, and ask_user parks a session in
+        AWAITING_USER while its task is still settling post-hooks. A dispatcher
+        that only reads the state can therefore start a second _run_agent_safe
+        on a session whose first turn is still writing to the same transcript —
+        both would call _finalize_turn, and session.task would point at only
+        one of them, leaving the other un-cancellable through the API.
+
+        The current-task comparison keeps the legitimate re-entry working:
+        _finalize_turn drains the queue from inside the very task that owns
+        session.task, and that dispatch must still be allowed.
+        """
+        task = session.task
+        if task is None or task.done():
+            return False
+        try:
+            return task is not asyncio.current_task()
+        except RuntimeError:
+            return True
+
+    async def _dispatch_after_turn(
+        self,
+        session: AgentSession,
+        task: asyncio.Task,
+        ready_states: tuple,
+    ) -> None:
+        """Drain the queue once `task` — the turn that was in flight — is done.
+
+        Callers that would have dispatched immediately queue instead when
+        _turn_in_flight says a turn is still settling. A turn ending in
+        IDLE_READY drains the queue itself, but one parked in AWAITING_USER or
+        AWAITING_WORKERS never reaches that state, so the queued message (an
+        ask_user answer, a worker-synthesis resume) would sit there
+        indefinitely. Waiting on the task rather than awaiting it directly
+        keeps a cancelled or failed turn from propagating into this one.
+        """
+        await asyncio.wait({task})
+        await self._process_pending(session, ready_states=ready_states)
+
     def set_agent_runner(self, runner: Callable[..., Awaitable]) -> None:
         """Register the agent loop function. Called once at startup."""
         self._agent_runner = runner
@@ -216,9 +284,7 @@ class SessionManager:
         """Get existing in-memory session or create from DB.
 
         Restores `_state_v2` and `_watched_worker_ids` from the DB row so
-        a restart can resume sessions suspended in AWAITING_WORKERS — the
-        legacy `state` column maps that v2 state to "idle" and would
-        otherwise drop the watch-set entirely."""
+        a restart can resume sessions suspended in AWAITING_WORKERS."""
         if session_id in self._sessions:
             return self._sessions[session_id]
 
@@ -232,14 +298,16 @@ class SessionManager:
             parent_session_id=db_session.get("parent_session_id"),
         )
 
-        # Restore v2 state if persisted (migration v16+).
+        # Restore the persisted state (migration v16+). A row written before
+        # v16, or one carrying a value this build no longer knows, hydrates at
+        # the AgentSession default of IDLE_READY.
         persisted_v2 = db_session.get("state_v2")
         if persisted_v2:
             try:
                 session._state_v2 = sv2.SessionStateV2(persisted_v2)
             except ValueError:
                 logger.warning(
-                    "Unknown state_v2 value %r for session %s; " "falling back to legacy mirror",
+                    "Unknown state_v2 value %r for session %s; defaulting to IDLE_READY",
                     persisted_v2,
                     session_id,
                 )
@@ -769,6 +837,14 @@ class SessionManager:
             # re-prompting should be an explicit user act. Other mid-turn
             # states queue, subject to max_pending_messages.
             current_v2 = sv2._current_state(session)
+            # A turn whose task is still alive owns the session even when the
+            # state already reads IDLE_READY / AWAITING_USER — see
+            # _turn_in_flight. Treat that as busy so the message queues instead
+            # of opening a second concurrent turn on the same transcript.
+            settling = self._turn_in_flight(session) and current_v2 in (
+                sv2.SessionStateV2.IDLE_READY,
+                sv2.SessionStateV2.AWAITING_USER,
+            )
             if current_v2 is sv2.SessionStateV2.CANCELLING:
                 session.emit_event(
                     {
@@ -778,7 +854,7 @@ class SessionManager:
                 )
                 logger.info("Session %s prompt rejected: cancelling", session_id)
                 return
-            if current_v2 not in (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_USER):
+            if settling or current_v2 not in (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_USER):
                 # Backpressure: reject if queue is full
                 if len(session.pending_messages) >= settings.max_pending_messages:
                     session.emit_event(
@@ -805,9 +881,13 @@ class SessionManager:
                 # too — so three messages within the window collapse to one
                 # turn even when the first one started running before the
                 # rest arrived.
+                # Never fold into a turn that is merely settling: its agent
+                # loop has stopped re-reading the row, so the appended text
+                # would be lost silently.
                 now = time.monotonic()
                 if (
                     message
+                    and not settling
                     and session.last_user_msg_id is not None
                     and (now - session.last_user_msg_at) <= RAPID_FIRE_WINDOW_SECONDS
                 ):
@@ -869,6 +949,24 @@ class SessionManager:
                     }
                 )
                 logger.debug("Message queued for busy session %s (depth=%d)", session_id, len(session.pending_messages))
+                if settling:
+                    logger.warning(
+                        "Session %s: message queued behind a turn that is still "
+                        "settling in %s — dispatching once it exits",
+                        session_id[:12],
+                        current_v2.value,
+                    )
+                    # A turn settling in AWAITING_USER never reaches IDLE_READY
+                    # on its own, so it will not drain the queue; the answer
+                    # that resumes it has to be dispatched from here.
+                    self._spawn_detached(
+                        self._dispatch_after_turn(
+                            session,
+                            session.task,
+                            (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_USER),
+                        ),
+                        "dispatch-after-turn",
+                    )
                 return
 
             # Start agent task — reset state for new user turn.
@@ -886,6 +984,7 @@ class SessionManager:
             session.last_tool_summary = {}
             session.eval_count = 0
             session.eval_retry_requested = False
+            session.eval_feedback = ""
             # Clear stale error / termination_reason from a prior turn —
             # otherwise _finalize_worker's fallback branch can mis-classify
             # a clean turn as errored based on last-turn state.
@@ -921,21 +1020,16 @@ class SessionManager:
             # queue the incoming message behind them. _process_pending handles
             # the whole sequence after the lock is released.
             #
-            # Skip when there's a live agent task: that task is currently
-            # processing the "orphan" candidate — it's not actually orphaned,
-            # just mid-turn with no assistant message written yet.
-            #
-            # Skip when AWAITING_USER: this is an ask_user answer resuming the
-            # session, not a Window B restart scenario. Running _find_db_orphans
-            # here incorrectly detects rapid-fire prior answers as orphans, then
-            # routes via _process_pending which immediately returns (state ≠
-            # IDLE_READY), leaving the answer message queued but never run.
+            # A live agent task cannot reach here any more — `settling` queues
+            # that case above — so the only remaining skip is AWAITING_USER:
+            # this is an ask_user answer resuming the session, not a Window B
+            # restart scenario. Running _find_db_orphans here incorrectly
+            # detects rapid-fire prior answers as orphans, then routes via
+            # _process_pending which immediately returns (state ≠ IDLE_READY),
+            # leaving the answer message queued but never run.
             import time as _time
 
-            _task_alive = session.task is not None and not session.task.done()
-            _orphans = (
-                [] if _task_alive or current_v2 is sv2.SessionStateV2.AWAITING_USER else self._find_db_orphans(session)
-            )
+            _orphans = [] if current_v2 is sv2.SessionStateV2.AWAITING_USER else self._find_db_orphans(session)
             # Filter orphans already swept — same guard as _sweep_db_pending.
             _orphans = [_o for _o in _orphans if _o["id"] not in session.swept_orphan_ids]
             if _orphans:
@@ -1068,13 +1162,15 @@ class SessionManager:
             session.reflect_lessons = ""
             session.reflect_count = 0
             session.retry_excluded_tools = set()
+            # Same rule for eval's feedback — it rides the same retry channel
+            # into the agent's scout report and must not outlive its turn.
+            session.eval_feedback = ""
 
             # --- Scout phase ---
-            # Distinguish an answer-resumed turn from a fresh user prompt.
-            # Both land here with legacy state==IDLE, but v2 encodes the
-            # difference explicitly (AWAITING_USER vs IDLE_READY) so the
-            # state log records the true cause and can chain turns via
-            # parent_turn_id.
+            # Distinguish an answer-resumed turn from a fresh user prompt and
+            # from a worker-resumed one: the entry state (AWAITING_USER /
+            # AWAITING_WORKERS / IDLE_READY) names the true cause, so the
+            # state log records it and can chain turns via parent_turn_id.
             start_state = sv2._current_state(session)
             start_reason = (
                 "answer-received"
@@ -1557,10 +1653,9 @@ class SessionManager:
         except Exception as e:
             logger.debug("Worker finalize: could not read messages for %s: %s", session.session_id, e)
 
-        # Classify from termination_reason, which survives the post-turn
-        # force-reset of session.state to IDLE. Falling back on session.state
-        # here was dead code — the finally block sets state=IDLE before we
-        # reach this point.
+        # Classify from termination_reason, which survives the turn's return
+        # to IDLE_READY. The state itself says nothing here — the finally
+        # block has already transitioned home before we reach this point.
         reason = session.termination_reason
         # Pull the most recent reflect verdict (if any) to embed in the header.
         # Reflect is the quality gate: when verdict != 'pass' (or reflect never
@@ -1656,6 +1751,8 @@ class SessionManager:
 
         from core.scout.runner import build_session_brief, run_scout
 
+        retry_directive = _build_retry_directive(session)
+
         reused_prior = False
         if reuse_scout and session.last_scout_report is not None:
             scout_report = session.last_scout_report
@@ -1666,16 +1763,27 @@ class SessionManager:
             brief = await asyncio.to_thread(build_session_brief, session.session_id, context_budget=effective_budget)
 
             scout_message = message
-            if session.reflect_lessons:
-                scout_message = f"{message}\n\n{session.reflect_lessons}"
+            if retry_directive:
+                scout_message = f"{message}\n\n{retry_directive}"
 
             scout_report = await run_scout(
                 session.session_id,
                 scout_message,
                 brief,
                 emit=session.emit_event,
+                is_retry=is_retry,
             )
             session.last_scout_report = scout_report
+
+        # Stamp the corrective signal onto the report the AGENT reads. Routing
+        # it through the scout's message alone meant it survived only if the
+        # scout LLM echoed it into approach_guidance — and scout bypass (which
+        # fires on retries of short messages), timeout, the deterministic
+        # fallback and cache hits all skip that LLM entirely, so the retry
+        # re-ran a byte-identical turn. Always assigned, including the empty
+        # case: reports are cached and reused, and a stale directive must not
+        # outlive the retry that produced it.
+        scout_report.retry_directive = retry_directive
 
         import json
 
@@ -1974,10 +2082,22 @@ class SessionManager:
         except Exception as _ext_err:
             logger.debug("Resume-from-workers budget extend failed: %s", _ext_err)
 
+        deferred_task: asyncio.Task | None = None
         async with parent.lock:
             current_v2 = sv2._current_state(parent)
             resume_msg = self._build_resume_message(parent)
-            if current_v2 is sv2.SessionStateV2.AWAITING_WORKERS:
+            # A fast worker can finish while the parent's suspended turn is
+            # still settling its post-hooks. Starting the synthesis turn now
+            # would run two turns against one transcript, so queue it and
+            # dispatch when the parent's task exits.
+            if self._turn_in_flight(parent):
+                logger.warning(
+                    "Session %s: worker resume queued — the suspended turn is still settling",
+                    parent.session_id[:12],
+                )
+                parent.pending_messages.append(PendingMessage(resume_msg, None, False))
+                deferred_task = parent.task
+            elif current_v2 is sv2.SessionStateV2.AWAITING_WORKERS:
                 # Parent is suspended waiting — start a new agent turn directly.
                 # _run_agent_safe detects AWAITING_WORKERS and uses reason="workers-complete".
                 parent.cancel_requested = False
@@ -1986,6 +2106,7 @@ class SessionManager:
                 parent.reflect_retry_requested = False
                 parent.eval_count = 0
                 parent.eval_retry_requested = False
+                parent.eval_feedback = ""
                 parent.error = None
                 parent.termination_reason = None
                 parent.task = asyncio.create_task(self._run_agent_safe(parent, resume_msg, None))
@@ -1996,23 +2117,50 @@ class SessionManager:
                 # _process_pending acquires lock itself, so release first.
 
         # Outside the lock: drain pending for the IDLE_READY case.
+        if deferred_task is not None:
+            self._spawn_detached(
+                self._dispatch_after_turn(
+                    parent,
+                    deferred_task,
+                    (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_WORKERS),
+                ),
+                "resume-after-turn",
+            )
+            return
         current_v2 = sv2._current_state(parent)
         if current_v2 is sv2.SessionStateV2.IDLE_READY:
             await self._process_pending(parent)
 
-    async def _process_pending(self, session: AgentSession) -> None:
-        """Process queued messages after agent completes."""
+    async def _process_pending(self, session: AgentSession, *, ready_states: tuple | None = None) -> None:
+        """Process queued messages after agent completes.
+
+        ready_states widens the set of states this will dispatch from, and is
+        used only by _dispatch_after_turn — a turn that parked in AWAITING_USER
+        or AWAITING_WORKERS never returns to IDLE_READY, so the message that
+        resumes it has to be dispatched from that state.
+        """
         async with session.lock:
             if not session.pending_messages:
                 return
-            # Use v2 state: legacy mirrors AWAITING_USER/FINALIZING/CANCELLING as
-            # "idle", so the old `session.state != SessionState.IDLE` check would
-            # pass while the session isn't truly ready, causing queued messages to
-            # be dispatched (and incorrectly routed as "answer-received" in the
-            # AWAITING_USER case).
-            if sv2._current_state(session) is not sv2.SessionStateV2.IDLE_READY:
+            # Dispatch only from an explicitly ready state. The pre-v2 enum
+            # collapsed AWAITING_USER/FINALIZING/CANCELLING into "idle", so a
+            # readiness check against it passed while the session wasn't truly
+            # ready — queued messages went out mid-turn (and were misrouted as
+            # "answer-received" in the AWAITING_USER case).
+            if sv2._current_state(session) not in (ready_states or (sv2.SessionStateV2.IDLE_READY,)):
                 return
             if session.session_id not in self._sessions:
+                return
+            # One turn per session. IDLE_READY is written by _finalize_turn
+            # several awaits before it drains the queue here, so a concurrent
+            # caller can observe a ready state while the previous turn is still
+            # running. Leave the message queued — the turn that owns
+            # session.task reaches this same drain from its own finally block.
+            if self._turn_in_flight(session):
+                logger.warning(
+                    "Session %s: pending dispatch skipped — a turn is still in flight",
+                    session.session_id[:12],
+                )
                 return
             entry = PendingMessage.coerce(session.pending_messages.popleft())
 
@@ -2122,9 +2270,9 @@ class SessionManager:
         # Only run when the session is in FINALIZING — that's the only state
         # where the agent loop has completed and post-hooks are appropriate.
         # All other states (SCOUTING, PROCESSING, AWAITING_USER, AWAITING_WORKERS,
-        # IDLE_READY) must not trigger post-hooks. Using the v2 state directly
-        # avoids the fragility of the legacy "idle" mapping, which collapses
-        # FINALIZING, AWAITING_USER, and AWAITING_WORKERS into the same value.
+        # IDLE_READY) must not trigger post-hooks — a distinction the pre-v2
+        # enum could not express, since it collapsed FINALIZING, AWAITING_USER
+        # and AWAITING_WORKERS into one "idle" value.
         if sv2._current_state(session) is not sv2.SessionStateV2.FINALIZING:
             return
         if session.pending_messages:
@@ -2232,7 +2380,7 @@ class SessionManager:
             # Legacy "status" field — preserved for CLI/external clients.
             # Maps v2 state to the old 3-value set via COMPAT_STATUS.
             "status": sv2.compat_status(v2_state),
-            # New authoritative v2 state (one of 9 values).
+            # The authoritative state (one of the 10 SessionStateV2 values).
             "state": v2_state.value,
             "compat_status": sv2.compat_status(v2_state),
             "session_type": session.session_type,
@@ -2301,7 +2449,7 @@ class SessionManager:
     def reap_idle_sessions(self, max_idle: int = 1800, protected_ids: set | None = None) -> int:
         """Remove truly-idle sessions, unstick stuck PROCESSING/COMPACTING,
         force-terminate stuck CANCELLING/FINALIZING, and apply state-specific
-        timeouts per the plan's reaper rules table (9-state version).
+        timeouts per the plan's reaper rules table (10-state version).
 
         Rules (from the state-machine migration plan):
           - IDLE_READY:        reap if idle > max_idle, no subscribers, no background refs
