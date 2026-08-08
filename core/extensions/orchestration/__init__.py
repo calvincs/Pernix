@@ -1048,8 +1048,6 @@ def await_workers(
             # Log once per minute so we surface the stalled worker without
             # spamming. The orchestrator's _finalize_step path will inspect
             # each worker's actual state when this wait ultimately returns.
-            if not hasattr(parent, "_await_stalled_logged_at"):
-                parent._await_stalled_logged_at = 0.0
             now_ts = time.time()
             if now_ts - parent._await_stalled_logged_at > 60:
                 logger.warning(

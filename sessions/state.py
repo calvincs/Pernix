@@ -57,13 +57,104 @@ class PendingMessage(NamedTuple):
 
 
 @dataclass
+class TurnState:
+    """State whose lifetime is exactly one turn.
+
+    Everything here used to live on AgentSession and be hand-reset in three
+    separate places (prompt()'s fresh-turn path, _run_agent_safe's turn-start
+    path, _resume_from_workers' direct-dispatch path). The three blocks had
+    drifted out of sync — reflect_count was cleared in all three, eval_count in
+    only two — which is how a stale reflect_retry_requested once leaked across
+    a turn boundary and forced a spurious retry despite reflect=pass. Now a
+    turn boundary is one assignment: `session.turn = TurnState()`.
+
+    Four of these fields were not fields at all: core/gates.py, sessions/hooks.py
+    and core/telos/anomaly.py monkey-patched them onto the AgentSession dataclass
+    from outside its class body, so the object's real shape was invisible from
+    its definition. tests/test_state_machine_invariants.py pins that shut.
+
+    A retry (reflect-retry / eval-retry) is NOT a new turn: it re-enters the
+    agent via _run_agent_retry, which deliberately does not touch this object.
+    reflect_count, eval_count and tool_summary accumulate across a turn's
+    attempts on purpose — that accumulation is what bounds the retry ladder and
+    what reflect grades.
+
+    Deliberately NOT here: error, termination_reason and cancel_requested.
+    They stay session-scoped because the previous turn's _finalize_turn may
+    still be reading them while the next turn's TurnState has already been
+    installed — see the comment in SessionManager._run_agent_safe.
+    """
+
+    # --- Reflect (post-execution verification) ---
+    reflect_count: int = 0  # retries used this turn
+    reflect_lessons: str = ""  # lessons carried into the next attempt
+    reflect_retry_requested: bool = False
+    # Tools mechanically disabled for the current retry attempt (reflect's
+    # retry_without_tools effector). Enforced twice: removed from the schema in
+    # core/agent.py, and refused in core/tools/executor.py.
+    retry_excluded_tools: set = field(default_factory=set)
+
+    # --- Evaluation (feature QA) ---
+    eval_count: int = 0  # eval retries used this turn
+    eval_retry_requested: bool = False
+    # The judge's per-feature feedback. Rides the same retry channel as
+    # reflect_lessons into the agent's scout report (_build_retry_directive).
+    eval_feedback: str = ""
+
+    # --- Tool bookkeeping ---
+    # Cumulative per-tool execution summary for reflect diagnostic recovery
+    # (LogAct-inspired). Accumulated by the agent loop across every attempt of
+    # the turn; read by reflect, Candor and TELOS at turn end.
+    tool_summary: dict = field(default_factory=dict)
+
+    # --- Owned by other subsystems, declared here so the shape is visible ---
+    # core.gates.GateHistory — deterministic-gate fingerprints for this turn, so
+    # a retry can reuse a prior failure when watch_paths are unchanged. Typed
+    # Any to keep sessions/ from importing core.gates.
+    gate_history: Any = None
+    # sessions.hooks._maybe_candor delta-tracking: {"turn": id, "tools": {...}}
+    # so a reflect-retry re-entry never double-observes the earlier attempt.
+    candor_emitted: dict | None = None
+    # (turn_id, verdict, failure_cause, experience) stashed by _maybe_reflect
+    # for _maybe_candor, which runs after it.
+    candor_reflect: tuple | None = None
+    # Skill-proposal ids injected as trial hints this turn; the post-verdict
+    # success bump reads them back.
+    injected_trial_proposals: list = field(default_factory=list)
+    # core.telos.anomaly.on_post_task per-turn dedup marker.
+    telos_turn_traced: Any = None
+
+
+def turn_state(session_obj) -> TurnState:
+    """Read a session-like object's TurnState, tolerating objects that have none.
+
+    The peripheral hooks (TELOS, Candor, the executor's retry-exclusion guard,
+    the canary runner) accept duck-typed or partially-built session objects and
+    used `getattr(session, "<field>", <default>)` for exactly that reason.
+    Returning a throwaway TurnState preserves that forgiveness now that the
+    fields live one level down. Read-only: a write to the throwaway is
+    discarded, so callers that must persist go through `session.turn`.
+    """
+    ts = getattr(session_obj, "turn", None)
+    return ts if isinstance(ts, TurnState) else TurnState()
+
+
+@dataclass
 class AgentSession:
     """In-memory state for an active session.
+
+    Everything here outlives a single turn. Anything that does not belongs on
+    `turn` (a TurnState, replaced wholesale at each turn boundary) — putting a
+    turn-scoped field here means adding it to a reset block somewhere, and the
+    reset blocks are exactly what drifted before TurnState existed.
 
     The session's state lives in `_state_v2` and is mutated exclusively by
     `sessions.state_v2.transition()`. The pre-v2 5-value `SessionState` enum
     and its `state` mirror field were deleted once the v2 machine became
     authoritative — read state via `state_v2._current_state(session)`.
+
+    Nothing outside this module may attach a field to an instance;
+    tests/test_state_machine_invariants.py enforces it.
     """
 
     session_id: str
@@ -159,13 +250,10 @@ class AgentSession:
     # Scout report cache
     last_scout_report: Any = None  # ScoutReport or None
 
-    # Reflect (post-execution verification)
-    reflect_count: int = 0  # Retries used this turn
-    reflect_lessons: str = ""  # Lessons from prior attempts
-    reflect_retry_requested: bool = False
-    # Tools mechanically disabled for the current retry attempt (reflect's
-    # retry_without_tools effector). Cleared at each fresh user turn.
-    retry_excluded_tools: set = field(default_factory=set)
+    # Everything whose lifetime is one turn. Replaced wholesale — never
+    # field-by-field — at each turn boundary. See TurnState.
+    turn: TurnState = field(default_factory=TurnState)
+
     # True while the session's turns are driven by goal auto-continuations.
     # Makes the session snooze-transparent (audit P5); cleared on a real
     # user prompt.
@@ -174,12 +262,15 @@ class AgentSession:
     # Worker watch-set: worker IDs this session is waiting on (Gap 1+2+5)
     _watched_worker_ids: set = field(default_factory=set)
 
-    # Tool execution summary for reflect diagnostic recovery (LogAct-inspired)
-    last_tool_summary: dict = field(default_factory=dict)
+    # The subprocess a tool is currently blocked on (bash, RLM child), so
+    # cancel can kill its process group. Set and cleared in the tool's own
+    # finally — not at a turn boundary — so it stays session-scoped. Typed Any
+    # to avoid importing subprocess here for a field nothing in sessions/ reads.
+    _active_process: Any = None
 
-    # Evaluation (feature QA)
-    eval_count: int = 0  # Eval retries used this turn
-    eval_retry_requested: bool = False
+    # Monotonic-ish timestamp of the last "workers appear stalled" warning
+    # emitted by orchestration.await_workers, which logs at most once a minute.
+    _await_stalled_logged_at: float = 0.0
 
     # Activity tracking
     last_activity_time: float = field(default_factory=time.time)

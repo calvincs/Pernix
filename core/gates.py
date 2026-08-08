@@ -316,7 +316,7 @@ def format_evidence(results: list[GateResult]) -> str:
 
 
 def format_retry_guidance(results: list[GateResult]) -> str:
-    """Failure text carried to the retry attempt via reflect_lessons — the
+    """Failure text carried to the retry attempt via turn.reflect_lessons — the
     only channel the next attempt's scout message actually reads."""
     bad = failing(results)
     if not bad:
@@ -332,8 +332,13 @@ def format_retry_guidance(results: list[GateResult]) -> str:
 
 @dataclass
 class GateHistory:
-    """Per-turn gate memory living on AgentSession: fingerprints + last
-    results per gate, reset when a new turn starts."""
+    """Per-turn gate memory living on AgentSession.turn: fingerprints + last
+    results per gate.
+
+    The turn_id check is belt-and-braces now that TurnState is replaced
+    wholesale at every turn boundary — it also covers a session object built
+    outside the manager (canary harness, tests) that never gets a fresh turn.
+    """
 
     turn_id: int | None = None
     prior: dict[str, tuple[str, GateResult]] = field(default_factory=dict)
@@ -353,8 +358,9 @@ def run_gates_for_turn(session_id: str, session_obj, attempt: int) -> list[GateR
     """Entry point for hooks: history tracking + execution. Blocking."""
     if not settings.gates_enabled:
         return []
-    history: GateHistory = getattr(session_obj, "_gate_history", None) or GateHistory()
-    session_obj._gate_history = history
+    turn = session_obj.turn
+    history: GateHistory = turn.gate_history or GateHistory()
+    turn.gate_history = history
     history.reset_if_new_turn(getattr(session_obj, "current_turn_user_msg_id", None))
     results = run_gates(session_id, history.prior, attempt)
     history.record(results)

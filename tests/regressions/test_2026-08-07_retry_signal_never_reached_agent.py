@@ -59,7 +59,7 @@ async def test_reflect_lessons_reach_the_agent_when_scout_is_bypassed(monkeypatc
         seen.append(session.last_scout_report.to_system_prompt_section())
 
     mgr.set_agent_runner(_runner)
-    session.reflect_lessons = "[REFLECT — Retry #1 of 2] Previous attempt wrote no file."
+    session.turn.reflect_lessons = "[REFLECT — Retry #1 of 2] Previous attempt wrote no file."
 
     await mgr._run_scout_and_process(session, "go", is_retry=True)
 
@@ -78,7 +78,7 @@ async def test_eval_feedback_reaches_the_agent(monkeypatch, mgr_and_session):
         seen.append(session.last_scout_report.retry_directive)
 
     mgr.set_agent_runner(_runner)
-    session.eval_feedback = "todo_list: the delete button does nothing"
+    session.turn.eval_feedback = "todo_list: the delete button does nothing"
 
     await mgr._run_scout_and_process(session, "build the app", is_retry=True)
 
@@ -137,5 +137,5 @@ async def test_eval_feedback_is_stored_on_the_session(monkeypatch, tmp_path):
 
     await _maybe_evaluate(sid, session, session_obj=session_obj)
 
-    assert session_obj.eval_retry_requested
-    assert "delete button does nothing" in session_obj.eval_feedback
+    assert session_obj.turn.eval_retry_requested
+    assert "delete button does nothing" in session_obj.turn.eval_feedback

@@ -51,8 +51,8 @@ async def _run_reflect(mock_llm_client, monkeypatch, response, *, excluded):
 
     session_obj = AgentSession(session_id=sid)
     # State left behind by the previous retry in this same turn.
-    session_obj.reflect_count = 1
-    session_obj.retry_excluded_tools = set(excluded)
+    session_obj.turn.reflect_count = 1
+    session_obj.turn.retry_excluded_tools = set(excluded)
 
     mock_llm_client.responses = [response]
     await _maybe_reflect(sid, db.get_session(sid), session_obj=session_obj)
@@ -66,8 +66,8 @@ async def test_exclusion_does_not_survive_a_verdict_that_names_nothing(mock_llm_
         _verdict(),
         excluded={"spawn_worker"},
     )
-    assert session_obj.reflect_retry_requested
-    assert session_obj.retry_excluded_tools == set(), "a prior retry's exclusion leaked into this one"
+    assert session_obj.turn.reflect_retry_requested
+    assert session_obj.turn.retry_excluded_tools == set(), "a prior retry's exclusion leaked into this one"
 
 
 async def test_a_named_tool_is_still_excluded(mock_llm_client, monkeypatch):
@@ -84,4 +84,4 @@ async def test_a_named_tool_is_still_excluded(mock_llm_client, monkeypatch):
         _verdict(retry_without_tools=["bash"]),
         excluded={"spawn_worker"},
     )
-    assert session_obj.retry_excluded_tools == {"bash"}
+    assert session_obj.turn.retry_excluded_tools == {"bash"}

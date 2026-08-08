@@ -221,8 +221,8 @@ async def test_maybe_reflect_runs_on_workers(mock_llm_client, monkeypatch):
     retry_events = [e for e in events if e.get("type") == "reflect.retry"]
     assert len(retry_events) == 1
     assert retry_events[0]["max"] == 2  # worker-specific cap, not 5
-    assert session_obj.reflect_count == 1
-    assert session_obj.reflect_retry_requested is True
+    assert session_obj.turn.reflect_count == 1
+    assert session_obj.turn.reflect_retry_requested is True
 
 
 async def test_maybe_reflect_worker_cap_emits_exhausted_not_phantom_retry(
@@ -270,7 +270,7 @@ async def test_maybe_reflect_worker_cap_emits_exhausted_not_phantom_retry(
     ]
 
     session_obj = AgentSession(session_id=worker_sid, session_type="worker")
-    session_obj.reflect_count = 1  # one retry already used, cap=2
+    session_obj.turn.reflect_count = 1  # one retry already used, cap=2
 
     events = []
     await _maybe_reflect(worker_sid, session, emit=events.append, session_obj=session_obj)
@@ -278,7 +278,7 @@ async def test_maybe_reflect_worker_cap_emits_exhausted_not_phantom_retry(
     # 2nd retry would increment to 2, 2 < 2 is False → exhausted, not retry.
     assert not any(e.get("type") == "reflect.retry" for e in events)
     assert any(e.get("type") == "reflect.exhausted" for e in events)
-    assert session_obj.reflect_retry_requested is False
+    assert session_obj.turn.reflect_retry_requested is False
 
 
 async def test_maybe_reflect_skips_errored():
@@ -337,7 +337,7 @@ async def test_maybe_reflect_pass_verdict(mock_llm_client, monkeypatch):
     # reflect.done event should be emitted
     assert any(e.get("type") == "reflect.done" for e in events)
     # No retry should be requested on pass
-    assert not session_obj.reflect_retry_requested
+    assert not session_obj.turn.reflect_retry_requested
 
 
 async def test_maybe_reflect_retry_verdict(mock_llm_client, monkeypatch):
@@ -378,8 +378,8 @@ async def test_maybe_reflect_retry_verdict(mock_llm_client, monkeypatch):
 
     await _maybe_reflect(sid, session, session_obj=session_obj)
     # Retry should be requested
-    assert session_obj.reflect_retry_requested
-    assert session_obj.reflect_count == 1
+    assert session_obj.turn.reflect_retry_requested
+    assert session_obj.turn.reflect_count == 1
 
 
 async def test_maybe_reflect_retry_blocked_when_budget_below_3x_scout(
@@ -441,7 +441,7 @@ async def test_maybe_reflect_retry_blocked_when_budget_below_3x_scout(
         session_obj=session_obj,
     )
     # Retry MUST be refused — budget < 3x scout floor.
-    assert not session_obj.reflect_retry_requested, "retry should be blocked when remaining < 3*scout_timeout+30"
+    assert not session_obj.turn.reflect_retry_requested, "retry should be blocked when remaining < 3*scout_timeout+30"
     assert any(e.get("type") == "reflect.budget_exhausted" for e in events), (
         f"expected reflect.budget_exhausted event, got: " f"{[e.get('type') for e in events]}"
     )
@@ -491,5 +491,5 @@ async def test_maybe_reflect_retry_allowed_when_budget_above_3x_scout(
     ]
 
     await _maybe_reflect(sid, session, session_obj=session_obj)
-    assert session_obj.reflect_retry_requested
-    assert session_obj.reflect_count == 1
+    assert session_obj.turn.reflect_retry_requested
+    assert session_obj.turn.reflect_count == 1

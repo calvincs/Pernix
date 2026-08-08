@@ -170,6 +170,7 @@ async def _execute_single(
     workspace_override: str | None = None
     if sid:
         from sessions.manager import get_manager
+        from sessions.state import turn_state
 
         s = get_manager().get(sid)
         session_type = (s.session_type or "") if s else ""
@@ -177,7 +178,7 @@ async def _execute_single(
     # Retry effector (audit P1f): reflect can mechanically disable tools for
     # the current retry attempt; the schema filter removes them, this guard
     # catches a model that calls one anyway.
-    _retry_excluded = getattr(s, "retry_excluded_tools", None) if sid and s else None
+    _retry_excluded = turn_state(s).retry_excluded_tools if sid and s else None
     if _retry_excluded and name in _retry_excluded:
         return ToolExecutionResult(
             tool_name=name,

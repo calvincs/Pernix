@@ -14,6 +14,7 @@ import pytest
 
 from core.canary.parser import CanaryParseError, parse_canary_md, scan_canaries
 from db import models as db
+from sessions.state import TurnState
 
 # ---------------------------------------------------------------------------
 # Parser
@@ -353,7 +354,7 @@ def _runner_manager(monkeypatch, solve):
             session_type=session_type,
             workspace_override=None,
             model_override=None,
-            reflect_count=1,
+            turn=TurnState(reflect_count=1),
             cancel_requested=False,
             _parked=False,
         )

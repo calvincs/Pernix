@@ -41,6 +41,7 @@ import inspect
 import pytest
 
 from core.tools.registry import ToolRegistry
+from sessions.state import TurnState
 
 
 def _registry_with(*register_fns) -> ToolRegistry:
@@ -99,9 +100,9 @@ def test_dangerous_skill_tools_take_no_approved_argument():
     from core.extensions.skillmaker import add_skill_script, create_skill
 
     for fn in (create_skill, add_skill_script):
-        assert "approved" not in inspect.signature(fn).parameters, (
-            f"{fn.__name__} still accepts a model-supplied approval argument"
-        )
+        assert (
+            "approved" not in inspect.signature(fn).parameters
+        ), f"{fn.__name__} still accepts a model-supplied approval argument"
 
 
 def test_approved_is_absent_from_the_dangerous_tools_schemas():
@@ -222,7 +223,10 @@ def test_legacy_gate_rows_are_refused_at_run_time_not_crashed(monkeypatch):
 
     from types import SimpleNamespace
 
-    results = {r.name: r for r in run_gates_for_turn(sid, SimpleNamespace(current_turn_user_msg_id=1), attempt=1)}
+    results = {
+        r.name: r
+        for r in run_gates_for_turn(sid, SimpleNamespace(current_turn_user_msg_id=1, turn=TurnState()), attempt=1)
+    }
     assert not results["legacy"].passed and "security policy" in results["legacy"].error
     assert not results["escapee"].passed and "workspace" in results["escapee"].error
     assert results["fine"].passed  # unaffected by its neighbours
@@ -242,7 +246,7 @@ def test_gate_children_get_their_own_process_group(monkeypatch):
     sid = db.create_session(title="gate-pgid")
     db.add_gate(sid, "pgid", 'python3 -c "import os;print(os.getpgid(0))"')
 
-    r = run_gates_for_turn(sid, SimpleNamespace(current_turn_user_msg_id=1), attempt=1)[0]
+    r = run_gates_for_turn(sid, SimpleNamespace(current_turn_user_msg_id=1, turn=TurnState()), attempt=1)[0]
     assert r.passed, r.output_tail or r.error
     # Without setsid the child would share the server's process group, and a
     # killpg on timeout would either miss the tree or hit the server itself.
