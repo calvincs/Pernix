@@ -1940,58 +1940,6 @@ async function renderJobs() {
     container.appendChild(_jobsContentEl);
 
     await _refreshJobsContent();
-    await _appendRlmRunsSection(container);
-}
-
-// Recent RLM runs — compact list under the jobs sub-tabs (workflow "Recent
-// runs" precedent). Only rendered when runs exist; absent entirely when the
-// RLM add-on has never produced one.
-async function _appendRlmRunsSection(container) {
-    let data;
-    try {
-        data = await get('/api/rlm/runs?limit=8');
-    } catch {
-        return; // endpoint unavailable — old server, nothing to show
-    }
-    const runs = data.runs || [];
-    if (runs.length === 0) return;
-
-    const section = el('div', { class: 'fp-rlm-runs' });
-    section.appendChild(el('div', { class: 'fp-wf-runs-label' }, [text('Recent RLM runs')]));
-    for (const run of runs) {
-        const badge = run.status === 'completed' ? 'fp-wf-run-pass'
-                    : run.status === 'running'   ? 'fp-wf-run-running'
-                    : 'fp-wf-run-fail';
-        const meta = `${run.iterations || 0} it · ${run.subcalls || 0} calls · `
-                   + `${run.created_at ? new Date(run.created_at).toLocaleString() : ''} · ${run.run_id}`;
-        const header = el('div', { class: 'fp-wf-run-row fp-rlm-run-row' }, [
-            el('span', { class: `fp-wf-run-badge ${badge}` }, [text(run.status)]),
-            el('span', { class: 'fp-wf-run-meta' }, [text(meta)]),
-        ]);
-        const detail = el('div', { class: 'fp-rlm-run-detail', style: 'display:none' });
-        header.addEventListener('click', async () => {
-            const open = detail.style.display !== 'none';
-            detail.style.display = open ? 'none' : '';
-            if (!open && !detail.childNodes.length) {
-                try {
-                    const d = await get(`/api/rlm/runs/${encodeURIComponent(run.run_id)}`);
-                    const lines = [
-                        `task: ${d.task || ''}`,
-                        `source: ${d.source_desc || ''}`,
-                        `models: root=${d.root_model || '?'} sub=${d.sub_model || '?'}`,
-                        d.error ? `error: ${d.error}` : `answer: ${d.answer_preview || ''}`,
-                        d.has_trace ? `trace: ${d.trace_path} (workspace)` : 'trace: (purged)',
-                    ];
-                    detail.appendChild(el('pre', { class: 'fp-rlm-run-pre' }, [text(lines.join('\n'))]));
-                } catch (e) {
-                    detail.appendChild(el('div', {}, [text(`Failed to load run: ${e.message}`)]));
-                }
-            }
-        });
-        section.appendChild(header);
-        section.appendChild(detail);
-    }
-    container.appendChild(section);
 }
 
 async function _refreshJobsContent() {

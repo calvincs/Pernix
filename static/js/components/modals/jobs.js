@@ -74,6 +74,57 @@ function _goToSession(sessionId) {
 }
 
 // ---------------------------------------------------------------------------
+// RLM runs — rendered as regular job rows in Active/History so they follow
+// the sub-tab model and the jobs text filter. Root runs only: nested child
+// runs are visible in the RLM viewer for the run's session.
+// ---------------------------------------------------------------------------
+
+async function fetchRlmRuns(limit = 20) {
+    try {
+        const data = await get(`/api/rlm/runs?limit=${limit}`);
+        return (data.runs || []).filter(r => !r.parent_run_id);
+    } catch {
+        return []; // endpoint unavailable — old server / RLM add-on absent
+    }
+}
+
+function rlmRunItem(run, { live = false } = {}) {
+    const meta = [];
+    if (live) {
+        const elapsedEl = el('span', { class: 'jobs-elapsed' }, [text(elapsed(run.created_at))]);
+        const timer = setInterval(() => {
+            elapsedEl.textContent = elapsed(run.created_at);
+        }, 1000);
+        _elapsedTimers.push(timer);
+        meta.push(elapsedEl);
+    } else {
+        if (run.created_at) meta.push(el('span', {}, [text(relativeTime(run.created_at))]));
+        if (run.finished_at && run.created_at) {
+            meta.push(el('span', {}, [text(formatDuration(
+                new Date(run.finished_at).getTime() - new Date(run.created_at).getTime()
+            ))]));
+        }
+    }
+    meta.push(el('span', {}, [text(`${run.iterations || 0} it · ${run.subcalls || 0} calls`)]));
+    if (run.session_id) {
+        meta.push(el('span', {
+            class: 'jobs-session-link',
+            onClick: () => _goToSession(run.session_id),
+        }, [text(run.session_id.slice(0, 8))]));
+    }
+    const task = (run.task || '').trim();
+    const name = `RLM: ${task ? (task.length > 70 ? task.slice(0, 70) + '…' : task) : run.run_id}`;
+    return el('div', { class: 'jobs-item' }, [
+        statusBadge(run.status === 'failed' ? 'error' : run.status),
+        el('div', { class: 'jobs-item-main' }, [
+            el('div', { class: 'jobs-item-name' }, [text(name)]),
+            el('div', { class: 'jobs-item-meta' }, meta),
+            run.error ? el('div', { class: 'jobs-error-detail' }, [text(run.error)]) : null,
+        ]),
+    ]);
+}
+
+// ---------------------------------------------------------------------------
 // Active tab
 // ---------------------------------------------------------------------------
 
@@ -83,11 +134,12 @@ export async function buildActiveTab() {
     try {
         const status = await get('/api/jobs/status');
         const runs = await get('/api/jobs/runs?limit=10');
+        const rlmRunning = (await fetchRlmRuns(10)).filter(r => r.status === 'running');
 
         const running = (runs.items || []).filter(r => r.status === 'running');
         const snoozing = status.snooze?.running;
 
-        if (running.length === 0 && !snoozing) {
+        if (running.length === 0 && rlmRunning.length === 0 && !snoozing) {
             container.appendChild(el('div', { class: 'jobs-empty' }, [text('No active tasks')]));
             return container;
         }
@@ -113,6 +165,10 @@ export async function buildActiveTab() {
                 ]),
             ]);
             container.appendChild(item);
+        }
+
+        for (const run of rlmRunning) {
+            container.appendChild(rlmRunItem(run, { live: true }));
         }
 
         if (snoozing) {
@@ -492,15 +548,18 @@ export async function buildHistoryTab() {
     try {
         const runsData = await get('/api/jobs/runs?limit=50');
         const runs = runsData.items || [];
+        const rlmRuns = (await fetchRlmRuns(50)).filter(r => r.status !== 'running');
 
         // Derive job names from run history (includes old/deleted jobs)
         const jobNameSet = new Set(runs.map(r => r.job_name));
+        if (rlmRuns.length > 0) jobNameSet.add('rlm');
         const jobNames = [...jobNameSet].sort();
 
+        const totalAll = (runsData.total || 0) + rlmRuns.length;
         let filter = '';
         const countEl = el('span', {
             style: { color: 'var(--text-faint)', fontSize: 'var(--text-xs)' },
-        }, [text(`${runsData.total} runs`)]);
+        }, [text(`${totalAll} runs`)]);
 
         const select = el('select', {
             onChange: (e) => {
@@ -515,6 +574,10 @@ export async function buildHistoryTab() {
         const clearBtn = el('button', {
             class: 'jobs-btn danger',
             onClick: async () => {
+                if (filter === 'rlm') {
+                    alert('RLM runs are purged automatically by retention (rlm_run_retention_days).');
+                    return;
+                }
                 const target = filter || 'all';
                 if (!confirm(`Clear ${target} run history?`)) return;
                 try {
@@ -542,43 +605,51 @@ export async function buildHistoryTab() {
         const listEl = el('div');
         container.appendChild(listEl);
 
+        function jobRunItem(run) {
+            const status = run.status || 'unknown';
+            return el('div', { class: 'jobs-item' }, [
+                statusBadge(status),
+                el('div', { class: 'jobs-item-main' }, [
+                    el('div', { class: 'jobs-item-name' }, [text(run.job_name)]),
+                    el('div', { class: 'jobs-item-meta' }, [
+                        run.started_at ? el('span', {}, [text(relativeTime(run.started_at))]) : null,
+                        run.completed_at && run.started_at ? el('span', {}, [
+                            text(formatDuration(
+                                new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()
+                            )),
+                        ]) : null,
+                        run.session_id ? el('span', {
+                            class: 'jobs-session-link',
+                            onClick: () => _goToSession(run.session_id),
+                        }, [text(run.session_id.slice(0, 8))]) : null,
+                    ]),
+                    run.error ? el('div', { class: 'jobs-error-detail' }, [text(run.error)]) : null,
+                ]),
+            ]);
+        }
+
         function renderRuns() {
             clear(listEl);
-            const filtered = filter ? runs.filter(r => r.job_name === filter) : runs;
+            const jobsFiltered = filter
+                ? (filter === 'rlm' ? [] : runs.filter(r => r.job_name === filter))
+                : runs;
+            const rlmFiltered = (!filter || filter === 'rlm') ? rlmRuns : [];
 
             // Update count to reflect filter
-            countEl.textContent = filter
-                ? `${filtered.length} of ${runsData.total} runs`
-                : `${runsData.total} runs`;
+            const shown = jobsFiltered.length + rlmFiltered.length;
+            countEl.textContent = filter ? `${shown} of ${totalAll} runs` : `${totalAll} runs`;
 
-            if (filtered.length === 0) {
+            if (shown === 0) {
                 listEl.appendChild(el('div', { class: 'jobs-empty' }, [text('No runs yet')]));
                 return;
             }
 
-            for (const run of filtered) {
-                const status = run.status || 'unknown';
-                const item = el('div', { class: 'jobs-item' }, [
-                    statusBadge(status),
-                    el('div', { class: 'jobs-item-main' }, [
-                        el('div', { class: 'jobs-item-name' }, [text(run.job_name)]),
-                        el('div', { class: 'jobs-item-meta' }, [
-                            run.started_at ? el('span', {}, [text(relativeTime(run.started_at))]) : null,
-                            run.completed_at && run.started_at ? el('span', {}, [
-                                text(formatDuration(
-                                    new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()
-                                )),
-                            ]) : null,
-                            run.session_id ? el('span', {
-                                class: 'jobs-session-link',
-                                onClick: () => _goToSession(run.session_id),
-                            }, [text(run.session_id.slice(0, 8))]) : null,
-                        ]),
-                        run.error ? el('div', { class: 'jobs-error-detail' }, [text(run.error)]) : null,
-                    ]),
-                ]);
-                listEl.appendChild(item);
-            }
+            // Merge cron-job and RLM runs into one newest-first timeline.
+            const entries = [
+                ...jobsFiltered.map(r => ({ ts: r.started_at || '', build: () => jobRunItem(r) })),
+                ...rlmFiltered.map(r => ({ ts: r.created_at || '', build: () => rlmRunItem(r) })),
+            ].sort((a, b) => (a.ts < b.ts ? 1 : -1));
+            for (const entry of entries) listEl.appendChild(entry.build());
         }
 
         renderRuns();
