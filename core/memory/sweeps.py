@@ -58,15 +58,13 @@ def _archive_entries_in_file(store, file_name: str, epochs: set[int]) -> None:
 
     Prefer archive_entries() — calling this without the index removal leaves
     markdown and FTS disagreeing.
+
+    Goes through store.rewrite_file rather than reaching into store._dir /
+    store._lock: the sweeps' private-state copy of read-modify-write is what
+    duplicated the flock-after-truncate race into this module.
     """
-    import fcntl
 
-    md_path = store._dir / f"{file_name}.md"
-    if not md_path.exists():
-        return
-
-    with store._lock:
-        content = md_path.read_text()
+    def _tag_archived(content: str) -> str:
         for epoch in epochs:
             # Find the epoch comment and add archived tag after it
             pattern = f"<!-- @epoch: {epoch} -->"
@@ -75,10 +73,9 @@ def _archive_entries_in_file(store, file_name: str, epochs: set[int]) -> None:
                     pattern,
                     f"{pattern}\n<!-- @archived: true -->",
                 )
-        with open(md_path, "w") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            f.write(content)
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return content
+
+    store.rewrite_file(file_name, _tag_archived)
 
 
 def _remove_from_index(store, file_name: str, epochs: set[int]) -> None:
@@ -194,9 +191,7 @@ def _pairwise_dedup(entries: list, is_cancelled: Callable[[], bool]) -> set[int]
     O(N+M) quick_ratio() as upper-bound prescreens — pairs that can't reach
     0.82 are skipped without ever computing the full O(N·M) ratio.
     """
-
-    def _tokens(s: str) -> set[str]:
-        return set(re.findall(r"\w+", s.lower()))
+    from core.memory.dedup import loses_no_unique_token
 
     archived: set[int] = set()
     for i in range(len(entries)):
@@ -214,14 +209,9 @@ def _pairwise_dedup(entries: list, is_cancelled: Callable[[], bool]) -> set[int]
             if sim > 0.82:
                 to_archive = entries[j] if len(entries[j].content) <= len(entries[i].content) else entries[i]
                 to_keep = entries[i] if to_archive is entries[j] else entries[j]
-                # Ratio alone is not enough: structured facts that differ only
-                # in a key value ("prod key X / :8090" vs "dev key Y / :8091")
-                # score ~0.9 and one would be silently lost forever. Only
-                # archive when the dropped entry carries NO token absent from
-                # the kept one — i.e. archiving loses no unique information.
-                # Pure rephrasings with novel words stay (false negatives are
-                # wasteful; false positives destroy facts).
-                if not _tokens(to_archive.content) <= _tokens(to_keep.content):
+                # Ratio alone is not enough — see loses_no_unique_token, the
+                # shared guard every entry-destroying operation must clear.
+                if not loses_no_unique_token(to_archive.content, to_keep.content):
                     continue
                 archived.add(to_archive.epoch)
                 logger.debug("Snooze: archiving duplicate (epoch=%d, sim=%.2f)", to_archive.epoch, sim)
@@ -700,24 +690,20 @@ def extract_tags(content: str, existing_tags: list[str]) -> list[str]:
 
 def update_tags_in_markdown(store, file_name: str, epoch: int, tags: list[str]) -> None:
     """Update or add the @tags comment in markdown for one entry."""
-    import fcntl
 
-    md_path = store._dir / f"{file_name}.md"
-    if not md_path.exists():
-        return
-
-    with store._lock:
-        content = md_path.read_text()
+    def _set_tags(content: str) -> str | None:
         epoch_marker = f"<!-- @epoch: {epoch} -->"
         if epoch_marker not in content:
-            return
+            return None
 
         new_tags_line = f"<!-- @tags: {','.join(tags)} -->"
 
-        # Find the section for this epoch, then replace its tags line or insert one
-        parts = content.split(epoch_marker)
+        # Find the section for this epoch, then replace its tags line or insert
+        # one. maxsplit=1 so a legacy file with a repeated epoch marker keeps
+        # everything after the second occurrence instead of losing it.
+        parts = content.split(epoch_marker, 1)
         if len(parts) < 2:
-            return
+            return None
 
         after = parts[1]
         existing_tags = re.search(r"<!-- @tags:.*?-->", after[:200])
@@ -726,11 +712,9 @@ def update_tags_in_markdown(store, file_name: str, epoch: int, tags: list[str]) 
         else:
             after = "\n" + new_tags_line + after
 
-        content = parts[0] + epoch_marker + after
-        with open(md_path, "w") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            f.write(content)
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return parts[0] + epoch_marker + after
+
+    store.rewrite_file(file_name, _set_tags)
 
 
 async def enrich_tags(store, is_cancelled: Callable[[], bool], *, max_entries: int = 10) -> int:
@@ -1042,19 +1026,41 @@ def _stale_candidates(rows, now: int, limit: int = 10) -> list[dict]:
             }
         )
 
-    candidates: list[dict] = []
+    per_cohort: dict[int, list[dict]] = {}
     for cohort_days, entries in cohorts.items():
         if len(entries) < 3:
             continue  # need enough data for meaningful average
         avg_hits = sum(e["hit_count"] for e in entries) / len(entries)
+        qualifying: list[dict] = []
         for entry in entries:
             if entry["weight"] == "high":
                 continue
             if entry["hit_count"] < avg_hits or (entry["hit_count"] == 0 and entry["age_days"] >= 60):
                 entry["cohort"] = f"{cohort_days}d"
                 entry["cohort_avg"] = avg_hits
-                candidates.append(entry)
-    return candidates[:limit]
+                qualifying.append(entry)
+        if qualifying:
+            per_cohort[cohort_days] = qualifying
+
+    # Deal slots round-robin, oldest cohort first. Accumulating every cohort
+    # into one list and truncating to `limit` handed every slot to the 30-day
+    # cohort — by far the most populous — so the 180- and 360-day cohorts, the
+    # entries most likely to actually be stale, were structurally unreachable
+    # on any store with more than ~10 under-average young entries. Forgetting
+    # was aimed at the wrong end of the age distribution. Round-robin gives
+    # every cohort with candidates a slot before any cohort gets a second one;
+    # oldest-first order breaks the tie on the final partial round.
+    candidates: list[dict] = []
+    buckets = [per_cohort[d] for d in reversed(_COHORT_DAYS) if d in per_cohort]
+    depth = 0
+    while len(candidates) < limit and any(len(b) > depth for b in buckets):
+        for bucket in buckets:
+            if depth < len(bucket):
+                candidates.append(bucket[depth])
+                if len(candidates) >= limit:
+                    break
+        depth += 1
+    return candidates
 
 
 async def prune_stale_entries(store, db, is_cancelled: Callable[[], bool], *, interval_days: int) -> int:

@@ -383,8 +383,12 @@ def test_compile_context_pins_active_turn_user_message():
     active_id = db.add_message(sid, "user", "ACTIVE_TURN_PROMPT https://example.com/needed-url")
     db.add_message(sid, "assistant", "padding " * 200)
 
-    # Force a tiny budget so trim must run.
-    payload = compile_context(sid, context_budget=4500, turn_user_msg_id=active_id)
+    # Force a tight budget so trim must run. 12k is the smallest budget that
+    # still leaves the 4k history floor plus a minimal output reservation once
+    # the ~4.1k system prompt and the 2k safety margin are paid for — below
+    # that compile_context now raises ContextBudgetError rather than
+    # fabricating headroom.
+    payload = compile_context(sid, context_budget=12_000, turn_user_msg_id=active_id)
     survived = any(
         "ACTIVE_TURN_PROMPT" in (m.get("content") or "") if isinstance(m.get("content"), str) else False
         for m in payload.messages
@@ -404,7 +408,7 @@ def test_compile_context_emits_trim_notice_when_drops_occur():
     db.add_message(sid, "user", "second turn padding " + big)
     db.add_message(sid, "assistant", "second answer padding " + big)
 
-    payload = compile_context(sid, context_budget=4500)
+    payload = compile_context(sid, context_budget=12_000)
     has_notice = any(
         m.get("role") == "system" and "[Context trim notice" in (m.get("content") or "") for m in payload.messages
     )

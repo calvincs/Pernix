@@ -15,6 +15,15 @@ from config import settings
 logger = logging.getLogger("pernix.tools.repl")
 
 _OUTPUT_CAP = 50_000  # chars, mirroring bash
+_DEFAULT_TIMEOUT_S = 300.0
+# Mirrors bash's BASH_MAX_TIMEOUT clamp, and must: an unclamped cell deadline
+# outlives every recovery path. The executor gives up at max_timeout + grace
+# and raises, but asyncio.to_thread cannot be cancelled, so the worker thread
+# stays blocked in kernel.execute for the whole (unbounded) cell; the kernel
+# deliberately never registers in session._active_process, so the post-timeout
+# subprocess kill cannot reach the child either. Net: a leaked executor thread
+# plus a runaway process, per call. The clamp keeps both bounded.
+_MAX_TIMEOUT_S = 1800.0
 
 
 def repl(code: str, timeout: int | None = None, _context: dict | None = None) -> str:
@@ -41,7 +50,11 @@ def repl(code: str, timeout: int | None = None, _context: dict | None = None) ->
     except Exception:
         pass
 
-    effective_timeout = float(timeout) if timeout else 300.0
+    try:
+        requested = float(timeout or 0)
+    except (TypeError, ValueError):
+        requested = 0.0
+    effective_timeout = min(requested, _MAX_TIMEOUT_S) if requested > 0 else _DEFAULT_TIMEOUT_S
     try:
         result, note = kernel.execute(code, timeout=effective_timeout, cancel_check=cancel_check)
     except KernelError as e:

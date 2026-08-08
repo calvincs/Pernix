@@ -88,13 +88,22 @@ cycle-generated hypotheses — no special write powers.
 
 ## What it deliberately doesn't do
 
-- **No direct promotion.** Validated conclusions never reach scout or the
-  live prompt from here; they route through the
+- **No direct promotion, and nothing auto-applies.** Validated conclusions
+  never reach scout or the live prompt from here; they route through the
   [Adaptive Layer](canary-and-adaptive.md) (when `adaptive_enabled`), where
-  mechanically-validated tool patterns may auto-apply as routing hints and
-  everything else — including any global-scope dream edit — waits for human
-  approval. With the adaptive layer off, the dream's entire observable
-  output remains the journal, the report, and sidecar rows.
+  **every** dream promotion waits for human approval — including
+  mechanically-validated tool patterns. `promote.py` always sets
+  `scope="global"`, and `compute_risk` escalates `source == "dream" and
+  scope == "global"` to high risk unconditionally, so there is no
+  auto-apply path out of the dream. That is deliberate: dream is the most
+  speculative producer in the stack. With the adaptive layer off, the
+  dream's entire observable output remains the journal, the report, and
+  sidecar rows.
+- **No permanent shelf space.** Promoted entries are retired again when
+  their evidence stops holding — the originating hypothesis is gone or
+  unpromoted, the cited Candor facts recovered above the degradation line,
+  or the entry outlived its TTL (`core/dream/retire.py`). Minting without
+  retiring silently wedges the per-kind entry cap.
 - **No self-modification.** Skills, prompts, and code are untouched.
 - **Strict write-permission rule.** The dream may write its own tables, files
   under `workspace/dreams/`, and (once promotion ships) memory entries marked

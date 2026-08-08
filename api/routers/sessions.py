@@ -28,9 +28,12 @@ async def create_session(body: dict = {}):
 
 @router.get("/api/sessions")
 async def list_sessions(limit: int = 50, offset: int = 0):
+    import asyncio as _asyncio
+
     from sessions.policy import annotate_read_only
 
-    sessions = [annotate_read_only(s) for s in db.list_sessions_enriched(limit=limit, offset=offset)]
+    rows = await _asyncio.to_thread(db.list_sessions_enriched, limit, offset)
+    sessions = [annotate_read_only(s) for s in rows]
     return {"items": sessions, "count": len(sessions)}
 
 
@@ -129,16 +132,16 @@ async def get_session(session_id: str, limit: int | None = None):
     """Session metadata + messages. With `limit`, only the newest N messages
     (oldest-first) plus a total count — the UI uses this so opening a long
     session doesn't load (and render) the entire unbounded transcript."""
-    session = db.get_session(session_id)
-    if not session:
-        raise HTTPException(404, detail=f"Session {session_id} not found")
     import asyncio as _asyncio
 
     from sessions.policy import annotate_read_only
 
+    session = await _asyncio.to_thread(db.get_session, session_id)
+    if not session:
+        raise HTTPException(404, detail=f"Session {session_id} not found")
     annotate_read_only(session)
     messages = await _asyncio.to_thread(db.get_messages, session_id, limit)
-    total = db.count_messages(session_id) if limit is not None else len(messages)
+    total = await _asyncio.to_thread(db.count_messages, session_id) if limit is not None else len(messages)
     return {**session, "messages": messages, "total_messages": total, "has_more": total > len(messages)}
 
 
@@ -148,7 +151,9 @@ async def get_session_status(session_id: str):
     status = manager.get_status(session_id)
     if status["status"] == "unknown":
         # Check DB
-        session = db.get_session(session_id)
+        import asyncio as _asyncio
+
+        session = await _asyncio.to_thread(db.get_session, session_id)
         if not session:
             raise HTTPException(404, detail=f"Session {session_id} not found")
         return {"session_id": session_id, "status": "idle", "in_memory": False}
@@ -278,8 +283,10 @@ def _kill_session_process(session):
 
 @router.post("/api/sessions/{session_id}/clear")
 async def clear_session(session_id: str):
-    db.clear_messages_only(session_id)
-    db.update_session(session_id, title="New session")
+    import asyncio as _asyncio
+
+    await _asyncio.to_thread(db.clear_messages_only, session_id)
+    await _asyncio.to_thread(db.update_session, session_id, title="New session")
     return {"status": "cleared"}
 
 
@@ -298,9 +305,11 @@ async def list_pending_messages(session_id: str):
     those with a persisted msg_id are listed — those are the ones rendered
     in the transcript and removable. Synthetic entries (worker resume,
     worker timeout) carry no DB row and are skipped."""
+    import asyncio as _asyncio
+
     from sessions.state import PendingMessage
 
-    if not db.get_session(session_id):
+    if not await _asyncio.to_thread(db.get_session, session_id):
         raise HTTPException(404, detail=f"Session {session_id} not found")
     session = get_manager().get(session_id)
     pending = []
@@ -323,12 +332,14 @@ async def remove_pending_message(session_id: str, message_id: int):
     session = get_manager().get(session_id)
     if not session:
         raise HTTPException(404, detail=f"Session {session_id} not found in memory")
+    import asyncio as _asyncio
+
     from sessions.state import PendingMessage
 
     for entry in list(session.pending_messages):
         if PendingMessage.coerce(entry).msg_id == message_id:
             session.pending_messages.remove(entry)
-            db.delete_message(message_id)
+            await _asyncio.to_thread(db.delete_message, message_id)
             if session.last_user_msg_id == message_id:
                 session.last_user_msg_id = None
             session.emit_event(
@@ -355,7 +366,9 @@ async def patch_session(session_id: str, body: dict = {}):
                          and unlike agent-initiated switch_model it is NOT
                          reverted at turn end.
     """
-    if not db.get_session(session_id):
+    import asyncio as _asyncio
+
+    if not await _asyncio.to_thread(db.get_session, session_id):
         raise HTTPException(404, detail=f"Session {session_id} not found")
 
     result: dict = {"session_id": session_id}
@@ -365,13 +378,13 @@ async def patch_session(session_id: str, body: dict = {}):
         if not isinstance(title, str) or not title.strip():
             raise HTTPException(400, detail="title must be a non-empty string")
         title = title.strip()[:300]
-        db.set_session_meta(session_id, title=title)
+        await _asyncio.to_thread(db.set_session_meta, session_id, title=title)
         result["title"] = title
         get_manager().emit(session_id, {"type": "session.title", "title": title})
 
     if "pinned" in body:
         pinned = bool(body["pinned"])
-        db.set_session_meta(session_id, pinned=pinned)
+        await _asyncio.to_thread(db.set_session_meta, session_id, pinned=pinned)
         result["pinned"] = pinned
 
     if "model_override" in body:
@@ -405,11 +418,15 @@ async def get_session_state_log(
 
     `tail=true` returns the newest `limit` rows; `before_id` pages backward
     from a tail window. Rows are always oldest-first within the window."""
-    session = db.get_session(session_id)
+    import asyncio as _asyncio
+
+    session = await _asyncio.to_thread(db.get_session, session_id)
     if not session:
         raise HTTPException(404, detail=f"Session {session_id} not found")
     limit = max(1, min(limit, 5000))
-    entries = db.get_state_log(session_id, since_id=since_id, before_id=before_id, limit=limit, tail=tail)
+    entries = await _asyncio.to_thread(
+        db.get_state_log, session_id, since_id=since_id, before_id=before_id, limit=limit, tail=tail
+    )
     return {"session_id": session_id, "count": len(entries), "entries": entries}
 
 
@@ -484,7 +501,9 @@ async def purge_sessions(body: dict = {}):
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
 
-    sessions = db.list_sessions(limit=1000)
+    import asyncio as _asyncio
+
+    sessions = await _asyncio.to_thread(db.list_sessions, 1000)
     # Sort by updated_at, keep at least keep_min
     candidates = [s for s in sessions if (s.get("updated_at") or "") < cutoff]
     to_delete = candidates[keep_min:] if len(candidates) > keep_min else []

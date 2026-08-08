@@ -163,6 +163,24 @@ def set_watched_workers(session_id: str, worker_ids: list[str]) -> None:
     update_session(session_id, watched_worker_ids=_json.dumps(list(worker_ids)))
 
 
+# SQL predicate for "this session is not actively being worked on", for the
+# background selectors (snooze distillation, refine, distill-coverage audit)
+# that pick over old sessions. Requires the `sessions` table aliased as `s`.
+#
+# These selectors used to test the legacy `state = 'idle'` column. That column
+# is no longer maintained by the state machine, so the test moved to state_v2.
+# The membership list is the exact set the legacy column collapsed to "idle":
+# CANCELLING/FINALIZING/AWAITING_* look busy but were indistinguishable from
+# idle to the old column, and every one of these selectors additionally gates
+# on `updated_at` being tens of minutes stale, so the transient members can
+# never actually be live when a row is picked. NULL means the session predates
+# migration v16 and has never transitioned since — idle by definition.
+SQL_SESSION_IS_IDLE = (
+    "(s.state_v2 IS NULL OR s.state_v2 IN "
+    "('idle_ready', 'cancelling', 'finalizing', 'awaiting_user', 'awaiting_workers'))"
+)
+
+
 def get_sessions_in_state_v2(state_v2: str) -> list[dict]:
     """Return all sessions persisted with the given v2 state. Used by the
     boot-time reconcile sweep to find parents that were suspended on
@@ -177,7 +195,17 @@ def get_sessions_in_state_v2(state_v2: str) -> list[dict]:
 
 def get_sessions_in_legacy_processing_only() -> list[dict]:
     """Return sessions where legacy state='processing' but state_v2 is NULL or empty.
-    Used by the boot reconcile to catch sessions that crashed before state_v2 was written."""
+    Used by the boot reconcile to catch sessions that crashed before state_v2 was written.
+
+    Still live despite the state machine no longer writing the legacy column:
+    migration v16 ADDs state_v2 without backfilling it, so any row that was
+    stranded at state='processing' by a crash *before* v16 ran still has
+    state_v2 NULL and is invisible to get_sessions_in_state_v2(). The boot
+    reconcile stamps state_v2 on each row it finds, so the set drains to
+    empty after one boot. Delete this (and its call site in
+    SessionManager.reconcile_processing_sessions) once no deployed database
+    — including restores from pre-v16 backups — can still contain a row with
+    state='processing' AND state_v2 IS NULL."""
     with connect_sessions() as conn:
         rows = conn.execute(
             "SELECT * FROM sessions WHERE state = 'processing' AND (state_v2 IS NULL OR state_v2 = '')",
@@ -206,10 +234,6 @@ def delete_session(session_id: str) -> None:
         )
         conn.execute("DELETE FROM session_messages WHERE sender_id = ? OR recipient_id = ?", (session_id, session_id))
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-
-
-def set_session_state(session_id: str, state: str) -> None:
-    update_session(session_id, state=state)
 
 
 def get_worker_sessions(parent_id: str) -> list[dict]:
@@ -1028,20 +1052,43 @@ def create_goal(
     continuation_budget: int = 0,
 ) -> int | None:
     """Create a goal. Returns None if the session already has an active one
-    (one active goal per session — update or complete it first)."""
+    (one active goal per session — update or complete it first).
+
+    The check and the insert are one BEGIN IMMEDIATE transaction. Without it
+    the SELECT ran in autocommit — Python's sqlite3 in legacy isolation mode
+    begins a transaction only before DML, so the read happened outside the
+    transaction the INSERT opened, and two concurrent callers (this is
+    reachable from an agent tool) both saw "no active goal" and both inserted.
+    Same explicit-transaction pattern as the migration runner. The v26 partial
+    unique index is the backstop: if a writer on another connection wins the
+    race anyway, the INSERT raises IntegrityError and we honour the documented
+    contract by returning None rather than surfacing a DB error to the agent.
+    """
     with connect_sessions() as conn:
-        existing = conn.execute(
-            "SELECT id FROM session_goals WHERE session_id = ? AND status IN ('active', 'paused', 'budget_limited')",
-            (session_id,),
-        ).fetchone()
-        if existing:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = conn.execute(
+                "SELECT id FROM session_goals WHERE session_id = ? "
+                "AND status IN ('active', 'paused', 'budget_limited')",
+                (session_id,),
+            ).fetchone()
+            if existing:
+                conn.execute("ROLLBACK")
+                return None
+            cur = conn.execute(
+                "INSERT INTO session_goals (session_id, objective, status, token_budget, time_budget_s, "
+                "continuation_budget, started_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?, ?)",
+                (session_id, objective[:4000], token_budget, time_budget_s, continuation_budget, _now(), _now()),
+            )
+            goal_id = cur.lastrowid
+            conn.execute("COMMIT")
+            return goal_id
+        except sqlite3.IntegrityError:
+            conn.execute("ROLLBACK")
             return None
-        cur = conn.execute(
-            "INSERT INTO session_goals (session_id, objective, status, token_budget, time_budget_s, "
-            "continuation_budget, started_at, updated_at) VALUES (?, ?, 'active', ?, ?, ?, ?, ?)",
-            (session_id, objective[:4000], token_budget, time_budget_s, continuation_budget, _now(), _now()),
-        )
-        return cur.lastrowid
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
 
 
 def get_active_goal(session_id: str) -> dict | None:
@@ -1673,9 +1720,9 @@ def get_unreviewed_sessions(min_age_minutes: int = 10, limit: int = 5) -> list[d
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes)).isoformat()
     with connect_sessions() as conn:
         rows = conn.execute(
-            """SELECT s.* FROM sessions s
+            f"""SELECT s.* FROM sessions s
                WHERE s.snooze_reviewed_at IS NULL
-                 AND s.state = 'idle'
+                 AND {SQL_SESSION_IS_IDLE}
                  AND s.updated_at < ?
                  AND s.session_type NOT IN ('worker', 'canary')
                  AND (
@@ -1719,8 +1766,8 @@ def get_unrefined_sessions(min_idle_minutes: int = 10, limit: int = 1) -> list[d
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=min_idle_minutes)).isoformat()
     with connect_sessions() as conn:
         rows = conn.execute(
-            """SELECT s.* FROM sessions s
-               WHERE s.state = 'idle'
+            f"""SELECT s.* FROM sessions s
+               WHERE {SQL_SESSION_IS_IDLE}
                  AND s.updated_at < ?
                  AND s.session_type NOT IN ('worker', 'canary')
                  AND NOT EXISTS (

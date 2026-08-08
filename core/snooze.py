@@ -685,9 +685,9 @@ Output valid JSON only. No markdown fences. /no_think"""
         with db.connect_sessions() as conn:
             cutoff = (datetime.now(timezone.utc) - timedelta(minutes=settings.snooze_cooldown_minutes * 2)).isoformat()
             rows = conn.execute(
-                """SELECT s.* FROM sessions s
+                f"""SELECT s.* FROM sessions s
                    WHERE s.snooze_reviewed_at IS NOT NULL
-                     AND s.state = 'idle'
+                     AND {db.SQL_SESSION_IS_IDLE}
                      AND s.updated_at < ?
                      AND s.session_type != 'worker'
                      AND (
@@ -1087,7 +1087,7 @@ Output valid JSON only. No markdown fences. /no_think"""
             from core.canary.maintain import run_maintenance
 
             stats = await asyncio.to_thread(run_maintenance, self._is_cancelled)
-            for key in ("promoted", "settled_flaky", "flaky_tagged", "retired", "purged"):
+            for key in ("promoted", "settled_flaky", "flaky_tagged", "demoted", "purged"):
                 self._bump(f"canaries_{key}", len(stats.get(key) or []))
         except Exception as e:
             logger.warning("Snooze canary maintenance failed: %s", e)

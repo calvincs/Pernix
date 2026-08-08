@@ -170,7 +170,31 @@ These endpoints are only accessible from `127.0.0.1` or `::1`, regardless of aut
 
 ## Dangerous Tool Gate
 
-Tools classified as `dangerous` (by default: `search_web`, `browse_web`, `delete_skill`, `delete_workflow`) require explicit per-invocation user confirmation before executing, unless the server was started with the `--dangerous` flag. The `bash` and file-write tools default to the `caution` level, which does not prompt — you can promote any tool to `dangerous` via `POST /api/tools/set-safety` or the Explorer → Tools panel.
+Tools classified as `dangerous` require explicit per-invocation user confirmation before executing, unless the server was started with the `--dangerous` flag. The default set is:
+
+| Tool | Why |
+|---|---|
+| `search_web`, `browse_web` | Outbound traffic and untrusted page content entering the context |
+| `delete_skill`, `delete_workflow` | Destroys authored artifacts |
+| `create_tool`, `update_tool` | Writes model-authored Python into the server's own source tree and imports it **into the server process** — see [Toolmaker](#toolmaker-model-authored-code-in-the-server-process) below |
+| `create_skill`, `add_skill_script` | Authors instructions the agent will later load and follow, and scripts `load_skill` then tells it to run under `bash` |
+| `add_gate` | Registers shell that re-runs unattended at every turn end for the life of the session |
+
+You can promote or demote any tool via `POST /api/tools/set-safety` or the Explorer → Tools panel.
+
+### What the gate is, and what it is not
+
+**The gate surfaces intent. It is not a containment boundary.**
+
+`bash` and `repl` stay at the `caution` level, which does not prompt. That is a deliberate choice, not an oversight: they are the product's core utility, and prompting on every call would make the agent unusable for ordinary work. The consequence has to be stated plainly — **every dangerous-gated action has an ungated equivalent through `bash`.** `delete_skill` prompts; `bash("rm -r data/skills/foo")` does not. `create_tool` prompts; `bash` writing the same file and waiting for a restart does not.
+
+So the gate's real job is to make a consequential action *visible and deliberate* at the moment the agent takes it — it stops a careless tool call, not a determined one. **The VM or container Pernix runs in is the actual boundary.** This is the same posture [internals/rlm.md](internals/rlm.md) states for the RLM child sandbox, and the same one the shell denylist below is labeled with.
+
+If you need a real boundary, run Pernix in a VM or container you are willing to lose, and give the process only the credentials it actually needs.
+
+### Server-side approval state
+
+Approval is stored on the session by `approve_dangerous_tool()` and matched against the call's arguments. **No tool argument can authorize its own call.** If you write a custom tool that takes an `approved`-style flag, that flag is a UI affordance and nothing more — the model supplies it, so the model can set it. Route real authorization through the `dangerous` safety level instead.
 
 ### Normal mode (default — `auto_approve_dangerous = false`)
 
@@ -199,11 +223,64 @@ Three settings control what environment variables the shell tool sees:
 
 | `shell_env_mode` | Behavior |
 |---|---|
-| `passthrough` (default) | Shell inherits the server process's full environment |
+| `allowlist` (default) | Only vars in `shell_env_allowlist` are passed to the shell |
 | `denylist` | All env vars passed except those in `shell_env_denylist` |
-| `allowlist` | Only vars in `shell_env_allowlist` are passed to the shell |
+| `passthrough` | Shell inherits the server process's full environment |
 
-Use `allowlist` mode for the most controlled environment.
+The default is `allowlist`. The server process holds every provider API key you have configured, and `passthrough` handed a copy of that environment to every `bash` child and to anything the child spawned — so a single `env` in a shell command, or any dependency that logs its environment, disclosed the full key set. `allowlist` builds a minimal environment (`PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, plus audio/display vars); `PATH`, `HOME`, and `VIRTUAL_ENV` are then set explicitly to the workspace venv, so the sandbox works exactly as before. This matches what the RLM child process already did.
+
+> This is a hardening default, not a secret boundary. `.env` is still readable from disk by anything running as the same user, including `bash`. It removes the *accidental* disclosure path, not the deliberate one.
+
+If a tool you rely on needs a variable that is not on the allowlist (a proxy setting, a cloud SDK credential), add it to `shell_env_allowlist` rather than reverting to `passthrough`.
+
+**Existing installs are unaffected**: `shell_env_mode` is persisted in `data/settings.json`, so a value already written there keeps winning. Delete the key (or set it to `"allowlist"`) to pick up the new default.
+
+---
+
+## Toolmaker: Model-Authored Code in the Server Process
+
+The `create_tool` / `update_tool` tools are the highest-authority surface in the system, and the documentation was previously silent about them. What actually happens:
+
+1. The model supplies a Python source string.
+2. It is written to `core/tools/builtin/custom_<name>.py` — **inside Pernix's own source tree**, via a raw `Path.write_text` that does not go through the workspace path-safety layer at all.
+3. It is immediately `importlib.import_module`'d and `register(reg)` is called **in the server process** — with the full server environment (every API key), no resource limits, no separate process group.
+4. `core/tools/builtin/__init__.py` re-imports every `custom_*.py` on **every boot**, so the code persists across restarts.
+
+Module-level statements in that file execute at import time. There is no sandbox on this path.
+
+**`PROHIBITED_PATTERNS` is a typo-guard, not a control.** It is an 11-entry substring scan over the submitted source. It is trivially bypassed — `os.popen` for `os.system`, `subprocess.run` for `subprocess.Popen`, double quotes for the single-quoted `open('/etc` patterns — and it is moot regardless, because it looks for *call sites* while module-level code needs none of them. Treat it as a lint that catches obvious mistakes, and do not reason about it as a security property.
+
+What has been tightened:
+
+- Both `create_tool` and `update_tool` are now `dangerous`, so they require the `ask_user` + `approve_dangerous_tool` handshake. Gating only `create_tool` would have left a one-call detour: create a benign tool once, then replace its body.
+- Tool names are validated as `[a-z][a-z0-9_]{0,39}` **before** being interpolated into any path, in `create_tool`, `update_tool`, and `restore_tool_packages`.
+
+What remains true, and is the reason to run Pernix in a container: **an approved `create_tool` call is arbitrary code execution in the server process, and it persists.** Relocating custom tools out of the source tree and into a sandboxed loader is the real fix and has not been done. Review `list_custom_tools` output and the contents of `core/tools/builtin/custom_*.py` if you ever approve one.
+
+---
+
+## Deterministic Gates
+
+`add_gate` registers a shell command that runs automatically before Reflect at **every turn end**, for the life of the session. That persistence — one approval buying repeated unattended execution the user never sees again — is what separates it from a one-shot `bash` call, and it is why `add_gate` is `dangerous`.
+
+Gate commands are held to the same policy as `bash`:
+
+- The command is checked against the shell denylist at **registration** time (so the agent gets the rejection while it can still fix the command) and again at **execution** time (so rows that predate the check, or that reached the table by another route, are still checked).
+- The denylist scan applies in every `shell_security_mode`, including `strict` — `strict`'s first-word allowlist is tuned for interactive commands and would reject ordinary gates like `pytest -q`.
+- `cwd` must resolve inside the workspace. It previously did not, so `add_gate(cwd="/")` relocated the entire policy surface.
+- Gate children get `setsid` and the same `RLIMIT_AS` / `RLIMIT_FSIZE` limits as `bash`, and a timeout kills the whole process group rather than leaving orphans behind every turn.
+
+A gate that policy refuses to run is recorded as a **failure**, not skipped — an unrunnable gate has verified nothing. It is logged and refused individually, so one bad legacy row does not break the turn-end sweep for the session's other gates.
+
+---
+
+## Skill Authoring
+
+`create_skill` and `add_skill_script` are `dangerous`. A skill is an instruction package the agent will later load and follow, and `add_skill_script` writes an executable file that `load_skill` then advertises to the agent as `bash <skill>/scripts/<file>` — write-then-run, previously ungated at every step.
+
+These two tools no longer take an `approved` argument. It was a **model-supplied boolean**: the first call posted an `ask_user` question and returned, and the model was told to call again with `approved=true` — but nothing correlated that argument with an actual user response, so the model could simply set it on the first call. Authorization now goes through the executor's server-side gate, which keeps approval state on the session where no argument can reach it.
+
+The remaining skillmaker tools (`update_skill`, `add_skill_reference`, `remove_skill_script`, `remove_skill_reference`) still take `approved`. They edit markdown inside an existing skill, so the prompt is a speed bump rather than a control — but it is an honor-system speed bump, and should be read that way.
 
 ---
 

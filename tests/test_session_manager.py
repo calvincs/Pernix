@@ -4,8 +4,9 @@ import asyncio
 
 import pytest
 
+from sessions import state_v2 as sv2
 from sessions.manager import SessionManager
-from sessions.state import AgentSession, PendingMessage, SessionState
+from sessions.state import AgentSession, PendingMessage
 
 
 def _make_manager() -> SessionManager:
@@ -157,7 +158,7 @@ async def test_prompt_queues_when_busy():
     # combined into the running turn's DB row.
     import time as _t
 
-    session._force_state_for_tests(SessionState.PROCESSING)
+    session._state_v2 = sv2.SessionStateV2.PROCESSING
     session.last_user_msg_at = _t.monotonic() - 10
     await mgr.prompt(sid, "second message")
 
@@ -175,7 +176,7 @@ async def test_prompt_rejects_full_queue(monkeypatch):
     session.pending_messages.append(PendingMessage("msg1", ""))
     session.pending_messages.append(PendingMessage("msg2", ""))
     # Force PROCESSING state
-    session._force_state_for_tests(SessionState.PROCESSING)
+    session._state_v2 = sv2.SessionStateV2.PROCESSING
 
     events_before = len(session.events)
     await mgr.prompt(sid, "overflow message")

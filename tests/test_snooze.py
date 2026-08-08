@@ -94,13 +94,13 @@ def test_is_idle_no_sessions(monkeypatch):
 
 def test_is_idle_busy_session(monkeypatch):
     """Session in PROCESSING state → not idle."""
+    from sessions import state_v2 as sv2
     from sessions.manager import SessionManager
-    from sessions.state import AgentSession, SessionState
 
     mgr = SessionManager()
     sid = mgr.create_session(title="Busy")
     session = mgr.get(sid)
-    session._force_state_for_tests(SessionState.PROCESSING)
+    session._state_v2 = sv2.SessionStateV2.PROCESSING
 
     monkeypatch.setattr("sessions.manager._manager", mgr)
     runner = SnoozeRunner()

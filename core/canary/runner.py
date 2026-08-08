@@ -192,12 +192,44 @@ async def run_canary(
     return result
 
 
+def _due_this_sweep(canary: CanaryDef, sweep_index: int) -> bool:
+    """Cadence filter for scheduled sweeps: run every Nth sweep.
+
+    Deterministic and stable per canary — the phase is derived from the
+    canary's own name, so demoted canaries spread across the rotation
+    instead of all landing on the same sweep.
+    """
+    cadence = max(1, int(canary.cadence or 1))
+    if cadence == 1:
+        return True
+    phase = sum(canary.name.encode("utf-8")) % cadence
+    return sweep_index % cadence == phase
+
+
+def _next_sweep_index() -> int:
+    """Monotonic scheduled-sweep counter, durable across restarts."""
+    from db import models as db
+
+    try:
+        current = int(db.get_snooze_state("canary_sweep_index") or "0")
+    except (TypeError, ValueError):
+        current = 0
+    db.set_snooze_state("canary_sweep_index", str(current + 1))
+    return current
+
+
 async def run_sweep(
     trigger: str = "scheduled",
     batch_id: str | None = None,
     names: list[str] | None = None,
 ) -> list[CanaryRunResult]:
-    """Run the whole suite (or a named subset) sequentially."""
+    """Run the whole suite (or a named subset) sequentially.
+
+    Scheduled sweeps honour each canary's `cadence`; post_batch and manual
+    sweeps never do. The post-batch sweep is the tripwire's active probe and
+    must cover every canary that could regress, and a human asking for a run
+    means now.
+    """
     if not settings.canary_enabled:
         logger.info("Canary sweep skipped: canary_enabled is off")
         return []
@@ -205,6 +237,13 @@ async def run_sweep(
     if names:
         wanted = set(names)
         defs = [d for d in defs if d.name in wanted]
+    elif trigger == "scheduled":
+        sweep_index = _next_sweep_index()
+        due = [d for d in defs if _due_this_sweep(d, sweep_index)]
+        deferred = len(defs) - len(due)
+        if deferred:
+            logger.info("Canary sweep #%d: %d canary(ies) deferred by cadence", sweep_index, deferred)
+        defs = due
     if not defs:
         logger.info("Canary sweep: no canaries to run")
         return []

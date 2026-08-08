@@ -11,6 +11,11 @@ with a provenance note `confabulation_repaired`. Divergence = unsupported /
 total, alarmed above telos_divergence_max. Identity, operationally, IS this
 reconciliation process — not either ledger alone.
 
+"Diffs" means the cited event is opened and tested for shared evidence
+against the claim (`claim_shares_evidence`), not that the ref number is in
+range. The range check alone is a property a model that can count clears
+every time, which made the coherence series a flat line.
+
 Authority ordering: trace > autobiography, always. Introspective reports
 are hypotheses about the self; the trace is the evidence they are tested
 against. This also buys a corrigibility property at zero cost: the agent's
@@ -45,6 +50,92 @@ Output JSON only, no fences:
 /no_think"""
 
 _REF_RE = re.compile(r"^T(\d+)$")
+
+# Telos object ids as they appear inside claim prose: g_/q_/h_/c_/a_ + slug.
+_ID_RE = re.compile(r"\b([gqhca]_[a-z0-9_]{2,})\b", re.IGNORECASE)
+_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+
+# Words that carry no evidential weight: they appear in almost every claim
+# AND in almost every trace line, so overlap on them proves nothing.
+_STOPWORDS = frozenset(
+    {
+        "this",
+        "that",
+        "with",
+        "from",
+        "into",
+        "have",
+        "were",
+        "been",
+        "them",
+        "they",
+        "their",
+        "there",
+        "then",
+        "than",
+        "when",
+        "what",
+        "which",
+        "will",
+        "would",
+        "about",
+        "after",
+        "before",
+        "also",
+        "over",
+        "week",
+        "time",
+        "type",
+        "true",
+        "false",
+        "null",
+        "none",
+        "self",
+        "telos",
+        "system",
+        "agent",
+    }
+)
+_MIN_TOKEN_LEN = 4
+_MIN_TOKEN_OVERLAP = 2
+
+
+def _content_tokens(text: str) -> set[str]:
+    return {t for t in _TOKEN_RE.findall(text.lower()) if len(t) >= _MIN_TOKEN_LEN and t not in _STOPWORDS}
+
+
+def claim_shares_evidence(claim: str, event: dict) -> bool:
+    """Mechanical entailment proxy (spec §5.4, `telos.md` "mechanically diffs").
+
+    A cited event supports a claim when the two demonstrably talk about the
+    same thing, by any of three checks in cost order:
+
+    1. the event's own type token appears in the claim ("narrowed" for a
+       `question_narrowed` event);
+    2. the claim names a telos identifier that is present in the event's
+       JSON (`h_0012`, `q_2026_0807_003`, `g_deploy`);
+    3. at least `_MIN_TOKEN_OVERLAP` content words are shared.
+
+    This is a proxy, not entailment — a claim can share vocabulary with an
+    event that does not actually entail it. It is deliberately crude and
+    deliberately mechanical: the property it replaces was `1 <= n <= N`,
+    which a model that can count clears every time, so the divergence series
+    it fed was a flat line. A crude filter that a paraphrase can fail is a
+    signal; a bounds check is not.
+    """
+    blob = json.dumps(event, ensure_ascii=False).lower()
+    claim_l = claim.lower()
+
+    etype = str(event.get("type") or "")
+    for token in etype.split("_"):
+        if len(token) >= _MIN_TOKEN_LEN and token in claim_l:
+            return True
+
+    for match in _ID_RE.findall(claim_l):
+        if match.lower() in blob:
+            return True
+
+    return len(_content_tokens(claim) & _content_tokens(blob)) >= _MIN_TOKEN_OVERLAP
 
 
 def _week_stamp() -> str:
@@ -94,17 +185,37 @@ async def compile_autobiography(store: TelosStore) -> dict:
         refs = [str(r).strip() for r in (item.get("refs") or []) if _REF_RE.match(str(r).strip())]
         if text and refs:
             claims.append({"claim": text[:400], "refs": refs})
-    return {"claims": len(claims), "items": claims, "trace_count": len(interesting)}
+    return {"claims": len(claims), "items": claims, "trace_count": len(interesting), "events": interesting}
 
 
-def reconcile(store: TelosStore, claims: list[dict], trace_count: int) -> dict:
-    """Mechanical diff: a claim is supported iff every cited ref resolves to
-    a real trace line in the sampled window. Unsupported -> self_report cap;
-    divergence over threshold -> alarm."""
+def reconcile(store: TelosStore, claims: list[dict], events: list[dict]) -> dict:
+    """Mechanical diff against the sampled trace window.
+
+    A claim is supported iff every cited ref resolves to a real line in the
+    window AND at least one of those lines shares evidence with the claim
+    (`claim_shares_evidence`). Opening the cited event is the whole point:
+    the ref number being in range says only that the model can count.
+
+    "At least one" rather than "all": a claim citing [T3, T7] where T7 is
+    corroborative colour should not be repaired for T7's sake. One cited
+    line that genuinely bears on the claim is the minimum the spec's
+    "cite >= 1 trace ref that entails it" asks for.
+
+    Unsupported -> self_report cap; divergence over threshold -> alarm.
+    """
+    trace_count = len(events)
     supported = []
     unsupported = []
     for c in claims:
-        ok = all((m := _REF_RE.match(r)) and 1 <= int(m.group(1)) <= trace_count for r in c["refs"])
+        resolved = []
+        in_range = True
+        for r in c["refs"]:
+            m = _REF_RE.match(r)
+            if not (m and 1 <= int(m.group(1)) <= trace_count):
+                in_range = False
+                break
+            resolved.append(events[int(m.group(1)) - 1])
+        ok = in_range and any(claim_shares_evidence(c["claim"], ev) for ev in resolved)
         (supported if ok else unsupported).append(c)
     total = len(claims)
     divergence = (len(unsupported) / total) if total else 0.0
@@ -119,7 +230,7 @@ async def run_reconciliation(store: TelosStore) -> dict:
     if not items:
         return {"claims": 0, "divergence": 0.0}
 
-    rec = reconcile(store, items, compiled.get("trace_count", 0))
+    rec = reconcile(store, items, compiled.get("events") or [])
     week = _week_stamp()
 
     lines = [f"# Autobiography — {week}", ""]

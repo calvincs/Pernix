@@ -16,7 +16,7 @@ import pytest
 from core.llm.semaphore import LLMConcurrencyError, LLMSessionTimeoutError, SessionAwareLLMScheduler
 from core.llm.types import ChatResponse, StreamEvent, StreamEventType, TokenUsage
 from sessions import state_v2 as sv2
-from sessions.state import AgentSession, PendingMessage, SessionState
+from sessions.state import AgentSession, PendingMessage
 
 # ---------------------------------------------------------------------------
 # Semaphore timeout tests
@@ -584,7 +584,6 @@ class TestRapidFireCombining:
         """A session parked mid-turn in PROCESSING, as prompt() would see it."""
         session = manager.get_or_create(sid)
         session._state_v2 = sv2.SessionStateV2.PROCESSING
-        session.state = SessionState.PROCESSING
         return session
 
     @pytest.mark.asyncio

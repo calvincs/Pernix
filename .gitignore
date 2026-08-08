@@ -52,6 +52,8 @@ data/artifacts/
 data/.tool_output/
 data/workspace/
 data/memories/
+# Snapshots from scripts/backup.py — full DB copies plus the memory corpus.
+data/backups/
 
 # Auto-generated TLS materials when network mode binds 0.0.0.0.
 # Regenerable on next start; never commit private keys to history.

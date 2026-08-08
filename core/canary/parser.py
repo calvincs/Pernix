@@ -14,6 +14,7 @@ Format (mirrors SKILL.md, reusing the same frontmatter helper):
     timeout: 600         # optional per-run wall clock (seconds)
     tags: [coding, debug]
     flaky: false         # flaky canaries inform, never trip the tripwire
+    cadence: 1           # run on every Nth scheduled sweep (1 = every sweep)
     last_reviewed: 2026-08-06
     ---
     Free-form notes for humans reviewing this canary.
@@ -31,6 +32,10 @@ from core.skills.parser import parse_frontmatter_md
 logger = logging.getLogger("pernix.canary")
 
 DEFAULT_TIMEOUT_S = 600
+# Ceiling on the scheduled-sweep cadence. A canary that ran once every 13
+# nightly sweeps would take a fortnight to contribute one baseline row, which
+# is functionally the retirement this field replaces.
+MAX_CADENCE = 12
 
 
 class CanaryParseError(Exception):
@@ -46,6 +51,12 @@ class CanaryDef:
     timeout: int = DEFAULT_TIMEOUT_S
     tags: list[str] = field(default_factory=list)
     flaky: bool = False
+    # Scheduled-sweep cadence: run on every Nth sweep. Long-green canaries are
+    # demoted to a higher number instead of being retired — the tripwire's
+    # baseline is computed from scheduled runs of these same tasks, so
+    # removing the stable ones shrinks the denominator of the only signal
+    # allowed to auto-rollback. Post-batch sweeps ignore cadence entirely.
+    cadence: int = 1
     last_reviewed: str = ""
     body: str = ""
     path: Path | None = None
@@ -101,6 +112,15 @@ def parse_canary_md(path: Path) -> CanaryDef:
     except (TypeError, ValueError):
         raise CanaryParseError(f"{path}: 'timeout' must be an integer (seconds)") from None
 
+    try:
+        cadence = int(fm.get("cadence") or 1)
+    except (TypeError, ValueError):
+        raise CanaryParseError(f"{path}: 'cadence' must be an integer (run every Nth scheduled sweep)") from None
+    if cadence < 1:
+        raise CanaryParseError(f"{path}: 'cadence' must be >= 1")
+    if cadence > MAX_CADENCE:
+        raise CanaryParseError(f"{path}: 'cadence' above {MAX_CADENCE} would starve the tripwire baseline")
+
     return CanaryDef(
         name=name,
         prompt=prompt,
@@ -109,6 +129,7 @@ def parse_canary_md(path: Path) -> CanaryDef:
         timeout=max(60, timeout),
         tags=[str(t) for t in tags],
         flaky=bool(fm.get("flaky", False)),
+        cadence=cadence,
         last_reviewed=str(fm.get("last_reviewed") or ""),
         body=body,
         path=path,

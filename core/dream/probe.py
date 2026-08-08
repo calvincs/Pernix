@@ -60,8 +60,9 @@ At most %d hypotheses — fewer, sharper ones beat many vague ones.""" % _MAX_PR
 
 
 def export_corpus(store) -> tuple[str, int]:
-    """Render every active non-dream entry as marked lines. Returns
-    (corpus_text, file_count). Sync — call via to_thread."""
+    """Render every active entry the dream did not author as marked lines.
+    Returns (corpus_text, file_count). Sync — call via to_thread."""
+    from core.dream.observe import is_dream_authored
     from core.memory.format import parse_entries_from_markdown
 
     lines: list[str] = []
@@ -74,7 +75,7 @@ def export_corpus(store) -> tuple[str, int]:
         md = store.read_file(f.name)
         if not md:
             continue
-        entries = [e for e in parse_entries_from_markdown(f.name, md) if e.source != "dream"]
+        entries = [e for e in parse_entries_from_markdown(f.name, md) if not is_dream_authored(e)]
         if not entries:
             continue
         file_count += 1

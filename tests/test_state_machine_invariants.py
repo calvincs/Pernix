@@ -76,28 +76,28 @@ def test_every_reason_in_transitions_is_in_migration_check_constraint():
 # ---------------------------------------------------------------------------
 
 
-def test_no_production_callers_import_force_state():
-    """The legacy force-state API (renamed `_force_state_for_tests`) is a
-    test-only escape hatch. No module under sessions/ or core/ (other than
-    state.py itself) should import or call it — production must go through
-    sessions.state_v2.transition()."""
-    offenders = []
-    # state.py defines it; state_v2.py's docstring references the old name.
-    allowed = {"sessions/state.py", "sessions/state_v2.py"}
-    # Match both the current and legacy names so a revert would still fail.
-    patterns = ("_force_state_for_tests(", "force_state(")
+def _production_sources():
+    """Yield (relative path, source) for every non-test production module."""
     for path in REPO_ROOT.glob("**/*.py"):
         if "tests" in path.parts:
             continue
         if "/.venv/" in str(path) or "/venv/" in str(path):
             continue
-        rel = str(path.relative_to(REPO_ROOT))
-        if rel in allowed:
-            continue
         try:
-            src = path.read_text()
+            yield str(path.relative_to(REPO_ROOT)), path.read_text()
         except Exception:
             continue
+
+
+def test_no_production_callers_import_force_state():
+    """The force-state escape hatch is gone entirely — `force_state()` and
+    its successor `_force_state_for_tests()` were both deleted. Nothing may
+    reintroduce one: production must go through
+    sessions.state_v2.transition()."""
+    offenders = []
+    # Match both the current and legacy names so a revert would still fail.
+    patterns = ("_force_state_for_tests(", "force_state(")
+    for rel, src in _production_sources():
         if any(p in src for p in patterns):
             offenders.append(rel)
     assert not offenders, (
@@ -113,20 +113,10 @@ def test_no_production_callers_write_retired_flags():
     runtime; this test catches them before the tests even load."""
     pattern = re.compile(r"\.(?:post_hooks_complete|waiting_for_input)\s*=")
     offenders = []
-    for path in REPO_ROOT.glob("**/*.py"):
-        if "tests" in path.parts:
-            continue
-        if "/.venv/" in str(path) or "/venv/" in str(path):
-            continue
-        try:
-            src = path.read_text()
-        except Exception:
-            continue
-        if pattern.search(src):
-            # Report file + line for easier fixing
-            for i, line in enumerate(src.splitlines(), 1):
-                if pattern.search(line):
-                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{i}: {line.strip()}")
+    for rel, src in _production_sources():
+        for i, line in enumerate(src.splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{rel}:{i}: {line.strip()}")
     assert not offenders, (
         "Writes to retired flags found:\n  "
         + "\n  ".join(offenders)
@@ -134,35 +124,38 @@ def test_no_production_callers_write_retired_flags():
     )
 
 
-def test_no_production_caller_assigns_session_state_directly():
-    """session.state = SessionState.X is a silent bypass of the mutator.
-    Production code must go through state_v2.transition() so the log row and
-    SSE event go out. Test fixtures may still assign directly for setup."""
-    # Allow the bridge in state_v2.py itself.
-    allowlist = {"sessions/state_v2.py"}
-    pattern = re.compile(r"session[_\w]*\.state\s*=\s*SessionState\.")
+# Symbols retired when the v1→v2 migration finished. Each pattern matches
+# *use* (attribute access, call, import), not prose — the docstrings in
+# sessions/state.py and sessions/state_v2.py still name the old enum when
+# explaining what was removed, and should stay readable.
+# The negative lookahead keeps SessionStateV2 out of the SessionState match.
+_RETIRED_SYMBOLS = (
+    (r"\bSessionState(?!V2)\s*[.(\[]", "the legacy SessionState enum"),
+    (r"import\s+[^\n]*\bSessionState(?!V2)\b", "an import of the legacy SessionState enum"),
+    (r"\bset_session_state\s*\(", "db.set_session_state (the legacy-column writer)"),
+    (r"\b_LEGACY_TO_V2\b|\b_V2_TO_LEGACY\b", "a legacy/v2 bridge table"),
+    (r"\b_persist_legacy_state\b", "the legacy-state persist helper"),
+    (r"session[_\w]*\.state\s*=", "a direct write to session.state"),
+)
+
+
+def test_no_production_module_references_the_retired_legacy_layer():
+    """The v1 state layer is deleted, not deprecated.
+
+    Reintroducing any of it — the 5-value enum, a `session.state` mirror,
+    the bridge tables, or the per-transition UPDATE of the legacy
+    `sessions.state` column — would restore the exact bug class v2 was
+    built to end: two sources of truth that disagree, one of which
+    collapses five distinct states into "idle". Everything goes through
+    sessions.state_v2.transition()."""
     offenders = []
-    for path in REPO_ROOT.glob("**/*.py"):
-        if "tests" in path.parts:
-            continue
-        if "/.venv/" in str(path) or "/venv/" in str(path):
-            continue
-        rel = str(path.relative_to(REPO_ROOT))
-        if rel in allowlist:
-            continue
-        try:
-            src = path.read_text()
-        except Exception:
-            continue
-        if pattern.search(src):
+    for rel, src in _production_sources():
+        for pattern, what in _RETIRED_SYMBOLS:
+            rx = re.compile(pattern)
             for i, line in enumerate(src.splitlines(), 1):
-                if pattern.search(line):
-                    offenders.append(f"{rel}:{i}: {line.strip()}")
-    assert not offenders, (
-        "Direct session.state assignment found:\n  "
-        + "\n  ".join(offenders)
-        + "\nUse sessions.state_v2.transition() instead."
-    )
+                if rx.search(line):
+                    offenders.append(f"{rel}:{i}: {what} — {line.strip()}")
+    assert not offenders, "Retired legacy state layer referenced in production code:\n  " + "\n  ".join(offenders)
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +166,3 @@ def test_no_production_caller_assigns_session_state_directly():
 def test_compat_status_covers_every_state():
     for state in sv2.SessionStateV2:
         assert state in sv2.COMPAT_STATUS, f"{state} missing from COMPAT_STATUS"
-
-
-def test_legacy_bridge_covers_every_state():
-    for state in sv2.SessionStateV2:
-        assert state in sv2._V2_TO_LEGACY, f"{state} missing from _V2_TO_LEGACY"

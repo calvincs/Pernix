@@ -8,6 +8,11 @@ code, confined to this module).
 The brief is an EXCEPTION REPORT: healthy facts say nothing. And per the
 fc329cb prompt lesson, it carries facts found in operational history — never
 conclusions about what is missing or unconfigured.
+
+The one thing exception-report semantics cannot express is its own absence,
+so `DEGRADED_BRIEF` exists: when the bridge's circuit breaker is open the
+brief says so explicitly instead of returning the empty string that a
+healthy toolchain also returns.
 """
 
 from __future__ import annotations
@@ -32,6 +37,23 @@ _HEADER = (
     "[OPERATIONAL INTEL] Calibrated reliability from logged outcome history "
     "(exception report — healthy tools are omitted; absence here means no known problem):"
 )
+
+# Fail-loud counterpart to _HEADER. Under exception-report semantics silence
+# means healthy, so an inert store and a perfectly healthy toolchain produce
+# byte-identical scout input — a dead reliability oracle reads as all-clear.
+# When the bridge's circuit breaker is open this line goes in the brief's
+# place, so the difference is visible rather than inferred from an absence.
+DEGRADED_BRIEF = (
+    "\n[OPERATIONAL INTEL] candor: DEGRADED — reliability data unavailable. The "
+    "operational-memory store went inert after repeated failures, so the usual "
+    "exception report cannot be produced. Absence of warnings below is NOT evidence "
+    "that tools are healthy; treat tool reliability as unknown this turn."
+)
+
+
+def build_degraded_brief() -> str:
+    """The brief to emit when the bridge cannot read the store at all."""
+    return DEGRADED_BRIEF
 
 
 def _observation_count(system, fact_id: str) -> int:

@@ -1,4 +1,14 @@
-"""Pernix — Per-session memory-recall dedup ledger.
+"""Pernix — Memory dedup primitives: the write-side guard and the recall ledger.
+
+Two halves of the same concern, kept together so they can't drift:
+
+- The write-side token guard (`content_tokens`, `loses_no_unique_token`) that
+  every entry-destroying operation must clear before it archives or overwrites
+  an entry. The dedup sweep, cross-file consolidation and the store's
+  supersede path all perform the same "is dropping this safe?" judgement; it
+  used to exist only inside the sweep, and consolidation's copy of the same
+  merge silently lacked it.
+- The per-session recall ledger, below.
 
 When the model fans out `recall` + `search_web` (or repeats a recall later in
 the same turn), the same memory entries get serialised into multiple tool
@@ -19,12 +29,38 @@ don't both emit full bodies for the same entries.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.memory.search import SearchResult
 
 logger = logging.getLogger("pernix.memory.dedup")
+
+_WORD_RE = re.compile(r"\w+")
+
+
+# ---------------------------------------------------------------------------
+# Write-side containment guard
+# ---------------------------------------------------------------------------
+
+
+def content_tokens(text: str) -> set[str]:
+    """Case-folded word-token set — the unit every write-side guard compares."""
+    return set(_WORD_RE.findall(text.lower()))
+
+
+def loses_no_unique_token(dropped: str, kept: str) -> bool:
+    """True when retiring `dropped` in favour of `kept` destroys no information.
+
+    A high similarity ratio is not enough on its own: structured facts that
+    differ only in a key value ("prod key X / :8090" vs "dev key Y / :8091")
+    score ~0.9, and archiving one loses it forever. Only retire an entry whose
+    tokens are all present in the survivor. Pure rephrasings that introduce
+    novel words therefore stay — false negatives are wasteful, false positives
+    destroy facts, and that asymmetry is the whole point of this check.
+    """
+    return content_tokens(dropped) <= content_tokens(kept)
 
 
 def _key(file_name: str, epoch: int) -> str:

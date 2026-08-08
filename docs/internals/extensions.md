@@ -101,9 +101,9 @@ Always enabled. Skill authoring without leaving the chat.
 
 | Tool | Safety | What |
 |---|---|---|
-| `create_skill` | safe | Author a new SKILL.md from inside a chat |
+| `create_skill` | dangerous | Author a new SKILL.md from inside a chat |
 | `update_skill` | safe | Modify an existing skill |
-| `add_skill_script` | safe | Drop a script into a skill's `scripts/` |
+| `add_skill_script` | dangerous | Drop a script into a skill's `scripts/` |
 | `add_skill_reference` | safe | Drop a doc into `references/` |
 | `remove_skill_script` / `remove_skill_reference` | safe | Delete a script / reference |
 
@@ -119,8 +119,8 @@ Always enabled. Custom Python tool authoring.
 
 | Tool | Safety | What |
 |---|---|---|
-| `create_tool` | safe | Author a new tool: name, description, Python body (with a `register(reg)` function) |
-| `update_tool` | safe | Modify an existing custom tool |
+| `create_tool` | dangerous | Author a new tool: name, description, Python body (with a `register(reg)` function) |
+| `update_tool` | dangerous | Modify an existing custom tool |
 | `list_custom_tools` | safe | List user-authored vs builtin tools |
 | `install_package` | caution | pip install into `data/workspace/.venv/` |
 | `restore_tool_packages` | caution | Reinstall after a venv wipe |

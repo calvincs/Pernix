@@ -32,7 +32,14 @@ PROTECTED_FILES = frozenset(
     }
 )
 
-PROTECTED_DIRS = frozenset({".git", "__pycache__"})
+# `.venv` is here for the same reason `.git` is, but the consequence is
+# sharper: data/workspace/.venv sits inside the only write root, and
+# ensure_workspace_venv_on_path() puts its site-packages on sys.path for every
+# source="custom" tool. Without this entry, file_write — a "safe" tool — could
+# drop a module into site-packages that the server then imports and executes
+# in-process, with the full server environment. bash still manages the venv
+# (pip, python -m venv); only the path-tool surface is closed.
+PROTECTED_DIRS = frozenset({".git", "__pycache__", ".venv"})
 
 
 def workspace() -> Path:
@@ -65,9 +72,25 @@ def kernel_state_root() -> Path | None:
         return None
 
 
+def tool_output_root() -> Path:
+    """Root of the truncation spill tree (data/.tool_output).
+
+    Read-only by intent, and for the same reason kernel_state_root() exists:
+    truncate_output() writes the full output there and tells the model to
+    `file_read(path="data/.tool_output/<tool>_<ts>.txt", ...)`. Without it as a
+    read root, that pointer falls through to the workspace-relative branch and
+    resolves to a path that never exists — every drill-in from bash, grep and
+    rlm_process dies with "File not found". Never a write root.
+    """
+    from core.tools.truncation import TOOL_OUTPUT_DIR  # module attr: tests repoint it
+
+    return Path(TOOL_OUTPUT_DIR).resolve()
+
+
 def allowed_read_roots() -> list[Path]:
-    """Directories that file_read may access (workspace + skills + workflows,
-    plus the kernel payload spill tree when the session kernel is on).
+    """Directories that file_read may access (workspace + skills + workflows +
+    the truncation spill tree, plus the kernel payload spill tree when the
+    session kernel is on).
 
     Order matters: workspace first, so a bare relative name still resolves
     against the workspace rather than being captured by a later root.
@@ -79,6 +102,12 @@ def allowed_read_roots() -> list[Path]:
     workflows = Path(settings.workflows_dir).resolve()
     if workflows not in roots:
         roots.append(workflows)
+    try:
+        tool_output = tool_output_root()
+        if tool_output not in roots:
+            roots.append(tool_output)
+    except Exception:
+        pass
     kernels = kernel_state_root()
     if kernels is not None and kernels not in roots:
         roots.append(kernels)

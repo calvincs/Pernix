@@ -36,6 +36,11 @@ PROMPT_NOTE_MAX_CHARS = 400
 CONTENT_MAX_CHARS = 2000
 TITLE_MAX_CHARS = 80
 
+# Marker inside the cap-rejection reason string. A full kind is the one
+# rejection that means "this producer's loop is now silently inert", so it
+# gets a notification rather than a log line — see _notify_capped.
+CAP_REJECTION_MARKER = "at max entries"
+
 
 class AdaptiveError(Exception):
     """Raised for structural problems (unknown batch, bad payload)."""
@@ -219,7 +224,10 @@ def _apply_one(edit: dict, producer: str, actor: str, batch_id: str, proposal_id
 
     # Caps (checked against live state, not planning-time state).
     if action == "create" and db.adaptive_entry_count(edit["kind"]) >= settings.adaptive_max_entries_per_kind:
-        return f"kind '{edit['kind']}' at max entries ({settings.adaptive_max_entries_per_kind})"
+        return (
+            f"kind '{edit['kind']}' {CAP_REJECTION_MARKER} ({settings.adaptive_max_entries_per_kind})"
+            " — retire an entry to make room"
+        )
     if action in ("update", "delete") and actor == "auto":
         cooldown_h = settings.adaptive_edit_cooldown_hours
         updated = (active or {}).get("updated_at") or ""
@@ -274,6 +282,38 @@ def _apply_one(edit: dict, producer: str, actor: str, batch_id: str, proposal_id
     return None
 
 
+def _notify_capped(producer: str, rejected: list[dict]) -> None:
+    """Surface a full per-kind cap to the operator, not just to the log.
+
+    A capped kind and a producer with nothing to say produce byte-identical
+    observable behaviour: the pass runs, applies nothing, logs a line nobody
+    reads. That ambiguity is the whole failure mode — the loop looks healthy
+    while every insight it generates is dropped on the floor. Notifying makes
+    "the shelf is full" a distinct, actionable state.
+    """
+    capped = {
+        e["reason"].split("'")[1]
+        for e in rejected
+        if CAP_REJECTION_MARKER in e.get("reason", "") and "'" in e.get("reason", "")
+    }
+    if not capped:
+        return
+    try:
+        db.add_notification(
+            title="Adaptive layer: entry cap reached",
+            body=(
+                f"{producer} produced edits that were dropped — kind(s) "
+                f"{', '.join(sorted(capped))} are at the "
+                f"{settings.adaptive_max_entries_per_kind}-entry cap "
+                "(adaptive_max_entries_per_kind). Retire or delete an entry in the Adaptive tab, "
+                "or raise the cap; until then this producer's output is being discarded."
+            ),
+            urgency="normal",
+        )
+    except Exception as e:
+        logger.warning("Adaptive cap notification failed: %s", e)
+
+
 def apply_batch(batch_id: str, actor: str = "auto", proposal_id: int | None = None) -> dict:
     """Apply a pending batch edit-by-edit. Partial application is by design:
     a rejected edit (version moved, cap hit) never blocks its siblings."""
@@ -301,6 +341,7 @@ def apply_batch(batch_id: str, actor: str = "auto", proposal_id: int | None = No
     # with nothing to measure, so it gets its own terminal, inert status.
     status = "applied" if applied else "rejected"
     db.adaptive_update_batch(batch_id, status=status)
+    _notify_capped(batch["producer"], rejected)
     if applied:
         from core.adaptive.render import render_mirror
 

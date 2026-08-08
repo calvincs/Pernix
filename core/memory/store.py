@@ -6,18 +6,29 @@ Markdown files are source of truth; FTS5 index is rebuildable.
 Writes are append-by-default (remember, ingest, distill, snooze) with
 explicit per-entry mutation via update_entry / delete_entry — used by the
 agent's update_memory / forget tools to correct or remove specific entries.
-Epochs are immutable: an updated entry keeps its original epoch.
+
+Epoch contract: an epoch is an entry's identity *within its file*, and
+content mutation never changes it — update_entry and add_or_supersede_entry
+both rewrite in place under the original epoch and stamp @updated. It is not
+a durable global identifier: any operation that re-keys an entry into another
+file or resolves a collision may bump it (move_entries on target collision,
+consolidation's fuse re-keying to the oldest epoch, repair_epoch_collisions
+re-epoching legacy duplicates). External references — `[[file@epoch]]`
+wiki-links, dream evidence refs, memory_hits rows — therefore survive
+corrections but not relocations, and dangling ones are silent by design.
 """
 
 from __future__ import annotations
 
 import fcntl
 import logging
+import os
 import re
 import threading
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Callable
 
 from config import settings
 from core.memory.format import (
@@ -36,6 +47,71 @@ __all__ = ["MemoryStore", "NAMESPACE_KEYWORDS", "get_memory_store"]
 
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+# Supersede band — see _supersede_reason.
+_SUPERSEDE_RATIO = 0.82
+_SUPERSEDE_MAX_DROPPED_TOKENS = 2
+
+
+def _duplicate_message(dup: SearchResult) -> str:
+    """The refusal the dedup gate returns, carrying the supersede hint."""
+    preview = dup.entry.content[:160].replace("\n", " ")
+    return (
+        f"Memory already contains similar content — entry skipped (duplicate of "
+        f'{dup.entry.file_name}@{dup.entry.epoch}: "{preview}"). If your version is '
+        f"newer or more accurate, supersede it with "
+        f"update_memory(file='{dup.entry.file_name}', epoch={dup.entry.epoch}, content=...)."
+    )
+
+
+def _supersede_reason(new_content: str, old_content: str) -> str:
+    """Why `new_content` may overwrite `old_content` in place; "" for never.
+
+    Only ever asked about a pair the dedup gate already refused, so "are these
+    similar?" is settled. The question here is narrower and much riskier: is
+    the new text the *same statement restated* (safe to overwrite) or a near
+    neighbour that happens to trip the gate (must not overwrite)?
+
+    Three conditions, all required, all biased toward keeping what is stored:
+
+    1. SequenceMatcher >= 0.82 — the bar the dedup sweep and consolidation
+       already require before they are willing to destroy an entry. The write
+       gate fires far lower (0.70 ratio OR 0.55 bag-of-words Jaccard over the
+       top-3 BM25 hits), and that lower band is full of merely-topical
+       neighbours; rewriting one of those replaces a fact with a different fact.
+    2. The new text must contribute at least one token the stored text lacks.
+       A pure paraphrase or a strict subset has nothing to add, so the stored
+       entry — older, possibly already linked to — wins, exactly as today.
+    3. The stored text may lose at most two tokens. A correction changes a
+       value or two inside an otherwise identical sentence; an entry carrying
+       three or more tokens the new version lacks is a distinct fact, and
+       overwriting it destroys information. Losing nothing at all is the safe
+       case (the new text is a strict superset) and is always allowed.
+
+    Dropping a real correction costs one fact until the next session relearns
+    it; overwriting the wrong entry destroys one permanently. When the shape
+    is ambiguous this returns "" and the caller falls back to dropping.
+
+    One boundary case is accepted knowingly: a one-word synonym swap has the
+    same token shape as a one-value correction, and nothing lexical can tell
+    them apart. Such a write rewrites equivalent text with equivalent text —
+    no fact is lost, the only cost is an @updated stamp on an entry that was
+    already right.
+    """
+    from core.memory.dedup import content_tokens
+
+    if SequenceMatcher(None, new_content, old_content).ratio() < _SUPERSEDE_RATIO:
+        return ""
+    new_tokens = content_tokens(new_content)
+    old_tokens = content_tokens(old_content)
+    if not (new_tokens - old_tokens):
+        return ""
+    dropped = old_tokens - new_tokens
+    if not dropped:
+        return "enrichment"
+    if len(dropped) <= _SUPERSEDE_MAX_DROPPED_TOKENS:
+        return "correction"
+    return ""
 
 
 class MemoryStore:
@@ -131,13 +207,9 @@ class MemoryStore:
             if dup is not None:
                 # Don't let a newer/corrected fact silently lose to a stale
                 # one — point at the match so the caller can supersede it.
-                preview = dup.entry.content[:160].replace("\n", " ")
-                return (
-                    f"Memory already contains similar content — entry skipped (duplicate of "
-                    f'{dup.entry.file_name}@{dup.entry.epoch}: "{preview}"). If your version is '
-                    f"newer or more accurate, supersede it with "
-                    f"update_memory(file='{dup.entry.file_name}', epoch={dup.entry.epoch}, content=...)."
-                )
+                # Automatic writers that can't act on a hint should call
+                # add_or_supersede_entry instead of parsing this string.
+                return _duplicate_message(dup)
 
         epoch = epoch or int(time.time())
 
@@ -215,6 +287,83 @@ class MemoryStore:
 
         self._candor_attest(file_name, "attest", source)
         return f"Saved to {file_name} (epoch={epoch})"
+
+    def add_or_supersede_entry(
+        self,
+        content: str,
+        file_name: str | None = None,
+        entry_type: str = "note",
+        tags: str = "",
+        weight: str = "normal",
+        epoch: int | None = None,
+        source: str = "",
+        origin: str = "",
+    ) -> str:
+        """add_entry, except a blocked duplicate that is a *correction* rewrites it.
+
+        The dedup gate refuses any write similar to something already stored —
+        which is precisely the shape of a corrected fact. add_entry hands back
+        a supersede hint naming the blocking entry, but only the agent-facing
+        `remember` tool has anything that can read it: the automatic writers
+        (distill, ingest) dropped every correction they learned, and the stale
+        version survived. This path gives clear corrections somewhere to go.
+
+        When the blocking entry is the same statement restated (see
+        _supersede_reason) the new text replaces it via update_entry — original
+        epoch preserved, @updated stamped, so wiki-links keep resolving and
+        recall shows the correction date. Everything else is unchanged: novel
+        content is appended and an ambiguous duplicate is still refused with
+        the same message add_entry returns.
+        """
+        if not content.strip():
+            return "Error: Empty content"
+
+        from core.memory.format import sanitize_entry_content
+
+        content = sanitize_entry_content(content)
+
+        # Same 60-char floor as add_entry: below it similarity is unreliable,
+        # so there is nothing trustworthy enough to overwrite an entry on.
+        if len(content) >= 60:
+            dup = self.find_duplicate(content)
+            if dup is not None:
+                reason = _supersede_reason(content, dup.entry.content)
+                if not reason:
+                    return _duplicate_message(dup)
+                result = self.update_entry(dup.entry.file_name, dup.entry.epoch, content)
+                if result.startswith("Error"):
+                    # Couldn't rewrite safely (epoch collision, file gone) —
+                    # fall back to the gate's original refusal rather than
+                    # appending a near-copy alongside the entry we meant to fix.
+                    logger.warning(
+                        "Supersede of %s@%s failed, keeping stored entry: %s",
+                        dup.entry.file_name,
+                        dup.entry.epoch,
+                        result,
+                    )
+                    return _duplicate_message(dup)
+                logger.info(
+                    "Superseded %s@%s (%s, source=%s)",
+                    dup.entry.file_name,
+                    dup.entry.epoch,
+                    reason,
+                    source or "unknown",
+                )
+                return f"Superseded {dup.entry.file_name}@{dup.entry.epoch} ({reason})"
+
+        # The gate already ran (or the content is too short to judge) — running
+        # it again in add_entry would only pay for the same search twice.
+        return self.add_entry(
+            content,
+            file_name=file_name,
+            entry_type=entry_type,
+            tags=tags,
+            weight=weight,
+            epoch=epoch,
+            source=source,
+            skip_dedup=True,
+            origin=origin,
+        )
 
     # Canonical implementations live in core.memory.routing (shared with
     # consolidation clustering); kept as static methods for callers/tests.
@@ -461,6 +610,66 @@ class MemoryStore:
             (len(entries), now, file_name),
         )
 
+    def _reindex_commit(self, file_name: str, raw: str) -> None:
+        """Rebuild one file's FTS rows from raw markdown and commit."""
+        conn = self._connect()
+        try:
+            self._reindex_file(conn, file_name, raw)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _write_locked(self, md_path: Path, data: str, on_written: Callable[[], None] | None = None) -> None:
+        """Replace a file's contents with the exclusive flock held across truncation.
+
+        open(path, "w") truncates at open time, so an flock taken on the next
+        line guards nothing: a concurrent reader landing between the truncation
+        and the write sees an empty memory file and reindex/parse treats it as
+        a file with no entries. Opening without O_TRUNC, locking, then
+        seek/truncate/write keeps the empty window entirely inside the lock.
+
+        `on_written` runs before the lock is released, so an index update can
+        commit while no other writer can touch the markdown.
+
+        Caller holds self._lock — this is the file-level half only.
+        """
+        fd = os.open(md_path, os.O_RDWR | os.O_CREAT, 0o644)
+        with os.fdopen(fd, "r+", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                f.truncate()
+                f.write(data)
+                f.flush()
+                if on_written is not None:
+                    on_written()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def rewrite_file(self, file_name: str, transform: Callable[[str], str | None]) -> bool:
+        """Read a memory file, apply `transform` to its raw markdown, write it back.
+
+        The store's own mutations and the maintenance sweeps both need
+        read-modify-write on a memory file. The sweeps reimplemented it against
+        `store._lock` / `store._dir` because the primitive wasn't on the public
+        surface — which is how the flock-after-truncate bug got copied into
+        them. This is the one implementation both use.
+
+        Returns True when the file was rewritten; False when it doesn't exist
+        or `transform` returned None / unchanged text.
+        """
+        file_name = self._validate_name(file_name)
+        md_path = self._dir / f"{file_name}.md"
+        if not md_path.exists():
+            return False
+        with self._lock:
+            raw = md_path.read_text(encoding="utf-8")
+            new_raw = transform(raw)
+            if new_raw is None or new_raw == raw:
+                return False
+            self._write_locked(md_path, new_raw)
+        return True
+
     def update_entry(self, file_name: str, epoch: int, new_content: str) -> str:
         """Replace the content of an existing entry (identified by epoch).
 
@@ -513,19 +722,7 @@ class MemoryStore:
 
             new_raw = "\n---\n".join(new_sections)
 
-            with open(md_path, "w", encoding="utf-8") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(new_raw)
-                    f.flush()
-                    conn = self._connect()
-                    try:
-                        self._reindex_file(conn, file_name, new_raw)
-                        conn.commit()
-                    finally:
-                        conn.close()
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            self._write_locked(md_path, new_raw, on_written=lambda: self._reindex_commit(file_name, new_raw))
 
         logger.info("Updated memory entry epoch=%d in '%s'", epoch, file_name)
         self._candor_attest(file_name, "revise")
@@ -567,19 +764,7 @@ class MemoryStore:
 
             new_raw = "\n---\n".join(new_sections)
 
-            with open(md_path, "w", encoding="utf-8") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                try:
-                    f.write(new_raw)
-                    f.flush()
-                    conn = self._connect()
-                    try:
-                        self._reindex_file(conn, file_name, new_raw)
-                        conn.commit()
-                    finally:
-                        conn.close()
-                finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            self._write_locked(md_path, new_raw, on_written=lambda: self._reindex_commit(file_name, new_raw))
 
         logger.info("Deleted memory entry epoch=%d from '%s'", epoch, file_name)
         self._candor_attest(file_name, "forget")
@@ -605,10 +790,7 @@ class MemoryStore:
                     f"<!-- @file: {name} -->",
                     f"<!-- @file: {name} -->\n<!-- @archived: true -->",
                 )
-                with open(md_path, "w") as f:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                    f.write(content)
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                self._write_locked(md_path, content)
 
             # Remove all FTS5 entries and zero count
             conn = self._connect()
@@ -1091,19 +1273,7 @@ class MemoryStore:
                     continue
 
                 new_raw = "\n---\n".join(new_sections)
-                with open(md_path, "w", encoding="utf-8") as f:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-                    try:
-                        f.write(new_raw)
-                        f.flush()
-                        conn = self._connect()
-                        try:
-                            self._reindex_file(conn, file_name, new_raw)
-                            conn.commit()
-                        finally:
-                            conn.close()
-                    finally:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                self._write_locked(md_path, new_raw, on_written=lambda: self._reindex_commit(file_name, new_raw))
 
                 repaired += changed
                 logger.info("Repaired %d epoch collision(s) in '%s'", changed, file_name)

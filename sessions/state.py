@@ -1,4 +1,6 @@
-"""Pernix — AgentSession dataclass and session state machine."""
+"""Pernix — AgentSession dataclass. The state machine itself lives in
+sessions/state_v2.py; this module only carries the per-session data it
+mutates."""
 
 from __future__ import annotations
 
@@ -7,7 +9,6 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, NamedTuple
 
 
@@ -55,38 +56,17 @@ class PendingMessage(NamedTuple):
         return cls(*entry)
 
 
-class SessionState(str, Enum):
-    """Legacy session state enum (pre-v2).
-
-    The authoritative state machine is now `sessions.state_v2.SessionStateV2`
-    (9 states). This enum is retained only as a compatibility mirror so that:
-      * existing in-memory consumers reading `session.state` keep working
-      * DB rows with legacy values ("error", "deleted") still load
-      * the reaper's signature-based checks still compile
-
-    `ERROR` and `DELETED` are **deprecated**: production code no longer writes
-    them (Stage 1 of the state-machine migration). The v2 bridge maps legacy
-    "error" → FINALIZING, "deleted" → IDLE_READY so any stale DB values
-    continue to hydrate sensibly.
-
-    Use sessions.state_v2.transition() for all state mutations. Tests may
-    still assign `session.state` directly or use `_force_state_for_tests`
-    for scenario setup.
-    """
-
-    IDLE = "idle"
-    SCOUTING = "scouting"
-    PROCESSING = "processing"
-    ERROR = "error"  # deprecated — no production writes; DB-load only
-    DELETED = "deleted"  # deprecated — was never set in v1 either
-
-
 @dataclass
 class AgentSession:
-    """In-memory state for an active session."""
+    """In-memory state for an active session.
+
+    The session's state lives in `_state_v2` and is mutated exclusively by
+    `sessions.state_v2.transition()`. The pre-v2 5-value `SessionState` enum
+    and its `state` mirror field were deleted once the v2 machine became
+    authoritative — read state via `state_v2._current_state(session)`.
+    """
 
     session_id: str
-    state: SessionState = SessionState.IDLE
     task: asyncio.Task | None = None
 
     # Event system
@@ -239,28 +219,6 @@ class AgentSession:
     _compaction_count: int = field(default=0)
     _state_entered_ms: int | None = field(default=None)
 
-    def _force_state_for_tests(self, new_state: SessionState, reason: str = "") -> None:
-        """TEST-ONLY: force a legacy-enum state change without validation.
-
-        Production code MUST go through `sessions.state_v2.transition()` which
-        validates against the graph, writes the state_log row, and emits
-        session.state_changed. This underscore-prefixed method exists so test
-        fixtures can arbitrarily set up a session in any legacy state (e.g.
-        assert snooze skips on ERROR) without routing through a full turn.
-
-        tests/test_state_machine_invariants.py enforces that this method is
-        only called from tests/ files.
-        """
-        import logging as _logging
-
-        _logging.getLogger("pernix.session.state").debug(
-            "[test] Force state %s → %s%s",
-            self.state.value,
-            new_state.value,
-            f" ({reason})" if reason else "",
-        )
-        self.state = new_state
-
     def emit_event(self, event: dict) -> None:
         """Broadcast event to all subscribers and buffer it.
 
@@ -333,9 +291,9 @@ class AgentSession:
 
         Derived from the v2 state machine: True iff state == IDLE_READY.
         Retained as a read-only property so existing consumers (API status
-        payloads, frontend scripts, orchestration checks) keep working
-        while the migration proceeds. Writers must go through
-        state_v2.transition() — bare assignments are gone."""
+        payloads, frontend scripts, orchestration checks) keep working.
+        Writers must go through state_v2.transition() — bare assignments
+        are gone."""
         from sessions.state_v2 import SessionStateV2, _current_state
 
         return _current_state(self) == SessionStateV2.IDLE_READY

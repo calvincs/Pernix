@@ -17,6 +17,20 @@ from core.tools.paths import ensure_workspace_venv_on_path
 
 CUSTOM_TOOLS_DIR = Path("core/tools/builtin")
 
+# Every filesystem path in this module is composed as
+# CUSTOM_TOOLS_DIR / f"custom_{name}...", i.e. `name` is interpolated straight
+# into a path inside the SERVER'S OWN SOURCE TREE, bypassing paths.py. So the
+# name is validated before it is ever used to compose a path: a strict
+# lowercase/digit/underscore identifier, first char a letter, 40 chars max.
+# Anything containing `/`, `.` or `..` cannot reach path composition at all.
+TOOL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+
+# NOT a security control — a typo-guard. These are substrings; the equivalent
+# call is always one variation away (os.popen for os.system, subprocess.run for
+# subprocess.Popen, double quotes for the single-quoted open() patterns), and
+# module-level code runs at import time without needing any of them. The real
+# control on this path is the dangerous-tool gate on create_tool/update_tool
+# plus the container the server runs in. See docs/security.md.
 PROHIBITED_PATTERNS = [
     "os.system",
     "__import__('os')",
@@ -30,6 +44,16 @@ PROHIBITED_PATTERNS = [
     "/usr/bin/pip",
     "/usr/local/bin/pip",
 ]
+
+
+def _validate_tool_name(name: str) -> str | None:
+    """Return an error string if `name` may not be composed into a path."""
+    if not name or not TOOL_NAME_PATTERN.match(name):
+        return (
+            "Error: Tool name must be lowercase letters, digits and underscores, "
+            "start with a letter, and be at most 40 characters."
+        )
+    return None
 
 
 def _parse_requirements(raw: str) -> list[str]:
@@ -56,12 +80,9 @@ def create_tool(
     name: str, description: str, code: str, tags: str = "", requirements: str = "", _context: dict | None = None
 ) -> str:
     """Create a custom tool. The code must define a function and a register(reg) function."""
-    # Validate name
-    if not re.match(r"^[a-z][a-z0-9_]*$", name):
-        return "Error: Tool name must be lowercase alphanumeric with underscores"
-
-    if len(name) > 50:
-        return "Error: Tool name too long (max 50 chars)"
+    err = _validate_tool_name(name)
+    if err:
+        return err
 
     # Check prohibited patterns
     for pattern in PROHIBITED_PATTERNS:
@@ -134,6 +155,10 @@ def create_tool(
 
 def update_tool(name: str, code: str, requirements: str = "", _context: dict | None = None) -> str:
     """Update an existing custom tool. Keeps backup of previous version."""
+    err = _validate_tool_name(name)
+    if err:
+        return err
+
     filepath = CUSTOM_TOOLS_DIR / f"custom_{name}.py"
     if not filepath.exists():
         return f"Error: Custom tool '{name}' not found"
@@ -218,6 +243,10 @@ def restore_tool_packages(name: str, _context: dict | None = None) -> str:
     Use this after the workspace venv is rebuilt or corrupted to restore
     all packages the tool declared when it was created.
     """
+    err = _validate_tool_name(name)
+    if err:
+        return err
+
     req_file = CUSTOM_TOOLS_DIR / f"custom_{name}.requirements.txt"
     if not req_file.exists():
         return f"No requirements file for '{name}'. Pass requirements= when calling create_tool."
@@ -308,7 +337,12 @@ def register(reg) -> None:
         tags=tags + ["new", "build"],
         timeout=60,
         parallel_safe=False,
-        safety_level="safe",
+        # Highest blast radius in the toolset: the code is written into the
+        # server's own source tree and imported into the SERVER PROCESS — full
+        # os.environ (every API key), no rlimits, no setsid — and re-imported
+        # on every boot. That is strictly more authority than any tool the
+        # gate already covers, so it is gated.
+        safety_level="dangerous",
         **common,
     )
     reg.register(
@@ -330,7 +364,10 @@ def register(reg) -> None:
         tags=tags + ["update", "edit", "modify"],
         timeout=60,
         parallel_safe=False,
-        safety_level="safe",
+        # Same write-and-import-into-the-server path as create_tool. Gating
+        # only create_tool would leave a one-call detour: create a benign tool
+        # once, then replace its body with anything.
+        safety_level="dangerous",
         **common,
     )
     reg.register(

@@ -18,9 +18,35 @@ logger = logging.getLogger("pernix.db")
 # Connections are reused per (thread, path); `with conn:` blocks commit but
 # never close, so reuse is transparent. Verified: no code path nests
 # connection contexts to the same DB in one thread, so a shared connection
-# cannot commit another block's in-flight transaction.
+# cannot commit another block's in-flight transaction. That invariant is
+# enforced by tests/test_db_invariants.py, not just by this comment.
 _conn_local = threading.local()
 _CONN_CACHE_MAX = 4  # sessions + memory + headroom for test tmp paths
+
+
+class _TrackedConnection(sqlite3.Connection):
+    """Connection that knows whether a `with` block is currently holding it.
+
+    Cache eviction used to close *every* cached connection unconditionally,
+    including one an outer stack frame was mid-`with` on — the caller's next
+    statement would then raise ProgrammingError and its in-flight transaction
+    would be lost. That was safe only by arithmetic coincidence (prod uses two
+    paths, the cap is four). Tracking checkouts makes it safe by construction:
+    eviction skips anything currently held.
+    """
+
+    # Class-level default so the attribute exists before the first __enter__.
+    _checkouts = 0
+
+    def __enter__(self):
+        self._checkouts += 1
+        return super().__enter__()
+
+    def __exit__(self, *exc_info):
+        try:
+            return super().__exit__(*exc_info)
+        finally:
+            self._checkouts -= 1
 
 
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
@@ -38,15 +64,20 @@ def _connect(db_path: str | None = None) -> sqlite3.Connection:
         except sqlite3.ProgrammingError:
             del cache[path]
     if len(cache) >= _CONN_CACHE_MAX:
-        # Evict everything (tests rotate tmp DB paths; prod uses 2 paths).
-        for stale in cache.values():
+        # Evict idle entries only (tests rotate tmp DB paths; prod uses 2).
+        # A connection checked out by an outer frame is left in place — the
+        # cap is a soft target, and briefly exceeding it costs one file handle
+        # whereas closing a live connection costs a transaction.
+        for stale_path, stale in list(cache.items()):
+            if getattr(stale, "_checkouts", 0) > 0:
+                continue
             try:
                 stale.close()
             except Exception:
                 pass
-        cache.clear()
+            del cache[stale_path]
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, factory=_TrackedConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -94,6 +125,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     system_prompt TEXT NOT NULL DEFAULT '',
     session_type TEXT DEFAULT 'normal',
     parent_session_id TEXT,
+    -- Retired: the pre-v2 5-state session enum. The state machine lives in
+    -- state_v2 (added by migration v16) and no longer writes this column;
+    -- see the v16 entry in MIGRATIONS. Kept rather than dropped because
+    -- SQLite would need a full table rebuild and the column is harmless —
+    -- its only remaining writers are create_session (seeds 'idle') and the
+    -- RLM view-session busy marker in core/extensions/rlm.
     state TEXT DEFAULT 'idle',
     created_at TEXT,
     updated_at TEXT
@@ -575,9 +612,16 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
         "persist v2 state and watched_worker_ids on sessions for restart recovery",
         [
             # state_v2 stores the 10-state machine value directly. The legacy
-            # `state` column maps AWAITING_WORKERS / AWAITING_USER / FINALIZING
-            # to "idle", losing crucial info across restart. With state_v2
-            # populated, get_or_create can restore the true v2 state.
+            # `state` column mapped AWAITING_WORKERS / AWAITING_USER /
+            # FINALIZING to "idle", losing crucial info across restart. With
+            # state_v2 populated, get_or_create restores the true state.
+            #
+            # state_v2 is now the only session-state column the state machine
+            # writes; `state` is retired but NOT dropped (see _SESSIONS_SCHEMA).
+            # This ALTER deliberately does not backfill state_v2, so rows
+            # stranded at state='processing' before this migration ran still
+            # read NULL here — that is the entire reason
+            # models.get_sessions_in_legacy_processing_only() exists.
             "ALTER TABLE sessions ADD COLUMN state_v2 TEXT",
             # watched_worker_ids is a JSON array (string '[]' default) holding
             # the IDs the parent is waiting on. Without this, restart loses the
@@ -840,6 +884,34 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
                 resolved_at TEXT,
                 created_at TEXT
             )""",
+        ],
+    ),
+    (
+        26,
+        "one-active-goal uniqueness (backstop for create_goal's check-then-insert)",
+        [
+            # v23 documented "one active goal per session (enforced in the
+            # accessor)" but shipped only a NON-unique index, and the accessor's
+            # SELECT ran in autocommit (legacy isolation_level begins a
+            # transaction only before DML) — so two concurrent create_goal calls
+            # both read "no active goal" and both inserted. create_goal now takes
+            # BEGIN IMMEDIATE around the check; this index is the backstop that
+            # makes the invariant true regardless of which caller races.
+            # Existing duplicates would fail the CREATE, so retire the older ones
+            # first: get_active_goal already resolves ties with ORDER BY id DESC,
+            # so the highest id per session is the one that has been live.
+            """UPDATE session_goals SET status = 'error',
+                   updated_at = COALESCE(updated_at, started_at),
+                   completed_at = COALESCE(completed_at, updated_at, started_at)
+               WHERE status IN ('active', 'paused', 'budget_limited')
+                 AND id NOT IN (
+                   SELECT MAX(id) FROM session_goals
+                   WHERE status IN ('active', 'paused', 'budget_limited')
+                   GROUP BY session_id
+                 )""",
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_session_goals_one_active
+                   ON session_goals(session_id)
+                   WHERE status IN ('active', 'paused', 'budget_limited')""",
         ],
     ),
 ]

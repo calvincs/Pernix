@@ -85,7 +85,9 @@ def apply_view_pruning(
     result = []
     for i, msg in enumerate(messages):
         if i < cutoff and msg.get("role") == "tool":
-            content = msg.get("content", "")
+            # `or ""` not a get() default: the column is nullable and a NULL
+            # row returns None, which len() then raises on.
+            content = msg.get("content") or ""
             if len(content) > min_chars:
                 preview = content[:80].replace("\n", " ")
                 stub = f"[pruned — {len(content)} chars] {preview}..."
@@ -134,11 +136,86 @@ def exclude_orphans(messages: list[dict]) -> list[dict]:
 # Phase 3: LLM summarization (append-only)
 # ---------------------------------------------------------------------------
 
+# settings.compaction_keep_tokens (51k) is a global constant that knows
+# nothing about the active model. The compiler's history share is roughly the
+# context budget minus the output reservation, the system prompt and the tool
+# schemas, and it fires compaction at settings.compaction_threshold of that.
+# On any model whose window is smaller than ~57k — every Ollama model at the
+# default ollama_num_ctx_cap — an unclamped keep_tokens exceeds the entire
+# history the compiler will ever hold, the boundary scan below never breaks,
+# and the whole live conversation gets folded into a summary.
+_KEEP_HISTORY_FRACTION = 0.5
+_KEEP_BUDGET_FRACTION = 0.25
+_MIN_KEEP_TOKENS = 2_000
+
+
+def _effective_context_budget(session_id: str) -> int:
+    """Context budget for this session, mirroring the agent loop's derivation."""
+    try:
+        from sessions.manager import get_manager
+
+        session = get_manager().get(session_id)
+        override = int(getattr(session, "context_budget_override", 0) or 0) if session else 0
+        if override:
+            return override
+    except Exception as e:
+        logger.debug("Session budget override lookup failed for %s: %s", session_id, e)
+    try:
+        from core.llm.budget import derive_model_budget
+
+        derived = derive_model_budget(settings.llm_model)
+        if derived:
+            return int(derived)
+    except Exception as e:
+        logger.debug("Model budget lookup failed: %s", e)
+    return int(settings.context_budget)
+
+
+def _resolve_keep_tokens(session_id: str, history_budget: int | None) -> int:
+    """compaction_keep_tokens clamped to what the model can actually hold."""
+    configured = int(settings.compaction_keep_tokens)
+    if history_budget and history_budget > 0:
+        ceiling = int(history_budget * _KEEP_HISTORY_FRACTION)
+    else:
+        ceiling = int(_effective_context_budget(session_id) * _KEEP_BUDGET_FRACTION)
+    return max(min(configured, ceiling), _MIN_KEEP_TOKENS)
+
+
+def _active_turn_root_index(convo: list[dict]) -> int:
+    """Index of the user message that opened the turn currently in flight.
+
+    The compaction boundary must never advance past it. compile_context
+    filters history on ``id > compacted_up_to`` *before* its pin can protect
+    the active turn's user message, so folding that message leaves the agent
+    resuming a live turn with a summary and no idea what it was asked.
+
+    The live root is the last user message that already has a non-user
+    message after it. A trailing run of user messages with nothing after them
+    is queued for future turns (the compiler hides those behind
+    turn_user_msg_id), so the root is the first of that run instead. Both
+    readings err toward keeping one turn too many, never one too few.
+    Returns -1 when the window holds no user message at all.
+    """
+    last_nonuser = -1
+    for i, msg in enumerate(convo):
+        if msg.get("role") != "user":
+            last_nonuser = i
+
+    for i in range(last_nonuser - 1, -1, -1):
+        if convo[i].get("role") == "user":
+            return i
+
+    for i in range(last_nonuser + 1, len(convo)):
+        if convo[i].get("role") == "user":
+            return i
+    return -1
+
 
 async def compact_with_llm(
     session_id: str,
     messages: list[dict],
     existing_summary: str | None = None,
+    history_budget: int | None = None,
 ) -> bool:
     """Run LLM summarization and append compaction marker. Never deletes messages.
 
@@ -179,8 +256,8 @@ async def compact_with_llm(
     # Conversational messages not yet folded into a summary, oldest -> newest.
     convo = [m for m in raw if m["role"] not in _MARKER_ROLES and m["id"] > prev_compacted_up_to]
 
-    # Find compaction boundary: keep recent messages totaling compaction_keep_tokens
-    keep_tokens = settings.compaction_keep_tokens
+    # Find compaction boundary: keep recent messages totaling keep_tokens
+    keep_tokens = _resolve_keep_tokens(session_id, history_budget)
     total = 0
     boundary_idx = len(convo)
     for i in range(len(convo) - 1, -1, -1):
@@ -189,6 +266,17 @@ async def compact_with_llm(
             boundary_idx = i + 1
             break
         total += tokens
+
+    # Hard floor: whatever the token arithmetic says, the live turn stays.
+    root_idx = _active_turn_root_index(convo)
+    if root_idx >= 0 and boundary_idx > root_idx:
+        logger.info(
+            "Compaction boundary clamped from %d to %d to preserve the active turn (session %s)",
+            boundary_idx,
+            root_idx,
+            session_id,
+        )
+        boundary_idx = root_idx
 
     to_summarize = convo[:boundary_idx]
     if len(to_summarize) < 4:

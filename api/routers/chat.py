@@ -271,19 +271,27 @@ async def chat(body: dict):
     if len(message) > MAX_MESSAGE_SIZE:
         raise HTTPException(413, detail=f"Message too large ({len(message)} bytes, max {MAX_MESSAGE_SIZE})")
 
-    # Check idempotency via DB index (not full scan)
+    # Check idempotency via DB index (not full scan). Off-loop like every
+    # other DB call on this path: blocking sqlite3 here stalls every open SSE
+    # stream for the duration of the query.
     idempotency_key = body.get("idempotency_key")
     if idempotency_key:
-        with db.connect_sessions() as conn:
-            row = conn.execute(
-                "SELECT id FROM messages WHERE idempotency_key = ? LIMIT 1",
-                (idempotency_key,),
-            ).fetchone()
-            if row:
-                return {"status": "duplicate", "session_id": session_id}
+
+        def _find_duplicate() -> bool:
+            with db.connect_sessions() as conn:
+                return (
+                    conn.execute(
+                        "SELECT id FROM messages WHERE idempotency_key = ? LIMIT 1",
+                        (idempotency_key,),
+                    ).fetchone()
+                    is not None
+                )
+
+        if await asyncio.to_thread(_find_duplicate):
+            return {"status": "duplicate", "session_id": session_id}
 
     manager = get_manager()
-    session_db = db.get_session(session_id)
+    session_db = await asyncio.to_thread(db.get_session, session_id)
     if not session_db:
         raise HTTPException(404, detail=f"Session {session_id} not found")
     # Read-only sessions (dream journals, RLM run views) reject messages —

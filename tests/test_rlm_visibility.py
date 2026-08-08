@@ -76,7 +76,7 @@ def test_list_rlm_run_children():
 
 def test_fail_orphaned_rlm_runs_parks_view_sessions():
     sid = db.create_session(title="RLM: x", session_type="rlm")
-    db.set_session_state(sid, "processing")
+    db.update_session(sid, state="processing")
     _seed_run(ui_session_id=sid)
     assert db.fail_orphaned_rlm_runs() == 1
     assert db.get_rlm_run("ab12cd34")["status"] == "orphaned"
@@ -206,7 +206,7 @@ def test_finalize_run_ui(monkeypatch):
     emitted = []
     monkeypatch.setattr(rlm_mod, "_emit_session_event", lambda sid, ev: emitted.append((sid, ev)))
     view_sid = db.create_session(title="RLM: x", session_type="rlm", parent_session_id="parent-1")
-    db.set_session_state(view_sid, "processing")
+    db.update_session(view_sid, state="processing")
 
     result = RLMRunResult(answer="a", status="completed", iterations=4, subcalls=2, duration=12.3)
     rlm_mod._finalize_run_ui("parent-1", view_sid, "ab12cd34", result)

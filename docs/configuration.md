@@ -272,7 +272,7 @@ A governed, machine-editable policy store — routing hints and prompt notes the
 | `shell_timeout` | `30` | Seconds before a shell command is killed. |
 | `tool_timeout` | `300` | Seconds before any tool call is killed (covers file ops, HTTP, etc.). |
 | `shell_address_space_limit_bytes` | `8589934592` | Virtual address space cap (8GB) applied per shell process via `RLIMIT_AS`. Set to `0` to disable. |
-| `shell_env_mode` | `"passthrough"` | How environment variables are passed to the shell: `passthrough` (inherit all), `denylist` (all except listed), `allowlist` (only listed). |
+| `shell_env_mode` | `"allowlist"` | How environment variables are passed to the shell: `allowlist` (only listed — the default, so provider API keys and other server secrets never reach shell children), `denylist` (all except listed), `passthrough` (inherit all — opt-in only; hands every server secret to every command). |
 | `shell_env_denylist` | *(empty)* | Variables to exclude when `shell_env_mode = "denylist"`. |
 | `shell_env_allowlist` | `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR`, plus audio/display vars | Variables to include when `shell_env_mode = "allowlist"`. |
 

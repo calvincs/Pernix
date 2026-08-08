@@ -283,6 +283,7 @@ async def ingest_document(
     stats = {
         "sections_parsed": len(sections),
         "entries_saved": 0,
+        "entries_superseded": 0,
         "entries_skipped_short": skipped_short,
         "entries_skipped_dup": 0,
         "files_used": {},
@@ -292,11 +293,6 @@ async def ingest_document(
 
     for section in valid_sections:
         content = section["clean_content"]
-
-        # Dedup check
-        if store.is_duplicate(content):
-            stats["entries_skipped_dup"] += 1
-            continue
 
         file_name = routing.get(section["index"], "pernix.notes")
 
@@ -321,23 +317,35 @@ async def ingest_document(
         if len(entry_content) > 20000:
             entry_content = entry_content[:20000] + "... [truncated]"
 
-        await asyncio.to_thread(
-            store.add_entry,
-            content=entry_content,
-            file_name=file_name,
-            entry_type="finding",
-            tags=tags,
-            weight=weight,
-            source="ingest",
+        # Dedup gate lives inside add_or_supersede_entry: a re-ingested
+        # document whose section has since been corrected upstream rewrites
+        # the stored entry rather than being dropped for resembling it.
+        result = str(
+            await asyncio.to_thread(
+                store.add_or_supersede_entry,
+                content=entry_content,
+                file_name=file_name,
+                entry_type="finding",
+                tags=tags,
+                weight=weight,
+                source="ingest",
+            )
         )
+        if result.startswith("Superseded"):
+            stats["entries_superseded"] += 1
+            continue
+        if not result.startswith("Saved to"):
+            stats["entries_skipped_dup"] += 1
+            continue
         stats["entries_saved"] += 1
         stats["files_used"][file_name] = stats["files_used"].get(file_name, 0) + 1
 
     logger.info(
-        "Ingested '%s': %d sections → %d saved, %d short, %d dup across %d files (%s routing)",
+        "Ingested '%s': %d sections → %d saved, %d superseded, %d short, %d dup across %d files (%s routing)",
         source_name,
         stats["sections_parsed"],
         stats["entries_saved"],
+        stats["entries_superseded"],
         stats["entries_skipped_short"],
         stats["entries_skipped_dup"],
         len(stats["files_used"]),

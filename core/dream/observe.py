@@ -9,8 +9,13 @@ Every item gets a short ref id ([P1], [C1], [M1]...). The hypothesizer may
 cite only these ids — fabricated references die at the parse boundary.
 Memory refs carry a content-hash prefix so later validation can detect that
 consolidation/splitting moved or rewrote the entry (stale ref => expired,
-never guessed). Entries with source == "dream" are excluded from the sample:
-the dreamer must not dream about its own output (self-reinforcement guard).
+never guessed). Dream-authored entries are excluded from the sample: the
+dreamer must not dream about its own output (self-reinforcement guard).
+The guard matches every source starting with "dream", not just the literal
+"dream" — the memory-correction effector writes source="dream_fix", and
+those entries land weight="high" with text instructing that they override
+older conflicting entries, which made them the highest-salience material in
+the file feeding the loop that authored them.
 """
 
 from __future__ import annotations
@@ -35,6 +40,17 @@ _RENDER_CHAR_CAP = 300
 
 # `- pred(arg1, arg2): 62% success over 41 obs ...` (intel.py line format)
 _BRIEF_LINE_RE = re.compile(r"^- (\w+)\(([^)]*)\):")
+
+
+def is_dream_authored(entry) -> bool:
+    """The self-reinforcement guard, as a prefix test.
+
+    Dream writes memory under source="dream"; the memory-correction effector
+    (`core/memory/ingest.py`) writes source="dream_fix". An equality check on
+    "dream" lets the second family straight back into the evidence pack, so
+    every source in the family is matched here instead.
+    """
+    return str(getattr(entry, "source", "") or "").startswith("dream")
 
 
 def content_hash(text: str) -> str:
@@ -154,7 +170,7 @@ async def build_pack(store) -> EvidencePack:
             mem_file = next((n for n in files if n > cursor), files[0])
             md = await asyncio.to_thread(store.read_file, mem_file)
             if md:
-                entries = [e for e in parse_entries_from_markdown(mem_file, md) if e.source != "dream"]
+                entries = [e for e in parse_entries_from_markdown(mem_file, md) if not is_dream_authored(e)]
                 now = time.time()
                 for i, e in enumerate(entries[:_MEMORY_ENTRY_LIMIT], 1):
                     age_days = max(0, int((now - e.epoch) // 86400))

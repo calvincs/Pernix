@@ -125,18 +125,11 @@ async def distill_session(
 
     # Save with dedup
     saved = 0
+    superseded = 0
     skipped_dup = 0
     for entry in entries:
         content = entry.get("content", "")
         if not content:
-            continue
-
-        # Dedup check (multi-signal: BM25 top-3 + SequenceMatcher + Jaccard).
-        # Threaded: with an embedding model set, is_duplicate runs a hybrid
-        # search whose query embedding is a blocking HTTP call — this hook
-        # runs on the event loop at turn end.
-        if await asyncio.to_thread(store.is_duplicate, content):
-            skipped_dup += 1
             continue
 
         tags = entry.get("tags", "")
@@ -145,20 +138,41 @@ async def distill_session(
         if session_type == "worker":
             tags += ",worker"
 
-        # add_entry enforces unique (file, epoch) identity at write time.
-        await asyncio.to_thread(
-            store.add_entry,
-            content=content,
-            file_name=entry.get("file") or None,
-            entry_type=entry.get("type", "note"),
-            tags=tags,
-            weight=entry.get("weight", "normal"),
-            source="distill",
-            origin=origin,
+        # add_or_supersede_entry runs the multi-signal dedup gate itself and,
+        # when a blocked write is a correction of the entry blocking it,
+        # rewrites that entry in place instead of dropping the correction —
+        # the similarity that makes a correction detectable is exactly what
+        # made the old is_duplicate-then-continue discard it. It also enforces
+        # unique (file, epoch) identity at write time.
+        # Threaded: with an embedding model set the gate runs a hybrid search
+        # whose query embedding is a blocking HTTP call, and this hook runs on
+        # the event loop at turn end.
+        result = str(
+            await asyncio.to_thread(
+                store.add_or_supersede_entry,
+                content=content,
+                file_name=entry.get("file") or None,
+                entry_type=entry.get("type", "note"),
+                tags=tags,
+                weight=entry.get("weight", "normal"),
+                source="distill",
+                origin=origin,
+            )
         )
-        saved += 1
+        if result.startswith("Superseded"):
+            superseded += 1
+        elif result.startswith("Saved to"):
+            saved += 1
+        else:
+            skipped_dup += 1
 
-    logger.info("Distilled session %s: %d saved, %d deduped", session_id, saved, skipped_dup)
+    logger.info(
+        "Distilled session %s: %d saved, %d superseded, %d deduped",
+        session_id,
+        saved,
+        superseded,
+        skipped_dup,
+    )
 
 
 _WEB_TOOLS = ("search_web", "browse_web", "http_get")

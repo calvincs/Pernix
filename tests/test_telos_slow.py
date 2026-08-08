@@ -288,13 +288,14 @@ def test_hevel_discharge_rewards_spawned_questions(store):
 
 
 def test_entropy_raises_temperature_when_cold(store):
-    # All executed hypotheses in one near-band bucket -> entropy 0.
+    # All executed hypotheses in one near-band bucket -> entropy 0. 'gated'
+    # is deliberately NOT executed (see novelty_entropy), so these run.
     for i in range(5):
         store.write(
             TelosObject(
                 id=store.mint_id("hypothesis"),
                 kind="hypothesis",
-                meta={"band": "near", "status": "gated", "mapping": {"source_domain": "same"}, "question": "q"},
+                meta={"band": "near", "status": "running", "mapping": {"source_domain": "same"}, "question": "q"},
             )
         )
         store.trace_append("hypothesis_resolved", {"band": "near", "question": "q"})
@@ -370,15 +371,51 @@ def test_realized_band_shares_counts_executed_not_generated(store):
 # --- reconciliation (mechanical part) --------------------------------------
 
 
-def test_reconcile_flags_unsupported_refs(store):
-    claims = [
-        {"claim": "I resolved a question.", "refs": ["T1", "T2"]},
-        {"claim": "I invented a memory.", "refs": ["T99"]},
+def _events() -> list[dict]:
+    """A small trace window with real content to reconcile against."""
+    return [
+        {"type": "question_narrowed", "id": "q_2026_0807_001", "resolved": 3},
+        {"type": "hypothesis_resolved", "id": "h_0012", "verdict": "refuted", "band": "far"},
+        {"type": "ordo_pass", "orphaned": ["g_stray"], "reranked": []},
     ]
-    rec = reconcile(store, claims, trace_count=10)
-    assert len(rec["supported"]) == 1
-    assert len(rec["unsupported"]) == 1
+
+
+def test_reconcile_opens_the_cited_event(store):
+    """Support requires shared evidence with the cited event, not a ref
+    number in range. Both claims below cite live refs; only one bears on
+    what its event actually records."""
+    events = _events()
+    claims = [
+        {"claim": "I narrowed q_2026_0807_001 after resolving its hypotheses.", "refs": ["T1"]},
+        {"claim": "I rewrote the scheduler to prefer cheaper models.", "refs": ["T3"]},
+    ]
+    rec = reconcile(store, claims, events)
+    assert [c["refs"] for c in rec["supported"]] == [["T1"]]
+    assert [c["refs"] for c in rec["unsupported"]] == [["T3"]]
     assert rec["divergence"] == 0.5
+
+
+def test_reconcile_supports_on_named_identifier(store):
+    """An id present in the event JSON entails the claim even when no words
+    overlap — the identifier IS the shared evidence."""
+    rec = reconcile(store, [{"claim": "The far-band idea h_0012 did not survive.", "refs": ["T2"]}], _events())
+    assert len(rec["supported"]) == 1
+
+
+def test_reconcile_flags_out_of_range_refs(store):
+    """The old bounds check is retained as a precondition, not the test."""
+    rec = reconcile(store, [{"claim": "I invented a memory.", "refs": ["T99"]}], _events())
+    assert len(rec["unsupported"]) == 1
+    assert rec["divergence"] == 1.0
+
+
+def test_reconcile_rejects_a_plausible_paraphrase(store):
+    """The regression this replaces: any claim citing any in-range ref used
+    to be 'supported by the trace'. A fluent sentence that shares nothing
+    with its cited event must now fail."""
+    claims = [{"claim": "I improved my performance considerably.", "refs": ["T1", "T2", "T3"]}]
+    rec = reconcile(store, claims, _events())
+    assert len(rec["unsupported"]) == 1
 
 
 async def test_full_reconciliation_writes_ledger_and_alarms(store, mock_llm_client, monkeypatch):
@@ -389,7 +426,8 @@ async def test_full_reconciliation_writes_ledger_and_alarms(store, mock_llm_clie
         _chat_resp(
             json.dumps(
                 [
-                    {"claim": "I completed four turns.", "refs": ["T1"]},
+                    # T1 is root_seeded (ensure_root); T2..T5 are the turns.
+                    {"claim": "I completed four turns.", "refs": ["T2"]},
                     {"claim": "I flew to the moon.", "refs": ["T400"]},
                 ]
             )

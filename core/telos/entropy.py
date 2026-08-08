@@ -58,24 +58,50 @@ def realized_band_shares(store: TelosStore, days: int = 7) -> dict:
     return {**{k: round(v / total, 3) for k, v in counts.items()}, "total": total}
 
 
+def _bucket_key(h: TelosObject) -> str:
+    """Novelty bucket for one hypothesis: band + the corpus region it drew on.
+
+    `context_files` is recorded by the SOUP sampler and names the memory
+    files the band actually returned — the model does not choose it and
+    cannot rename it. When it is absent (hypotheses generated before the
+    field existed, or a pass where memory returned nothing for that band)
+    the key falls back to the model-authored `source_domain` label, and that
+    fallback is a known weakness, stated plainly: a model that rotates
+    synonyms scores high novelty with zero change in actual exploration.
+    Bucketing on the sampled file is what closes that hole, so the fallback
+    is a gap in the data, not a design choice.
+    """
+    files = h.get("context_files") or []
+    if isinstance(files, list) and files:
+        return f"{h.get('band')}:{'|'.join(sorted(str(f) for f in files))[:120]}"
+    mapping = h.get("mapping") or {}
+    return f"{h.get('band')}:domain:{str(mapping.get('source_domain', ''))[:40].lower()}"
+
+
 def novelty_entropy(store: TelosStore, days: int = 7) -> float:
-    """Normalized Shannon entropy over (band, source_domain) of hypotheses
-    executed in the last `days` — collapse to one band/domain reads as 0, an
-    even spread as 1. The window is load-bearing: measured over all time the
-    detector desensitizes as history accumulates, and a drive that went flat
-    last week stays hidden behind years of past variety."""
+    """Normalized Shannon entropy over (band, sampled corpus region) of
+    hypotheses executed in the last `days` — collapse to one bucket reads as
+    0, an even spread as 1. The window is load-bearing: measured over all
+    time the detector desensitizes as history accumulates, and a drive that
+    went flat last week stays hidden behind years of past variety.
+
+    "Executed" means the same thing here as in `realized_band_shares`:
+    hypotheses that actually ran. `gated` is excluded — generation emits
+    ~3 candidates per cycle and evaluation resolves ~1, so counting the
+    gated pool let generation variety dominate a detector that is supposed
+    to be measuring what the layer *does*.
+    """
     executed = [
         h
         for h in store.list_hypotheses()
-        if h.get("status") in ("running", "supported", "refuted", "gated")
+        if h.get("status") in ("running", "supported", "refuted")
         and _within_days(h.get("updated_at") or h.get("created_at"), days)
     ]
     if len(executed) < 2:
         return 1.0  # too little signal to call the drive extinguished
     buckets: dict[str, int] = {}
     for h in executed:
-        mapping = h.get("mapping") or {}
-        key = f"{h.get('band')}:{str(mapping.get('source_domain', ''))[:40].lower()}"
+        key = _bucket_key(h)
         buckets[key] = buckets.get(key, 0) + 1
     total = sum(buckets.values())
     h_val = -sum((n / total) * math.log2(n / total) for n in buckets.values())

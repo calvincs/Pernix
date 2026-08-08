@@ -30,6 +30,27 @@ _STATUS_HEADINGS = {
 }
 
 
+def _confidence_note(row: dict) -> str:
+    """Render a confidence number with its provenance, or not at all.
+
+    Neither number in this pipeline is calibrated. Post-validation
+    confidence is `validate.VALIDATION_PRIOR`, one hardcoded constant on
+    every validated row; pre-validation confidence is the generating model's
+    own estimate of its own output. A bare `_(confidence 0.75)_` in a
+    human-facing artifact reads as a measurement, which is the one thing it
+    is not — so the label names where the figure came from.
+    """
+    conf = row.get("confidence")
+    if conf is None:
+        return ""
+    try:
+        value = float(conf)
+    except (TypeError, ValueError):
+        return ""
+    origin = "fixed heuristic prior" if row.get("validation_json") else "model's own estimate"
+    return f" _({origin} {value:.2f} — not calibrated)_"
+
+
 def compose_report(period_start: str, period_end: str, rows: list[dict]) -> str:
     """Pure: render report markdown from hypothesis rows updated in period."""
     counts: dict[str, int] = {}
@@ -54,8 +75,7 @@ def compose_report(period_start: str, period_end: str, rows: list[dict]) -> str:
         lines.append(f"## {_STATUS_HEADINGS[status]}")
         lines.append("")
         for r in rows_for:
-            conf = float(r.get("confidence") or 0.0)
-            lines.append(f"- **[{r.get('kind')}]** {r.get('statement')} _(confidence {conf:.2f})_")
+            lines.append(f"- **[{r.get('kind')}]** {r.get('statement')}{_confidence_note(r)}")
             validation = r.get("validation_json")
             if validation:
                 try:

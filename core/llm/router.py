@@ -215,31 +215,48 @@ class ProviderRouter:
 
         await sem.acquire(session_id=sid, session_created_at=s_at, priority=s_pri)
         released = False
+        # Failing over is only safe before the first token reaches the caller.
+        # agent.py accumulates every TOKEN into collected_content without a
+        # reset signal, so restarting on a fallback provider mid-stream would
+        # persist "<partial primary><complete fallback>" and bill both
+        # (architecture review, Appendix C §2). The remote adapters already
+        # refuse to raise past that point; this is the router-side guard for
+        # providers that do.
+        emitted_output = False
         try:
             async for event in provider.chat_stream(messages, **kwargs):
+                if event.type in (StreamEventType.TOKEN, StreamEventType.TOOL_CALL):
+                    emitted_output = True
                 yield event
         except FailoverError as fe:
             if fe.reason in FALLBACK_REASONS and self._fallback_eligible(provider):
-                logger.warning("OpenRouter %s, falling back to Ollama", fe.reason.value)
-                sem.release()
-                released = True
-                async for event in self._fallback_stream(messages, sid, s_at, s_pri, **kwargs):
-                    yield event
+                if emitted_output:
+                    logger.error("%s %s after partial stream — not failing over", provider.name, fe.reason.value)
+                    yield StreamEvent(type=StreamEventType.ERROR, error=fe.message)
+                else:
+                    logger.warning("%s %s, falling back to Ollama", provider.name, fe.reason.value)
+                    sem.release()
+                    released = True
+                    async for event in self._fallback_stream(messages, sid, s_at, s_pri, **kwargs):
+                        yield event
             else:
                 raise  # let caller (agent loop) handle typed error
         except httpx.HTTPStatusError as e:
             body = e.response.text if hasattr(e.response, "text") else ""
             reason = classify_http_error(e.response.status_code, body)
-            if reason in FALLBACK_REASONS and self._fallback_eligible(provider):
-                logger.warning("OpenRouter %s, falling back to Ollama", reason.value)
+            if reason in FALLBACK_REASONS and self._fallback_eligible(provider) and not emitted_output:
+                logger.warning("%s %s, falling back to Ollama", provider.name, reason.value)
                 sem.release()
                 released = True
                 async for event in self._fallback_stream(messages, sid, s_at, s_pri, **kwargs):
                     yield event
+            elif emitted_output:
+                logger.error("%s %s after partial stream — not failing over", provider.name, reason.value)
+                yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
             else:
                 raise FailoverError(reason, str(e), original=e) from e
         except httpx.ConnectError as e:
-            if self._fallback_eligible(provider):
+            if self._fallback_eligible(provider) and not emitted_output:
                 sem.release()
                 released = True
                 async for event in self._fallback_stream(messages, sid, s_at, s_pri, **kwargs):

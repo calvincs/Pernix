@@ -104,6 +104,14 @@ class ScoutReport:
     session_state: str = ""  # Max ~200 tokens
     approach_guidance: str = ""  # Max ~500 tokens
 
+    # Corrective signal for a retry attempt (reflect lessons, failing eval
+    # feedback), stamped by the session manager onto whatever report this turn
+    # ended up with. It deliberately does NOT come from the scout LLM: every
+    # path that skips scout — bypass, timeout, deterministic fallback, cache
+    # hit — used to drop the signal, and the retry then re-ran a byte-identical
+    # turn. Riding on the report means the agent sees it on all of them.
+    retry_directive: str = ""
+
     # Deliverables plan (new in Phase 2d — the agent's work contract).
     # Reflect and the eval harness read this to check completion without
     # re-parsing the transcript. Empty list is legitimate for pure Q&A.
@@ -144,6 +152,16 @@ class ScoutReport:
         """
         parts = []
 
+        if self.retry_directive:
+            # First block: this turn is a repeat of one that failed
+            # verification, and the agent has to know that before it reads a
+            # plan that may itself be the plan that failed.
+            parts.append(
+                "[RETRY — PREVIOUS ATTEMPT FAILED VERIFICATION]\n"
+                "This turn repeats work that was already judged incomplete. Do not "
+                "reproduce the previous attempt — address the findings below.\n\n"
+                f"{self.retry_directive}"
+            )
         if self.memory_context:
             parts.append(f"[RELEVANT MEMORY]\n{self.memory_context}")
         if self.cross_session_context:

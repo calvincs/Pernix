@@ -51,6 +51,15 @@ def stream_tokens(*tokens: str) -> dict:
     return {"kind": "stream", "tokens": list(tokens)}
 
 
+def stream_then_raise(tokens: list[str], status: int, body: str = "") -> dict:
+    """Step: stream these TOKEN events, then fail mid-stream.
+
+    The router must NOT fail over here — the caller has already accumulated
+    the partial response and a fallback would be appended to it.
+    """
+    return {"kind": "stream_then_raise", "tokens": list(tokens), "status": status, "body": body}
+
+
 def _http_error(status: int, body: str) -> httpx.HTTPStatusError:
     request = httpx.Request("POST", "http://faux/chat/completions")
     response = httpx.Response(status, text=body or f"faux {status}", request=request)
@@ -101,6 +110,8 @@ class FauxProvider:
             raise httpx.ConnectError("faux connect error")
         for token in step.get("tokens", [step.get("content", "")]):
             yield StreamEvent(type=StreamEventType.TOKEN, content=token)
+        if step["kind"] == "stream_then_raise":
+            raise _http_error(step["status"], step.get("body", ""))
         yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
 
     async def get_model_info(self, model: str) -> ModelInfo:

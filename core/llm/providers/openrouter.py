@@ -11,6 +11,8 @@ from typing import AsyncGenerator
 import httpx
 
 from config import settings
+from core.llm.errors import FailoverError, FailoverReason, classify_http_error
+from core.llm.providers._shared import http_status_failover, parse_usage, stream_failover
 from core.llm.types import (
     ChatResponse,
     HealthStatus,
@@ -18,7 +20,6 @@ from core.llm.types import (
     ProviderConfig,
     StreamEvent,
     StreamEventType,
-    TokenUsage,
     ToolCall,
 )
 
@@ -113,10 +114,7 @@ class OpenRouterProvider:
         # OpenRouter can return 200 with error body
         if "choices" not in data:
             error_msg = data.get("error", {}).get("message", str(data)[:500])
-            from core.llm.errors import FailoverError, classify_http_error
-
-            reason = classify_http_error(400, error_msg)
-            raise FailoverError(reason, f"OpenRouter error: {error_msg}")
+            raise FailoverError(classify_http_error(400, error_msg), f"OpenRouter error: {error_msg}")
 
         return self._parse_response(data, model)
 
@@ -138,19 +136,10 @@ class OpenRouterProvider:
             ]
             finish = "tool_calls"
 
-        usage_data = data.get("usage", {})
-        usage = TokenUsage(
-            prompt_tokens=usage_data.get("prompt_tokens", 0),
-            completion_tokens=usage_data.get("completion_tokens", 0),
-            total_tokens=usage_data.get("total_tokens", 0),
-            cache_read_tokens=usage_data.get("cache_read_input_tokens", 0),
-            cache_write_tokens=usage_data.get("cache_creation_input_tokens", 0),
-        )
-
         return ChatResponse(
             content=content,
             tool_calls=tool_calls,
-            usage=usage,
+            usage=parse_usage(data.get("usage")),
             model=model,
             provider=self.name,
             finish_reason=finish,
@@ -182,6 +171,15 @@ class OpenRouterProvider:
 
         client = self._get_client()
         done_sent = False
+        # Failover bookkeeping. `emitted_output` flips on the first TOKEN or
+        # TOOL_CALL handed to the caller: up to that point a failure can still
+        # be raised for the router to retry elsewhere, after it the caller has
+        # already accumulated partial prose and a fallback response would be
+        # spliced onto it (architecture review, Appendix C §2). `failing_over`
+        # suppresses the finally-block's DONE so a raised failure reaches the
+        # router as an exception rather than a clean end-of-stream.
+        emitted_output = False
+        failing_over = False
         # Track the last finish_reason we observed across chunks so the DONE
         # event can carry it to the agent loop (which uses it to detect
         # max_tokens truncation and trigger an in-turn continuation).
@@ -215,13 +213,13 @@ class OpenRouterProvider:
                 headers=self._headers(),
             ) as resp:
                 if resp.status_code >= 400:
-                    body = await resp.aread()
-                    logger.error(
-                        "OpenRouter %d error body: %s",
-                        resp.status_code,
-                        body.decode("utf-8", errors="replace")[:500],
-                    )
-                resp.raise_for_status()
+                    body = (await resp.aread()).decode("utf-8", errors="replace")
+                    logger.error("OpenRouter %d error body: %s", resp.status_code, body[:500])
+                    # Typed rather than raise_for_status(): the body is the only
+                    # place the real reason lives, and the router needs it
+                    # classified to decide between fallback, compaction, and a
+                    # hard stop.
+                    raise http_status_failover("OpenRouter", resp.status_code, body)
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
                         continue
@@ -250,8 +248,6 @@ class OpenRouterProvider:
                         )
                         logger.error("OpenRouter stream error in chunk: %s", err_msg)
                         # Context overflow should propagate as FailoverError for retry
-                        from core.llm.errors import FailoverError, FailoverReason, classify_http_error
-
                         reason = classify_http_error(400, err_msg)
                         if reason == FailoverReason.CONTEXT_OVERFLOW:
                             raise FailoverError(reason, err_msg)
@@ -261,16 +257,7 @@ class OpenRouterProvider:
                     # Usage
                     usage_data = chunk.get("usage")
                     if usage_data:
-                        yield StreamEvent(
-                            type=StreamEventType.USAGE,
-                            usage=TokenUsage(
-                                prompt_tokens=usage_data.get("prompt_tokens", 0),
-                                completion_tokens=usage_data.get("completion_tokens", 0),
-                                total_tokens=usage_data.get("total_tokens", 0),
-                                cache_read_tokens=usage_data.get("cache_read_input_tokens", 0),
-                                cache_write_tokens=usage_data.get("cache_creation_input_tokens", 0),
-                            ),
-                        )
+                        yield StreamEvent(type=StreamEventType.USAGE, usage=parse_usage(usage_data))
 
                     choices = chunk.get("choices", [])
                     if not choices:
@@ -300,6 +287,7 @@ class OpenRouterProvider:
                     if finish_reason in ("tool_calls", "stop") and tc_accumulator:
                         flushed = _flush_tool_calls()
                         if flushed:
+                            emitted_output = True
                             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
 
                     reasoning = delta.get("reasoning") or delta.get("reasoning_content")
@@ -308,23 +296,46 @@ class OpenRouterProvider:
 
                     content = delta.get("content")
                     if content:
+                        emitted_output = True
                         yield StreamEvent(type=StreamEventType.TOKEN, content=content)
         except GeneratorExit:
             return
+        except FailoverError as fe:
+            if not emitted_output:
+                # Pre-stream: nothing reached the caller, so this can still be
+                # retried cleanly. The old blanket `except Exception` caught
+                # this and downgraded it to an ERROR event, which made both
+                # ProviderRouter.chat_stream's failover block and agent.py's
+                # CONTEXT_OVERFLOW compact-and-retry unreachable from any
+                # streaming call.
+                failing_over = True
+                raise
+            logger.error("OpenRouter mid-stream failure after partial output (%s); terminating", fe.reason.value)
+            yield StreamEvent(type=StreamEventType.ERROR, error=fe.message)
+        except (httpx.HTTPStatusError, httpx.TransportError) as e:
+            logger.error("OpenRouter stream transport error: %s", e)
+            if not emitted_output:
+                failing_over = True
+                raise stream_failover("OpenRouter", e) from e
+            yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
         except Exception as e:
             logger.error("OpenRouter stream error: %s", e)
             yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
         finally:
-            try:
-                # Safety flush for any un-yielded tool calls
-                flushed = _flush_tool_calls()
-                if flushed:
-                    yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
-                if not done_sent:
-                    done_sent = True
-                    yield StreamEvent(type=StreamEventType.DONE, finish_reason=last_finish_reason)
-            except GeneratorExit:
-                return
+            # A failover in flight discards this stream entirely — emitting a
+            # DONE here would hand the router a clean end-of-stream and the
+            # exception would surface one __anext__ too late.
+            if not failing_over:
+                try:
+                    # Safety flush for any un-yielded tool calls
+                    flushed = _flush_tool_calls()
+                    if flushed:
+                        yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=flushed)
+                    if not done_sent:
+                        done_sent = True
+                        yield StreamEvent(type=StreamEventType.DONE, finish_reason=last_finish_reason)
+                except GeneratorExit:
+                    return
 
     # ------------------------------------------------------------------
     # Model info
