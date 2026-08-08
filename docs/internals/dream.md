@@ -81,8 +81,9 @@ intra-file contradictions. With `dream_rlm_probe` enabled (requires
 **staged copies** of the whole memory corpus, hunting cross-file
 contradictions — at most once per `dream_rlm_probe_interval_days`, with caps
 sized from your observed completed RLM runs. The probe runs as a tracked
-background task outside the snooze cycle, shows up in the RLM runs panel like
-any other run, and its candidates go through the same dedup and filters as
+background task outside the snooze cycle, shows up in the Jobs tab
+(Active while running, History when done) like any other run, and its
+candidates go through the same dedup and filters as
 cycle-generated hypotheses — no special write powers.
 
 ## What it deliberately doesn't do
