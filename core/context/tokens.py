@@ -32,7 +32,17 @@ class TokenEstimator:
         if not text:
             return 0
         if self._enc:
-            return len(self._enc.encode(text))
+            # disallowed_special=() is load-bearing, not a tuning knob. tiktoken
+            # defaults to raising on any special-token *string* ("<|endoftext|>",
+            # "<|im_start|>", ...), and this counter runs over every message on
+            # every compile. A tool result that merely quotes one — a HuggingFace
+            # model listing, a tokenizer config, a conversation about prompts —
+            # otherwise raises here and kills the turn before it starts, which
+            # bricks the session permanently: the text is in the transcript, so
+            # every later turn dies on the same message. Counting it as ordinary
+            # text is also the more accurate answer, because providers escape
+            # these sequences rather than honouring them as control tokens.
+            return len(self._enc.encode(text, disallowed_special=()))
         return self._count_heuristic(text)
 
     def _count_heuristic(self, text: str) -> int:
