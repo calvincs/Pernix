@@ -510,9 +510,15 @@ def rlm_process(task: str, source, model: str = "", continue_from: str = "", _co
                 "already have (including partial answers from earlier runs) instead."
             )
 
+    # Handles for every child this run registers, released together in the
+    # finally below. A run can spawn several children over its lifetime; each
+    # gets its own registration so one finishing never untracks the others.
+    _proc_handles: list[str] = []
+    _proc_owner = (_context or {}).get("_call_id", "")
+
     def on_child_spawn(popen):
         if session is not None:
-            session._active_process = popen
+            _proc_handles.append(session.register_process(popen, _proc_owner))
 
     try:
         run_id, run_dir, run_rel = runs.mint_run_dir()
@@ -640,7 +646,8 @@ def rlm_process(task: str, source, model: str = "", continue_from: str = "", _co
         return f"Error: RLM run {run_id} failed to start — {e}"
     finally:
         if session is not None:
-            session._active_process = None
+            for _h in _proc_handles:
+                session.release_process(_h)
 
     runs.record_finish(run_id, run_dir, result)
     _finalize_run_ui(sid, ui_session_id, run_id, result)

@@ -18,9 +18,9 @@ _OUTPUT_CAP = 50_000  # chars, mirroring bash
 _DEFAULT_TIMEOUT_S = 300.0
 # Mirrors bash's BASH_MAX_TIMEOUT clamp, and must: an unclamped cell deadline
 # outlives every recovery path. The executor gives up at max_timeout + grace
-# and raises, but asyncio.to_thread cannot be cancelled, so the worker thread
-# stays blocked in kernel.execute for the whole (unbounded) cell; the kernel
-# deliberately never registers in session._active_process, so the post-timeout
+# and raises, but a worker thread cannot be cancelled, so the thread stays
+# blocked in kernel.execute for the whole (unbounded) cell; the kernel
+# deliberately never registers via session.register_process, so the post-timeout
 # subprocess kill cannot reach the child either. Net: a leaked executor thread
 # plus a runaway process, per call. The clamp keeps both bounded.
 _MAX_TIMEOUT_S = 1800.0

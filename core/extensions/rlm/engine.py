@@ -110,7 +110,7 @@ class RLMEngine:
         self.limiter = limiter if limiter is not None else SubcallLimiter(caps.max_concurrent_subcalls)
         self._deadline = deadline
         # Called with the child Popen right after spawn — the tool uses it to
-        # register session._active_process so cancel/dispatch-timeout kill paths work.
+        # call session.register_process so cancel/dispatch-timeout kill paths work.
         self._on_child_spawn = on_child_spawn
         # Real rlm_query recursion: (prompt, model) -> answer, running a nested
         # engine on the broker handler thread. None -> rlm_query degrades to

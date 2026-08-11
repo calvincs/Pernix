@@ -636,10 +636,15 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
             preexec_fn=_child_setup,
         )
 
-        # Track process on session so cancel can kill it
+        # Track process on session so cancel and dispatch-timeout can kill it.
+        # Registered under this dispatch's call id: two concurrent bash calls in
+        # one session must not overwrite each other's entry, or the loser
+        # becomes unkillable and holds its executor thread until the child
+        # exits on its own.
         _session = _get_session_from_context(_context)
+        _proc_handle = None
         if _session:
-            _session._active_process = process
+            _proc_handle = _session.register_process(process, (_context or {}).get("_call_id", ""))
 
         # Resolve effective timeout: caller override (capped at 30 min)
         # falls back to global setting. Negative/zero treated as "use default".
@@ -654,8 +659,8 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
             _kill_process_tree(process)
             return f"Error: Command timed out after {effective_timeout}s"
         finally:
-            if _session:
-                _session._active_process = None
+            if _session and _proc_handle is not None:
+                _session.release_process(_proc_handle)
 
         output = ""
         if stdout:

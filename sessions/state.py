@@ -5,11 +5,16 @@ mutates."""
 from __future__ import annotations
 
 import asyncio
+import itertools
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
+
+# Monotonic source of unique subprocess handles. count() is atomic under the
+# GIL, so concurrent tool threads registering at once still get distinct keys.
+_process_handle_counter = itertools.count()
 
 
 class PendingMessage(NamedTuple):
@@ -262,11 +267,19 @@ class AgentSession:
     # Worker watch-set: worker IDs this session is waiting on (Gap 1+2+5)
     _watched_worker_ids: set = field(default_factory=set)
 
-    # The subprocess a tool is currently blocked on (bash, RLM child), so
-    # cancel can kill its process group. Set and cleared in the tool's own
-    # finally — not at a turn boundary — so it stays session-scoped. Typed Any
-    # to avoid importing subprocess here for a field nothing in sessions/ reads.
-    _active_process: Any = None
+    # Subprocesses tools are currently blocked on (bash, RLM children), keyed
+    # by an opaque handle. A single slot used to live here, but two concurrent
+    # bash calls in one session overwrote each other: the second registration
+    # clobbered the first, so a dispatch timeout could no longer kill the first
+    # process (its thread stayed blocked for the child's full runtime) and the
+    # first `finally` to run cleared the slot out from under the second.
+    # Registered and released in the tool's own finally — not at a turn
+    # boundary — so entries stay session-scoped. Values are (owner, proc):
+    # `owner` is the dispatch call id, which lets a dispatch timeout kill
+    # exactly the call that timed out while session cancel kills all of them.
+    # Typed loosely to avoid importing subprocess for a field nothing in
+    # sessions/ dereferences.
+    _active_processes: dict = field(default_factory=dict)
 
     # Monotonic-ish timestamp of the last "workers appear stalled" warning
     # emitted by orchestration.await_workers, which logs at most once a minute.
@@ -367,6 +380,29 @@ class AgentSession:
 
     def remove_background_ref(self) -> None:
         self._background_refs = max(0, self._background_refs - 1)
+
+    def register_process(self, proc, owner: str = "") -> str:
+        """Track a subprocess so cancel and dispatch-timeout can kill it.
+
+        Returns an opaque handle to pass back to release_process(). Keyed per
+        process rather than per session so concurrent tool calls — and a single
+        RLM run spawning several children — never overwrite one another.
+        """
+        handle = f"{owner}#{next(_process_handle_counter)}"
+        self._active_processes[handle] = (owner, proc)
+        return handle
+
+    def release_process(self, handle: str) -> None:
+        """Stop tracking one subprocess. Idempotent."""
+        self._active_processes.pop(handle, None)
+
+    def processes_for(self, owner: str) -> list:
+        """Live subprocesses registered by one dispatch call."""
+        return [proc for _h, (o, proc) in list(self._active_processes.items()) if o == owner]
+
+    def all_processes(self) -> list:
+        """Every live subprocess tracked for this session."""
+        return [proc for _h, (_o, proc) in list(self._active_processes.items())]
 
     @property
     def has_background_tasks(self) -> bool:

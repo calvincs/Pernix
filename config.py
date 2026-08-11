@@ -169,6 +169,13 @@ class Settings:
     # --- Tools / Shell ---
     tool_timeout: int = 300
     shell_timeout: int = 30
+    # Threads for ordinary tool calls. Tools run on their own pool so they can
+    # never occupy asyncio's default executor, which every API route needs for
+    # its DB reads — see the pool comments in core/tools/executor.py. Sized
+    # above the default executor (min(32, cpu+4)) because occupants are blocked
+    # on IO, not burning CPU; each also bounds concurrent subprocesses, so
+    # raising it costs memory and PIDs rather than throughput.
+    tool_executor_workers: int = 32
     auto_approve_dangerous: bool = False  # Allow "dangerous" tools without ask_user confirmation
     shell_security_mode: str = "permissive"
     # Per-process virtual-address-space cap applied to every `bash` child via
