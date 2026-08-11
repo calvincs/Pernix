@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import time
 from dataclasses import dataclass, field
@@ -12,9 +13,47 @@ from core.tools.registry import ToolRegistry
 
 logger = logging.getLogger("pernix.tools.executor")
 
-# Dedicated executor for long-poll tools — see ToolDef.long_poll. Sized for
-# concurrent orchestrations, not throughput: each occupant is 99% blocked.
+# Distinguishes concurrent dispatches of the same tool so each call's
+# subprocesses stay separable. count() is atomic under the GIL.
+_call_id_counter = itertools.count()
+
+# Tool execution runs on its own threads, never on asyncio's default executor.
+#
+# asyncio.to_thread() dispatches to the loop's default ThreadPoolExecutor,
+# sized min(32, cpu_count + 4) — 20 threads on the deployment box. Every API
+# route also hops that pool for its DB reads (`await asyncio.to_thread(db...)`
+# in api/routers/*, ~150 call sites). Running tools there put the web UI in
+# direct competition with agent work for the same 20 slots: one `bash` call can
+# hold a slot for BASH_MAX_TIMEOUT (30 minutes) and http_get for ~150s (15s ×
+# 10 redirect hops), so a handful of concurrent tool calls starved every API
+# request. The symptom is a UI that looks hung while the event loop is idle and
+# CPU sits near zero, recovering in batches as tool calls release slots.
+#
+# Two dedicated pools instead, so the default executor stays reserved for the
+# API and framework:
+#   _tool_executor      — ordinary tool calls. Bounded, so runaway tool fan-out
+#                         cannot exhaust threads or spawn unbounded subprocesses.
+#   _long_poll_executor — ToolDef.long_poll tools (await_workers, run_workflow,
+#                         rlm_process), which block for 30-60 minutes waiting on
+#                         OTHER work. They keep their own pool: parking them
+#                         alongside ordinary calls would let a few orchestrations
+#                         occupy every tool slot while the workers they wait on
+#                         need those same slots to run their tools — the
+#                         starvation deadlock this split exists to prevent.
+_tool_executor = None
 _long_poll_executor = None
+
+
+def _get_tool_executor():
+    global _tool_executor
+    if _tool_executor is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _tool_executor = ThreadPoolExecutor(
+            max_workers=max(4, int(settings.tool_executor_workers)),
+            thread_name_prefix="pernix-tool",
+        )
+    return _tool_executor
 
 
 def _get_long_poll_executor():
@@ -72,15 +111,19 @@ def _resolve_timeout(tool, arguments: dict | None) -> int:
     return min(max(requested, base), ceiling) + _DISPATCH_TIMEOUT_GRACE_S
 
 
-def _kill_tool_subprocess(context: dict | None) -> None:
-    """Kill the session's tracked subprocess after a dispatch timeout.
+def _kill_tool_subprocess(context: dict | None, call_id: str) -> None:
+    """Kill the subprocesses spawned by ONE dispatch call after its timeout.
 
-    asyncio.to_thread cannot be cancelled: when wait_for gives up, the worker
-    thread stays blocked in the tool until the tool itself returns. For bash
-    that means holding a shared-executor thread AND a live process tree for the
+    A worker thread cannot be cancelled: when wait_for gives up, the thread
+    stays blocked in the tool until the tool itself returns. For bash that
+    means holding a tool-executor thread AND a live process tree for the
     remainder of the child's runtime. Killing the process group lets the thread
-    unwind promptly. Best-effort — the tool clears _active_process in its own
-    finally, so a None here just means the call already finished.
+    unwind promptly.
+
+    Scoped to `call_id` rather than the whole session: sibling tool calls that
+    are still running healthily must not be killed because this one timed out.
+    Best-effort — the tool releases its registration in its own finally, so an
+    empty list here just means the call already finished.
     """
     sid = (context or {}).get("session_id", "")
     if not sid:
@@ -89,13 +132,15 @@ def _kill_tool_subprocess(context: dict | None) -> None:
         from sessions.manager import get_manager
 
         session = get_manager().get(sid)
-        proc = getattr(session, "_active_process", None) if session else None
-        if proc is None or proc.poll() is not None:
+        if session is None:
             return
         from core.tools.builtin.core_tools import _kill_process_tree
 
-        _kill_process_tree(proc)
-        logger.warning("Killed subprocess %s after tool dispatch timeout", proc.pid)
+        for proc in session.processes_for(call_id):
+            if proc is None or proc.poll() is not None:
+                continue
+            _kill_process_tree(proc)
+            logger.warning("Killed subprocess %s after tool dispatch timeout", proc.pid)
     except Exception as e:
         logger.debug("Post-timeout subprocess kill skipped: %s", e)
 
@@ -292,36 +337,30 @@ async def _execute_single(
 
     timeout = _resolve_timeout(tool, arguments)
     start = time.monotonic()
+    call_id = f"{name}@{next(_call_id_counter)}"
     try:
         # Capture the running event loop so tools on worker threads can
         # schedule coroutines back onto it via run_coroutine_threadsafe().
         loop = asyncio.get_running_loop()
         ctx = dict(context) if context else {}
         ctx["_loop"] = loop
+        # Identifies this dispatch to any subprocess the tool registers, so a
+        # timeout kills this call's children and nobody else's.
+        ctx["_call_id"] = call_id
         if workspace_override:
             ctx["workspace_override"] = workspace_override
-        if tool.long_poll:
-            # Long-poll tools (await_workers, run_workflow) hold their thread
-            # for up to 30-60 minutes while the workers they wait on need
-            # threads from the SHARED to_thread pool for their own tools.
-            # Enough concurrent orchestrations could occupy every shared slot:
-            # workers' tools then queue, "time out" without executing, the
-            # workers stall, and the blockers keep holding their threads —
-            # starvation deadlock. A dedicated executor caps the blast radius.
-            import functools
+        import functools
 
-            raw = await asyncio.wait_for(
-                loop.run_in_executor(
-                    _get_long_poll_executor(),
-                    functools.partial(registry.execute_sync, name, arguments, ctx),
-                ),
-                timeout=timeout,
-            )
-        else:
-            raw = await asyncio.wait_for(
-                asyncio.to_thread(registry.execute_sync, name, arguments, ctx),
-                timeout=timeout,
-            )
+        # Never asyncio.to_thread here: that is the default executor the API
+        # depends on. See the pool comments at the top of this module.
+        executor = _get_long_poll_executor() if tool.long_poll else _get_tool_executor()
+        raw = await asyncio.wait_for(
+            loop.run_in_executor(
+                executor,
+                functools.partial(registry.execute_sync, name, arguments, ctx),
+            ),
+            timeout=timeout,
+        )
         latency = int((time.monotonic() - start) * 1000)
 
         # execute_sync may return (str, dict) for structured metadata
@@ -347,10 +386,10 @@ async def _execute_single(
     except asyncio.TimeoutError:
         latency = int((time.monotonic() - start) * 1000)
         registry.metrics[name].record_timeout(latency)
-        # The to_thread worker is still blocked in the tool and cannot be
+        # The worker thread is still blocked in the tool and cannot be
         # cancelled. Kill any subprocess it spawned so it unwinds instead of
-        # holding a shared-executor thread for the child's full runtime.
-        _kill_tool_subprocess(context)
+        # holding a tool-executor thread for the child's full runtime.
+        _kill_tool_subprocess(context, call_id)
         return ToolExecutionResult(
             tool_name=name,
             content=f"Error: Tool '{name}' timed out after {timeout}s",

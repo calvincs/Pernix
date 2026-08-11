@@ -8,10 +8,10 @@ no sub-LLM stubs, no answer dict) as long-lived per-session state:
   view transform; the kernel is a process, untouched).
 - Across restarts, per-variable dill snapshots revive the namespace; one
   unpicklable object is skipped-and-reported, never fatal.
-- The kernel lives in its own slot — NEVER session._active_process, whose
-  consumers kill unconditionally on any tool dispatch timeout in the
-  session. Cell aborts are soft (SIGINT preserving the namespace), with
-  kill only as the unresponsive-child escalation.
+- The kernel lives in its own slot — it is NEVER handed to
+  session.register_process, whose consumers kill unconditionally when the
+  owning tool dispatch times out. Cell aborts are soft (SIGINT preserving
+  the namespace), with kill only as the unresponsive-child escalation.
 - cwd = the shared workspace (or the session's 1g override at spawn time),
   so repl and bash see the same files; sockets, logs, and snapshots stay in
   data/kernels/<session_id>/.
