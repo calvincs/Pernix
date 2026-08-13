@@ -90,3 +90,53 @@ def retire_stale_hints(store: TelosStore) -> dict:
         store.trace_append("adaptive_retire", {"count": result["retired"], "reasons": result["reasons"]})
         logger.info("telos: queued %d routing-hint retirement(s)", result["retired"])
     return result
+
+
+def prune_speculation_pool(store: TelosStore) -> dict:
+    """Delete pooled hypotheses past `telos_soup_retention_days`.
+
+    The pool is a retained record, not a feedstock: nothing reads
+    `status == "soup"` (the spec's recombination pass is unimplemented, and
+    `core/telos/soup.py` says so). Left unbounded it grows by roughly the
+    generation rate forever — 388 of 402 files on one seven-day-old install —
+    and every `list_hypotheses()` call in the generate/evaluate loop re-reads
+    all of them, so the cost lands on the hot path rather than on disk.
+
+    Only `soup` rows are eligible: `gated` is queued work, and `supported` /
+    `refuted` are the falsification record that hint retirement and the
+    calibration fallback both read. Deletion is safe only because ids are
+    minted against a persisted high-water mark (`TelosStore.mint_id`) — with
+    the old disk-derived scheme this would have recycled ids out from under
+    live references.
+    """
+    result: dict = {"pruned": 0}
+    days = int(settings.telos_soup_retention_days or 0)
+    if days <= 0:
+        return result
+
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    for h in store.list_hypotheses(status="soup"):
+        created = str(h.get("created_at") or "")
+        if not created:
+            continue
+        try:
+            when = datetime.fromisoformat(created)
+        except ValueError:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if when >= cutoff:
+            continue
+        try:
+            if h.path is not None:
+                h.path.unlink()
+                result["pruned"] += 1
+        except OSError as e:
+            logger.debug("telos: soup prune failed for %s: %s", h.id, e)
+
+    if result["pruned"]:
+        store.trace_append("soup_pruned", {"count": result["pruned"], "older_than_days": days})
+        logger.info("telos: pruned %d pooled hypotheses older than %dd", result["pruned"], days)
+    return result

@@ -29,6 +29,11 @@ from db import models as db
 logger = logging.getLogger("pernix.dream")
 
 _PROMOTE_LIMIT_PER_STEP = 3
+# promoted_ref for a validated hypothesis that had nothing to propose. It is
+# a terminal marker, so the row leaves the promotion queue instead of being
+# retried forever, and it is distinguishable from a real proposal in the
+# record.
+_NO_EFFECTOR_REF = "reported:no-effector"
 
 
 def _evidence_refs(row: dict) -> list[str]:
@@ -74,7 +79,11 @@ async def promote_validated(limit: int = _PROMOTE_LIMIT_PER_STEP) -> int:
                 continue  # open_question is report material, never promoted
             if ref:
                 db.update_dream_hypothesis(row["id"], status="promoted", promoted_ref=ref)
-                promoted += 1
+                # A row that reached a terminal non-proposal outcome has left
+                # the queue but produced nothing to review; don't count it as
+                # a promotion or it inflates the step's reported yield.
+                if ref != _NO_EFFECTOR_REF:
+                    promoted += 1
         except Exception as e:
             logger.warning("dream promote failed for %s: %s", row["id"][:8], e)
     return promoted
@@ -124,38 +133,53 @@ def _promote_memory_review(row: dict) -> str | None:
     (audit P5). The old empty-payload proposal dead-ended: 72/75 pending
     proposals on the live box had no effector. Approving now writes a
     corrective entry into each cited file — additive and non-destructive,
-    the human approval is the gate."""
+    the human approval is the gate.
+
+    With no cited files there is no effector, so **no proposal is minted**.
+    The effectorless variant was not merely useless, it was corrosive: 62 of
+    126 pending proposals on the live box were empty payloads whose approval
+    would have written nothing, and a review queue that is half no-ops is a
+    queue nobody finishes reading. The finding still reaches the operator —
+    the hypothesis stays `validated` and the dream report carries it — it
+    just stops pretending to be an actionable decision.
+    """
     files = _memory_files_from_evidence(row)
-    payload = (
-        [
-            {
-                "action": "memory_correction",
-                "kind": row.get("kind"),
-                "statement": (row.get("statement") or "").strip()[:1200],
-                "files": files,
-                "hypothesis_id": row["id"],
-            }
-        ]
-        if files
-        else []
-    )
+    if not files:
+        logger.info(
+            "dream: %s hypothesis %s validated with no citable memory file — reported, not proposed (nothing to apply)",
+            row.get("kind"),
+            row["id"][:8],
+        )
+        # Terminal, not skipped. Returning None would leave the row
+        # `validated` forever at the head of this oldest-first queue, to be
+        # re-examined on every pass and eventually to fill the window — the
+        # same starvation shape that killed the validator.
+        return _NO_EFFECTOR_REF
     pid = db.adaptive_add_proposal(
         producer="dream",
-        payload_json=json.dumps(payload),
+        payload_json=json.dumps(
+            [
+                {
+                    "action": "memory_correction",
+                    "kind": row.get("kind"),
+                    "statement": (row.get("statement") or "").strip()[:1200],
+                    "files": files,
+                    "hypothesis_id": row["id"],
+                }
+            ]
+        ),
         evidence_json=json.dumps(_evidence_refs(row)),
         rationale=(
-            (
-                f"[memory correction — approving writes a corrective entry into "
-                f"{', '.join(files)}] Dream {row.get('kind')} hypothesis (validated): "
-                f"{(row.get('statement') or '').strip()[:500]}"
-            )
-            if files
-            else (
-                f"[memory review — no automatic apply] Dream {row.get('kind')} "
-                f"hypothesis (validated): {(row.get('statement') or '').strip()[:500]} "
-                f"— review the cited memory entries and correct them via "
-                f"update_memory/forget if the claim holds."
-            )
+            f"[memory correction — approving writes a corrective entry into "
+            f"{', '.join(files)}] Dream {row.get('kind')} hypothesis (validated): "
+            f"{(row.get('statement') or '').strip()[:500]}"
         ),
+        max_pending=settings.adaptive_max_pending_proposals,
     )
+    if pid is None:
+        # Queue full: leave the row `validated` so it is reconsidered once a
+        # human drains the backlog. Unlike the no-effector case this is a
+        # transient refusal, and the finding is worth re-raising.
+        logger.info("dream: proposal queue full, deferring %s hypothesis %s", row.get("kind"), row["id"][:8])
+        return None
     return f"proposal:{pid}"

@@ -8,7 +8,13 @@ import pytest
 
 from config import settings
 from core.llm.types import ChatResponse, TokenUsage
-from core.telos.soup import gate, generate_for_next_question, next_question, parse_soup_output
+from core.telos.soup import (
+    gate,
+    generate_for_next_question,
+    next_question,
+    observable_coverage,
+    parse_soup_output,
+)
 from core.telos.store import TelosStore
 
 
@@ -97,6 +103,30 @@ def test_scheduler_prefers_goal_linked_with_serendipity_slice(store):
         assert float(q.get("surprise")) == pytest.approx(0.7)
 
 
+def test_scheduler_rotates_instead_of_pinning_the_top_question(store):
+    """Regression: a surprise argmax is not a scheduler.
+
+    Questions leave the pool only by being resolved or abandoned, so a pure
+    max-by-surprise pull re-picks the same winner on every pass forever. On
+    the live box that put one question at 63 passes and 186 hypotheses while
+    five comparable questions sat at zero, never scheduled once.
+    """
+    hi = store.add_question("The highest-surprise question about tool failures?", surprise=0.95)
+    mid = store.add_question("A middling question about memory recall drift?", surprise=0.90)
+    lo = store.add_question("A lower-surprise question about scheduling jitter?", surprise=0.85)
+
+    picks = []
+    for _ in range(3):
+        q = next_question(store)
+        picks.append(q.id)
+        # generate_for_next_question is what spends the attempt in production.
+        store.update(q, attempts=int(q.get("attempts", 0)) + 1)
+
+    # Surprise still decides who goes FIRST; attempts decide who goes NEXT.
+    assert picks == [hi.id, mid.id, lo.id]
+    assert len(set(picks)) == 3, "every open question must get scheduled"
+
+
 def test_scheduler_empty_store(store):
     assert next_question(store) is None
 
@@ -132,6 +162,25 @@ async def test_dry_generations_abandon_question(store, mock_llm_client):
     assert len(qs) == 1
 
 
+async def test_productive_generation_still_spends_the_attempt_budget(store, mock_llm_client):
+    """Regression: abandonment used to require a pass that generated nothing.
+
+    A question whose hypotheses are all unresolvable keeps generating, so it
+    never met that condition — it just ran forever. Generating is not
+    progress; the budget must be spent per pass regardless of yield.
+    """
+    store.add_question("A question that always yields hypotheses but never resolves?")
+    mock_llm_client.responses = [_resp([_hyp()]) for _ in range(settings.telos_question_max_attempts)]
+    for _ in range(settings.telos_question_max_attempts):
+        await generate_for_next_question(store, lambda: False)
+
+    abandoned = store.list_questions(state="abandoned")
+    assert len(abandoned) == 1
+    assert abandoned[0].get("spawned"), "it was productive by volume — and still ran out"
+    events = store.trace_events(days=1, types={"question_abandoned"})
+    assert events and events[0]["reason"] == "attempt budget exhausted"
+
+
 async def test_generation_no_questions_is_noop(store, mock_llm_client):
     result = await generate_for_next_question(store, lambda: False)
     assert result["ran"] is False
@@ -154,3 +203,49 @@ def test_supported_claim_edit_passes_adaptive_validation():
         "evidence": ["c_0001", "h_0001", "q_0001"],
     }
     assert validate_edit(edit, "telos") is None
+
+
+# --- observability probe ---------------------------------------------------
+
+
+def test_observable_coverage_rejects_data_the_system_never_records():
+    """The dominant waste mode: a falsifier naming data that does not exist.
+
+    Every sampled inconclusive verdict on the live box was a variant of "the
+    evidence consists of tool reliability statistics and does not contain the
+    required <thing>" — two judge calls each, teaching nothing.
+    """
+    h = _hyp()
+    h["falsifier"] = {
+        "observable": "median DNS resolution and TCP connect latency to blog.example.com",
+        "rule": "reject if within normal range",
+    }
+    evidence = "[candor] browse_web p=0.62 n=41\n[trace] tool_failed browse_web"
+    ok, detail = observable_coverage(h, evidence)
+    assert not ok and "missing" in detail
+
+
+def test_observable_coverage_admits_a_falsifier_the_records_answer():
+    h = _hyp()
+    h["falsifier"] = {"observable": "browse_web failure count per turn", "rule": "reject if zero"}
+    evidence = "[candor] browse_web p=0.62 n=41 failure rate rising\n[trace] browse_web failure per turn count 3"
+    ok, _ = observable_coverage(h, evidence)
+    assert ok
+
+
+def test_gate_uses_the_probe_to_pool_untestable_hypotheses():
+    h = _hyp()
+    h["falsifier"] = {"observable": "kernel scheduler run-queue depth samples", "rule": "reject if flat"}
+    admitted, reason = gate(h, evidence_probe=lambda _c: "[candor] fetch_ok p=0.5 n=20")
+    assert not admitted and "observable absent" in reason
+    # Same hypothesis, no probe: unchanged behaviour for callers that pass none.
+    assert gate(h)[0] is True
+
+
+def test_gate_admits_when_the_probe_raises():
+    """A broken probe must not silently shut the gate."""
+
+    def _boom(_c):
+        raise RuntimeError("evidence store offline")
+
+    assert gate(_hyp(), evidence_probe=_boom)[0] is True

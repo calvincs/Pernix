@@ -83,6 +83,64 @@ def test_mint_id_skips_gaps_rather_than_colliding(store):
     assert store.mint_id("alarm") == "a_0004"
 
 
+def test_mint_id_never_reuses_after_the_tail_is_pruned(store):
+    """Ids must be monotonic, not merely unused.
+
+    Retention deletes pooled hypotheses, and the old disk-count scheme would
+    hand the freed numbers straight back out — silently re-pointing every
+    claim, trace event and derived_from edge still naming them.
+    """
+    ids = [store.mint_id("hypothesis") for _ in range(3)]
+    for i in ids:
+        store.write(TelosObject(id=i, kind="hypothesis", meta={"status": "soup"}))
+    # Prune the whole tail, exactly as retention does.
+    for i in ids:
+        (store.root / "soup" / f"{i}.md").unlink()
+    assert not list((store.root / "soup").glob("h_*.md"))
+    assert store.mint_id("hypothesis") == "h_0004"
+
+
+def test_soup_prune_removes_only_aged_pooled_hypotheses(store, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from core.telos.retire import prune_speculation_pool
+
+    monkeypatch.setattr(settings, "telos_soup_retention_days", 30)
+    old = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+    new = datetime.now(timezone.utc).isoformat()
+    cases = [("soup", old, True), ("soup", new, False), ("gated", old, False), ("supported", old, False)]
+    for status, created, _ in cases:
+        store.write(
+            TelosObject(
+                id=store.mint_id("hypothesis"),
+                kind="hypothesis",
+                meta={"status": status, "created_at": created, "statement": "x"},
+            )
+        )
+
+    assert prune_speculation_pool(store)["pruned"] == 1
+    survivors = {h.get("status") for h in store.list_hypotheses()}
+    assert survivors == {"soup", "gated", "supported"}  # queued work and the
+    # falsification record both survive; only the aged pool row went.
+
+
+def test_soup_prune_disabled_by_zero_retention(store, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from core.telos.retire import prune_speculation_pool
+
+    monkeypatch.setattr(settings, "telos_soup_retention_days", 0)
+    store.write(
+        TelosObject(
+            id=store.mint_id("hypothesis"),
+            kind="hypothesis",
+            meta={"status": "soup", "created_at": (datetime.now(timezone.utc) - timedelta(days=900)).isoformat()},
+        )
+    )
+    assert prune_speculation_pool(store)["pruned"] == 0
+    assert len(store.list_hypotheses()) == 1
+
+
 def test_acknowledged_alarms_stay_live(store):
     """Ack silences the notification; only 'cleared' retires an alarm. The
     escalation ladder reads this list, so an acked alarm must remain."""

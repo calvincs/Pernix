@@ -171,6 +171,100 @@ def test_disabled_is_inert(monkeypatch):
     assert all(not v for v in stats.values())
 
 
+# ---------------------------------------------------------------------------
+# Suite health — the absolute check the relative signals cannot make
+# ---------------------------------------------------------------------------
+
+
+def _noop_run(name: str) -> None:
+    """A run where the agent never executed: no tokens, sub-second, failed."""
+    db.add_canary_run(
+        task=name,
+        trigger="scheduled",
+        session_id=None,
+        gate_results_json="[]",
+        passed=False,
+        tokens=0,
+        duration_s=0.03,
+    )
+
+
+def _real_fail(name: str) -> None:
+    """An honest failure: the agent ran, spent tokens, and missed the gate."""
+    db.add_canary_run(
+        task=name,
+        trigger="scheduled",
+        session_id=None,
+        gate_results_json="[]",
+        passed=False,
+        tokens=54000,
+        duration_s=120.0,
+    )
+
+
+def test_health_flags_chronically_failing_canary():
+    _mk("solo", vetting=False)
+    for _ in range(3):
+        _real_fail("solo")
+    stats = run_maintenance()
+    assert stats["unhealthy"] == ["solo"]
+    # The Goodhart lock still holds: reporting must not mutate the canary.
+    assert load_canary("solo", base=_base()).flaky is False
+
+
+def test_health_ignores_a_canary_that_still_passes_sometimes():
+    _mk("flappy", vetting=False)
+    _real_fail("flappy")
+    _run("flappy", True)
+    _real_fail("flappy")
+    stats = run_maintenance()
+    assert stats["unhealthy"] == []
+
+
+def test_health_needs_enough_scheduled_history():
+    _mk("young", vetting=False)
+    for _ in range(2):  # below the 3-run health window
+        _real_fail("young")
+    assert run_maintenance()["unhealthy"] == []
+
+
+def test_health_separates_harness_break_from_quality_regression():
+    """Zero tokens + sub-second + failing == the agent never ran.
+
+    This is the 2026-08 blackout signature: gates scored against the seeded
+    fixtures. It must raise at high urgency and say so, because the remedy
+    is nothing like the remedy for a genuine regression.
+    """
+    _mk("broken", vetting=False)
+    for _ in range(3):
+        _noop_run("broken")
+    run_maintenance()
+    notes = db.get_notifications()
+    hit = [n for n in notes if "not running" in n["title"]]
+    assert hit and hit[0]["urgency"] == "high"
+    assert "harness failure" in hit[0]["body"]
+
+
+def test_health_alert_does_not_renotify_on_every_sweep():
+    _mk("solo", vetting=False)
+    for _ in range(3):
+        _real_fail("solo")
+    run_maintenance()
+    first = len(db.get_notifications())
+    run_maintenance()
+    assert len(db.get_notifications()) == first  # deduped by day + signature
+
+
+def test_health_recovery_clears_the_alert_state():
+    _mk("solo", vetting=False)
+    for _ in range(3):
+        _real_fail("solo")
+    run_maintenance()
+    for _ in range(3):
+        _run("solo", True)
+    assert run_maintenance()["unhealthy"] == []
+
+
 def test_frontmatter_rewrite_preserves_body_and_unknown_keys():
     _mk()
     md = _base() / "pin" / "CANARY.md"

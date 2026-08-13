@@ -52,6 +52,10 @@ _FLAP_WINDOW = 8
 _MIN_FLIPS = 3
 _REVIEW_BUMP_DAYS = 60
 _RUN_SCAN_LIMIT = 200
+# Trailing scheduled runs the health check reads. Three consecutive failing
+# nightly sweeps with no pass between them is not noise.
+_HEALTH_WINDOW = 3
+_HEALTH_STATE_KEY = "canary_health_alert"
 
 
 def retired_dir(base: Path | None = None) -> Path:
@@ -205,6 +209,101 @@ def _maintain_one(c: CanaryDef, base: Path, stats: dict) -> None:
             stats["reviewed"].append(c.name)
 
 
+def _scheduled_runs(name: str, window: int) -> list[dict]:
+    """The trailing scheduled runs for one canary, newest first."""
+    rows = [r for r in db.list_canary_runs(task=name, limit=_RUN_SCAN_LIMIT) if r.get("trigger") == "scheduled"]
+    return rows[:window]
+
+
+def _is_noop_run(row: dict) -> bool:
+    """True when the gates scored a workspace the agent never touched.
+
+    A real canary turn costs tokens and takes seconds. A run that consumed
+    zero tokens and finished in well under a second did not execute the
+    agent at all — the gates ran against the seeded fixtures and every one
+    of them 'failed'. That is a harness break, and it is worth separating
+    from an honest failure because the remedy is completely different.
+    """
+    return not row.get("passed") and int(row.get("tokens") or 0) == 0 and float(row.get("duration_s") or 0.0) < 1.0
+
+
+def check_suite_health(canaries: list[CanaryDef]) -> dict:
+    """Absolute health of the measurement substrate itself.
+
+    Every other signal in this subsystem is RELATIVE — the adaptive tripwire
+    asks whether a batch made the pass rate worse than baseline. None of them
+    can see a suite that is uniformly broken, because a broken suite moves
+    the baseline down with it: with baseline 0%, `base - now` can never reach
+    the regression delta and the tripwire is silently disarmed.
+
+    So this asks the absolute question instead. It never mutates a canary —
+    it only reports, because a failing canary is doing its job.
+    """
+    chronic: list[str] = []
+    noop: list[str] = []
+    judged = 0
+    for c in (c for c in canaries if not c.flaky):
+        runs = _scheduled_runs(c.name, _HEALTH_WINDOW)
+        if len(runs) < _HEALTH_WINDOW:
+            continue  # not enough scheduled history to judge
+        judged += 1
+        if any(r.get("passed") for r in runs):
+            continue
+        chronic.append(c.name)
+        if all(_is_noop_run(r) for r in runs):
+            noop.append(c.name)
+    # Blackout = every canary with enough history is failing. One failing
+    # canary is a signal about that task; all of them is a signal about the
+    # harness, and the two want different urgencies.
+    blackout = judged > 1 and len(chronic) == judged
+    return {"chronic": chronic, "noop": noop, "blackout": blackout}
+
+
+def _report_suite_health(health: dict) -> None:
+    """Notify on suite health, deduped so it nags once per day, not per sweep."""
+    chronic = health.get("chronic") or []
+    if not chronic:
+        db.set_snooze_state(_HEALTH_STATE_KEY, "")
+        return
+    signature = f"{_today()}|{','.join(sorted(chronic))}"
+    if db.get_snooze_state(_HEALTH_STATE_KEY) == signature:
+        return
+
+    noop = health.get("noop") or []
+    if noop:
+        title = "Canary suite: the agent is not running"
+        body = (
+            f"{len(noop)} canary task(s) scored without executing the agent — zero tokens, "
+            f"sub-second runs, every gate failing on missing files: {', '.join(sorted(noop))}. "
+            "This is a harness failure, not a quality regression; the gates are being scored "
+            "against the seeded fixtures. Until it is fixed the suite measures nothing and the "
+            "adaptive tripwire is disarmed."
+        )
+        urgency = "high"
+    elif health.get("blackout"):
+        title = "Canary suite: every scored canary is failing"
+        body = (
+            f"All {len(chronic)} non-flaky canaries failed their last {_HEALTH_WINDOW} scheduled "
+            "sweeps. A uniformly failing suite drags the tripwire baseline to 0%, and a baseline "
+            "of 0% can never register a regression — so the adaptive layer is applying batches "
+            "with no working safety net. Investigate before trusting further auto-applies."
+        )
+        urgency = "high"
+    else:
+        title = "Canary suite: chronically failing task(s)"
+        body = (
+            f"{', '.join(sorted(chronic))} failed the last {_HEALTH_WINDOW} scheduled sweeps with "
+            "no pass in between. Either the agent has genuinely regressed on this task or the "
+            "canary needs updating; both are worth a look, and neither will surface on its own."
+        )
+        urgency = "normal"
+    try:
+        db.add_notification(title=title, body=body, urgency=urgency)
+        db.set_snooze_state(_HEALTH_STATE_KEY, signature)
+    except Exception as e:
+        logger.warning("Canary health notification failed: %s", e)
+
+
 def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dict:
     """One full maintenance sweep. Mechanical, bounded, never raises."""
     stats: dict = {
@@ -214,6 +313,7 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
         "demoted": [],
         "purged": [],
         "reviewed": [],
+        "unhealthy": [],
     }
     if not (settings.canary_enabled and settings.canary_auto_maintain):
         return stats
@@ -221,7 +321,8 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
 
     from core.canary.parser import scan_canaries
 
-    for c in scan_canaries(base):
+    suite = list(scan_canaries(base))
+    for c in suite:
         if is_cancelled():
             return stats
         try:
@@ -232,15 +333,32 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
     if not is_cancelled():
         stats["purged"] = _purge_quarantine(base)
 
+    # Health reporting runs last and mutates nothing: the sweep above is all
+    # success-shaped (promote/demote/review), so without this a suite that
+    # fails everything produces an entirely empty maintenance report.
+    if not is_cancelled():
+        try:
+            health = check_suite_health(suite)
+            stats["unhealthy"] = health["chronic"]
+            _report_suite_health(health)
+        except Exception as e:
+            logger.warning("Canary health check failed: %s", e)
+
     changed = {k: v for k, v in stats.items() if v}
     if changed:
         summary = "; ".join(f"{k}: {', '.join(_describe(i) for i in v)}" for k, v in changed.items())
         logger.info("Canary maintenance: %s", summary)
+    # 'unhealthy' is reported by _report_suite_health with its own urgency and
+    # its own dedupe; folding it in here would double-notify and bury a
+    # measurement outage under routine bookkeeping.
+    mutations = {k: v for k, v in changed.items() if k != "unhealthy"}
+    if mutations:
         try:
             db.add_notification(
                 title="Canary suite auto-maintenance",
-                body=f"{summary}. Demoted canaries stay in the scheduled sweep at a "
-                f"reduced cadence so the tripwire keeps its baseline.",
+                body="; ".join(f"{k}: {', '.join(_describe(i) for i in v)}" for k, v in mutations.items())
+                + ". Demoted canaries stay in the scheduled sweep at a "
+                "reduced cadence so the tripwire keeps its baseline.",
                 urgency="normal",
             )
         except Exception:

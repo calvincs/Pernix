@@ -44,11 +44,25 @@ distances:
 - far: an unrelated domain (only the relational skeleton transfers). Far-band output will \
 mostly be wrong; that is its job — do not self-censor far candidates into near ones.
 
-For every hypothesis provide a FALSIFIER: a named observable that can be checked against \
-the system's recorded evidence (memory entries, trace events, tool reliability records, \
-post-mortems), plus a decision rule that says what outcome rejects the hypothesis. A \
-hypothesis without a checkable falsifier is still worth emitting — it will be kept in the \
-speculation pool — but mark it falsifier: null rather than inventing an untestable one.
+For every hypothesis provide a FALSIFIER: a named observable plus a decision rule that says \
+what outcome rejects the hypothesis.
+
+The observable must be answerable from THIS system's records, and that is a closed set. \
+Evaluation can read exactly four things:
+1. memory entries — durable notes the agent wrote about its work and the user
+2. trace events — turn outcomes, tool failures, hypotheses, claims, alarms, token spend
+3. tool reliability records — per-tool success probabilities with observation counts
+4. post-mortems — per-turn verdicts, failure causes, reflect retries
+
+Nothing else exists. There is no network telemetry, no DNS/TCP/TLS timing, no CPU or memory \
+profile, no per-request latency histogram, no external log. An observable like "median TCP \
+connect time to host X" cannot be evaluated at all — it produces an inconclusive verdict, \
+teaches nothing, and wastes the evaluation budget. This is the single most common defect in \
+this module's output: do not name an observable the four sources above cannot answer.
+
+A hypothesis whose honest falsifier would need data the system does not record is still worth \
+emitting — it will be kept in the speculation pool — but mark it falsifier: null rather than \
+inventing an untestable one that looks checkable.
 
 Also estimate:
 - eig: expected information gain in [0,1] — how much answering this would move the question
@@ -122,15 +136,28 @@ def parse_soup_output(raw: str) -> list[dict]:
     return out
 
 
-def gate(h: dict, eig_discount: float = 1.0) -> tuple[bool, str]:
-    """Testability gate (spec §3.4). Admitted iff falsifier defined, cost
-    fits budget, and eig clears the floor. Returns (admitted, reason).
+def gate(h: dict, eig_discount: float = 1.0, evidence_probe=None) -> tuple[bool, str]:
+    """Testability gate (spec §3.4). Admitted iff the falsifier is defined,
+    its observable is actually obtainable, cost fits budget, and eig clears
+    the floor. Returns (admitted, reason).
 
     `eig_discount` is the mean-recalibration factor from
     core.telos.calibration: without it the eig condition is a self-graded
     number checked against a fixed floor, which a constant optimistic
     estimate clears forever. The discount makes the floor answer to the
     generator's realized track record instead.
+
+    `evidence_probe(h) -> str` is the observability check, and it is the one
+    that matters most in practice. A falsifier is only testable if the system
+    records the thing it names, and the generator has no idea what the system
+    records — it happily asks for "median DNS/TCP/TLS time to host X", which
+    Pernix has never logged. Such a hypothesis is doomed to two inconclusive
+    evaluations before being pooled, and on the live box that pattern burned
+    882K tokens across 391 evaluations to resolve two hypotheses.
+
+    The probe runs the evaluator's own `_gather_evidence`, so what the gate
+    calls observable and what evaluation can actually obtain cannot drift
+    apart. Mechanical, no LLM — pennies here instead of two judge calls there.
     """
     if not h.get("falsifier"):
         return False, "no falsifier"
@@ -144,19 +171,128 @@ def gate(h: dict, eig_discount: float = 1.0) -> tuple[bool, str]:
                 f"eig {claimed} discounted to {effective} by calibration, below floor {settings.telos_eig_floor}"
             )
         return False, f"eig {claimed} below floor {settings.telos_eig_floor}"
+    if evidence_probe is not None:
+        try:
+            evidence = evidence_probe(h) or ""
+            covered, detail = observable_coverage(h, evidence)
+            if not covered:
+                return False, f"observable absent from records ({detail}) — evaluation could only be inconclusive"
+        except Exception as e:  # a probe failure must not block generation
+            logger.debug("telos: evidence probe failed, admitting anyway: %s", e)
     return True, "admitted"
+
+
+# Words that carry no discriminating power when matching an observable
+# against gathered evidence.
+_STOPWORDS = frozenset(
+    {
+        "this",
+        "that",
+        "with",
+        "from",
+        "than",
+        "then",
+        "when",
+        "were",
+        "have",
+        "been",
+        "over",
+        "into",
+        "during",
+        "across",
+        "versus",
+        "same",
+        "each",
+        "per",
+        "and",
+        "the",
+        "for",
+        "prior",
+        "recent",
+        "system",
+        "events",
+        "event",
+        "data",
+        "records",
+        "record",
+        "logs",
+        "log",
+        "metrics",
+        "showing",
+        "required",
+        "within",
+        "between",
+    }
+)
+# Fraction of an observable's distinctive terms that must appear in the
+# gathered evidence before the falsifier counts as checkable.
+#
+# Calibrated by replaying the live corpus (196 evaluated hypotheses: 194
+# pooled as inconclusive, 2 resolved). Rejection of the wasted class is flat
+# from 0.34 to 0.50 (41-42 of 194), but at 0.50 one of the two hypotheses
+# that actually resolved is also rejected. Same benefit, real cost — so the
+# floor sits below it. The positive class is n=2, which is far too small to
+# call this tuned; it is only enough to rule out a threshold with a known
+# false positive. Revisit once the resolve rate is high enough to measure.
+_COVERAGE_FLOOR = 0.4
+
+
+def observable_coverage(h: dict, evidence: str) -> tuple[bool, str]:
+    """Does the gathered evidence plausibly contain the named observable?
+
+    A deliberately crude lexical proxy for a question only a judge can answer
+    exactly — but a proxy that catches the dominant failure mode. On the live
+    box every sampled inconclusive verdict said some version of "the evidence
+    consists of tool reliability statistics and does not contain the required
+    <thing>": the falsifier named data that does not exist, evaluation ran
+    twice anyway, and the hypothesis was pooled having taught nothing.
+
+    Emptiness alone is not the test — evaluation almost always gathers
+    *something*, which is exactly why those hypotheses looked checkable. What
+    matters is whether the evidence speaks to the observable's own terms.
+    """
+    falsifier = h.get("falsifier") or {}
+    observable = str(falsifier.get("observable", "") or "")
+    terms = {w.lower().strip(".,:;()[]\"'") for w in observable.split()}
+    terms = {w for w in terms if len(w) > 3 and w not in _STOPWORDS}
+    if not terms:
+        return True, "no distinctive terms to check"
+    blob = (evidence or "").lower()
+    hits = {w for w in terms if w in blob}
+    needed = max(1, round(len(terms) * _COVERAGE_FLOOR))
+    if len(hits) >= needed:
+        return True, f"{len(hits)}/{len(terms)} terms present"
+    missing = sorted(terms - hits)[:5]
+    return False, f"{len(hits)}/{len(terms)} terms present, missing {', '.join(missing)}"
 
 
 def next_question(store: TelosStore) -> TelosObject | None:
     """Deterministic 85/15 scheduler pull (spec §3.2). Serendipity questions
     are those whose parent is the root itself with origin='serendipity' —
-    high surprise, no active-goal relevance."""
+    high surprise, no active-goal relevance.
+
+    Within a pool the pull is **least-attempted first, surprise breaking
+    ties**. A plain surprise argmax is not a scheduler: because a question
+    only leaves the pool when it is resolved or abandoned, the single
+    highest-surprise question wins every pass forever. That is not
+    hypothetical — one question reached 63 passes and 186 hypotheses while
+    five questions of comparable surprise sat at zero, never scheduled once.
+    Ordering by attempts first makes the rotation an actual rotation, and
+    surprise still decides who goes first among equals.
+    """
     open_qs = store.list_questions(state="open")
     if not open_qs:
         return None
 
     def score(q: TelosObject) -> tuple:
-        return (float(q.get("surprise", 0.0)), str(q.get("created_at", "")))
+        # Read with min(): fewest attempts, then highest surprise (negated so
+        # the largest sorts first), then oldest. A total order, so the pull
+        # stays deterministic and testable.
+        return (
+            int(q.get("attempts", 0) or 0),
+            -float(q.get("surprise", 0.0)),
+            str(q.get("created_at", "")),
+        )
 
     serendipity = [q for q in open_qs if q.get("origin") == "serendipity"]
     goal_linked = [q for q in open_qs if q.get("origin") != "serendipity"]
@@ -171,7 +307,7 @@ def next_question(store: TelosStore) -> TelosObject | None:
     pool = serendipity if take_serendipity else (goal_linked or serendipity)
     if not pool:
         return None
-    return max(pool, key=score)
+    return min(pool, key=score)
 
 
 def _band_context(store: TelosStore, question_text: str) -> tuple[str, dict[str, list[str]]]:
@@ -290,11 +426,19 @@ async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
         logger.info("telos: eig gate discount %.3f engaged (%s)", discount, calib)
         store.trace_append("eig_calibration", {"question": q.id, **calib})
 
+    # Observability probe: the evaluator's own evidence gatherer, run dry.
+    # A hypothesis whose observable returns nothing here would return nothing
+    # there too, twice, before being pooled — so reject it now for free.
+    from core.telos.evaluate import gather_evidence_for
+
+    def _probe(candidate: dict) -> str:
+        return gather_evidence_for(store, candidate)
+
     spawned = list(q.get("spawned") or [])
     for h in candidates:
         if is_cancelled():
             break
-        admitted, reason = gate(h, eig_discount=discount)
+        admitted, reason = gate(h, eig_discount=discount, evidence_probe=_probe)
         obj = TelosObject(
             id=store.mint_id("hypothesis"),
             kind="hypothesis",
@@ -342,8 +486,22 @@ async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
 
     # The question advances regardless of yield: attempts feed abandonment,
     # spawned ids feed the hevel audit's quality-weighted question count.
-    store.update(q, spawned=spawned, attempts=int(q.get("attempts", 0)) + 1)
-    if result["generated"] == 0 and int(q.get("attempts", 0)) >= settings.telos_question_max_attempts:
+    attempts = int(q.get("attempts", 0)) + 1
+    store.update(q, spawned=spawned, attempts=attempts)
+
+    # `telos_question_max_attempts` is a BUDGET, not a tiebreaker. It used to
+    # apply only when a pass generated nothing, which meant a question whose
+    # hypotheses were all unresolvable never hit it at all — it kept
+    # producing, kept being scheduled, and only stopped if a pass happened to
+    # come back empty. One question ran 63 passes and 186 hypotheses that way.
+    # Generating is not progress; resolving is. So the budget is spent every
+    # pass and refunded only by a hypothesis that actually resolved
+    # (core/telos/evaluate.py) — a question that is teaching the system
+    # something keeps its slot, one that only produces noise runs out.
+    if attempts >= max(1, settings.telos_question_max_attempts):
         store.update(q, state="abandoned")
-        store.trace_append("question_abandoned", {"id": q.id, "attempts": q.get("attempts")})
+        store.trace_append(
+            "question_abandoned",
+            {"id": q.id, "attempts": attempts, "spawned": len(spawned), "reason": "attempt budget exhausted"},
+        )
     return result

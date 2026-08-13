@@ -152,14 +152,27 @@ class TelosStore:
             stem, width = f"q_{stamp}_", 3
         else:
             stem, width = f"{prefix}_", 4
-        # The listing count is only a starting guess: increment past anything
-        # already on disk or reserved by a concurrent mint, then reserve.
+        # Ids must be monotonic, not merely unused. Deriving the next number
+        # from what is on disk means deleting a file frees its id for reuse —
+        # and a reused id silently re-points every claim, trace event and
+        # `derived_from` edge that still names it. Retention (pruning the
+        # speculation pool) is therefore only safe against a persisted
+        # high-water mark, which is what this reads and advances.
         with _MINT_LOCK:
-            n = len(list(d.glob(f"{stem}*.md"))) + 1
+            hw_key = f"id_high_water_{prefix}" if kind != "question" else f"id_high_water_q_{stamp}"
+            state = self.get_state()
+            try:
+                high_water = int(state.get(hw_key, 0) or 0)
+            except (TypeError, ValueError):
+                high_water = 0
+            # max() with the disk scan keeps stores predating the high-water
+            # mark correct on their first mint after upgrade.
+            n = max(high_water, len(list(d.glob(f"{stem}*.md")))) + 1
             while True:
                 path = d / f"{stem}{n:0{width}d}.md"
                 if not path.exists() and str(path) not in _MINT_RESERVED:
                     _MINT_RESERVED.add(str(path))
+                    self.set_state(**{hw_key: n})
                     return f"{stem}{n:0{width}d}"
                 n += 1
 
