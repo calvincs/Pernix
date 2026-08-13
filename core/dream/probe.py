@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timezone
 
 from config import settings
+from core.pools import run_background
 from db import models as db
 
 logger = logging.getLogger("pernix.dream.probe")
@@ -167,7 +168,11 @@ async def _run_probe(store, loop: asyncio.AbstractEventLoop) -> None:
         # unparseable answer. A week of silence costs more than a second run.
         status = "no-run"
         for attempt in (1, 2):
-            result = await asyncio.to_thread(_run_engine_blocking, bundle, file_count, loop)
+            # Background pool, not to_thread: this is a full multi-iteration
+            # RLM run (and this loop may do it twice), so on the default
+            # executor it would hold one of the ~20 threads the API needs for
+            # its DB reads for the whole probe. See core/pools.py.
+            result = await run_background(_run_engine_blocking, bundle, file_count, loop)
             status = result.status if result is not None else "no-run"
             ingested = None
             if result is not None and result.status != "failed" and result.answer:

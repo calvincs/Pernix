@@ -100,7 +100,9 @@ export async function renderTelosTab(container) {
                 try { await post(`/api/telos/alarms/${a.id}/ack`, {}); refresh(); }
                 catch (e) { alert(`Ack failed: ${e.message || e}`); ack.disabled = false; }
             });
-            row.appendChild(ack);
+            // Wrapped rather than appended bare, so the button picks up the
+            // shared action-row spacing instead of butting against the meta line.
+            row.appendChild(el('div', { class: 'adaptive-card-actions' }, [ack]));
             container.appendChild(row);
         });
     }

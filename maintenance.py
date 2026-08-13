@@ -7,6 +7,7 @@ import logging
 import time
 
 from config import settings
+from core.pools import run_background
 
 logger = logging.getLogger("pernix.maintenance")
 
@@ -237,7 +238,7 @@ class MaintenanceRunner:
             try:
                 from scripts.backup import run_backup
 
-                result = await asyncio.to_thread(run_backup)
+                result = await run_background(run_backup)
                 if result.get("skipped"):
                     logger.debug("Backup skipped: %s", result["skipped"])
                 else:

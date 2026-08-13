@@ -50,6 +50,9 @@ let _filterBtns = [];
 let _tabBtns = [];
 let _panes = [];
 let _lastRowTs = 0;     // last rendered row timestamp, for live gap dividers
+let _graphRefreshTimer = null;  // pending debounced graph refresh
+let _graphRenderToken = 0;      // newest _renderGraph call wins
+let _graphRenderSeq = 0;        // unique mermaid render ids
 
 export async function openTimeline() {
     if (_overlay) return;
@@ -115,6 +118,13 @@ export function closeTimeline() {
         _overlay.remove();
         _overlay = null;
     }
+    if (_graphRefreshTimer) {
+        clearTimeout(_graphRefreshTimer);
+        _graphRefreshTimer = null;
+    }
+    // Invalidate any _renderGraph still parked on an await, so it cannot
+    // touch a pane belonging to a modal that is already gone.
+    _graphRenderToken++;
     _scroller = null;
     _bodyEl = null;
     _filterInput = null;
@@ -214,11 +224,22 @@ export function appendTimelineToolRow(tool) {
     _refreshGraphIfVisible();
 }
 
+// Coalesce graph refreshes. Every live tool.start/tool.call invalidates the
+// diagram, and mermaid.render() is a full layout pass — re-running it once per
+// event through a tool-heavy turn pins the main thread for no visible gain,
+// since the intermediate frames are superseded before anyone reads them. A
+// trailing debounce collapses a burst into a single render.
+const GRAPH_REFRESH_DEBOUNCE_MS = 250;
+
 function _refreshGraphIfVisible() {
-    const graphPane = document.querySelector('#timeline-modal .tab-content[data-tab="graph"]');
-    if (graphPane && graphPane.classList.contains('active')) {
-        _renderGraph(graphPane);
-    }
+    if (_graphRefreshTimer) clearTimeout(_graphRefreshTimer);
+    _graphRefreshTimer = setTimeout(() => {
+        _graphRefreshTimer = null;
+        const graphPane = document.querySelector('#timeline-modal .tab-content[data-tab="graph"]');
+        if (graphPane && graphPane.classList.contains('active')) {
+            _renderGraph(graphPane);
+        }
+    }, GRAPH_REFRESH_DEBOUNCE_MS);
 }
 
 function _appendLiveEntry(entry) {
@@ -458,6 +479,13 @@ function _jumpToNextError() {
 // ---------------------------------------------------------------------------
 
 async function _renderGraph(pane) {
+    // This function awaits twice (library load, mermaid.render), so a second
+    // call can interleave with one already in flight. Both would then run the
+    // stale-section sweep below and both would insert their own dwell/tally
+    // block, leaving duplicates on screen. Newest call wins; older ones bail
+    // at their next resumption point.
+    const token = ++_graphRenderToken;
+
     const statusEl = pane.querySelector('.timeline-graph-status');
     const container = pane.querySelector('.timeline-graph-container');
     const caption = pane.querySelector('.timeline-graph-caption');
@@ -480,13 +508,18 @@ async function _renderGraph(pane) {
         statusEl.textContent = 'Failed to load diagram library: ' + e.message;
         return;
     }
+    if (token !== _graphRenderToken) return;
 
     const { source, current, termination, invariantViolations, nodeNames } = _buildMermaidSource(_data.stateLog);
 
     try {
-        // Unique id per render so Mermaid doesn't collide on re-entry.
-        const id = `timeline-diagram-${Date.now()}`;
+        // Unique id per render so Mermaid doesn't collide on re-entry. A
+        // counter, not Date.now() — two renders in the same millisecond are
+        // reachable from the debounce above plus a tab switch, and mermaid
+        // keys its internal style block on this id.
+        const id = `timeline-diagram-${++_graphRenderSeq}`;
         const { svg } = await mermaid.render(id, source);
+        if (token !== _graphRenderToken) return;
         // Node and edge labels come from server-supplied state-log rows
         // (to_state, reason, termination_reason), so this markup is not
         // developer-controlled. Inline SVG is a scripting context — sanitize
@@ -586,14 +619,19 @@ function _buildMermaidSource(rows) {
 
     // Phase color hints — applied before current/violation so they can always override.
     const phaseGroups = {
-        work: ['processing', 'compacting'],
-        wait: ['awaiting_user', 'awaiting_workers', 'paused', 'pause_requested'],
-        end:  ['finalizing', 'cancelling'],
+        work:  ['processing', 'compacting'],
+        // scouting is a real, frequently-visited state (it has its own dwell
+        // colour below) and was the one phase with no hint here, so it drew
+        // in the default grey next to colour-coded neighbours.
+        scout: ['scouting'],
+        wait:  ['awaiting_user', 'awaiting_workers', 'paused', 'pause_requested'],
+        end:   ['finalizing', 'cancelling'],
     };
     const phaseStyles = {
-        work: 'fill:#162116,stroke:#4a7a4a,color:#bbb',
-        wait: 'fill:#231f10,stroke:#7a6a30,color:#bbb',
-        end:  'fill:#231616,stroke:#6a3838,color:#bbb',
+        work:  'fill:#162116,stroke:#4a7a4a,color:#bbb',
+        scout: 'fill:#13202b,stroke:#3f6c92,color:#bbb',
+        wait:  'fill:#231f10,stroke:#7a6a30,color:#bbb',
+        end:   'fill:#231616,stroke:#6a3838,color:#bbb',
     };
     for (const [phaseName, stateList] of Object.entries(phaseGroups)) {
         const present = stateList.filter(s => nodes.has(s));
@@ -771,6 +809,26 @@ async function _ensureMermaid() {
                 startOnLoad: false,
                 theme: 'dark',
                 securityLevel: 'strict',
+                // Native <text> labels, not HTML-in-<foreignObject>.
+                //
+                // Mermaid's default label mode wraps every node and edge label
+                // in a <foreignObject>, and DOMPurify ships `foreignobject` in
+                // its svgDisallowed list — so setSanitizedSvg() stripped all of
+                // them and the graph rendered as correctly-coloured, correctly
+                // -connected, completely UNLABELLED boxes. It also broke the
+                // click-a-node-to-filter wiring below, which matches on
+                // node.textContent (empty once the labels are gone).
+                //
+                // Widening the sanitizer does NOT fix this: allowing
+                // foreignObject through keeps the element but DOMPurify's
+                // namespace check still strips its HTML children, so the
+                // labels stay empty. Turning htmlLabels off is what actually
+                // works — mermaid then emits plain SVG <text>, which survives
+                // sanitization untouched and needs no loosening of the CSP or
+                // the purifier. Both keys are needed: the state renderer reads
+                // the flowchart config for label construction.
+                flowchart: { htmlLabels: false },
+                state: { htmlLabels: false },
             });
             return _mermaid;
         });

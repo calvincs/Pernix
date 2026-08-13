@@ -40,6 +40,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from config import settings
+from core.pools import run_background
 
 logger = logging.getLogger("pernix.snooze")
 
@@ -1086,7 +1087,7 @@ Output valid JSON only. No markdown fences. /no_think"""
         try:
             from core.canary.maintain import run_maintenance
 
-            stats = await asyncio.to_thread(run_maintenance, self._is_cancelled)
+            stats = await run_background(run_maintenance, self._is_cancelled)
             for key in ("promoted", "settled_flaky", "flaky_tagged", "demoted", "purged"):
                 self._bump(f"canaries_{key}", len(stats.get(key) or []))
         except Exception as e:
@@ -1236,7 +1237,7 @@ Output valid JSON only. No markdown fences. /no_think"""
         from core import synthesis
 
         try:
-            stats = await asyncio.to_thread(synthesis.run, 500)
+            stats = await run_background(synthesis.run, 500)
             if stats.processed:
                 logger.info(
                     "Snooze synthesis: %d post-mortems → %d signal updates",

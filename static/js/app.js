@@ -523,42 +523,42 @@ async function loadContextInfo(sid) {
             if (sess.total_cost >= 0.005) title += ` (~$${sess.total_cost.toFixed(2)})`;
             title += '.';
         }
-        // Prompt-cache hit rate (providers that report it: OpenAI, OpenRouter/
-        // Anthropic). Verifies that the cache-stable context assembly pays off.
-        try {
-            const usage = await get(`/api/usage/${sid}`);
-            if (usage && usage.cache_read > 0 && usage.prompt > 0) {
-                const pct = Math.round((usage.cache_read / usage.prompt) * 100);
-                title += ` Cache: ${usage.cache_read.toLocaleString()} prompt tokens read from cache (${pct}%).`;
-            }
-            // Cache writes = breakpoints being PLACED (plan 1b). Writes with
-            // no reads means the breakpoints land on unstable bytes.
-            if (usage && usage.cache_write > 0) {
-                title += ` ${usage.cache_write.toLocaleString()} written to cache.`;
-            }
-        } catch {}
-        // Autonomy substrate (plan §12.6): active goal, gates, live kernel.
-        try {
-            const g = await get(`/api/sessions/${sid}/goal`);
-            if (g && g.goal) {
-                const gl = g.goal;
-                let goalLine = ` Goal: "${(gl.objective || '').slice(0, 60)}" — ${gl.continuations_used || 0}/${gl.continuation_budget || 0} continuations`;
-                if (gl.token_budget) goalLine += `, ${(gl.tokens_used || 0).toLocaleString()}/${gl.token_budget.toLocaleString()} tokens`;
-                title += goalLine + '.';
-            }
-        } catch {}
-        try {
-            const gt = await get(`/api/sessions/${sid}/gates`);
-            if (gt && gt.gates && gt.gates.length) {
-                title += ` ${gt.gates.length} deterministic gate${gt.gates.length === 1 ? '' : 's'} active.`;
-            }
-        } catch {}
-        try {
-            const k = await get('/api/kernel/status');
-            if (k && k.enabled && k.alive > 0) {
-                title += ` Kernel: ${k.alive}/${k.max} live.`;
-            }
-        } catch {}
+        // Prompt-cache hit rate plus the autonomy substrate (plan §12.6):
+        // active goal, gates, live kernel.
+        //
+        // Issued together, not one after another. Awaited in series these four
+        // added four sequential round-trips to every turn.complete — and all
+        // of it only decorates a tooltip, so it must never be the reason the
+        // status bar lags behind the turn. Each is caught on its own: a
+        // subsystem that is off or an endpoint an older server lacks should
+        // cost its own line, not the other three.
+        const [usage, goalRes, gatesRes, kernel] = await Promise.all([
+            get(`/api/usage/${sid}`).catch(() => null),
+            get(`/api/sessions/${sid}/goal`).catch(() => null),
+            get(`/api/sessions/${sid}/gates`).catch(() => null),
+            get('/api/kernel/status').catch(() => null),
+        ]);
+        if (usage && usage.cache_read > 0 && usage.prompt > 0) {
+            const pct = Math.round((usage.cache_read / usage.prompt) * 100);
+            title += ` Cache: ${usage.cache_read.toLocaleString()} prompt tokens read from cache (${pct}%).`;
+        }
+        // Cache writes = breakpoints being PLACED (plan 1b). Writes with
+        // no reads means the breakpoints land on unstable bytes.
+        if (usage && usage.cache_write > 0) {
+            title += ` ${usage.cache_write.toLocaleString()} written to cache.`;
+        }
+        if (goalRes && goalRes.goal) {
+            const gl = goalRes.goal;
+            let goalLine = ` Goal: "${(gl.objective || '').slice(0, 60)}" — ${gl.continuations_used || 0}/${gl.continuation_budget || 0} continuations`;
+            if (gl.token_budget) goalLine += `, ${(gl.tokens_used || 0).toLocaleString()}/${gl.token_budget.toLocaleString()} tokens`;
+            title += goalLine + '.';
+        }
+        if (gatesRes && gatesRes.gates && gatesRes.gates.length) {
+            title += ` ${gatesRes.gates.length} deterministic gate${gatesRes.gates.length === 1 ? '' : 's'} active.`;
+        }
+        if (kernel && kernel.enabled && kernel.alive > 0) {
+            title += ` Kernel: ${kernel.alive}/${kernel.max} live.`;
+        }
         el.title = title;
     } catch {}
 }

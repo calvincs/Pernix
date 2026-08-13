@@ -24,6 +24,7 @@ from difflib import SequenceMatcher
 from typing import Callable
 
 from config import settings
+from core.pools import run_background
 
 logger = logging.getLogger("pernix.memory.sweeps")
 
@@ -170,7 +171,7 @@ async def dedup_sweep(store, db, is_cancelled: Callable[[], bool], *, interval_d
         db.set_snooze_state(f"dedup_{target_file.name}", datetime.now(timezone.utc).isoformat())
         return 0
 
-    archived_epochs = await asyncio.to_thread(_pairwise_dedup, entries, is_cancelled)
+    archived_epochs = await run_background(_pairwise_dedup, entries, is_cancelled)
 
     deduped = 0
     if archived_epochs:
