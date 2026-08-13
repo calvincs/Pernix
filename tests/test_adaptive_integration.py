@@ -702,3 +702,58 @@ def test_pending_proposals_lapse_after_the_ttl():
     assert db.adaptive_get_proposal(fresh)["status"] == "pending"
     # Disabled by zero.
     assert db.adaptive_expire_stale_proposals(0) == 0
+
+
+def test_one_producer_cannot_own_the_whole_review_queue():
+    """Every one of the 126 backed-up proposals on the live box came from
+    dream; once it filled the queue, Candor/Refine/Telos were refused too."""
+    for i in range(3):
+        assert db.adaptive_add_proposal(
+            "dream", json.dumps([{"n": i}]), "[]", f"d{i}", max_pending=40, max_pending_per_producer=3
+        )
+    # dream is at its share — refused, even though the queue has room.
+    assert (
+        db.adaptive_add_proposal(
+            "dream", json.dumps([{"n": 9}]), "[]", "d9", max_pending=40, max_pending_per_producer=3
+        )
+        is None
+    )
+    # A quieter producer still gets through.
+    assert db.adaptive_add_proposal(
+        "candor", json.dumps([{"n": 9}]), "[]", "c", max_pending=40, max_pending_per_producer=3
+    )
+
+
+async def test_paraphrased_tool_findings_promote_once():
+    """Eleven of the sixty-four live proposals were one fetch_ok finding
+    restated. Lexical dedup cannot see a paraphrase; the Candor evidence key
+    is the claim's semantic identity, and promotion must use it."""
+    from core.dream.promote import promote_validated
+
+    ev = json.dumps([{"type": "candor", "pred": "fetch_ok", "args": ["*"], "quote": "p=0.49"}])
+    first = db.add_dream_hypothesis("tool_pattern", "fetch_ok succeeds only about half the time overall", ev)
+    second = db.add_dream_hypothesis("tool_pattern", "Fetching is unreliable, working roughly 50% of the time", ev)
+    for hid in (first, second):
+        db.update_dream_hypothesis(hid, status="validated")
+
+    assert await promote_validated(limit=10) == 1  # the paraphrase adds nothing
+    rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
+    assert rows[first]["promoted_ref"].startswith("proposal:")
+    assert rows[second]["promoted_ref"] == "reported:duplicate-evidence"  # terminal
+    assert len(db.adaptive_list_proposals(status="pending")) == 1
+
+
+async def test_same_file_correction_is_not_proposed_twice():
+    """One conflicted memory file produced four separate proposals live."""
+    from core.dream.promote import promote_validated
+
+    ev = json.dumps([{"type": "memory", "file": "pernix.versions", "epoch": 1, "hash": "a"}])
+    a = db.add_dream_hypothesis("contradiction", "two entries disagree about the version", ev)
+    b = db.add_dream_hypothesis("contradiction", "the recorded version numbers are inconsistent", ev)
+    for hid in (a, b):
+        db.update_dream_hypothesis(hid, status="validated")
+
+    assert await promote_validated(limit=10) == 1
+    assert len(db.adaptive_list_proposals(status="pending")) == 1
+    rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
+    assert rows[b]["promoted_ref"] == "reported:duplicate-evidence"

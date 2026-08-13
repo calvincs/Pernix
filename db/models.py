@@ -1501,6 +1501,7 @@ def adaptive_add_proposal(
     evidence_json: str,
     rationale: str,
     max_pending: int = 0,
+    max_pending_per_producer: int = 0,
 ) -> int | None:
     """Queue a proposal for human review. Returns the id, or None if suppressed.
 
@@ -1516,6 +1517,12 @@ def adaptive_add_proposal(
     * **Cap** — at `max_pending` the insert is refused. Refusing is the
       honest response: another row on a queue this long would not be
       reviewed either, and a caller that hears "no" can say so.
+    * **Per-producer share** — `max_pending_per_producer` stops one
+      chatty producer from owning the whole queue. On the live box every
+      one of the 126 backed-up proposals came from `dream`, so once it
+      filled the queue Candor, Refine and Telos were refused too: the
+      loudest producer silenced the quieter ones, which is the opposite of
+      how a review queue should triage.
     """
     with connect_sessions() as conn:
         dup = conn.execute(
@@ -1530,6 +1537,18 @@ def adaptive_add_proposal(
             if int(pending) >= max_pending:
                 logger.warning(
                     "adaptive: proposal from %s refused — %d pending at cap %d", producer, pending, max_pending
+                )
+                return None
+        if max_pending_per_producer > 0:
+            mine = conn.execute(
+                "SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending' AND producer = ?", (producer,)
+            ).fetchone()[0]
+            if int(mine) >= max_pending_per_producer:
+                logger.warning(
+                    "adaptive: proposal from %s refused — %d of its own pending at per-producer cap %d",
+                    producer,
+                    mine,
+                    max_pending_per_producer,
                 )
                 return None
         cur = conn.execute(

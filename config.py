@@ -339,6 +339,7 @@ class Settings:
     # after a batch (canary-stamped post-mortems excluded).
     adaptive_tripwire_window_turns: int = 20
     adaptive_max_pending_proposals: int = 40  # review queue cap (0 = unbounded)
+    adaptive_max_pending_per_producer: int = 12  # one producer's share of it (0 = unbounded)
     adaptive_proposal_ttl_days: int = 30  # pending proposals lapse after this (0 = never)
 
     # --- Session kernel (persistent per-session REPL, off by default) ---

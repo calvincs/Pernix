@@ -178,6 +178,7 @@ def queue_edits(edits: list[dict], producer: str, rationale: str = "") -> dict:
             evidence_json=json.dumps(evidence),
             rationale=f"{why} — {tier}-risk tier" if split else why,
             max_pending=settings.adaptive_max_pending_proposals,
+            max_pending_per_producer=settings.adaptive_max_pending_per_producer,
         )
         if pid is None:
             # Queue full. Same shape as the entry-cap rejection: the producer
