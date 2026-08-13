@@ -34,6 +34,11 @@ _PROMOTE_LIMIT_PER_STEP = 3
 # retried forever, and it is distinguishable from a real proposal in the
 # record.
 _NO_EFFECTOR_REF = "reported:no-effector"
+# promoted_ref for a hypothesis whose evidence already produced a promotion.
+# Terminal for the same reason as _NO_EFFECTOR_REF: it must leave the queue.
+_DUPLICATE_EVIDENCE_REF = "reported:duplicate-evidence"
+# Terminal markers do not count toward the step's promotion yield.
+_TERMINAL_NON_PROPOSAL = (_NO_EFFECTOR_REF, _DUPLICATE_EVIDENCE_REF)
 
 
 def _evidence_refs(row: dict) -> list[str]:
@@ -82,16 +87,52 @@ async def promote_validated(limit: int = _PROMOTE_LIMIT_PER_STEP) -> int:
                 # A row that reached a terminal non-proposal outcome has left
                 # the queue but produced nothing to review; don't count it as
                 # a promotion or it inflates the step's reported yield.
-                if ref != _NO_EFFECTOR_REF:
+                if ref not in _TERMINAL_NON_PROPOSAL:
                     promoted += 1
         except Exception as e:
             logger.warning("dream promote failed for %s: %s", row["id"][:8], e)
     return promoted
 
 
+def _evidence_already_promoted(row: dict) -> bool:
+    """True when a prior promotion already rests on this row's Candor facts.
+
+    `hypothesize.candor_keys` exists because "the same degradation
+    (fetch_ok(*) p=0.49) was validated as ten differently worded
+    tool_pattern hypotheses" — lexical dedup cannot see a paraphrase, so the
+    evidence key is the semantic identity of the claim. Validation already
+    applies that test; promotion did not, so those ten paraphrases each
+    minted their own proposal. Eleven of the sixty-four proposals backed up
+    on the live box were one finding about fetch_ok reliability, restated.
+    """
+    from core.dream.hypothesize import candor_keys, existing_candor_keys
+
+    try:
+        evidence = [e for e in json.loads(row.get("evidence_json") or "[]") if isinstance(e, dict)]
+    except (TypeError, ValueError):
+        return False
+    keys = candor_keys(evidence)
+    if not keys:
+        return False  # nothing to key on: fall through to normal promotion
+    prior = [
+        r
+        for r in db.list_dream_hypotheses(kind=row.get("kind"), limit=500)
+        if r["id"] != row["id"] and r.get("status") == "promoted"
+    ]
+    return keys <= existing_candor_keys(prior)
+
+
 def _promote_edit(row: dict, target_kind: str) -> str | None:
     """Queue an adaptive edit; dream+global risk rules route it to a proposal."""
     from core.adaptive.contract import queue_producer_edits
+
+    if _evidence_already_promoted(row):
+        logger.info(
+            "dream: %s hypothesis %s rests on already-promoted evidence — not re-proposed",
+            row.get("kind"),
+            row["id"][:8],
+        )
+        return _DUPLICATE_EVIDENCE_REF
 
     edit = {
         "action": "create",
@@ -128,6 +169,28 @@ def _memory_files_from_evidence(row: dict) -> list[str]:
     return files[:3]
 
 
+def _correction_already_pending(kind: str | None, files: list[str]) -> bool:
+    """True when the same file is already awaiting the same kind of correction.
+
+    Dream re-derives a contradiction every time it re-samples the file that
+    holds it, so one genuinely-conflicted memory file produced four separate
+    proposals. They are not alternatives a reviewer chooses between — they
+    are the same finding, and approving any one of them writes the note.
+    """
+    target = {kind, *files}
+    for p in db.adaptive_list_proposals(status="pending", limit=200):
+        try:
+            edits = json.loads(p.get("payload_json") or "[]")
+        except (TypeError, ValueError):
+            continue
+        for e in edits:
+            if not isinstance(e, dict) or e.get("action") != "memory_correction":
+                continue
+            if {e.get("kind"), *(e.get("files") or [])} == target:
+                return True
+    return False
+
+
 def _promote_memory_review(row: dict) -> str | None:
     """contradiction/memory_stale → an approvable memory correction
     (audit P5). The old empty-payload proposal dead-ended: 72/75 pending
@@ -144,6 +207,13 @@ def _promote_memory_review(row: dict) -> str | None:
     just stops pretending to be an actionable decision.
     """
     files = _memory_files_from_evidence(row)
+    if files and _correction_already_pending(row.get("kind"), files):
+        logger.info(
+            "dream: %s correction for %s already awaiting review — not re-proposed",
+            row.get("kind"),
+            ", ".join(files),
+        )
+        return _DUPLICATE_EVIDENCE_REF
     if not files:
         logger.info(
             "dream: %s hypothesis %s validated with no citable memory file — reported, not proposed (nothing to apply)",
@@ -175,6 +245,7 @@ def _promote_memory_review(row: dict) -> str | None:
             f"{(row.get('statement') or '').strip()[:500]}"
         ),
         max_pending=settings.adaptive_max_pending_proposals,
+        max_pending_per_producer=settings.adaptive_max_pending_per_producer,
     )
     if pid is None:
         # Queue full: leave the row `validated` so it is reconsidered once a
