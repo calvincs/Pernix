@@ -1432,9 +1432,10 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-snooze-activity-icon { color: var(--accent); }
 
 /* ---------------------------------------------------------------------------
-   Adaptive tab (plan 4f)
+   Adaptive tab (plan 4f) — shared by the Canary and Telos tabs, which reuse
+   this vocabulary rather than defining their own.
 --------------------------------------------------------------------------- */
-#fp-adaptive, #fp-canary { overflow-y: auto; padding: 10px 14px; }
+#fp-adaptive, #fp-canary, #fp-telos { overflow-y: auto; padding: 10px 14px; }
 .adaptive-head { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
 .adaptive-section-title {
     font-weight: 600; margin: 14px 0 6px; font-size: 0.95em;
@@ -1462,6 +1463,22 @@ body.fp-resizing #main { pointer-events: none; }
     background: var(--bg); color: var(--text); cursor: pointer; font-size: 0.85em;
 }
 .adaptive-btn:hover { border-color: var(--accent); }
+/* Entry rows — the Telos tab's row vocabulary (and the read-only rows on the
+   Adaptive tab). Same card treatment as .adaptive-card; kept as its own name
+   because entries are informational and carry no action row. Without these
+   three rules the whole Telos tab rendered as one unbroken wall of text. */
+.adaptive-entry {
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 8px 10px; margin: 6px 0; font-size: 0.9em;
+}
+.adaptive-entry-title {
+    display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px;
+    color: var(--text); overflow-wrap: anywhere;
+}
+.adaptive-entry-meta {
+    color: var(--text-dim); font-size: 0.85em; margin-top: 4px;
+    font-family: var(--mono); overflow-wrap: anywhere;
+}
 .adaptive-entry-content, .adaptive-edit-line { color: var(--text-dim); margin-top: 4px; white-space: pre-wrap; }
 .adaptive-flag-reason { color: var(--warning, #c9a35a); margin-top: 4px; font-size: 0.85em; }
 .adaptive-empty { color: var(--text-dim); font-style: italic; margin: 4px 0; }

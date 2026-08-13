@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from config import settings
+from core.pools import run_background
 from db import models as db
 
 logger = logging.getLogger("pernix.retention")
@@ -127,7 +128,7 @@ async def nudge_stale_canaries(max_age_days: int = 90) -> int:
     try:
         from core.canary import scan_canaries
 
-        for c in await asyncio.to_thread(scan_canaries):
+        for c in await run_background(scan_canaries):
             if not c.last_reviewed:
                 continue
             try:
@@ -208,7 +209,7 @@ async def prune_workflow_runs(max_runs_per_workflow: int = 10, max_age_days: int
             # rmtree is blocking filesystem recursion; offload so the event
             # loop stays responsive across many deletions.
             if run_dir.exists():
-                await asyncio.to_thread(shutil.rmtree, run_dir)
+                await run_background(shutil.rmtree, run_dir)
             db.delete_workflow_run(run_id)
             deleted += 1
         except Exception as e:
@@ -251,7 +252,7 @@ async def prune_rlm_runs(retention_days: int | None = None) -> int:
         try:
             # rmtree is blocking filesystem recursion; keep the loop responsive.
             if run_dir.exists():
-                await asyncio.to_thread(shutil.rmtree, run_dir)
+                await run_background(shutil.rmtree, run_dir)
             db.delete_rlm_run(run_id)
             # The run's sidebar view session goes with it — it is pure
             # navigation chrome over the (now deleted) trace. Mirror of

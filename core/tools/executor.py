@@ -83,6 +83,14 @@ class ToolExecutionResult:
 # and so the worker thread unwinds on its own.
 _DISPATCH_TIMEOUT_GRACE_S = 5
 
+# How long a dispatch may sit in a bounded pool's queue before we stop waiting
+# for a thread. Generous, because a legitimately busy pool recovers: with 32
+# tool slots, exceeding this means either a genuine fan-out storm or slots held
+# by long occupants, and in both cases a clear "pool saturated" error beats a
+# misleading per-tool timeout. Kept as a constant rather than a setting — it is
+# a diagnostic backstop, and the actionable knob is the pool size itself.
+_QUEUE_WAIT_CEILING_S = 300
+
 
 def _resolve_timeout(tool, arguments: dict | None) -> int:
     """Resolve the dispatch timeout for one call.
@@ -349,18 +357,68 @@ async def _execute_single(
         ctx["_call_id"] = call_id
         if workspace_override:
             ctx["workspace_override"] = workspace_override
-        import functools
 
         # Never asyncio.to_thread here: that is the default executor the API
         # depends on. See the pool comments at the top of this module.
         executor = _get_long_poll_executor() if tool.long_poll else _get_tool_executor()
-        raw = await asyncio.wait_for(
-            loop.run_in_executor(
-                executor,
-                functools.partial(registry.execute_sync, name, arguments, ctx),
-            ),
-            timeout=timeout,
-        )
+
+        # Both pools are bounded, so a dispatch can sit in the queue before any
+        # thread picks it up — and asyncio.wait_for starts its clock at SUBMIT,
+        # not at first execution. Charging queue time against the tool's own
+        # budget meant that under heavy fan-out a tool could be reported as
+        # "timed out after 300s" without having executed a single line, which
+        # is both wrong and un-actionable: the fix for a saturated pool is not
+        # a longer per-tool timeout. So the wait is split — a ceiling on queue
+        # time, then the tool's real timeout measured from the moment a thread
+        # actually enters it.
+        started = asyncio.Event()
+
+        def _runner():
+            # Runs on the pool thread. call_soon_threadsafe, not Event.set:
+            # asyncio.Event is not thread-safe.
+            loop.call_soon_threadsafe(started.set)
+            return registry.execute_sync(name, arguments, ctx)
+
+        fut = loop.run_in_executor(executor, _runner)
+        waiter = asyncio.ensure_future(started.wait())
+        try:
+            await asyncio.wait({fut, waiter}, timeout=_QUEUE_WAIT_CEILING_S, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+
+        if not started.is_set() and not fut.done():
+            # Never got a thread inside the ceiling. Report saturation as
+            # itself rather than as a tool timeout — the two have different
+            # causes and different fixes. fut.cancel() drops the queued item
+            # if the executor has not dequeued it yet; if it loses that race
+            # the call runs to completion with nobody awaiting it, which is
+            # the same exposure a dispatch timeout already carries.
+            fut.cancel()
+            latency = int((time.monotonic() - start) * 1000)
+            registry.metrics[name].record_timeout(latency)
+            logger.warning(
+                "Tool '%s' never started: %s pool saturated for %ds (%s)",
+                name,
+                "long-poll" if tool.long_poll else "tool",
+                _QUEUE_WAIT_CEILING_S,
+                (
+                    "long-poll pool is a fixed 16 — too many concurrent orchestrations"
+                    if tool.long_poll
+                    else "raise settings.tool_executor_workers"
+                ),
+            )
+            return ToolExecutionResult(
+                tool_name=name,
+                content=(
+                    f"Error: Tool '{name}' never started — the executor pool was saturated for "
+                    f"{_QUEUE_WAIT_CEILING_S}s. This is thread exhaustion, not a slow tool."
+                ),
+                was_error=True,
+                latency_ms=latency,
+            )
+
+        raw = await asyncio.wait_for(fut, timeout=timeout)
         latency = int((time.monotonic() - start) * 1000)
 
         # execute_sync may return (str, dict) for structured metadata

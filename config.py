@@ -176,6 +176,13 @@ class Settings:
     # on IO, not burning CPU; each also bounds concurrent subprocesses, so
     # raising it costs memory and PIDs rather than throughput.
     tool_executor_workers: int = 32
+    # Threads for long-running idle-time background work (dream deep probes,
+    # canary maintenance, synthesis, backups, memory dedup). Same reasoning as
+    # tool_executor_workers — these must never occupy asyncio's default
+    # executor, which every API route needs for its DB reads. Small on purpose:
+    # occupants are heavyweight and idle-time-only, so a hard ceiling on
+    # concurrency matters more than throughput. See core/pools.py.
+    background_executor_workers: int = 8
     auto_approve_dangerous: bool = False  # Allow "dangerous" tools without ask_user confirmation
     shell_security_mode: str = "permissive"
     # Per-process virtual-address-space cap applied to every `bash` child via
