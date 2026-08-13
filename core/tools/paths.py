@@ -88,8 +88,8 @@ def tool_output_root() -> Path:
 
 
 def allowed_read_roots() -> list[Path]:
-    """Directories that file_read may access (workspace + skills + workflows +
-    the truncation spill tree, plus the kernel payload spill tree when the
+    """Directories that file_read may access (workspace + skills + the
+    truncation spill tree, plus the kernel payload spill tree when the
     session kernel is on).
 
     Order matters: workspace first, so a bare relative name still resolves
@@ -99,9 +99,6 @@ def allowed_read_roots() -> list[Path]:
     skills = Path(settings.skills_dir).resolve()
     if skills not in roots:
         roots.append(skills)
-    workflows = Path(settings.workflows_dir).resolve()
-    if workflows not in roots:
-        roots.append(workflows)
     try:
         tool_output = tool_output_root()
         if tool_output not in roots:

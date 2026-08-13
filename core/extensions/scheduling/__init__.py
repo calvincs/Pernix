@@ -1,7 +1,8 @@
 """Pernix — Scheduling extension: cron job management via APScheduler.
 
-Scheduled workflows are expressed as ordinary cron prompts that call
-`run_workflow` — there is no separate workflow-scheduling tool.
+A scheduled multi-step pipeline is an ordinary cron prompt that tells the agent
+which skill to load and which steps to run — there is no separate pipeline
+scheduler.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ def init_scheduler():
 
 # Entry keys that are positional args or derived state, not meta payload.
 # Everything else in a persisted entry round-trips through extra_meta so
-# variant fields (kind, last_fired_at, workflow_name, ...) survive restarts.
+# variant fields (kind, last_fired_at, ...) survive restarts.
 _ENTRY_STRUCTURAL_KEYS = frozenset({"name", "cron_expr", "prompt", "session_id", "model", "cron_trigger", "paused"})
 
 
@@ -133,8 +134,8 @@ def _save_jobs():
                 "paused": job.next_run_time is None,
                 "created_at": meta.get("created_at", ""),
             }
-            # Round-trip every remaining meta key verbatim (workflow_name,
-            # last_fired_at, kind, ...) — the load side mirrors this.
+            # Round-trip every remaining meta key verbatim (last_fired_at,
+            # kind, ...) — the load side mirrors this.
             for k, v in meta.items():
                 if k not in entry and k != "name":
                     entry[k] = v
@@ -1177,7 +1178,8 @@ def register(reg) -> None:
         func=schedule_job,
         description=(
             "Schedule a recurring job with 5-field cron expression. Job sends a prompt to a session on "
-            "schedule. To schedule a workflow, make the prompt instruct run_workflow('<name>', ...)."
+            "schedule. For a multi-step pipeline, write the prompt to load the relevant skill and follow "
+            "its steps, spawning workers for the heavy ones."
         ),
         parameters={
             "type": "object",

@@ -7,7 +7,7 @@ sliced from the most recent ``scout`` role marker so retries don't drown the
 verifier in stale messages from prior attempts.
 
 These tests verify:
-- the preamble (workspace files, tool summary, deliverables, workflow runs)
+- the preamble (workspace files, tool summary, deliverables)
 - the new ATTEMPT TRANSCRIPT section's content and scoping
 - per-tool-result truncation behavior
 - backwards compatibility for the deprecated ``reflect_full_transcript`` flag
@@ -147,30 +147,6 @@ def test_evidence_includes_retry_preamble_on_attempt_gt_1():
     sid = _make_session_with_transcript()
     _, evidence = _build_evidence(sid, attempt=2)
     assert "attempt #2" in evidence
-
-
-def test_evidence_includes_workflow_runs_for_session():
-    """Regression for session 7b97cf7ef84a: when the agent invokes
-    run_workflow, reflect's evidence must include the workflow_runs row's
-    authoritative status so the LLM doesn't conflate intermediate scratch
-    files with a 'pass'.
-    """
-    sid = db.create_session(title="Workflow reflect test")
-    db.add_message(sid, "user", "execute scheduled job ai-tech-daily-brief")
-    db.add_message(sid, "tool", "Workflow 'ai-tech-daily-brief' run abc12345: running. " "1/4 complete, 3 pending.")
-    db.add_message(sid, "assistant", "The workflow is running, I'll wait for it.")
-
-    db.create_workflow_run(run_id="abc12345", workflow_name="ai-tech-daily-brief", run_dir="x/abc12345", step_count=4)
-
-    _, evidence = _build_evidence(sid, attempt=1)
-    assert "WORKFLOW RUNS:" in evidence, evidence
-    assert "abc12345" in evidence
-    assert "status=running" in evidence
-
-
-# ---------------------------------------------------------------------------
-# Per-attempt transcript scoping (new in turn-digest redesign)
-# ---------------------------------------------------------------------------
 
 
 def test_messages_since_attempt_start_with_scout_marker():

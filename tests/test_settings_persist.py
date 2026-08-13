@@ -23,7 +23,6 @@ _EXPECTED_NO_PERSIST = {
     "workspace_dir",
     "memory_dir",
     "skills_dir",
-    "workflows_dir",
     "candor_store_dir",
     "telos_dir",
 }

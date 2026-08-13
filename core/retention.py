@@ -1,6 +1,6 @@
 """Pernix — Retention sweeps: age out the transient records the system emits.
 
-Cron runs, post-mortems, canary runs, workflow run directories and RLM run
+Cron runs, post-mortems, canary runs and RLM run
 directories all accumulate as a side effect of normal operation. Nothing here
 decides *when* to sweep — snooze's activity ladder (Activities 7, 11, 12, 12a,
 12c) and maintenance's 24h fallback own the cadence and the watermarks. These
@@ -155,69 +155,6 @@ async def nudge_stale_canaries(max_age_days: int = 90) -> int:
     except Exception as e:
         logger.warning("Canary staleness nudge failed: %s", e)
     return raised
-
-
-# ---------------------------------------------------------------------------
-# Workflow run directories
-# ---------------------------------------------------------------------------
-
-
-async def prune_workflow_runs(max_runs_per_workflow: int = 10, max_age_days: int = 30) -> int:
-    """Delete old workflow run directories and DB rows beyond retention limits.
-
-    Keeps the N most recent completed runs per workflow, and deletes any run
-    older than max_age_days regardless of count. Running runs are never
-    touched. Returns the number of runs deleted.
-    """
-    try:
-        runs = db.list_workflow_runs(limit=1000)
-    except Exception as e:
-        logger.warning("Snooze workflow cleanup: could not list runs: %s", e)
-        return 0
-
-    cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
-
-    # Group completed runs by workflow name (exclude running ones)
-    by_workflow: dict[str, list[dict]] = {}
-    for run in runs:
-        if run.get("status") == "running":
-            continue
-        by_workflow.setdefault(run["workflow_name"], []).append(run)
-
-    to_delete: list[dict] = []
-    for wf_runs in by_workflow.values():
-        # Sort newest first. Runs with missing started_at sort to the front
-        # (empty string < any ISO timestamp) so they appear as "oldest" —
-        # exclude them from the keep window to avoid deleting recent runs.
-        wf_runs.sort(key=lambda r: r.get("started_at") or "", reverse=True)
-        for i, run in enumerate(wf_runs):
-            started = run.get("started_at") or ""
-            if i >= max_runs_per_workflow or (started and started < cutoff_iso):
-                to_delete.append(run)
-
-    if not to_delete:
-        return 0
-
-    workspace_dir = Path(settings.workspace_dir)
-    deleted = 0
-    for run in to_delete:
-        run_id = run["run_id"]
-        run_dir = workspace_dir / run["run_dir"]
-        try:
-            # Archive pending proposals before deleting
-            db.archive_proposals_for_run(run_id)
-            # rmtree is blocking filesystem recursion; offload so the event
-            # loop stays responsive across many deletions.
-            if run_dir.exists():
-                await run_background(shutil.rmtree, run_dir)
-            db.delete_workflow_run(run_id)
-            deleted += 1
-        except Exception as e:
-            logger.warning("Snooze workflow cleanup: error deleting run %s: %s", run_id, e)
-
-    if deleted:
-        logger.info("Snooze workflow cleanup: deleted %d old run(s)", deleted)
-    return deleted
 
 
 # ---------------------------------------------------------------------------

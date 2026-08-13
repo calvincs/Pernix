@@ -136,7 +136,7 @@ def test_save_jobs_roundtrips_extra_meta_and_skips_transient(tmp_path, monkeypat
         "created_at": "2026-08-01T00:00:00+00:00",
         "kind": "future-variant",
         "last_fired_at": "2026-08-04T09:00:00+00:00",
-        "workflow_name": "wf",
+        "pipeline_name": "pl",
     }
     transient = {"name": "j1__coalesced", "transient": True, "prompt": "x", "cron_expr": "0 9 * * *"}
     fake = _FakeScheduler([_FakeJob("j1", meta), _FakeJob("j1__coalesced", transient)])
@@ -149,7 +149,7 @@ def test_save_jobs_roundtrips_extra_meta_and_skips_transient(tmp_path, monkeypat
     assert e["name"] == "j1"
     assert e["kind"] == "future-variant"
     assert e["last_fired_at"] == "2026-08-04T09:00:00+00:00"
-    assert e["workflow_name"] == "wf"
+    assert e["pipeline_name"] == "pl"
 
     # Load side: every non-structural key round-trips into extra_meta.
     captured = []

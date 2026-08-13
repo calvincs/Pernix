@@ -1,9 +1,13 @@
 """Pernix — Apply a reviewed skill-improvement proposal to its target SKILL.md.
 
-Invoked only by an explicit user action (POST /api/workflows/proposals/{id}/apply
-or the corresponding UI button). The run_workflow loop never calls this — that's
-deliberate: proposals go through a human review step, and an approved/applied
-proposal never triggers an automatic workflow re-run (users re-invoke).
+Proposals are written by reflect and refine when a skill visibly under-performs
+(see core/refine.py). Applying one is always an explicit user action — POST
+/api/skills/proposals/{id}/apply, or the Apply button on the Skills tab. Nothing
+applies a proposal automatically: the review step is the point.
+
+Lived under core/workflows/ until the workflow engine was removed; proposals
+target SKILL.md files and never had anything to do with workflows beyond
+sharing that module.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from dataclasses import dataclass
 
 from db import models as db
 
-logger = logging.getLogger("pernix.workflows.apply")
+logger = logging.getLogger("pernix.skills.proposals")
 
 
 class ProposalApplyError(Exception):
@@ -133,7 +137,7 @@ def apply_proposal(proposal_id: str) -> ApplyResult:
       5. Mark the proposal status='applied' in the DB.
 
     Raises ProposalApplyError on missing proposal, unknown skill, or I/O error.
-    Never auto-retries the workflow — the user re-invokes explicitly.
+    Never auto-retries anything — the user re-invokes explicitly.
     """
     proposal = db.get_skill_proposal(proposal_id)
     if not proposal:

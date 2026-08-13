@@ -1,6 +1,6 @@
 """RLM run artifacts: run dirs, manifest, and the rlm_runs audit rows.
 
-Layout (workflow_runs precedent — relative path in the DB, heavy data on disk):
+Layout (relative path in the DB, heavy data on disk):
 
     <workspace>/rlm/<run_id>/
         manifest.json   run parameters + terminal status

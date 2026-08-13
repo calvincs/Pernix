@@ -35,7 +35,7 @@ Three file tools are always loaded:
 
 | Tool | What it does | Restrictions |
 |---|---|---|
-| `file_read` | Read a file | Workspace, `data/skills/`, `data/workflows/` |
+| `file_read` | Read a file | Workspace, `data/skills/` |
 | `file_write` | Write a file (full overwrite) | Workspace only |
 | `file_edit` | In-place edit (string replace, regex, fuzzy whole-file merge) | Workspace only |
 

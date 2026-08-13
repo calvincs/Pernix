@@ -30,7 +30,7 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Native OpenAI & OpenAI-compatible servers** — point `openai_base_url` at api.openai.com, vLLM, LM Studio, or a llama.cpp server; key via `OPENAI_API_KEY`
 - **Automatic fallback** — if a call fails or a cloud provider hits a rate limit, Pernix retries on your backup model; it can cross providers (OpenRouter → local Ollama) or just swap models within the same provider
 - **Prompt caching** — cache breakpoints for Anthropic models via OpenRouter (on by default); cache hit rates show in the session cost tooltip
-- **Three model roles** — **Primary** (`llm_model`) handles your conversation and every quality-critical call (compaction, reflect, eval); **Background** (`background_model`) runs the cheap/offline tier (scout, auto-titling, memory distillation, idle work); **Backup** (`fallback_model`) catches failures from either. Plus an optional embedding model for semantic recall, and per-request overrides for workers and workflow steps
+- **Three model roles** — **Primary** (`llm_model`) handles your conversation and every quality-critical call (compaction, reflect, eval); **Background** (`background_model`) runs the cheap/offline tier (scout, auto-titling, memory distillation, idle work); **Backup** (`fallback_model`) catches failures from either. Plus an optional embedding model for semantic recall, and per-request overrides for workers
 
 ### Agent Capabilities
 - **Persistent memory** — the agent remembers facts, decisions, and lessons across sessions using a full-text-searchable collection of markdown files
@@ -39,7 +39,7 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Headless browser** — Playwright renders JavaScript-heavy pages, SPAs, and dynamic content
 - **Workspace** — sandboxed file area the agent can read, write, and organize
 - **Worker orchestration** — spawn parallel sub-agents running on different models for complex multi-part work
-- **Skills system** — installable capability packs that teach the agent domain-specific workflows
+- **Skills system** — installable capability packs that teach the agent domain-specific procedures
 - **Cron scheduling** — run agents on a schedule for recurring tasks
 - **Reflect & retry** — a quality gate verifies each response and automatically retries if the agent missed the intent
 - **Session kernel** — an optional persistent per-session Python REPL (`repl` tool) whose variables survive turns, compaction, and restarts; huge tool results auto-bind as variables instead of flooding context
@@ -169,11 +169,11 @@ The UI works on mobile when accessed via network mode. It can also be installed 
 
 Pernix's behavior beyond raw LLM responses is shaped by three things:
 
-**Skills** (`data/skills/`) are capability packs you install. Each skill teaches the agent a specific workflow — how to call a particular API, process a specific file type, or follow a domain procedure. Skills are plain markdown with YAML frontmatter; the agent discovers them automatically and loads their instructions only when relevant.
+**Skills** (`data/skills/`) are capability packs you install. Each skill teaches the agent a specific procedure — how to call a particular API, process a specific file type, or follow a domain procedure. Skills are plain markdown with YAML frontmatter; the agent discovers them automatically and loads their instructions only when relevant.
 
 **SOUL.md** (`data/agent/SOUL.md`) defines who Pernix is — its personality, communication style, and core traits. Edit it freely to match how you want the agent to talk to you.
 
-**RULES.md** (`data/agent/RULES.md`) defines how Pernix should act — which tools to prefer, how to handle failures, when to delegate to workers. Edit it to add project-specific constraints or workflows.
+**RULES.md** (`data/agent/RULES.md`) defines how Pernix should act — which tools to prefer, how to handle failures, when to delegate to workers. Edit it to add project-specific constraints or procedures.
 
 See [docs/authoring/writing-skills.md](docs/authoring/writing-skills.md) for the full guide including how to write your own skills.
 

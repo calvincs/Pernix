@@ -11,7 +11,7 @@ the authoritative order). They fall into a few clusters:
 - Skill learning — extracting skill requirements, mining skill co-occurrence.
 - Signal synthesis — folding operational signals (and, when Candor is on, the
   candor gate) into durable memory.
-- Retention sweeps — expiring post-mortems, workflow runs, RLM runs, canary
+- Retention sweeps — expiring post-mortems, RLM runs, canary
   runs, and old cron runs/sessions.
 - Self-modification — refine (authoring improvements) and applying approved
   adaptive-policy edits.
@@ -490,14 +490,9 @@ class SnoozeRunner:
             _announce(bus, "cleanup_post_mortems", "Pruning old synthesized post-mortems")
             await self._cleanup_post_mortems()
 
-        # Activity 12: Workflow run directory cleanup (no LLM)
-        if not self._is_cancelled():
-            _announce(bus, "cleanup_workflow_runs", "Pruning old workflow run directories")
-            await self._cleanup_workflow_runs()
-
         # Activity 12a: RLM run directory cleanup (no LLM). Age-based only —
         # runs are one-shot transient work products ("extract and discard"),
-        # so unlike workflows there is no keep-N-per-name window.
+        # so there is no keep-N-per-name window.
         if not self._is_cancelled():
             _announce(bus, "cleanup_rlm_runs", "Pruning old RLM run directories")
             await self._cleanup_rlm_runs()
@@ -1092,12 +1087,6 @@ Output valid JSON only. No markdown fences. /no_think"""
                 self._bump(f"canaries_{key}", len(stats.get(key) or []))
         except Exception as e:
             logger.warning("Snooze canary maintenance failed: %s", e)
-
-    async def _cleanup_workflow_runs(self) -> None:
-        """Activity 12 — workflow run dirs beyond keep-10-per-name or 30 days."""
-        from core import retention
-
-        await retention.prune_workflow_runs()
 
     async def _cleanup_rlm_runs(self) -> None:
         """Activity 12a — RLM run dirs past rlm_run_retention_days."""

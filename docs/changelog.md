@@ -6,7 +6,13 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
-## 2026-07 (recent)
+## 2026-08 (recent)
+
+**The workflow engine was removed.** `run_workflow` and its eight sibling tools, the `/api/workflows` routes, the Explorer's Workflows tab and `WORKFLOW.md` parsing are gone. It was never used — zero invocations across the reference deployment's entire history — and a step graph you have to declare before the work begins is the one assumption an agent lets you drop. Everything it did is still available from its parts: write the procedure as a **skill**, run steps with `spawn_worker` / `await_workers`, pass data through workspace files, enforce hard pass/fail with **gates**, schedule with `schedule_job`, bound long runs with **goals**. Your `data/workflows/` directory is left alone and no migration runs. If a cron job or skill of yours calls `run_workflow` by name, rewrite its prompt. Full rationale and a conversion table in [upgrade.md](upgrade.md#2026-08-12--the-workflow-engine-was-removed).
+
+**Skill-improvement proposals moved to `/api/skills/proposals*`.** They were served from the workflows router by accident of history; they target `SKILL.md` files and are unrelated to workflows. The Explorer already points at the new paths — only external callers need updating.
+
+## 2026-07
 
 **Pernix can now dream: idle-time introspection that fact-checks its own memory.** A new Dream add-on — off by default, Settings → Dream (Introspection) — runs as the final snooze activity: it examines memory, Candor evidence, and post-mortems; raises typed hypotheses about itself (contradictions, stale memory, ineffective lessons, tool patterns); and tries to *falsify* them against recorded outcomes, including counterfactual scout replays of past failed turns. Nothing influences live behavior until validated — the observable output is a weekly report in `workspace/dreams/` and a read-only **Dream journal session** per day in the sidebar (purple dot, own legend filter). See [internals/dream.md](internals/dream.md). (migration v19)
 
@@ -50,7 +56,7 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 **Restart recovery for stuck sessions.** Sessions stuck in `PROCESSING` or `AWAITING_WORKERS` from a prior crash are reconciled to `IDLE_READY` immediately at startup, instead of waiting for the 5-minute reaper tick. (migration v16, commit `cf849fa`)
 
-**`delete_skill` and `delete_workflow` tools.** Both are dangerous (require `ask_user` + `approve_dangerous_tool`); cron sessions auto-bypass the gate. (commit `9085876`)
+**`delete_skill` and `delete_workflow` tools.** Both are dangerous (require `ask_user` + `approve_dangerous_tool`); cron sessions auto-bypass the gate. (commit `9085876`) *(`delete_workflow` removed 2026-08.)*
 
 **Workspace upload limit raised from 10 MB to 250 MB.** Per file. Useful for media-cast skills and bulk file analysis. (commit `9b883b3`)
 

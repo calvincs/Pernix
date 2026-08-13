@@ -108,7 +108,7 @@ If you want the agent to pause for input on tricky reclassifications, remove the
 
 ---
 
-## 5. Authoring a one-shot skill from a recurring workflow
+## 5. Authoring a one-shot skill from a recurring procedure
 
 **What it does:** turn a multi-step prompt you keep typing into a reusable skill.
 

@@ -2125,47 +2125,6 @@ function handleEvent(event) {
         updateStatus(`Pruned ${event.stubbed} large tool result(s) from view`);
     }
 
-    else if (type === 'workflow.started') {
-        appendMessage('system', `Workflow started: ${event.workflow} (${event.step_count} step${event.step_count === 1 ? '' : 's'})`);
-        if (state.sid) updateSessionActivity(state.sid, `workflow: ${event.workflow}`);
-    }
-
-    else if (type === 'workflow.wave_started') {
-        updateStatus(`Workflow ${event.workflow}: wave ${(event.wave_idx ?? 0) + 1} (${event.wave_size} step(s))`);
-    }
-
-    else if (type === 'workflow.step_started') {
-        updateStatus(`Workflow ${event.workflow}: step ${event.step_id}…`);
-        if (state.sid) updateSessionActivity(state.sid, `${event.workflow}/${event.step_id}`);
-    }
-
-    else if (type === 'workflow.step_completed') {
-        const status = event.status || 'done';
-        if (status !== 'passed' && status !== 'done') {
-            appendMessage('system', `Workflow step ${event.step_id}: ${status}`);
-        }
-    }
-
-    else if (type === 'workflow.step_skipped') {
-        appendMessage('system', `Workflow step ${event.step_id} skipped: ${event.reason || ''}`);
-    }
-
-    else if (type === 'workflow.step_retry') {
-        updateStatus(`Workflow ${event.workflow}: ${event.step_id} retry #${event.attempt}…`);
-    }
-
-    else if (type === 'workflow.completed') {
-        const passed = event.steps_passed ?? '?';
-        appendMessage('system', `Workflow ${event.workflow} ${event.status || 'completed'} (${passed} step(s) passed)`);
-        updateStatus('');
-    }
-
-    else if (type === 'workflow.cancelled') {
-        const killed = (event.cancelled_workers || []).length;
-        appendMessage('system', `Workflow ${event.workflow} cancelled${killed ? ` (${killed} worker(s) killed)` : ''}`);
-        updateStatus('');
-    }
-
     // Snooze (background idle-time consolidation), session.message_combined
     // and session.message_combine_skipped are intentionally silent — they're
     // informational only, but listing them in sse.js EVENT_TYPES keeps

@@ -39,5 +39,5 @@ Long-running goals the agent is tracking on the user's behalf. Add, update, or c
 
 ## Conventions
 
-- Naming: (e.g. "prefix cron workflow names with `daily-`")
+- Naming: (e.g. "prefix cron job names with `daily-`")
 - Outputs: (e.g. "save reports to `reports/` in the workspace")

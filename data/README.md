@@ -15,7 +15,6 @@ data/
   skills/              # Skill packages — NOT wiped on rebuild
     {skill-name}/      #   Each skill has SKILL.md + optional scripts/, references/
     .disabled.json     #   Disabled skill names
-  workflows/           # WORKFLOW.md recipes for the workflow runner
   memories/            # Memory store (FTS5 index + markdown files)
   candor/              # Candor operational-memory store (when candor_enabled)
   certs/               # TLS certs for network mode — NOT wiped on rebuild

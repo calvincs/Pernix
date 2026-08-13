@@ -20,7 +20,6 @@ _NO_PERSIST = {
     "workspace_dir",
     "memory_dir",
     "skills_dir",
-    "workflows_dir",
     "candor_store_dir",
     "telos_dir",
 }
@@ -69,7 +68,7 @@ class Settings:
     #                      fails (stream failover, provider failover, scout
     #                      last resort, one-shot retry). Empty = no backup.
     # Per-request overrides (switch_model, spawn_worker(model=), worker
-    # specs, workflow steps) remain the task-scoped axis.
+    # specs) remain the task-scoped axis.
     llm_model: str = ""
     fallback_model: str = ""
     background_model: str = ""
@@ -544,7 +543,6 @@ class Settings:
     workspace_dir: str = "data/workspace"
     memory_dir: str = "data/memories"
     skills_dir: str = "data/skills"
-    workflows_dir: str = "data/workflows"
     candor_store_dir: str = "data/candor"
 
     @property

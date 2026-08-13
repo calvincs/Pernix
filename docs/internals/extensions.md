@@ -46,7 +46,6 @@ Always enabled. The worker model lives here.
 | `cancel_worker` / `retry_worker` | safe | Stop a worker / respawn it with revised instructions |
 | `await_workers` | safe | Block parent until specified workers settle |
 | `notify_parent` | safe | Worker-side: push a status note up to the parent session |
-| `run_workflow` / `cancel_workflow` | safe | Execute a `data/workflows/` workflow (steps run as workers) / cancel a run |
 
 See [../guides/workers.md](../guides/workers.md).
 

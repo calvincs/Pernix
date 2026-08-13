@@ -30,7 +30,6 @@ Authoring new capabilities — no Pernix code changes required.
 
 - [authoring/writing-skills.md](authoring/writing-skills.md) — the SKILL.md schema and how to write your own
 - [authoring/custom-tools.md](authoring/custom-tools.md) — author Python tools via the toolmaker extension
-- [authoring/workflows.md](authoring/workflows.md) — multi-step workflows the agent can follow
 
 ## I'm operating / deploying Pernix
 

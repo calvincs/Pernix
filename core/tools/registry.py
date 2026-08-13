@@ -130,7 +130,7 @@ class ToolDef:
     denied_session_types: set[str] = field(default_factory=set)
     source: str = "builtin"  # builtin | extension | custom
     safety_level: str = "safe"  # safe | caution | dangerous
-    # Long-poll tools (await_workers, run_workflow) block their thread for up
+    # Long-poll tools (await_workers, rlm_process) block their thread for up
     # to 30-60 minutes waiting on OTHER work. They run on a dedicated executor
     # so they can never starve the shared to_thread pool that the very workers
     # they're waiting on need for their own tool calls.

@@ -30,7 +30,7 @@ There used to be a DuckDuckGo fallback; it was removed because it produced unrel
 
 ### Why does the agent ask me to confirm things like web searches or deleting a skill?
 
-That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `delete_skill`, `delete_workflow`) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
+That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `delete_skill`) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
 
 Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Security**.
 
@@ -148,7 +148,7 @@ The bind address (`127.0.0.1` vs `0.0.0.0`), TLS context, and CORS middleware ar
 Yes, with two adjustments:
 
 1. **Different ports.** `python run.py --port 8091` for the second instance.
-2. **Different `data/` directories.** Either run from separate clones, or override `db_path`, `workspace_dir`, `memory_dir`, `skills_dir`, `workflows_dir` per instance. The first option is simpler.
+2. **Different `data/` directories.** Either run from separate clones, or override `db_path`, `workspace_dir`, `memory_dir`, `skills_dir` per instance. The first option is simpler.
 
 There's no built-in coordination between instances — they're fully independent.
 

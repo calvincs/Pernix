@@ -135,7 +135,7 @@ Running scout on the same heavy model as the main agent is wasteful — you'd pa
 
 ### Task-scoped overrides are a separate axis
 
-The three roles are global. Per-request overrides — `switch_model` mid-turn, `spawn_worker(model=…)`, worker specs, and workflow step models — pick a model for one unit of work and are unaffected by the role slots.
+The three roles are global. Per-request overrides — `switch_model` mid-turn, `spawn_worker(model=…)`, and worker specs — pick a model for one unit of work and are unaffected by the role slots.
 
 ---
 

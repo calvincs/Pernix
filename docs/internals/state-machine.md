@@ -1,6 +1,6 @@
-# Pernix Agent Harness — Workflow Architecture
+# Pernix Agent Harness — Request Architecture
 
-Complete walkthrough of how requests flow through the harness: session lifecycle, the agent turn loop, sub-agent workers, and the workflow inside workers. File:line citations reference the repo at the time of writing.
+Complete walkthrough of how requests flow through the harness: session lifecycle, the agent turn loop, sub-agent workers, and the loop inside workers. File:line citations reference the repo at the time of writing.
 
 > **True state machine (v2)** — amended 2026-04-20, legacy layer deleted 2026-08-07
 >
@@ -142,7 +142,7 @@ Sessions/manager.py `reap_idle_sessions()`:
 1. [Session Lifecycle](#1-session-lifecycle)
 2. [Agent Turn Loop](#2-agent-turn-loop-tool-calls-within-a-session)
 3. [Sub-Agent Workers](#3-sub-agent-workers)
-4. [Workflow Inside a Worker](#4-workflow-inside-a-worker)
+4. [Loop Inside a Worker](#4-loop-inside-a-worker)
 5. [Summary Table](#5-summary-table)
 
 > **Archive.** Sections 1-5 predate the v2 state machine. Their descriptions of the turn pipeline — scout, reflect, ask_user, cancel, snooze, worker orchestration — still hold, and the file:line citations are a useful map even where they have drifted. Their descriptions of *state* do not: read every mention of a state name, a transition, or the `post_hooks_complete` / `waiting_for_input` gates against §0, which is authoritative.
@@ -414,7 +414,7 @@ The LLM layer is abstracted by `ProviderRouter` (`core/llm/router.py`) sitting b
   | `fallback_model` | **Backup** (empty ⇒ no backup) | used whenever a Primary *or* Background call fails: stream failover, provider failover, scout's last resort, one-shot retry |
 
   `embedding_model` is not a chat role — it names a local Ollama embedding model and setting it is what switches memory search from lexical to hybrid.
-- **Per-session override** — `session.model_override` is read at turn start; registry resolves bare names to provider-qualified IDs. Enables workers (or `switch_model`) to swap models without touching global config. Paired with `context_budget_override` so concurrent sessions on different-sized models don't clobber each other. Per-request overrides (`switch_model`, `spawn_worker(model=)`, worker specs, workflow steps) are the task-scoped axis and are orthogonal to the three role slots.
+- **Per-session override** — `session.model_override` is read at turn start; registry resolves bare names to provider-qualified IDs. Enables workers (or `switch_model`) to swap models without touching global config. Paired with `context_budget_override` so concurrent sessions on different-sized models don't clobber each other. Per-request overrides (`switch_model`, `spawn_worker(model=)`, worker specs) are the task-scoped axis and are orthogonal to the three role slots.
 - **Typed failover** — `FailoverReason` enum (`core/llm/errors.py:8-18`): `RATE_LIMIT`, `OVERLOADED`, `TIMEOUT`, `CONTEXT_OVERFLOW`, `AUTH`, `MODEL_NOT_FOUND`, `FORMAT_ERROR`, `UNKNOWN`. Classification via `classify_http_error()` (`errors.py:43-64`): 429/402 → `RATE_LIMIT`, 502/503 → `OVERLOADED`, 408 → `TIMEOUT`, 400 + context-keyword → `CONTEXT_OVERFLOW`.
 - **Behavior by reason**:
   - `RATE_LIMIT` / `OVERLOADED` on a remote provider → automatic fallback to Ollama running `settings.fallback_model`, via `_fallback_chat()` / `_fallback_stream()` (`router.py:253-305`). Eligibility is `_fallback_eligible()` (`router.py:120-122`): any provider that is not already Ollama. Fallback **sanitizes messages** first: strips vision blocks, converts tool→user messages (`router.py:25-81`) since Ollama may not support them
@@ -523,7 +523,7 @@ Mechanics:
 
 ---
 
-## 4. Workflow Inside a Worker
+## 4. Loop Inside a Worker
 
 ### 4.1 Same loop as a main session
 

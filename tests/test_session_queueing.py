@@ -32,7 +32,7 @@ class TestSemaphoreTimeout:
 
         The acquire() signature now uses `timeout: float | None = None` and
         resolves None → self._session_timeout; the 1800s default lives on
-        the instance (and is overridable for the workflow orchestrator).
+        the instance (and is overridable for an orchestrator).
         Verify both: the parameter default is the sentinel None, and the
         instance's _session_timeout is 1800."""
         import inspect
@@ -130,7 +130,7 @@ class TestSessionSecondsRemaining:
 class TestExtendSessionBudget:
     """The session-time wall-clock cap is right for normal turns but wrong
     for orchestrator sessions whose duration is dominated by waiting on
-    workers (run_workflow). extend_session_budget grows the cap so reflect
+    workers (await_workers). extend_session_budget grows the cap so reflect
     and post-flow rounds still have budget left.
     """
 
@@ -292,7 +292,7 @@ class TestResetSessionBudget:
 
     @pytest.mark.asyncio
     async def test_reset_clears_extension_override(self):
-        """A workflow run on this session may have installed an override.
+        """An orchestration on this session may have installed an override.
         Reset clears it so the next user turn starts at base timeout."""
         sem = SessionAwareLLMScheduler(max_concurrent=1, session_timeout=1800.0)
         sem.extend_session_budget("chat", 5000.0)

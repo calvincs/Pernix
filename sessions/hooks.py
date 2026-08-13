@@ -974,7 +974,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
         #     as Exception, transient DB lock during add_message)
         #   * the verdict handler itself raised (notification broadcast bug)
         # Either way, leaving the worker with NO reflect row is what trips
-        # up the workflow engine — _latest_reflect() returns None, the manifest
+        # up an orchestrator — _latest_reflect() returns None, its bookkeeping
         # records verdict='unknown', and downstream steps short-circuit. Write
         # a sentinel reflect row so the engine knows reflect was attempted but
         # failed, distinct from "reflect never ran". logger.exception captures

@@ -80,31 +80,6 @@ async def lifespan(app: FastAPI):
     skill_count = skill_reg.scan(skills_dir)
     logger.info("Skills loaded: %d skills scanned from %s", skill_count, skills_dir)
 
-    # 2.7 Workflow registry — scan data/workflows/ for WORKFLOW.md packages
-    try:
-        from core.workflows.registry import get_workflow_registry
-
-        workflows_dir = Path("data/workflows")
-        workflows_dir.mkdir(parents=True, exist_ok=True)
-        wf_reg = get_workflow_registry()
-        wf_count = wf_reg.scan(workflows_dir)
-        logger.info("Workflows loaded: %d workflows scanned from %s", wf_count, workflows_dir)
-    except Exception as e:
-        logger.warning("Workflow registry scan failed (continuing without workflows): %s", e)
-
-    # 2.75 Orphan workflow_runs sweep. run_workflow() is in-process and has no
-    # resume path; any row stuck at status='running' across a restart is dead.
-    # Marking these failed prevents misleading "still running" responses to
-    # list_workflow_runs and keeps the dashboard honest.
-    try:
-        from db import models as _db_models
-
-        orphans = _db_models.fail_orphaned_workflow_runs()
-        if orphans:
-            logger.warning("Marked %d orphaned workflow_runs as failed at startup", orphans)
-    except Exception as e:
-        logger.warning("Workflow orphan sweep failed: %s", e)
-
     # 2.8 Orphan rlm_runs sweep — same reasoning: the RLM engine is synchronous
     # and its child self-reaps with the server, so a 'running' row across a
     # restart is dead. Retention later purges the dir + row.
@@ -495,7 +470,6 @@ from api.routers import (
     telos,
     tools,
     voice,
-    workflows,
     workspace,
 )
 
@@ -513,7 +487,6 @@ app.include_router(workspace.router)
 app.include_router(jobs.router)
 app.include_router(skills.router)
 app.include_router(push.router)
-app.include_router(workflows.router)
 app.include_router(rlm.router)
 app.include_router(telos.router)
 app.include_router(voice.router)

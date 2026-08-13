@@ -512,8 +512,6 @@ def test_pending_proposal_counts_by_skill_aggregates():
     sid = db.create_session(title="Source")
     for _ in range(2):
         db.add_skill_proposal(
-            workflow_name=None,
-            run_id=None,
             skill_name="alpha-skill",
             section="Usage",
             problem="p",
@@ -523,8 +521,6 @@ def test_pending_proposal_counts_by_skill_aggregates():
             session_id=sid,
         )
     db.add_skill_proposal(
-        workflow_name=None,
-        run_id=None,
         skill_name="beta-skill",
         section="Usage",
         problem="p",
@@ -544,8 +540,6 @@ def test_pending_proposal_counts_excludes_resolved():
 
     sid = db.create_session(title="Source")
     pid = db.add_skill_proposal(
-        workflow_name=None,
-        run_id=None,
         skill_name="gamma-skill",
         section="Usage",
         problem="p",

@@ -623,10 +623,10 @@ async def test_budget_exhaustion_fires_user_notification(monkeypatch):
 @pytest.mark.asyncio
 async def test_budget_exhaustion_does_not_notify_for_workers(monkeypatch):
     """Worker sessions that exhaust their budget must NOT spam the user —
-    workers are managed by their orchestrator (run_workflow handles
+    workers are managed by their orchestrator (which handles
     extending budgets, retrying, falling back). Per-worker notifications
-    on a 7-step workflow with retries would be noise. The orchestrator can
-    surface a single roll-up notification if the workflow as a whole fails.
+    on a 7-step run with retries would be noise. The orchestrator can
+    surface a single roll-up notification if the run as a whole fails.
     """
     from sessions import manager as mgr_mod
 

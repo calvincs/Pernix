@@ -760,24 +760,20 @@ def test_approve_dangerous_tool_not_registered_under_dangerous(monkeypatch):
 
 
 def test_delete_tool_descriptions_drop_ritual_under_dangerous(monkeypatch):
-    """delete_skill/delete_workflow descriptions must describe the actual gate
-    behavior for the process: the ask_user + approve sequence only when the
-    executor will really block the call."""
+    """delete_skill's description must describe the actual gate behavior for
+    the process: the ask_user + approve sequence only when the executor will
+    really block the call."""
     from config import settings
-    from core.tools.builtin import skill_tools, workflow_tools
+    from core.tools.builtin import skill_tools
     from core.tools.registry import ToolRegistry
 
     monkeypatch.setattr(settings, "auto_approve_dangerous", True)
     reg = ToolRegistry()
     skill_tools.register(reg)
-    workflow_tools.register(reg)
     assert "approve_dangerous_tool" not in reg.get("delete_skill").description
-    assert "approve_dangerous_tool" not in reg.get("delete_workflow").description
     assert "--dangerous" in reg.get("delete_skill").description
 
     monkeypatch.setattr(settings, "auto_approve_dangerous", False)
     reg2 = ToolRegistry()
     skill_tools.register(reg2)
-    workflow_tools.register(reg2)
     assert "approve_dangerous_tool" in reg2.get("delete_skill").description
-    assert "approve_dangerous_tool" in reg2.get("delete_workflow").description

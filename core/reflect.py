@@ -79,8 +79,7 @@ RULES:
 - Use the TOOL EXECUTION SUMMARY to identify failure patterns. If a tool failed 2+ times with the same error, the retry strategy MUST suggest a different tool or approach.
 - TOOL CALL FACTS ARE NOT NEGOTIABLE. The TOOL EXECUTION SUMMARY is observed truth, not interpretation. Before claiming the agent did NOT use a tool, verify: if the tool name appears in the summary with calls > 0, the agent DID call it. Do NOT write "agent did not call X" or "agent failed to use X" or "X was skipped" if X.calls > 0 in the summary. If you believe the call was *ineffective* (tool ran but didn't produce the expected result), say that — but do not deny the call happened. Hallucinating absence of a call that the summary records as present is a verifier-side correctness failure.
 - EVIDENCE PRIMACY. The transcript's tool RESULTS are ground truth. When a tool result body in the transcript supports or contradicts a claim in the agent's final response, that body outranks your priors about the topic. If the agent fetched URL X and the transcript shows the fetch returned real content, do NOT call hallucination just because your training data doesn't recognize X. Verify against what the tools actually returned, not what you "know" about the topic. The verifier-side failure mode this prevents: dismissing a fact as fabricated when the session contains real evidence for it.
-- TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent, workflow result) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
-- WORKFLOW RUNS: If the WORKFLOW RUNS section is present, treat its `status` field as authoritative for whether the named workflow finished. status='running' or status='failed' both mean the workflow did NOT produce its terminal output, regardless of how many intermediate scratch files were written to the workspace — those are inputs to later steps, not deliverables. status='partial'/'failed'/'running' for a user-named workflow → retry (or escalate if the same failure has already occurred). status='complete' AND the terminal-step output_file is listed under WORKSPACE FILES → pass.
+- TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
 - CEILING LOOP → ESCALATE: If TERMINATION HISTORY shows the same blocking reason (e.g. round_ceiling, budget_exhausted, compaction_failed) on the current turn AND at least one prior turn, the agent is hitting the same hard wall — another retry will hit it again. Verdict MUST be 'escalate'. In `missing`, name the wall: e.g. 'round_ceiling on consecutive attempts; agent cannot finish within max_tool_rounds — split the task or raise the limit.'
 - THRASHING → ESCALATE: If the summary shows ≥4 distinct tools used with no forward progress (empty outputs repeated, same files re-read, error count growing, or the agent drifting across unrelated checks), the agent is thrashing, not pursuing a coherent-but-wrong strategy. Prefer "escalate" with a clear "missing" field over "retry" — another round of the same thrashing will not help. A single failing tool being tried with sibling tools is NOT thrashing; reserve "escalate" for cases where the agent lost the thread.
 - For failure_cause attribution: if tools were hallucinated or the plan jumped straight to the wrong approach, lean "scout". If the plan was sensible but the agent used tools incorrectly or gave up early, lean "agent". Don't guess — use "none" with low confidence if unclear.
@@ -179,7 +178,6 @@ SIDE_EFFECT_TOOLS: frozenset[str] = frozenset(
         "update_scheduled_job",
         "remove_scheduled_job",
         "spawn_worker",
-        "run_workflow",
         "notify_parent",
         "message_worker",
     }
@@ -453,7 +451,7 @@ def _build_compact_evidence(
     Includes the current attempt's transcript (from the most recent scout-role
     marker forward — earlier attempts are not re-included), workspace files,
     scout's deliverables_plan and approach (if any), tool execution summary,
-    workflow runs, and the user's request paired with the agent's final
+    and the user's request paired with the agent's final
     response. Tool result bodies are kept verbatim up to ``_PER_TOOL_RESULT_CHAR_CAP``
     chars so reflect can verify claims against what tools actually returned.
     """
@@ -550,14 +548,6 @@ def _build_compact_evidence(
                 summary_lines.append(f"    ERROR: {err}")
         parts.append("\n".join(summary_lines))
 
-    # Workflow runs invoked during this session. Reflect uses workflow_runs.status
-    # as the authoritative answer to "did the workflow finish?" — without this,
-    # the LLM can be misled by intermediate scratch files in the workspace and
-    # mark the turn 'pass' for a workflow that orphaned mid-flight.
-    wf_lines = _collect_workflow_runs_for_session(messages)
-    if wf_lines:
-        parts.append("WORKFLOW RUNS:\n" + "\n".join(wf_lines))
-
     # User's ask (echoed) so reflect anchors against the original goal even when
     # the transcript scrolls through tool calls.
     parts.append(f"USER REQUEST:\n{user_request}")
@@ -588,60 +578,6 @@ def _build_compact_evidence(
     return "\n\n".join(parts)
 
 
-_WF_TOOL_RUN_ID_RE = __import__("re").compile(r"Workflow\s+'([^']+)'\s+run\s+([0-9a-f]{8})")
-
-
-def _collect_workflow_runs_for_session(messages: list[dict]) -> list[str]:
-    """Pull workflow run rows that this session triggered.
-
-    Walks the session's tool-message responses (each `run_workflow` call's
-    return value embeds the run_id in its summary header) and looks each one
-    up in the workflow_runs table to read authoritative status. Returns
-    formatted lines suitable for inline injection into reflect evidence.
-
-    Empty list if the session never called run_workflow. Errors swallowed —
-    this is best-effort enrichment, not a correctness gate.
-    """
-    run_ids: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for msg in messages:
-        if msg.get("role") != "tool":
-            continue
-        content = msg.get("content") or ""
-        m = _WF_TOOL_RUN_ID_RE.search(content)
-        if not m:
-            continue
-        wf_name, rid = m.group(1), m.group(2)
-        if rid in seen:
-            continue
-        seen.add(rid)
-        run_ids.append((wf_name, rid))
-
-    if not run_ids:
-        return []
-
-    lines: list[str] = []
-    for wf_name, rid in run_ids:
-        try:
-            row = db.get_workflow_run(rid)
-        except Exception:
-            row = None
-        if not row:
-            lines.append(f"- {wf_name} run {rid}: <row not found in DB>")
-            continue
-        status = row.get("status", "?")
-        passed = row.get("steps_passed", 0)
-        failed = row.get("steps_failed", 0)
-        total = row.get("step_count", 0)
-        completed = row.get("completed_at") or "<not finalized>"
-        lines.append(
-            f"- {wf_name} run {rid}: status={status}, "
-            f"steps_passed={passed}/{total}, steps_failed={failed}, "
-            f"completed_at={completed}"
-        )
-    return lines
-
-
 def _build_evidence(
     session_id: str,
     attempt: int = 1,
@@ -654,7 +590,7 @@ def _build_evidence(
     """Build evidence for reflect verification.
 
     Always emits per-attempt evidence: preamble (workspace files, termination
-    history, scout plan, tool summary, workflow runs) + the current attempt's
+    history, scout plan, tool summary) + the current attempt's
     transcript with verbatim tool results + the agent's final response.
     Earlier attempts are NOT included — they are carried forward to scout via
     the prior turn_digest stored in post_mortems, not re-shown to reflect.
@@ -793,12 +729,11 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
     )
     if result.verdict not in ("pass", "retry", "escalate"):
         # Coerce invalid verdict — but to "retry", NOT "pass". Defaulting to
-        # pass on garbage was historically dangerous: workflow run e8c94b86
+        # pass on garbage was historically dangerous: run e8c94b86
         # (2026-04-27) had reflect emit verdict='fail' (not in the schema)
         # while the reasoning correctly noted the deliverable was missing,
-        # and the coercion silently flipped it to pass. The orchestrator's
-        # pass-but-no-output check then had to clean up; for callers that
-        # don't have that guard, the workflow would have shipped a fake-pass.
+        # and the coercion silently flipped it to pass — shipping a fake-pass
+        # to any caller without its own pass-but-no-output check.
         # "retry" is the correct default for malformed verdicts: the model
         # tried to say something other than pass, so don't pretend it said
         # pass. The retry budget will catch genuinely-broken cases.

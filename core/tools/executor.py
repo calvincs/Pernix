@@ -33,8 +33,8 @@ _call_id_counter = itertools.count()
 # API and framework:
 #   _tool_executor      — ordinary tool calls. Bounded, so runaway tool fan-out
 #                         cannot exhaust threads or spawn unbounded subprocesses.
-#   _long_poll_executor — ToolDef.long_poll tools (await_workers, run_workflow,
-#                         rlm_process), which block for 30-60 minutes waiting on
+#   _long_poll_executor — ToolDef.long_poll tools (await_workers, rlm_process),
+#                         which block for 30-60 minutes waiting on
 #                         OTHER work. They keep their own pool: parking them
 #                         alongside ordinary calls would let a few orchestrations
 #                         occupy every tool slot while the workers they wait on

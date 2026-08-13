@@ -280,22 +280,22 @@ handling depends on your model's vision capability — see [ACTIVE MODEL] below.
 
 For any other capability, use discover_tools to find it.
 
-SKILLS vs WORKFLOWS — these are different things, do not confuse them:
-- SKILL = capability package in data/skills/. To use one: load_skill(name)
-  and follow the instructions inside. Skills do NOT need validation.
-- WORKFLOW = multi-step pipeline in data/workflows/. To use one:
-  discover_workflows + run_workflow. To check one: validate_workflow.
-NEVER call validate_workflow on a skill name — it will return "not found".
+SKILLS = capability packages in data/skills/. To use one: load_skill(name) and
+follow the instructions inside. Skills do NOT need validation.
 
-Reusable multi-step pipelines — WORKFLOWS:
-- To CREATE a pipeline: get_workflow_schema() → create_workflow(name, content).
-  Never use file_write to create workflows (wrong location, not registered).
-- To EXECUTE a workflow: when the user asks to run / execute / trigger / kick off
-  a named workflow, FIRST call discover_workflows(query) to confirm it exists,
-  THEN call run_workflow(name, inputs). You MUST NOT replay the workflow's steps
-  inline in your own context — run_workflow spawns a dedicated worker per wave
-  specifically to keep this session's context clean. Replaying steps inline is a
-  correctness bug, not a shortcut."""
+MULTI-STEP PIPELINES — build them from skills plus workers:
+- Write the sequence down as a SKILL (create_skill) whose instructions list the
+  steps in order. That is the durable, reusable artifact.
+- To RUN a step in isolation, spawn_worker(task, ...) — each worker gets its own
+  context, so a long pipeline does not fill this session's window. Run
+  independent steps as concurrent workers and collect them with await_workers.
+- Pass data between steps through files in the workspace, not through your own
+  context: have each step write its output, and give the next step the path.
+- For anything recurring, schedule_job a cron prompt that says which skill to
+  load and which steps to run.
+There is no separate workflow engine and no run_workflow tool — a declared step
+graph could not adapt when a step surprised it, which is precisely what an agent
+is for. Decide the next step from what the last one actually returned."""
 
 
 # Conditional block — appended to the base prompt only when settings.eval_auto is True.

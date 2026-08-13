@@ -4,7 +4,7 @@
 
 Skills are installable capability packs that extend what Pernix can do. Each skill lives in its own directory under `data/skills/` and contains a `SKILL.md` file with metadata and instructions. The agent discovers available skills automatically — it reads their descriptions during the planning phase and decides whether to load the full instructions for a given task.
 
-Skills are how you teach Pernix about custom APIs, services, workflows, or domain-specific procedures. You can add, edit, or remove them at any time without restarting the server.
+Skills are how you teach Pernix about custom APIs, services, or domain-specific procedures. You can add, edit, or remove them at any time without restarting the server.
 
 ---
 
@@ -58,7 +58,7 @@ Escalate through tools in order of speed: `search_web` → `http_get` → `brows
 **Python environment**
 Always use the workspace virtualenv at `data/workspace/.venv/`. Never install packages to the system Python.
 
-**You can and should edit RULES.md** to add project-specific constraints or workflows. For example: "always run tests before committing," "use this company's internal API for X," or "never delete files without asking."
+**You can and should edit RULES.md** to add project-specific constraints or procedures. For example: "always run tests before committing," "use this company's internal API for X," or "never delete files without asking."
 
 ### `data/agent/SESSIONS.md` — Deployment Context
 

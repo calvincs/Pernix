@@ -64,7 +64,7 @@ Pernix also runs this automatically. `maintenance.py`'s 24-hour tier calls the s
 | `data/workspace/` | ❌ | Agent scratch space, reproducible, and potentially huge (it can hold a venv). |
 | `data/settings.json`, `.env`, `data/certs/` | ❌ | Configuration, not accumulated state — and the files holding your auth token and API keys. A rotating plaintext copy of your secrets next to the database is a liability. Back these up deliberately, wherever you keep secrets. |
 
-`data/skills/`, `data/agent/` and `data/workflows/` are also not included: they are hand-authored files you should be keeping in version control alongside your other configuration.
+`data/skills/` and `data/agent/` are also not included: they are hand-authored files you should be keeping in version control alongside your other configuration.
 
 ### Restoring
 
@@ -109,6 +109,48 @@ Running newer Pernix against an older DB is fine — that's just a normal upgrad
 ## Breaking changes worth knowing about
 
 These are the upgrade points where something the user might have set up needs attention. Each is dated.
+
+### 2026-08-12 — The workflow engine was removed
+
+**What's gone.** `run_workflow` and `cancel_workflow`, the `get_workflow_schema` / `create_workflow` / `discover_workflows` / `delete_workflow` / `validate_workflow` tools, the whole `/api/workflows` route family, the Workflows tab in the Explorer, the `workflows_dir` setting, and `WORKFLOW.md` parsing. Nine agent-facing tools in total.
+
+**Why.** It was never used. Not "rarely" — never: across the full message history of the reference deployment, from first boot to removal, `run_workflow` was called zero times, `create_workflow` zero times, `discover_workflows` zero times, and the `workflow_runs` table never held a single row. Six workflows sat parsed and registered at every boot for two months and not one ever ran. That is not a discoverability problem you fix with better prompting — the tool was in the agent's list the entire time.
+
+The structural reason is that a workflow is a step graph you have to declare *before* the work starts, which is the one assumption an LLM agent lets you drop. Every capability built after it — goals, gates, heartbeats, worker specs — moved the other way, toward deciding the next step from what the last step actually returned. A declared graph cannot do that; when a step surprised it, its only options were retry, skip, or halt. Meanwhile it cost ~2,000 lines of dedicated code, a 1,400-line test file, and workflow-shaped conditionals threaded through `reflect.py`, `scout/runner.py`, `context/compiler.py`, `snooze.py` and `retention.py` — files you touch for unrelated reasons and had to reason around every time.
+
+**How to do the same thing.** The capability is not gone, only the declarative wrapper around it:
+
+| You want | Do this |
+|---|---|
+| A reusable multi-step procedure | Write it as a **skill** (`create_skill`) whose instructions list the steps in order. This is the durable, shareable artifact — same role `WORKFLOW.md` played, but the agent can deviate when a step surprises it. |
+| Steps that must not pollute the main context | `spawn_worker(task, ...)` per step. Each worker gets its own context and its own scout, exactly as workflow steps did. |
+| Steps that can run at the same time | Spawn them together and collect with `await_workers`. That is precisely what a workflow "wave" was. |
+| Data passed between steps | Have each step write its output to the workspace and give the next step the path — the same `output_file` discipline, without the manifest. |
+| A step on a stronger model | `spawn_worker(model=...)`, or a worker spec. This replaces per-step `model:`. |
+| Hard pass/fail between steps | **Gates** — deterministic shell checks reflect cannot overrule. Stricter than the old per-step reflect verdict. |
+| Run the whole thing on a schedule | `schedule_job` with a prompt that names the skill and its steps. Cron jobs that previously called `run_workflow` need their prompt rewritten this way. |
+| A long autonomous run with a budget | **Goals** — persistent objectives with continuation and token budgets. |
+
+**What you need to do on upgrade.** Three things, all small:
+
+1. **Rewrite any cron job whose prompt calls `run_workflow`.** It will now fail as an unknown tool. Point the prompt at a skill instead. Check with: `grep -l run_workflow data/cron_jobs.json`.
+2. **Update any skill that references the workflow tools by name.** Same failure mode.
+3. **Re-point saved API calls** from `/api/workflows/proposals*` to `/api/skills/proposals*` (see below).
+
+**Your data is untouched.** `data/workflows/` is left exactly as it is — nothing reads it any more, so you can keep the `WORKFLOW.md` files as reference while you convert them into skills, or delete the directory. Delete it whenever you like; nothing depends on it.
+
+**No migration ran.** The `workflow_runs` table and the `workflow_name` / `run_id` columns on `skill_improvement_proposals` are still there — migrations are forward-only, so dropping them would be the one genuinely irreversible part of this change. They are simply never written now (new proposals store `NULL`), and historical rows stay readable.
+
+**One feature moved rather than died.** Skill-improvement proposals — reflect and refine noticing that a skill under-performed, and offering a `SKILL.md` edit for you to review — were served from the workflows router and applied by `core/workflows/apply.py`, but had nothing to do with workflows beyond sharing a module. They now live where they belong:
+
+| Old | New |
+|---|---|
+| `GET /api/workflows/proposals` | `GET /api/skills/proposals` |
+| `POST /api/workflows/proposals/{id}/approve` | `POST /api/skills/proposals/{id}/approve` |
+| `POST /api/workflows/proposals/{id}/reject` | `POST /api/skills/proposals/{id}/reject` |
+| `POST /api/workflows/proposals/{id}/apply` | `POST /api/skills/proposals/{id}/apply` |
+
+The Explorer's Skills tab already points at the new paths; only external callers need updating.
 
 ### 2026-08-07 — Scheduled backups; one-active-goal index (migration v26)
 

@@ -54,7 +54,7 @@ What scout does:
 
 - Reads the user's new message
 - Searches your persistent memory for relevant prior facts
-- Lists available tools, skills, and workflows
+- Lists available tools and skills
 - Decides which tools the main agent should be aware of, which skills to load, and what the high-level approach should be
 - Submits a `ScoutReport` — the structured plan handed off to the main agent
 
@@ -108,7 +108,7 @@ When no sessions are actively processing, **Snooze** runs background maintenance
 - **Memory consolidation** — clusters semantically related entries into the same file
 - **User profile extraction** — pulls preferences and recurring patterns into a profile memory
 - **Post-mortem cleanup** — old failure logs get summarized and archived
-- **Run-directory retention** — old workflow and RLM run directories (and their DB rows) are purged past their retention windows
+- **Run-directory retention** — old RLM run directories (and their DB rows) are purged past their retention windows
 - **Candor maintenance** — when enabled, runs the admission gate over recorded tool outcomes and checkpoints the operational-memory store
 - **Dream step** — when enabled, one increment of idle-time introspection: hypotheses about the agent's own memory and behavior, validated against recorded outcomes (see [internals/dream.md](internals/dream.md))
 
@@ -186,7 +186,7 @@ On every startup, the session manager sweeps the database for sessions stuck in 
 INFO pernix.api  Reconciled 2 stuck PROCESSING session(s) at startup
 ```
 
-The same startup pass also sweeps run records orphaned by a crash: `workflow_runs` rows stuck at `running` are marked `failed`, and `rlm_runs` rows stuck at `running` are marked `orphaned` (the RLM engine is synchronous and its child self-reaps with the server, so neither can legitimately survive a restart).
+The same startup pass also sweeps run records orphaned by a crash: `rlm_runs` rows stuck at `running` are marked `orphaned` (the RLM engine is synchronous and its child self-reaps with the server, so such a row cannot legitimately survive a restart).
 
 ### Reaper rules (summary)
 
