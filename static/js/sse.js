@@ -69,11 +69,6 @@ const EVENT_TYPES = [
     'snooze.start', 'snooze.activity', 'snooze.done',
     // Model switches (mid-turn override + scout-routed pill)
     'model.divider', 'model.override',
-    // Workflows (orchestration extension)
-    'workflow.started', 'workflow.completed', 'workflow.cancelled',
-    'workflow.wave_started',
-    'workflow.step_started', 'workflow.step_completed',
-    'workflow.step_retry', 'workflow.step_skipped',
     // Turn boundary (safety-net for button reset)
     'turn.complete',
 ];

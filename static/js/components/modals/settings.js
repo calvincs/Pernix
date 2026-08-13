@@ -1749,7 +1749,7 @@ async function buildSecurityTab(settings) {
             el('li', {}, [text('Bypasses the dangerous-tool confirmation gate for every tool call in every session.')]),
             el('li', {}, [text('Shell commands, file writes, and network requests execute without asking for approval.')]),
             el('li', {}, [text('Workers and cron jobs are fully exempt — there is no human in the loop.')]),
-            el('li', {}, [text('A prompt injection or a misbehaving workflow can cause irreversible damage silently.')]),
+            el('li', {}, [text('A prompt injection or a misbehaving agent loop can cause irreversible damage silently.')]),
             el('li', {}, [text('Only enable if you fully trust the current task context. Disable it when done.')]),
         ]),
     ]);

@@ -439,8 +439,6 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
                 continue
             try:
                 db.add_skill_proposal(
-                    workflow_name=None,
-                    run_id=None,
                     skill_name=p_skill,
                     section=str(p.get("section", "") or "").strip(),
                     problem=str(p.get("problem", "") or "").strip(),

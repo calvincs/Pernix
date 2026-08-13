@@ -32,7 +32,7 @@ These are the most important settings to configure before first use.
 | `llm_base_url` | `http://localhost:11434/v1` | Base URL for the primary LLM provider. Points to Ollama by default. Change to any OpenAI-compatible endpoint. |
 | `llm_model` | *(empty)* | **Required. Primary** role — agent turns, plus every quality-critical call: compaction summaries, reflect verdicts, eval, and the RLM root. Set this before your first session. |
 | `fallback_model` | *(empty)* | **Backup** role — used whenever a Primary *or* Background call fails: provider failover, agent-loop stream failover, scout's last resort, and the one-shot retry wrapped around every non-streaming call. A different model on the **same** provider counts, so an all-Ollama setup still gets failover. Empty disables failover entirely. |
-| `background_model` | *(empty)* | **Background** role — the fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, workflow reflect, refine input prep, LLM-backed Snooze activities, Dream, Telos, and RLM sub-calls. Quality-critical calls (compaction, reflect, eval) run on Primary instead. Empty falls back to `llm_model`. |
+| `background_model` | *(empty)* | **Background** role — the fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, refine input prep, LLM-backed Snooze activities, Dream, Telos, and RLM sub-calls. Quality-critical calls (compaction, reflect, eval) run on Primary instead. Empty falls back to `llm_model`. |
 | `llm_max_concurrent` | `1` | Maximum simultaneous requests to Ollama. Increase only if your hardware supports parallel inference. |
 | `llm_session_timeout` | `1800` | Maximum wall-clock seconds a session may hold an LLM slot. Prevents hung sessions from blocking others. Set to `0` for unlimited. |
 
@@ -132,7 +132,7 @@ After each agent turn, a lightweight reflect pass verifies that the agent actual
 
 ## Snooze (Idle Optimization)
 
-During idle periods (no active sessions), Pernix runs background maintenance: deduplicating memory entries, consolidating similar notes, profiling user preferences, purging expired run directories (workflow and RLM runs past retention), and — when enabled — the [Dream](internals/dream.md) introspection step. Cycles run until the full activity ladder completes; any user activity cancels them instantly and the interrupted work resumes next cycle.
+During idle periods (no active sessions), Pernix runs background maintenance: deduplicating memory entries, consolidating similar notes, profiling user preferences, purging expired RLM run directories past retention, and — when enabled — the [Dream](internals/dream.md) introspection step. Cycles run until the full activity ladder completes; any user activity cancels them instantly and the interrupted work resumes next cycle.
 
 | Setting | Default | Description |
 |---|---|---|

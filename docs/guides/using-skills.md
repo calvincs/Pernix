@@ -1,6 +1,6 @@
 # Using skills
 
-A **skill** is a capability pack — a markdown file plus optional scripts that teaches the agent a specific workflow. Skills live in `data/skills/` and load on-demand: the agent discovers what skills exist on every turn, but only loads the full instructions for the ones it needs.
+A **skill** is a capability pack — a markdown file plus optional scripts that teaches the agent a specific procedure. Skills live in `data/skills/` and load on-demand: the agent discovers what skills exist on every turn, but only loads the full instructions for the ones it needs.
 
 This page is about **using** skills you've installed or authored. To author your own, see [../authoring/writing-skills.md](../authoring/writing-skills.md).
 
@@ -93,9 +93,9 @@ For permanent disabling, move the skill out of `data/skills/` (e.g., to `data/sk
 
 ## When skills aren't enough
 
-If you find yourself wishing for a skill but the workflow is small or one-off, you have two options:
+If you find yourself wishing for a skill but the task is small or one-off, you have two options:
 
 - **Just teach the agent in-conversation.** Tell it the procedure once, ask it to remember it. The relevant lesson lands in long-term memory and Snooze may eventually distill it.
-- **Author a skill** if it's a workflow you'd want to reuse across sessions or share with others. See [../authoring/writing-skills.md](../authoring/writing-skills.md) for the full format.
+- **Author a skill** if it's a procedure you'd want to reuse across sessions or share with others. See [../authoring/writing-skills.md](../authoring/writing-skills.md) for the full format.
 
 Skills are especially valuable for **multi-step procedures with specific tools or APIs** — calling a particular service, formatting output a particular way, walking through a checklist that's hard to fit into a single prompt.

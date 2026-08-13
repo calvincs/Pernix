@@ -150,9 +150,9 @@ def test_get_worker_result_stamped_summary_without_marker_gets_gated(mgr):
 # entered FINALIZING to run reflect (a single ~60-180s LLM call that doesn't
 # bump last_activity_time). With the prior 120s stale_threshold applying to
 # every non-IDLE_READY state, await_workers returned a "stalled" warning
-# mid-reflect; run_workflow then called _finalize_step before the post-hook
+# mid-reflect; the orchestrator then finalized the step before the post-hook
 # could write its verdict, the manifest was stamped failed, and the entire
-# workflow short-circuited even though the worker was about to verdict 'pass'.
+# the run short-circuited even though the worker was about to verdict 'pass'.
 
 
 def _make_worker_in_state(mgr, parent_id: str, *, v2_state, idle_seconds: float):
@@ -218,7 +218,7 @@ def test_await_workers_finalizing_does_not_count_as_stalled(mgr, monkeypatch):
     """Regression: a worker in FINALIZING running its reflect post-hook is
     NOT stalled even when last_activity_time is older than stale_threshold.
     Reflect is a bounded LLM call that doesn't bump activity but is doing
-    real work — the workflow engine must not bail on it.
+    real work — await_workers must not bail on it.
     """
     from core.extensions.orchestration import await_workers
     from sessions.state_v2 import SessionStateV2 as S
@@ -338,15 +338,15 @@ def test_await_workers_all_stalled_returns_warning(mgr, monkeypatch):
 
 
 def test_await_workers_treats_awaiting_user_as_stale(mgr, monkeypatch):
-    """A workflow worker that calls ask_user enters AWAITING_USER. There is
-    no human in the loop for a cron-fired workflow, so the question deadlocks
+    """A worker that calls ask_user enters AWAITING_USER. There is
+    no human in the loop for a cron-fired run, so the question deadlocks
     the wave forever — await_workers used to wait the full max_wait (30 min)
     in this case because AWAITING_USER wasn't in STALE_GATED_STATES.
 
     Now AWAITING_USER counts as stale: after stale_threshold seconds with no
     answer, the orchestrator reports the worker as stalled and (per the
     healthy-peer logic) finalizes it once no peer is making progress. Workers
-    can no longer hang a wave by calling ask_user from a workflow context.
+    can no longer hang a batch by calling ask_user from an unattended context.
     """
     from core.extensions.orchestration import await_workers
     from sessions.state_v2 import SessionStateV2 as S
@@ -361,7 +361,7 @@ def test_await_workers_treats_awaiting_user_as_stale(mgr, monkeypatch):
     # Single worker, AWAITING_USER for >10s → it's the only pending worker
     # and it's stalled → all-stalled return path fires immediately.
     assert "appear stalled" in out, (
-        f"AWAITING_USER worker should be detected as stalled " f"(workflow has no human to answer); got: {out!r}"
+        f"AWAITING_USER worker should be detected as stalled " f"(no human to answer); got: {out!r}"
     )
 
 
@@ -409,7 +409,7 @@ def test_await_workers_does_not_mark_unstarted_worker_as_done(mgr, monkeypatch):
     None or _turn_id > 0` would mark this worker DONE because it sees
     IDLE_READY + task != None. The wave loop then ran _finalize_step on
     a worker with empty transcript, reflect verdict=retry, retry exhausted
-    → escalate → workflow halt.
+    → escalate → run halt.
 
     Fix: has_started is now `_turn_id > 0` only. A scheduled-but-not-yet-
     started Task does not count as "started".
@@ -531,11 +531,11 @@ def test_await_workers_drains_pending_worker_id_appends(mgr, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# spawn_worker extends parent's LLM budget (mirrors run_workflow's pattern)
+# spawn_worker extends parent's LLM budget
 # ---------------------------------------------------------------------------
 # Regression for sessions bc6e98/cdbf08/8b6345 (cron daily-brief sessions):
 # A "normal" parent that hand-rolls spawn_worker + await_workers (instead of
-# going through run_workflow) would never extend its session-time budget,
+# spawning workers directly) would never extend its session-time budget,
 # hit the 1800s cap mid-flight, and die on the synthesis turn's first scout
 # acquire with LLMSessionTimeoutError. spawn_worker now extends the parent's
 # budget by (worker_count + 1) × base_timeout per call, capped at 24h.
@@ -543,7 +543,7 @@ def test_await_workers_drains_pending_worker_id_appends(mgr, monkeypatch):
 
 def test_spawn_worker_extends_parent_session_budget(mgr, monkeypatch):
     """spawn_worker must extend the parent session's LLM budget, mirroring
-    the (waves+1)*base_timeout pattern run_workflow uses for orchestrators."""
+    the batch-scaled timeout pattern orchestrators rely on."""
     parent_id = mgr.create_session(title="Parent orchestrator")
     # spawn_worker now requires the parent to be in PROCESSING state.
     from sessions import state_v2 as sv2

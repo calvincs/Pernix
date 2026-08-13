@@ -19,8 +19,8 @@ Three client streams consume server events, each with its own listener list:
   static/js/notifications.js                → /api/notifications/events
 
 An event is considered handled if *any* of the three registers it, because
-several types (workflow.*, snooze.*, dialog.*) are deliberately fanned out
-to more than one stream by manager.broadcast() and _emit_workflow_event().
+several types (snooze.*, dialog.*) are deliberately fanned out
+to more than one stream by manager.broadcast().
 """
 
 from __future__ import annotations

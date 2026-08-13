@@ -141,7 +141,7 @@ You also have tools to search deeper if the baseline is insufficient:
 - search_post_mortems: Look up past failure narratives (filter by failure_cause or subject tool/skill name). Use when you suspect a prior failure pattern is relevant.
 - search_adaptive: Search machine-curated routing hints, prompt notes, and policies by keyword (only useful when the adaptive layer is enabled).
 
-WORKFLOW:
+PROCEDURE:
 1. Review the user message, session context, and pre-loaded baseline data (memory, tools, skills).
 2. If the baseline data is sufficient, call submit_report immediately with your recommendations.
 3. If you need deeper context (e.g., a skill looks promising but you want to read its instructions, or you want to search memory with different keywords), use your tools first.
@@ -842,29 +842,8 @@ CORE_MINIMUM = frozenset(
         "discover_skills",
         "load_skill",
         "read_skill_resource",
-        # Workflow discovery is always on — cheap lookup that helps the agent
-        # recognize when an execute-intent request matches an installed workflow.
-        "discover_workflows",
     }
 )
-
-# Phrases that indicate the user wants to execute an existing workflow
-# end-to-end. When matched, scout will bias toward run_workflow and avoid
-# recommending the agent replay steps inline.
-import re as _re_scout
-
-_WORKFLOW_EXECUTE_RE = _re_scout.compile(
-    r"\b(?:run|execute|trigger|kick[- ]off|start|invoke|launch)\b" r".{0,40}?" r"\bworkflow\b",
-    _re_scout.IGNORECASE,
-)
-
-
-def _looks_like_workflow_execute(message: str) -> bool:
-    """Heuristic: does the user message read as 'run X workflow'?"""
-    if not message:
-        return False
-    return bool(_WORKFLOW_EXECUTE_RE.search(message))
-
 
 # Cache
 import threading as _threading
@@ -1018,7 +997,7 @@ def _build_lessons_section(message: str) -> str:
         if len(snippet) > 400:
             snippet = snippet[:400] + "…"
         # Surface age so the agent can weigh lessons against recent code
-        # changes. A "manifest bug" lesson 2d old is suspect if the workflow
+        # changes. A "manifest bug" lesson 2d old is suspect if the run
         # engine was rewritten yesterday — let the agent see the freshness.
         age_days = max(0, (now_ts - int(r.entry.epoch or now_ts)) // 86400)
         age_str = f"{age_days}d ago" if age_days > 0 else "today"
@@ -1389,19 +1368,6 @@ async def _run_scout_llm(
             user_content_parts.append(f"\nProject instructions ({fname}):\n{content}")
             break
 
-    # Workflow-execute intent nudge. If the user clearly wants to run a named
-    # workflow, tell scout upfront so it pre-selects run_workflow instead of
-    # letting the main agent replay steps inline.
-    if _looks_like_workflow_execute(message):
-        user_content_parts.append(
-            "\n[WORKFLOW EXECUTION INTENT DETECTED]\n"
-            "The user's message reads as a request to run/execute a named workflow. "
-            "If discover_workflows returns a matching entry, your recommended_tools "
-            "MUST include run_workflow (plus discover_workflows, validate_workflow), "
-            "and your approach_guidance MUST tell the main agent to call "
-            "run_workflow(name, inputs) — NOT to replay the workflow's steps inline."
-        )
-
     # --- Baseline gathering -------------------------------------------------
     # Six independent searches (memory, deep memory, cross-session FTS, tool
     # discovery, skill discovery, lessons) plus the provider model listing.
@@ -1667,7 +1633,7 @@ async def _run_scout_llm(
         # confusion — append a stricter format reminder and retry the round
         # rather than restarting the entire scout from scratch (the previous
         # behavior, which burned a whole fresh attempt — up to settings.
-        # scout_timeout of wall clock — per occurrence on real workflow runs).
+        # scout_timeout of wall clock — per occurrence on real runs).
         if not response.tool_calls:
             just_sent_revision = (
                 revisions_used > 0
@@ -2078,33 +2044,16 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
         if registry.exists(name) and not registry.is_disabled(name):
             tool_names.add(name)
 
-    # Workflow-execution bias: if the user clearly wants to run a workflow,
-    # ensure run_workflow is on the tool list and nudge the approach to use it.
-    is_workflow_execute = _looks_like_workflow_execute(message)
-    if is_workflow_execute:
-        for name in ("discover_workflows", "run_workflow", "validate_workflow"):
-            if registry.exists(name):
-                tool_names.add(name)
-
-    base_guidance = (
+    approach = (
         "Scout unavailable — proceed conservatively. Use discover_tools / "
         "discover_skills before assuming tool surface. Verify file paths "
         "with glob/grep before file_write. Aim to write any deliverable early."
     )
-    approach = base_guidance
-    if is_workflow_execute:
-        approach = (
-            "WORKFLOW EXECUTION DETECTED. Call discover_workflows() to confirm "
-            "the named workflow exists, then run_workflow(name, inputs). DO NOT "
-            "replay the workflow's steps inline — that defeats the context "
-            "isolation the workflow runner provides.\n\n" + base_guidance
-        )
 
     return ScoutReport(
         memory_context=memory_context,
         recommended_tools=sorted(tool_names),
-        tool_rationale="Fallback: core tools + recently used (scout unavailable)"
-        + (" + workflow tools (execute intent detected)" if is_workflow_execute else ""),
+        tool_rationale="Fallback: core tools + recently used (scout unavailable)",
         session_state=brief.to_prompt_text()[:500] if not brief.is_fresh else "",
         approach_guidance=approach,
         from_fallback=True,

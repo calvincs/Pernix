@@ -36,7 +36,7 @@ Behavioral rules and operational constraints. Injected as `[RULES]`.
 Session-specific context: naming conventions, output conventions, standing facts. Injected as `[INSTRUCTIONS]`.
 
 - Use this for things specific to *this installation* that the agent should always know.
-  Do not duplicate tool protocols here — workflow and skill creation instructions are already built into the system.
+  Do not duplicate tool protocols here — skill creation instructions are already built into the system.
 - The compiler prepends a framing note: a blank or unset field here means "not pinned
   in config," never "fact unknown" — so placeholder lines don't override memory.
 - Falls back to `INSTRUCTIONS.md` if this file is absent.

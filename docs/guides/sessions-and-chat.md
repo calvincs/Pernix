@@ -142,7 +142,7 @@ The other two model roles (Background and Backup) follow the global setting; onl
 
 A session is single-threaded — only one turn runs at a time. If you send messages while one is processing, they queue in `pending_messages`. The cap is `max_pending_messages` (default 10).
 
-If the queue fills, further submissions get rejected immediately with a `session.queue_full` SSE event. This is intentional — it prevents a runaway loop of submissions from piling up indefinitely. Adjust the cap if you have a workflow that genuinely needs more headroom.
+If the queue fills, further submissions get rejected immediately with a `session.queue_full` SSE event. This is intentional — it prevents a runaway loop of submissions from piling up indefinitely. Adjust the cap if you have a use case that genuinely needs more headroom.
 
 ---
 

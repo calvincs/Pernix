@@ -206,35 +206,3 @@ def test_get_session_usage():
     assert usage["completion"] == 150
     assert usage["total"] == 450
     assert usage["calls"] == 2
-
-
-# ---------------------------------------------------------------------------
-# Workflow run orphan sweep (Fix 3 from session 7b97cf7ef84a investigation)
-# ---------------------------------------------------------------------------
-
-
-def test_fail_orphaned_workflow_runs_marks_running_rows_failed():
-    """Rows stuck at status='running' across a process restart must be
-    swept to 'failed' at startup. run_workflow is in-process with no resume
-    path, so a 'running' row that survives a restart is by definition dead.
-    """
-    db.create_workflow_run(run_id="orphan01", workflow_name="wf-a", run_dir="x/orphan01", step_count=3)
-    db.create_workflow_run(run_id="orphan02", workflow_name="wf-b", run_dir="x/orphan02", step_count=1)
-    # One that already finished — must NOT be touched.
-    db.create_workflow_run(run_id="alive03", workflow_name="wf-c", run_dir="x/alive03", step_count=1)
-    db.finish_workflow_run("alive03", "complete", 1, 0, 0)
-
-    swept = db.fail_orphaned_workflow_runs()
-    assert swept == 2
-
-    a = db.get_workflow_run("orphan01")
-    b = db.get_workflow_run("orphan02")
-    c = db.get_workflow_run("alive03")
-
-    assert a["status"] == "failed" and a["completed_at"] is not None
-    assert b["status"] == "failed" and b["completed_at"] is not None
-    # Already-complete runs must be left alone.
-    assert c["status"] == "complete"
-
-    # Idempotent: running it again with no orphans returns 0.
-    assert db.fail_orphaned_workflow_runs() == 0

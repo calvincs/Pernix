@@ -3,7 +3,7 @@
 Shipped defects (architecture review 2026-08-07, appendix E). All of these
 were live at 3ef1e6c:
 
-1. Only four tools were `dangerous` (delete_skill, delete_workflow,
+1. Only four tools were `dangerous` (delete_skill,
    search_web, browse_web), while `create_tool` — which writes model-authored
    Python into the SERVER'S OWN source tree and imports it in-process — was
    `safe`, `add_gate` (shell that re-runs unattended every turn) was

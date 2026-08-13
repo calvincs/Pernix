@@ -175,7 +175,7 @@ Tools classified as `dangerous` require explicit per-invocation user confirmatio
 | Tool | Why |
 |---|---|
 | `search_web`, `browse_web` | Outbound traffic and untrusted page content entering the context |
-| `delete_skill`, `delete_workflow` | Destroys authored artifacts |
+| `delete_skill` | Destroys authored artifacts |
 | `create_tool`, `update_tool` | Writes model-authored Python into the server's own source tree and imports it **into the server process** — see [Toolmaker](#toolmaker-model-authored-code-in-the-server-process) below |
 | `create_skill`, `add_skill_script` | Authors instructions the agent will later load and follow, and scripts `load_skill` then tells it to run under `bash` |
 | `add_gate` | Registers shell that re-runs unattended at every turn end for the life of the session |

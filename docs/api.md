@@ -500,6 +500,25 @@ GET /api/skills/{name}
 ```
 Returns the full SKILL.md content.
 
+### Skill Improvement Proposals
+
+Written by reflect and refine when a skill visibly under-performs; a human
+reviews each one before it touches a `SKILL.md`. Nothing is applied
+automatically.
+
+```
+GET    /api/skills/proposals                 List proposals (default status=pending)
+POST   /api/skills/proposals/{id}/approve    Mark approved (you edit the skill yourself)
+POST   /api/skills/proposals/{id}/reject     Dismiss
+POST   /api/skills/proposals/{id}/apply      Write the change into the target SKILL.md
+```
+
+Filter with `?skill_name=`, `?status=`, `?source_origin=` (`session` for
+post-turn reflect, `refine` for the authoring pass).
+
+> These lived under `/api/workflows/proposals` before the workflow engine was
+> removed in 2026-08. Update any saved calls.
+
 ### Update a Skill
 ```
 PUT /api/skills/{name}
@@ -543,28 +562,6 @@ POST /api/tools/set-safety
 ```
 ```json
 { "name": "bash", "safety_level": "dangerous" }
-```
-
----
-
-## Workflows
-
-Workflows are reusable multi-step pipelines defined in YAML. See `data/workflows/` for examples.
-
-```
-GET    /api/workflows                       List all workflows
-POST   /api/workflows                       Create a workflow
-GET    /api/workflows/{name}                Read a workflow
-PUT    /api/workflows/{name}                Update a workflow
-DELETE /api/workflows/{name}                Delete a workflow
-POST   /api/workflows/validate              Validate workflow content
-GET    /api/workflows/{name}/runs           List runs of a workflow
-GET    /api/workflows/{name}/runs/{run_id}  Get a specific run
-DELETE /api/workflows/{name}/runs/{run_id}  Delete a run
-GET    /api/workflows/proposals             List pending workflow proposals
-POST   /api/workflows/proposals/{id}/approve
-POST   /api/workflows/proposals/{id}/reject
-POST   /api/workflows/proposals/{id}/apply
 ```
 
 ---
@@ -775,7 +772,7 @@ POST   /api/notify                              Trigger a manual notification
 
 ---
 
-## Complete Workflow Example
+## Complete Polling Example
 
 Here is a minimal polling example using `curl`:
 

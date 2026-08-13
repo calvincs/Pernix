@@ -206,7 +206,7 @@ class SkillRegistry:
     """Central registry for all skills. Thread-safe for concurrent access.
 
     Owns the disabled-skill set so every consumer (scout, builtin tools,
-    workflows, agent loop) gets consistent filtering through one set of
+    agent loop) gets consistent filtering through one set of
     methods. Persisted to ``data/skills/.disabled.json`` as a sorted JSON
     array — same on-disk format the API router historically used.
 

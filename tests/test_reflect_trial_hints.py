@@ -20,8 +20,6 @@ def _seed_pending_proposal(skill_name: str = "test-skill", confidence: float = 0
     from db import models as db
 
     return db.add_skill_proposal(
-        workflow_name=None,
-        run_id=None,
         skill_name=skill_name,
         section="Pre-flight",
         problem="needs check",
@@ -124,8 +122,6 @@ def test_add_skill_proposal_session_origin_defaults():
     from db import models as db
 
     pid = db.add_skill_proposal(
-        workflow_name=None,
-        run_id=None,
         skill_name="x",
         section="Notes",
         problem="p",
@@ -143,25 +139,25 @@ def test_add_skill_proposal_session_origin_defaults():
     assert row["trial_successes"] == 0
 
 
-def test_add_skill_proposal_workflow_origin_default():
-    """Existing workflow callers (no source_origin kwarg) still get 'workflow'."""
+def test_add_skill_proposal_refine_origin():
+    """The authoring pass (core/refine.py) tags its proposals 'refine'."""
     from db import models as db
 
     pid = db.add_skill_proposal(
-        workflow_name="my-wf",
-        run_id="run-1",
         skill_name="x",
         section="Notes",
         problem="p",
         proposed_change="c",
         confidence=0.7,
-        source_step_id="step-1",
-        source_worker_id="worker-1",
+        source_origin="refine",
+        session_id="s9",
     )
     row = db.get_skill_proposal(pid)
-    assert row["source_origin"] == "workflow"
-    assert row["workflow_name"] == "my-wf"
-    assert row["session_id"] is None
+    assert row["source_origin"] == "refine"
+    assert row["session_id"] == "s9"
+    # Legacy columns are written NULL now that the workflow engine is gone.
+    assert row["workflow_name"] is None
+    assert row["run_id"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -173,17 +169,15 @@ def test_list_proposals_filter_by_origin():
     from db import models as db
 
     db.add_skill_proposal(
-        workflow_name="wf",
-        run_id="r1",
         skill_name="x",
         section="",
         problem="p",
         proposed_change="c",
         confidence=0.7,
+        source_origin="refine",
+        session_id="s0",
     )
     db.add_skill_proposal(
-        workflow_name=None,
-        run_id=None,
         skill_name="x",
         section="",
         problem="p",
@@ -192,9 +186,9 @@ def test_list_proposals_filter_by_origin():
         source_origin="session",
         session_id="s1",
     )
-    workflow_only = db.list_skill_proposals(source_origin="workflow")
+    refine_only = db.list_skill_proposals(source_origin="refine")
     session_only = db.list_skill_proposals(source_origin="session")
     both = db.list_skill_proposals()
-    assert len(workflow_only) == 1
+    assert len(refine_only) == 1
     assert len(session_only) == 1
     assert len(both) == 2

@@ -2,7 +2,7 @@
 
 Shipped defect (found in the 2026-08-05 adaptation-plan review, fixed in 1c):
 `_save_jobs` persisted a fixed field list and `_load_jobs` reconstructed jobs
-from only five hardcoded keys, so any extra metadata on a job — the workflow
+from only five hardcoded keys, so any extra metadata on a job — the pipeline
 variant's fields survived only via special-casing, and anything else
 (a future `kind`, `last_fired_at`, ...) was erased every restart. The fix
 makes both sides round-trip every non-structural key verbatim.

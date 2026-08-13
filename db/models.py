@@ -249,8 +249,8 @@ def get_worker_sessions(parent_id: str) -> list[dict]:
 # Session state log (v13+)
 # ---------------------------------------------------------------------------
 # Append-only log of state-machine transitions. Written synchronously by
-# sessions.state_v2.transition() under session.lock. See docs/workflow.md
-# and the state-machine migration plan for the reason vocabulary.
+# sessions.state_v2.transition() under session.lock. See
+# docs/internals/state-machine.md for the reason vocabulary.
 
 
 def add_state_log(
@@ -2080,104 +2080,6 @@ def delete_signal(signal_type: str, subject: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Workflow runs (migration v14)
-# ---------------------------------------------------------------------------
-
-
-def create_workflow_run(
-    run_id: str,
-    workflow_name: str,
-    run_dir: str,
-    step_count: int,
-) -> None:
-    """Insert a new workflow_runs row with status='running'."""
-    with connect_sessions() as conn:
-        conn.execute(
-            """INSERT INTO workflow_runs
-               (run_id, workflow_name, started_at, status, run_dir, step_count)
-               VALUES (?, ?, ?, 'running', ?, ?)""",
-            (run_id, workflow_name, _now(), run_dir, step_count),
-        )
-
-
-def finish_workflow_run(
-    run_id: str,
-    status: str,
-    steps_passed: int,
-    steps_failed: int,
-    proposal_count: int,
-) -> None:
-    """Mark a workflow run complete with final step counts."""
-    with connect_sessions() as conn:
-        conn.execute(
-            """UPDATE workflow_runs SET
-               status = ?, completed_at = ?,
-               steps_passed = ?, steps_failed = ?, proposal_count = ?
-               WHERE run_id = ?""",
-            (status, _now(), steps_passed, steps_failed, proposal_count, run_id),
-        )
-
-
-def update_workflow_run_proposals(run_id: str, proposal_count: int) -> None:
-    """Update proposal_count on an existing run row."""
-    with connect_sessions() as conn:
-        conn.execute(
-            "UPDATE workflow_runs SET proposal_count = ? WHERE run_id = ?",
-            (proposal_count, run_id),
-        )
-
-
-def fail_orphaned_workflow_runs() -> int:
-    """Mark any workflow_runs row stuck at status='running' as 'failed'.
-
-    Called once at startup. A row stuck at 'running' across a process restart
-    is by definition orphaned — the in-process driver that owned it is gone
-    (run_workflow is synchronous; there is no resume path). Without this sweep
-    such rows persist forever, blocking observability and giving the agent
-    misleading "still running" signals from list_workflow_runs.
-
-    Returns the number of rows updated.
-    """
-    with connect_sessions() as conn:
-        cur = conn.execute(
-            """UPDATE workflow_runs SET
-               status = 'failed', completed_at = ?
-               WHERE status = 'running' AND completed_at IS NULL""",
-            (_now(),),
-        )
-        return cur.rowcount
-
-
-def list_workflow_runs(workflow_name: str | None = None, limit: int = 20) -> list[dict]:
-    """Return workflow runs, newest first. Optionally filter by workflow_name."""
-    with connect_sessions() as conn:
-        if workflow_name:
-            rows = conn.execute(
-                """SELECT * FROM workflow_runs WHERE workflow_name = ?
-                   ORDER BY started_at DESC LIMIT ?""",
-                (workflow_name, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM workflow_runs ORDER BY started_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def get_workflow_run(run_id: str) -> dict | None:
-    with connect_sessions() as conn:
-        row = conn.execute("SELECT * FROM workflow_runs WHERE run_id = ?", (run_id,)).fetchone()
-        return dict(row) if row else None
-
-
-def delete_workflow_run(run_id: str) -> bool:
-    with connect_sessions() as conn:
-        cur = conn.execute("DELETE FROM workflow_runs WHERE run_id = ?", (run_id,))
-        return cur.rowcount > 0
-
-
-# ---------------------------------------------------------------------------
 # RLM runs (migration v18)
 # ---------------------------------------------------------------------------
 
@@ -2243,7 +2145,7 @@ def finish_rlm_run(
 def fail_orphaned_rlm_runs() -> int:
     """Mark rlm_runs rows stuck at status='running' as 'orphaned'.
 
-    Called once at startup (fail_orphaned_workflow_runs precedent): a running
+    Called once at startup: a running
     row across a restart is by definition dead — the engine is synchronous and
     its child self-reaps when the server process goes away. Returns rows updated.
     """
@@ -2341,8 +2243,6 @@ def list_rlm_run_children(parent_run_id: str) -> list[dict]:
 
 
 def add_skill_proposal(
-    workflow_name: str | None,
-    run_id: str | None,
     skill_name: str,
     section: str,
     problem: str,
@@ -2350,14 +2250,16 @@ def add_skill_proposal(
     confidence: float,
     source_step_id: str = "",
     source_worker_id: str = "",
-    source_origin: str = "workflow",
+    source_origin: str = "session",
     session_id: str | None = None,
 ) -> str:
     """Insert a skill improvement proposal. Returns proposal id.
 
-    `source_origin` is "workflow" (default — workflow_reflect) or "session"
-    (snooze_reflect on a regular session). Session-origin rows leave
-    workflow_name/run_id NULL and populate session_id instead.
+    `source_origin` is "session" (reflect on a regular session) or "refine".
+    The legacy `workflow_name`/`run_id` columns are written NULL: they belong
+    to the removed workflow engine and are kept only so historical rows stay
+    readable — migrations are forward-only, so the columns outlive the
+    feature. Nothing writes them any more.
     """
     pid = _new_id()
     with connect_sessions() as conn:
@@ -2366,11 +2268,9 @@ def add_skill_proposal(
                (id, workflow_name, run_id, session_id, source_origin, skill_name,
                 section, problem, proposed_change, confidence, source_step_id,
                 source_worker_id, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+               VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
             (
                 pid,
-                workflow_name,
-                run_id,
                 session_id,
                 source_origin,
                 skill_name,

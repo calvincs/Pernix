@@ -4,7 +4,7 @@ Disabled-skill state is owned by ``SkillRegistry`` (see
 ``core/skills/registry.py``). This router only proxies to the registry's
 ``is_disabled`` / ``enable`` / ``disable`` methods so there is one source of
 truth for what's disabled — same JSON file, same in-memory set, used by every
-agent path (scout, builtins, workflows, agent loop).
+agent path (scout, builtins, agent loop).
 """
 
 from __future__ import annotations
@@ -67,6 +67,94 @@ async def list_skills():
         )
 
     return {"skills": result}
+
+
+# ---------------------------------------------------------------------------
+# Skill improvement proposals
+# ---------------------------------------------------------------------------
+# Written by reflect/refine when a skill visibly under-performs, then reviewed
+# by a human here. These endpoints were served under /api/workflows/proposals
+# until the workflow engine was removed — they only ever shared that router by
+# accident of where post-run reflect happened to live. The proposals themselves
+# target SKILL.md files, so they belong here.
+#
+# Declared BEFORE the parameterised /api/skills/{name} routes below. Starlette
+# matches in DECLARATION order, not by specificity, so with these last a GET of
+# /api/skills/proposals binds name="proposals" and 404s as a missing skill.
+
+
+@router.get("/api/skills/proposals")
+async def list_proposals(
+    skill_name: str = "",
+    status: str = "pending",
+    source_origin: str = "",
+    limit: int = 50,
+):
+    """List skill improvement proposals. Defaults to pending proposals.
+
+    `source_origin` filters by what produced the proposal ("session" for
+    post-turn reflect, "refine" for the authoring pass). Empty string = all.
+    """
+    from db import models as db
+
+    proposals = db.list_skill_proposals(
+        skill_name=skill_name or None,
+        status=status or None,
+        source_origin=source_origin or None,
+        limit=limit,
+    )
+    return {"proposals": proposals}
+
+
+@router.post("/api/skills/proposals/{proposal_id}/approve")
+async def approve_proposal(proposal_id: str):
+    """Mark a proposal as approved (user will edit the skill manually)."""
+    from db import models as db
+
+    ok = db.resolve_skill_proposal(proposal_id, "approved")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found")
+    return {"ok": True, "status": "approved"}
+
+
+@router.post("/api/skills/proposals/{proposal_id}/reject")
+async def reject_proposal(proposal_id: str):
+    """Mark a proposal as rejected."""
+    from db import models as db
+
+    ok = db.resolve_skill_proposal(proposal_id, "rejected")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found")
+    return {"ok": True, "status": "rejected"}
+
+
+@router.post("/api/skills/proposals/{proposal_id}/apply")
+async def apply_proposal_route(proposal_id: str):
+    """Apply a proposal to its target SKILL.md and mark it applied.
+
+    User-gated only. Nothing re-runs afterwards: the user re-invokes the skill
+    themselves, so a misdiagnosed proposal cannot compound into automatic cost.
+    """
+    from core.skills.proposals import ProposalApplyError, apply_proposal
+
+    try:
+        result = apply_proposal(proposal_id)
+    except ProposalApplyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("apply_proposal failed for %s", proposal_id)
+        raise HTTPException(status_code=500, detail=f"Internal error: {e}")
+    return {
+        "ok": True,
+        "status": "applied",
+        "proposal_id": result.proposal_id,
+        "skill_name": result.skill_name,
+        "skill_md_path": result.skill_md_path,
+        "section": result.section,
+        "section_existed": result.section_existed,
+        "bytes_before": result.bytes_before,
+        "bytes_after": result.bytes_after,
+    }
 
 
 @router.get("/api/skills/{name}")

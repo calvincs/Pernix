@@ -594,8 +594,6 @@ async def test_skills_list_surfaces_pending_proposal_count(tmp_path, monkeypatch
     sid = db.create_session(title="Refine source")
     for _ in range(2):
         db.add_skill_proposal(
-            workflow_name=None,
-            run_id=None,
             skill_name="alpha",
             section="Usage",
             problem="p",

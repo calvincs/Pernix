@@ -203,9 +203,6 @@ let _toolsListEl = null;  // stable container for the filtered list; updated in-
 let _skillsSearchQuery = '';
 let _skillsSearchTimer = null;
 let _skillsListEl = null;
-let _workflowsSearchQuery = '';
-let _workflowsSearchTimer = null;
-let _workflowsListEl = null;
 let _jobsSearchQuery = '';
 let _jobsSearchTimer = null;
 let _jobsContentEl = null;
@@ -389,7 +386,6 @@ function buildPanelDOM() {
     const skillContent = el('div', { class: 'fp-tab-content', 'data-tab': 'skills', id: 'fp-skills' });
     const jobsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'jobs', id: 'fp-jobs' });
     const toolsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'tools', id: 'fp-tools' });
-    const workflowsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'workflows', id: 'fp-workflows' });
     const adaptiveContent = el('div', { class: 'fp-tab-content', 'data-tab': 'adaptive', id: 'fp-adaptive' });
     const canaryContent = el('div', { class: 'fp-tab-content', 'data-tab': 'canary', id: 'fp-canary' });
     const telosContent = el('div', { class: 'fp-tab-content', 'data-tab': 'telos', id: 'fp-telos' });
@@ -402,7 +398,6 @@ function buildPanelDOM() {
     _panel.appendChild(skillContent);
     _panel.appendChild(toolsContent);
     _panel.appendChild(jobsContent);
-    _panel.appendChild(workflowsContent);
     _panel.appendChild(adaptiveContent);
     _panel.appendChild(canaryContent);
     _panel.appendChild(telosContent);
@@ -420,7 +415,6 @@ function renderTabs() {
         { key: 'memory', label: 'Memory' },
         { key: 'skills', label: 'Skills' },
         { key: 'tools', label: 'Tools' },
-        { key: 'workflows', label: 'Workflows' },
         { key: 'jobs', label: 'Jobs' },
         { key: 'adaptive', label: 'Adaptive' },
         { key: 'canary', label: 'Canary' },
@@ -445,7 +439,7 @@ function renderTabs() {
     });
 
     // Show/hide tab content
-    ['workspace', 'memory', 'skills', 'tools', 'workflows', 'jobs', 'adaptive', 'canary', 'telos'].forEach(key => {
+    ['workspace', 'memory', 'skills', 'tools', 'jobs', 'adaptive', 'canary', 'telos'].forEach(key => {
         const container = document.getElementById(`fp-${key}`);
         if (container) container.classList.toggle('active', key === _state.tab);
     });
@@ -455,7 +449,6 @@ async function loadTabData() {
     if (_state.tab === 'workspace') await loadWorkspace();
     else if (_state.tab === 'memory') await loadMemory();
     else if (_state.tab === 'skills') await loadSkills();
-    else if (_state.tab === 'workflows') await loadWorkflows();
     else if (_state.tab === 'tools') await loadTools();
     else if (_state.tab === 'jobs') await loadJobs();
     else if (_state.tab === 'adaptive') await renderAdaptiveTab(document.getElementById('fp-adaptive'));
@@ -1322,7 +1315,7 @@ async function loadSkills() {
     try {
         const [skillsData, proposalsData] = await Promise.all([
             get('/api/skills'),
-            get('/api/workflows/proposals?status=pending&limit=20').catch(() => ({ proposals: [] })),
+            get('/api/skills/proposals?status=pending&limit=20').catch(() => ({ proposals: [] })),
         ]);
         _skills = skillsData.skills || [];
         _pendingProposals = proposalsData.proposals || [];
@@ -1374,10 +1367,13 @@ function renderSkills() {
         ]));
         for (const proposal of _pendingProposals) {
             const row = el('div', { class: 'fp-proposal-row' });
-            const origin = proposal.source_origin || 'workflow';
+            // Historical rows may still carry source_origin='workflow' from
+            // before the workflow engine was removed; they render by their
+            // stored origin name rather than being relabelled.
+            const origin = proposal.source_origin || 'session';
             const originLabel = origin === 'session'
                 ? `SESSION \u00b7 ${(proposal.session_id || '').slice(0, 8)}`
-                : `WORKFLOW \u00b7 ${proposal.workflow_name || '?'}`;
+                : `${origin.toUpperCase()} \u00b7 ${(proposal.session_id || '').slice(0, 8) || '?'}`;
             const trialUses = proposal.trial_uses || 0;
             const trialSuccesses = proposal.trial_successes || 0;
             const trialLabel = trialUses > 0
@@ -1601,7 +1597,7 @@ function renderSkillViewer(container) {
         editBtn.addEventListener('click', async () => {
             // Mark approved and open Monaco editor
             try {
-                await post(`/api/workflows/proposals/${proposal.id}/approve`, {});
+                await post(`/api/skills/proposals/${proposal.id}/approve`, {});
             } catch (e) { /* non-fatal */ }
             _state.viewMode = 'editor';
             _state.originalContent = file.content;
@@ -1610,17 +1606,17 @@ function renderSkillViewer(container) {
         });
 
         const applyBtn = el('button', { class: 'fp-btn fp-btn-primary' }, [text('apply')]);
-        applyBtn.title = 'Insert the suggested change into this skill\'s SKILL.md under the referenced section. Re-run the workflow to validate the fix.';
+        applyBtn.title = 'Insert the suggested change into this skill\'s SKILL.md under the referenced section. Re-run the skill to validate the fix.';
         applyBtn.addEventListener('click', async () => {
-            if (!confirm(`Apply this proposal to ${proposal.skill_name}'s SKILL.md?\n\nSection: ${proposal.section || '(new section)'}\n\nThe workflow will NOT re-run automatically — you'll need to invoke it again to validate the fix.`)) {
+            if (!confirm(`Apply this proposal to ${proposal.skill_name}'s SKILL.md?\n\nSection: ${proposal.section || '(new section)'}\n\nNothing re-runs automatically — invoke the skill again to validate the fix.`)) {
                 return;
             }
             try {
-                const res = await post(`/api/workflows/proposals/${proposal.id}/apply`, {});
+                const res = await post(`/api/skills/proposals/${proposal.id}/apply`, {});
                 _pendingProposals = _pendingProposals.filter(p => p.id !== proposal.id);
                 file.pendingProposal = null;
                 const delta = (res.bytes_after || 0) - (res.bytes_before || 0);
-                console.log(`[workflow] proposal applied: +${delta} bytes into ${res.skill_md_path}`);
+                console.log(`[skills] proposal applied: +${delta} bytes into ${res.skill_md_path}`);
                 // Reload file data so the editor shows the updated skill body
                 await loadSkills();
                 renderSkills();
@@ -1632,7 +1628,7 @@ function renderSkillViewer(container) {
         const rejectBtn = el('button', { class: 'fp-btn fp-btn-danger' }, [text('reject')]);
         rejectBtn.addEventListener('click', async () => {
             try {
-                await post(`/api/workflows/proposals/${proposal.id}/reject`, {});
+                await post(`/api/skills/proposals/${proposal.id}/reject`, {});
                 _pendingProposals = _pendingProposals.filter(p => p.id !== proposal.id);
                 file.pendingProposal = null;
                 renderSkills();
@@ -2013,569 +2009,6 @@ function _buildTabDesc(brief, full) {
         ]),
         fullEl,
     ]);
-}
-
-// ---------------------------------------------------------------------------
-// Workflows tab
-// ---------------------------------------------------------------------------
-
-let _workflows = [];
-let _workflowRuns = {};   // { [name]: runs[] } cached per workflow
-
-async function loadWorkflows() {
-    try {
-        const data = await get('/api/workflows');
-        _workflows = data.workflows || [];
-    } catch {
-        _workflows = [];
-    }
-    renderWorkflows();
-}
-
-function renderWorkflows() {
-    const container = document.getElementById('fp-workflows');
-    if (!container) return;
-    disposeActiveEditor();
-    clear(container);
-
-    if (_state.viewMode === 'viewer' && _state.currentFile && _state.currentFile.source === 'workflow') {
-        renderWorkflowViewer(container);
-        return;
-    }
-    if (_state.viewMode === 'editor' && _state.currentFile && _state.currentFile.source === 'workflow') {
-        renderWorkflowEditor(container);
-        return;
-    }
-
-    // Section header
-    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('\u21bb')]);
-    refreshBtn.addEventListener('click', loadWorkflows);
-    const newBtn = el('button', { class: 'fp-btn fp-btn-xs', title: 'Create new workflow' }, [text('+ new')]);
-    newBtn.addEventListener('click', () => {
-        _state.currentFile = {
-            path: '',
-            content: _workflowTemplate(),
-            source: 'workflow',
-            type: 'text',
-            name: 'WORKFLOW.md',
-            isNew: true,
-        };
-        _state.viewMode = 'editor';
-        _state.dirty = false;
-        renderWorkflows();
-    });
-
-    container.appendChild(el('div', { class: 'fp-section-header' }, [
-        el('div', {}, [
-            el('span', { class: 'fp-section-label' }, [text('Workflows')]),
-            el('div', { class: 'fp-section-sub' }, [text(
-                `${_workflows.length} workflow${_workflows.length !== 1 ? 's' : ''} installed`
-            )]),
-        ]),
-        el('div', { class: 'fp-section-actions' }, [newBtn, refreshBtn]),
-    ]));
-    container.appendChild(_buildTabDesc(
-        'Reusable multi-step pipelines that chain skills together.',
-        'Each workflow is a WORKFLOW.md file in data/workflows/. Define steps as skill or instruction types. Steps with no shared dependencies run in parallel. Run with: run_workflow(name, inputs).',
-    ));
-
-    // Search input
-    const wfSearch = el('input', {
-        class: 'fp-search-input',
-        type: 'text',
-        placeholder: 'Search workflows…',
-        value: _workflowsSearchQuery,
-    });
-    wfSearch.addEventListener('input', () => {
-        _workflowsSearchQuery = wfSearch.value.trim();
-        if (_workflowsSearchTimer) clearTimeout(_workflowsSearchTimer);
-        _workflowsSearchTimer = setTimeout(_renderWorkflowsFiltered, 150);
-    });
-    container.appendChild(el('div', { class: 'fp-search-bar' }, [wfSearch]));
-
-    _workflowsListEl = el('div', {});
-    container.appendChild(_workflowsListEl);
-    _renderWorkflowsFiltered();
-}
-
-function _renderWorkflowsFiltered() {
-    if (!_workflowsListEl) return;
-    clear(_workflowsListEl);
-
-    const q = _workflowsSearchQuery.toLowerCase();
-    const visible = q
-        ? _workflows.filter(w =>
-            w.name.toLowerCase().includes(q) ||
-            (w.description || '').toLowerCase().includes(q) ||
-            (w.tags || []).some(t => t.toLowerCase().includes(q))
-          )
-        : [..._workflows];
-
-    if (visible.length === 0) {
-        _workflowsListEl.appendChild(el('div', { class: 'fp-empty' }, [
-            text(q ? `No workflows match "${q}"` : 'No workflows installed'),
-        ]));
-        return;
-    }
-
-    const listEl = el('div', { class: 'fp-wf-list' });
-    for (const wf of visible) {
-        const item = el('div', { class: 'fp-wf-item' });
-
-        const deleteBtn = el('button', { class: 'fp-tree-action danger', title: 'Delete workflow' }, [text('\u00d7')]);
-        deleteBtn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            if (!confirm(`Delete workflow '${wf.name}'?`)) return;
-            try {
-                await del(`/api/workflows/${encodeURIComponent(wf.name)}`);
-                await loadWorkflows();
-            } catch (err) {
-                console.error('Failed to delete workflow:', err);
-            }
-        });
-
-        item.appendChild(el('div', { class: 'fp-wf-header' }, [
-            el('div', { class: 'fp-wf-name' }, [
-                text(wf.name),
-                el('span', { class: 'fp-skill-version' }, [text(`v${wf.version || '1.0'}`)]),
-            ]),
-            el('div', { class: 'fp-skill-actions' }, [deleteBtn]),
-        ]));
-        item.appendChild(el('div', { class: 'fp-skill-desc' }, [text(wf.description)]));
-
-        const meta = el('div', { class: 'fp-wf-meta' });
-        meta.appendChild(el('span', { class: 'fp-wf-steps' }, [
-            text(`${wf.step_count} step${wf.step_count !== 1 ? 's' : ''}`)
-        ]));
-        if (wf.tags && wf.tags.length > 0) {
-            const tagsEl = el('div', { class: 'fp-skill-tags' });
-            for (const tag of wf.tags.slice(0, 5)) {
-                tagsEl.appendChild(el('span', { class: 'fp-skill-tag' }, [text(tag)]));
-            }
-            meta.appendChild(tagsEl);
-        }
-        item.appendChild(meta);
-
-        item.addEventListener('click', () => viewWorkflow(wf.name));
-        listEl.appendChild(item);
-    }
-    _workflowsListEl.appendChild(listEl);
-}
-
-async function viewWorkflow(name) {
-    try {
-        const [wfData, runsData] = await Promise.all([
-            get(`/api/workflows/${encodeURIComponent(name)}`),
-            get(`/api/workflows/${encodeURIComponent(name)}/runs?limit=5`).catch(() => ({ runs: [] })),
-        ]);
-        _state.currentFile = {
-            path: name,
-            content: wfData.raw_content || '',
-            source: 'workflow',
-            type: 'text',
-            name: 'WORKFLOW.md',
-            wfData,
-            recentRuns: runsData.runs || [],
-            validationResult: null,
-        };
-        _state.viewMode = 'viewer';
-        renderWorkflows();
-    } catch (e) {
-        console.error('Failed to load workflow:', e);
-    }
-}
-
-function renderWorkflowViewer(container) {
-    const file = _state.currentFile;
-    if (!file || !file.wfData) return;
-    const data = file.wfData;
-
-    // Toolbar
-    const backBtn = el('button', { class: 'fp-toolbar-back' }, [text('\u2190')]);
-    backBtn.addEventListener('click', () => {
-        _state.viewMode = 'tree';
-        _state.currentFile = null;
-        renderWorkflows();
-    });
-    const editBtn = el('button', { class: 'fp-btn' }, [text('edit')]);
-    editBtn.addEventListener('click', () => {
-        _state.viewMode = 'editor';
-        _state.originalContent = file.content;
-        _state.dirty = false;
-        renderWorkflows();
-    });
-    const validateBtn = el('button', { class: 'fp-btn' }, [text('validate')]);
-    validateBtn.addEventListener('click', async () => {
-        validateBtn.disabled = true;
-        validateBtn.textContent = 'validating\u2026';
-        try {
-            const result = await post('/api/workflows/validate', { content: file.content });
-            file.validationResult = result;
-            renderWorkflows();
-        } catch (e) {
-            console.error('Validation failed:', e);
-        } finally {
-            validateBtn.disabled = false;
-            validateBtn.textContent = 'validate';
-        }
-    });
-
-    container.appendChild(el('div', { class: 'fp-toolbar' }, [
-        backBtn,
-        el('span', { class: 'fp-toolbar-path' }, [text(`${data.name}/WORKFLOW.md`)]),
-        el('div', { class: 'fp-toolbar-actions' }, [validateBtn, editBtn]),
-    ]));
-
-    // Validation result banner
-    if (file.validationResult) {
-        const vr = file.validationResult;
-        const bannerClass = vr.valid ? 'fp-wf-validation valid' : 'fp-wf-validation invalid';
-        const banner = el('div', { class: bannerClass });
-        banner.appendChild(el('div', { class: 'fp-wf-validation-title' }, [
-            text(vr.valid ? '\u2713 Valid' : '\u2717 Invalid'),
-        ]));
-        if (vr.errors && vr.errors.length > 0) {
-            for (const err of vr.errors) {
-                const loc = err.step_id ? ` [step '${err.step_id}']` : '';
-                banner.appendChild(el('div', { class: 'fp-wf-validation-error' }, [text(`\u2022${loc} ${err.message}`)]));
-            }
-        }
-        if (vr.warnings && vr.warnings.length > 0) {
-            for (const w of vr.warnings) {
-                banner.appendChild(el('div', { class: 'fp-wf-validation-warning' }, [text(`\u26a0 ${w.message}`)]));
-            }
-        }
-        if (vr.valid && vr.info) {
-            banner.appendChild(el('div', { class: 'fp-wf-validation-info' }, [
-                text(`${vr.info.step_count} step(s) in ${vr.info.wave_count} execution wave(s)`)
-            ]));
-        }
-        container.appendChild(banner);
-    }
-
-    // Info card
-    const info = el('div', { class: 'fp-skill-info' });
-    info.appendChild(el('div', { class: 'fp-skill-info-name' }, [text(data.name)]));
-    info.appendChild(el('div', { class: 'fp-skill-desc' }, [text(data.description)]));
-    if (data.tags && data.tags.length > 0) {
-        const tagsEl = el('div', { class: 'fp-skill-tags' });
-        for (const tag of data.tags) tagsEl.appendChild(el('span', { class: 'fp-skill-tag' }, [text(tag)]));
-        info.appendChild(tagsEl);
-    }
-    container.appendChild(info);
-
-    // Recent runs
-    if (file.recentRuns && file.recentRuns.length > 0) {
-        const runsEl = el('div', { class: 'fp-wf-runs' });
-        runsEl.appendChild(el('div', { class: 'fp-wf-runs-label' }, [text('Recent runs')]));
-        for (const run of file.recentRuns) {
-            const badge = run.status === 'complete' ? 'fp-wf-run-pass'
-                        : run.status === 'running'  ? 'fp-wf-run-running'
-                        : 'fp-wf-run-fail';
-            const passedStr = run.steps_passed != null
-                ? `${run.steps_passed}/${run.step_count} steps`
-                : '';
-            const date = run.started_at ? new Date(run.started_at).toLocaleString() : '';
-            runsEl.appendChild(el('div', { class: 'fp-wf-run-row' }, [
-                el('span', { class: `fp-wf-run-badge ${badge}` }, [text(run.status)]),
-                el('span', { class: 'fp-wf-run-meta' }, [text(`${passedStr} \u00b7 ${date}`)]),
-            ]));
-        }
-        container.appendChild(runsEl);
-    }
-
-    // Step visualization — grouped by execution wave
-    if (data.steps && data.steps.length > 0) {
-        _renderStepGraph(container, data.steps);
-    }
-
-    // Usage notes (body markdown)
-    if (data.body && data.body.trim()) {
-        const viewer = el('div', { class: 'fp-viewer' });
-        viewer.appendChild(el('div', { class: 'fp-wf-body-label' }, [text('Usage notes')]));
-        const md = el('div', { class: 'fp-viewer-md' });
-        md.appendChild(renderMarkdown(data.body));
-        viewer.appendChild(md);
-        container.appendChild(viewer);
-    }
-}
-
-function _renderStepGraph(container, steps) {
-    // Compute waves from depends_on (topological sort in JS)
-    const stepMap = {};
-    steps.forEach(s => { stepMap[s.id] = s; });
-
-    const inDegree = {};
-    const adjacency = {};
-    steps.forEach(s => { inDegree[s.id] = 0; adjacency[s.id] = []; });
-    steps.forEach(s => {
-        (s.depends_on || []).forEach(dep => {
-            if (inDegree[s.id] !== undefined) inDegree[s.id]++;
-            if (adjacency[dep]) adjacency[dep].push(s.id);
-        });
-    });
-
-    const waves = [];
-    let queue = steps.filter(s => inDegree[s.id] === 0).map(s => s.id);
-    while (queue.length > 0) {
-        waves.push([...queue]);
-        const next = [];
-        queue.forEach(sid => {
-            (adjacency[sid] || []).forEach(child => {
-                inDegree[child]--;
-                if (inDegree[child] === 0) next.push(child);
-            });
-        });
-        queue = next;
-    }
-
-    const graphEl = el('div', { class: 'fp-wf-graph' });
-    graphEl.appendChild(el('div', { class: 'fp-wf-graph-label' }, [text('Execution plan')]));
-
-    waves.forEach((waveIds, i) => {
-        const waveEl = el('div', { class: 'fp-wf-wave' });
-        waveEl.appendChild(el('div', { class: 'fp-wf-wave-label' }, [
-            text(`Wave ${i + 1}${waveIds.length > 1 ? ' (parallel)' : ''}`)
-        ]));
-        const stepsRow = el('div', { class: 'fp-wf-wave-steps' });
-        waveIds.forEach(sid => {
-            const step = stepMap[sid];
-            if (!step) return;
-            const card = el('div', { class: 'fp-wf-step-card' });
-
-            // Type badge
-            const badgeClass = step.type === 'skill' ? 'fp-wf-badge-skill' : 'fp-wf-badge-instruction';
-            card.appendChild(el('div', { class: 'fp-wf-step-top' }, [
-                el('span', { class: `fp-wf-step-id` }, [text(step.id)]),
-                el('span', { class: `fp-wf-step-badge ${badgeClass}` }, [text(step.type)]),
-            ]));
-
-            if (step.skill) {
-                card.appendChild(el('div', { class: 'fp-wf-step-skill' }, [
-                    el('span', { class: 'fp-wf-step-skill-icon' }, [text('\u2699')]),
-                    text(` ${step.skill}`),
-                ]));
-            }
-
-            if (step.description) {
-                card.appendChild(el('div', { class: 'fp-wf-step-desc' }, [text(step.description)]));
-            }
-
-            if (step.instructions) {
-                card.appendChild(el('div', { class: 'fp-wf-step-instructions' }, [
-                    text(step.instructions.length > 120
-                        ? step.instructions.slice(0, 120) + '\u2026'
-                        : step.instructions)
-                ]));
-            }
-
-            const foot = el('div', { class: 'fp-wf-step-foot' });
-            if (step.output_file) {
-                foot.appendChild(el('span', { class: 'fp-wf-step-output' }, [text(`\u2192 ${step.output_file}`)]));
-            }
-            if (step.depends_on && step.depends_on.length > 0) {
-                foot.appendChild(el('span', { class: 'fp-wf-step-deps' }, [
-                    text(`after: ${step.depends_on.join(', ')}`)
-                ]));
-            }
-            if (foot.children.length > 0) card.appendChild(foot);
-
-            stepsRow.appendChild(card);
-        });
-        waveEl.appendChild(stepsRow);
-
-        // Arrow between waves
-        if (i < waves.length - 1) {
-            waveEl.appendChild(el('div', { class: 'fp-wf-wave-arrow' }, [text('\u2193')]));
-        }
-        graphEl.appendChild(waveEl);
-    });
-
-    container.appendChild(graphEl);
-}
-
-function renderWorkflowEditor(container) {
-    const file = _state.currentFile;
-    if (!file) return;
-    const isNew = file.isNew || false;
-    const pathText = isNew ? 'new WORKFLOW.md' : `${file.path}/WORKFLOW.md`;
-
-    const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back' }, [text('\u2190')]);
-    backBtn.addEventListener('click', () => {
-        if (_state.dirty && !confirm('Discard unsaved changes?')) return;
-        disposeActiveEditor();
-        _state.dirty = false;
-        _state.viewMode = isNew ? 'tree' : 'viewer';
-        if (isNew) _state.currentFile = null;
-        renderWorkflows();
-    });
-
-    const saveBtn = el('button', { class: 'fp-btn save-btn', disabled: true }, [text('save')]);
-    saveBtn.addEventListener('click', () => { if (_state.dirty) saveWorkflow(container, isNew); });
-
-    const validateBtn = el('button', { class: 'fp-btn' }, [text('validate')]);
-    validateBtn.addEventListener('click', async () => {
-        validateBtn.disabled = true;
-        validateBtn.textContent = 'validating\u2026';
-        const statusEl = container.querySelector('.fp-editor-status');
-        try {
-            const content = _activeEditor ? _activeEditor.getValue() : file.content;
-            const result = await post('/api/workflows/validate', { content });
-            if (statusEl) {
-                if (result.valid) {
-                    const waves = (result.info && result.info.wave_count) || 0;
-                    statusEl.className = 'fp-editor-status saved';
-                    statusEl.textContent = `\u2713 Valid \u00b7 ${result.info.step_count} steps, ${waves} wave(s)`;
-                } else {
-                    const errCount = (result.errors || []).length;
-                    statusEl.className = 'fp-editor-status error';
-                    statusEl.textContent = `\u2717 ${errCount} error(s) \u2014 ${(result.errors[0] || {}).message || ''}`;
-                }
-            }
-        } catch (e) {
-            if (statusEl) { statusEl.className = 'fp-editor-status error'; statusEl.textContent = 'Validation failed'; }
-        } finally {
-            validateBtn.disabled = false;
-            validateBtn.textContent = 'validate';
-        }
-    });
-
-    const cancelBtn = el('button', { class: 'fp-btn' }, [text('cancel')]);
-    cancelBtn.addEventListener('click', () => {
-        if (_state.dirty && !confirm('Discard unsaved changes?')) return;
-        disposeActiveEditor();
-        _state.dirty = false;
-        _state.viewMode = isNew ? 'tree' : 'viewer';
-        if (isNew) _state.currentFile = null;
-        renderWorkflows();
-    });
-
-    const pathLabel = el('span', { class: 'fp-toolbar-path' }, [text(pathText)]);
-
-    container.appendChild(el('div', { class: 'fp-toolbar' }, [
-        backBtn,
-        pathLabel,
-        el('div', { class: 'fp-toolbar-actions' }, [validateBtn, saveBtn, cancelBtn]),
-    ]));
-
-    // Editor wrap: host div for Monaco + status bar inside — matches workspace/skill pattern
-    const editorWrap = el('div', { class: 'fp-editor' });
-    const editorHost = el('div', { class: 'fp-editor-host' });
-    const statusEl = el('div', { class: 'fp-editor-status' }, [text('Ready')]);
-    editorWrap.appendChild(editorHost);
-    editorWrap.appendChild(statusEl);
-    container.appendChild(editorWrap);
-
-    function onDirtyChange(dirty) {
-        _state.dirty = dirty;
-        saveBtn.disabled = !dirty;
-        saveBtn.className = `fp-btn save-btn${dirty ? ' dirty' : ''}`;
-        statusEl.className = `fp-editor-status${dirty ? ' dirty' : ''}`;
-        statusEl.textContent = dirty ? 'Modified' : 'Ready';
-        pathLabel.textContent = dirty ? `\u25CF ${pathText}` : pathText;
-    }
-
-    createCodeEditor(editorHost, file.content, 'yaml', (value) => {
-        onDirtyChange(value !== (file.content || ''));
-    }).then(inst => {
-        _activeEditor = inst;
-        inst.addSaveCommand(() => saveWorkflow(container, isNew));
-        inst.focus();
-    });
-
-    editorHost.addEventListener('keydown', (e) => {
-        if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
-            e.preventDefault();
-            saveWorkflow(container, isNew);
-        }
-    });
-}
-
-async function saveWorkflow(container, isNew) {
-    if (!_activeEditor) return;
-    const content = _activeEditor.getValue();
-    const statusEl = container.querySelector('.fp-editor-status');
-    const saveBtn = container.querySelector('.save-btn');
-    const pathLabel = container.querySelector('.fp-toolbar-path');
-
-    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'saving\u2026'; }
-    if (statusEl) { statusEl.className = 'fp-editor-status'; statusEl.textContent = 'Saving\u2026'; }
-
-    // Validate before writing
-    try {
-        const result = await post('/api/workflows/validate', { content });
-        if (!result.valid) {
-            const errCount = (result.errors || []).length;
-            const firstErr = (result.errors[0] || {}).message || 'unknown error';
-            if (statusEl) { statusEl.className = 'fp-editor-status error'; statusEl.textContent = `\u2717 Cannot save: ${errCount} error(s) \u2014 ${firstErr}`; }
-            if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'save'; saveBtn.className = 'fp-btn save-btn dirty'; }
-            return;
-        }
-    } catch (e) {
-        console.error('Pre-save validation failed:', e);
-        // Non-fatal — server will also validate
-    }
-
-    try {
-        if (isNew) {
-            await post('/api/workflows', { content });
-        } else {
-            const resp = await fetch(`/api/workflows/${encodeURIComponent(_state.currentFile.path)}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json', ..._authHdr() },
-                body: JSON.stringify({ content }),
-            });
-            if (!resp.ok) throw new Error(`Save failed: ${resp.statusText}`);
-        }
-
-        _state.currentFile.content = content;
-        _state.dirty = false;
-        if (saveBtn) { saveBtn.disabled = true; saveBtn.className = 'fp-btn save-btn'; saveBtn.textContent = 'save'; }
-        if (statusEl) { statusEl.className = 'fp-editor-status saved'; statusEl.textContent = 'Saved'; }
-        const pathText = isNew ? 'new WORKFLOW.md' : `${_state.currentFile.path}/WORKFLOW.md`;
-        if (pathLabel) pathLabel.textContent = pathText;
-
-        if (isNew) {
-            // Navigate to the workflow list so the new workflow is visible
-            disposeActiveEditor();
-            _state.dirty = false;
-            _state.viewMode = 'tree';
-            _state.currentFile = null;
-            await loadWorkflows();
-        }
-    } catch (e) {
-        console.error('Failed to save workflow:', e);
-        if (statusEl) { statusEl.className = 'fp-editor-status error'; statusEl.textContent = `Save failed: ${e.message || e}`; }
-        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'save'; saveBtn.className = 'fp-btn save-btn dirty'; }
-    }
-}
-
-function _workflowTemplate() {
-    return `---
-name: my-workflow
-description: Describe what this workflow does
-tags: []
-version: "1.0"
-steps:
-  - id: step-one
-    type: instruction
-    description: First step — describe what to do
-    output_file: step_one_output.md
-    depends_on: []
-
-  - id: step-two
-    skill: my-skill
-    instructions: |
-      Use the skill to process the output from step-one.
-      Read: step_one_output.md
-    output_file: step_two_output.md
-    depends_on: [step-one]
----
-
-## Usage
-
-Describe when and how to run this workflow.
-`;
 }
 
 // ---------------------------------------------------------------------------

@@ -58,7 +58,7 @@ class SessionAwareLLMScheduler:
         # session_id → effective timeout (set by extend_session_budget when the
         # session takes on a long-running orchestrator role; the wall-clock
         # cap conflates "active LLM work" with "blocked waiting on workers",
-        # which is wrong for run_workflow). Absent → use the base timeout.
+        # which is wrong for a long orchestration). Absent → use the base timeout.
         self._session_timeout_override: dict[str, float] = {}
 
     def _effective_timeout(self, session_id: str) -> float:
@@ -199,8 +199,8 @@ class SessionAwareLLMScheduler:
         Called by SessionManager.prompt() at the start of a new user turn.
         Clears both _session_first_active (so the next acquire restarts
         the clock) and any extend_session_budget override (so the next turn
-        starts at the base llm_session_timeout — workflow runs that need
-        more headroom will re-extend on entry to run_workflow).
+        starts at the base llm_session_timeout — orchestrations that need
+        more headroom re-extend when they begin waiting on workers).
 
         Idempotent and cheap. session_id == "" is a no-op.
         """
@@ -215,7 +215,7 @@ class SessionAwareLLMScheduler:
         Returns float('inf') if the session has not yet acquired its first
         slot (so no budget has been started). Returns 0.0 if the budget is
         already exhausted. Honours any extension installed via
-        extend_session_budget — workflow orchestrators get more rope so the
+        extend_session_budget — orchestrators get more rope so the
         reflect-retry guard doesn't block legitimate long-runs. Used by hooks
         to refuse a retry that has no chance of completing — without this,
         reflect-retry can fire scout (which burns its own 180s timeout) only
@@ -234,11 +234,11 @@ class SessionAwareLLMScheduler:
 
         Used when a session takes on an orchestrator role whose wall-clock is
         dominated by waiting on subordinate sessions, not by its own LLM work
-        (e.g. run_workflow blocking on workers). The base session_timeout is
+        (e.g. await_workers blocking on workers). The base session_timeout is
         a wall-clock guard against any single session monopolising resources;
         for an orchestrator, that mental model is wrong because the workers
         are already independently capped. We grow the cap proportionally to
-        the workflow's natural shape so reconciliation rounds and post-flow
+        the orchestration's natural shape so reconciliation rounds and post-flow
         reflect have budget left.
 
         Semantics:

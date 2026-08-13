@@ -18,7 +18,7 @@ Defined in `core/reflect.py`. Runs after the main agent loop completes, before t
 Reflect sees the **current attempt's transcript** with verbatim tool result bodies — sliced from the most recent `scout` role marker forward, so on a retry it sees only the work that just happened, not the whole growing session. The evidence blob is:
 
 - The original user message that started the turn.
-- A preamble with workspace files, termination history, scout's plan/approach, tool execution summary (counts, failures, last few errors), and any workflow run statuses.
+- A preamble with workspace files, termination history, scout's plan/approach, and a tool execution summary (counts, failures, last few errors).
 - An `ATTEMPT TRANSCRIPT` section containing every assistant message, tool call, and tool result from this attempt — tool result bodies are kept verbatim up to a per-result cap (5000 chars), with longer results truncated and marked `[+N chars truncated]`.
 - The agent's final response (echoed at the end for grounding).
 
@@ -113,7 +113,6 @@ Each cycle walks an ordered ladder of activities. `core/snooze.py` owns the life
 | 9 | Skill co-occurrence | Update which skills tend to load together. |
 | 10 | Signal synthesis | Fold post-mortems into tool/skill performance counters (and, per model, into the routing counters behind scout's `[MODEL ROUTING INTEL]` brief). |
 | 11 | Post-mortem TTL | Archive post-mortems past `post_mortem_retention_days` (default 90). |
-| 12 | Workflow run cleanup | Delete workflow run dirs beyond keep-10-per-workflow or older than 30 days. |
 | 12a | RLM run cleanup | Delete `data/workspace/rlm/<run_id>/` dirs + `rlm_runs` rows older than `rlm_run_retention_days` (default 30). Running runs are never touched. |
 | 12b | Candor maintenance | When `candor_enabled`: run the admission gate, drain the observation buffer, checkpoint the store. When `adaptive_enabled` too: queue `routing_hint` edits for tools whose calibrated reliability regressed (the Candor producer). |
 | 12c | Canary cleanup | When `canary_enabled`: prune `canary_runs` rows and their sessions past `canary_retention_days` (default 30), and nudge once per canary whose `last_reviewed` is over 90 days old. Never dispatches sweeps — those are enqueued for the next idle window. |
