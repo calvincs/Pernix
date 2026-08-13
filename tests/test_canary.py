@@ -342,7 +342,16 @@ class _FakeState:
 
 
 def _runner_manager(monkeypatch, solve):
-    """Fake manager whose prompt() 'solves' the task in the temp workspace."""
+    """Fake manager whose prompt() 'solves' the task in the temp workspace.
+
+    prompt() leaves a completed `task` behind, because the real one always
+    does (`session.task = asyncio.create_task(_run_agent_safe(...))`). An
+    earlier version of this fake omitted it and parked the session inline,
+    modelling prompt as synchronous-and-complete — which is precisely the
+    assumption that let the start race in _wait_for_turn_end ship and score
+    99 consecutive canary runs against work that had not happened. See
+    tests/regressions/test_2026-08-12_canary_never_waited_for_the_turn.py.
+    """
     from sessions import state_v2 as sv2
 
     sessions = {}
@@ -357,13 +366,18 @@ def _runner_manager(monkeypatch, solve):
             turn=TurnState(reflect_count=1),
             cancel_requested=False,
             _parked=False,
+            task=None,
         )
         return sid
 
     async def prompt(sid, message):
         s = sessions[sid]
-        solve(Path(s.workspace_override))
-        s._parked = True
+
+        async def _turn():
+            solve(Path(s.workspace_override))
+            s._parked = True
+
+        s.task = asyncio.create_task(_turn())
 
     mgr = SimpleNamespace(create_session=create_session, get=lambda sid: sessions.get(sid), prompt=prompt)
     monkeypatch.setattr("sessions.manager.get_manager", lambda: mgr)

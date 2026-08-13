@@ -30,6 +30,9 @@ logger = logging.getLogger("pernix.canary")
 # give up waiting and score the run as-is (failed).
 _CANCEL_GRACE_S = 30
 _POLL_INTERVAL_S = 1.0
+# Only used on the degraded no-task-handle path in _wait_for_turn_end: how long
+# to give a turn to visibly leave IDLE_READY before assuming it already ended.
+_START_GRACE_S = 5.0
 
 
 @dataclass
@@ -70,16 +73,63 @@ def _seed_workspace(canary: CanaryDef, ws: Path) -> None:
 
 
 async def _wait_for_turn_end(session, deadline: float) -> bool:
-    """Poll until the session parks (IDLE_READY/AWAITING_USER) or deadline.
+    """Wait until the turn scheduled on `session` has actually finished.
 
     Returns True when the turn ended on its own; False on timeout (after
     which the caller has already requested cancel and granted grace).
     AWAITING_USER counts as an ending: a canary that asks a question into
     the void has failed its gates, which is exactly what gets recorded.
+
+    **This must not be a bare "is the state parked?" poll.** `manager.prompt()`
+    does not run the turn — its last act is
+    `session.task = asyncio.create_task(_run_agent_safe(...))`, and the
+    transition out of IDLE_READY happens *inside* that coroutine, which has
+    not been entered when prompt() returns. A state-only poll therefore
+    matched on its first check and reported "ended" before the agent had
+    executed a single round: every canary scored FAIL against an untouched
+    workspace in ~0.2s with 0 tokens, and the real turn ran on orphaned after
+    run_canary's finally had already deleted the workspace under it. 99 runs,
+    0 passes, for the life of the feature.
+
+    So wait on the task handle, which is the only signal that is true exactly
+    when the turn is over. Awaiting it also covers reflect retries and the
+    queue drain, since `_finalize_turn` runs inside that same task.
     """
     from sessions import state_v2 as sv2
 
     parked = (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_USER)
+
+    task = getattr(session, "task", None)
+    if task is not None:
+        if not task.done():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            done, _pending = await asyncio.wait({task}, timeout=remaining)
+            if not done:
+                return False
+        # The task is finished. State normally already reads parked; give the
+        # last transition a moment to land rather than trusting the ordering.
+        while time.monotonic() < deadline:
+            if sv2._current_state(session) in parked:
+                return True
+            await asyncio.sleep(_POLL_INTERVAL_S)
+        return False
+
+    # No task handle. In production `prompt()` always leaves one on an
+    # accepted turn, so this means either a rejected prompt or a caller that
+    # does not model the manager — worth saying out loud, because the failure
+    # it degrades into is the silent one above.
+    logger.warning(
+        "Canary session %s has no task handle after prompt — falling back to "
+        "state polling, which cannot tell 'not started yet' from 'finished'",
+        getattr(session, "session_id", "?"),
+    )
+    start_deadline = min(deadline, time.monotonic() + _START_GRACE_S)
+    while time.monotonic() < start_deadline:
+        if sv2._current_state(session) not in parked:
+            break  # the turn is visibly running; fall through to wait it out
+        await asyncio.sleep(_POLL_INTERVAL_S)
     while time.monotonic() < deadline:
         if sv2._current_state(session) in parked:
             return True
@@ -109,6 +159,11 @@ async def run_canary(
     tmp = Path(tempfile.mkdtemp(prefix=f"canary-{canary.name[:24]}-"))
     sid = ""
     result = CanaryRunResult(task=canary.name, passed=False, trigger=trigger, flaky=canary.flaky)
+    # Both consulted from `finally`, so they must exist before anything below
+    # can raise. "Not started" and "ended" are the two states in which nothing
+    # can still be reading the temp workspace.
+    turn_started = False
+    turn_ended = False
     try:
         _seed_workspace(canary, tmp)
 
@@ -125,13 +180,14 @@ async def run_canary(
             db.add_gate(sid, g["name"], g["command"], watch_paths=g.get("watch_paths") or [], scope="canary")
 
         await manager.prompt(sid, canary.prompt)
+        turn_started = True
 
         deadline = time.monotonic() + canary.timeout
-        finished = await _wait_for_turn_end(session, deadline)
-        if not finished:
+        turn_ended = await _wait_for_turn_end(session, deadline)
+        if not turn_ended:
             logger.warning("Canary '%s' exceeded %ds — requesting cancel", canary.name, canary.timeout)
             session.cancel_requested = True
-            await _wait_for_turn_end(session, time.monotonic() + _CANCEL_GRACE_S)
+            turn_ended = await _wait_for_turn_end(session, time.monotonic() + _CANCEL_GRACE_S)
             result.error = f"timeout after {canary.timeout}s"
 
         # Score: the canary's gates against the FINAL workspace state. This
@@ -165,7 +221,20 @@ async def run_canary(
                 s.model_override = None
         except Exception:
             pass
-        shutil.rmtree(tmp, ignore_errors=True)
+        # Only reclaim the workspace once the turn is genuinely over. Deleting
+        # it under a still-running agent is what turned a refused cancel into
+        # a worker flailing inside a directory that no longer existed, one
+        # tool call per round, long after its sweep had reported. Leaking a
+        # temp dir is the far cheaper failure — it is under the OS temp root,
+        # and the path is logged so it can be reclaimed deliberately.
+        if turn_ended or not turn_started:
+            shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            logger.warning(
+                "Canary '%s' never ended its turn — leaving %s in place rather " "than deleting it under a live agent",
+                canary.name,
+                tmp,
+            )
 
     try:
         result.run_id = db.add_canary_run(
