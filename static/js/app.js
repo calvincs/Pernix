@@ -459,7 +459,19 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
                 closeToolGroup();
                 try {
                     const evalData = JSON.parse(m.content);
-                    renderEvalCard(evalData);
+                    // Two different producers share role='eval': the feature
+                    // judge ({results, all_passed}) and the deterministic gate
+                    // runner ({kind:'gate', attempt, gates}). Dispatch on the
+                    // row's own kind — handing a gate row to renderEvalCard
+                    // rendered it as a red "fail — eval — 0/0 passed", because
+                    // it finds no `results` array and no `all_passed`. Every
+                    // gate row on the reference deployment was a PASS shown as
+                    // a failure.
+                    if (evalData && evalData.kind === 'gate') {
+                        renderGateCard(evalData);
+                    } else {
+                        renderEvalCard(evalData);
+                    }
                 } catch { /* skip malformed eval data */ }
                 continue;
             }
@@ -3141,6 +3153,66 @@ function renderEvalCard(event) {
     header.addEventListener('click', () => {
         container.classList.toggle('scout-collapsed');
     });
+
+    inner.appendChild(container);
+    scrollToBottom();
+}
+
+// Deterministic gate results, replayed from a persisted role='eval' row of
+// shape {kind:'gate', attempt, gates:[{name, command, passed, exit_code,
+// output_tail, reused, error}]}. Distinct from renderEvalCard, which renders
+// the LLM feature judge — the two share a row role and nothing else.
+function renderGateCard(event) {
+    const inner = _messagesInner();
+    const emptyEl = inner.querySelector('.empty-state');
+    if (emptyEl) emptyEl.remove();
+
+    const gates = Array.isArray(event.gates) ? event.gates : [];
+    if (!gates.length) return;   // nothing ran; don't manufacture a verdict
+
+    const passedCount = gates.filter(g => g && g.passed).length;
+    const allPassed = passedCount === gates.length;
+    const verdict = allPassed ? 'pass' : 'fail';
+    const attempt = Number(event.attempt) || 0;
+    const attemptSuffix = attempt > 1 ? ` · attempt ${attempt}` : '';
+
+    const header = el('div', { class: 'reflect-header' }, [
+        el('span', { class: 'scout-toggle' }, [text('▼')]),
+        el('span', { class: `reflect-badge reflect-${verdict}` }, [text(verdict)]),
+        el('span', {}, [text(`gates — ${passedCount}/${gates.length} passed${attemptSuffix}`)]),
+    ]);
+
+    const sections = [];
+    for (const g of gates) {
+        if (!g) continue;
+        const status = g.passed ? '✓ PASS' : '✗ FAIL';
+        const marks = [];
+        if (g.reused) marks.push('reused');
+        if (g.exit_code !== null && g.exit_code !== undefined && !g.passed) marks.push(`exit ${g.exit_code}`);
+        const suffix = marks.length ? ` (${marks.join(', ')})` : '';
+        const parts = [
+            el('div', { class: 'scout-section-label' }, [text(`${status} — ${g.name || '(unnamed)'}${suffix}`)]),
+        ];
+        if (g.command) {
+            parts.push(el('div', { class: 'scout-section-body' }, [text(`$ ${g.command}`)]));
+        }
+        // Only surface output for failures — a passing gate's tail is noise.
+        if (!g.passed && g.output_tail) {
+            parts.push(el('pre', { class: 'scout-section-body' }, [text(g.output_tail)]));
+        }
+        if (g.error) {
+            parts.push(el('div', { class: 'scout-section-body' }, [
+                el('strong', {}, [text('Error: ')]),
+                text(g.error),
+            ]));
+        }
+        sections.push(el('div', { class: 'scout-section' }, parts));
+    }
+
+    const body = el('div', { class: 'scout-body' }, sections);
+    const collapsed = allPassed ? ' scout-collapsed' : '';
+    const container = el('div', { class: `reflect-activity${collapsed}` }, [header, body]);
+    header.addEventListener('click', () => container.classList.toggle('scout-collapsed'));
 
     inner.appendChild(container);
     scrollToBottom();
