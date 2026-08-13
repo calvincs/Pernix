@@ -112,7 +112,7 @@ These are the upgrade points where something the user might have set up needs at
 
 ### 2026-08-12 — The workflow engine was removed
 
-**What's gone.** `run_workflow` and `cancel_workflow`, the `get_workflow_schema` / `create_workflow` / `discover_workflows` / `delete_workflow` / `validate_workflow` tools, the whole `/api/workflows` route family, the Workflows tab in the Explorer, the `workflows_dir` setting, and `WORKFLOW.md` parsing. Nine agent-facing tools in total.
+**What's gone.** `run_workflow` and `cancel_workflow`, the `get_workflow_schema` / `create_workflow` / `discover_workflows` / `delete_workflow` / `validate_workflow` tools, the whole `/api/workflows` route family, the Workflows tab in the Explorer, the `workflows_dir` setting, and `WORKFLOW.md` parsing. Seven agent-facing tools in total — the boot line drops from 90 registered to 83 (builtin 35 → 30, extensions 55 → 53).
 
 **Why.** It was never used. Not "rarely" — never: across the full message history of the reference deployment, from first boot to removal, `run_workflow` was called zero times, `create_workflow` zero times, `discover_workflows` zero times, and the `workflow_runs` table never held a single row. Six workflows sat parsed and registered at every boot for two months and not one ever ran. That is not a discoverability problem you fix with better prompting — the tool was in the agent's list the entire time.
 
