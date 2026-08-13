@@ -128,6 +128,16 @@ async def run_slow_loops(force_weekly: bool = False) -> dict:
     except Exception as e:
         logger.warning("telos: adaptive hint retirement failed: %s", e)
 
+    # Daily: bound the speculation pool. Nothing reads status='soup', but the
+    # generate/evaluate loop re-reads every file on disk each pass, so an
+    # unbounded pool is a growing tax on the hot path, not just on storage.
+    try:
+        from core.telos.retire import prune_speculation_pool
+
+        stats["soup_prune"] = prune_speculation_pool(store)
+    except Exception as e:
+        logger.warning("telos: speculation-pool prune failed: %s", e)
+
     # Weekly block, watermarked so cron cadence changes can't double-run it.
     week = datetime.now(timezone.utc).strftime("%G-W%V")
     if force_weekly or db.get_snooze_state("telos_weekly") != week:

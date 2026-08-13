@@ -6,6 +6,7 @@ and snooze Activity 15.
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -95,28 +96,44 @@ async def test_dream_promotion_mapping():
     for hid in (h_tool, h_lesson, h_stale):
         db.update_dream_hypothesis(hid, status="validated")
 
+    # h_stale cites no memory file, so there is nothing an approval could
+    # write. It resolves terminally without minting a proposal and is not
+    # counted as a promotion — only the two with real effectors are.
     promoted = await promote_validated(limit=10)
-    assert promoted == 3
+    assert promoted == 2
 
     rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
-    assert set(rows) == {h_tool, h_lesson, h_stale}
+    assert set(rows) == {h_tool, h_lesson, h_stale}  # all three left the queue
     # Dream global edits are proposal-gated (4b escalation wins over 4d
-    # "auto-eligible" phrasing) — all three land as proposals, none auto.
-    assert all(r["promoted_ref"].startswith("proposal:") for r in rows.values())
+    # "auto-eligible" phrasing) — the actionable ones land as proposals.
+    assert rows[h_tool]["promoted_ref"].startswith("proposal:")
+    assert rows[h_lesson]["promoted_ref"].startswith("proposal:")
+    assert rows[h_stale]["promoted_ref"] == "reported:no-effector"
     assert db.adaptive_list_batches(status="pending") == []
 
+    # Two proposals, both with a payload someone can actually approve. The
+    # empty review-only variant is gone: 62 of 126 pending proposals on the
+    # live box were no-ops, and a queue that is half no-ops is a queue nobody
+    # finishes reading.
     props = db.adaptive_list_proposals(status="pending")
-    assert len(props) == 3
-    # memory_stale is review-only: empty payload, rationale renders the claim.
-    stale_prop = next(p for p in props if "memory review" in (p["rationale"] or ""))
-    assert json.loads(stale_prop["payload_json"]) == []
+    assert len(props) == 2
+    assert all(json.loads(p["payload_json"]) for p in props)
 
-    # Approving a review-only proposal acknowledges without applying.
-    from core.adaptive import approve_proposal
 
-    result = approve_proposal(stale_prop["id"])
-    assert result.get("review_only") and result["batch_id"] is None
-    assert db.adaptive_list_entries(status=None) == []  # nothing was written
+async def test_effectorless_finding_is_reported_not_queued():
+    """A validated hypothesis with a citable file still becomes a proposal."""
+    from core.dream.promote import promote_validated
+
+    ev = json.dumps([{"type": "memory", "file": "pernix.config", "epoch": 1, "hash": "abc"}])
+    hid = db.add_dream_hypothesis("contradiction", "two entries disagree about the port", ev)
+    db.update_dream_hypothesis(hid, status="validated")
+
+    assert await promote_validated(limit=10) == 1
+    props = db.adaptive_list_proposals(status="pending")
+    assert len(props) == 1
+    payload = json.loads(props[0]["payload_json"])
+    assert payload[0]["action"] == "memory_correction"
+    assert payload[0]["files"] == ["pernix.config"]
 
 
 async def test_dream_promotion_gated_on_flag(monkeypatch):
@@ -271,6 +288,25 @@ def test_tripwire_flags_canary_regression(monkeypatch):
     assert db.adaptive_get_batch("ab-bad")["status"] == "suspect"
     notes = db.get_notifications()
     assert any("tripwire" in (n.get("title") or "") for n in notes)
+
+
+def test_tripwire_refuses_to_judge_against_a_zero_baseline(monkeypatch):
+    """A 0% baseline means the suite is broken, not that the bar is strict.
+
+    `drop = base - now` against base=0 can only come out <= 0, so every batch
+    would be certified clean by a suite measuring nothing — the exact state
+    the box was in for five days. The signal must report unavailable.
+    """
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    _seed_canary_history("ab-blind", baseline_pass=False, post_pass=False)
+    db.adaptive_update_batch("ab-blind", status="suspect", flagged_reason="earlier flake")
+    actions = evaluate_tripwire()
+    # Neither flagged nor cleared: with no usable baseline there is no verdict
+    # to give, and a false all-clear would silently dismiss a real flag.
+    assert not [a for a in actions if a["batch_id"] == "ab-blind"]
+    assert db.adaptive_get_batch("ab-blind")["status"] == "suspect"
 
 
 def test_tripwire_clears_on_clean_comparison(monkeypatch):
@@ -544,6 +580,45 @@ async def test_candor_retires_recovered_hints(monkeypatch):
     assert db.adaptive_get_entry("tool-http_get-degraded")["status"] == "active"
 
 
+async def test_candor_does_not_mint_hints_for_names_that_are_not_tools(monkeypatch):
+    """Candor's ledger is keyed by operation name, so cron jobs land in it.
+
+    A hint reading "tool ai-tech-daily-brief degraded" advises scout about
+    something it cannot call, while holding a slot against the per-kind cap —
+    two of eleven live hints on the box were exactly this.
+    """
+    from core.snooze import SnoozeRunner
+    from core.tools.registry import get_registry
+
+    registry = get_registry()
+    registry.register(
+        name="http_get",
+        func=lambda **kw: "",
+        description="fetch a url",
+        parameters={"type": "object", "properties": {}},
+        category="web",
+    )
+
+    class _Bridge:
+        async def run_maintenance(self, cancelled):
+            return {}
+
+        async def degraded_tools(self):
+            return [
+                {"tool": "http_get", "p": 0.41, "n": 30},
+                {"tool": "ai-tech-daily-brief", "p": 0.20, "n": 12},  # a cron job
+            ]
+
+    monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: _Bridge())
+    runner = SnoozeRunner.__new__(SnoozeRunner)
+    runner._is_cancelled = lambda: False
+    await SnoozeRunner._candor_maintenance(runner)
+
+    pending = db.adaptive_list_batches(status="pending")
+    queued = [e["entry_id"] for e in json.loads(pending[0]["payload_json"])]
+    assert queued == ["tool-http_get-degraded"]
+
+
 async def test_memory_correction_effector_writes_on_approve(monkeypatch, tmp_path):
     """Approved dream contradiction findings with cited memory files write a
     corrective entry instead of dead-ending (audit P5: 72/75 pending
@@ -578,3 +653,52 @@ async def test_memory_correction_effector_writes_on_approve(monkeypatch, tmp_pat
     assert result.get("corrections_written") == ["test.corrections"]
     assert written_calls == [(("test.corrections",), "contradiction")]
     assert db.adaptive_get_proposal(prop["id"])["status"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# Proposal queue bounds
+# ---------------------------------------------------------------------------
+
+
+def test_proposal_queue_dedupes_identical_pending_payloads():
+    """Re-deriving a finding from the same evidence is normal producer
+    behaviour, not new information — it must not stack copies."""
+    payload = json.dumps([{"action": "create", "kind": "policy", "title": "t"}])
+    first = db.adaptive_add_proposal("dream", payload, "[]", "why")
+    again = db.adaptive_add_proposal("dream", payload, "[]", "why")
+    assert again == first
+    assert db.adaptive_count_pending_proposals() == 1
+    # A different producer with the same payload is a genuinely separate claim.
+    assert db.adaptive_add_proposal("telos", payload, "[]", "why") != first
+    assert db.adaptive_count_pending_proposals() == 2
+
+
+def test_proposal_queue_refuses_past_the_cap():
+    for i in range(3):
+        db.adaptive_add_proposal("dream", json.dumps([{"n": i}]), "[]", f"r{i}", max_pending=3)
+    assert db.adaptive_count_pending_proposals() == 3
+    # Full: the next one is refused rather than silently deepening a queue
+    # nobody is going to finish reading.
+    assert db.adaptive_add_proposal("dream", json.dumps([{"n": 99}]), "[]", "r99", max_pending=3) is None
+    assert db.adaptive_count_pending_proposals() == 3
+    # Resolving one frees the slot.
+    db.adaptive_resolve_proposal(db.adaptive_list_proposals(status="pending")[0]["id"], "rejected")
+    assert db.adaptive_add_proposal("dream", json.dumps([{"n": 99}]), "[]", "r99", max_pending=3) is not None
+
+
+def test_pending_proposals_lapse_after_the_ttl():
+    """A proposal is a snapshot of evidence; approving a stale one blind is
+    worse than letting the producer re-raise it from current evidence."""
+    from db.database import connect_sessions
+
+    fresh = db.adaptive_add_proposal("dream", json.dumps([{"a": 1}]), "[]", "fresh")
+    stale = db.adaptive_add_proposal("dream", json.dumps([{"a": 2}]), "[]", "stale")
+    old = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+    with connect_sessions() as conn:
+        conn.execute("UPDATE adaptive_proposals SET created_at = ? WHERE id = ?", (old, stale))
+
+    assert db.adaptive_expire_stale_proposals(30) == 1
+    assert db.adaptive_get_proposal(stale)["status"] == "expired"
+    assert db.adaptive_get_proposal(fresh)["status"] == "pending"
+    # Disabled by zero.
+    assert db.adaptive_expire_stale_proposals(0) == 0

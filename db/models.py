@@ -3,7 +3,8 @@
 import logging
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
 
 from db.database import connect_sessions
 
@@ -584,7 +585,7 @@ def delete_messages_from(session_id: str, from_id: int) -> None:
     with connect_sessions() as conn:
         try:
             conn.execute(
-                "DELETE FROM messages_fts WHERE rowid IN " "(SELECT id FROM messages WHERE session_id = ? AND id >= ?)",
+                "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id = ? AND id >= ?)",
                 (session_id, from_id),
             )
         except Exception as e:
@@ -654,7 +655,7 @@ def clear_messages_only(session_id: str) -> None:
     with connect_sessions() as conn:
         try:
             conn.execute(
-                "DELETE FROM messages_fts WHERE rowid IN " "(SELECT id FROM messages WHERE session_id = ?)",
+                "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE session_id = ?)",
                 (session_id,),
             )
         except Exception:
@@ -1494,8 +1495,43 @@ def adaptive_update_batch(
         conn.execute(f"UPDATE adaptive_batches SET {cols} WHERE batch_id = ?", [*updates.values(), batch_id])
 
 
-def adaptive_add_proposal(producer: str, payload_json: str, evidence_json: str, rationale: str) -> int:
+def adaptive_add_proposal(
+    producer: str,
+    payload_json: str,
+    evidence_json: str,
+    rationale: str,
+    max_pending: int = 0,
+) -> int | None:
+    """Queue a proposal for human review. Returns the id, or None if suppressed.
+
+    Two bounds, because this queue is written by machines and drained by a
+    person. Producers emit continuously and approval is a scarce human act,
+    so without them the backlog only ever grows — 126 pending on the live
+    box, untouched for five days, which is a queue nobody finishes reading.
+
+    * **Dedupe** — an identical pending payload from the same producer
+      returns the existing id rather than stacking a copy. Re-deriving the
+      same finding from the same evidence is normal producer behaviour, not
+      new information.
+    * **Cap** — at `max_pending` the insert is refused. Refusing is the
+      honest response: another row on a queue this long would not be
+      reviewed either, and a caller that hears "no" can say so.
+    """
     with connect_sessions() as conn:
+        dup = conn.execute(
+            "SELECT id FROM adaptive_proposals WHERE status = 'pending' AND producer = ? AND payload_json = ? "
+            "ORDER BY id LIMIT 1",
+            (producer, payload_json),
+        ).fetchone()
+        if dup:
+            return int(dup[0])
+        if max_pending > 0:
+            pending = conn.execute("SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending'").fetchone()[0]
+            if int(pending) >= max_pending:
+                logger.warning(
+                    "adaptive: proposal from %s refused — %d pending at cap %d", producer, pending, max_pending
+                )
+                return None
         cur = conn.execute(
             """INSERT INTO adaptive_proposals
                (producer, payload_json, evidence_json, rationale, status, resolved_at, created_at)
@@ -1503,6 +1539,31 @@ def adaptive_add_proposal(producer: str, payload_json: str, evidence_json: str, 
             (producer, payload_json, evidence_json, rationale, _now()),
         )
         return cur.lastrowid
+
+
+def adaptive_count_pending_proposals() -> int:
+    with connect_sessions() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending'").fetchone()[0])
+
+
+def adaptive_expire_stale_proposals(max_age_days: int) -> int:
+    """Expire pending proposals past the TTL. Returns the number expired.
+
+    A proposal is a snapshot of evidence at a moment. Weeks later the entries
+    it cites may have moved, the tool it complains about may have recovered,
+    and approving it blind is worse than letting it lapse — the producer will
+    re-raise it from current evidence if it still holds.
+    """
+    if max_age_days <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "UPDATE adaptive_proposals SET status = 'expired', resolved_at = ? "
+            "WHERE status = 'pending' AND created_at < ?",
+            (_now(), cutoff),
+        )
+        return cur.rowcount
 
 
 def adaptive_get_proposal(proposal_id: int) -> dict | None:
@@ -1948,7 +2009,7 @@ def delete_old_post_mortems(cutoff_iso: str) -> int:
     """
     with connect_sessions() as conn:
         cur = conn.execute(
-            "DELETE FROM post_mortems " "WHERE synthesized_at IS NOT NULL AND created_at < ?",
+            "DELETE FROM post_mortems WHERE synthesized_at IS NOT NULL AND created_at < ?",
             (cutoff_iso,),
         )
         return cur.rowcount
@@ -2463,10 +2524,20 @@ def list_dream_hypotheses(
     kind: str | None = None,
     limit: int = 100,
     oldest_first: bool = False,
+    exclude_kinds: Iterable[str] | None = None,
 ) -> list[dict]:
     """List hypotheses, newest-first by default. `oldest_first` orders (and
     therefore windows) from the other end — queue consumers must use it, or
-    a backlog larger than `limit` permanently starves its oldest rows."""
+    a backlog larger than `limit` permanently starves its oldest rows.
+
+    `exclude_kinds` filters **inside** the query, which matters for exactly
+    the same reason `oldest_first` does. A caller that windows to `limit` and
+    then drops rows in Python is windowing over the wrong population: kinds
+    it never wanted can fill the entire window and leave it with nothing,
+    which is indistinguishable from an empty queue. That is not theoretical —
+    `open_question` rows are never validated and never expire, and once 200
+    of them accumulated they silently starved the validator (see
+    core/dream/__init__.py)."""
     clauses = []
     params: list = []
     if status:
@@ -2475,6 +2546,10 @@ def list_dream_hypotheses(
     if kind:
         clauses.append("kind = ?")
         params.append(kind)
+    excluded = [k for k in (exclude_kinds or []) if k]
+    if excluded:
+        clauses.append(f"kind NOT IN ({','.join('?' for _ in excluded)})")
+        params.extend(excluded)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     order = "ASC" if oldest_first else "DESC"
     params.append(limit)
@@ -2518,6 +2593,44 @@ def update_dream_hypothesis(
             params,
         )
         return cur.rowcount > 0
+
+
+def archive_stale_dream_hypotheses(kind: str, max_age_days: int) -> int:
+    """Retire `pending` rows of a kind that has no validation path.
+
+    `open_question` is report material: it is deliberately excluded from
+    validation, so nothing ever moves it out of `pending` and the rows
+    accumulate forever. Left alone they are not merely clutter — they crowd
+    the validator's oldest-first window and starve the kinds that *do* have
+    a path. Archiving keeps them readable (the report groups `archived`) and
+    terminal, so the queue converges.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, max_age_days))).isoformat()
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            """UPDATE dream_hypotheses SET status = 'archived', updated_at = ?
+               WHERE kind = ? AND status = 'pending' AND created_at < ?""",
+            (_now(), kind, cutoff),
+        )
+        return cur.rowcount
+
+
+def count_dream_hypotheses(status: str | None = None, kind: str | None = None) -> int:
+    """Row count without paying to materialize the rows. Used by the queue
+    health check, which needs the true population size rather than a
+    windowed sample."""
+    clauses = []
+    params: list = []
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if kind:
+        clauses.append("kind = ?")
+        params.append(kind)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with connect_sessions() as conn:
+        row = conn.execute(f"SELECT COUNT(*) FROM dream_hypotheses {where}", params).fetchone()
+        return int(row[0]) if row else 0
 
 
 def add_dream_report(period_start: str, period_end: str, path: str, stats_json: str) -> str:

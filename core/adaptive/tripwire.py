@@ -83,6 +83,19 @@ def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool,
     now = _pass_rate(post)
     if base is None or now is None:
         return None
+    if base == 0.0:
+        # A baseline of 0% is not a strict baseline, it is a broken suite.
+        # `drop = base - now` can only ever come out <= 0 against it, so every
+        # batch would be certified clean by a measurement substrate that is
+        # measuring nothing. Report "no usable signal" instead of a false
+        # all-clear; core/canary/maintain.py raises the outage separately.
+        logger.warning(
+            "Tripwire: canary baseline for batch %s is 0%% over %d runs — suite health, not batch quality. "
+            "Treating the canary signal as unavailable.",
+            batch.get("batch_id"),
+            len(baseline_rows),
+        )
+        return None
     drop = base - now
     detail = f"canary pass rate {now:.0%} vs baseline {base:.0%} ({len(post)} post-batch, {len(baseline_rows)} baseline runs)"
     return (drop >= settings.canary_regression_delta, detail)

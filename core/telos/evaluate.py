@@ -41,6 +41,18 @@ Output JSON only, no fences:
 /no_think"""
 
 
+def gather_evidence_for(store: TelosStore, h) -> str:
+    """Public alias of the evidence gatherer for the SOUP testability gate.
+
+    `h` needs only `falsifier` and `statement`, so an ungated candidate dict
+    works as well as a stored hypothesis. Sharing the one implementation is
+    the point: if the gate probed for evidence differently than evaluation
+    gathers it, the gate would admit hypotheses evaluation still cannot test
+    — which is the failure it exists to prevent.
+    """
+    return _gather_evidence(store, h)
+
+
 def _gather_evidence(store: TelosStore, h: TelosObject) -> str:
     """Pull the falsifier's observable from memory, the trace, and Candor."""
     falsifier = h.get("falsifier") or {}
@@ -215,4 +227,14 @@ async def evaluate_one(store: TelosStore, gated: list[TelosObject], is_cancelled
         if len(resolved) >= len(siblings) > 0 or len(resolved) >= 3:
             store.update(q, state="narrowed")
             store.trace_append("question_narrowed", {"id": q.id, "resolved": len(resolved)})
+        else:
+            # Refund one generation attempt. The attempt budget in soup.py is
+            # spent per pass to stop a question that only produces
+            # unresolvable hypotheses from running forever; a question that
+            # just resolved one has earned another pass. This is what makes
+            # the budget a productivity filter rather than a fixed quota.
+            spent = int(q.get("attempts", 0) or 0)
+            if spent > 0:
+                store.update(q, attempts=spent - 1)
+                store.trace_append("question_credited", {"id": q.id, "attempts": spent - 1, "hypothesis": h.id})
     return verdict

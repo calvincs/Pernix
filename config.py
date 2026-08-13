@@ -338,6 +338,8 @@ class Settings:
     # Passive tripwire: post-mortem retry drift over this many organic turns
     # after a batch (canary-stamped post-mortems excluded).
     adaptive_tripwire_window_turns: int = 20
+    adaptive_max_pending_proposals: int = 40  # review queue cap (0 = unbounded)
+    adaptive_proposal_ttl_days: int = 30  # pending proposals lapse after this (0 = never)
 
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
@@ -405,7 +407,8 @@ class Settings:
     telos_hypotheses_per_question: int = 3  # SOUP output cap per generation
     telos_max_gated_backlog: int = 12  # above it, every step evaluates
     telos_max_eval_tokens: int = 20_000  # gate's cost_est ceiling
-    telos_question_max_attempts: int = 3  # dry generations before abandonment
+    telos_question_max_attempts: int = 3  # generation passes before abandonment
+    telos_soup_retention_days: int = 30  # speculation-pool prune window (0 = keep forever)
     telos_soup_context_entries: int = 10  # memory entries in the band sample
     telos_budget_share_max: float = 0.35  # binding-monitor 7d share alarm (§5.2)
     telos_claims_floor_per_window: int = 1  # binding: new-claims floor

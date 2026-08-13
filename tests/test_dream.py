@@ -496,6 +496,55 @@ async def test_run_step_alternates_validate_and_generate(store, dream_on, monkey
     assert r2["dream_validated"] == 0 and r2["dream_refuted"] == 0
 
 
+async def test_open_questions_cannot_starve_the_validation_window(store, dream_on, monkeypatch):
+    """Regression: the kind exclusion must window inside the query.
+
+    open_question rows are never validated and never expire. When the
+    exclusion ran as a comprehension over an already-LIMITed result, enough
+    of them filled the window and the validator saw an empty queue — so it
+    generated forever while real candidates sat unreachable behind them.
+    """
+    _seed_memory(store)
+    monkeypatch.setattr("core.memory.store.get_memory_store", lambda: store)
+
+    # One real candidate, buried behind a window's worth of open questions.
+    ev = [_mem_evidence(store, "pernix.config", 1000), _mem_evidence(store, "pernix.config", 2000)]
+    db.add_dream_hypothesis("contradiction", "Port claims conflict between two entries.", json.dumps(ev))
+    for i in range(250):
+        db.add_dream_hypothesis("open_question", f"What is unmeasured about subsystem {i}?", "[]")
+
+    # The query must reach past every open_question to the real candidate.
+    window = db.list_dream_hypotheses(status="pending", limit=200, oldest_first=True, exclude_kinds=("open_question",))
+    assert [r["kind"] for r in window] == ["contradiction"]
+
+    fake = FakeLLMClient(responses=[_resp('{"verdict": "holds", "note": "8090 vs 9090"}')])
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
+    result = await run_step(_never_cancelled)
+    assert result["dream_validated"] == 1
+    assert db.get_snooze_state("dream_last_action") == "validate"
+
+
+def test_archive_stale_open_questions_is_scoped_and_terminal(store):
+    """The TTL sweep retires only aged, pending rows of the named kind."""
+    from db.database import connect_sessions
+
+    old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    fresh_oq = db.add_dream_hypothesis("open_question", "Recently raised open question.", "[]")
+    aged_oq = db.add_dream_hypothesis("open_question", "Long-stale open question.", "[]")
+    aged_other = db.add_dream_hypothesis("contradiction", "An aged contradiction row.", "[]")
+    with connect_sessions() as conn:
+        conn.execute("UPDATE dream_hypotheses SET created_at = ? WHERE id IN (?, ?)", (old, aged_oq, aged_other))
+
+    assert db.archive_stale_dream_hypotheses("open_question", 14) == 1
+
+    by_id = {r["id"]: r for r in db.list_dream_hypotheses(limit=50)}
+    assert by_id[aged_oq]["status"] == "archived"  # aged + right kind
+    assert by_id[fresh_oq]["status"] == "pending"  # inside the TTL
+    assert by_id[aged_other]["status"] == "pending"  # has a validation path
+    # Archived rows leave the validator's queue for good.
+    assert db.count_dream_hypotheses(status="pending", kind="open_question") == 1
+
+
 async def test_run_step_backpressure_pauses_generation(store, dream_on, monkeypatch):
     _seed_memory(store)
     monkeypatch.setattr("core.memory.store.get_memory_store", lambda: store)

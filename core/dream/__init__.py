@@ -20,6 +20,11 @@ from db import models as db
 
 logger = logging.getLogger("pernix.dream")
 
+# Kinds with no validation path. They are generated, reported, and never
+# resolved, so they must be kept out of the validator's queue window and
+# aged out of `pending` — see archive_stale_dream_hypotheses.
+_NON_VALIDATED_KINDS = ("open_question",)
+
 
 async def run_step(is_cancelled) -> dict:
     """One dream unit. Called from snooze Activity 14. Never raises upward
@@ -43,11 +48,17 @@ async def run_step(is_cancelled) -> dict:
     # Genuinely oldest-first pending queue (ordered at the query, so a
     # backlog larger than the window cannot starve its oldest rows); open
     # questions are report material, not validation candidates.
-    pending = [
-        r
-        for r in db.list_dream_hypotheses(status="pending", limit=200, oldest_first=True)
-        if r.get("kind") != "open_question"
-    ]
+    #
+    # The kind exclusion belongs in the QUERY, not in a comprehension over
+    # its result. Filtering after the LIMIT windows over the wrong
+    # population: open_question rows are never validated and never expire,
+    # so once 200 of them accumulated they filled the window completely and
+    # this list came back empty — which reads exactly like "nothing to
+    # validate". Dream then generated on every cycle instead, for two days,
+    # while 58 real candidates sat unreachable behind them.
+    pending = db.list_dream_hypotheses(
+        status="pending", limit=200, oldest_first=True, exclude_kinds=_NON_VALIDATED_KINDS
+    )
     last_action = db.get_snooze_state("dream_last_action") or ""
     # Backpressure: generation adds up to dream_hypotheses_per_cycle rows per
     # step while validation resolves ~one, so an unbounded queue only grows.
@@ -116,6 +127,8 @@ async def run_step(is_cancelled) -> dict:
             logger.warning("dream: probe launch failed: %s", e)
 
     # Journal retention: once per day, drop journal sessions past the window.
+    # The same daily slot ages out the kinds that have no validation path, so
+    # `pending` converges instead of growing without bound.
     if not is_cancelled():
         import asyncio
         from datetime import datetime, timezone
@@ -125,6 +138,60 @@ async def run_step(is_cancelled) -> dict:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if db.get_snooze_state("dream_journal_prune") != today:
             await asyncio.to_thread(prune_old_journals_sync)
+            # Twice the report interval, so every open question is carried by
+            # at least one report before it is archived.
+            ttl_days = max(2, settings.dream_report_interval_days * 2)
+            for kind in _NON_VALIDATED_KINDS:
+                try:
+                    n = await asyncio.to_thread(db.archive_stale_dream_hypotheses, kind, ttl_days)
+                    if n:
+                        logger.info("dream: archived %d stale %s rows (>%dd)", n, kind, ttl_days)
+                except Exception as e:
+                    logger.warning("dream: %s archival failed: %s", kind, e)
+            _check_queue_health(pending)
             db.set_snooze_state("dream_journal_prune", today)
 
     return stats
+
+
+# A validation candidate older than this has not been looked at in a week of
+# cycles. Dream runs many times a day, so this is far past "busy" — it means
+# the queue has stopped draining.
+_STALL_DAYS = 7
+
+
+def _check_queue_health(pending: list[dict]) -> None:
+    """Absolute-health check: is the validator actually draining its queue?
+
+    The tripwire-style signals in this codebase all measure *relative*
+    change. None of them can see a loop that has stopped entirely, which is
+    why the open_question starvation ran unnoticed for two days. This asks
+    the absolute question instead — is the oldest thing in the queue older
+    than any healthy cycle would leave it — and says so out loud.
+    """
+    from datetime import datetime, timezone
+
+    if not pending:
+        return
+    oldest = min((r.get("created_at") or "") for r in pending)
+    if not oldest:
+        return
+    try:
+        age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(oldest)).days
+    except ValueError:
+        return
+    if age_days < _STALL_DAYS:
+        return
+    try:
+        db.add_notification(
+            title="Dream: validation queue is not draining",
+            body=(
+                f"The oldest pending hypothesis is {age_days} days old and {len(pending)} "
+                "candidates are waiting. Dream validates roughly one per idle cycle, so a "
+                "backlog this old means validation is failing or starved rather than busy. "
+                "Check the dream log for validator errors."
+            ),
+            urgency="normal",
+        )
+    except Exception as e:
+        logger.warning("dream: queue health notification failed: %s", e)

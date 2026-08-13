@@ -1269,6 +1269,29 @@ Output valid JSON only. No markdown fences. /no_think"""
                 from db import models as db
 
                 degraded = await get_candor_bridge().degraded_tools()
+                # Candor's tool_ok ledger is keyed by whatever the caller
+                # named the operation, so cron jobs and scripts land in it
+                # alongside real tools. A hint reading "tool
+                # ai-tech-daily-brief degraded" advises scout about something
+                # it cannot call, and it holds a slot against the per-kind cap
+                # while doing it — two of eleven live hints were this. The
+                # registry is the authority on what is actually a tool.
+                from core.tools.registry import get_registry
+
+                registry = get_registry()
+                # An empty registry means "not loaded yet", not "no tool is
+                # real". Filtering against it would discard every hint and,
+                # worse, retire every live one — so the check only engages
+                # once the registry actually has tools in it.
+                known = registry.all_tools()
+
+                def _is_tool(name: str) -> bool:
+                    return not known or registry.exists(name)
+
+                skipped = [d["tool"] for d in degraded if not _is_tool(d["tool"])]
+                if skipped:
+                    logger.info("Candor: skipped %d degraded non-tool name(s): %s", len(skipped), ", ".join(skipped))
+                degraded = [d for d in degraded if _is_tool(d["tool"])]
                 degraded_ids = {f"tool-{d['tool']}-degraded" for d in degraded}
                 mints = []
                 for d in degraded:
@@ -1305,6 +1328,12 @@ Output valid JSON only. No markdown fences. /no_think"""
                         continue
                     if not (eid.startswith("tool-") and eid.endswith("-degraded")):
                         continue
+                    # Two ways to leave the degraded set, and the audit trail
+                    # should not call them the same thing: the tool recovered,
+                    # or the name was never a tool and should not have minted
+                    # a hint at all.
+                    named = eid[len("tool-") : -len("-degraded")]
+                    why = "recovered" if _is_tool(named) else "not a registered tool"
                     retires.append(
                         {
                             "action": "delete",
@@ -1312,7 +1341,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                             "scope": "global",
                             "entry_id": eid,
                             "baseline_version": row["version"],
-                            "evidence": [f"candor:tool_ok recovered ({eid})"],
+                            "evidence": [f"candor:tool_ok {why} ({eid})"],
                         }
                     )
                 edits = mints[:2] + retires[:2]
@@ -1368,6 +1397,19 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         if self._is_cancelled():
             return
+        # Lapse pending proposals nobody got to. A proposal is a snapshot of
+        # evidence; weeks later approving it blind is worse than letting the
+        # producer re-raise it from current evidence. Without this the queue
+        # only ever grows, because producers write and only a human drains.
+        try:
+            from db import models as db
+
+            expired = await asyncio.to_thread(db.adaptive_expire_stale_proposals, settings.adaptive_proposal_ttl_days)
+            if expired:
+                logger.info("Adaptive: expired %d stale pending proposal(s)", expired)
+        except Exception as e:
+            logger.warning("Adaptive proposal expiry failed: %s", e)
+
         try:
             from core.adaptive.tripwire import evaluate_tripwire
 

@@ -177,7 +177,16 @@ def queue_edits(edits: list[dict], producer: str, rationale: str = "") -> dict:
             payload_json=json.dumps(edits),
             evidence_json=json.dumps(evidence),
             rationale=f"{why} — {tier}-risk tier" if split else why,
+            max_pending=settings.adaptive_max_pending_proposals,
         )
+        if pid is None:
+            # Queue full. Same shape as the entry-cap rejection: the producer
+            # is being discarded, so say so rather than letting it look like
+            # a producer with nothing to report.
+            for e in edits:
+                result["rejected"].append({"edit": e, "reason": f"proposal queue {CAP_REJECTION_MARKER}"})
+            _notify_proposal_queue_full(producer)
+            return
         result["proposal_ids"].append(pid)
         if result["proposal_id"] is None:
             result["proposal_id"] = pid
@@ -280,6 +289,34 @@ def _apply_one(edit: dict, producer: str, actor: str, batch_id: str, proposal_id
         proposal_id=proposal_id,
     )
     return None
+
+
+def _notify_proposal_queue_full(producer: str) -> None:
+    """The review queue is full, so this producer's output is being dropped.
+
+    Deduped by day: a full queue stays full until a human drains it, and a
+    notification per producer pass would itself become noise.
+    """
+    marker = f"adaptive_queue_full:{_now_iso()[:10]}"
+    try:
+        if db.get_snooze_state(marker):
+            return
+        pending = db.adaptive_count_pending_proposals()
+        db.add_notification(
+            title="Adaptive layer: review queue is full",
+            body=(
+                f"{pending} proposals are pending, at the "
+                f"{settings.adaptive_max_pending_proposals}-proposal cap "
+                "(adaptive_max_pending_proposals), so new ones from "
+                f"{producer} are being discarded. Approve or reject in the Adaptive tab — "
+                f"pending proposals also lapse on their own after "
+                f"{settings.adaptive_proposal_ttl_days} days."
+            ),
+            urgency="normal",
+        )
+        db.set_snooze_state(marker, "1")
+    except Exception as e:
+        logger.warning("Adaptive queue-full notification failed: %s", e)
 
 
 def _notify_capped(producer: str, rejected: list[dict]) -> None:
