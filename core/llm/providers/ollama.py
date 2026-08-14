@@ -25,6 +25,22 @@ from core.llm.types import (
 
 logger = logging.getLogger("pernix.llm.ollama")
 
+# How long a failed /api/show is remembered before the fetch is retried.
+# Long enough that a fan-out over every model on the host cannot re-trigger
+# the same timeouts within one session's worth of calls; short enough that a
+# model which was merely mid-pull becomes usable again without a restart.
+_INFO_FAILURE_TTL_S = 300.0
+
+
+def _DEFAULT_INFO(model: str, provider: str) -> ModelInfo:
+    """Metadata for a model whose /api/show did not answer.
+
+    The 128K window is a guess and is never cached, so it can never reach
+    the server as num_ctx — _effective_num_ctx reads _info_cache directly
+    and declines to pin a window it does not actually know.
+    """
+    return ModelInfo(id=model, provider=provider, context_length=128_000)
+
 
 class OllamaProvider:
     """Ollama adapter implementing ProviderProtocol."""
@@ -45,6 +61,14 @@ class OllamaProvider:
         # /api/show failure is retried on the next lookup and a guess is
         # never sent to the server as num_ctx.
         self._info_cache: dict[str, ModelInfo] = {}
+        # Failures are remembered too, briefly. Not caching the guess is
+        # right; retrying it on every list_models() was not. A model whose
+        # /api/show timed out under the fan-out below stayed uncached, was
+        # re-requested by the next caller, contended again, and kept a few
+        # models permanently un-learned — every scout run paid seconds of
+        # /api/show for the same handful. model → monotonic deadline before
+        # which the fetch is not retried.
+        self._info_failed_until: dict[str, float] = {}
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -60,8 +84,13 @@ class OllamaProvider:
     def _get_quick_client(self) -> httpx.AsyncClient:
         if self._quick_client is None or self._quick_client.is_closed:
             self._quick_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(15.0, connect=10.0),
-                limits=httpx.Limits(max_connections=5, max_keepalive_connections=3),
+                # list_models() fans out one /api/show per model on the host
+                # — 35 on the reference box, each 1-5s server-side. Five
+                # connections meant the tail of that queue could sit past the
+                # 15s read timeout and get recorded as a failure; the pool is
+                # sized to the fan-out instead.
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
             )
         return self._quick_client
 
@@ -102,6 +131,22 @@ class OllamaProvider:
             return None
         return self._capped(info).context_length
 
+    def _think_enabled(self, model: str) -> bool:
+        """Whether to ask Ollama for reasoning on this call.
+
+        Roles are told apart by which settings key names the model. When
+        Primary and Background are the same model they cannot be
+        distinguished at this layer and Primary wins — a switch you turned
+        on should do something. Point background_model at a different tag
+        (a smaller one is the recommended setup anyway) to run the tiers
+        differently. Backup follows Primary.
+        """
+        background = (settings.background_model or "").strip()
+        primary = (settings.llm_model or "").strip()
+        if model and model == background and model != primary:
+            return bool(settings.ollama_think_background)
+        return bool(settings.ollama_think)
+
     # ------------------------------------------------------------------
     # Chat (non-streaming)
     # ------------------------------------------------------------------
@@ -137,7 +182,7 @@ class OllamaProvider:
             "model": model,
             "messages": native_msgs,
             "stream": False,
-            "think": False,
+            "think": self._think_enabled(model),
             "options": {"num_predict": max_tokens},
         }
         # Pin the server-side window to the harness budget. Without num_ctx
@@ -217,7 +262,10 @@ class OllamaProvider:
             "model": model,
             "messages": native_msgs,
             "stream": True,
-            "think": False,  # Disable reasoning/thinking mode
+            # Reasoning mode, per role (settings.ollama_think*). Was a
+            # hardcoded False, which ran reasoning-tuned models with their
+            # reasoning suppressed and no way to say otherwise.
+            "think": self._think_enabled(model),
             "options": {"num_predict": max_tokens},
         }
         # See _chat_native: pin the server window to the harness budget.
@@ -265,6 +313,15 @@ class OllamaProvider:
                             for i, tc in enumerate(raw_tcs)
                         ]
                         yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=tool_calls)
+
+                    # Reasoning deltas (think=true). Not surfaced as tokens —
+                    # the reasoning chain is not the answer and the OpenRouter
+                    # adapter drops it the same way — but data keeps flowing
+                    # on the socket, so the read timeout stays quiet while the
+                    # model thinks.
+                    thinking = msg.get("thinking")
+                    if thinking:
+                        logger.debug("Ollama reasoning delta (%d chars) model=%s", len(thinking), model)
 
                     # Content
                     content = msg.get("content", "")
@@ -362,6 +419,8 @@ class OllamaProvider:
         cached = self._info_cache.get(model)
         if cached is not None:
             return self._capped(cached)
+        if time.monotonic() < self._info_failed_until.get(model, 0.0):
+            return _DEFAULT_INFO(model, self.name)
         client = self._get_quick_client()
         # Use Ollama native API for model details
         base = self._config.base_url.replace("/v1", "")
@@ -369,13 +428,21 @@ class OllamaProvider:
             resp = await client.post(f"{base}/api/show", json={"name": model})
             resp.raise_for_status()
             data = resp.json()
-        except Exception:
-            # Fallback: return defaults
-            return ModelInfo(
-                id=model,
-                provider=self.name,
-                context_length=128_000,
+        except Exception as e:
+            # Fallback: return defaults. The guess is deliberately not
+            # cached (it must never become a num_ctx), but the *failure* is
+            # — otherwise this is retried by every caller, forever. Logged,
+            # because silence here is what made a permanent per-call cost
+            # look like the model list simply being slow.
+            self._info_failed_until[model] = time.monotonic() + _INFO_FAILURE_TTL_S
+            logger.warning(
+                "Ollama /api/show failed for %s (%s: %s) — using default metadata, not retrying for %ds",
+                model,
+                type(e).__name__,
+                e,
+                int(_INFO_FAILURE_TTL_S),
             )
+            return _DEFAULT_INFO(model, self.name)
 
         model_info = data.get("model_info", {})
         details = data.get("details", {})

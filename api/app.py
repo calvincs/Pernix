@@ -1,5 +1,6 @@
 """Pernix — FastAPI application with lifecycle management."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -91,6 +92,21 @@ async def lifespan(app: FastAPI):
             logger.warning("Marked %d orphaned rlm_runs at startup", rlm_orphans)
     except Exception as e:
         logger.warning("RLM orphan sweep failed: %s", e)
+
+    # 2.4 Token estimator — built lazily on the first compile, which put a
+    # cold tiktoken load (a 1.7MB CDN download when the cache is empty) on
+    # the first turn after every deploy. Warm it here instead, off the
+    # request path and off the event loop. Not awaited: nothing before the
+    # first compile needs it, and a slow CDN must not hold up startup.
+    async def _warm_token_estimator() -> None:
+        try:
+            from core.context.tokens import get_estimator
+
+            await asyncio.to_thread(get_estimator)
+        except Exception as e:
+            logger.debug("Token estimator warm-up failed (falls back on first use): %s", e)
+
+    asyncio.create_task(_warm_token_estimator())
 
     # 2.5 Model registry — populate from provider APIs
     from core.llm.client import get_llm_client
@@ -201,10 +217,6 @@ async def lifespan(app: FastAPI):
 
     # 5b. Dream journal listener — narrates snooze cycles into the journal
     # session. Idles (no writes) unless dream_enabled; cancelled at shutdown.
-    # NB: `import asyncio` here is required — a later local import in this
-    # function makes the name function-local for the whole scope.
-    import asyncio
-
     from core.dream.journal import run_journal_listener
 
     app.state.dream_journal_task = asyncio.create_task(run_journal_listener())
@@ -257,8 +269,6 @@ async def lifespan(app: FastAPI):
             s.task.cancel()
 
     # Brief pause to let SSE generators finish their current iteration
-    import asyncio
-
     await asyncio.sleep(0.5)
 
     try:

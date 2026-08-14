@@ -54,6 +54,9 @@ data/workspace/
 data/memories/
 # Snapshots from scripts/backup.py — full DB copies plus the memory corpus.
 data/backups/
+# Downloaded model assets (the tiktoken BPE, 1.7MB) — regenerated on demand,
+# kept out of the image on purpose so the persistent volume holds them.
+data/cache/
 
 # Auto-generated TLS materials when network mode binds 0.0.0.0.
 # Regenerable on next start; never commit private keys to history.

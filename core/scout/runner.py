@@ -855,6 +855,42 @@ CACHE_TTL = 300  # 5 minutes
 # Known model IDs (populated during scout LLM run for validation)
 _known_model_ids: set[str] = set()
 
+
+async def build_model_catalog_block() -> str | None:
+    """The AVAILABLE MODELS block scout puts in its prompt, or None.
+
+    Reads the registry catalog rather than listing models live. Every field
+    rendered here — id, provider, context_length, vision — is already in the
+    registry, populated at startup and repopulated whenever an unknown model
+    turns up; the live call meant `/api/tags` plus an `/api/show` per
+    uncached model on every scout run (4.7s of an 18.3s scout when warm, up
+    to 20s cold), and it was the slowest gatherer, so it set the floor for
+    the whole gather phase. The live listing stays as the fallback for a
+    registry that never populated.
+    """
+    global _known_model_ids
+    try:
+        from core.llm.client import get_llm_client
+
+        llm_client = get_llm_client()
+        registry = llm_client.router.registry
+        models = registry.all_models() if registry.populated else []
+        if not models:
+            models = await asyncio.wait_for(llm_client.list_models(), timeout=8)
+        if not models:
+            return None
+        models = sorted(models, key=lambda m: (m.provider, m.id))
+        _known_model_ids = {m.id for m in models}
+        lines = ["", f"AVAILABLE MODELS (current: {settings.llm_model}):"]
+        for m in models:
+            caps = " [vision]" if m.supports_vision else ""
+            lines.append(f"- {m.id} ({m.provider}, ctx={m.context_length:,}{caps})")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.debug("Scout model listing failed: %s", e)
+        return None
+
+
 # Cap on the auto-injected skill body, in CHARACTERS (~1.25k tokens, not the
 # ~5k an earlier comment here claimed). Anything longer is cut with a marker
 # pointing at load_skill.
@@ -1490,23 +1526,7 @@ async def _run_scout_llm(
 
     async def _gather_models() -> str | None:
         _step("models", "Listing available models")
-        global _known_model_ids
-        try:
-            llm_client = get_llm_client()
-            models = await asyncio.wait_for(llm_client.list_models(), timeout=8)
-            if models:
-                _known_model_ids = {m.id for m in models}
-                model_lines = ["", f"AVAILABLE MODELS (current: {settings.llm_model}):"]
-                for m in models:
-                    caps = []
-                    if m.supports_vision:
-                        caps.append("vision")
-                    cap_str = f" [{', '.join(caps)}]" if caps else ""
-                    model_lines.append(f"- {m.id} ({m.provider}, ctx={m.context_length:,}{cap_str})")
-                return "\n".join(model_lines)
-        except Exception as e:
-            logger.debug("Scout model listing failed: %s", e)
-        return None
+        return await build_model_catalog_block()
 
     async def _gather_candor_intel() -> str | None:
         # Calibrated operational intel (Candor add-on): degraded tools,

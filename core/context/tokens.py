@@ -4,10 +4,31 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from pathlib import Path
 
 from core.llm.types import extract_tool_call_fields
 
 logger = logging.getLogger("pernix.context.tokens")
+
+# tiktoken downloads cl100k_base (1.7MB) from a Microsoft CDN on first use and
+# caches it in a temp directory keyed by hash. In a container that temp
+# directory is ephemeral, so every rebuild re-downloaded it — 40s on the first
+# turn after a deploy, measured, on the request path, and a hard internet
+# dependency for an otherwise self-contained box. Point the cache at the
+# persistent data directory instead: downloaded once, ever. An operator who
+# has already set TIKTOKEN_CACHE_DIR keeps their choice.
+_TIKTOKEN_CACHE = Path("data/cache/tiktoken")
+
+
+def _prepare_tiktoken_cache() -> None:
+    if os.environ.get("TIKTOKEN_CACHE_DIR"):
+        return
+    try:
+        _TIKTOKEN_CACHE.mkdir(parents=True, exist_ok=True)
+        os.environ["TIKTOKEN_CACHE_DIR"] = str(_TIKTOKEN_CACHE.resolve())
+    except Exception as e:  # read-only FS, odd permissions — fall back to the default
+        logger.debug("tiktoken cache dir unavailable (%s); using the library default", e)
 
 
 class TokenEstimator:
@@ -19,6 +40,7 @@ class TokenEstimator:
 
     def __init__(self):
         self._enc = None
+        _prepare_tiktoken_cache()
         try:
             import tiktoken
 
@@ -26,6 +48,12 @@ class TokenEstimator:
             logger.info("Token estimator: using tiktoken cl100k_base")
         except ImportError:
             logger.info("Token estimator: tiktoken unavailable, using char heuristic")
+        except Exception as e:
+            # get_encoding also reaches the network on a cold cache. Only
+            # ImportError was caught, so an offline box (or a CDN hiccup)
+            # raised straight out of the constructor and took the turn with
+            # it, when the heuristic was right there.
+            logger.warning("Token estimator: tiktoken load failed (%s: %s), using char heuristic", type(e).__name__, e)
 
     def count(self, text: str) -> int:
         """Count tokens in a text string."""

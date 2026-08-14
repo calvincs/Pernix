@@ -101,14 +101,26 @@ async def test_num_ctx_cap_applied(monkeypatch):
 
 
 async def test_show_failure_not_cached(monkeypatch):
-    """A transient /api/show failure degrades to 128K but is retried later."""
+    """A failed /api/show degrades to 128K, is never cached as metadata, and
+    is retried once its cooldown elapses — not on the very next lookup.
+
+    Immediate retry is what let a handful of models stay permanently
+    un-learned: every caller re-requested them, re-creating the contention
+    that caused the timeout in the first place.
+    """
     monkeypatch.setattr("config.settings.ollama_num_ctx_cap", 0)
     fake = _FakeOllamaClient(shows={"m": _QWEN_SHOW}, fail_show=True)
     provider = _provider_with(fake)
     info = await provider.get_model_info("m")
     assert info.context_length == 128_000
     assert "m" not in provider._info_cache
+
+    # Within the cooldown the guess is repeated without touching the server.
     fake.fail_show = False
+    assert (await provider.get_model_info("m")).context_length == 128_000
+
+    # Once it lapses, the real metadata is picked up.
+    provider._info_failed_until["m"] = 0.0
     info = await provider.get_model_info("m")
     assert info.context_length == 262_144
 
