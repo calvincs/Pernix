@@ -496,8 +496,10 @@ def _to_native_format(messages: list[dict]) -> list[dict]:
     - tool_calls: no 'id' or 'type' fields, just {function: {name, arguments}}
     - tool responses: no 'tool_call_id' field
     - multimodal: image_url content parts → Ollama native 'images' field (base64 list)
+    - mid-conversation system messages → user-role carriers (see below)
     """
     native = []
+    seen_system = False
     for msg in messages:
         content = msg.get("content") or ""
 
@@ -522,6 +524,26 @@ def _to_native_format(messages: list[dict]) -> list[dict]:
         role = msg.get("role", "")
         if role not in ("system", "user", "assistant", "tool"):
             continue
+
+        # Ollama's newer chat renderers (the qwen3.8 family and everything
+        # else off the new template path) reject a system message that is
+        # not first: /api/chat answers 500 "system message must be at the
+        # beginning" before the model is ever reached, so every turn fails
+        # and burns the retry ladder. The compile deliberately emits later
+        # system messages — the compaction summary, trim notices, and the
+        # volatile clock/resource/telos tail, which sits last precisely to
+        # keep the prompt prefix cacheable. Carry them as user-role text,
+        # exactly as normalize_for_openrouter() already does for the strict
+        # OpenAI providers; their content is bracket-marked ("[CURRENT
+        # STATE]", "[Previous conversation summary]") so the model reads
+        # them as harness context rather than user speech. Dropping them
+        # instead would take the compaction summary with it.
+        if role == "system":
+            if seen_system:
+                role = "user"
+            else:
+                seen_system = True
+
         entry = {"role": role, "content": content}
         if images:
             entry["images"] = images

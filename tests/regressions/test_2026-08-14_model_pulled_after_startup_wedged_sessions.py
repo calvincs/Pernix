@@ -28,11 +28,22 @@ from core.llm.types import ModelInfo
 
 
 def _stub_client(monkeypatch, models, *, on_refresh=None):
-    """A get_llm_client() stub whose refresh_registry() mutates the catalog."""
+    """A get_llm_client() stub whose repopulate mutates the catalog.
+
+    Both entry points are counted separately: the lazy path must use
+    populate_registry() (keeps each provider's per-model metadata cache) and
+    never refresh_registry(), which clears those caches and turns learning
+    one new model into an /api/show for every model on the host.
+    """
     registry = ModelRegistry()
     registry._models = dict(models)
     registry._populated = True
-    calls = {"refresh": 0}
+    calls = {"populate": 0, "refresh": 0}
+
+    async def populate_registry():
+        calls["populate"] += 1
+        if on_refresh is not None:
+            on_refresh(registry)
 
     async def refresh_registry():
         calls["refresh"] += 1
@@ -41,6 +52,7 @@ def _stub_client(monkeypatch, models, *, on_refresh=None):
 
     stub = SimpleNamespace(
         router=SimpleNamespace(registry=registry),
+        populate_registry=populate_registry,
         refresh_registry=refresh_registry,
     )
     monkeypatch.setattr("core.llm.client.get_llm_client", lambda: stub)
@@ -53,10 +65,10 @@ def _clean_budget_module_state():
     from core.llm import budget
 
     budget._warned_unknown.clear()
-    budget._refresh_attempts.clear()
+    budget._refresh_next_allowed.clear()
     yield
     budget._warned_unknown.clear()
-    budget._refresh_attempts.clear()
+    budget._refresh_next_allowed.clear()
 
 
 async def test_model_pulled_after_startup_is_picked_up_by_a_refresh(monkeypatch):
@@ -68,7 +80,7 @@ async def test_model_pulled_after_startup_is_picked_up_by_a_refresh(monkeypatch)
     def pull_it(registry):
         registry._models["qwen3.8:27b"] = ModelInfo(id="qwen3.8:27b", provider="ollama", context_length=262_144)
 
-    _stub_client(
+    _, calls = _stub_client(
         monkeypatch, {"old:7b": ModelInfo(id="old:7b", provider="ollama", context_length=8_192)}, on_refresh=pull_it
     )
 
@@ -77,6 +89,9 @@ async def test_model_pulled_after_startup_is_picked_up_by_a_refresh(monkeypatch)
 
     assert await ensure_model_known("qwen3.8:27b") is True
     assert derive_model_budget("qwen3.8:27b") == int(262_144 * 0.9)
+    # Via populate, which keeps the per-model metadata caches: re-learning
+    # one model must not re-fetch /api/show for every model on the host.
+    assert (calls["populate"], calls["refresh"]) == (1, 0)
 
 
 async def test_known_model_does_not_trigger_a_refresh(monkeypatch):
@@ -89,11 +104,16 @@ async def test_known_model_does_not_trigger_a_refresh(monkeypatch):
     )
 
     assert await ensure_model_known("local:9b") is True
-    assert calls["refresh"] == 0
+    assert calls["populate"] == 0
 
 
 async def test_unknown_model_refreshes_once_then_backs_off(monkeypatch):
-    """A typo'd name must not re-list every provider once per turn."""
+    """A typo'd name must not re-list every provider once per turn.
+
+    The status-bar poll calls this too, so a name that survives one
+    repopulate backs off to the long interval rather than the short one.
+    """
+    from core.llm import budget
     from core.llm.budget import ensure_model_known
 
     monkeypatch.setattr("config.settings.context_auto", True)
@@ -102,7 +122,11 @@ async def test_unknown_model_refreshes_once_then_backs_off(monkeypatch):
     assert await ensure_model_known("nope:1b") is False
     assert await ensure_model_known("nope:1b") is False
     assert await ensure_model_known("nope:1b") is False
-    assert calls["refresh"] == 1
+    assert calls["populate"] == 1
+
+    import time as _time
+
+    assert budget._refresh_next_allowed["nope:1b"] - _time.monotonic() > budget._REFRESH_COOLDOWN_S
 
 
 async def test_unpopulated_registry_is_left_alone(monkeypatch):
@@ -114,7 +138,7 @@ async def test_unpopulated_registry_is_left_alone(monkeypatch):
     registry._populated = False
 
     assert await ensure_model_known("anything") is False
-    assert calls["refresh"] == 0
+    assert calls["populate"] == 0
 
 
 def test_unknown_model_warns_once_about_the_manual_fallback(monkeypatch, caplog):
