@@ -18,14 +18,16 @@ async def context_breakdown(session_id: str):
     post-compaction, post-prune, post-trim payload — not the raw DB sum.
     """
     from core.context.compiler import compile_context
-    from core.llm.budget import derive_max_output, derive_model_budget
+    from core.llm.budget import derive_max_output, derive_model_budget, ensure_model_known
     from core.tools.registry import get_registry
     from sessions.manager import get_manager
 
     session = get_manager().get(session_id)
     # Mirror the agent loop's budget resolution (override → model-derived →
-    # fallback) so the status bar reports the budget the agent actually uses.
+    # fallback) so the status bar reports the budget the agent actually uses,
+    # registry refresh on a miss included.
     model = (session.model_override if session else None) or settings.llm_model
+    await ensure_model_known(model)
     effective_budget = (
         (session.context_budget_override if session else None) or derive_model_budget(model) or settings.context_budget
     )

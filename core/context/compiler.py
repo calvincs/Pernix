@@ -39,6 +39,32 @@ _HISTORY_BUDGET_FLOOR = 4_000
 # from not calling the model at all.
 _MIN_OUTPUT_TOKENS = 1_024
 
+
+def _budget_origin(budget: int, model_name: str | None) -> str:
+    """Where an unworkable budget came from — error path only.
+
+    A budget too small to compile is usually not the model's real window
+    but the manual settings.context_budget fallback, taken because the
+    registry doesn't know the model (e.g. pulled onto the host after
+    startup). Naming that in the error saves the "but the model has 256K"
+    round trip.
+    """
+    model = model_name or settings.llm_model
+    try:
+        from core.llm.budget import derive_model_budget
+
+        derived = derive_model_budget(model)
+    except Exception:
+        derived = None
+    if derived is None and budget == settings.context_budget:
+        return (
+            f"model '{model}' is unknown to the model registry, so this is the manual "
+            f"settings.context_budget fallback and not the model's real window — refresh "
+            "the registry (POST /api/models/switch) if the model was pulled after startup"
+        )
+    return f"budget in effect for model '{model}'"
+
+
 # --- Attachment expansion (compile-time, per-turn) ---------------------------
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
@@ -939,6 +965,7 @@ def compile_context(
             raise ContextBudgetError(
                 f"Context budget {budget} cannot hold system ({system_tokens}) + tools ({tool_tokens}) "
                 f"+ margin ({safety_margin}) + {_HISTORY_BUDGET_FLOOR} history + {_MIN_OUTPUT_TOKENS} output; "
+                f"{_budget_origin(budget, model_name)}; "
                 "switch to a larger-window model or reduce the tool set"
             )
         logger.warning(
