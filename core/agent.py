@@ -20,7 +20,7 @@ from config import settings
 from core.context.compaction import compact_with_llm
 from core.context.compiler import attach_cache_breakpoints, compile_context, normalize_for_openrouter
 from core.context.tokens import get_estimator
-from core.llm.budget import derive_max_output, derive_model_budget
+from core.llm.budget import derive_max_output, derive_model_budget, ensure_model_known
 from core.llm.client import get_llm_client
 from core.llm.providers.salvage import salvage_tool_calls
 from core.llm.router import OPENAI_FORMAT_PROVIDERS
@@ -820,6 +820,13 @@ async def run_agent(
     # core/llm/budget.py (shared with the context introspection endpoint so
     # the status bar and the agent agree). Registry catalog lookup, no
     # network; both honor settings.context_auto.
+    #
+    # A model pulled onto the host after startup isn't in the registry yet,
+    # which silently drops the budget to the manual fallback — small enough
+    # to make every turn die in the compiler. Refresh once before deriving.
+    if await ensure_model_known(effective_model):
+        effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
+        _last_effective_model = effective_model
     _model_budget: int | None = derive_model_budget(effective_model)
     _max_output: int = derive_max_output(effective_model)
 
@@ -870,6 +877,10 @@ async def run_agent(
         # round's LLM call to the new provider/model.
         effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
         if effective_model != _last_effective_model:
+            # Same registry-miss guard as at turn start: an in-turn switch to
+            # a freshly pulled model must not land on the manual fallback.
+            if await ensure_model_known(effective_model):
+                effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
             _model_budget = derive_model_budget(effective_model)
             _max_output = derive_max_output(effective_model)
             await _announce_model_switch(session, session_id, _last_effective_model, effective_model, _baseline_model)
