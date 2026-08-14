@@ -23,11 +23,14 @@ logger = logging.getLogger("pernix.llm.budget")
 # derivation calls don't repeat the same warning every tool round.
 _warned_unknown: set[str] = set()
 
-# Last refresh attempt per model (monotonic seconds). Rate limits the lazy
-# repopulate below so a typo'd or genuinely absent model name cannot storm
-# the provider list endpoints once per turn.
-_refresh_attempts: dict[str, float] = {}
+# Next time each model may trigger a lazy repopulate (monotonic seconds).
+# Without it a typo'd or genuinely absent model name would re-list every
+# provider on every turn and on every status-bar poll. A name that survives
+# a repopulate is almost certainly not coming back, so it backs off hard
+# rather than retrying on the short interval forever.
+_refresh_next_allowed: dict[str, float] = {}
 _REFRESH_COOLDOWN_S = 60.0
+_REFRESH_COOLDOWN_MISSING_S = 900.0
 
 
 async def ensure_model_known(model: str) -> bool:
@@ -57,14 +60,21 @@ async def ensure_model_known(model: str) -> bool:
             return True
 
         now = time.monotonic()
-        last = _refresh_attempts.get(model)
-        if last is not None and now - last < _REFRESH_COOLDOWN_S:
+        if now < _refresh_next_allowed.get(model, 0.0):
             return False
-        _refresh_attempts[model] = now
+        _refresh_next_allowed[model] = now + _REFRESH_COOLDOWN_S
 
         logger.info("Model '%s' unknown to the registry — refreshing from providers", model)
-        await client.refresh_registry()
+        # populate, not refresh: refresh_registry() clears each provider's
+        # per-model metadata cache, so re-learning ONE model costs an
+        # /api/show for every model on the host (~35 × 2s on the reference
+        # box, all of it on the turn's critical path). populate re-lists the
+        # tags and only fetches metadata for names it has never seen.
+        # Changed metadata for an existing tag still needs the explicit
+        # refresh behind /api/models/switch.
+        await client.populate_registry()
         if registry.get_model_info(registry.resolve_model_id(model)) is None:
+            _refresh_next_allowed[model] = time.monotonic() + _REFRESH_COOLDOWN_MISSING_S
             logger.warning(
                 "Model '%s' still unknown after a registry refresh; context budget falls back to "
                 "the manual settings.context_budget (%d) and output to settings.max_tokens (%d)",
@@ -73,6 +83,7 @@ async def ensure_model_known(model: str) -> bool:
                 settings.max_tokens,
             )
             return False
+        _refresh_next_allowed.pop(model, None)
         _warned_unknown.discard(model)
         return True
     except Exception as e:
