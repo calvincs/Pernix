@@ -79,10 +79,12 @@ const NETWORK_FIELDS = [
 const SECTIONS = [
     {
         title: 'LLM Providers',
-        description: 'Configure endpoints and concurrency for LLM providers. Max Concurrent limits parallel requests per provider. Session LLM Timeout caps how long a single session may hold LLM slots — prevents a hung or runaway session from blocking others indefinitely (0 = unlimited). Model selection is on the Models tab.',
+        description: 'Configure endpoints and concurrency for LLM providers. Max Concurrent limits parallel requests per provider. Session LLM Timeout caps how long a single session may hold LLM slots — prevents a hung or runaway session from blocking others indefinitely (0 = unlimited). Reasoning applies to Ollama models that have a thinking mode (the qwen3 family, nemotron3, …) and is off for both roles by default: it buys quality on hard turns and costs latency and output tokens everywhere. If Primary and Background name the same model the two cannot be told apart — Primary\'s setting applies to both. Model selection is on the Models tab.',
         fields: [
             { key: 'llm_base_url', label: 'Ollama Base URL', type: 'text' },
             { key: 'llm_max_concurrent', label: 'Ollama Max Concurrent', type: 'number', min: 1, max: 20, restart: RESTART_ROUTER },
+            { key: 'ollama_think', label: 'Ollama Reasoning — Primary', type: 'bool' },
+            { key: 'ollama_think_background', label: 'Ollama Reasoning — Background', type: 'bool' },
             { key: 'openrouter_base_url', label: 'OpenRouter URL', type: 'text' },
             { key: 'openrouter_max_concurrent', label: 'OpenRouter Max Concurrent', type: 'number', min: 1, max: 20, restart: RESTART_ROUTER },
             { key: 'openrouter_cache_control', label: 'Anthropic Cache Breakpoints (via OpenRouter)', type: 'bool' },

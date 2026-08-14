@@ -104,6 +104,17 @@ class Settings:
     # Audio-capable Ollama models (gemma4, nemotron3, …) accept WAV bytes via the
     # same `images[]` field; the server dispatches by RIFF/WAVE magic bytes.
     audio_model_overrides: list = field(default_factory=list)
+    # Reasoning mode on Ollama's native /api/chat, which takes think=true|false.
+    # This was a hardcoded False for every call, so a reasoning-tuned model
+    # (the qwen3 family, nemotron3, …) ran with its reasoning suppressed and
+    # no way to say otherwise — invisible from the outside, and it reads as
+    # the model simply being weaker here than in a terminal. Per role, since
+    # the trade is different at each tier: thinking costs latency and output
+    # tokens, which is worth it for agent turns and rarely worth it for
+    # scout/titles/dream. Off everywhere preserves the old behavior.
+    # Models with no reasoning mode ignore the flag.
+    ollama_think: bool = False  # Primary (llm_model) — agent turns
+    ollama_think_background: bool = False  # Background (background_model)
 
     # --- Context ---
     # Context-auto (2026-08): the harness derives per-model limits from live
