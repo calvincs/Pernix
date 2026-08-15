@@ -248,17 +248,22 @@ Golden-task canaries: canned tasks with deterministic gates, run headlessly thro
 
 ## Adaptive Layer
 
-A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies/worker specs that always wait for your approval. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Adaptive Layer; entries, events, and proposals surface in the Explorer's Adaptive tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies/worker specs that route through the proposal queue: a **veto window**, not an approval gate. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Adaptive Layer; entries, events, and proposals surface in the Explorer's Adaptive tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
 
 | Setting | Default | Description |
 |---|---|---|
 | `adaptive_enabled` | `false` | Master switch for the store, the producers, and the compiler/scout consumption. |
-| `adaptive_auto_apply` | `true` | Auto-apply low-risk kinds (`routing_hint`, `prompt_note`) during idle windows; high-risk kinds are always proposal-gated. Run the canary suite for at least a week before relying on this. |
+| `adaptive_auto_apply` | `true` | Auto-apply low-risk kinds (`routing_hint`, `prompt_note`) during idle windows; high-risk kinds always route through the proposal queue. Run the canary suite for at least a week before relying on this. |
 | `adaptive_auto_rollback` | `false` | Promote a canary-regression tripwire hit to automatic rollback. Off until the metric earns trust — a hit otherwise only flags the batch `suspect`. |
 | `adaptive_max_entries_per_kind` | `12` | Cap on active entries per kind. |
 | `adaptive_max_auto_applies_per_day` | `6` | Cap on auto-applied batches per day. |
 | `adaptive_edit_cooldown_hours` | `24` | Minimum hours between machine edits to the same entry. |
 | `adaptive_tripwire_window_turns` | `20` | Organic turns after a batch over which post-mortem retry drift is watched (the passive tripwire; canary-stamped post-mortems excluded). |
+| `adaptive_max_pending_proposals` | `40` | Review-queue cap; at the cap new proposals are refused (the producer re-raises once the queue drains). `0` = unbounded. |
+| `adaptive_max_pending_per_producer` | `12` | One producer's share of the queue, so a chatty producer cannot silence the quieter ones. `0` = unbounded. |
+| `adaptive_proposal_ttl_days` | `30` | Pending proposals lapse (`expired`) after this — a proposal is a snapshot of evidence, and the producer re-raises it from current evidence if it still holds. `0` = never. |
+| `adaptive_auto_approve_after_hours` | `24` | The veto window. A proposal still pending after this many hours is approved by the system itself — same apply path as a human approval, journaled, swept, rollback-able, resolved as `auto_approved` for the audit trail. Canary-suite proposals are excluded (they keep their human gate; `canary_auto_admit` is their autonomy path). `0` = human approval only. |
+| `adaptive_max_auto_approvals_per_day` | `10` | Cap on veto-window auto-approvals per rolling 24h. |
 
 ---
 

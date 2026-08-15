@@ -757,3 +757,98 @@ async def test_same_file_correction_is_not_proposed_twice():
     assert len(db.adaptive_list_proposals(status="pending")) == 1
     rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
     assert rows[b]["promoted_ref"] == "reported:duplicate-evidence"
+
+
+# ---------------------------------------------------------------------------
+# Proposal auto-approval — the veto window (2026-08-15)
+# ---------------------------------------------------------------------------
+
+
+def _backdate_proposal(pid: int, hours: float) -> None:
+    from db.database import connect_sessions
+
+    old = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    with connect_sessions() as conn:
+        conn.execute("UPDATE adaptive_proposals SET created_at = ? WHERE id = ?", (old, pid))
+
+
+_POLICY_EDIT = [
+    {
+        "action": "create",
+        "kind": "policy",
+        "title": "veto window test",
+        "content": "auto-approved policies still apply through the engine",
+        "evidence": ["pm:1"],
+        "entry_id": "veto-window-test",
+        "scope": "global",
+        "risk": "high",
+    }
+]
+
+
+def test_ripe_proposal_auto_approves_and_applies():
+    """Past the veto window the system applies the proposal itself — same
+    engine as a human approval, distinct terminal status for the audit trail."""
+    from core.adaptive import auto_approve_stale_proposals
+
+    pid = db.adaptive_add_proposal("dream", json.dumps(_POLICY_EDIT), "[]", "why")
+    _backdate_proposal(pid, hours=25)
+
+    out = auto_approve_stale_proposals()
+    assert out["approved"] == [pid]
+    assert db.adaptive_get_proposal(pid)["status"] == "auto_approved"
+    entry = db.adaptive_get_entry("veto-window-test")
+    assert entry is not None and entry["kind"] == "policy"
+
+
+def test_fresh_proposal_stays_inside_the_veto_window():
+    from core.adaptive import auto_approve_stale_proposals
+
+    pid = db.adaptive_add_proposal("dream", json.dumps(_POLICY_EDIT), "[]", "why")
+    _backdate_proposal(pid, hours=2)  # window is 24h
+
+    out = auto_approve_stale_proposals()
+    assert out["approved"] == []
+    assert db.adaptive_get_proposal(pid)["status"] == "pending"
+
+
+def test_canary_proposals_keep_their_human_gate():
+    """Materializing a canary keeps invariant I6 — it never auto-approves,
+    no matter how stale; canary_auto_admit is its graduated-autonomy path."""
+    from core.adaptive import auto_approve_stale_proposals
+
+    pid = db.adaptive_add_proposal("canary", json.dumps({"canary": {"name": "x"}}), "[]", "why")
+    _backdate_proposal(pid, hours=200)
+
+    out = auto_approve_stale_proposals()
+    assert out["approved"] == []
+    assert out["skipped_canary"] == 1
+    assert db.adaptive_get_proposal(pid)["status"] == "pending"
+
+
+def test_auto_approvals_respect_the_daily_cap(monkeypatch):
+    from core.adaptive import auto_approve_stale_proposals
+
+    monkeypatch.setattr("config.settings.adaptive_max_auto_approvals_per_day", 1)
+    first = db.adaptive_add_proposal("dream", json.dumps([]), "[]", "older")
+    second = db.adaptive_add_proposal("dream", json.dumps([{"a": 1}]), "[]", "newer")
+    _backdate_proposal(first, hours=48)
+    _backdate_proposal(second, hours=30)
+
+    out = auto_approve_stale_proposals()
+    assert out["approved"] == [first]  # oldest first
+    assert db.adaptive_get_proposal(second)["status"] == "pending"
+    # The cap counts terminal 'auto_approved' rows, so a second pass in the
+    # same day has no budget left.
+    assert auto_approve_stale_proposals()["approved"] == []
+
+
+def test_zero_window_restores_the_human_gate(monkeypatch):
+    from core.adaptive import auto_approve_stale_proposals
+
+    monkeypatch.setattr("config.settings.adaptive_auto_approve_after_hours", 0)
+    pid = db.adaptive_add_proposal("dream", json.dumps(_POLICY_EDIT), "[]", "why")
+    _backdate_proposal(pid, hours=500)
+
+    assert auto_approve_stale_proposals()["approved"] == []
+    assert db.adaptive_get_proposal(pid)["status"] == "pending"
