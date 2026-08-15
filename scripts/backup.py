@@ -165,6 +165,27 @@ def _rotate(root: Path, pattern: str, keep: int) -> list[str]:
     return removed
 
 
+def hours_since_last_backup() -> float | None:
+    """Age of the newest DB snapshot in hours, by name-encoded timestamp.
+
+    None when no snapshot exists (or none parses) — callers treat that as
+    overdue. Reads names, not mtimes, for the same reason _rotate does: a
+    restore or an rsync rewrites mtimes but not the generation stamp.
+    """
+    newest: datetime | None = None
+    for path in backups_dir().glob(f"{_DB_PREFIX}-*.db"):
+        stamp = path.stem[len(_DB_PREFIX) + 1 :].split("_", 1)[0]  # drop any _NNN collision counter
+        try:
+            taken = datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if newest is None or taken > newest:
+            newest = taken
+    if newest is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - newest).total_seconds() / 3600.0)
+
+
 def run_backup(keep: int | None = None) -> dict:
     """Take one snapshot and rotate old ones. Returns a summary dict.
 

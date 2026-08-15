@@ -69,6 +69,7 @@ async def promote_validated(limit: int = _PROMOTE_LIMIT_PER_STEP) -> int:
         return 0
     rows = db.list_dream_hypotheses(status="validated", limit=50, oldest_first=True)
     promoted = 0
+    deferred = 0
     for row in rows:
         if promoted >= limit:
             break
@@ -89,8 +90,15 @@ async def promote_validated(limit: int = _PROMOTE_LIMIT_PER_STEP) -> int:
                 # a promotion or it inflates the step's reported yield.
                 if ref not in _TERMINAL_NON_PROPOSAL:
                     promoted += 1
+            else:
+                deferred += 1
         except Exception as e:
             logger.warning("dream promote failed for %s: %s", row["id"][:8], e)
+    if deferred:
+        # One line per pass instead of one per parked row per pass — the
+        # per-row detail is at DEBUG in the promoters. This is the signal a
+        # human can act on: the review queue needs draining in the UI.
+        logger.info("dream: %d validated hypotheses waiting on proposal review (queue full or refused)", deferred)
     return promoted
 
 
@@ -250,7 +258,9 @@ def _promote_memory_review(row: dict) -> str | None:
     if pid is None:
         # Queue full: leave the row `validated` so it is reconsidered once a
         # human drains the backlog. Unlike the no-effector case this is a
-        # transient refusal, and the finding is worth re-raising.
-        logger.info("dream: proposal queue full, deferring %s hypothesis %s", row.get("kind"), row["id"][:8])
+        # transient refusal, and the finding is worth re-raising. DEBUG, not
+        # INFO: this fires for every parked row on every cycle while the
+        # queue stays full — promote_validated logs the one-line summary.
+        logger.debug("dream: proposal queue full, deferring %s hypothesis %s", row.get("kind"), row["id"][:8])
         return None
     return f"proposal:{pid}"

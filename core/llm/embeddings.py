@@ -86,7 +86,13 @@ async def embed_texts(texts: list[str]) -> list[list[float]] | None:
     provider = getattr(router, "_ollama", None)
     if sem is None or provider is None or not hasattr(provider, "embed"):
         return None
-    await sem.acquire(session_id="_embeddings", session_created_at=float("inf"), priority=PRIORITY_BACKGROUND)
+    # session_id must stay "" (the scheduler's background-caller contract):
+    # a named pseudo-session opts into the 1800s wall-clock session budget,
+    # and only SessionManager clears that stamp — for real sessions. With
+    # session_id="_embeddings" the clock started at the first post-restart
+    # embed and never reset, so every embed failed with LLMSessionTimeoutError
+    # from 30 minutes of uptime until the next restart.
+    await sem.acquire(session_id="", session_created_at=float("inf"), priority=PRIORITY_BACKGROUND)
     try:
         return await provider.embed(settings.embedding_model, texts)
     except Exception as e:

@@ -26,7 +26,6 @@ drift-free at low throughput.
 
 from __future__ import annotations
 
-import json
 import logging
 
 from config import settings
@@ -80,18 +79,16 @@ Output: JSON array only, no markdown fences:
 
 
 def parse_soup_output(raw: str) -> list[dict]:
-    """Fence-strip + parse + shape validation. [] on any failure."""
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:])
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-    try:
-        data = json.loads(text)
-    except (ValueError, TypeError):
-        logger.warning("telos: unparseable soup output: %s", text[:200])
+    """Robust-extract + shape validation. [] on any failure.
+
+    Extraction (fences, embedded JSON, truncated output) lives in
+    core.llm.jsonx; unparseable output is logged by the caller's retry loop,
+    which knows the attempt number.
+    """
+    from core.llm.jsonx import extract_json
+
+    data = extract_json(raw)
+    if data is None:
         return []
     if isinstance(data, dict):
         data = [data]
@@ -395,26 +392,37 @@ async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
     )
 
     from core.llm.client import get_llm_client
+    from core.llm.jsonx import extract_json
 
     model = settings.background_model or settings.llm_model
-    response = await get_llm_client().chat(
-        messages=[{"role": "system", "content": SOUP_PROMPT}, {"role": "user", "content": user_content}],
-        model=model,
-        max_tokens=1800,
-    )
-    result["ran"] = True
-    # Spend attribution (spec §5.2): the Binding Monitor's budget-share
-    # signal is a flat sum over these events, keyed by the parent goal.
-    store.trace_append(
-        "spend",
-        {
-            "goal": str(q.get("parent_goal", "g_root")),
-            "question": q.id,
-            "tokens": getattr(response.usage, "total_tokens", 0) or 0,
-            "phase": "soup",
-        },
-    )
-    candidates = parse_soup_output(response.content or "")[: max(1, settings.telos_hypotheses_per_question)]
+    # One retry on an unparseable response (the background model's MTP tag
+    # sometimes early-stops mid-JSON; a resample usually lands). Each attempt
+    # traces its own spend — the Binding Monitor's budget-share signal is a
+    # flat sum over these events (spec §5.2), and the retry's tokens are real.
+    raw = ""
+    for attempt in (1, 2):
+        response = await get_llm_client().chat(
+            messages=[{"role": "system", "content": SOUP_PROMPT}, {"role": "user", "content": user_content}],
+            model=model,
+            max_tokens=1800,
+        )
+        result["ran"] = True
+        store.trace_append(
+            "spend",
+            {
+                "goal": str(q.get("parent_goal", "g_root")),
+                "question": q.id,
+                "tokens": getattr(response.usage, "total_tokens", 0) or 0,
+                "phase": "soup",
+            },
+        )
+        raw = response.content or ""
+        if extract_json(raw) is not None:
+            break
+        logger.warning("telos: unparseable soup output (attempt %d): %s", attempt, raw[:200])
+        if is_cancelled():
+            break
+    candidates = parse_soup_output(raw)[: max(1, settings.telos_hypotheses_per_question)]
 
     # Calibration-corrected gate (spec §8): one lookup per pass, applied to
     # every candidate. When it engages the trace says so — a gate that
