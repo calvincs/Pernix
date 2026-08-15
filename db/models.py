@@ -1495,6 +1495,23 @@ def adaptive_update_batch(
         conn.execute(f"UPDATE adaptive_batches SET {cols} WHERE batch_id = ?", [*updates.values(), batch_id])
 
 
+# Producers re-derive and re-offer the same findings every cycle while the
+# review queue stays full, so an unconditional WARNING per refusal compounds
+# into thousands of identical lines (~32% of a day's log on the live box while
+# dream's share sat at cap). Warn once per producer per fill episode; a
+# successful insert re-arms the warning. Process-lifetime state is fine here —
+# the point is log volume, not exact bookkeeping across restarts.
+_refusal_warned: set[str] = set()
+
+
+def _log_refusal(producer: str, message: str, *args) -> None:
+    if producer in _refusal_warned:
+        logger.debug(message, *args)
+    else:
+        _refusal_warned.add(producer)
+        logger.warning(message + " (further refusals for this producer log at DEBUG)", *args)
+
+
 def adaptive_add_proposal(
     producer: str,
     payload_json: str,
@@ -1535,8 +1552,12 @@ def adaptive_add_proposal(
         if max_pending > 0:
             pending = conn.execute("SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending'").fetchone()[0]
             if int(pending) >= max_pending:
-                logger.warning(
-                    "adaptive: proposal from %s refused — %d pending at cap %d", producer, pending, max_pending
+                _log_refusal(
+                    producer,
+                    "adaptive: proposal from %s refused — %d pending at cap %d",
+                    producer,
+                    pending,
+                    max_pending,
                 )
                 return None
         if max_pending_per_producer > 0:
@@ -1544,7 +1565,8 @@ def adaptive_add_proposal(
                 "SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending' AND producer = ?", (producer,)
             ).fetchone()[0]
             if int(mine) >= max_pending_per_producer:
-                logger.warning(
+                _log_refusal(
+                    producer,
                     "adaptive: proposal from %s refused — %d of its own pending at per-producer cap %d",
                     producer,
                     mine,
@@ -1557,6 +1579,7 @@ def adaptive_add_proposal(
                VALUES (?, ?, ?, ?, 'pending', NULL, ?)""",
             (producer, payload_json, evidence_json, rationale, _now()),
         )
+        _refusal_warned.discard(producer)  # queue has room again — re-arm the refusal warning
         return cur.lastrowid
 
 

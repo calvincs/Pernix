@@ -74,18 +74,16 @@ Output: a JSON array, no markdown fences:
 
 
 def parse_hypotheses(raw: str) -> list[dict]:
-    """Fence-strip + parse + per-item shape validation. [] on any failure."""
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:])
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
-    try:
-        data = json.loads(text)
-    except (ValueError, TypeError):
-        logger.warning("dream: unparseable hypothesis output: %s", text[:200])
+    """Robust-extract + per-item shape validation. [] on any failure.
+
+    Extraction (fences, embedded JSON, truncated output) lives in
+    core.llm.jsonx; unparseable output is logged by the caller's retry loop,
+    which knows the attempt number.
+    """
+    from core.llm.jsonx import extract_json
+
+    data = extract_json(raw)
+    if data is None:
         return []
     if isinstance(data, dict):
         data = [data]
@@ -192,15 +190,27 @@ async def generate(store, is_cancelled) -> int:
         f"{kind_counts.get('memory', 0)} entries from '{pack.memory_file or '—'}'"
     )
 
-    response = await get_llm_client().chat(
-        messages=[
-            {"role": "system", "content": DREAM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        model=model,
-        max_tokens=1500,
-    )
-    raw = (response.content or "").strip()
+    # One retry on an unparseable response: the background model's MTP tag
+    # sometimes early-stops mid-array (the live box logged bare "[" and
+    # mid-string cuts) — unrecoverable by parsing, usually fine on a resample.
+    from core.llm.jsonx import extract_json
+
+    raw = ""
+    for attempt in (1, 2):
+        response = await get_llm_client().chat(
+            messages=[
+                {"role": "system", "content": DREAM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            model=model,
+            max_tokens=1500,
+        )
+        raw = (response.content or "").strip()
+        if extract_json(raw) is not None:
+            break
+        logger.warning("dream: unparseable hypothesis output (attempt %d): %s", attempt, raw[:200])
+        if is_cancelled():
+            break
 
     candidates = parse_hypotheses(raw)[:max_n]
     refs = pack.refs_by_id()

@@ -227,30 +227,40 @@ class MaintenanceRunner:
             except Exception as e:
                 logger.warning("WAL checkpoint failed: %s", e)
 
-        # Every 1440 ticks (24 hours): backup, memory maintenance, vacuum
-        if tick % 1440 == 0:
-            # Backup runs FIRST in the tier: the steps below it mutate data
-            # (health_check(fix=True) rewrites the memory index, the prunes
-            # delete rows), so a snapshot taken before them is the one that
-            # can undo a bad sweep. Off-loop — VACUUM INTO plus a corpus copy
-            # is seconds of blocking IO, the same reason the WAL checkpoint
-            # above moved off the loop.
+            # Daily backup, checked hourly. This lived in the 24h tier below,
+            # keyed on tick % 1440 — but the tick counter starts at zero on
+            # every process start, so a box that restarts daily (every deploy
+            # day) never reached tick 1440 and silently skipped its backups
+            # for as long as the deploy streak lasted (4 days on the live
+            # box). Due-ness now comes from the newest snapshot's own
+            # name-encoded timestamp, which survives restarts. Off-loop —
+            # VACUUM INTO plus a corpus copy is seconds of blocking IO, the
+            # same reason the WAL checkpoint above moved off the loop.
             try:
-                from scripts.backup import run_backup
+                from scripts.backup import hours_since_last_backup, run_backup
 
-                result = await run_background(run_backup)
-                if result.get("skipped"):
-                    logger.debug("Backup skipped: %s", result["skipped"])
-                else:
-                    logger.info(
-                        "Backup complete: %s (%d memory files, %d rotated out)",
-                        result["db"],
-                        result["memory_files"],
-                        len(result["rotated_out"]),
-                    )
+                age = await asyncio.to_thread(hours_since_last_backup)
+                if age is None or age >= 24.0:
+                    result = await run_background(run_backup)
+                    if result.get("skipped"):
+                        logger.debug("Backup skipped: %s", result["skipped"])
+                    else:
+                        logger.info(
+                            "Backup complete: %s (%d memory files, %d rotated out)",
+                            result["db"],
+                            result["memory_files"],
+                            len(result["rotated_out"]),
+                        )
             except Exception as e:
                 logger.warning("Backup failed: %s", e)
 
+        # Every 1440 ticks (24 hours): memory maintenance, vacuum
+        if tick % 1440 == 0:
+            # The mutating steps here (health_check(fix=True) rewrites the
+            # memory index, the prunes delete rows) always run with a backup
+            # at most ~24h old: the hourly check above shares this tick's
+            # boundary (60 divides 1440) and runs earlier in the same pass
+            # whenever one is due.
             try:
                 from core.memory.store import get_memory_store
 

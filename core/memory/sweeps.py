@@ -888,30 +888,41 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
         f'Output JSON only: {{"groups": [{{"file": "name.here", "entries": [0, 1, 5]}}]}} /no_think'
     )
 
-    try:
-        response = await get_llm_client().chat(
-            messages=[{"role": "user", "content": prompt}],
-            model=settings.background_model or settings.llm_model,
-            max_tokens=2000,
+    from core.llm.jsonx import extract_json
+
+    # One retry on an unparseable response: the background model's MTP tag
+    # sometimes early-stops mid-JSON (empty or cut-off output), which no
+    # parser can recover — a fresh sample usually lands. On the live box this
+    # site failed dozens of times a day with nothing logged about WHAT came
+    # back, so the failure line now carries the head of the response.
+    data = None
+    for attempt in (1, 2):
+        try:
+            response = await get_llm_client().chat(
+                messages=[{"role": "user", "content": prompt}],
+                model=settings.background_model or settings.llm_model,
+                max_tokens=2000,
+            )
+        except Exception as e:
+            logger.warning("Snooze: file split LLM call failed: %s", e)
+            return True, 0  # LLM was attempted; count against maintenance budget
+
+        if is_cancelled():
+            return True, 0
+
+        data = extract_json(response.content)
+        if data is not None:
+            break
+        logger.warning(
+            "Snooze: could not parse file split response (attempt %d, %d chars): %r",
+            attempt,
+            len(response.content or ""),
+            (response.content or "")[:160],
         )
-    except Exception as e:
-        logger.warning("Snooze: file split LLM call failed: %s", e)
-        return True, 0  # LLM was attempted; count against maintenance budget
 
-    if is_cancelled():
+    if not isinstance(data, dict):
         return True, 0
-
-    # Parse groupings
-    try:
-        text = response.content.strip()
-        if "```" in text:
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        groups = json.loads(text.strip()).get("groups", [])
-    except (json.JSONDecodeError, KeyError, IndexError):
-        logger.warning("Snooze: could not parse file split response")
-        return True, 0
+    groups = data.get("groups", [])
 
     # Build per-target-file epoch lists; deduplicate so each epoch goes to at most one file.
     seen_epochs: set[int] = set()
