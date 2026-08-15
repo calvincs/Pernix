@@ -303,15 +303,25 @@ def _notify_proposal_queue_full(producer: str) -> None:
         if db.get_snooze_state(marker):
             return
         pending = db.adaptive_count_pending_proposals()
+        if settings.adaptive_auto_approve_after_hours > 0:
+            drain_hint = (
+                f"They drain on their own: each auto-approves "
+                f"{settings.adaptive_auto_approve_after_hours}h after minting "
+                f"(up to {settings.adaptive_max_auto_approvals_per_day}/day) — "
+                "reject in the Adaptive tab inside that window to veto one."
+            )
+        else:
+            drain_hint = (
+                "Approve or reject in the Adaptive tab — pending proposals "
+                f"also lapse on their own after {settings.adaptive_proposal_ttl_days} days."
+            )
         db.add_notification(
             title="Adaptive layer: review queue is full",
             body=(
                 f"{pending} proposals are pending, at the "
                 f"{settings.adaptive_max_pending_proposals}-proposal cap "
                 "(adaptive_max_pending_proposals), so new ones from "
-                f"{producer} are being discarded. Approve or reject in the Adaptive tab — "
-                f"pending proposals also lapse on their own after "
-                f"{settings.adaptive_proposal_ttl_days} days."
+                f"{producer} are being refused. " + drain_hint
             ),
             urgency="normal",
         )
@@ -445,9 +455,15 @@ def drain_pending(max_batches: int | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def approve_proposal(proposal_id: int, actor: str = "user") -> dict:
+def approve_proposal(proposal_id: int, actor: str = "user", resolution: str = "approved") -> dict:
     """Approving EXECUTES the batch through the same apply engine and mints
-    a batch_id the post-batch canary sweep can join on."""
+    a batch_id the post-batch canary sweep can join on.
+
+    `resolution` is the terminal status written to the proposal row —
+    "approved" for a human decision, "auto_approved" when the veto-window
+    drain (auto_approve_stale_proposals) is the caller. One code path, two
+    labels, so the audit trail keeps who-decided without a schema change.
+    """
     prop = db.adaptive_get_proposal(proposal_id)
     if prop is None:
         raise AdaptiveError(f"unknown proposal {proposal_id}")
@@ -468,7 +484,7 @@ def approve_proposal(proposal_id: int, actor: str = "user") -> dict:
         name, err = materialize_canary(payload_edits["canary"])
         if name is None:
             raise AdaptiveError(f"canary materialization failed: {err}")
-        db.adaptive_resolve_proposal(proposal_id, "approved")
+        db.adaptive_resolve_proposal(proposal_id, resolution)
         try:
             from core.extensions.scheduling import enqueue_manual_canary
 
@@ -501,19 +517,19 @@ def approve_proposal(proposal_id: int, actor: str = "user") -> dict:
                 )
             except Exception as ce:
                 logger.warning("memory correction failed for proposal %s: %s", proposal_id, ce)
-        db.adaptive_resolve_proposal(proposal_id, "approved")
+        db.adaptive_resolve_proposal(proposal_id, resolution)
         return {"batch_id": None, "applied": [], "rejected": [], "corrections_written": written}
 
     # Review-only proposals (legacy Dream memory reviews) carry no engine
     # payload: approving acknowledges — nothing to apply, no batch, no sweep.
     if not payload_edits:
-        db.adaptive_resolve_proposal(proposal_id, "approved")
+        db.adaptive_resolve_proposal(proposal_id, resolution)
         return {"batch_id": None, "applied": [], "rejected": [], "review_only": True}
 
     batch_id = _mint_batch_id()
     db.adaptive_create_batch(batch_id, prop["producer"], prop["payload_json"], status="pending")
     result = apply_batch(batch_id, actor=actor, proposal_id=proposal_id)
-    db.adaptive_resolve_proposal(proposal_id, "approved")
+    db.adaptive_resolve_proposal(proposal_id, resolution)
 
     try:
         from core.extensions.scheduling import enqueue_post_batch_sweep
@@ -524,6 +540,86 @@ def approve_proposal(proposal_id: int, actor: str = "user") -> dict:
     except Exception as e:
         logger.warning("Post-batch sweep enqueue failed for %s: %s", batch_id, e)
     return result
+
+
+def auto_approve_stale_proposals() -> dict:
+    """Approve pending proposals whose veto window has elapsed.
+
+    The review queue held a structural contradiction: producers emit
+    continuously, validation already happened upstream (dream hypotheses are
+    evidence-judged before they ever mint a proposal), yet application waited
+    on a scarce human click — so validated lessons died in a backlog (12
+    parked for days on the live box, 39 hypotheses queued behind them, all
+    TTL-bound for the void). The gate becomes a veto window: a human can
+    reject anything inside `adaptive_auto_approve_after_hours`; after that
+    the system applies it itself and the REAL validation — tripwire drift,
+    post-batch canary sweeps, rollback — happens over time, on observed
+    behavior, the only place it means anything.
+
+    Same guardrails as drain_pending: idle window only (caller = Activity
+    15), oldest first, day-capped (`adaptive_max_auto_approvals_per_day`,
+    counted via the distinct 'auto_approved' status). Canary-suite proposals
+    are never taken — materializing a canary keeps its human invariant (I6)
+    and its own graduated-autonomy path (canary_auto_admit).
+    """
+    out: dict = {"approved": [], "skipped_canary": 0, "deferred": 0, "results": []}
+    window_hours = settings.adaptive_auto_approve_after_hours
+    if not settings.adaptive_enabled or window_hours <= 0:
+        return out
+    pending = db.adaptive_list_proposals(status="pending", limit=500)
+    if not pending:
+        return out
+    try:
+        from sessions.manager import get_manager
+
+        if get_manager().has_active_work():
+            out["deferred"] = len(pending)
+            return out
+    except Exception:
+        pass
+
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(hours=window_hours)).isoformat()
+    ripe = sorted(
+        (p for p in pending if (p.get("created_at") or "") < cutoff),
+        key=lambda p: p.get("created_at") or "",
+    )
+    if not ripe:
+        return out
+
+    used = db.adaptive_count_auto_approved_since((now - timedelta(hours=24)).isoformat())
+    budget = max(0, settings.adaptive_max_auto_approvals_per_day - used)
+    if budget <= 0:
+        out["deferred"] = len(ripe)
+        logger.info("Adaptive auto-approve deferred: daily cap reached (%d)", used)
+        return out
+
+    for prop in ripe:
+        if budget <= 0:
+            break
+        try:
+            payload = json.loads(prop.get("payload_json") or "[]")
+        except (TypeError, ValueError):
+            payload = []
+        if isinstance(payload, dict) and payload.get("canary"):
+            out["skipped_canary"] += 1
+            continue
+        try:
+            result = approve_proposal(int(prop["id"]), actor="auto", resolution="auto_approved")
+            out["approved"].append(int(prop["id"]))
+            out["results"].append(result)
+            budget -= 1
+        except AdaptiveError as e:
+            logger.warning("Adaptive auto-approve skipped proposal %s: %s", prop.get("id"), e)
+    out["deferred"] = len(ripe) - len(out["approved"]) - out["skipped_canary"]
+    if out["approved"]:
+        logger.info(
+            "Adaptive: auto-approved %d proposal(s) past the %dh veto window (%s)",
+            len(out["approved"]),
+            window_hours,
+            ", ".join(f"#{i}" for i in out["approved"]),
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------

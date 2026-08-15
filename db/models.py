@@ -1588,6 +1588,19 @@ def adaptive_count_pending_proposals() -> int:
         return int(conn.execute("SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending'").fetchone()[0])
 
 
+def adaptive_count_auto_approved_since(since_iso: str) -> int:
+    """Auto-approvals in a window — the daily budget check for the veto-window
+    drain. Counts by the distinct 'auto_approved' status, which is exactly why
+    that status exists instead of reusing 'approved'."""
+    with connect_sessions() as conn:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'auto_approved' AND resolved_at >= ?",
+                (since_iso,),
+            ).fetchone()[0]
+        )
+
+
 def adaptive_expire_stale_proposals(max_age_days: int) -> int:
     """Expire pending proposals past the TTL. Returns the number expired.
 

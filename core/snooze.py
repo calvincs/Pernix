@@ -1362,10 +1362,40 @@ Output valid JSON only. No markdown fences. /no_think"""
     # ------------------------------------------------------------------
 
     async def _adaptive_step(self) -> None:
-        """Drain pending auto-applies → enqueue post-batch sweeps → evaluate
-        the tripwire. Each stage guarded; a failure never kills the cycle."""
+        """Auto-approve ripe proposals → drain pending auto-applies → enqueue
+        post-batch sweeps → evaluate the tripwire. Each stage guarded; a
+        failure never kills the cycle."""
         if _mutation_blocked():
             return  # global prompt/policy mutations wait for genuine idle
+        # Veto-window drain first: proposals older than the window apply
+        # themselves (same engine as a human approval; approve_proposal
+        # enqueues its own post-batch sweeps). Runs before drain_pending so a
+        # cycle that has budget for both applies the older, human-visible
+        # decisions first.
+        try:
+            from core.adaptive import auto_approve_stale_proposals
+
+            auto = await asyncio.to_thread(auto_approve_stale_proposals)
+            if auto.get("approved"):
+                ids = auto["approved"]
+                self._bump("adaptive_proposals_auto_approved", len(ids))
+                from db import models as db
+
+                db.add_notification(
+                    title="Adaptive layer: proposals auto-approved",
+                    body=(
+                        f"{len(ids)} proposal(s) past the "
+                        f"{settings.adaptive_auto_approve_after_hours}h veto window applied at idle "
+                        f"({', '.join(f'#{i}' for i in ids)}). The tripwire and canary sweeps watch the "
+                        "result; roll back any batch in the Adaptive panel if you disagree."
+                    ),
+                    urgency="normal",
+                )
+        except Exception as e:
+            logger.warning("Adaptive auto-approve failed: %s", e)
+
+        if self._is_cancelled():
+            return
         try:
             from core.adaptive import drain_pending
 

@@ -290,6 +290,20 @@ batch through the same apply engine as auto-applies — and mints the same
 batch id and post-batch canary sweep, so batch-tagged measurement data
 accumulates even with auto-apply off.
 
+The pending queue is a **veto window, not an approval gate**. A proposal
+still pending after `adaptive_auto_approve_after_hours` (default 24h) is
+approved by the system itself in snooze Activity 15 — oldest first, capped at
+`adaptive_max_auto_approvals_per_day`, resolved as `auto_approved` so the
+audit trail distinguishes it from a human `approved`. The reasoning: dream
+hypotheses are evidence-judged *before* they mint a proposal, and the
+validation that actually measures anything — tripwire drift, post-batch
+sweeps — can only run *after* application; a queue that waits on a scarce
+human click just converts validated lessons into TTL lapses. Reject inside
+the window to veto; roll back the batch afterward to overrule. Canary-suite
+proposals are the exception and never auto-approve: materializing a canary
+keeps its human invariant (I6), and graduated autonomy for canaries lives in
+`canary_auto_admit` instead.
+
 **Rollback is exact.** Every apply is an append-only event with full
 before/after snapshots; `rollback(batch_id | event_id)` walks the events in
 reverse and restores each entry byte-for-byte (or deletes what the batch

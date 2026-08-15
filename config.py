@@ -352,6 +352,19 @@ class Settings:
     adaptive_max_pending_proposals: int = 40  # review queue cap (0 = unbounded)
     adaptive_max_pending_per_producer: int = 12  # one producer's share of it (0 = unbounded)
     adaptive_proposal_ttl_days: int = 30  # pending proposals lapse after this (0 = never)
+    # The review queue is a VETO WINDOW, not an approval gate: a pending
+    # proposal older than this many hours is approved by the system itself —
+    # same apply path as a human approval, journaled, post-batch-swept and
+    # rollback-able, resolved as 'auto_approved' so the audit trail tells the
+    # two apart. Validation happens AFTER application, over time (tripwire,
+    # canary sweeps), which is the only validation that measures anything
+    # real; a proposal parked until a human clicks it is a lesson lost to a
+    # backlog. Reject anything you disagree with inside the window; 0 turns
+    # the gate back on (human approval only, TTL lapse). Canary-suite
+    # proposals never auto-approve — admitting a new canary has its own
+    # graduated-autonomy path (canary_auto_admit) and a human invariant (I6).
+    adaptive_auto_approve_after_hours: int = 24
+    adaptive_max_auto_approvals_per_day: int = 10
 
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
