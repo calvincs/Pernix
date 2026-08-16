@@ -7,6 +7,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from core.tools.paths import root_mismatch_hint
 from core.tools.paths import workspace as _workspace
 
 logger = logging.getLogger("pernix.tools.glob")
@@ -29,9 +30,9 @@ def glob_search(pattern: str, path: str = "") -> str:
     if path:
         candidate = (workspace / path).resolve()
         if not candidate.is_relative_to(workspace):
-            return f"Error: Path not within workspace: {path}"
+            return f"Error: Path not within workspace: {path}{root_mismatch_hint(path)}"
         if not candidate.is_dir():
-            return f"Error: Not a directory: {path}"
+            return f"Error: Not a directory: {path}{root_mismatch_hint(path)}"
         search_root = candidate
 
     matches: list[Path] = []

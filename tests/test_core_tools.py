@@ -777,3 +777,31 @@ def test_delete_tool_descriptions_drop_ritual_under_dangerous(monkeypatch):
     reg2 = ToolRegistry()
     skill_tools.register(reg2)
     assert "approve_dangerous_tool" in reg2.get("delete_skill").description
+
+
+# ---------------------------------------------------------------------------
+# root_mismatch_hint on the file tools
+# ---------------------------------------------------------------------------
+
+
+def test_file_read_harness_data_path_explains_the_root(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    result = file_read("data/telos/questions/open.md")
+    assert "File not found: data/telos/questions/open.md" in result
+    assert "resolved against workspace root" in result
+    assert "use bash with an absolute path" in result
+
+
+def test_file_read_workspace_typo_keeps_its_clean_error(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    result = file_read("notes/todo.md")
+    assert result == "Error: File not found: notes/todo.md"
+
+
+def test_file_edit_harness_data_path_explains_the_root(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    from core.tools.builtin.file_edit import file_edit
+
+    result = file_edit("data/telos/ledger.md", "old", "new")
+    assert "File not found: data/telos/ledger.md" in result
+    assert "resolved against workspace root" in result

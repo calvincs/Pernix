@@ -106,3 +106,62 @@ def test_glob_not_a_directory(tmp_path, monkeypatch):
     (tmp_path / "file.txt").write_text("x")
     result = glob_search("*.py", path="file.txt")
     assert "Error" in result or "Not a directory" in result
+
+
+# ---------------------------------------------------------------------------
+# root_mismatch_hint — a harness-data path resolves under the workspace root
+# and fails with an error that reads as "wrong path" when the root is what is
+# wrong. bash with an absolute path is the only whole-filesystem tool.
+# ---------------------------------------------------------------------------
+
+
+def test_glob_harness_data_path_explains_the_root(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    result = glob_search("*.md", path="data/telos")
+    assert "Not a directory: data/telos" in result
+    assert "resolved against workspace root" in result
+    assert "use bash with an absolute path" in result
+    assert "telos_status" in result
+
+
+def test_grep_harness_data_path_explains_the_root(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    result = grep("anything", path="data/memories")
+    assert "Error" in result
+    assert "resolved against workspace root" in result
+
+
+def test_glob_workspace_typo_keeps_its_clean_error(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    (tmp_path / "file.txt").write_text("x")
+    result = glob_search("*.py", path="file.txt")
+    assert result == "Error: Not a directory: file.txt"
+
+
+def test_root_hint_ignores_real_workspace_paths(tmp_path, monkeypatch):
+    from core.tools.paths import root_mismatch_hint
+
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "telos").mkdir()
+    assert root_mismatch_hint("data/telos") == ""
+    assert root_mismatch_hint("notes/todo.md") == ""
+    assert root_mismatch_hint("") == ""
+
+
+def test_root_hint_fires_on_bare_harness_dirs_and_absolute_data_paths(tmp_path, monkeypatch):
+    import config
+    from core.tools.paths import root_mismatch_hint
+
+    data = tmp_path / "data"
+    (data / "telos").mkdir(parents=True)
+    (data / "workspace").mkdir()
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    monkeypatch.setattr("config.settings.workspace_dir", str(data / "workspace"))
+
+    assert "resolved against workspace root" in root_mismatch_hint("telos/questions")
+    assert "resolved against workspace root" in root_mismatch_hint(str(data / "telos"))
+    # data/workspace/... is the workspace under its full name, not harness data.
+    assert root_mismatch_hint("data/workspace/notes.md") == ""
+    # An absolute path inside the workspace is not a root mistake either.
+    assert root_mismatch_hint(str(data / "workspace" / "notes.md")) == ""

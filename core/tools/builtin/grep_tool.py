@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from core.tools.paths import root_mismatch_hint
 from core.tools.paths import workspace as _workspace
 from core.tools.truncation import truncate_output
 
@@ -37,12 +38,12 @@ def grep(pattern: str, path: str = "", include: str = "") -> str:
         search_path = search_path.resolve()
         # Security: must be within workspace
         if not search_path.is_relative_to(workspace):
-            return f"Error: Path not within workspace: {path}"
+            return f"Error: Path not within workspace: {path}{root_mismatch_hint(path)}"
     else:
         search_path = workspace
 
     if not search_path.exists():
-        return f"Error: Path not found: {search_path}"
+        return f"Error: Path not found: {search_path}{root_mismatch_hint(path)}"
 
     rg = _find_rg()
     if rg:
