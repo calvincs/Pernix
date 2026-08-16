@@ -37,6 +37,21 @@ def test_anomalies_from_tool_failures_and_retries():
     assert extract_turn_anomalies({"shell": {"calls": 2, "failures": 0}}, "complete", False, "normal") == []
 
 
+def test_anomaly_questions_cite_standing_ledgers_not_turn_snapshots():
+    """The question must name continuously recorded observables (tool_ok,
+    tool_failure_mode), never 'this turn' — a turn snapshot is gone by
+    evaluation time, making every spawned hypothesis un-evaluable (14/18
+    abandoned questions in the 2026-08-16 audit were that class)."""
+    out = extract_turn_anomalies(
+        {"http_get": {"calls": 3, "failures": 2, "errors": ["403"]}}, "complete", False, "normal"
+    )
+    assert len(out) == 1
+    text = out[0]["text"]
+    assert "tool_ok('http_get')" in text
+    assert "tool_failure_mode('http_get')" in text
+    assert "this turn" not in text
+
+
 async def test_on_post_task_traces_and_mints(store):
     sess = _FakeSession(tools={"browse_web": {"calls": 3, "failures": 2, "errors": ["boom"]}}, reflect_count=1)
     await on_post_task("s1", {"session_type": "normal"}, sess)
@@ -67,6 +82,34 @@ async def test_duplicate_questions_not_minted(store):
     n = len(store.list_questions())
     await on_post_task("s2", {"session_type": "normal"}, _FakeSession(turn_id="m2", tools=tools))
     assert len(store.list_questions()) == n  # near-duplicate rejected
+
+
+async def test_remint_cooldown_suppresses_same_source(store):
+    """Different failure counts defeat text dedup, but the derived_from marker
+    (tool:X) is stable — within the cooldown the same source mints once, even
+    after the first question was abandoned."""
+    await on_post_task(
+        "s1", {"session_type": "normal"}, _FakeSession(turn_id="m1", tools={"x": {"calls": 1, "failures": 1}})
+    )
+    qs = store.list_questions()
+    n = len(qs)
+    assert n >= 1
+    for q in qs:  # abandonment must not reopen the mint window
+        store.update(q, state="abandoned")
+    await on_post_task(
+        "s2", {"session_type": "normal"}, _FakeSession(turn_id="m2", tools={"x": {"calls": 9, "failures": 7}})
+    )
+    assert len(store.list_questions()) == n
+
+
+async def test_remint_cooldown_zero_disables(store, monkeypatch):
+    monkeypatch.setattr(settings, "telos_anomaly_remint_cooldown_days", 0)
+    from core.telos.anomaly import _recently_minted
+
+    await on_post_task(
+        "s1", {"session_type": "normal"}, _FakeSession(turn_id="m1", tools={"x": {"calls": 1, "failures": 1}})
+    )
+    assert _recently_minted(store, ["tool:x"]) is False
 
 
 async def test_hook_gated_off(monkeypatch):

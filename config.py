@@ -440,6 +440,10 @@ class Settings:
     telos_max_gated_backlog: int = 12  # above it, every step evaluates
     telos_max_eval_tokens: int = 20_000  # gate's cost_est ceiling
     telos_question_max_attempts: int = 3  # generation passes before abandonment
+    # One anomaly line of inquiry per source (tool:X, reflect:retry, ...) per
+    # window — stops the same flaky tool minting a near-identical question
+    # every day (14/18 abandoned questions were that class). 0 disables.
+    telos_anomaly_remint_cooldown_days: int = 7
     telos_soup_retention_days: int = 30  # speculation-pool prune window (0 = keep forever)
     telos_soup_context_entries: int = 10  # memory entries in the band sample
     telos_budget_share_max: float = 0.35  # binding-monitor 7d share alarm (§5.2)

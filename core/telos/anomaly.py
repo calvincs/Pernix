@@ -19,6 +19,7 @@ the reliability record already contains this turn. Failure is never fatal.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from config import settings
 
@@ -76,11 +77,21 @@ def extract_turn_anomalies(
         surprise = prior if prior is not None else 0.9
         errors = s.get("errors") or []
         detail = f" ({str(errors[0])[:120]})" if errors else ""
+        # Phrase the question against observables that are CONTINUOUSLY
+        # recorded, never against the triggering turn's snapshot. The old
+        # wording ("fail N/M calls this turn") named evidence that no longer
+        # existed by evaluation time, so every spawned hypothesis was
+        # un-evaluable by construction — 14 of the 18 questions abandoned by
+        # 2026-08-16 were this exact class (session 1e2806e0d2ea's audit).
+        # tool_ok(tool) and tool_failure_mode(tool) have standing Candor
+        # loggers, so hypotheses citing them can actually be discriminated.
         anomalies.append(
             {
                 "text": (
-                    f"Why did tool '{tool}' fail {failures}/{calls} calls this turn when its "
-                    f"prior reliability is ~{surprise:.2f}?{detail}"
+                    f"Under what conditions does tool '{tool}' fail? It just failed "
+                    f"{failures}/{calls} calls despite calibrated reliability ~{surprise:.2f}."
+                    f"{detail} Evaluable against the standing ledgers: tool_ok('{tool}') and "
+                    f"tool_failure_mode('{tool}') record every call."
                 ),
                 "surprise": surprise,
                 "derived_from": [f"tool:{tool}"],
@@ -89,8 +100,9 @@ def extract_turn_anomalies(
     if reflect_retry:
         anomalies.append(
             {
-                "text": "Why did this turn's first attempt miss the intent (reflect requested a retry)? "
-                "What class of turn does this keep happening on?",
+                "text": "What class of turn keeps failing its first attempt? Reflect requested a "
+                "retry; the reflect_verdict ledger and post-mortems record every verdict with "
+                "its failure cause.",
                 "surprise": 0.8,
                 "derived_from": ["reflect:retry"],
             }
@@ -98,8 +110,8 @@ def extract_turn_anomalies(
     if termination_reason == "round_ceiling":
         anomalies.append(
             {
-                "text": "Why did the turn hit the tool-round ceiling instead of converging? Is a loop "
-                "pattern consuming rounds without reducing the task?",
+                "text": "What loop pattern consumes tool rounds without reducing the task? A turn "
+                "hit the round ceiling; the trace's turn events record per-turn tool call counts.",
                 "surprise": 0.85,
                 "derived_from": ["termination:round_ceiling"],
             }
@@ -213,6 +225,8 @@ def _post_task_store_work(
     for a in extract_turn_anomalies(tool_summary, termination, reflect_retry, session_type, priors=priors):
         if minted >= _MAX_QUESTIONS_PER_TURN:
             break
+        if _recently_minted(store, a["derived_from"]):
+            continue
         if store.question_is_duplicate(a["text"]):
             continue
         origin = "anomaly"
@@ -229,6 +243,32 @@ def _post_task_store_work(
             origin=origin,
         )
         minted += 1
+
+
+def _recently_minted(store, derived_from: list[str]) -> bool:
+    """A question from the same source marker exists within the cooldown.
+
+    Text dedup alone cannot do this job from either direction: the old
+    per-turn wording varied by failure counts, so the same flaky tool minted
+    a near-identical question every day; a stable wording would flip that
+    into a forever-block against the abandoned corpus. The derived_from
+    marker (tool:X, reflect:retry, termination:round_ceiling) is stable per
+    source, so it gives time-boxed suppression: one open line of inquiry per
+    source at a time, and a re-ask becomes possible once the cooldown passes.
+    """
+    days = max(0, settings.telos_anomaly_remint_cooldown_days)
+    if not days:
+        return False
+    markers = {m for m in derived_from if not m.startswith("session:")}
+    if not markers:
+        return False
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for q in store.list_questions():
+        if str(q.get("created_at") or "") < cutoff:
+            continue
+        if markers & set(q.get("derived_from") or []):
+            return True
+    return False
 
 
 _SERENDIPITY_WINDOW = 30
