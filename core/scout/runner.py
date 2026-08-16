@@ -193,15 +193,37 @@ _SCOUT_RLM_RULE = (
     "inputs that size, and do NOT recommend it for inputs that fit in context."
 )
 
+# Injected only when settings.gates_enabled (add_gate only exists then). A
+# structural spec is countable, so the mechanical gate — not the probabilistic
+# post-hoc Reflect pass — is the right verifier: gates run before Reflect at
+# turn end and a failing one blocks a pass verdict without burning a retry on
+# something a 5-line checker could have caught.
+_SCOUT_GATE_RULE = (
+    "- STRUCTURAL SPECS: When the request pins countable properties of a deliverable "
+    "(exactly N sections, ≥M words each, K items/facts per section, a file that must "
+    "exist or parse), recommend add_gate and make registering the gate the FIRST step "
+    "of approach_guidance: a short shell/python command over the output file that exits "
+    "non-zero while any count is unmet, with watch_paths on the deliverable. The gate "
+    "runs before Reflect at turn end and mechanically blocks a pass verdict. Do NOT "
+    "register gates for non-countable qualities (tone, accuracy, relevance) — those "
+    "stay with Reflect."
+)
+
 
 def _scout_system_prompt() -> str:
     """SCOUT_SYSTEM_PROMPT plus conditional rules, keeping /no_think last."""
-    if not settings.rlm_enabled:
+    rules = []
+    if settings.rlm_enabled:
+        rules.append(_SCOUT_RLM_RULE)
+    if settings.gates_enabled:
+        rules.append(_SCOUT_GATE_RULE)
+    if not rules:
         return SCOUT_SYSTEM_PROMPT
+    block = "\n".join(rules)
     head, _, tail = SCOUT_SYSTEM_PROMPT.rpartition("\n- Do NOT use <think>")
     if not head:  # tail marker drifted — fail open with the static prompt
-        return SCOUT_SYSTEM_PROMPT + "\n" + _SCOUT_RLM_RULE
-    return f"{head}\n{_SCOUT_RLM_RULE}\n- Do NOT use <think>{tail}"
+        return SCOUT_SYSTEM_PROMPT + "\n" + block
+    return f"{head}\n{block}\n- Do NOT use <think>{tail}"
 
 
 # ---------------------------------------------------------------------------
