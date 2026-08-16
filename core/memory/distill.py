@@ -15,6 +15,18 @@ from config import settings
 
 logger = logging.getLogger("pernix.memory.distill")
 
+
+def _is_saved(result: str) -> bool:
+    """True for either shape of a landed write.
+
+    The store returns "Saved to <file> (epoch=N)"; the memory tools translate
+    that into the model-facing "SAVED file=<f> epoch=<n> VERIFY=OK". Both are
+    accepted so this counter cannot silently mislabel a save as a dedup skip
+    when a write path is routed through the tool layer.
+    """
+    return result.startswith("Saved to") or result.startswith("SAVED ")
+
+
 # The FILE ROUTING RULES below name canonical memory files — keep in sync
 # with the routing vocabulary in core/memory/routing.py.
 DISTILL_PROMPT = """You are a session memory distiller. Extract the most important findings,
@@ -83,8 +95,10 @@ async def distill_session(
         if role in ("user", "assistant", "reflect") and content:
             transcript_lines.append(f"[{role}] {content[:800]}")
         elif role == "tool" and content:
-            # Include tool results (e.g., "Saved to user.profile") so the LLM
-            # knows what entries were already saved and won't re-extract them
+            # Include tool results (e.g. "SAVED file=user.profile epoch=... VERIFY=OK",
+            # or "Saved to user.profile" in transcripts predating the verdict
+            # contract) so the LLM knows what entries were already saved and
+            # won't re-extract them
             transcript_lines.append(f"[tool_result] {content[:400]}")
     transcript = "\n".join(transcript_lines)
 
@@ -161,7 +175,7 @@ async def distill_session(
         )
         if result.startswith("Superseded"):
             superseded += 1
-        elif result.startswith("Saved to"):
+        elif _is_saved(result):
             saved += 1
         else:
             skipped_dup += 1

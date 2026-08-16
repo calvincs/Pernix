@@ -32,6 +32,7 @@ from typing import Callable
 
 from config import settings
 from core.memory.format import (
+    MemoryEntry,
     MemoryFile,
     format_entry,
     format_file_header,
@@ -1061,6 +1062,26 @@ class MemoryStore:
             ]
         finally:
             conn.close()
+
+    def get_entry(self, file_name: str, epoch: int) -> MemoryEntry | None:
+        """The live entry at (file_name, epoch), or None when it isn't there.
+
+        Reads the markdown, not the FTS index: the memory tools use this to
+        prove a write actually landed in the source of truth, and an index row
+        the reindex would later drop is not proof. Read-only — never mutates,
+        never raises on a bad name or a missing file.
+        """
+        try:
+            file_name = self._validate_name(file_name)
+        except ValueError:
+            return None
+        md_path = self._dir / f"{file_name}.md"
+        if not md_path.exists():
+            return None
+        for entry in parse_entries_from_markdown(file_name, md_path.read_text(encoding="utf-8")):
+            if entry.epoch == epoch:
+                return entry
+        return None
 
     def read_file(self, name: str) -> str | None:
         name = self._validate_name(name)

@@ -570,3 +570,42 @@ async def test_execute_tool_round_health_metrics():
     metrics = reg.metrics.get("counter")
     assert metrics is not None
     assert metrics.success_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# _is_failure_verdict — memory-write verdicts in tool health
+# ---------------------------------------------------------------------------
+
+
+def test_write_failure_verdicts_count_as_errors():
+    from core.tools.executor import _is_failure_verdict
+
+    assert _is_failure_verdict("NOT SAVED — Memory system unavailable")
+    assert _is_failure_verdict("NOT UPDATED — no entry with epoch=123 in 'demo.notes'")
+    assert _is_failure_verdict(
+        "NOT DELETED — VERIFY=STILL-PRESENT: entry epoch=123 is still in demo.notes on read-back"
+    )
+
+
+def test_dedup_refusal_is_not_a_tool_failure():
+    from core.tools.executor import _is_failure_verdict
+
+    assert not _is_failure_verdict(
+        'NOT SAVED — duplicate of demo.notes@123: "already stored". If your version is newer'
+    )
+
+
+def test_success_verdicts_and_plain_results_are_not_failures():
+    from core.tools.executor import _is_failure_verdict
+
+    assert not _is_failure_verdict("SAVED file=demo.notes epoch=123 VERIFY=OK")
+    assert not _is_failure_verdict("UPDATED file=demo.notes epoch=123 VERIFY=OK")
+    assert not _is_failure_verdict("some ordinary tool output")
+
+
+@pytest.mark.asyncio
+async def test_execute_single_records_write_failure_verdict_as_error():
+    reg = _make_registry({"remember": lambda: "NOT SAVED — Memory system unavailable"})
+    result = await _execute_single("remember", {}, None, reg)
+    assert result.was_error is True
+    assert reg.metrics["remember"].failure_count == 1

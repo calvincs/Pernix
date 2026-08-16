@@ -4,8 +4,84 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 logger = logging.getLogger("pernix.tools.memory")
+
+# ---------------------------------------------------------------------------
+# Write verdicts
+#
+# The store's return strings are an internal contract (consolidate, ingest and
+# audit parse them) and stay as they are. What the model sees is translated
+# here into a leading case-locked verdict token, because the untranslated
+# strings cost a real save: a dedup refusal reads as neither "Error" nor
+# "Saved", and the model reported a save that never landed.
+#
+# Two tokens, never one. The verdict says whether the write happened; a
+# separate trailing VERIFY= token says whether a read-back of the markdown
+# agreed. Blurring them lets a skimmer collapse "SAVED + mismatch" into
+# "SAVED". VERIFY is only ever OK, MISMATCH, MISSING, STILL-PRESENT or
+# UNVERIFIED — nothing hedged like PARTIALLY, which no read-back can support.
+# ---------------------------------------------------------------------------
+
+_SAVED_RE = re.compile(r"^Saved to (?P<file>\S+) \(epoch=(?P<epoch>\d+)\)")
+_UPDATED_RE = re.compile(r"^Updated entry epoch=(?P<epoch>\d+) in '(?P<file>[^']+)'")
+_DELETED_RE = re.compile(r"^Deleted entry epoch=(?P<epoch>\d+) from '(?P<file>[^']+)'")
+_DUPLICATE_RE = re.compile(r'duplicate of (?P<file>[^\s@]+)@(?P<epoch>\d+): "(?P<preview>.*?)"\)', re.DOTALL)
+
+_PREVIEW_CHARS = 120
+
+
+def _reason(store_result: str) -> str:
+    """The store's message with its leading 'Error: ' stripped."""
+    text = store_result.strip()
+    if text.lower().startswith("error:"):
+        return text[6:].strip()
+    return text
+
+
+def _duplicate_verdict(store_result: str) -> str:
+    """Translate the dedup refusal, keeping the supersede call intact.
+
+    Without the action the model treats a blocked write as done and moves on,
+    so the instruction is not decoration — it is the only path from "blocked"
+    to "corrected".
+    """
+    m = _DUPLICATE_RE.search(store_result)
+    if not m:
+        return f"NOT SAVED — {_reason(store_result)}"
+    f, e, preview = m.group("file"), m.group("epoch"), m.group("preview")
+    return (
+        f'NOT SAVED — duplicate of {f}@{e}: "{preview}". If your version is newer or more '
+        f"accurate, supersede it with update_memory(file='{f}', epoch={e}, content=...)"
+    )
+
+
+def _verify_write(store, verdict: str, file_name: str, epoch: int, sent_content: str) -> str:
+    """Read the entry back from markdown and append the VERIFY token.
+
+    `sent_content` is compared after sanitize_entry_content, the same
+    transform the store applies before writing — comparing against the raw
+    text would report legitimate sanitization as a mismatch.
+    """
+    head = f"{verdict} file={file_name} epoch={epoch}"
+    try:
+        entry = store.get_entry(file_name, epoch)
+    except Exception as e:
+        logger.warning("Memory read-back failed for %s@%s: %s", file_name, epoch, e)
+        return f"{head} VERIFY=UNVERIFIED — read-back failed ({e}); confirm with recall()"
+
+    not_saved = "NOT SAVED" if verdict == "SAVED" else "NOT UPDATED"
+    if entry is None:
+        return f"{not_saved} — VERIFY=MISSING: write did not land (no entry epoch={epoch} in {file_name} on read-back)"
+
+    from core.memory.format import sanitize_entry_content
+
+    if entry.content.strip() != sanitize_entry_content(sent_content).strip():
+        stored = entry.content.strip()[:_PREVIEW_CHARS].replace("\n", " ")
+        return f'{head} VERIFY=MISMATCH — stored content differs from what you sent (stored: "{stored}")'
+    return f"{head} VERIFY=OK"
+
 
 # ---------------------------------------------------------------------------
 # deep_recall: LLM-backed memory agent
@@ -182,12 +258,12 @@ async def _deep_recall_async(query: str, context: str) -> str:
 
 
 def remember(content: str, file: str = "", tags: str = "", weight: str = "", _context: dict | None = None) -> str:
-    """Save content to persistent memory."""
+    """Save content to persistent memory. Returns a SAVED / NOT SAVED verdict."""
     from core.memory.store import get_memory_store
 
     store = get_memory_store()
     if store is None:
-        return "Error: Memory system unavailable"
+        return "NOT SAVED — Memory system unavailable"
 
     # Auto-infer weight if not specified
     if not weight:
@@ -205,23 +281,31 @@ def remember(content: str, file: str = "", tags: str = "", weight: str = "", _co
             weight=weight,
             source="user",
         )
-
-        # Track manual save for this session so distillation can skip it
-        if _context and _context.get("session_id"):
-            try:
-                from db import models as db
-
-                db.set_snooze_state(
-                    f"manual_save:{_context['session_id']}",
-                    str(int(__import__("time").time())),
-                )
-            except Exception:
-                pass  # Non-critical, don't fail the save
-
-        return result
     except Exception as e:
         logger.error("Remember failed: %s", e)
-        return f"Error saving to memory: {e}"
+        return f"NOT SAVED — {e}"
+
+    if "already contains similar content" in result:
+        return _duplicate_verdict(result)
+
+    m = _SAVED_RE.match(result)
+    if not m:
+        return f"NOT SAVED — {_reason(result)}"
+
+    # Only a landed write suppresses distillation for this session — a refused
+    # or failed one leaves the fact unrecorded and distill must still see it.
+    if _context and _context.get("session_id"):
+        try:
+            from db import models as db
+
+            db.set_snooze_state(
+                f"manual_save:{_context['session_id']}",
+                str(int(__import__("time").time())),
+            )
+        except Exception:
+            pass  # Non-critical, don't fail the save
+
+    return _verify_write(store, "SAVED", m.group("file"), int(m.group("epoch")), content)
 
 
 def ingest(
@@ -425,43 +509,83 @@ def _coerce_epoch(epoch) -> int:
 
 def update_memory(file: str, epoch: int, content: str, _context: dict | None = None) -> str:
     """Replace the content of a specific memory entry. Use recall() first to find the file
-    and epoch of the entry to correct. All metadata (type, tags, weight) is preserved."""
+    and epoch of the entry to correct. All metadata (type, tags, weight) is preserved.
+    Returns an UPDATED / NOT UPDATED verdict."""
     from core.memory.store import get_memory_store
 
     store = get_memory_store()
     if store is None:
-        return "Error: Memory system unavailable"
+        return "NOT UPDATED — Memory system unavailable"
     if not file or not content.strip():
-        return "Error: file and content are required"
+        return "NOT UPDATED — file and content are required"
     try:
         epoch = _coerce_epoch(epoch)
     except (TypeError, ValueError):
-        return f"Error: epoch must be the entry's integer timestamp from the recall output (got {epoch!r})"
-    return store.update_entry(file, epoch, content)
+        return "NOT UPDATED — epoch must be the entry's integer timestamp from the " f"recall output (got {epoch!r})"
+    try:
+        result = store.update_entry(file, epoch, content)
+    except Exception as e:
+        logger.error("update_memory failed: %s", e)
+        return f"NOT UPDATED — {e}"
+
+    m = _UPDATED_RE.match(result)
+    if not m:
+        return f"NOT UPDATED — {_reason(result)}"
+    return _verify_write(store, "UPDATED", m.group("file"), int(m.group("epoch")), content)
 
 
 def forget(file: str, epoch: int, _context: dict | None = None) -> str:
     """Permanently delete a specific memory entry. Use recall() first to find the file
-    and epoch of the entry to remove. This cannot be undone."""
+    and epoch of the entry to remove. This cannot be undone. Returns a
+    DELETED / NOT DELETED verdict."""
     from core.memory.store import get_memory_store
 
     store = get_memory_store()
     if store is None:
-        return "Error: Memory system unavailable"
+        return "NOT DELETED — Memory system unavailable"
     if not file:
-        return "Error: file is required"
+        return "NOT DELETED — file is required"
     try:
         epoch = _coerce_epoch(epoch)
     except (TypeError, ValueError):
-        return f"Error: epoch must be the entry's integer timestamp from the recall output (got {epoch!r})"
-    return store.delete_entry(file, epoch)
+        return "NOT DELETED — epoch must be the entry's integer timestamp from the " f"recall output (got {epoch!r})"
+    try:
+        result = store.delete_entry(file, epoch)
+    except Exception as e:
+        logger.error("forget failed: %s", e)
+        return f"NOT DELETED — {e}"
+
+    m = _DELETED_RE.match(result)
+    if not m:
+        return f"NOT DELETED — {_reason(result)}"
+
+    file_name, deleted_epoch = m.group("file"), int(m.group("epoch"))
+    head = f"DELETED file={file_name} epoch={deleted_epoch}"
+    try:
+        entry = store.get_entry(file_name, deleted_epoch)
+    except Exception as e:
+        logger.warning("Memory read-back failed for %s@%s: %s", file_name, deleted_epoch, e)
+        return f"{head} VERIFY=UNVERIFIED — read-back failed ({e}); confirm with recall()"
+    if entry is not None:
+        return (
+            f"NOT DELETED — VERIFY=STILL-PRESENT: entry epoch={deleted_epoch} is still in " f"{file_name} on read-back"
+        )
+    return f"{head} VERIFY=OK"
 
 
 def register(reg) -> None:
     reg.register(
         name="remember",
         func=remember,
-        description="Save knowledge to persistent memory. Survives across sessions. Use for decisions, findings, preferences, techniques worth retaining.",
+        description=(
+            "Save knowledge to persistent memory. Survives across sessions. Use for decisions, "
+            "findings, preferences, techniques worth retaining. The result always begins SAVED "
+            "or NOT SAVED — only 'SAVED file=<f> epoch=<n> VERIFY=OK' means the entry is on "
+            "disk (VERIFY is a read-back of the stored text; MISMATCH means it landed but "
+            "differs from what you sent). 'NOT SAVED — duplicate of <f>@<e>' means nothing was "
+            "written: if your version is newer or more accurate, call update_memory(file, "
+            "epoch, content) on that entry, otherwise the correction is lost."
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -606,7 +730,10 @@ def register(reg) -> None:
             "Correct or rewrite an existing memory entry. "
             "First call recall() to find the entry — the output shows [file epoch=N score=X.X]. "
             "Then call update_memory with that file and epoch to replace its content. "
-            "Use when a stored fact is wrong, outdated, or needs clarification."
+            "Use when a stored fact is wrong, outdated, or needs clarification — including "
+            "after remember() returns 'NOT SAVED — duplicate of <f>@<e>'. The result always "
+            "begins UPDATED or NOT UPDATED; only 'UPDATED file=<f> epoch=<n> VERIFY=OK' means "
+            "the new text is on disk."
         ),
         parameters={
             "type": "object",
@@ -632,7 +759,9 @@ def register(reg) -> None:
             "Permanently delete a memory entry. "
             "First call recall() to find the entry — the output shows [file epoch=N score=X.X]. "
             "Then call forget with that file and epoch. Cannot be undone. "
-            "Prefer update_memory to correct wrong facts rather than deleting them entirely."
+            "Prefer update_memory to correct wrong facts rather than deleting them entirely. "
+            "The result always begins DELETED or NOT DELETED; only 'DELETED file=<f> "
+            "epoch=<n> VERIFY=OK' means the entry is gone from disk."
         ),
         parameters={
             "type": "object",
