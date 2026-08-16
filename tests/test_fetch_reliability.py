@@ -256,6 +256,16 @@ def test_scout_prompt_injects_gate_rule_when_gates_enabled(monkeypatch):
     assert prompt.index("STRUCTURAL SPECS") < prompt.index("Do NOT use <think>")
 
 
+def test_scout_prompt_has_live_state_rule():
+    # Static rule (always on): stale memories about mutable operational state
+    # (worker limits, cron jobs) produced phantom friction in session
+    # 1e2806e0d2ea — live tools are the source of truth for such state.
+    from core.scout.runner import SCOUT_SYSTEM_PROMPT
+
+    idx = SCOUT_SYSTEM_PROMPT.index("LIVE STATE BEATS MEMORY")
+    assert idx < SCOUT_SYSTEM_PROMPT.index("KNOWN FACTS BEAT EMPTY CONFIG")
+
+
 def test_scout_prompt_stacks_conditional_rules(monkeypatch):
     from core.scout.runner import _scout_system_prompt
 
