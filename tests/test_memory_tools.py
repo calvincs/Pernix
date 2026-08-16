@@ -192,3 +192,47 @@ def test_truncate_output_long():
     result, meta = truncate_output(long_content, "test")
     assert len(result) <= MAX_OUTPUT + 500  # some header overhead allowed
     assert "TRUNCATED" in result or "truncated" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# _coerce_epoch — scientific-notation epochs from local-model serializers
+# (session 1e2806e0d2ea: 12 failed update_memory retries on '1.777e+09')
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_epoch_accepts_int_float_and_strings():
+    from core.tools.builtin.memory_tools import _coerce_epoch
+
+    assert _coerce_epoch(1777154774) == 1777154774
+    assert _coerce_epoch(1777154774.0) == 1777154774
+    assert _coerce_epoch("1777154774") == 1777154774
+    assert _coerce_epoch("1.777154774e+09") == 1777154774
+    assert _coerce_epoch(" 1.78690871e+09 ") == 1786908710
+
+
+def test_coerce_epoch_rejects_fractional_and_garbage():
+    from core.tools.builtin.memory_tools import _coerce_epoch
+
+    for bad in (1777154774.5, "1.7771547745e+09", "not-an-epoch", True):
+        with pytest.raises(ValueError):
+            _coerce_epoch(bad)
+
+
+def test_update_memory_accepts_scientific_notation_epoch(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.tools.builtin.memory_tools import remember, update_memory
+
+    remember("The worker cap is three and that is a hard limit forever.", file="pernix.test_workers")
+    from core.memory.store import get_memory_store
+
+    entry = get_memory_store().search("worker cap", limit=1)[0].entry
+    out = update_memory("pernix.test_workers", f"{float(entry.epoch):.9e}", "The worker cap is max_concurrent_workers, currently 4.")
+    assert out.startswith("Updated entry")
+
+
+def test_update_memory_rejects_lossy_epoch(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.tools.builtin.memory_tools import update_memory
+
+    out = update_memory("pernix.test_workers", "1.5", "x")
+    assert out.startswith("Error: epoch must be")
