@@ -403,6 +403,26 @@ def deep_recall(
             return f"Error searching memory: {e2}"
 
 
+def _coerce_epoch(epoch) -> int:
+    """Accept an epoch as int, integral float, or numeric string — including
+    scientific notation.
+
+    Local models serialize large integers as scientific notation
+    ('1.777154774e+09'); a hard int() parse cost 12 failed retries in one
+    observed session (1e2806e0d2ea). Every observed case preserved the full
+    digits in a different format, so an exact integral value is coerced; a
+    genuinely fractional value still raises.
+    """
+    if isinstance(epoch, bool):
+        raise ValueError(f"epoch must be an integer, got {epoch!r}")
+    if isinstance(epoch, int):
+        return epoch
+    f = float(str(epoch).strip())
+    if not f.is_integer():
+        raise ValueError(f"epoch must be a whole number, got {epoch!r}")
+    return int(f)
+
+
 def update_memory(file: str, epoch: int, content: str, _context: dict | None = None) -> str:
     """Replace the content of a specific memory entry. Use recall() first to find the file
     and epoch of the entry to correct. All metadata (type, tags, weight) is preserved."""
@@ -413,7 +433,11 @@ def update_memory(file: str, epoch: int, content: str, _context: dict | None = N
         return "Error: Memory system unavailable"
     if not file or not content.strip():
         return "Error: file and content are required"
-    return store.update_entry(file, int(epoch), content)
+    try:
+        epoch = _coerce_epoch(epoch)
+    except (TypeError, ValueError):
+        return f"Error: epoch must be the entry's integer timestamp from the recall output (got {epoch!r})"
+    return store.update_entry(file, epoch, content)
 
 
 def forget(file: str, epoch: int, _context: dict | None = None) -> str:
@@ -426,7 +450,11 @@ def forget(file: str, epoch: int, _context: dict | None = None) -> str:
         return "Error: Memory system unavailable"
     if not file:
         return "Error: file is required"
-    return store.delete_entry(file, int(epoch))
+    try:
+        epoch = _coerce_epoch(epoch)
+    except (TypeError, ValueError):
+        return f"Error: epoch must be the entry's integer timestamp from the recall output (got {epoch!r})"
+    return store.delete_entry(file, epoch)
 
 
 def register(reg) -> None:
