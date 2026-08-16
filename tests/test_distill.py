@@ -151,3 +151,26 @@ async def test_distill_session_llm_error(mock_llm_client, tmp_path, monkeypatch)
 
     # Should not raise
     await distill_session(sid, title="Error", messages=messages)
+
+
+# ---------------------------------------------------------------------------
+# _is_saved — the store still returns "Saved to ...", the memory tools return
+# the model-facing "SAVED file=... VERIFY=OK". Both count as a landed write.
+# ---------------------------------------------------------------------------
+
+
+def test_is_saved_accepts_both_shapes():
+    from core.memory.distill import _is_saved
+
+    assert _is_saved("Saved to pernix.notes (epoch=1777154774)")
+    assert _is_saved("SAVED file=pernix.notes epoch=1777154774 VERIFY=OK")
+
+
+def test_is_saved_rejects_refusals_and_supersedes():
+    from core.memory.distill import _is_saved
+
+    assert not _is_saved('Memory already contains similar content — entry skipped (duplicate of a@1: "x").')
+    assert not _is_saved('NOT SAVED — duplicate of pernix.notes@1777154774: "x"')
+    assert not _is_saved("NOT SAVED — VERIFY=MISSING: write did not land (no entry epoch=1 in a on read-back)")
+    assert not _is_saved("Superseded pernix.notes@1777154774")
+    assert not _is_saved("Error: Empty content")

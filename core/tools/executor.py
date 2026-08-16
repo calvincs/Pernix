@@ -193,6 +193,20 @@ def _is_unattended_session(sid: str) -> bool:
     return False
 
 
+def _is_failure_verdict(result: str) -> bool:
+    """Memory-write failures carry a NOT SAVED / NOT UPDATED / NOT DELETED
+    verdict instead of an "Error:" prefix (tool-layer contract in
+    memory_tools). They must still count as failures in per-tool health —
+    the anomaly telemetry that caught the epoch-parse bug watches exactly
+    these rates. The one exception is the dedup refusal: that is the store
+    doing its job, not the tool failing, and counting it would bury real
+    failures in noise.
+    """
+    if not result.startswith(("NOT SAVED", "NOT UPDATED", "NOT DELETED")):
+        return False
+    return "duplicate of" not in result[:200]
+
+
 async def _execute_single(
     name: str,
     arguments: dict,
@@ -427,7 +441,7 @@ async def _execute_single(
         else:
             result, metadata = raw, {}
 
-        was_error = (not result) or result.startswith("Error:")
+        was_error = (not result) or result.startswith("Error:") or _is_failure_verdict(result)
 
         if was_error:
             registry.metrics[name].record_failure(result, latency)

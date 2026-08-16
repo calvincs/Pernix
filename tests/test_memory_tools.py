@@ -114,7 +114,8 @@ def test_remember_basic(tmp_path, monkeypatch):
     from core.tools.builtin.memory_tools import remember
 
     result = remember("Important finding about the database schema")
-    assert "Saved" in result or "Error" not in result
+    assert result.startswith("SAVED file=")
+    assert result.endswith("VERIFY=OK")
 
 
 def test_remember_empty_content(tmp_path, monkeypatch):
@@ -122,7 +123,7 @@ def test_remember_empty_content(tmp_path, monkeypatch):
     from core.tools.builtin.memory_tools import remember
 
     result = remember("")
-    assert "Error" in result
+    assert result == "NOT SAVED — Empty content"
 
 
 def test_remember_high_weight_auto(tmp_path, monkeypatch):
@@ -130,7 +131,7 @@ def test_remember_high_weight_auto(tmp_path, monkeypatch):
     from core.tools.builtin.memory_tools import remember
 
     result = remember("CRITICAL: Never delete the production database")
-    assert "Error" not in result or "Saved" in result
+    assert result.startswith("SAVED file=")
 
 
 def test_recall_empty_store(tmp_path, monkeypatch):
@@ -226,8 +227,10 @@ def test_update_memory_accepts_scientific_notation_epoch(tmp_path, monkeypatch):
     from core.memory.store import get_memory_store
 
     entry = get_memory_store().search("worker cap", limit=1)[0].entry
-    out = update_memory("pernix.test_workers", f"{float(entry.epoch):.9e}", "The worker cap is max_concurrent_workers, currently 4.")
-    assert out.startswith("Updated entry")
+    out = update_memory(
+        "pernix.test_workers", f"{float(entry.epoch):.9e}", "The worker cap is max_concurrent_workers, currently 4."
+    )
+    assert out.startswith("UPDATED file=pernix.test_workers")
 
 
 def test_update_memory_rejects_lossy_epoch(tmp_path, monkeypatch):
@@ -235,4 +238,150 @@ def test_update_memory_rejects_lossy_epoch(tmp_path, monkeypatch):
     from core.tools.builtin.memory_tools import update_memory
 
     out = update_memory("pernix.test_workers", "1.5", "x")
-    assert out.startswith("Error: epoch must be")
+    assert out.startswith("NOT UPDATED — epoch must be")
+
+
+# ---------------------------------------------------------------------------
+# Write verdicts — a leading SAVED/NOT SAVED token plus a separate VERIFY
+# read-back token. Session 2026-08: a dedup refusal was neither "Error" nor
+# "Saved", and the model reported a save that never landed.
+# ---------------------------------------------------------------------------
+
+
+def test_remember_verifies_read_back(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.memory.store import get_memory_store
+    from core.tools.builtin.memory_tools import remember
+
+    content = "The heartbeat interval is 90 seconds and the watchdog fires after three misses."
+    out = remember(content, file="pernix.test_verify")
+    assert out.startswith("SAVED file=pernix.test_verify epoch=")
+    assert out.endswith(" VERIFY=OK")
+
+    epoch = int(out.split("epoch=")[1].split()[0])
+    assert get_memory_store().get_entry("pernix.test_verify", epoch).content == content
+
+
+def test_remember_duplicate_is_not_saved_and_names_the_supersede_call(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.tools.builtin.memory_tools import remember
+
+    content = "The nightly backup runs at 03:00 UTC and retains fourteen daily snapshots."
+    first = remember(content, file="pernix.test_dup")
+    assert first.startswith("SAVED file=")
+
+    second = remember(content, file="pernix.test_dup")
+    assert second.startswith("NOT SAVED — duplicate of pernix.test_dup@")
+    assert "update_memory(file='pernix.test_dup', epoch=" in second
+    assert "SAVED file=" not in second
+
+
+def test_remember_reports_missing_read_back(tmp_path, monkeypatch):
+    """The write path claimed success but nothing is on disk — never SAVED."""
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.memory.store import MemoryStore
+    from core.tools.builtin.memory_tools import remember
+
+    monkeypatch.setattr(MemoryStore, "get_entry", lambda self, f, e: None)
+    out = remember("A finding long enough to clear the dedup floor without tripping it.")
+    assert out.startswith("NOT SAVED — VERIFY=MISSING: write did not land")
+
+
+def test_remember_reports_mismatched_read_back(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.memory.format import MemoryEntry
+    from core.memory.store import MemoryStore
+    from core.tools.builtin.memory_tools import remember
+
+    monkeypatch.setattr(
+        MemoryStore,
+        "get_entry",
+        lambda self, f, e: MemoryEntry(file_name=f, content="something else entirely", epoch=e),
+    )
+    out = remember("A finding long enough to clear the dedup floor without tripping it.")
+    assert out.startswith("SAVED file=")
+    assert "VERIFY=MISMATCH — stored content differs from what you sent" in out
+    assert 'stored: "something else entirely"' in out
+
+
+def test_remember_sanitized_content_is_not_a_mismatch(tmp_path, monkeypatch):
+    """add_entry rewrites bare `---` rules; that is storage, not divergence."""
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.tools.builtin.memory_tools import remember
+
+    out = remember(
+        "Deployment steps for the box:\n---\nBuild, then compose up on the host.",
+        file="pernix.test_sanitize",
+    )
+    assert out.endswith("VERIFY=OK")
+
+
+def test_update_memory_verdicts(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.memory.store import get_memory_store
+    from core.tools.builtin.memory_tools import remember, update_memory
+
+    remember("The queue drains oldest-first and never reorders on retry.", file="pernix.test_upd")
+    epoch = get_memory_store().search("queue drains", limit=1)[0].entry.epoch
+
+    out = update_memory("pernix.test_upd", epoch, "The queue drains newest-first under backpressure.")
+    assert out == f"UPDATED file=pernix.test_upd epoch={epoch} VERIFY=OK"
+
+    missing = update_memory("pernix.test_upd", epoch + 99, "anything")
+    assert missing.startswith("NOT UPDATED — no entry with epoch=")
+
+    no_file = update_memory("pernix.test_absent", epoch, "anything")
+    assert no_file.startswith("NOT UPDATED — memory file 'pernix.test_absent' not found")
+
+    assert update_memory("", epoch, "x") == "NOT UPDATED — file and content are required"
+
+
+def test_forget_verdicts(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.memory.store import get_memory_store
+    from core.tools.builtin.memory_tools import forget, remember
+
+    remember("The canary suite caps at twenty-four entries before auto-admission stops.", file="pernix.test_del")
+    epoch = get_memory_store().search("canary suite caps", limit=1)[0].entry.epoch
+
+    out = forget("pernix.test_del", epoch)
+    assert out == f"DELETED file=pernix.test_del epoch={epoch} VERIFY=OK"
+    assert get_memory_store().get_entry("pernix.test_del", epoch) is None
+
+    again = forget("pernix.test_del", epoch)
+    assert again.startswith("NOT DELETED — no entry with epoch=")
+
+
+def test_forget_reports_entry_still_present(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.memory.format import MemoryEntry
+    from core.memory.store import MemoryStore, get_memory_store
+    from core.tools.builtin.memory_tools import forget, remember
+
+    remember("The reflect pass runs after every third assistant turn in long sessions.", file="pernix.test_ghost")
+    epoch = get_memory_store().search("reflect pass runs", limit=1)[0].entry.epoch
+
+    monkeypatch.setattr(
+        MemoryStore,
+        "get_entry",
+        lambda self, f, e: MemoryEntry(file_name=f, content="still here", epoch=e),
+    )
+    out = forget("pernix.test_ghost", epoch)
+    assert out.startswith("NOT DELETED — VERIFY=STILL-PRESENT")
+
+
+def test_verdicts_never_hedge(tmp_path, monkeypatch):
+    monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    from core.tools.builtin.memory_tools import forget, remember, update_memory
+
+    outs = [
+        remember("A durable finding about the scheduler that is long enough to be deduped."),
+        remember("A durable finding about the scheduler that is long enough to be deduped."),
+        remember(""),
+        update_memory("pernix.nope", 1, "x"),
+        forget("pernix.nope", 1),
+    ]
+    for out in outs:
+        assert "PARTIALLY" not in out.upper()
+        assert "MOSTLY" not in out.upper()
+        assert out.split()[0] in ("SAVED", "UPDATED", "DELETED", "NOT")
