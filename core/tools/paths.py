@@ -56,6 +56,92 @@ def workspace() -> Path:
     return Path(settings.workspace_dir).resolve()
 
 
+# Harness-data subtrees that live under DATA_DIR, never under the workspace.
+# `workspace` and `skills` are deliberately absent: the first is the tools'
+# own root and the second is already an allowed read root, so a path leading
+# with either is not a root-naming mistake.
+HARNESS_DATA_DIRS = frozenset(
+    {
+        "adaptive",
+        "telos",
+        "memories",
+        "canaries",
+        "kernels",
+        "sessions",
+        "logs",
+        "agent",
+        "cache",
+        "workflows",
+        "candor",
+    }
+)
+
+
+def data_root() -> Path:
+    """Absolute path of the harness data tree (data/), which holds every
+    subtree the workspace-rooted file tools cannot reach."""
+    from config import DATA_DIR
+
+    return Path(DATA_DIR).resolve()
+
+
+def root_mismatch_hint(path: str) -> str:
+    """Suffix explaining a workspace-root failure caused by a harness-data path.
+
+    glob/grep/file_read/file_write resolve relative paths under the workspace
+    root, so `data/telos` silently becomes <workspace>/data/telos and fails
+    with an error that reads as "wrong path" when the real fault is "wrong
+    root". Returns "" unless the path is one of those cases — an ordinary
+    workspace typo must keep its clean error.
+    """
+    if not path:
+        return ""
+    try:
+        ws = workspace()
+        data = data_root()
+    except Exception:
+        return ""
+
+    raw = path.strip()
+    while raw.startswith("./"):
+        raw = raw[2:]
+    if not raw:
+        return ""
+
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        try:
+            target = candidate.resolve()
+        except OSError:
+            return ""
+        # An absolute path inside the workspace is not a root mistake.
+        if not target.is_relative_to(data) or target.is_relative_to(ws):
+            return ""
+    else:
+        # The tools resolve relative paths under the workspace; if that
+        # resolution would have worked, the root was never the problem.
+        if (ws / raw).exists():
+            return ""
+        parts = Path(raw).parts
+        first = parts[0] if parts else ""
+        if first in ("data", data.name):
+            rest = Path(*parts[1:]) if len(parts) > 1 else None
+            # data/workspace/... is the workspace itself under its full name.
+            if rest is not None and (data / rest).is_relative_to(ws):
+                return ""
+        elif first in HARNESS_DATA_DIRS and (data / first).exists():
+            pass
+        else:
+            return ""
+
+    return (
+        f" — resolved against workspace root ({ws}). Harness data (telos ledgers, memory "
+        f"files, canary state) lives outside the workspace at {data}; use bash with an "
+        f"absolute path (e.g. ls {data}/telos/questions/) or purpose-built tools "
+        f"(telos_status, recall, search_sessions)."
+    )
+
+
 def kernel_state_root() -> Path | None:
     """Root of the session kernels' state trees (data/kernels), or None when
     the kernel is off. Read-only by intent: bound tool results are spilled to

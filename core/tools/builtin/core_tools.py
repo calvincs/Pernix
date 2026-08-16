@@ -13,6 +13,7 @@ from config import settings
 from core.tools.paths import (
     PROTECTED_DIRS,
     PROTECTED_FILES,
+    root_mismatch_hint,
 )
 from core.tools.paths import (
     allowed_read_roots as _allowed_roots,
@@ -415,7 +416,7 @@ def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
                     if len(entries) > 200:
                         result += f"\n[... {len(entries) - 200} more entries]"
                     return result
-            return f"Error: File not found: {path}"
+            return f"Error: File not found: {path}{root_mismatch_hint(path)}"
         if resolved.is_dir():
             entries = sorted(resolved.iterdir(), key=lambda e: (not e.is_dir(), e.name))
             lines = []
@@ -486,7 +487,7 @@ def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
 
         return _read_text_nofollow(resolved)
     except ValueError as e:
-        return f"Error: {e}"
+        return f"Error: {e}{root_mismatch_hint(path)}"
     except Exception as e:
         return f"Error reading file: {e}"
 
@@ -521,7 +522,7 @@ def file_write(path: str, content: str) -> str:
         logger.info("file_write path=%s bytes=%d", resolved, len(content))
         return f"Written {len(content)} chars to {resolved}"
     except ValueError as e:
-        return f"Error: {e}"
+        return f"Error: {e}{root_mismatch_hint(path)}"
     except Exception as e:
         return f"Error writing file: {e}"
 

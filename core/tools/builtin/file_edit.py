@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Generator
 
 from config import settings
+from core.tools.paths import root_mismatch_hint
 from core.tools.paths import safe_write_path as _safe_path
 
 logger = logging.getLogger("pernix.tools.file_edit")
@@ -395,7 +396,7 @@ def file_edit(path: str, old_string: str, new_string: str, replace_all: bool = F
     try:
         resolved = _safe_path(path)
     except ValueError as e:
-        return f"Error: {e}"
+        return f"Error: {e}{root_mismatch_hint(path)}"
 
     if not resolved.exists():
         if not old_string:
@@ -405,7 +406,7 @@ def file_edit(path: str, old_string: str, new_string: str, replace_all: bool = F
                 return f"Created new file: {resolved} ({len(new_string)} chars)"
             except Exception as e:
                 return f"Error creating file: {e}"
-        return f"Error: File not found: {path}"
+        return f"Error: File not found: {path}{root_mismatch_hint(path)}"
 
     if not resolved.is_file():
         return f"Error: Not a file: {path}"
@@ -485,10 +486,10 @@ def multiedit(path: str, edits: list[dict]) -> str:
     try:
         resolved = _safe_path(path)
     except ValueError as e:
-        return f"Error: {e}"
+        return f"Error: {e}{root_mismatch_hint(path)}"
 
     if not resolved.is_file():
-        return f"Error: File not found: {path}"
+        return f"Error: File not found: {path}{root_mismatch_hint(path)}"
 
     if _is_binary(resolved):
         return f"Error: Refusing to edit binary file: {path}. Use bash for binary edits."
