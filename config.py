@@ -288,6 +288,13 @@ class Settings:
     candor_enabled: bool = False
     candor_scout_brief: bool = True  # inject [OPERATIONAL INTEL] into scout preload
     candor_max_obs_per_turn: int = 200  # safety valve on turn-end emission volume
+    # Deterministic fetch routing (needs candor_enabled): http_get consults the
+    # calibrated per-domain fetch_ok rate before fetching and refuses domains
+    # that historically fail, pointing the agent at browse_web instead of
+    # burning a timeout on a bot wall. force=true on the call overrides.
+    fetch_routing_enabled: bool = True
+    fetch_routing_min_obs: int = 8  # below this the rate is noise; never reroute
+    fetch_routing_threshold: float = 0.40  # reroute when calibrated p(fetch_ok) < this
 
     # --- Gates / goals / heartbeats (long-running work, plan Phase 3) ---
     # Deterministic gates: user-authored shell checks that run before

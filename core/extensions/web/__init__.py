@@ -335,13 +335,125 @@ class _TavilyLimitError(Exception):
     pass
 
 
-def http_get(url: str, _context: dict | None = None) -> str:
+# ---------------------------------------------------------------------------
+# Fetch reliability — per-domain fetch_ok emission + deterministic reroute
+# ---------------------------------------------------------------------------
+
+# Bot walls answer HTTP 200 with challenge HTML, so a "successful" fetch that
+# matches the wall signature is still a failed fetch as far as reliability
+# history is concerned. The signature table lives in nudges (it drives the
+# post-failure hint); sharing it keeps the two classifiers from drifting.
+from core.harness.nudges import _BOT_DETECTION_RE as _WALL_RE  # noqa: E402
+
+
+def _fetch_domain(url: str) -> str | None:
+    """Domain key for reliability tracking: hostname, lowercased, minus `www.`.
+
+    None for anything that isn't a public-looking DNS name (IP literals,
+    single-label hosts) — reliability history is about sites, and loopback or
+    LAN outcomes would poison the aggregate.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    if not host or "." not in host:
+        return None
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+    return host[4:] if host.startswith("www.") else host
+
+
+def _record_fetch(domain: str | None, ok: bool, method: str) -> None:
+    """Log a fetch outcome to Candor. Fire-and-forget — never blocks the fetch.
+
+    Only actual attempts land here: SSRF/policy blocks and user cancellations
+    say nothing about the domain and must not count against it.
+    """
+    if domain is None or not settings.candor_enabled:
+        return
+    try:
+        from core.extensions.candor.bridge import get_candor_bridge
+
+        ts = int(time.time() * 1000)
+        ctx = {"method": method}
+        get_candor_bridge().record_nowait(
+            [
+                {
+                    "pred": "fetch_ok",
+                    "args": [domain],
+                    "stmt_type": "frequency",
+                    "outcome": ok,
+                    "ctx": ctx,
+                    "actor": "agent:pernix",
+                    "ts": ts,
+                },
+                {
+                    "pred": "fetch_ok",
+                    "args": ["*"],
+                    "stmt_type": "frequency",
+                    "outcome": ok,
+                    "ctx": {**ctx, "target": domain},
+                    "actor": "agent:pernix",
+                    "ts": ts,
+                },
+            ]
+        )
+    except Exception as e:
+        logger.debug("fetch_ok emission failed: %s", e)
+
+
+def _reliability_reroute(domain: str | None) -> str | None:
+    """Deterministic pre-flight: refuse a raw fetch of a domain whose calibrated
+    fetch_ok rate is below threshold, before spending a timeout on its bot wall.
+
+    The rate blends http and browse outcomes, which is the recovery valve: when
+    browse_web keeps succeeding on the domain the blended rate climbs back over
+    the threshold and raw fetches get probed again on their own.
+
+    Returns the refusal text, or None to proceed. Any reliability-layer error
+    means proceed — a degraded oracle must never take the fetch path down.
+    """
+    if domain is None or not (settings.candor_enabled and settings.fetch_routing_enabled):
+        return None
+    try:
+        from core.extensions.candor.bridge import get_candor_bridge
+
+        pred = get_candor_bridge().predict_sync("fetch_ok", [domain], timeout=2.0)
+    except Exception:
+        return None
+    if not pred or not isinstance(pred.get("p"), (int, float)):
+        return None
+    n = int(pred.get("observations") or 0)
+    p = float(pred["p"])
+    if n < settings.fetch_routing_min_obs or p >= settings.fetch_routing_threshold:
+        return None
+    return (
+        f"Skipped: operational memory shows fetches of {domain} succeed only {p:.0%} "
+        f"of the time over {n} logged attempts (usually a bot wall), so the raw HTTP "
+        f"attempt was not made. Use browse_web for this URL — it renders like a real "
+        f"browser — or load_skill('crawl4ai-fetch') if browse_web also fails. To force "
+        f"the raw attempt anyway, call http_get with force=true."
+    )
+
+
+def http_get(url: str, force: bool = False, _context: dict | None = None) -> str:
     """Fetch content from a URL. Returns plain text, max 100KB."""
     allow_loopback = _loopback_allowed()
     try:
         url = _validate_url(url, allow_loopback=allow_loopback)
     except ValueError as e:
         return f"Error: {e}"
+    domain = _fetch_domain(url)
+    if not force:
+        rerouted = _reliability_reroute(domain)
+        if rerouted:
+            return rerouted
     import httpx
 
     try:
@@ -359,13 +471,16 @@ def http_get(url: str, _context: dict | None = None) -> str:
                     continue
                 resp.raise_for_status()
                 content = resp.text
+                _record_fetch(domain, not _WALL_RE.search(content[:8000]), method="http")
                 if len(content) > settings.max_fetch_size:
                     content = content[: settings.max_fetch_size] + f"\n[truncated at {settings.max_fetch_size} bytes]"
                 return content
+            _record_fetch(domain, False, method="http")
             return f"Error fetching {url}: too many redirects"
     except ValueError as e:
         return f"Error: redirect blocked: {e}"
     except Exception as e:
+        _record_fetch(domain, False, method="http")
         return f"Error fetching {url}: {e}"
 
 
@@ -710,14 +825,21 @@ def browse_web(url: str, _context: dict | None = None) -> str:
     # Inner timeout = browser_timeout + 10s grace; the executor's outer timeout
     # (registered tool timeout) is the upper bound.
     try:
-        return fut.result(timeout=settings.browser_timeout + 10)
+        result = fut.result(timeout=settings.browser_timeout + 10)
     except _futures.TimeoutError:
         fut.cancel()
-        return f"Error: browse_web timed out after {settings.browser_timeout}s for {url}"
+        result = f"Error: browse_web timed out after {settings.browser_timeout}s for {url}"
     except _futures.CancelledError:
+        # A cancellation says nothing about the domain — don't record it.
         return "Error: browse_web was cancelled"
     except Exception as e:
-        return f"Error navigating to {url}: {e}"
+        result = f"Error navigating to {url}: {e}"
+    _record_fetch(
+        _fetch_domain(url),
+        not result.startswith("Error") and not _WALL_RE.search(result[:8000]),
+        method="browse",
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -769,11 +891,23 @@ def register(reg) -> None:
     reg.register(
         name="http_get",
         func=http_get,
-        description="Fetch content from a URL. Returns plain text. Max 100KB. Follows redirects.",
+        description=(
+            "Fetch content from a URL. Returns plain text. Max 100KB. Follows redirects. "
+            "Domains with a poor logged fetch success rate are refused up front with a "
+            "pointer to browse_web (deterministic reroute from operational memory); "
+            "force=true attempts the raw fetch anyway."
+        ),
         parameters={
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "URL to fetch"},
+                "force": {
+                    "type": "boolean",
+                    "description": (
+                        "Attempt the raw HTTP fetch even when operational memory says "
+                        "this domain usually fails. Default false."
+                    ),
+                },
             },
             "required": ["url"],
         },
