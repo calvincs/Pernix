@@ -43,6 +43,9 @@ async def _run_reflect(mock_llm_client, monkeypatch, response, *, excluded):
     monkeypatch.setattr("config.settings.reflect_enabled", True)
     monkeypatch.setattr("config.settings.reflect_min_messages", 2)
     monkeypatch.setattr("config.settings.reflect_max_retries", 3)
+    # The effector under test only exists on the synchronous, retry-capable
+    # path; interactive sessions defer their grade by default.
+    monkeypatch.setattr("config.settings.reflect_deferred_normal", False)
 
     sid = db.create_session()
     db.add_message(sid, "user", "Create a report")

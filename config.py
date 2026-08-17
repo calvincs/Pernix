@@ -543,6 +543,24 @@ class Settings:
         True  # Parse reflect's per-turn experience read (sentiment, friction, user observations)
         # and feed it to Candor / post-mortems / user-profile memory. Prompt always asks for it.
     )
+    # Interactive turns don't pay for their own verification. Reflect is
+    # synchronous today — 370 runs over 14 days on the box measured a 16.5s
+    # median and a 47s p90 between the agent's last word and IDLE_READY, all
+    # of it in front of a waiting human. With this on, "normal" sessions
+    # finalize immediately and the grade runs later, observe-only: lessons,
+    # post-mortem and experience records are written exactly as before, but no
+    # verdict can re-run the turn. Retry-capable reflect stays synchronous for
+    # cron/worker/canary, where nobody is waiting and a retry is free of
+    # interaction cost. Deterministic gates still run (and still clamp)
+    # in-line — they're cheap and material by construction.
+    reflect_deferred_normal: bool = True
+    reflect_defer_idle_s: int = (
+        300  # Quiet period before a deferred grade runs. A turn superseded by a newer
+        # one inside this window is never graded — only the latest completed turn is.
+        # Keep this comfortably above one turn's tail: the grade only runs on an
+        # IDLE_READY session, so a near-zero delay finds the turn still finalizing
+        # and skips it.
+    )
     reflect_digest_max_chars_per_excerpt: int = (
         2000  # Per-call result_excerpt cap inside the turn_digest (defensive trim at parse time)
     )

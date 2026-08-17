@@ -68,8 +68,9 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
   Ground every field in transcript evidence: the user's actual words and reactions, not your judgment of the work's quality.
 
 RULES:
+- MATERIALITY BAR FOR NON-PASS VERDICTS: A retry is warranted only when a concrete user-facing deliverable is missing, incomplete, or factually false — or when a success claim (file written, job scheduled, memory saved, command executed) is unsupported by verifiable evidence. Plan-literalism (deviating from the scout plan when the outcome was delivered), tone/length mismatches, and defensible judgment calls are PASS — record them in the lessons fields and in `experience`, never as a retry. A non-pass verdict MUST name a concrete, checkable failure_cause; if you cannot name one, the verdict is "pass".
 - Be strict: if the user asked for a file/deliverable and none was created, that's a retry.
-- Be strict: if the user asked to use a specific tool or approach and the agent used something else, that's a retry.
+- Be strict: if the USER named a specific tool or approach and the agent used something else, that's a retry. This covers the user's own instruction only — scout's plan is the agent's planning artifact, not a contract with the user, so departing from SCOUT DELIVERABLES PLAN / PLANNED APPROACH while still delivering the outcome is a pass.
 - Be fair: if the agent produced a reasonable answer even without creating files, that can be a pass.
 - Be concise: the retry strategy must be actionable, not vague.
 - Verdict "pass" should be the default for conversational exchanges, questions answered, simple requests fulfilled.
@@ -754,6 +755,26 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
     # fallback? No — keep strict; downstream treats "none" on non-pass as missing.
     result.failure_cause = cause
 
+    # Self-contradiction guard: a non-pass verdict that explicitly attributes
+    # the failure to "none" is claiming a failure and denying one in the same
+    # object. Observed in the 14-day verdict review (Aug 2026): verdict=escalate,
+    # failure_cause="none", reasoning "the ask was fully satisfied" — a
+    # strictness artifact that cost a real escalation notification.
+    # Scope is deliberately narrow: only an EXPLICIT "none" trips this. A
+    # missing or unrecognized failure_cause is malformed output, and malformed
+    # output stays on the conservative side (see the verdict coercion above,
+    # which goes the other way for the same reason).
+    if result.verdict in ("retry", "escalate") and data.get("failure_cause") == "none":
+        logger.warning(
+            "Reflect verdict %r carried failure_cause=none — coercing to 'pass' (%s)",
+            result.verdict,
+            (result.reasoning or "")[:120],
+        )
+        result.verdict = "pass"
+        result.reasoning = (
+            result.reasoning or ""
+        ) + " [verdict coerced to pass: non-pass verdict carried failure_cause=none]"
+
     try:
         conf = float(data.get("confidence", 0.0))
     except (TypeError, ValueError):
@@ -884,6 +905,17 @@ def _sanitize_turn_digest(digest: dict) -> dict:
     return cleaned
 
 
+def _forced_cause(current: str, fallback: str) -> str:
+    """Attribution for a verdict the harness forced, not the model.
+
+    "none" is the schema's absence value, not a cause — and it is truthy, so
+    the `current or fallback` idiom this replaces never fired: every clamped
+    or guard-forced verdict shipped with failure_cause="none", the exact
+    self-contradiction _result_from_data coerces away one step earlier.
+    """
+    return fallback if current in ("", "none") else current
+
+
 def _has_pass_with_lessons(result: ReflectResult) -> bool:
     """True when verdict=pass but the model populated retry-shaped fields.
 
@@ -904,6 +936,7 @@ def _write_post_mortem(
     scout_report,
     tool_summary: dict | None,
     extra_payload: dict | None = None,
+    reflect_mode: str = "sync",
 ) -> None:
     """Persist a post-mortem artifact for this reflect invocation (Phase 2c).
 
@@ -912,10 +945,16 @@ def _write_post_mortem(
     loss, so we log failures but never let them propagate.
 
     extra_payload merges into the JSON payload (e.g. parse_error markers).
+
+    reflect_mode stamps which grading regime produced this row ("sync" =
+    blocking, retry-capable; "deferred" = observe-only background grade).
+    The verdict sample now spans both, and a rate computed across the two
+    without splitting them is meaningless.
     """
     try:
         payload = {
             "verdict": result.verdict,
+            "reflect_mode": reflect_mode,
             "reasoning": result.reasoning,
             "diagnostic": result.diagnostic,
             "what_worked": result.what_worked,
@@ -1050,6 +1089,7 @@ async def reflect_on_session(
     termination_reason: str | None = None,
     prior_termination_reasons: list[str] | None = None,
     gate_results: list | None = None,
+    reflect_mode: str = "sync",
 ) -> ReflectResult:
     """Analyze a completed session turn and decide if the task was fulfilled.
 
@@ -1065,6 +1105,9 @@ async def reflect_on_session(
             provided, reflect grades against THIS turn's request, not the latest
             user message in the DB (which may be a queued message for a future
             turn during rapid traffic).
+        reflect_mode: "sync" (blocking, gates the retry loop) or "deferred"
+            (observe-only background grade). Stamped on the post-mortem so the
+            two regimes stay separable in verdict-rate analysis.
 
     Returns:
         ReflectResult with verdict and optional lessons
@@ -1082,7 +1125,7 @@ async def reflect_on_session(
     )
     if not user_request or not evidence:
         r = ReflectResult(verdict="pass", reasoning="No user request found to verify")
-        _write_post_mortem(session_id, attempt, r, scout_report, tool_summary)
+        _write_post_mortem(session_id, attempt, r, scout_report, tool_summary, reflect_mode=reflect_mode)
         return r
 
     if extra_evidence:
@@ -1220,7 +1263,9 @@ async def reflect_on_session(
                     session_id,
                 )
                 result.verdict = "escalate"
-                result.failure_cause = result.failure_cause or "task"
+                # The wall is the task's shape against the round budget, not a
+                # bad plan or a bad execution of one.
+                result.failure_cause = _forced_cause(result.failure_cause, "task")
                 if not result.missing:
                     result.missing = (
                         "Agent hit round_ceiling on consecutive attempts. Either split "
@@ -1244,7 +1289,9 @@ async def reflect_on_session(
                         names,
                     )
                     result.verdict = "retry"
-                    result.failure_cause = result.failure_cause or "task"
+                    # The gate names work the turn did not finish; the model's
+                    # own attribution wins when it identified something else.
+                    result.failure_cause = _forced_cause(result.failure_cause, "task")
                     result.reasoning = (
                         f"[gate clamp] Deterministic gate(s) failing: {names}. "
                         f"A pass verdict is unreachable while a gate fails. "
@@ -1287,7 +1334,15 @@ async def reflect_on_session(
             extra_payload = extra_payload or {}
             if gate_results:
                 extra_payload["gates"] = [g.to_payload() for g in gate_results]
-            _write_post_mortem(session_id, attempt, result, scout_report, tool_summary, extra_payload=extra_payload)
+            _write_post_mortem(
+                session_id,
+                attempt,
+                result,
+                scout_report,
+                tool_summary,
+                extra_payload=extra_payload,
+                reflect_mode=reflect_mode,
+            )
             await _save_user_observations(session_id, result)
             return result
 
@@ -1332,11 +1387,12 @@ async def reflect_on_session(
             scout_report,
             tool_summary,
             extra_payload={"parse_error": True, "raw_response_excerpt": (raw or "")[:500]},
+            reflect_mode=reflect_mode,
         )
         return r
 
     except Exception as e:
         logger.warning("Reflect failed for session %s: %s", session_id, e)
         r = ReflectResult(verdict="pass", reasoning=f"Reflect error: {e}")
-        _write_post_mortem(session_id, attempt, r, scout_report, tool_summary)
+        _write_post_mortem(session_id, attempt, r, scout_report, tool_summary, reflect_mode=reflect_mode)
         return r

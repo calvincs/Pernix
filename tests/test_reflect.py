@@ -813,3 +813,221 @@ def test_recent_termination_reasons_helper():
     assert out[0] == "round_ceiling"
     assert out[1] == "round_ceiling"
     assert out[2] == "complete"
+
+
+# ---------------------------------------------------------------------------
+# Materiality bar (prompt text) — Aug 2026 verdict review
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_states_the_materiality_bar():
+    """The bar has to be IN the prompt to bind the grader. Manual review of 14
+    days of verdicts found ~half the non-pass verdicts were strictness
+    artifacts (tone, plan-literalism), so the rule is load-bearing text."""
+    from core.reflect import REFLECT_PROMPT
+
+    assert "MATERIALITY BAR FOR NON-PASS VERDICTS" in REFLECT_PROMPT
+    assert "A non-pass verdict MUST name a concrete, checkable failure_cause" in REFLECT_PROMPT
+    # It must frame the strictness rules, not trail them.
+    assert REFLECT_PROMPT.index("MATERIALITY BAR") < REFLECT_PROMPT.index(
+        "if the user asked for a file/deliverable and none was created"
+    )
+
+
+def test_prompt_scopes_tool_literalism_to_the_user():
+    """Deviating from scout's plan while delivering the outcome is not a
+    failure — scout's plan is the agent's own artifact, not the user's ask."""
+    from core.reflect import REFLECT_PROMPT
+
+    assert "if the USER named a specific tool or approach" in REFLECT_PROMPT
+    # The unscoped form (any "user asked to use a specific tool" reading that
+    # swept in the scout plan) must be gone.
+    assert "if the user asked to use a specific tool or approach" not in REFLECT_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Consistency guard: non-pass verdict that attributes nothing
+# ---------------------------------------------------------------------------
+
+
+def test_retry_with_failure_cause_none_is_coerced_to_pass():
+    r = _result_from_data(
+        {"verdict": "retry", "reasoning": "the ask was fully satisfied", "failure_cause": "none"},
+        "m",
+        0,
+    )
+    assert r.verdict == "pass"
+    assert "coerced to pass" in r.reasoning
+    assert "the ask was fully satisfied" in r.reasoning
+
+
+def test_escalate_with_failure_cause_none_is_coerced_to_pass():
+    """The observed specimen: verdict=escalate, failure_cause=none, reasoning
+    saying the request was met — a self-contradiction that cost a real
+    'needs attention' notification."""
+    r = _result_from_data(
+        {"verdict": "escalate", "reasoning": "everything the user asked for was delivered", "failure_cause": "none"},
+        "m",
+        0,
+    )
+    assert r.verdict == "pass"
+
+
+def test_retry_with_a_named_failure_cause_is_untouched():
+    r = _result_from_data(
+        {"verdict": "retry", "reasoning": "report.md was never written", "failure_cause": "agent"},
+        "m",
+        0,
+    )
+    assert r.verdict == "retry"
+    assert r.failure_cause == "agent"
+    assert "coerced" not in r.reasoning
+
+
+def test_missing_failure_cause_does_not_coerce_a_retry():
+    """Scope guard: only an EXPLICIT "none" is a self-contradiction. Absent or
+    unrecognized attribution is malformed output, and malformed output keeps
+    the conservative verdict (mirroring the invalid-verdict→retry coercion)."""
+    assert _result_from_data({"verdict": "retry", "reasoning": "no file"}, "m", 0).verdict == "retry"
+    assert (
+        _result_from_data({"verdict": "retry", "reasoning": "no file", "failure_cause": "solar-flare"}, "m", 0).verdict
+        == "retry"
+    )
+
+
+def test_coercion_suppresses_the_retry_tool_effector():
+    """A coerced pass must not carry retry-only machinery forward."""
+    r = _result_from_data(
+        {
+            "verdict": "retry",
+            "reasoning": "tone was off",
+            "failure_cause": "none",
+            "retry_without_tools": ["spawn_worker"],
+        },
+        "m",
+        0,
+    )
+    assert r.verdict == "pass"
+    assert r.retry_without_tools == []
+
+
+# ---------------------------------------------------------------------------
+# reflect_mode: which grading regime produced the record
+# ---------------------------------------------------------------------------
+
+
+async def test_post_mortem_stamps_reflect_mode_sync_by_default(mock_llm_client):
+    from db import models as db
+
+    sid = db.create_session(title="Mode sync")
+    db.add_message(sid, "user", "Do the thing")
+    db.add_message(sid, "assistant", "Done")
+
+    mock_llm_client.responses = [
+        ChatResponse(
+            content=json.dumps({"verdict": "pass", "reasoning": "ok"}),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+    await reflect_on_session(sid)
+    payload = json.loads(db.list_post_mortems(session_id=sid)[0]["payload_json"])
+    assert payload["reflect_mode"] == "sync"
+
+
+async def test_post_mortem_stamps_reflect_mode_deferred(mock_llm_client):
+    """The verdict sample now spans two regimes; the Sept 7 calibration review
+    needs to split them."""
+    from db import models as db
+
+    sid = db.create_session(title="Mode deferred")
+    db.add_message(sid, "user", "Do the thing")
+    db.add_message(sid, "assistant", "Done")
+
+    mock_llm_client.responses = [
+        ChatResponse(
+            content=json.dumps({"verdict": "pass", "reasoning": "ok"}),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+    await reflect_on_session(sid, reflect_mode="deferred")
+    payload = json.loads(db.list_post_mortems(session_id=sid)[0]["payload_json"])
+    assert payload["reflect_mode"] == "deferred"
+
+
+# ---------------------------------------------------------------------------
+# Forced verdicts must carry a real cause ("none" is truthy — see _forced_cause)
+# ---------------------------------------------------------------------------
+
+
+def test_forced_cause_replaces_the_absence_value():
+    from core.reflect import _forced_cause
+
+    assert _forced_cause("none", "task") == "task"
+    assert _forced_cause("", "task") == "task"
+    assert _forced_cause("env", "task") == "env"
+
+
+async def test_ceiling_loop_escalate_carries_a_real_failure_cause(mock_llm_client):
+    """The guard forces escalate; shipping it with failure_cause="none" is the
+    same self-contradiction _result_from_data coerces away, minted downstream
+    of that coercion where nothing can catch it."""
+    from db import models as db
+
+    sid = db.create_session(title="Ceiling cause")
+    db.add_message(sid, "user", "Transcribe massive video")
+    db.add_message(sid, "assistant", "Hit max rounds before completing")
+
+    mock_llm_client.responses = [
+        ChatResponse(
+            # No failure_cause key → parses to "none" without being coerced.
+            content=json.dumps({"verdict": "retry", "reasoning": "More rounds might help"}),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+
+    result = await reflect_on_session(
+        sid,
+        termination_reason="round_ceiling",
+        prior_termination_reasons=["round_ceiling"],
+    )
+    assert result.verdict == "escalate"
+    assert result.failure_cause == "task"
+
+
+async def test_ceiling_loop_keeps_the_models_own_cause(mock_llm_client):
+    from db import models as db
+
+    sid = db.create_session(title="Ceiling cause kept")
+    db.add_message(sid, "user", "Transcribe massive video")
+    db.add_message(sid, "assistant", "Hit max rounds before completing")
+
+    mock_llm_client.responses = [
+        ChatResponse(
+            content=json.dumps({"verdict": "retry", "reasoning": "network kept dropping", "failure_cause": "env"}),
+            tool_calls=None,
+            usage=TokenUsage(10, 5, 15),
+            model="test",
+            provider="fake",
+            finish_reason="stop",
+        )
+    ]
+
+    result = await reflect_on_session(
+        sid,
+        termination_reason="round_ceiling",
+        prior_termination_reasons=["round_ceiling"],
+    )
+    assert result.verdict == "escalate"
+    assert result.failure_cause == "env"

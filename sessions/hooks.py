@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import dataclass, field
+from typing import Any
 
 from config import settings
 from db import models as db
@@ -69,7 +71,9 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
     if settings.gates_enabled and session_obj:
         gate_results = await _run_turn_gates(session_id, session_obj, emit=emit)
 
-    # Reflect: post-execution verification
+    # Reflect: post-execution verification. For interactive sessions this may
+    # only schedule the grade (see _reflect_is_deferred) — the gates above are
+    # then the sole synchronous verification this turn gets.
     if settings.reflect_enabled and session_obj:
         await _maybe_reflect(session_id, session, emit=emit, session_obj=session_obj, gate_results=gate_results)
     elif gate_results and session_obj:
@@ -81,6 +85,9 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
 
     # Candor: feed this turn's operational outcomes to the add-on store.
     # Runs after reflect so the verdict is available. Mechanical, no LLM.
+    # When the grade is deferred there is no verdict yet: the tool/termination
+    # outcomes go now, and _deferred_candor emits the verdict and experience
+    # observations when the background grade lands.
     if settings.candor_enabled and session_obj:
         await _maybe_candor(session_id, session, session_obj=session_obj)
 
@@ -452,9 +459,12 @@ def _same_failure_repeating(session_id: str, turn_started_iso: str | None = None
 
 
 def _apply_gate_retry_fallback(session_id: str, session: dict, session_obj, gate_results, emit=None) -> None:
-    """When Reflect doesn't run (disabled, or skipped for a short turn), a
+    """When Reflect's verdict can't gate the turn (reflect disabled, skipped
+    for a short turn, or deferred to an observe-only background grade), a
     failing gate still requests the retry — subject to the same cap Reflect
-    honors. AWAITING_USER and errored turns deliberately get no fallback:
+    honors. A gate result is deterministic and material by construction, so it
+    keeps its clamp even where LLM verdicts lost theirs.
+    AWAITING_USER and errored turns deliberately get no fallback:
     waiting on a human is a legitimate block, and error turns lack reliable
     evidence."""
     from core.gates import failing, format_retry_guidance
@@ -488,6 +498,306 @@ def _apply_gate_retry_fallback(session_id: str, session: dict, session_obj, gate
                 "strategy": "",
             }
         )
+
+
+async def _recall_lesson_evidence(session_id: str, messages: list) -> str:
+    """Past-lesson recall block appended to reflect's evidence blob.
+
+    Shared by the synchronous and deferred grading paths so both verdicts are
+    formed against the same evidence. Never raises: a memory problem must not
+    cost the turn its verdict.
+    """
+    try:
+        last_user_msg = next(
+            (m["content"] for m in reversed(messages) if m["role"] == "user" and m.get("content")),
+            "",
+        )
+        if not last_user_msg:
+            return ""
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if not store:
+            return ""
+        lessons = await asyncio.to_thread(store.search_lessons, last_user_msg, limit=3)
+        if not lessons:
+            return ""
+        import time as _t
+
+        _now_ts = int(_t.time())
+        lines = ["## Past lessons that may apply (verify current relevance — codebase moves fast)"]
+        for r in lessons:
+            _age_d = max(0, (_now_ts - int(r.entry.epoch or _now_ts)) // 86400)
+            _age_s = f"{_age_d}d ago" if _age_d > 0 else "today"
+            lines.append(f"- [{r.entry.file_name}, {_age_s}] {r.entry.content[:400]}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.debug("Reflect lesson recall failed for %s: %s", session_id, e)
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Deferred reflect — observe-only grading for interactive sessions
+# ---------------------------------------------------------------------------
+
+
+def _reflect_is_deferred(session: dict) -> bool:
+    """True when this session's reflect grade runs in the background.
+
+    Only interactive ("normal") sessions defer: they're the ones with a human
+    watching the turn finish (measured: 16.5s median, 47s p90 of reflect
+    latency in front of them, and roughly half the resulting non-pass verdicts
+    were strictness artifacts that shouldn't have re-run anything).
+    cron/worker/canary keep the synchronous retry-capable path — nobody is
+    waiting, and an unattended retry is the point.
+    """
+    return bool(settings.reflect_deferred_normal) and (session.get("session_type") or "normal") == "normal"
+
+
+@dataclass
+class _DeferredGrade:
+    """Turn-end snapshot the background grade runs against.
+
+    Everything here is copied at scheduling time. `session.turn` is replaced
+    wholesale at the next turn boundary, so the deferred task must neither read
+    from nor write to it — the snapshot is its only view of the graded turn.
+    """
+
+    session_id: str
+    ticket: int  # matched against session._deferred_reflect_seq to detect supersession
+    turn_id: int
+    turn_user_msg_id: int | None
+    attempt: int
+    tool_summary: dict = field(default_factory=dict)
+    scout_report: Any = None
+    termination_reason: str | None = None
+    prior_termination_reasons: list = field(default_factory=list)
+    gate_results: list = field(default_factory=list)
+    # Candor context, captured here because both move after the turn: the
+    # model override is restored at turn end, and the session row is re-read.
+    model: str = ""
+    session_kind: str = "normal"
+
+
+def _deferred_grade_superseded(session_obj, snap: _DeferredGrade) -> str | None:
+    """Reason this snapshot is stale, or None when it's still gradable.
+
+    Rapid-fire policy: only the latest completed turn gets graded. A turn the
+    user has already moved past is explicitly marked ungraded rather than
+    graded late against a transcript that has since grown.
+    """
+    from sessions import state_v2 as sv2
+    from sessions.manager import get_manager
+
+    live = get_manager().get(snap.session_id)
+    if live is not None and live is not session_obj:
+        return "session object was replaced (reaped and re-created)"
+    if getattr(session_obj, "_deferred_reflect_seq", 0) != snap.ticket:
+        return "a later turn scheduled its own grade"
+    if getattr(session_obj, "_turn_id", 0) != snap.turn_id:
+        return "turn counter advanced"
+    if session_obj.current_turn_user_msg_id is not None:
+        return "a turn is in flight"
+    state = sv2._current_state(session_obj)
+    if state is not sv2.SessionStateV2.IDLE_READY:
+        return f"session is {state.value}"
+    return None
+
+
+async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj, gate_results, emit=None) -> None:
+    """Hand this turn's grade to a background task and return immediately."""
+    from sessions.manager import get_manager
+
+    try:
+        termination_history = await asyncio.to_thread(db.recent_termination_reasons, session_id, 3)
+    except Exception as e:
+        logger.debug("Failed to fetch termination history for %s: %s", session_id, e)
+        termination_history = []
+
+    session_obj._deferred_reflect_seq += 1
+    snap = _DeferredGrade(
+        session_id=session_id,
+        ticket=session_obj._deferred_reflect_seq,
+        turn_id=getattr(session_obj, "_turn_id", 0),
+        turn_user_msg_id=getattr(session_obj, "current_turn_user_msg_id", None),
+        attempt=session_obj.turn.reflect_count + 1,
+        tool_summary=dict(session_obj.turn.tool_summary or {}),
+        scout_report=session_obj.last_scout_report,
+        termination_reason=getattr(session_obj, "termination_reason", None),
+        prior_termination_reasons=termination_history[1:] if termination_history else [],
+        gate_results=list(gate_results or []),
+        model=getattr(session_obj, "model_override", None) or settings.llm_model or "default",
+        session_kind=session.get("session_type") or "normal",
+    )
+
+    delay = max(0, int(settings.reflect_defer_idle_s))
+    # Fire-and-forget by design: if the process dies before the grade runs the
+    # turn is simply ungraded. _spawn_detached only supplies the strong task
+    # ref and the failure log — nothing here is awaited by the turn.
+    get_manager()._spawn_detached(
+        _deferred_reflect_task(session_obj, snap),
+        f"deferred-reflect:{session_id[:12]}",
+    )
+    logger.info(
+        "Reflect deferred for session %s: grading in %ds (observe-only, ticket=%d)",
+        session_id,
+        delay,
+        snap.ticket,
+    )
+    if emit:
+        emit({"type": "reflect.deferred_scheduled", "delay_s": delay})
+
+
+async def _deferred_reflect_task(session_obj, snap: _DeferredGrade) -> None:
+    """Wait out the quiet period, then grade the turn if it's still the latest."""
+    await asyncio.sleep(max(0, int(settings.reflect_defer_idle_s)))
+
+    stale = _deferred_grade_superseded(session_obj, snap)
+    if stale:
+        logger.info("Deferred reflect skipped for %s: %s", snap.session_id, stale)
+        # Durable marker so the gap in graded turns is explainable later.
+        # "notice" rows are filtered from LLM context by the compiler.
+        try:
+            await asyncio.to_thread(
+                db.add_message,
+                snap.session_id,
+                "notice",
+                "[reflect deferred — superseded by a newer turn, this turn ungraded]",
+            )
+        except Exception as e:
+            logger.debug("Deferred-reflect supersede notice insert skipped: %s", e)
+        return
+
+    await _run_deferred_reflect(session_obj, snap)
+
+
+async def _deferred_candor(snap: _DeferredGrade, result) -> None:
+    """Feed the deferred verdict and experience read to Candor.
+
+    The synchronous _maybe_candor already emitted this turn's tool and
+    termination outcomes — with no verdict, because the grade hadn't run yet.
+    Verdict and interaction-quality are the two families only reflect can
+    produce, so without this every interactive turn would lose exactly the
+    signal interactive sessions exist to carry (sentiment, friction,
+    clarification loops).
+
+    Tool/turn observations are suppressed by handing the builder an empty
+    summary rather than by delta bookkeeping: the per-turn ledger
+    (session.turn.candor_emitted / candor_reflect) belongs to a turn that is
+    over, and the deferred path never writes to session.turn.
+    """
+    if not settings.candor_enabled or snap.session_kind == "canary":
+        return
+
+    import time as _time
+
+    try:
+        from core.extensions.candor.bridge import get_candor_bridge
+        from core.extensions.candor.emit import build_experience_observations, build_turn_observations
+
+        ts_ms = int(_time.time() * 1000)
+        # attempt > 1 ⟺ turn.reflect_count was non-zero when this was snapshotted.
+        is_retry = snap.attempt > 1
+        observations, _emitted = build_turn_observations(
+            tool_summary={},  # already observed on the synchronous path
+            already_emitted={},
+            termination_reason=None,  # ditto
+            reflect_verdict=result.verdict,
+            failure_cause=result.failure_cause,
+            model=snap.model,
+            session_kind=snap.session_kind,
+            is_retry=is_retry,
+            ts_ms=ts_ms,
+            max_obs=settings.candor_max_obs_per_turn,
+        )
+        if result.experience and settings.reflect_experience:
+            observations.extend(
+                build_experience_observations(
+                    experience=result.experience,
+                    model=snap.model,
+                    session_kind=snap.session_kind,
+                    is_retry=is_retry,
+                    ts_ms=ts_ms,
+                )
+            )
+        if not observations:
+            return
+        observations = observations[: settings.candor_max_obs_per_turn]
+        # Bounded wait as on the sync path, though nothing is blocked on us
+        # here: if the executor is busy the job still completes, just later.
+        await asyncio.wait_for(get_candor_bridge().record(observations), timeout=10)
+    except asyncio.TimeoutError:
+        logger.warning("Deferred Candor record still queued after 10s — continuing without waiting")
+    except Exception as e:
+        logger.warning("Deferred Candor emission failed for %s: %s", snap.session_id, e)
+
+
+async def _run_deferred_reflect(session_obj, snap: _DeferredGrade) -> None:
+    """Grade the snapshotted turn, observe-only.
+
+    Writes exactly what the synchronous path writes — reflect row, post-mortem,
+    lessons, experience, user observations, Candor — and nothing else. No retry flag,
+    no state transition, no write to session.turn: by the time this runs the
+    turn is finished, and a new one may already own the session.
+    """
+    import json
+
+    session_id = snap.session_id
+    # The ref covers the grade itself, not the quiet period — a sleeping task
+    # is nothing to protect from the reaper, and holding it for 5 minutes would
+    # make every graded session look busy to snooze.
+    session_obj.add_background_ref()
+    try:
+        from core.reflect import reflect_on_session
+
+        messages = await asyncio.to_thread(db.get_messages, session_id, last=REFLECT_TAIL_MESSAGES)
+        extra_evidence = await _recall_lesson_evidence(session_id, messages)
+
+        result = await reflect_on_session(
+            session_id,
+            emit=None,  # reflect.start/.done describe a blocking grade; this one isn't
+            attempt=snap.attempt,
+            tool_summary=snap.tool_summary or None,
+            scout_report=snap.scout_report,
+            extra_evidence=extra_evidence,
+            turn_user_msg_id=snap.turn_user_msg_id,
+            termination_reason=snap.termination_reason,
+            prior_termination_reasons=snap.prior_termination_reasons,
+            gate_results=snap.gate_results or None,
+            reflect_mode="deferred",
+        )
+
+        reflect_event = {
+            "verdict": result.verdict,
+            "reasoning": result.reasoning,
+            "diagnostic": result.diagnostic,
+            "what_worked": result.what_worked,
+            "what_failed": result.what_failed,
+            "strategy": result.strategy,
+            "missing": result.missing,
+            "failure_cause": result.failure_cause,
+            "confidence": result.confidence,
+            "latency_ms": result.reflect_latency_ms,
+            "reflect_model": result.reflect_model,
+            # Regime marker: this verdict never had the power to retry the
+            # turn, so verdict rates across the two modes are not comparable.
+            "reflect_mode": "deferred",
+        }
+        await asyncio.to_thread(db.add_message, session_id, "reflect", json.dumps(reflect_event))
+        await _deferred_candor(snap, result)
+
+        session_obj.emit_event({"type": "reflect.deferred", **reflect_event})
+        logger.info(
+            "Deferred reflect verdict=%s for session %s (observe-only): %s",
+            result.verdict,
+            session_id,
+            result.reasoning,
+        )
+    except Exception as e:
+        # Observe-only: a failed background grade costs a record, not a turn.
+        logger.warning("Deferred reflect failed for %s: %s", session_id, e)
+    finally:
+        session_obj.remove_background_ref()
 
 
 async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=None, gate_results=None) -> None:
@@ -619,6 +929,19 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             _apply_gate_retry_fallback(session_id, session, session_obj, gate_results, emit=emit)
         return
 
+    # Deferred grading (interactive sessions): the verdict is worth having, but
+    # not worth holding a human at FINALIZING for it — and with retries off the
+    # table for this path, nothing about the turn can change once it lands.
+    # Gates already ran synchronously above; their clamp is now the only
+    # mechanical retry path for these turns, which is the intent: a failing
+    # deterministic check is material by construction, an LLM strictness
+    # artifact is not.
+    if _reflect_is_deferred(session):
+        if gate_results:
+            _apply_gate_retry_fallback(session_id, session, session_obj, gate_results, emit=emit)
+        await _schedule_deferred_reflect(session_id, session, session_obj, gate_results, emit=emit)
+        return
+
     # Pre-reflect enrichment: lessons recall + (when stuck) trial-hint peek at
     # pending skill proposals. extra_evidence is appended to reflect's prompt
     # context, never written into SKILL.md. Stuck = we've already retried at
@@ -627,29 +950,9 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
     injected_trial_proposals: list[str] = []
     is_stuck = session_obj.turn.reflect_count >= 1
 
-    try:
-        last_user_msg = next(
-            (m["content"] for m in reversed(messages) if m["role"] == "user" and m.get("content")),
-            "",
-        )
-        if last_user_msg:
-            from core.memory.store import get_memory_store
-
-            store = get_memory_store()
-            if store:
-                lessons = await asyncio.to_thread(store.search_lessons, last_user_msg, limit=3)
-                if lessons:
-                    import time as _t
-
-                    _now_ts = int(_t.time())
-                    lines = ["## Past lessons that may apply (verify current relevance — codebase moves fast)"]
-                    for r in lessons:
-                        _age_d = max(0, (_now_ts - int(r.entry.epoch or _now_ts)) // 86400)
-                        _age_s = f"{_age_d}d ago" if _age_d > 0 else "today"
-                        lines.append(f"- [{r.entry.file_name}, {_age_s}] {r.entry.content[:400]}")
-                    extra_evidence_parts.append("\n".join(lines))
-    except Exception as e:
-        logger.debug("Reflect lesson recall failed for %s: %s", session_id, e)
+    lesson_block = await _recall_lesson_evidence(session_id, messages)
+    if lesson_block:
+        extra_evidence_parts.append(lesson_block)
 
     if is_stuck:
         try:
@@ -746,6 +1049,9 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             "confidence": result.confidence,
             "latency_ms": result.reflect_latency_ms,
             "reflect_model": result.reflect_model,
+            # Regime marker — this verdict ran on the critical path and can
+            # still retry the turn. Deferred grades stamp "deferred".
+            "reflect_mode": "sync",
         }
         await asyncio.to_thread(db.add_message, session_id, "reflect", json.dumps(reflect_event))
 

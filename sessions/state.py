@@ -285,6 +285,13 @@ class AgentSession:
     # emitted by orchestration.await_workers, which logs at most once a minute.
     _await_stalled_logged_at: float = 0.0
 
+    # Deferred-reflect ticket counter (sessions/hooks.py). Bumped every time a
+    # deferred grade is scheduled; the sleeping task compares the ticket it was
+    # issued against this value and skips grading if it no longer matches.
+    # Session-scoped on purpose — TurnState is replaced at every turn boundary,
+    # and this counter's whole job is to outlive the turn it was issued for.
+    _deferred_reflect_seq: int = 0
+
     # Activity tracking
     last_activity_time: float = field(default_factory=time.time)
 
