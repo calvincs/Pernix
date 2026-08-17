@@ -196,6 +196,38 @@ async def test_reflect_clamp_forces_retry_on_failing_gate(monkeypatch):
     assert "agent_model" in row_text or "task_category" in row_text or "gates" in row_text
 
 
+async def test_gate_clamp_carries_a_real_failure_cause(monkeypatch):
+    """A pass verdict attributes to "none" by definition, and "none" is truthy —
+    so the clamp used to mint retry verdicts that named no cause at all, on the
+    far side of the coercion in _result_from_data."""
+
+    class _NoneCauseClient:
+        async def chat(self, messages=None, model="", max_tokens=0, **kwargs):
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "verdict": "pass",
+                        "reasoning": "looks complete",
+                        "failure_cause": "none",
+                        "confidence": 0.9,
+                        "deliverables": [],
+                    }
+                )
+            )
+
+    sid = db.create_session(title="clamp cause")
+    db.add_message(sid, "user", "build the thing and make the tests pass")
+    db.add_message(sid, "assistant", "Done!")
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: _NoneCauseClient())
+
+    from core.reflect import reflect_on_session
+
+    failing_gate = GateResult(name="tests", command="pytest -q", passed=False, exit_code=1, output_tail="2 failed")
+    result = await reflect_on_session(sid, gate_results=[failing_gate])
+    assert result.verdict == "retry"
+    assert result.failure_cause == "task"
+
+
 async def test_reflect_passing_gates_do_not_clamp(monkeypatch):
     sid = db.create_session(title="noclamp")
     db.add_message(sid, "user", "do the thing")

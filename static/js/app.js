@@ -1959,6 +1959,17 @@ function handleEvent(event) {
             updateStatus('');
         }
     }
+    else if (type === 'reflect.deferred_scheduled') {
+        // Interactive turns finalize without waiting for the grade; say so
+        // once, quietly, so a reflect-less turn doesn't read as broken.
+        updateStatus('');
+    }
+    else if (type === 'reflect.deferred') {
+        // Observe-only grade landing minutes after the turn finished. Same
+        // card as a live verdict, but it never retried anything — don't touch
+        // streaming state or the status line, a new turn may be running.
+        renderReflectCard(event);
+    }
     else if (type === 'reflect.skipped') {
         // Render a small inline notice so a finalizing-without-reflect turn
         // doesn't look like a missing piece. The skip is intentional —

@@ -263,11 +263,13 @@ const SECTIONS = [
     },
     {
         title: 'Reflect',
-        description: 'Post-task verification re-reads the agent\'s work and checks for mistakes or incomplete steps. If issues are found, the agent retries automatically. Min messages prevents reflect from firing on trivial exchanges.',
+        description: 'Post-task verification re-reads the agent\'s work and checks for mistakes or incomplete steps. If issues are found, the agent retries automatically. Min messages prevents reflect from firing on trivial exchanges. Deferred grading keeps interactive turns off the critical path: the grade runs in the background after a quiet period and can record lessons, but never retries the turn.',
         fields: [
             { key: 'reflect_enabled', label: 'Post-Task Verification', type: 'bool' },
             { key: 'reflect_max_retries', label: 'Max Retries', type: 'number' },
             { key: 'reflect_min_messages', label: 'Min Messages to Trigger', type: 'number' },
+            { key: 'reflect_deferred_normal', label: 'Defer Grading (Interactive)', type: 'bool' },
+            { key: 'reflect_defer_idle_s', label: 'Defer Delay (seconds)', type: 'number' },
             { key: 'post_mortem_retention_days', label: 'Post-mortem retention (days)', type: 'number' },
         ],
     },

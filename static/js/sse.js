@@ -62,6 +62,7 @@ const EVENT_TYPES = [
     'reflect.start', 'reflect.done', 'reflect.skipped',
     'reflect.retry', 'reflect.exhausted', 'reflect.escalate',
     'reflect.budget_exhausted', 'reflect.circuit_breaker',
+    'reflect.deferred_scheduled', 'reflect.deferred',
     // Eval (autonomous evaluation pass) + goal gates
     'eval.start', 'eval.pass', 'eval.done', 'eval.retry', 'eval.exhausted',
     'gates.done',
