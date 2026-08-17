@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 
 from config import settings
@@ -555,6 +556,24 @@ def _detect_duplicate_workspace_prefix(command: str, workspace: Path) -> str | N
 # override is silently inert.
 BASH_MAX_TIMEOUT = 30 * 60  # 30 minutes
 
+# Upper bound on how much captured output is read back from the temp files.
+# truncate_output then trims to MAX_OUTPUT; this cap only guards against
+# pathological multi-GB captures being pulled into memory first.
+_CAPTURE_READ_CAP = 5 * 1024 * 1024
+
+
+def _read_capture(f) -> str:
+    """Read a binary capture temp file back from the start (bounded by _CAPTURE_READ_CAP)."""
+    try:
+        size = f.seek(0, os.SEEK_END)
+        f.seek(0)
+        data = f.read(_CAPTURE_READ_CAP).decode("utf-8", errors="replace")
+        if size > _CAPTURE_READ_CAP:
+            data += f"\n[... output truncated: {size - _CAPTURE_READ_CAP} more bytes not shown ...]"
+        return data
+    except (OSError, ValueError):
+        return ""
+
 
 def bash(command: str, timeout: int | None = None, _context: dict | None = None) -> str:
     """Execute a shell command in the workspace.
@@ -625,43 +644,64 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
             except (ValueError, resource.error):
                 pass
 
-        process = subprocess.Popen(
-            command,
-            shell=True,
-            executable="/bin/bash",  # bash-only features (source, <<<, $'...') work
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=str(workspace),
-            env=env,
-            preexec_fn=_child_setup,
-        )
+        # Capture to unlinked temp files, not pipes. With PIPE + communicate()
+        # the tool returns only on pipe EOF — so a backgrounded compound list
+        # (`cd app && nohup server > log 2>&1 &`) left bash's wrapper subshell
+        # holding the pipe fds for the server's lifetime, and the call "hung"
+        # until shell_timeout even though every foreground command finished in
+        # seconds (session b23ffafde5ba: two exact-600s stalls). wait() returns
+        # when the shell exits, regardless of what grandchildren still hold
+        # the capture fds.
+        with (
+            tempfile.TemporaryFile(mode="w+b") as out_f,
+            tempfile.TemporaryFile(mode="w+b") as err_f,
+        ):
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                executable="/bin/bash",  # bash-only features (source, <<<, $'...') work
+                stdout=out_f,
+                stderr=err_f,
+                cwd=str(workspace),
+                env=env,
+                preexec_fn=_child_setup,
+            )
 
-        # Track process on session so cancel and dispatch-timeout can kill it.
-        # Registered under this dispatch's call id: two concurrent bash calls in
-        # one session must not overwrite each other's entry, or the loser
-        # becomes unkillable and holds its executor thread until the child
-        # exits on its own.
-        _session = _get_session_from_context(_context)
-        _proc_handle = None
-        if _session:
-            _proc_handle = _session.register_process(process, (_context or {}).get("_call_id", ""))
+            # Track process on session so cancel and dispatch-timeout can kill it.
+            # Registered under this dispatch's call id: two concurrent bash calls in
+            # one session must not overwrite each other's entry, or the loser
+            # becomes unkillable and holds its executor thread until the child
+            # exits on its own.
+            _session = _get_session_from_context(_context)
+            _proc_handle = None
+            if _session:
+                _proc_handle = _session.register_process(process, (_context or {}).get("_call_id", ""))
 
-        # Resolve effective timeout: caller override (capped at 30 min)
-        # falls back to global setting. Negative/zero treated as "use default".
-        if timeout is not None and int(timeout) > 0:
-            effective_timeout = min(int(timeout), BASH_MAX_TIMEOUT)
-        else:
-            effective_timeout = settings.shell_timeout
+            # Resolve effective timeout: caller override (capped at 30 min)
+            # falls back to global setting. Negative/zero treated as "use default".
+            if timeout is not None and int(timeout) > 0:
+                effective_timeout = min(int(timeout), BASH_MAX_TIMEOUT)
+            else:
+                effective_timeout = settings.shell_timeout
 
-        try:
-            stdout, stderr = process.communicate(timeout=effective_timeout)
-        except subprocess.TimeoutExpired:
-            _kill_process_tree(process)
-            return f"Error: Command timed out after {effective_timeout}s"
-        finally:
-            if _session and _proc_handle is not None:
-                _session.release_process(_proc_handle)
+            try:
+                process.wait(timeout=effective_timeout)
+            except subprocess.TimeoutExpired:
+                _kill_process_tree(process)
+                # Include what the command managed to print — the difference
+                # between "hung silently" and "hung after X" is usually the
+                # whole diagnosis.
+                partial = (_read_capture(out_f) + _read_capture(err_f)).strip()
+                msg = f"Error: Command timed out after {effective_timeout}s"
+                if partial:
+                    msg += f"\n[partial output before timeout]\n{partial[-2000:]}"
+                return msg
+            finally:
+                if _session and _proc_handle is not None:
+                    _session.release_process(_proc_handle)
+
+            stdout = _read_capture(out_f)
+            stderr = _read_capture(err_f)
 
         output = ""
         if stdout:
@@ -709,22 +749,31 @@ def _get_session_from_context(ctx: dict | None):
 
 
 def _kill_process_tree(process):
-    """Kill a process and its entire process group (SIGTERM then SIGKILL)."""
+    """Kill a process and its entire process group (SIGTERM then SIGKILL).
+
+    Every caller spawns the child with setsid() in preexec_fn, so the child's
+    pid IS its pgid — use it directly. Resolving via os.getpgid() looks safer
+    but is not: on macOS it raises ProcessLookupError once the shell is a
+    zombie, silently skipping the group kill in exactly the case the group
+    kill exists for (shell exited, backgrounded grandchildren still alive).
+    """
     import signal
 
-    try:
-        pgid = os.getpgid(process.pid)
-    except (OSError, ProcessLookupError):
-        return  # Already dead
+    pgid = process.pid
 
     # Graceful: SIGTERM to process group
     try:
         os.killpg(pgid, signal.SIGTERM)
     except (OSError, ProcessLookupError):
-        return
+        return  # Group already empty
     try:
         process.wait(timeout=3)
-        return  # Clean exit
+        # Shell exited — but its backgrounded children may not have. Only
+        # skip the SIGKILL escalation once the whole group is gone.
+        try:
+            os.killpg(pgid, 0)
+        except (OSError, ProcessLookupError):
+            return  # Clean exit, group empty
     except subprocess.TimeoutExpired:
         pass
 
@@ -795,7 +844,11 @@ def register(reg) -> None:
             "at 50KB. Covers git, curl, pip, node, python, etc. "
             "Pass `timeout` (seconds, max 1800) for commands that legitimately "
             "need more than the default — Whisper transcription, large clones, "
-            "long builds. Without an override, the default shell_timeout applies."
+            "long builds. Without an override, the default shell_timeout applies. "
+            "To start a long-lived background process (server, daemon), fully "
+            "detach it so it survives cancellation and group cleanup: "
+            "`(setsid cmd </dev/null >app.log 2>&1 &)` — then verify it with a "
+            "separate short command (curl/pgrep) in a follow-up call."
         ),
         parameters={
             "type": "object",
