@@ -160,6 +160,72 @@ def build_experience_observations(
     return observations
 
 
+def build_gate_observations(
+    *,
+    gates: list[dict],
+    attempt: int,
+    model: str,
+    session_kind: str,
+    reflect_mode: str,
+    ts_ms: int,
+) -> list[dict]:
+    """Map one attempt's deterministic gate verdicts to observations.
+
+    gates: [{"name", "passed", "excerpt"}] — one entry per gate that ran on
+    THIS attempt (gates re-run on every reflect retry, and each attempt is a
+    genuine observation: a gate that failed attempt 1 and passed attempt 2
+    observed two different things).
+
+    Semantics mirror tool_ok / tool_failure_mode. gate_ok carries the verdict
+    either way — a ledger that only ever sees passes calibrates to p=1 and
+    predicts nothing — and a failure additionally lands a gate_failure_mode
+    bucket. The excerpt is classified, never carried raw: the append-only
+    chain holds labels and booleans only (same rule as
+    build_memory_observations), and a free-form categorical value would mint
+    a fresh category per stack trace. The prose lives in the TELOS trace.
+
+    reflect_mode rides in ctx because the two grading regimes are different
+    retry loops: since bfbaadd an interactive turn's reflect grade is
+    observe-only, so the gate is the only mechanical retry path it has.
+    """
+    base_ctx = {
+        "model": model or "default",
+        "kind": session_kind or "normal",
+        "retry": "yes" if attempt > 1 else "no",
+        "reflect_mode": reflect_mode or "sync",
+    }
+    observations: list[dict] = []
+    for gate in gates:
+        name = str(gate.get("name") or "")
+        if not name:
+            continue
+        passed = bool(gate.get("passed"))
+        observations.append(
+            {
+                "pred": "gate_ok",
+                "args": [name],
+                "stmt_type": "frequency",
+                "outcome": passed,
+                "ctx": dict(base_ctx),
+                "actor": "agent:pernix",
+                "ts": ts_ms,
+            }
+        )
+        if not passed:
+            observations.append(
+                {
+                    "pred": "gate_failure_mode",
+                    "args": [name],
+                    "stmt_type": "categorical",
+                    "value": classify_error(str(gate.get("excerpt") or "")),
+                    "ctx": dict(base_ctx),
+                    "actor": "agent:pernix",
+                    "ts": ts_ms,
+                }
+            )
+    return observations
+
+
 def build_turn_observations(
     *,
     tool_summary: dict,
