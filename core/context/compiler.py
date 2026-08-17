@@ -1090,7 +1090,21 @@ def compile_context(
     # suppressing the new turn's response.
     def _parent_id(msg: dict) -> int:
         if msg["role"] == "user":
-            return msg["id"]
+            # Injected mid-turn rows carry the turn root's id (stamped by
+            # /api/chat/inject). Honor it, or the row sorts by its own
+            # (higher) id — after every assistant reply of the turn — and is
+            # re-presented as the newest unanswered user message on every
+            # round, which the model re-acknowledges each time. Turn-root
+            # user messages have no stamp and key on their own id as before.
+            meta_raw = msg.get("metadata")
+            if not meta_raw:
+                return msg["id"]
+            try:
+                meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
+                pid = meta.get("parent_user_msg_id") if isinstance(meta, dict) else None
+                return int(pid) if pid is not None else msg["id"]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return msg["id"]
         meta_raw = msg.get("metadata") or msg.get("tool_calls")  # tool_calls held metadata pre-v5
         if not meta_raw:
             return msg["id"]

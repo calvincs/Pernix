@@ -371,13 +371,26 @@ async def inject(body: dict):
     # user messages with id > turn_user_msg_id to prevent turn N from
     # pre-answering queued messages bound for turn N+1 — but injected
     # messages are explicitly meant to land in the CURRENT turn's view.
+    #
+    # Also stamp the active turn's root user-message id: the compiler's
+    # logical-turn sort groups every assistant/tool row under that root, so
+    # an unstamped injected row (keyed by its own, higher id) sorts after
+    # every reply of the turn — permanently the "newest unanswered" user
+    # message, which the model re-acknowledges on every round (session
+    # b23ffafde5ba re-acked the same 5 corrections 10 rounds in a row).
+    # With the stamp it sorts chronologically inside the turn instead.
     import json as _json
+
+    meta: dict = {"injected": True}
+    turn_root = getattr(session, "current_turn_user_msg_id", None) if session else None
+    if turn_root is not None:
+        meta["parent_user_msg_id"] = turn_root
 
     db.add_message(
         session_id,
         "user",
         message,
-        metadata=_json.dumps({"injected": True}),
+        metadata=_json.dumps(meta),
     )
 
     if session:
