@@ -8,9 +8,13 @@ and the result is committed as a claim with the humility-layer cap for its
 epistemic class: analogy-band output evaluated against records becomes an
 inference (cap 0.95); an unresolvable check stays analogy (cap 0.70).
 
-Two inconclusive attempts return the hypothesis to the speculation pool —
-retained, recombinable, zero further execution rights until new evidence
-re-gates it.
+Two inconclusive attempts are a terminal verdict, not a return ticket. The
+hypothesis is archived `untestable` (soup/archive/): retained on disk for the
+calibration record, out of every scan the loop makes, never re-run. It used
+to go back to the speculation pool with status 'soup', which was a cycle
+rather than an exit — nothing re-gates a pooled hypothesis, so the entry
+could only accumulate, and the pool is re-read on every generate and evaluate
+pass. A hypothesis worth another look re-mints cheaply from its question.
 """
 
 from __future__ import annotations
@@ -23,6 +27,9 @@ from core.telos.store import TelosObject, TelosStore
 
 logger = logging.getLogger("pernix.telos.evaluate")
 
+# Attempts before the check is called a dead end. Stays at 2: a third pass
+# reads the same records with the same prompt, so the only thing raising it
+# buys is more spend on the class of hypothesis that already taught nothing.
 _MAX_ATTEMPTS = 2
 
 JUDGE_PROMPT = """You are the evaluation judge of TELOS. You are given one HYPOTHESIS with a \
@@ -165,9 +172,16 @@ async def evaluate_one(store: TelosStore, gated: list[TelosObject], is_cancelled
     if parsed is None or parsed["verdict"] == "inconclusive":
         note = (parsed or {}).get("note", "unparseable judge output")
         if attempts >= _MAX_ATTEMPTS:
-            # Back to the pool: retained, recombinable, zero execution rights.
-            store.update(h, status="soup", attempts=attempts, gate_reason=f"inconclusive x{attempts}: {note}")
-            store.trace_append("hypothesis_pooled", {"id": h.id, "note": note})
+            # Dead end, and a terminal one: the records cannot answer this
+            # falsifier and no path re-gates it, so it is archived rather
+            # than returned to the pool. `gate_reason` keeps the judge's own
+            # words — that string is what the backfill sweep and the
+            # calibration review classify on.
+            reason = f"inconclusive x{attempts}: {note}"
+            store.archive_hypothesis(h, "untestable", reason, attempts=attempts, gate_reason=reason)
+            # Trace type unchanged: calibration scores 'hypothesis_pooled' as
+            # the realized-zero outcome, and this is still exactly that event.
+            store.trace_append("hypothesis_pooled", {"id": h.id, "note": note, "archived": "untestable"})
         else:
             store.update(h, status="gated", attempts=attempts)
         return "inconclusive"

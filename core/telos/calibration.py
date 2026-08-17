@@ -103,6 +103,13 @@ def eig_calibration(store: TelosStore, days: int = _WINDOW_DAYS) -> dict:
         by_id = {h.id: h for h in store.list_hypotheses()}
         for hid in missing:
             obj = by_id.get(hid)
+            if obj is None:
+                # A dead-end hypothesis is archived at the moment it is
+                # pooled, so the fallback must look there too — otherwise the
+                # only samples it can ever recover are the ones that resolved
+                # and the discount is computed against a resolve rate this
+                # module exists to distrust.
+                obj = store.read_archived("hypothesis", hid)
             eig = _as_eig(obj.get("eig")) if obj is not None else None
             if eig is not None:
                 predicted[hid] = eig

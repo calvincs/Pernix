@@ -5,6 +5,7 @@ Layout (spec §1):
       config/telos.yaml          layer provenance record (readable tier)
       questions/q_*.md           Question objects
       soup/h_*.md                hypotheses: speculation pool + gated + resolved
+      soup/archive/h_*.md        terminal hypotheses, out of the scan path
       goals/g_*.md               root, dreams, milestones, tasks
       claims/c_*.md              committed claims with epistemic class caps
       alarms/a_*.md              binding | hevel | divergence | acedia
@@ -54,7 +55,25 @@ EPISTEMIC_CAPS = {
 }
 
 QUESTION_STATES = ("open", "narrowed", "closed", "abandoned")
-HYPOTHESIS_STATES = ("soup", "gated", "running", "supported", "refuted")
+
+# Terminal hypothesis statuses. Both live in soup/archive/ and neither comes
+# back: there is no un-archive path, because a hypothesis still worth asking
+# re-mints cheaply from its question. They are two statuses rather than one
+# on purpose — the calibration review reads them as different failure classes:
+#
+#   untestable — examined and unresolvable. Either the evaluator spent its
+#                attempts and stayed inconclusive, or the mint-time gate made
+#                a structural diagnosis (no falsifier named, or the observable
+#                is absent from the records evaluation can read).
+#   expired    — aged out of the pool without ever being examined. Says
+#                nothing about the hypothesis; only that its turn never came.
+#
+# Note what is NOT terminal: an eig-below-floor gate reason. Low expected
+# information gain is a prior about how much answering would teach, not a
+# statement that it cannot be answered — a different axis, and the pool keeps
+# those entries.
+ARCHIVED_HYPOTHESIS_STATES = ("untestable", "expired")
+HYPOTHESIS_STATES = ("soup", "gated", "running", "supported", "refuted") + ARCHIVED_HYPOTHESIS_STATES
 GOAL_KINDS = ("root", "dream", "milestone", "task")
 GOAL_STATES = ("active", "suspended", "completed", "vapor")
 ALARM_TYPES = ("binding", "hevel", "divergence", "acedia")
@@ -126,6 +145,12 @@ class TelosStore:
         "alarm": "alarms",
     }
 
+    # Terminal objects move one level down, into <kind dir>/archive/. Every
+    # scan in this class globs a single directory level, so an archived file
+    # is invisible to the hot path by construction rather than by remembering
+    # to filter on status at each call site.
+    _ARCHIVE_SUBDIR = "archive"
+
     @classmethod
     def open(cls) -> "TelosStore":
         root = Path(settings.telos_dir)
@@ -141,6 +166,12 @@ class TelosStore:
     def _dir_for(self, kind: str) -> Path:
         return self.root / self._KIND_DIRS[kind]
 
+    def _archive_dir(self, kind: str, create: bool = False) -> Path:
+        d = self._dir_for(kind) / self._ARCHIVE_SUBDIR
+        if create:
+            d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def mint_id(self, kind: str, hint: str = "") -> str:
         """Provenas-style ids: q_2026_0807_003, h_0042, g_<slug>, c_0007, a_0003."""
         prefix = {"question": "q", "hypothesis": "h", "goal": "g", "claim": "c", "alarm": "a"}[kind]
@@ -155,8 +186,9 @@ class TelosStore:
         # Ids must be monotonic, not merely unused. Deriving the next number
         # from what is on disk means deleting a file frees its id for reuse —
         # and a reused id silently re-points every claim, trace event and
-        # `derived_from` edge that still names it. Retention (pruning the
-        # speculation pool) is therefore only safe against a persisted
+        # `derived_from` edge that still names it. Retention (archiving the
+        # speculation pool out of this listing, and the archive's own
+        # hard-delete horizon) is therefore only safe against a persisted
         # high-water mark, which is what this reads and advances.
         with _MINT_LOCK:
             hw_key = f"id_high_water_{prefix}" if kind != "question" else f"id_high_water_q_{stamp}"
@@ -177,7 +209,12 @@ class TelosStore:
                 n += 1
 
     def write(self, obj: TelosObject) -> Path:
-        """Atomic write of one object (mkstemp + os.replace, config.py pattern)."""
+        """Atomic write of one object (mkstemp + os.replace, config.py pattern).
+
+        Always writes to the kind's live directory, never to the archive —
+        `archive_hypothesis` is the only way a file gets down there, and the
+        only way one leaves is `prune_soup_archive` unlinking it.
+        """
         d = self._dir_for(obj.kind)
         path = d / f"{obj.id}.md"
         meta = dict(obj.meta)
@@ -232,8 +269,14 @@ class TelosStore:
         """All objects of a kind, oldest-first by filename, filtered by
         frontmatter equality (state='open', parent='g_root', kind='dream'...).
         First param is positional-only in spirit: 'kind' stays available as a
-        frontmatter filter (goals use it for root|dream|milestone|task)."""
-        d = self._dir_for(obj_kind)
+        frontmatter filter (goals use it for root|dream|milestone|task).
+
+        The glob is one level deep on purpose: <kind>/archive/ is not scanned,
+        so terminal objects cost nothing here and drop out of every count
+        built on this method."""
+        return self._list_dir(self._dir_for(obj_kind), obj_kind, filters)
+
+    def _list_dir(self, d: Path, obj_kind: str, filters: dict) -> list[TelosObject]:
         out = []
         for p in sorted(d.glob("*.md")):
             obj = self._parse(obj_kind, p)
@@ -248,12 +291,77 @@ class TelosStore:
         self.write(obj)
         return obj
 
+    # ------------------------------------------------------------------
+    # Archive (terminal objects, out of the scan path)
+    # ------------------------------------------------------------------
+
+    def archive_hypothesis(self, obj: TelosObject, status: str, reason: str, **changes) -> Path | None:
+        """Stamp a terminal status on a hypothesis and move it to soup/archive/.
+
+        Changing the status alone would not be enough. The cost of a dead
+        entry is file count, not status: `list()` re-reads every file in
+        soup/ on every generate and evaluate pass, so an entry that can never
+        run again is charged to the hot path forever unless its file leaves
+        the scanned directory. Moving it is what makes a terminal verdict
+        free, and it is also what takes the entry out of the pool counts —
+        both follow from the one-level glob, with no filter to remember.
+
+        Nothing is deleted here. The pool doubles as the calibration review's
+        forensic record, and `gate_reason` — the diagnosis that put the entry
+        in the pool — is preserved; the archive's own `archive_reason` says
+        why it left. Ids stay retired either way: `mint_id` counts against a
+        persisted high-water mark, not the directory listing.
+
+        Write-then-move, in that order. A crash between the two steps leaves
+        one correctly-stamped file still in soup/, which the next sweep
+        retries; move-then-write could leave two.
+        """
+        if obj.kind != "hypothesis":
+            raise ValueError(f"archive_hypothesis: not a hypothesis ({obj.kind})")
+        if status not in ARCHIVED_HYPOTHESIS_STATES:
+            raise ValueError(f"archive_hypothesis: {status!r} is not a terminal status")
+        obj.meta.update(changes)
+        obj.meta["status"] = status
+        obj.meta["archive_reason"] = str(reason)[:300]
+        obj.meta["archived_at"] = _now_iso()
+        src = self.write(obj)
+        dest = self._archive_dir(obj.kind, create=True) / f"{obj.id}.md"
+        try:
+            os.replace(src, dest)
+        except OSError as e:
+            logger.warning("telos: archiving %s failed, left in place: %s", obj.id, e)
+            return None
+        obj.path = dest
+        return dest
+
+    def list_archived(self, obj_kind: str, **filters) -> list[TelosObject]:
+        """Archived objects, same filtering as `list()`. Retention passes and
+        forensic readers only — nothing on the fast loop calls this, which is
+        the entire point of moving the files."""
+        d = self._archive_dir(obj_kind)
+        return self._list_dir(d, obj_kind, filters) if d.is_dir() else []
+
+    def read_archived(self, kind: str, obj_id: str) -> TelosObject | None:
+        """Explicit archive read. `read()` deliberately does NOT fall through
+        to here: live callers treat a missing hypothesis as gone, and an
+        archive that answered `read` would feed terminal entries back into
+        loop logic through the back door."""
+        return self._parse(kind, self._archive_dir(kind) / f"{obj_id}.md")
+
+    def count_archived(self, kind: str) -> int:
+        """How many archived files exist — filenames only, no parse. The
+        overview surfaces want the number, not the objects."""
+        d = self._archive_dir(kind)
+        return sum(1 for _ in d.glob("*.md")) if d.is_dir() else 0
+
     # Convenience filters -------------------------------------------------
 
     def list_questions(self, state: str | None = None) -> list[TelosObject]:
         return self.list("question", **({"state": state} if state else {}))
 
     def list_hypotheses(self, status: str | None = None) -> list[TelosObject]:
+        """Live hypotheses only. Terminal ones (untestable | expired) sit in
+        soup/archive/ and never appear here — see `list_archived`."""
         return self.list("hypothesis", **({"status": status} if status else {}))
 
     def list_goals(self, **filters) -> list[TelosObject]:

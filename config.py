@@ -444,7 +444,14 @@ class Settings:
     # window — stops the same flaky tool minting a near-identical question
     # every day (14/18 abandoned questions were that class). 0 disables.
     telos_anomaly_remint_cooldown_days: int = 7
-    telos_soup_retention_days: int = 30  # speculation-pool prune window (0 = keep forever)
+    # Age axis on the speculation pool: past this many days an unexamined
+    # pooled hypothesis is archived 'expired' (moved to soup/archive/, never
+    # deleted). 0 = keep it in the pool forever.
+    telos_soup_retention_days: int = 30
+    # The archive's own hard-delete horizon — the only place a hypothesis
+    # file is ever unlinked. Long by design: the archive is the calibration
+    # review's forensic record. 0 = keep forever.
+    telos_soup_archive_retention_days: int = 180
     telos_soup_context_entries: int = 10  # memory entries in the band sample
     telos_budget_share_max: float = 0.35  # binding-monitor 7d share alarm (§5.2)
     telos_claims_floor_per_window: int = 1  # binding: new-claims floor

@@ -111,7 +111,10 @@ export async function renderTelosTab(container) {
     container.appendChild(sectionTitle('Fast loop'));
     container.appendChild(el('div', { class: 'adaptive-entry' }, [
         el('div', { class: 'adaptive-entry-meta' }, [text(`Questions: ${countLine(overview.questions)} (${overview.serendipity_open || 0} serendipity open)`)]),
-        el('div', { class: 'adaptive-entry-meta' }, [text(`Hypotheses: ${countLine(overview.hypotheses)}`)]),
+        // Live statuses only — terminal ones (untestable | expired) are moved
+        // to soup/archive/ and out of every store scan, so they are counted
+        // separately rather than silently missing from the pipeline line.
+        el('div', { class: 'adaptive-entry-meta' }, [text(`Hypotheses: ${countLine(overview.hypotheses)}${overview.hypotheses_archived ? ` · ${overview.hypotheses_archived} archived` : ''}`)]),
         el('div', { class: 'adaptive-entry-meta' }, [text(`Claims committed: ${overview.claims || 0}`)]),
         el('div', { class: 'adaptive-entry-meta' }, [
             text(`Band mix near/mid/far: ${(overview.band_mix?.near ?? 0).toFixed(2)} / ${(overview.band_mix?.mid ?? 0).toFixed(2)} / ${(overview.band_mix?.far ?? 0).toFixed(2)} · serendipity budget ${(overview.serendipity_budget ?? 0).toFixed(2)}`),

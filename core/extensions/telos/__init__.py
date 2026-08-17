@@ -52,9 +52,14 @@ def telos_status(_context: dict | None = None) -> str:
         f"{count(questions, 'state', 'narrowed')} narrowed, "
         f"{count(questions, 'state', 'abandoned')} abandoned "
         f"({sum(1 for q in questions if q.get('origin') == 'serendipity')} serendipity)",
+        # The archived count is a file tally, not a scan: terminal hypotheses
+        # live in soup/archive/ and are excluded from every list above by the
+        # store's one-level glob. Reported anyway so the pool count reads as a
+        # live queue rather than as everything the layer ever produced.
         f"Hypotheses: {count(hyps, 'status', 'gated')} gated, {count(hyps, 'status', 'soup')} in the "
         f"speculation pool, {count(hyps, 'status', 'supported')} supported, "
-        f"{count(hyps, 'status', 'refuted')} refuted",
+        f"{count(hyps, 'status', 'refuted')} refuted, "
+        f"{store.count_archived('hypothesis')} archived (untestable/expired, soup/archive/)",
         f"Goals: {len(goals)} total — "
         f"{count(goals, 'kind', 'dream')} dreams, {count(goals, 'kind', 'milestone')} milestones, "
         f"{count(goals, 'kind', 'task')} tasks; {count(goals, 'state', 'suspended')} suspended",

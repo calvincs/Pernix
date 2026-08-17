@@ -207,6 +207,8 @@ A non-convergent drive with correction machinery over the whole loop: turn anoma
 | `telos_max_eval_tokens` | `20000` | Gate ceiling on a hypothesis's estimated evaluation cost. |
 | `telos_question_max_attempts` | `3` | Dry generation passes before a question is abandoned. |
 | `telos_soup_context_entries` | `10` | Memory entries in the band-sampled SOUP context. |
+| `telos_soup_retention_days` | `30` | Age after which an unexamined pooled hypothesis is archived `expired` into `soup/archive/` — moved out of the loop's scans, never deleted. 0 = keep it in the pool forever. |
+| `telos_soup_archive_retention_days` | `180` | Hard-delete horizon for `soup/archive/` — the only place a hypothesis file is unlinked. Long by design: the archive is the calibration review's forensic record. 0 = keep forever. |
 | `telos_budget_share_max` | `0.35` | Binding Monitor: 7-day budget share above which the Goodhart signature can fire. |
 | `telos_claims_floor_per_window` | `1` | Binding Monitor: new-claims floor — below it (with the other three conditions) the signature holds. |
 | `telos_divergence_max` | `0.15` | Ledger reconciliation: unsupported-autobiography-claims share that raises a divergence alarm. |

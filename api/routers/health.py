@@ -195,6 +195,10 @@ _SETTING_BOUNDS = {
     "telos_max_eval_tokens": (1000, 200_000),
     "telos_question_max_attempts": (1, 10),
     "telos_soup_context_entries": (4, 40),
+    # 0 disables each horizon (keep forever) — retention here archives and
+    # only the archive's own horizon deletes, so long values are cheap.
+    "telos_soup_retention_days": (0, 3650),
+    "telos_soup_archive_retention_days": (0, 3650),
     "telos_budget_share_max": (0.1, 0.9),
     "telos_claims_floor_per_window": (0, 20),
     "telos_divergence_max": (0.01, 1.0),

@@ -128,15 +128,36 @@ async def run_slow_loops(force_weekly: bool = False) -> dict:
     except Exception as e:
         logger.warning("telos: adaptive hint retirement failed: %s", e)
 
-    # Daily: bound the speculation pool. Nothing reads status='soup', but the
-    # generate/evaluate loop re-reads every file on disk each pass, so an
-    # unbounded pool is a growing tax on the hot path, not just on storage.
+    # Daily: take terminal hypotheses out of the pool. A gate_reason that
+    # says the falsifier cannot be checked at all is a verdict, not a
+    # holding pattern — those entries move to soup/archive/ and stop being
+    # re-read by every generate/evaluate pass (see core/telos/retire.py).
+    try:
+        from core.telos.retire import archive_untestable_pool
+
+        stats["soup_untestable"] = archive_untestable_pool(store)
+    except Exception as e:
+        logger.warning("telos: untestable-pool sweep failed: %s", e)
+
+    # Daily: bound the speculation pool on the age axis. Nothing reads
+    # status='soup', but the generate/evaluate loop re-reads every file on
+    # disk each pass, so an unbounded pool is a growing tax on the hot path,
+    # not just on storage. Aged entries are archived 'expired', never deleted.
     try:
         from core.telos.retire import prune_speculation_pool
 
         stats["soup_prune"] = prune_speculation_pool(store)
     except Exception as e:
         logger.warning("telos: speculation-pool prune failed: %s", e)
+
+    # Daily: the archive's own horizon — the only place a hypothesis file is
+    # unlinked, and long by default (the archive is the calibration record).
+    try:
+        from core.telos.retire import prune_soup_archive
+
+        stats["soup_archive_prune"] = prune_soup_archive(store)
+    except Exception as e:
+        logger.warning("telos: soup-archive prune failed: %s", e)
 
     # Weekly block, watermarked so cron cadence changes can't double-run it.
     week = datetime.now(timezone.utc).strftime("%G-W%V")

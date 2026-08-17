@@ -16,6 +16,13 @@ future SOUP passes. Nothing reads status == 'soup' — the pool is a retained
 record, not a feedstock. Said here rather than in a docstring that promises
 otherwise.
 
+Which is why the pool has an exit. A rejection like "no falsifier" or
+"observable absent from records" is a verdict on evaluability, and
+core/telos/retire.py archives those entries as 'untestable' (soup/archive/,
+never deleted); age archives the rest as 'expired'. An eig-below-floor
+rejection is NOT terminal — that is a prior about payoff, not a claim that
+the hypothesis cannot be checked — so those stay in the pool.
+
 Scheduler (§3.1/§3.2): 85% of throughput goes to goal-linked questions by
 surprise x recency; a serendipity budget (default 15%) is reserved for
 high-surprise questions with no goal relevance, so the layer is structurally
