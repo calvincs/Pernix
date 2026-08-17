@@ -86,9 +86,10 @@ def test_mint_id_skips_gaps_rather_than_colliding(store):
 def test_mint_id_never_reuses_after_the_tail_is_pruned(store):
     """Ids must be monotonic, not merely unused.
 
-    Retention deletes pooled hypotheses, and the old disk-count scheme would
-    hand the freed numbers straight back out — silently re-pointing every
-    claim, trace event and derived_from edge still naming them.
+    Retention takes pooled hypotheses out of the listing (archived now, and
+    eventually unlinked by the archive horizon), and the old disk-count
+    scheme would hand the freed numbers straight back out — silently
+    re-pointing every claim, trace event and derived_from edge naming them.
     """
     ids = [store.mint_id("hypothesis") for _ in range(3)]
     for i in ids:
@@ -100,45 +101,54 @@ def test_mint_id_never_reuses_after_the_tail_is_pruned(store):
     assert store.mint_id("hypothesis") == "h_0004"
 
 
-def test_soup_prune_removes_only_aged_pooled_hypotheses(store, monkeypatch):
-    from datetime import datetime, timedelta, timezone
-
-    from core.telos.retire import prune_speculation_pool
-
-    monkeypatch.setattr(settings, "telos_soup_retention_days", 30)
-    old = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
-    new = datetime.now(timezone.utc).isoformat()
-    cases = [("soup", old, True), ("soup", new, False), ("gated", old, False), ("supported", old, False)]
-    for status, created, _ in cases:
-        store.write(
-            TelosObject(
-                id=store.mint_id("hypothesis"),
-                kind="hypothesis",
-                meta={"status": status, "created_at": created, "statement": "x"},
-            )
-        )
-
-    assert prune_speculation_pool(store)["pruned"] == 1
-    survivors = {h.get("status") for h in store.list_hypotheses()}
-    assert survivors == {"soup", "gated", "supported"}  # queued work and the
-    # falsification record both survive; only the aged pool row went.
-
-
-def test_soup_prune_disabled_by_zero_retention(store, monkeypatch):
-    from datetime import datetime, timedelta, timezone
-
-    from core.telos.retire import prune_speculation_pool
-
-    monkeypatch.setattr(settings, "telos_soup_retention_days", 0)
-    store.write(
-        TelosObject(
-            id=store.mint_id("hypothesis"),
-            kind="hypothesis",
-            meta={"status": "soup", "created_at": (datetime.now(timezone.utc) - timedelta(days=900)).isoformat()},
-        )
+def test_archive_moves_the_file_out_of_the_scan_path(store):
+    """The whole mechanism in one assertion: a terminal hypothesis stops
+    being a file that `list()` reads. Status alone would not do it — the hot
+    path's cost is file count, not status."""
+    obj = TelosObject(
+        id=store.mint_id("hypothesis"),
+        kind="hypothesis",
+        meta={"status": "soup", "statement": "x", "gate_reason": "no falsifier"},
     )
-    assert prune_speculation_pool(store)["pruned"] == 0
-    assert len(store.list_hypotheses()) == 1
+    store.write(obj)
+    live = store.root / "soup" / f"{obj.id}.md"
+    assert live.is_file()
+
+    dest = store.archive_hypothesis(obj, "untestable", "backfill sweep: no falsifier named at mint")
+    assert dest == store.root / "soup" / "archive" / f"{obj.id}.md"
+    assert dest.is_file() and not live.exists()  # moved, never copied
+    assert store.list_hypotheses() == []  # invisible to every scan and count
+    assert store.count_archived("hypothesis") == 1
+
+    archived = store.read_archived("hypothesis", obj.id)
+    assert archived.get("status") == "untestable"
+    assert archived.get("archive_reason").startswith("backfill sweep")
+    assert archived.get("archived_at")
+    # The diagnosis that pooled it is preserved — that string is what the
+    # calibration review counts classes with.
+    assert archived.get("gate_reason") == "no falsifier"
+
+
+def test_read_of_an_archived_hypothesis_returns_none(store):
+    """`read` must not fall through to the archive: live callers treat a
+    missing hypothesis as gone, and answering them would put terminal
+    entries back into loop logic through the back door."""
+    obj = TelosObject(id=store.mint_id("hypothesis"), kind="hypothesis", meta={"status": "soup"})
+    store.write(obj)
+    store.archive_hypothesis(obj, "expired", "aged out")
+    assert store.read("hypothesis", obj.id) is None
+    assert store.read_archived("hypothesis", obj.id) is not None
+
+
+def test_archive_rejects_non_terminal_status_and_wrong_kind(store):
+    obj = TelosObject(id=store.mint_id("hypothesis"), kind="hypothesis", meta={"status": "soup"})
+    store.write(obj)
+    with pytest.raises(ValueError):
+        store.archive_hypothesis(obj, "soup", "not a terminal status")
+    goal = TelosObject(id="g_x", kind="goal", meta={"kind": "task"})
+    store.write(goal)
+    with pytest.raises(ValueError):
+        store.archive_hypothesis(goal, "expired", "wrong kind")
 
 
 def test_acknowledged_alarms_stay_live(store):

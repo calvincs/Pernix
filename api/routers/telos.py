@@ -58,7 +58,11 @@ async def telos_overview():
             "serendipity_open": sum(
                 1 for q in questions if q.get("origin") == "serendipity" and q.get("state") == "open"
             ),
+            # Live statuses only — terminal hypotheses are in soup/archive/,
+            # out of every store scan. Counted separately so the overview
+            # does not read as if they vanished.
             "hypotheses": by(hyps, "status"),
+            "hypotheses_archived": store.count_archived("hypothesis"),
             "goals": by(goals, "kind"),
             "goals_suspended": sum(1 for g in goals if g.get("state") == "suspended"),
             "claims": len(store.list("claim")),
@@ -88,14 +92,31 @@ async def telos_questions(state: str = "", limit: int = 100):
 
 @router.get("/api/telos/hypotheses")
 async def telos_hypotheses(status: str = "", limit: int = 100):
+    """Live hypotheses: soup | gated | running | supported | refuted.
+
+    Terminal ones are not served here. `untestable` (examined, unresolvable)
+    and `expired` (aged out unexamined) are moved to `<telos_dir>/soup/archive/`
+    so the loop's scans stop paying for them, and they are read off disk, not
+    through this endpoint — asking for either status returns an empty list
+    plus a `note` saying where they went, rather than implying none exist.
+    """
     if not settings.telos_enabled:
         return {"hypotheses": []}
 
     def build():
+        from core.telos.store import ARCHIVED_HYPOTHESIS_STATES
+
         store = _store()
         hs = store.list_hypotheses(status=status or None)
         hs.sort(key=lambda h: str(h.get("updated_at", "")), reverse=True)
-        return {"hypotheses": [_obj_dict(h) for h in hs[: max(1, min(limit, 500))]]}
+        out = {"hypotheses": [_obj_dict(h) for h in hs[: max(1, min(limit, 500))]]}
+        if status in ARCHIVED_HYPOTHESIS_STATES:
+            out["note"] = (
+                f"'{status}' hypotheses are archived out of the live store: "
+                f"{store.count_archived('hypothesis')} file(s) under "
+                f"{settings.telos_dir}/soup/archive/ (read on disk; there is no un-archive path)."
+            )
+        return out
 
     return await _asyncio.to_thread(build)
 
