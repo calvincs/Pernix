@@ -120,6 +120,52 @@ async def test_chat_inject():
     assert resp.status_code in (200, 400)
 
 
+async def test_chat_inject_stamps_turn_root_when_loop_live():
+    """Mid-turn injections must carry parent_user_msg_id = the active turn's
+    root so compile_context sorts them inside the turn instead of permanently
+    after every reply (session b23ffafde5ba re-acknowledgment loop)."""
+    import json
+
+    from api.routers import chat
+    from db import models as db
+    from sessions import state_v2 as sv2
+
+    app = _make_app(chat.router)
+    sid = db.create_session(title="Inject Stamp Test")
+    root = db.add_message(sid, "user", "the turn root")
+
+    class _StubSession:
+        _state_v2 = sv2.SessionStateV2.PROCESSING
+        current_turn_user_msg_id = root
+
+        def emit_event(self, _evt):
+            pass
+
+    class _StubManager:
+        def get(self, _sid):
+            return _StubSession()
+
+    orig_get_manager = chat.get_manager
+    chat.get_manager = lambda: _StubManager()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/api/chat/inject",
+                json={"session_id": sid, "message": "use port 8137"},
+            )
+    finally:
+        chat.get_manager = orig_get_manager
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "injected"
+    rows = db.get_messages(sid)
+    injected = [r for r in rows if r["content"] == "use port 8137"]
+    assert injected, rows
+    meta = json.loads(injected[-1]["metadata"])
+    assert meta["injected"] is True
+    assert meta["parent_user_msg_id"] == root
+
+
 async def test_chat_usage():
     from api.routers import chat
     from db import models as db

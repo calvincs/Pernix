@@ -396,6 +396,54 @@ def test_compile_context_pins_active_turn_user_message():
     assert survived, "active turn's user message was evicted despite turn_user_msg_id pin"
 
 
+def test_injected_midturn_message_sorts_before_later_replies():
+    """Regression for session b23ffafde5ba: an injected mid-turn user message
+    used to sort by its own id while every assistant row of the turn sorted by
+    the (lower) turn-root id — pushing the injection after ALL replies of the
+    turn, forever. Each LLM round then re-presented it as the newest unanswered
+    user message and the model re-acknowledged it every round. Stamped with the
+    turn root's parent_user_msg_id, it must sort chronologically inside the
+    turn: after the replies that preceded it, before the reply that answered it."""
+    from db import models as db
+
+    sid = db.create_session(title="InjectOrder")
+    root = db.add_message(sid, "user", "ROOT build the app")
+    db.add_message(sid, "assistant", "REPLY-1 scaffolding", metadata=json.dumps({"parent_user_msg_id": root}))
+    db.add_message(
+        sid,
+        "user",
+        "INJECTED use port 8137",
+        metadata=json.dumps({"injected": True, "parent_user_msg_id": root}),
+    )
+    db.add_message(sid, "assistant", "REPLY-2 acknowledged, port 8137", metadata=json.dumps({"parent_user_msg_id": root}))
+
+    payload = compile_context(sid, turn_user_msg_id=root)
+    order = [m["content"] for m in payload.messages if isinstance(m.get("content"), str)]
+
+    def _idx(marker):
+        return next(i for i, c in enumerate(order) if marker in c)
+
+    assert _idx("ROOT") < _idx("REPLY-1") < _idx("INJECTED") < _idx("REPLY-2"), order
+
+
+def test_unstamped_injected_message_keeps_legacy_tail_position():
+    """Rows injected before the stamp existed (no parent_user_msg_id) must not
+    crash the sort and keep their old own-id key."""
+    from db import models as db
+
+    sid = db.create_session(title="InjectLegacy")
+    root = db.add_message(sid, "user", "ROOT prompt")
+    db.add_message(sid, "assistant", "REPLY-1", metadata=json.dumps({"parent_user_msg_id": root}))
+    db.add_message(sid, "user", "INJECTED legacy", metadata=json.dumps({"injected": True}))
+
+    payload = compile_context(sid, turn_user_msg_id=root)
+    order = [m["content"] for m in payload.messages if isinstance(m.get("content"), str)]
+    assert any("INJECTED legacy" in c for c in order)
+    assert next(i for i, c in enumerate(order) if "REPLY-1" in c) < next(
+        i for i, c in enumerate(order) if "INJECTED legacy" in c
+    )
+
+
 def test_compile_context_emits_trim_notice_when_drops_occur():
     from db import models as db
 
