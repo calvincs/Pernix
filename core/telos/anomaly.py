@@ -14,6 +14,10 @@ the eternity clause at the tactical level (§3.2).
 
 Mechanical, no LLM. Called from run_post_task_hooks after Candor's hook so
 the reliability record already contains this turn. Failure is never fatal.
+
+record_gate_outcomes also lives here: it is the other turn-end trace emitter,
+writing the deterministic gate verdicts that hypotheses about the gate/retry
+loop have to be evaluable against.
 """
 
 from __future__ import annotations
@@ -243,6 +247,47 @@ def _post_task_store_work(
             origin=origin,
         )
         minted += 1
+
+
+def record_gate_outcomes(
+    session_id: str,
+    session_type: str,
+    attempt: int,
+    reflect_mode: str,
+    gates: list[dict],
+) -> None:
+    """Append one trace event per gate for this attempt. Blocking — call via
+    to_thread, like the rest of this module's store work.
+
+    Separate events, never one event carrying an attempts array: the
+    hypothesis evaluator keyword-matches whole trace events against a
+    falsifier's observables, so the fail -> retry -> pass arc has to be
+    readable as a SEQUENCE of events to be discriminable at all. Field order
+    puts the discriminating fields first because _gather_evidence shows only
+    the first 300 characters of an event (it matches on the full blob).
+
+    trace_append never raises; this loop is bounded by the session's gate
+    count, so the whole call is cheap.
+    """
+    from core.telos.store import TelosStore
+
+    if not gates:
+        return
+    store = TelosStore.open()
+    for gate in gates:
+        passed = bool(gate.get("passed"))
+        event = {
+            "name": gate.get("name"),
+            "passed": passed,
+            "attempt": attempt,
+            "reflect_mode": reflect_mode,
+            "session_type": session_type,
+            "session": session_id,
+        }
+        excerpt = str(gate.get("excerpt") or "")
+        if not passed and excerpt:
+            event["excerpt"] = excerpt
+        store.trace_append("gates", event)
 
 
 def _recently_minted(store, derived_from: list[str]) -> bool:

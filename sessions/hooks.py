@@ -25,6 +25,10 @@ logger = logging.getLogger("pernix.sessions.hooks")
 # turn while keeping the read bounded on a long-lived session.
 REFLECT_TAIL_MESSAGES = 400
 
+# Failure text carried into the gate trace event. Ledger-safe: enough to name
+# the failure, short enough that an append-only daily JSONL stays readable.
+GATE_EXCERPT_CHARS = 200
+
 
 def _strip_thinking(text: str) -> str:
     """Strip LLM thinking/reasoning blocks from response content.
@@ -69,7 +73,7 @@ async def run_post_task_hooks(session_id: str, emit=None, session_obj=None) -> N
     # requests the retry directly.
     gate_results: list = []
     if settings.gates_enabled and session_obj:
-        gate_results = await _run_turn_gates(session_id, session_obj, emit=emit)
+        gate_results = await _run_turn_gates(session_id, session, session_obj, emit=emit)
 
     # Reflect: post-execution verification. For interactive sessions this may
     # only schedule the grade (see _reflect_is_deferred) — the gates above are
@@ -371,9 +375,10 @@ def _broadcast_reflect_notification(
     get_event_bus().emit({**notification, "session_id": session_id})
 
 
-async def _run_turn_gates(session_id: str, session_obj, emit=None) -> list:
+async def _run_turn_gates(session_id: str, session: dict, session_obj, emit=None) -> list:
     """Execute this attempt's gates (blocking runner via to_thread), persist
-    a transcript-visible eval row, emit SSE. Never raises."""
+    a transcript-visible eval row, emit SSE, log the outcomes to the standing
+    ledgers. Never raises."""
     import json as _json
 
     from core.gates import run_gates_for_turn
@@ -406,7 +411,86 @@ async def _run_turn_gates(session_id: str, session_obj, emit=None) -> list:
                 "names_failed": [r.name for r in failed],
             }
         )
+    try:
+        await _log_gate_outcomes(session_id, session, session_obj, results, attempt)
+    except Exception as e:
+        # Belt-and-braces over the logger's own per-surface guards: this
+        # function's contract is that it never raises, and gate results drive
+        # the clamp and the retry fallback. Observability never gates a turn.
+        logger.warning("Gate outcome logging failed for %s: %s", session_id, e)
     return results
+
+
+async def _log_gate_outcomes(session_id: str, session: dict, session_obj, results: list, attempt: int) -> None:
+    """Record this attempt's gate verdicts where hypotheses can reach them.
+
+    Gate outcomes used to survive only inside a post-mortem's extra_payload,
+    and only on turns where reflect actually ran. Since bfbaadd deferred the
+    interactive grade to an observe-only background task, gates are the sole
+    synchronous retry path a "normal" session has — and the one part of that
+    loop with no standing ledger, so every TELOS hypothesis about it was
+    un-evaluable by construction (the defect class the 2026-08-16 question
+    audit found in anomaly minting).
+
+    One trace event and one gate_ok observation PER GATE PER ATTEMPT, never
+    an attempts array: the fail -> retry -> pass arc has to be matchable as a
+    sequence. reflect_mode rides on both surfaces so the September
+    calibration review can tell the two grading regimes apart.
+
+    Fail soft on both surfaces, independently: a ledger problem must never
+    cost the turn, and a broken trace must not suppress the observation.
+    """
+    if session.get("session_type") == "canary":
+        # Canary isolation, as in _maybe_candor / on_post_task: synthetic
+        # turns run deliberately-hard gates, and neither the trace nor the
+        # reliability ledger should learn from them.
+        return
+
+    session_type = session.get("session_type") or "normal"
+    reflect_mode = "deferred" if _reflect_is_deferred(session) else "sync"
+    gates = [
+        {
+            "name": r.name,
+            "passed": bool(r.passed),
+            # The tail is where a failing command says why; runner-level
+            # problems (timeout, policy refusal) produce no output at all.
+            "excerpt": "" if r.passed else ((r.output_tail or r.error or "")[-GATE_EXCERPT_CHARS:]).strip(),
+        }
+        for r in results
+    ]
+
+    if settings.telos_enabled:
+        try:
+            from core.telos.anomaly import record_gate_outcomes
+
+            await asyncio.to_thread(record_gate_outcomes, session_id, session_type, attempt, reflect_mode, gates)
+        except Exception as e:
+            logger.warning("Gate trace append failed for %s: %s", session_id, e)
+
+    if settings.candor_enabled:
+        import time as _time
+
+        try:
+            from core.extensions.candor.bridge import get_candor_bridge
+            from core.extensions.candor.emit import build_gate_observations
+
+            observations = build_gate_observations(
+                gates=gates,
+                attempt=attempt,
+                model=getattr(session_obj, "model_override", None) or settings.llm_model or "default",
+                session_kind=session_type,
+                reflect_mode=reflect_mode,
+                ts_ms=int(_time.time() * 1000),
+            )
+            if observations:
+                # Bounded wait, as in _maybe_candor: post-hooks block turn
+                # completion, and a busy bridge executor still finishes the
+                # job after we stop waiting — data is late, not lost.
+                await asyncio.wait_for(get_candor_bridge().record(observations), timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning("Candor gate record still queued after 10s — continuing without waiting")
+        except Exception as e:
+            logger.warning("Candor gate emission failed for %s: %s", session_id, e)
 
 
 def _same_failure_repeating(session_id: str, turn_started_iso: str | None = None) -> str | None:
