@@ -569,3 +569,105 @@ def test_base_prompt_bypass_block_only_under_dangerous(monkeypatch):
     # The gate-off note must not blanket-discourage ask_user — genuine
     # decisions still route through it.
     assert "ask_user" in text
+
+
+# ---------------------------------------------------------------------------
+# _telos_baseline_line / _build_telos_drive_block
+# ---------------------------------------------------------------------------
+
+
+class _FakeObj:
+    def __init__(self, **meta):
+        self.meta = meta
+
+    def get(self, key, default=None):
+        return self.meta.get(key, default)
+
+
+class _FakeStore:
+    def __init__(self, soup=2, gated=1, archived=5, alarms=1, questions=None):
+        self._hyps = [_FakeObj(status="soup")] * soup + [_FakeObj(status="gated")] * gated
+        self._archived = archived
+        self._alarms = [_FakeObj(state="open")] * alarms
+        self._questions = questions or []
+
+    def list_hypotheses(self, status=None):
+        return self._hyps
+
+    def count_archived(self, kind):
+        return self._archived
+
+    def list_alarms(self, open_only=True):
+        return self._alarms
+
+    def list_questions(self, state=None):
+        return self._questions
+
+
+@pytest.fixture()
+def _fresh_baseline_cache(monkeypatch):
+    """Each test sees a cold TTL cache and controls the calibration result."""
+    import core.context.compiler as compiler
+
+    monkeypatch.setattr(compiler, "_telos_baseline_cache", (0.0, ""))
+    return compiler
+
+
+def test_baseline_line_carries_pool_calibration_and_alarms(_fresh_baseline_cache, monkeypatch):
+    compiler = _fresh_baseline_cache
+    monkeypatch.setattr(
+        "core.telos.calibration.eig_calibration",
+        lambda store: {"brier": 0.475, "n": 239, "discount": 0.25},
+    )
+    line = compiler._telos_baseline_line(_FakeStore(soup=266, gated=12, archived=265, alarms=1))
+    assert "pool 266 soup / 12 gated / 265 archived" in line
+    assert "EIG Brier 0.475/239 (discount 0.25x)" in line
+    assert "1 live alarm" in line
+
+
+def test_baseline_line_reports_absent_calibration_as_absent(_fresh_baseline_cache, monkeypatch):
+    """An unevaluated EIG must never render as a flattering zero."""
+    compiler = _fresh_baseline_cache
+    monkeypatch.setattr(
+        "core.telos.calibration.eig_calibration",
+        lambda store: {"brier": None, "n": 0, "discount": 1.0},
+    )
+    line = compiler._telos_baseline_line(_FakeStore())
+    assert "EIG unevaluated" in line
+
+
+def test_baseline_line_is_ttl_cached(_fresh_baseline_cache, monkeypatch):
+    """The volatile tail rebuilds every round; the store must not be re-read
+    inside the TTL window."""
+    compiler = _fresh_baseline_cache
+    calls = []
+    monkeypatch.setattr(
+        "core.telos.calibration.eig_calibration",
+        lambda store: calls.append(1) or {"brier": 0.4, "n": 10, "discount": 0.5},
+    )
+    first = compiler._telos_baseline_line(_FakeStore(soup=1))
+    second = compiler._telos_baseline_line(_FakeStore(soup=999))
+    assert first == second  # served from cache, not recomputed
+    assert len(calls) == 1
+
+
+def test_drive_block_leads_with_the_baseline_even_when_quiet(_fresh_baseline_cache, monkeypatch):
+    """No open questions and no alarms used to mean an empty block; the
+    baseline numbers are the point now — they show up regardless (the agent's
+    2026-08-17 request: ambient drive state, no tool call)."""
+    compiler = _fresh_baseline_cache
+    monkeypatch.setattr("config.settings.telos_enabled", True)
+    monkeypatch.setattr(
+        "core.telos.calibration.eig_calibration",
+        lambda store: {"brier": 0.475, "n": 239, "discount": 0.25},
+    )
+    monkeypatch.setattr("core.telos.store.TelosStore.open", classmethod(lambda cls: _FakeStore(alarms=0)))
+    block = compiler._build_telos_drive_block()
+    assert block.startswith("[TELOS] Baseline: pool")
+    assert "Open questions" not in block
+
+
+def test_drive_block_empty_when_telos_disabled(_fresh_baseline_cache, monkeypatch):
+    compiler = _fresh_baseline_cache
+    monkeypatch.setattr("config.settings.telos_enabled", False)
+    assert compiler._build_telos_drive_block() == ""
