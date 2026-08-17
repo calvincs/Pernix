@@ -701,11 +701,59 @@ def _build_goal_burn(session_id: str) -> str:
         return ""
 
 
+# The baseline line re-reads the soup directory and the calibration trace
+# window, and the volatile tail is rebuilt on every LLM round — a TTL keeps
+# that cost to once a minute. Baselines are trends, not to-the-second state;
+# a number up to a minute old answers "is the pool growing / is EIG red /
+# did an alarm open" exactly as well as a fresh one.
+_TELOS_BASELINE_TTL_S = 60
+_telos_baseline_cache: tuple[float, str] = (0.0, "")
+
+
+def _telos_baseline_line(store) -> str:
+    """One line of drive-state numbers for the volatile tail.
+
+    Requested by the agent itself (2026-08-17): it was blind to its own pool
+    size, calibration, and alarm count unless it spent a tool call on
+    telos_status — on exactly the turns where the user asks about system
+    state. Injected like the token budget: ambiently, every turn.
+    """
+    import time as _time
+
+    global _telos_baseline_cache
+    stamp, cached = _telos_baseline_cache
+    now = _time.monotonic()
+    if cached and now - stamp < _TELOS_BASELINE_TTL_S:
+        return cached
+
+    hyps = store.list_hypotheses()
+    soup = sum(1 for h in hyps if h.get("status") == "soup")
+    gated = sum(1 for h in hyps if h.get("status") == "gated")
+    archived = store.count_archived("hypothesis")
+    alarms = len(store.list_alarms(open_only=True))
+
+    from core.telos.calibration import eig_calibration
+
+    calib = eig_calibration(store)
+    if calib.get("brier") is None:
+        eig = "EIG unevaluated"
+    else:
+        eig = f"EIG Brier {calib['brier']:.3f}/{calib['n']} (discount {calib['discount']:.2f}x)"
+
+    line = (
+        f"Baseline: pool {soup} soup / {gated} gated / {archived} archived · {eig} · "
+        f"{alarms} live alarm{'s' if alarms != 1 else ''}"
+    )
+    _telos_baseline_cache = (now, line)
+    return line
+
+
 def _build_telos_drive_block() -> str:
-    """Open telos questions + live alarms for the volatile tail (audit P5
-    port 3). The agent used to be unaware of its own drive state unless it
-    voluntarily called telos_status. Byte-identical output (empty string)
-    when telos is disabled; capped to three questions to bound tail churn."""
+    """Open telos questions + live alarms + baseline numbers for the volatile
+    tail (audit P5 port 3). The agent used to be unaware of its own drive
+    state unless it voluntarily called telos_status. Byte-identical output
+    (empty string) when telos is disabled; capped to three questions to bound
+    tail churn."""
     if not settings.telos_enabled:
         return ""
     try:
@@ -717,13 +765,15 @@ def _build_telos_drive_block() -> str:
             key=lambda q: (-float(q.get("surprise") or 0.0), q.get("created_at") or ""),
         )[:3]
         alarms = store.list_alarms(open_only=True)
-        if not qs and not alarms:
-            return ""
-        lines = [
-            "[TELOS] Open questions the idle loop is working on (FYI — answer opportunistically if your task touches one):"
-        ]
-        for q in qs:
-            lines.append(f"- ({q.id}, surprise {float(q.get('surprise') or 0):.2f}) {str(q.get('text') or '')[:180]}")
+        lines = ["[TELOS] " + _telos_baseline_line(store)]
+        if qs:
+            lines.append(
+                "Open questions the idle loop is working on (FYI — answer opportunistically if your task touches one):"
+            )
+            for q in qs:
+                lines.append(
+                    f"- ({q.id}, surprise {float(q.get('surprise') or 0):.2f}) {str(q.get('text') or '')[:180]}"
+                )
         if alarms:
             lines.append(f"Open telos alarms: {len(alarms)} (see telos_status)")
         return "\n".join(lines)
