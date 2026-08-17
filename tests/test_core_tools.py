@@ -312,22 +312,64 @@ def test_bash_timeout_override_capped_at_30_minutes(tmp_path, monkeypatch):
     (venv_dir / "bin" / "python").write_text("#!/bin/sh\nexit 0\n")
     (venv_dir / "bin" / "python").chmod(0o755)
 
-    # Probe communicate() to capture the timeout the tool actually used.
+    # Probe wait() to capture the timeout the tool actually used.
     import core.tools.builtin.core_tools as core_tools
 
     captured: dict = {}
     real_popen = core_tools.subprocess.Popen
 
     class _ProbePopen(real_popen):
-        def communicate(self, input=None, timeout=None):  # type: ignore[override]
+        def wait(self, timeout=None):  # type: ignore[override]
             captured["timeout"] = timeout
-            return ("done\n", "")
+            return super().wait(timeout=timeout)
 
     monkeypatch.setattr(core_tools.subprocess, "Popen", _ProbePopen)
 
     bash("echo done", timeout=99999)
     # 99999 should be clamped to 1800.
     assert captured.get("timeout") == 1800, f"expected 1800s cap, got {captured.get('timeout')}"
+
+
+def test_bash_backgrounded_compound_does_not_block(tmp_path, monkeypatch):
+    """Regression for session b23ffafde5ba: `cd X && nohup server > log 2>&1 &`
+    backgrounds the whole && list, so bash forks a wrapper subshell that holds
+    the tool's stdout/stderr for the server's lifetime. With PIPE+communicate()
+    the call then "hung" until shell_timeout (2 exact-600s stalls in one turn)
+    even though every foreground command finished in seconds. File-backed
+    capture + wait() must return as soon as the shell exits."""
+    import time as _time
+
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
+    monkeypatch.setattr("config.settings.shell_timeout", 8)
+    start = _time.monotonic()
+    # The sleep self-expires in 6s so the test never leaks a process.
+    result = bash("cd . && nohup sleep 6 > /dev/null 2>&1 & disown\necho launched")
+    elapsed = _time.monotonic() - start
+    assert "launched" in result, result
+    assert "timed out" not in result.lower(), result
+    assert elapsed < 5, f"tool blocked on backgrounded child's fds ({elapsed:.1f}s)"
+
+
+def test_bash_timeout_reports_partial_output(tmp_path, monkeypatch):
+    """A timed-out command should surface what it printed before the kill —
+    that's usually the whole diagnosis."""
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
+    monkeypatch.setattr("config.settings.shell_timeout", 1)
+    result = bash("echo started-ok; sleep 5")
+    assert "timed out after 1s" in result, result
+    assert "started-ok" in result, result
+
+
+def test_bash_stdout_stderr_both_captured(tmp_path, monkeypatch):
+    """File-backed capture must preserve the old contract: stdout then stderr."""
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    monkeypatch.setattr("config.settings.shell_security_mode", "permissive")
+    result = bash("echo out-line; echo err-line >&2")
+    assert "out-line" in result, result
+    assert "err-line" in result, result
+    assert result.index("out-line") < result.index("err-line"), result
 
 
 def test_bash_timeout_zero_or_negative_falls_back_to_default(tmp_path, monkeypatch):

@@ -239,17 +239,30 @@ def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
     start = time.monotonic()
     proc = None
     try:
-        proc = subprocess.Popen(
-            command,
-            shell=True,
-            cwd=cwd,
-            env=_gate_env(workspace),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            preexec_fn=_gate_child_setup,
-        )
-        stdout, stderr = proc.communicate(timeout=GATE_TIMEOUT_S)
+        # File-backed capture + wait(), not PIPE + communicate(): communicate()
+        # returns only on pipe EOF, so a gate that backgrounds anything holding
+        # the pipe fds would stall the whole gate pass until GATE_TIMEOUT_S
+        # (same defect as the bash tool, fixed in core_tools.bash).
+        import tempfile
+
+        from core.tools.builtin.core_tools import _read_capture
+
+        with (
+            tempfile.TemporaryFile(mode="w+b") as out_f,
+            tempfile.TemporaryFile(mode="w+b") as err_f,
+        ):
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                cwd=cwd,
+                env=_gate_env(workspace),
+                stdout=out_f,
+                stderr=err_f,
+                preexec_fn=_gate_child_setup,
+            )
+            proc.wait(timeout=GATE_TIMEOUT_S)
+            stdout = _read_capture(out_f)
+            stderr = _read_capture(err_f)
         tail = ((stdout or "") + ("\n" + stderr if stderr else ""))[-GATE_OUTPUT_TAIL:]
         result = GateResult(
             name=name,
