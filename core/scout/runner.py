@@ -1005,6 +1005,19 @@ def build_session_brief(session_id: str, context_budget: int | None = None) -> S
     # Count user turns
     turn_count = sum(1 for m in messages if m["role"] == "user")
 
+    # Scheduled-job tool allow-list (C1): read from the live session object —
+    # it's set by the scheduling dispatch before the prompt, and scout runs
+    # inside that prompt's turn. Guarded: the DB row has no such field.
+    tool_allowlist: list = []
+    try:
+        from sessions.manager import get_manager
+
+        live = get_manager().get(session_id)
+        if live is not None and getattr(live, "tool_allowlist", None):
+            tool_allowlist = sorted(live.tool_allowlist)
+    except Exception as e:
+        logger.debug("Session brief allowlist lookup failed for %s: %s", session_id, e)
+
     return SessionBrief(
         session_id=session_id,
         title=session.get("title", "New session"),
@@ -1015,6 +1028,7 @@ def build_session_brief(session_id: str, context_budget: int | None = None) -> S
         tools_used_recently=sorted(tools_used),
         context_utilization=min(utilization, 1.0),
         is_fresh=(turn_count == 0),
+        tool_allowlist=tool_allowlist,
     )
 
 

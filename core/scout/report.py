@@ -41,6 +41,11 @@ class SessionBrief:
     feature_state: dict | None = None
     context_utilization: float = 0.0
     is_fresh: bool = True
+    # Scheduled-job tool allow-list (C1): when the dispatching job constrains
+    # the session (AgentSession.tool_allowlist), scout must plan within it —
+    # the schema builder enforces the same set, so recommending outside it
+    # produces a plan the agent mechanically cannot follow.
+    tool_allowlist: list = field(default_factory=list)
 
     def to_prompt_text(self) -> str:
         """Format as text for the scout's input."""
@@ -65,6 +70,15 @@ class SessionBrief:
 
         if self.compaction_summary:
             lines.append(f"Previous summary: {self.compaction_summary[:500]}")
+
+        if self.tool_allowlist:
+            lines.append(
+                "CONSTRAINED SESSION — the dispatching job's tool schema contains EXACTLY these "
+                f"tools and nothing else: {', '.join(sorted(self.tool_allowlist))}. "
+                "recommended_tools MUST be a subset of this list (the usual 5-15 guidance does "
+                "not apply), and approach_guidance must not name any tool outside it — the "
+                "schema mechanically refuses everything else, builtins included."
+            )
 
         return "\n".join(lines)
 
