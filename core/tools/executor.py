@@ -258,6 +258,23 @@ async def _execute_single(
             latency_ms=0,
         )
 
+    # Scheduled-job allow-list (E1): backstop for the schema-side intersection
+    # in core/agent.py — catches a model that fabricates a call to a tool its
+    # schema no longer offers. Same two-point enforcement as retry_excluded.
+    _allowlist = getattr(s, "tool_allowlist", None) if sid and s else None
+    if _allowlist and name not in _allowlist:
+        return ToolExecutionResult(
+            tool_name=name,
+            content=(
+                f"Error: Tool '{name}' is not permitted in this scheduled run — the job's "
+                f"charter restricts this session to: {', '.join(sorted(_allowlist))}. "
+                "Complete the task with the permitted tools, or log the need in your "
+                "proposals instead of executing."
+            ),
+            was_error=True,
+            latency_ms=0,
+        )
+
     if session_type and session_type in tool.denied_session_types:
         return ToolExecutionResult(
             tool_name=name,

@@ -241,6 +241,18 @@ class AgentSession:
     # Per-session model override (for workers with specific model needs)
     model_override: str | None = None
 
+    # Per-dispatch tool allow-list for scheduled (cron/heartbeat) runs. Set by
+    # the scheduling extension from the job's `allowed_tools` field before the
+    # prompt is dispatched, cleared in the same finally as model_override.
+    # When set it is EXCLUSIVE: the schema builder intersects the active tool
+    # set with it (overriding the builtin force-add and the monotonic
+    # allowlist), and the executor refuses anything outside it — the same two
+    # enforcement points as reflect's retry_excluded_tools. None (the normal
+    # case) means no constraint. Prose bans in job prompts demonstrably do not
+    # bind (field case 0ba19fdbc823: bash forbidden in the charter, called 8
+    # times on the retry — because the schema still offered it).
+    tool_allowlist: frozenset | None = None
+
     # Per-session context budget override, paired with model_override. When a
     # switch_model call scales the budget to the new model's capacity, the
     # value lives here instead of on global settings so concurrent sessions
