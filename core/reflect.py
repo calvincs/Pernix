@@ -78,6 +78,7 @@ RULES:
 - TURN SCOPE OVERRIDES THE PLAN: If the evidence includes a TURN SCOPE block (e.g. "ask_user answer"), that block defines the deliverable for this turn. It supersedes the SCOUT DELIVERABLES PLAN, PLANNED APPROACH, and any session-wide goal. An ask_user answer turn passes when the agent honors the answer (applies the approved change, declines cleanly, uses the value provided) — even if scout's plan listed wider work, that work is out of scope for this verdict.
 - TRUST THE PLAN: If the evidence includes ACTIVE SKILL / PLANNED APPROACH / TOOL RATIONALE, treat those as the contract the agent was given. If the agent followed the planned approach using the planned tools, do NOT call hallucination just because the tools look "generic" (e.g. browse_web). Skills routinely mandate generic tools — that's expected, not a failure. Only flag hallucination when the agent invented data with no supporting tool calls AND the plan called for a tool that wasn't run.
 - Use the TOOL EXECUTION SUMMARY to identify failure patterns. If a tool failed 2+ times with the same error, the retry strategy MUST suggest a different tool or approach.
+- SELF-REPORTED COUNTS ARE NOT A RUBRIC INPUT: the agent cannot see the TOOL EXECUTION SUMMARY and, on a retry, cannot see prior attempts' totals — so a mismatch between the agent's own stated tool count and the summary is NOT, by itself, dishonesty or a retry cause. Grade what the agent DID against the summary and transcript; ignore its arithmetic about itself. (Actual misuse of a forbidden tool remains gradeable — from the summary, not from the agent's count.)
 - TOOL CALL FACTS ARE NOT NEGOTIABLE. The TOOL EXECUTION SUMMARY is observed truth, not interpretation. Before claiming the agent did NOT use a tool, verify: if the tool name appears in the summary with calls > 0, the agent DID call it. Do NOT write "agent did not call X" or "agent failed to use X" or "X was skipped" if X.calls > 0 in the summary. If you believe the call was *ineffective* (tool ran but didn't produce the expected result), say that — but do not deny the call happened. Hallucinating absence of a call that the summary records as present is a verifier-side correctness failure.
 - EVIDENCE PRIMACY. The transcript's tool RESULTS are ground truth. When a tool result body in the transcript supports or contradicts a claim in the agent's final response, that body outranks your priors about the topic. If the agent fetched URL X and the transcript shows the fetch returned real content, do NOT call hallucination just because your training data doesn't recognize X. Verify against what the tools actually returned, not what you "know" about the topic. The verifier-side failure mode this prevents: dismissing a fact as fabricated when the session contains real evidence for it.
 - TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
@@ -537,9 +538,22 @@ def _build_compact_evidence(
         if approach_lines:
             parts.append("\n\n".join(approach_lines))
 
-    # Tool execution summary with last few errors per tool
+    # Tool execution summary with last few errors per tool. Labeled with its
+    # scope: tool_summary accumulates across ALL attempts of the turn (see
+    # TurnState.tool_summary) while the transcript below is current-attempt
+    # only — without the label, reflect compares the agent's per-attempt
+    # behavior against multi-attempt totals and calls the mismatch dishonesty
+    # (field case 0ba19fdbc823: "claimed 8, actual 20" — the 20 included the
+    # stripped first attempt's calls).
     if tool_summary:
-        summary_lines = ["TOOL EXECUTION SUMMARY:"]
+        scope_note = (
+            " (cumulative across ALL attempts of this turn — on a retry these counts "
+            "include prior attempts' calls; the transcript below covers only the "
+            "current attempt)"
+            if attempt > 1
+            else ""
+        )
+        summary_lines = [f"TOOL EXECUTION SUMMARY{scope_note}:"]
         for tool_name, stats in sorted(tool_summary.items()):
             summary_lines.append(
                 f"- {tool_name}: {stats['calls']} call(s), "
