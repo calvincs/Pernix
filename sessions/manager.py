@@ -1773,6 +1773,21 @@ class SessionManager:
             )
             session.last_scout_report = scout_report
 
+        # Scheduled-job allow-list (C1): drop recommendations the schema will
+        # mechanically refuse anyway, so the plan the agent reads and the tool
+        # surface it gets never contradict. Applied to every report source —
+        # LLM, cache, fallback, reused-prior — at this single choke point.
+        allowlist = getattr(session, "tool_allowlist", None)
+        if allowlist and scout_report.recommended_tools:
+            dropped = [t for t in scout_report.recommended_tools if t not in allowlist]
+            if dropped:
+                scout_report.recommended_tools = [t for t in scout_report.recommended_tools if t in allowlist]
+                logger.info(
+                    "Scout recommendations outside job allow-list dropped for %s: %s",
+                    session.session_id[:12],
+                    ", ".join(sorted(dropped)),
+                )
+
         # Stamp the corrective signal onto the report the AGENT reads. Routing
         # it through the scout's message alone meant it survived only if the
         # scout LLM echoed it into approach_guidance — and scout bypass (which
