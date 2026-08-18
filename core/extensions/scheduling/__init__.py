@@ -604,13 +604,24 @@ def _ensure_dispatch_session(session_id: str | None, title: str = "") -> str:
     return get_manager().create_session(title=title, session_type="cron")
 
 
-async def _dispatch_prompt(session_id: str | None, prompt: str, title: str = "", model: str = "") -> str:
+async def _dispatch_prompt(
+    session_id: str | None,
+    prompt: str,
+    title: str = "",
+    model: str = "",
+    allowed_tools: list | None = None,
+) -> str:
     """Open-or-reuse a session and send it one prompt under the cron bound.
 
     The single dispatch path for scheduled work: cron fires and heartbeat
     ticks into an idle session are the same operation (a scheduled prompt IS
     the turn), so they share the session handling, the model override, and the
     cron_dispatch_timeout ceiling. Returns the session id used.
+
+    allowed_tools, when set on the job, becomes the session's exclusive tool
+    allow-list for the dispatched turn (enforced in the schema builder and the
+    executor — see AgentSession.tool_allowlist). Set and cleared exactly like
+    the model override so a reused session isn't left constrained.
     """
     from sessions.manager import get_manager
 
@@ -619,6 +630,8 @@ async def _dispatch_prompt(session_id: str | None, prompt: str, title: str = "",
     session = manager.get(session_id)
     if session and model:
         session.model_override = model
+    if session and allowed_tools:
+        session.tool_allowlist = frozenset(str(t) for t in allowed_tools if t)
 
     try:
         await asyncio.wait_for(
@@ -626,11 +639,13 @@ async def _dispatch_prompt(session_id: str | None, prompt: str, title: str = "",
             timeout=settings.cron_dispatch_timeout,
         )
     finally:
-        # Clear the model override for reused sessions
-        if model:
-            session = manager.get(session_id)
-            if session:
+        # Clear the model override and tool allow-list for reused sessions
+        session = manager.get(session_id)
+        if session:
+            if model:
                 session.model_override = None
+            if allowed_tools:
+                session.tool_allowlist = None
     return session_id
 
 
@@ -670,7 +685,7 @@ async def _execute_cron_job(meta: dict):
         # Bind the session id BEFORE dispatch: a timeout/error must still
         # reference the session that holds the partial transcript.
         session_id = _ensure_dispatch_session(session_id, title=f"Cron: {name}")
-        await _dispatch_prompt(session_id, prompt, model=model)
+        await _dispatch_prompt(session_id, prompt, model=model, allowed_tools=meta.get("allowed_tools"))
 
         duration_ms = int((time.time() - start_time) * 1000)
         db.update_cron_run(run_id, "completed")

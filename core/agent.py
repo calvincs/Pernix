@@ -1383,10 +1383,11 @@ async def _announce_model_switch(
 def _resolve_tool_surface(session: AgentSession, session_id: str, registry) -> tuple[str, list[str]]:
     """Decide which tools this turn may call, and the scout text to prepend.
 
-    Scout proposes; four rules dispose, in order: builtins are always present,
+    Scout proposes; five rules dispose, in order: builtins are always present,
     the monotonic allowlist re-adds anything this session already used
-    successfully, co-occurrence pulls in siblings, and reflect's retry
-    exclusions are subtracted last so they beat all three.
+    successfully, co-occurrence pulls in siblings, a scheduled job's
+    allowed_tools (when set) intersects the result, and reflect's retry
+    exclusions are subtracted last so they beat all four.
     """
     scout_report = session.last_scout_report
     if not scout_report:
@@ -1394,7 +1395,13 @@ def _resolve_tool_surface(session: AgentSession, session_id: str, registry) -> t
         # arrive via the compiler's fixed-prefix directives block on every
         # turn, so there is no identity to recover here — only the per-task
         # curation is missing, and no deterministic text can stand in for that.
-        return "", sorted(t.name for t in registry.enabled_tools())
+        # A scheduled job's allow-list still applies — this path must not be
+        # the one that hands a constrained cron run the full tool surface.
+        names = set(t.name for t in registry.enabled_tools())
+        _allow = getattr(session, "tool_allowlist", None)
+        if _allow:
+            names &= set(_allow)
+        return "", sorted(names)
 
     active: set[str] = set(scout_report.get_tool_names())
     # Always ensure core tools are available
@@ -1418,6 +1425,18 @@ def _resolve_tool_surface(session: AgentSession, session_id: str, registry) -> t
     # Pull in co-occurring siblings so e.g. spawn_worker brings
     # get_worker_result / check_workers / await_workers into the schema.
     active = registry.expand_cooccurrence(active)
+    # Scheduled-job tool allow-list (E1, field case 0ba19fdbc823): when the
+    # dispatching cron/heartbeat job declares allowed_tools, the schema is
+    # intersected with it AFTER the builtin force-add, the monotonic allowlist
+    # and cooccurrence expansion — a job's charter outranks all three. A tool
+    # the model can't see is a tool it can't drift onto; the executor enforces
+    # the same set as a backstop.
+    allowlist = getattr(session, "tool_allowlist", None)
+    if allowlist:
+        dropped = active - set(allowlist)
+        if dropped:
+            logger.debug("Job allow-list dropped %d tools from schema: %s", len(dropped), sorted(dropped))
+        active &= set(allowlist)
     # Retry effector (audit P1f): tools reflect disabled for this retry attempt
     # are removed from the schema entirely — overriding builtins and the
     # monotonic allowlist. The executor enforces this too.
