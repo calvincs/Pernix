@@ -1571,6 +1571,18 @@ async def _record_round_results(
             if err_preview not in entry["errors"]:
                 entry["errors"].append(err_preview)
 
+        # Per-attempt view (C2): reflect_count is the number of retries granted
+        # so far, so it doubles as this attempt's zero-based index — it is
+        # incremented by _maybe_reflect BEFORE the retry attempt re-enters here.
+        attempt_idx = session.turn.reflect_count
+        attempts = session.turn.tool_summary_attempts
+        while len(attempts) <= attempt_idx:
+            attempts.append({})
+        a_entry = attempts[attempt_idx].setdefault(result.tool_name, {"calls": 0, "failures": 0})
+        a_entry["calls"] += 1
+        if result.was_error:
+            a_entry["failures"] += 1
+
         # Dynamic tool expansion via discover_tools
         if result.tool_name == "discover_tools" and not result.was_error:
             _expand_tools_from_discovery(result.content, active_tools)

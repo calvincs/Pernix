@@ -653,6 +653,9 @@ class _DeferredGrade:
     turn_user_msg_id: int | None
     attempt: int
     tool_summary: dict = field(default_factory=dict)
+    # Per-attempt breakdown (C2). Snapshotted like tool_summary: the deferred
+    # grader runs ~minutes after the turn, when session.turn is long replaced.
+    tool_summary_attempts: list = field(default_factory=list)
     scout_report: Any = None
     termination_reason: str | None = None
     prior_termination_reasons: list = field(default_factory=list)
@@ -706,6 +709,7 @@ async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj
         turn_user_msg_id=getattr(session_obj, "current_turn_user_msg_id", None),
         attempt=session_obj.turn.reflect_count + 1,
         tool_summary=dict(session_obj.turn.tool_summary or {}),
+        tool_summary_attempts=[dict(a) for a in (session_obj.turn.tool_summary_attempts or [])],
         scout_report=session_obj.last_scout_report,
         termination_reason=getattr(session_obj, "termination_reason", None),
         prior_termination_reasons=termination_history[1:] if termination_history else [],
@@ -849,6 +853,7 @@ async def _run_deferred_reflect(session_obj, snap: _DeferredGrade) -> None:
             prior_termination_reasons=snap.prior_termination_reasons,
             gate_results=snap.gate_results or None,
             reflect_mode="deferred",
+            tool_summary_attempts=snap.tool_summary_attempts or None,
         )
 
         reflect_event = {
@@ -1095,6 +1100,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             termination_reason=current_reason,
             prior_termination_reasons=prior_reasons,
             gate_results=gate_results,
+            tool_summary_attempts=session_obj.turn.tool_summary_attempts or None,
         )
 
         # Stash the verdict for _maybe_candor (which runs after reflect).

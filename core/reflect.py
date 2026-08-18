@@ -83,7 +83,7 @@ RULES:
 - EVIDENCE PRIMACY. The transcript's tool RESULTS are ground truth. When a tool result body in the transcript supports or contradicts a claim in the agent's final response, that body outranks your priors about the topic. If the agent fetched URL X and the transcript shows the fetch returned real content, do NOT call hallucination just because your training data doesn't recognize X. Verify against what the tools actually returned, not what you "know" about the topic. The verifier-side failure mode this prevents: dismissing a fact as fabricated when the session contains real evidence for it.
 - TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
 - CEILING LOOP → ESCALATE: If TERMINATION HISTORY shows the same blocking reason (e.g. round_ceiling, budget_exhausted, compaction_failed) on the current turn AND at least one prior turn, the agent is hitting the same hard wall — another retry will hit it again. Verdict MUST be 'escalate'. In `missing`, name the wall: e.g. 'round_ceiling on consecutive attempts; agent cannot finish within max_tool_rounds — split the task or raise the limit.'
-- THRASHING → ESCALATE: If the summary shows ≥4 distinct tools used with no forward progress (empty outputs repeated, same files re-read, error count growing, or the agent drifting across unrelated checks), the agent is thrashing, not pursuing a coherent-but-wrong strategy. Prefer "escalate" with a clear "missing" field over "retry" — another round of the same thrashing will not help. A single failing tool being tried with sibling tools is NOT thrashing; reserve "escalate" for cases where the agent lost the thread.
+- THRASHING → ESCALATE: When a CURRENT ATTEMPT TOOL CALLS section is present (retry attempts), judge thrashing from THAT section only — the cumulative summary includes prior attempts' tools, and a focused retry must not inherit a scattered first attempt's diversity. If the (scoped) summary shows ≥4 distinct tools used with no forward progress (empty outputs repeated, same files re-read, error count growing, or the agent drifting across unrelated checks), the agent is thrashing, not pursuing a coherent-but-wrong strategy. Prefer "escalate" with a clear "missing" field over "retry" — another round of the same thrashing will not help. A single failing tool being tried with sibling tools is NOT thrashing; reserve "escalate" for cases where the agent lost the thread.
 - For failure_cause attribution: if tools were hallucinated or the plan jumped straight to the wrong approach, lean "scout". If the plan was sensible but the agent used tools incorrectly or gave up early, lean "agent". Don't guess — use "none" with low confidence if unclear.
 
 EVIDENCE QUALITY (outcome vs. execution):
@@ -444,6 +444,7 @@ def _build_compact_evidence(
     attempt: int,
     tool_summary: dict | None,
     scout_report=None,
+    tool_summary_attempts: list | None = None,
     termination_reason: str | None = None,
     prior_termination_reasons: list[str] | None = None,
     turn_user_msg_id: int | None = None,
@@ -563,6 +564,19 @@ def _build_compact_evidence(
                 summary_lines.append(f"    ERROR: {err}")
         parts.append("\n".join(summary_lines))
 
+    # Current attempt's own calls (C2): the scope-sensitive rules (THRASHING's
+    # distinct-tool count, per-attempt behavior) grade against THIS section on
+    # retries, never against the cumulative block above.
+    if attempt > 1 and tool_summary_attempts and len(tool_summary_attempts) >= attempt:
+        cur = tool_summary_attempts[attempt - 1] or {}
+        cur_lines = [f"CURRENT ATTEMPT (#{attempt}) TOOL CALLS — this attempt only:"]
+        if cur:
+            for tool_name, stats in sorted(cur.items()):
+                cur_lines.append(f"- {tool_name}: {stats['calls']} call(s), {stats['failures']} failure(s)")
+        else:
+            cur_lines.append("(no tool calls this attempt)")
+        parts.append("\n".join(cur_lines))
+
     # User's ask (echoed) so reflect anchors against the original goal even when
     # the transcript scrolls through tool calls.
     parts.append(f"USER REQUEST:\n{user_request}")
@@ -601,6 +615,7 @@ def _build_evidence(
     turn_user_msg_id: int | None = None,
     termination_reason: str | None = None,
     prior_termination_reasons: list[str] | None = None,
+    tool_summary_attempts: list | None = None,
 ) -> tuple[str, str]:
     """Build evidence for reflect verification.
 
@@ -646,6 +661,7 @@ def _build_evidence(
         attempt,
         tool_summary,
         scout_report,
+        tool_summary_attempts=tool_summary_attempts,
         termination_reason=termination_reason,
         prior_termination_reasons=prior_termination_reasons,
         turn_user_msg_id=turn_user_msg_id,
@@ -951,6 +967,7 @@ def _write_post_mortem(
     tool_summary: dict | None,
     extra_payload: dict | None = None,
     reflect_mode: str = "sync",
+    tool_summary_attempts: list | None = None,
 ) -> None:
     """Persist a post-mortem artifact for this reflect invocation (Phase 2c).
 
@@ -983,6 +1000,11 @@ def _write_post_mortem(
             ],
             "tool_summary": tool_summary or {},
         }
+        # Per-attempt breakdown (C2) — persisted so the deferred grader and
+        # later audits can scope counts per attempt; absent pre-C2 rows read
+        # via .get() as before.
+        if tool_summary_attempts:
+            payload["tool_summary_attempts"] = tool_summary_attempts
         # Persist turn_digest when present so the next scout can read it on
         # retry (sessions/manager.py composes scout_message from this).
         # Older readers use .get(), so adding the key is back-compat-safe.
@@ -1104,6 +1126,7 @@ async def reflect_on_session(
     prior_termination_reasons: list[str] | None = None,
     gate_results: list | None = None,
     reflect_mode: str = "sync",
+    tool_summary_attempts: list | None = None,
 ) -> ReflectResult:
     """Analyze a completed session turn and decide if the task was fulfilled.
 
@@ -1136,10 +1159,19 @@ async def reflect_on_session(
         turn_user_msg_id=turn_user_msg_id,
         termination_reason=termination_reason,
         prior_termination_reasons=prior_termination_reasons,
+        tool_summary_attempts=tool_summary_attempts,
     )
     if not user_request or not evidence:
         r = ReflectResult(verdict="pass", reasoning="No user request found to verify")
-        _write_post_mortem(session_id, attempt, r, scout_report, tool_summary, reflect_mode=reflect_mode)
+        _write_post_mortem(
+            session_id,
+            attempt,
+            r,
+            scout_report,
+            tool_summary,
+            reflect_mode=reflect_mode,
+            tool_summary_attempts=tool_summary_attempts,
+        )
         return r
 
     if extra_evidence:
@@ -1356,6 +1388,7 @@ async def reflect_on_session(
                 tool_summary,
                 extra_payload=extra_payload,
                 reflect_mode=reflect_mode,
+                tool_summary_attempts=tool_summary_attempts,
             )
             await _save_user_observations(session_id, result)
             return result
@@ -1402,11 +1435,20 @@ async def reflect_on_session(
             tool_summary,
             extra_payload={"parse_error": True, "raw_response_excerpt": (raw or "")[:500]},
             reflect_mode=reflect_mode,
+            tool_summary_attempts=tool_summary_attempts,
         )
         return r
 
     except Exception as e:
         logger.warning("Reflect failed for session %s: %s", session_id, e)
         r = ReflectResult(verdict="pass", reasoning=f"Reflect error: {e}")
-        _write_post_mortem(session_id, attempt, r, scout_report, tool_summary, reflect_mode=reflect_mode)
+        _write_post_mortem(
+            session_id,
+            attempt,
+            r,
+            scout_report,
+            tool_summary,
+            reflect_mode=reflect_mode,
+            tool_summary_attempts=tool_summary_attempts,
+        )
         return r

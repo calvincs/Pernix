@@ -178,3 +178,93 @@ async def test_dispatch_leaves_allowlist_untouched_when_job_has_none(monkeypatch
 
     await scheduling._dispatch_prompt("cron-test", "go")
     assert session.tool_allowlist is None
+
+
+# ---------------------------------------------------------------------------
+# C1: scout constraint awareness
+# ---------------------------------------------------------------------------
+
+
+def test_session_brief_renders_constraint_block():
+    from core.scout.report import SessionBrief
+
+    brief = SessionBrief(session_id="s", tool_allowlist=["recall", "telos_status"])
+    text = brief.to_prompt_text()
+    assert "CONSTRAINED SESSION" in text
+    assert "recall, telos_status" in text
+    assert "5-15 guidance does not apply" in text
+
+
+def test_session_brief_unconstrained_has_no_block():
+    from core.scout.report import SessionBrief
+
+    assert "CONSTRAINED SESSION" not in SessionBrief(session_id="s").to_prompt_text()
+
+
+def test_build_session_brief_reads_live_allowlist(monkeypatch):
+    from db import models as db
+    from core.scout.runner import build_session_brief
+
+    sid = db.create_session()
+    live = AgentSession(session_id=sid)
+    live.tool_allowlist = frozenset({"recall", "file_read"})
+    _fake_manager(monkeypatch, live)
+
+    brief = build_session_brief(sid)
+    assert brief.tool_allowlist == ["file_read", "recall"]
+
+
+# ---------------------------------------------------------------------------
+# C2: per-attempt tool summary in reflect evidence
+# ---------------------------------------------------------------------------
+
+
+def _evidence(attempt, tool_summary, attempts_list):
+    from core.reflect import _build_compact_evidence
+
+    messages = [
+        {"id": 1, "role": "user", "content": "do the thing"},
+        {"id": 2, "role": "assistant", "content": "done"},
+    ]
+    return _build_compact_evidence(
+        "sid-c2",
+        "do the thing",
+        messages,
+        attempt,
+        tool_summary,
+        None,
+        tool_summary_attempts=attempts_list,
+    )
+
+
+def test_retry_evidence_carries_current_attempt_section():
+    cumulative = {
+        "bash": {"calls": 7, "failures": 7, "errors": [], "total_latency_ms": 100},
+        "recall": {"calls": 3, "failures": 0, "errors": [], "total_latency_ms": 50},
+    }
+    attempts = [
+        {"bash": {"calls": 7, "failures": 7}, "recall": {"calls": 1, "failures": 0}},
+        {"recall": {"calls": 2, "failures": 0}},
+    ]
+    evidence = _evidence(2, cumulative, attempts)
+    assert "cumulative across ALL attempts" in evidence
+    assert "CURRENT ATTEMPT (#2) TOOL CALLS" in evidence
+    # The current-attempt section must not inherit attempt 1's bash calls.
+    section = evidence.split("CURRENT ATTEMPT (#2) TOOL CALLS")[1].split("USER REQUEST")[0]
+    assert "bash" not in section
+    assert "recall: 2 call(s)" in section
+
+
+def test_first_attempt_evidence_has_no_per_attempt_section():
+    cumulative = {"recall": {"calls": 1, "failures": 0, "errors": [], "total_latency_ms": 10}}
+    evidence = _evidence(1, cumulative, [{"recall": {"calls": 1, "failures": 0}}])
+    assert "CURRENT ATTEMPT" not in evidence
+    assert "cumulative across ALL attempts" not in evidence
+
+
+def test_retry_evidence_tolerates_missing_attempt_data():
+    """Pre-C2 callers pass no attempts list — the section is simply absent."""
+    cumulative = {"recall": {"calls": 5, "failures": 0, "errors": [], "total_latency_ms": 10}}
+    evidence = _evidence(3, cumulative, None)
+    assert "CURRENT ATTEMPT" not in evidence
+    assert "cumulative across ALL attempts" in evidence

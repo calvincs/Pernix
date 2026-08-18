@@ -111,6 +111,12 @@ class TurnState:
     # (LogAct-inspired). Accumulated by the agent loop across every attempt of
     # the turn; read by reflect, Candor and TELOS at turn end.
     tool_summary: dict = field(default_factory=dict)
+    # Per-attempt view of the same calls (C2): list indexed by attempt-1, each
+    # a {tool: {"calls": n, "failures": n}} dict. Exists because reflect's
+    # scope-sensitive rules (thrashing's distinct-tool count, per-attempt
+    # honesty) misgrade when they read multi-attempt totals — the cumulative
+    # dict above stays authoritative for Candor/TELOS and the retry ladder.
+    tool_summary_attempts: list = field(default_factory=list)
 
     # --- Owned by other subsystems, declared here so the shape is visible ---
     # core.gates.GateHistory — deterministic-gate fingerprints for this turn, so
