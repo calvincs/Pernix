@@ -64,6 +64,9 @@ data/certs/
 data/cert.pem
 data/key.pem
 
+# Outbound SSH identity for the container (e.g. box -> aibox); never commit private keys.
+data/ssh/
+
 # =============================================================================
 # User-owned content (skills, workflows are user-authored)
 # Pernix creates the parent dirs at startup; nothing to commit here.
