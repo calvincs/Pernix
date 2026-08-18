@@ -80,6 +80,7 @@ def eig_calibration(store: TelosStore, days: int = _WINDOW_DAYS) -> dict:
 
     predicted: dict[str, float] = {}
     outcomes: dict[str, float] = {}
+    bands: dict[str, str] = {}
     for e in events:
         hid = str(e.get("id") or "")
         if not hid:
@@ -89,8 +90,14 @@ def eig_calibration(store: TelosStore, days: int = _WINDOW_DAYS) -> dict:
             eig = _as_eig(e.get("eig"))
             if eig is not None:
                 predicted[hid] = eig
+            band = str(e.get("band") or "")
+            if band:
+                bands[hid] = band
         elif etype == "hypothesis_resolved":
             outcomes[hid] = 1.0
+            band = str(e.get("band") or "")
+            if band and hid not in bands:
+                bands[hid] = band
         elif etype == "hypothesis_pooled":
             outcomes[hid] = 0.0
 
@@ -113,6 +120,10 @@ def eig_calibration(store: TelosStore, days: int = _WINDOW_DAYS) -> dict:
             eig = _as_eig(obj.get("eig")) if obj is not None else None
             if eig is not None:
                 predicted[hid] = eig
+            if obj is not None and hid not in bands:
+                band = str(obj.get("band") or "")
+                if band:
+                    bands[hid] = band
 
     pairs = [(predicted[hid], realized) for hid, realized in outcomes.items() if hid in predicted]
     n = len(pairs)
@@ -128,14 +139,70 @@ def eig_calibration(store: TelosStore, days: int = _WINDOW_DAYS) -> dict:
     if n >= _MIN_SAMPLES and mean_eig > 0 and overclaim >= _MIN_OVERCLAIM:
         discount = max(_MIN_DISCOUNT, round(resolve_rate / mean_eig, 3))
 
-    return {
+    # Per-band slice of the SAME scored pairs (P5-c-reduced). Every other
+    # artifact carries only aggregates — soup files have no claimed/realized
+    # fields, telos_status prints one line, the trace's eig_calibration events
+    # are per-question — so this is the single site where band, claimed and
+    # realized are all known at once. Hypotheses whose band never surfaced
+    # (pre-band trace lines with no surviving object) land in "unknown"
+    # rather than being dropped, so the slices still sum to n.
+    per_band: dict[str, dict] = {}
+    for hid, realized in outcomes.items():
+        if hid not in predicted:
+            continue
+        b = bands.get(hid) or "unknown"
+        row = per_band.setdefault(b, {"n": 0, "_sq": 0.0, "_eig": 0.0, "_res": 0.0})
+        row["n"] += 1
+        row["_sq"] += (predicted[hid] - realized) ** 2
+        row["_eig"] += predicted[hid]
+        row["_res"] += realized
+    for b, row in per_band.items():
+        bn = row.pop("n")
+        row.update(
+            n=bn,
+            brier=round(row.pop("_sq") / bn, 4),
+            mean_eig=round(row.pop("_eig") / bn, 3),
+            resolve_rate=round(row.pop("_res") / bn, 3),
+        )
+        row["overclaim"] = round(row["mean_eig"] - row["resolve_rate"], 3)
+
+    calib = {
         "n": n,
         "brier": round(brier, 4),
         "mean_eig": round(mean_eig, 3),
         "resolve_rate": round(resolve_rate, 3),
         "overclaim": round(overclaim, 3),
         "discount": discount,
+        "per_band": per_band,
     }
+    _export_per_band(store, calib, days)
+    return calib
+
+
+def _export_per_band(store: TelosStore, calib: dict, days: int) -> None:
+    """Dump the per-band table next to the trace ledger (P5-c-reduced).
+
+    Written on every scoring pass so the file always reflects the current
+    window; atomic rename so a reader (the curiosity deep-dive greps this
+    path) never sees a torn write. Best-effort — the score itself must never
+    fail because the instrument couldn't write.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    try:
+        path = store.root / "ledgers" / "telos_eig_perband.json"
+        payload = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "window_days": days,
+            "aggregate": {k: v for k, v in calib.items() if k != "per_band"},
+            "per_band": calib["per_band"],
+        }
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(path)
+    except Exception as e:
+        logger.debug("Per-band calibration export skipped: %s", e)
 
 
 def eig_discount(store: TelosStore, days: int = _WINDOW_DAYS) -> tuple[float, dict]:
@@ -154,4 +221,14 @@ def describe(calib: dict) -> str:
     )
     if calib["discount"] < 1.0:
         line += f" — GATE DISCOUNT {calib['discount']}x active (systematic over-claim {calib['overclaim']})"
+    # Per-band slice (P5-c-reduced): surfaces through telos_status so the
+    # bash-less scout runs can read it too; the full table lives in
+    # ledgers/telos_eig_perband.json.
+    per_band = calib.get("per_band") or {}
+    if per_band:
+        parts = [
+            f"{b} {row['n']}@claimed {row['mean_eig']}/realized {row['resolve_rate']}"
+            for b, row in sorted(per_band.items())
+        ]
+        line += " | per-band: " + ", ".join(parts) + " (full table: ledgers/telos_eig_perband.json)"
     return line
