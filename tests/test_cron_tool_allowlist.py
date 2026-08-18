@@ -298,3 +298,44 @@ async def test_dispatch_allowlist_survives_fire_and_forget_prompt(monkeypatch):
     await scheduling._dispatch_prompt("cron-test", "go", allowed_tools=["recall"])
     assert seen["during_turn"] == frozenset({"recall"}), "allow-list was cleared before the turn ran"
     assert session.tool_allowlist is None
+
+
+def test_update_scheduled_job_preserves_extra_meta(monkeypatch, tmp_path):
+    """Regression: update_scheduled_job re-added the job without extra_meta,
+    stripping allowed_tools/last_fired_at/session_mode from any job it touched."""
+    import json as _json
+    from core.extensions import scheduling
+
+    cron_path = tmp_path / "cron_jobs.json"
+    cron_path.write_text(
+        _json.dumps(
+            [
+                {
+                    "name": "j1",
+                    "cron_expr": "0 3 * * 2",
+                    "prompt": "old",
+                    "model": "",
+                    "session_id": None,
+                    "session_mode": "fresh",
+                    "paused": False,
+                    "allowed_tools": ["recall", "bash"],
+                    "last_fired_at": "2026-08-18T00:00:00+00:00",
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(scheduling, "CRON_PATH", cron_path)
+
+    captured = {}
+
+    def _fake_add(name, cron, prompt, session_id=None, model="", extra_meta=None):
+        captured["extra_meta"] = extra_meta or {}
+
+    monkeypatch.setattr(scheduling, "_add_job_internal", _fake_add)
+    monkeypatch.setattr(scheduling, "_get_scheduler", lambda: object())
+    monkeypatch.setattr(scheduling, "_save_jobs", lambda: None)
+
+    result = scheduling.update_scheduled_job("j1", cron_expr="0 4 * * 3")
+    assert "updated" in result
+    assert captured["extra_meta"].get("allowed_tools") == ["recall", "bash"]
+    assert captured["extra_meta"].get("last_fired_at") == "2026-08-18T00:00:00+00:00"
