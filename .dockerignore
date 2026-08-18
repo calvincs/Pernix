@@ -1,0 +1,20 @@
+# Runtime state lives in the bind-mounted ./data volume, never in the image.
+data/
+# (data/ already excludes this; explicit so the outbound SSH private key is obviously never imaged)
+data/ssh
+*.bak*
+# VCS / caches / local tooling that must not leak into the image
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+.claude/
+tests/
+
+# Secrets: loaded at runtime via compose env_file from the host, never needed in the image.
+.env
+.env.*
