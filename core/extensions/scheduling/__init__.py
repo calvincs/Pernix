@@ -638,6 +638,28 @@ async def _dispatch_prompt(
             manager.prompt(session_id, prompt),
             timeout=settings.cron_dispatch_timeout,
         )
+        # prompt() returns as soon as the turn TASK is created (manager.prompt
+        # ends in asyncio.create_task and does not await it). The per-dispatch
+        # overrides must outlive the TURN, not the enqueue — clearing right
+        # here silently unconstrained every scheduled run (field case: runs
+        # ecfd3f89c219 / 404eaba3c8d9 called file_edit/multiedit straight
+        # through the E1 allow-list because it was already cleared before the
+        # schema was built). Wait for the task, bounded by the same dispatch
+        # ceiling; shielded so a timeout stops the WAIT, never the turn.
+        session = manager.get(session_id)
+        task = getattr(session, "task", None) if session else None
+        if task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=settings.cron_dispatch_timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Scheduled dispatch for %s still running after %ds — "
+                    "clearing per-dispatch overrides while the turn continues",
+                    session_id[:12],
+                    settings.cron_dispatch_timeout,
+                )
+            except Exception:
+                pass  # _run_agent_safe owns its errors; the wait is best-effort
     finally:
         # Clear the model override and tool allow-list for reused sessions
         session = manager.get(session_id)
