@@ -268,3 +268,33 @@ def test_retry_evidence_tolerates_missing_attempt_data():
     evidence = _evidence(3, cumulative, None)
     assert "CURRENT ATTEMPT" not in evidence
     assert "cumulative across ALL attempts" in evidence
+
+
+async def test_dispatch_allowlist_survives_fire_and_forget_prompt(monkeypatch):
+    """Regression: manager.prompt() returns at task CREATION, not turn end.
+    Clearing the allow-list right after prompt() returned unconstrained every
+    real scheduled run (runs ecfd3f89c219/404eaba3c8d9 called file_edit
+    straight through E1). The dispatch must wait for the turn task."""
+    from core.extensions import scheduling
+
+    session = AgentSession(session_id="cron-test")
+    seen = {}
+
+    async def _turn():
+        # The schema builder runs well after prompt() has returned.
+        await asyncio.sleep(0.05)
+        seen["during_turn"] = session.tool_allowlist
+
+    class _Manager:
+        def get(self, sid):
+            return session
+
+        async def prompt(self, sid, prompt):
+            session.task = asyncio.get_running_loop().create_task(_turn())
+            # returns immediately — the turn is still running
+
+    monkeypatch.setattr("sessions.manager.get_manager", lambda: _Manager())
+
+    await scheduling._dispatch_prompt("cron-test", "go", allowed_tools=["recall"])
+    assert seen["during_turn"] == frozenset({"recall"}), "allow-list was cleared before the turn ran"
+    assert session.tool_allowlist is None
