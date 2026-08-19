@@ -133,6 +133,29 @@ def test_child_exec_and_state_persistence(child):
     assert any(v.startswith("x:int") for v in r2.var_names)
 
 
+def test_child_rlimits_treat_zero_as_unset(tmp_path):
+    """Regression for run 9701f42b: the tool forwards
+    settings.shell_address_space_limit_bytes (default 0, meaning "unset")
+    straight into ChildREPL, and taking it literally meant
+    setrlimit(RLIMIT_AS, (0, 0)) — a child that cannot allocate a byte, dies
+    before writing anything to child.log, and surfaces only as a bare 15s
+    "child REPL failed to start: timed out". Non-positive means default."""
+    default_as, default_fsize = child_env_mod._rlimit_defaults()
+    zeroed = ChildREPL(tmp_path / "zeroed", address_space_limit=0, fsize_limit=0)
+    assert (zeroed._as_limit, zeroed._fsize_limit) == (default_as, default_fsize)
+
+    # An explicit positive limit is still honoured.
+    explicit = ChildREPL(tmp_path / "explicit", address_space_limit=1234567, fsize_limit=7654321)
+    assert (explicit._as_limit, explicit._fsize_limit) == (1234567, 7654321)
+
+    # And the zeroed child really spawns (the failure mode was at start()).
+    zeroed.start()
+    try:
+        assert zeroed.popen is not None and zeroed.popen.poll() is None
+    finally:
+        zeroed.cleanup()
+
+
 def test_child_scaffold_restore_and_show_vars(child):
     staged = stage_context(child.run_dir, text="the context body")
     child.load_context(staged)
