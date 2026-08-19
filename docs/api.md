@@ -464,7 +464,7 @@ POST /api/settings/auth-token/regenerate   Rotate the token
 ```
 GET /api/settings/access-qr
 ```
-Returns a QR code image encoding `https://<LAN-IP>:<port>/?token=<token>`. Scan with a phone to log in.
+Returns a QR code image encoding `https://<LAN-IP>:<port>/#token=<token>`. Scan with a phone to log in. The token is in the URL fragment, which browsers do not transmit, so it never appears in a server access log.
 
 ### Environment Variables *(localhost-only)*
 ```
