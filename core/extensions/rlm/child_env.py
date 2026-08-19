@@ -203,8 +203,15 @@ class ChildREPL:
         self.llm_sock_path = sock_dir / "llm.sock"
         self._python_exe = python_exe or sys.executable
         default_as, default_fsize = _rlimit_defaults()
-        self._as_limit = address_space_limit if address_space_limit is not None else default_as
-        self._fsize_limit = fsize_limit if fsize_limit is not None else default_fsize
+        # Non-positive means "unset" here, exactly as it does in the settings
+        # these values come from (_rlimit_defaults applies the same `or`).
+        # Callers forward settings.shell_*_limit_bytes straight in, and those
+        # default to 0 — taken literally that is setrlimit(RLIMIT_AS, (0, 0)),
+        # a child that cannot allocate one byte. It dies before the
+        # interpreter can write a word to child.log, so every spawn failed as
+        # a bare 15s "child REPL failed to start: timed out" (run 9701f42b).
+        self._as_limit = address_space_limit if (address_space_limit or 0) > 0 else default_as
+        self._fsize_limit = fsize_limit if (fsize_limit or 0) > 0 else default_fsize
         self.scaffold = scaffold  # "rlm" (sub-LLM stubs + answer) | "plain" (session kernel)
         # Session kernels run with cwd = the shared workspace so repl and
         # bash see the same files, while sockets/logs stay in run_dir.
