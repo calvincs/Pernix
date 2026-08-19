@@ -567,6 +567,18 @@
 }
 
 /* ------------------------------------------------------------------
+   Auth screen — the first thing a remote device touches
+   ------------------------------------------------------------------ */
+/* 15px on a touch device means iOS zooms the page in the moment the token
+   field is focused, and never zooms back — on the one screen a new tablet
+   or phone cannot get past. db29f52 swept every other input to 16px but
+   missed this one: the auth overlay is built in JS and styled from
+   layout.css, so it is not near the rest of the form rules. */
+.auth-input {
+    font-size: 16px;
+}
+
+/* ------------------------------------------------------------------
    Input area (sole bottom element — compact, native-feeling)
    ------------------------------------------------------------------ */
 #input-wrapper {
