@@ -136,6 +136,9 @@ def run_entropy_control(store: TelosStore) -> dict:
                 "target": "soup",
                 "level": 1,
                 "state": "open",
+                # Entropy control clears these itself on recovery; the
+                # discharge pass must leave them alone.
+                "check_mode": "live",
                 "evidence": {"novelty_entropy": entropy, "far_share": shares["far"], "executed": shares["total"]},
             },
         )

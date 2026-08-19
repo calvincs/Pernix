@@ -456,6 +456,9 @@ class Settings:
     telos_budget_share_max: float = 0.35  # binding-monitor 7d share alarm (§5.2)
     telos_claims_floor_per_window: int = 1  # binding: new-claims floor
     telos_divergence_max: float = 0.15  # ledger reconciliation alarm (§5.4)
+    telos_alarm_autoclose: bool = True  # discharge pass may close re-checked alarms (E3)
+    telos_alarm_autoclose_checks: int = 3  # consecutive clean re-checks to discharge
+    telos_alarm_autoclose_window_hours: int = 24  # min first→last clean-check span
 
     # --- Evaluation (extension) ---
     eval_auto: bool = False

@@ -114,5 +114,10 @@ def run_hevel_rollup(store: TelosStore) -> dict:
                 ),
                 urgency="normal",
             )
+    # Alarm discharges ride the same weekly rollup (E3): the count of alarms
+    # that closed by evidence this week, so discharge is visible in the same
+    # place goal discharge is.
+    alarm_discharges = len(store.trace_events(days=7, types={"alarm_discharge"}))
+
     logger.info("telos: hevel rollup: %s", changed)
-    return {"classes": len(by_class), **{k: len(v) for k, v in changed.items()}}
+    return {"classes": len(by_class), "alarm_discharges": alarm_discharges, **{k: len(v) for k, v in changed.items()}}

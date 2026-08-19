@@ -275,6 +275,9 @@ async def run_reconciliation(store: TelosStore) -> dict:
                 "target": f"AUTO-{week}",
                 "level": 1,
                 "state": "open",
+                # Evidence fixed at mint, no monitor of its own: the E3
+                # discharge pass owns closing this (N spaced clean weeks).
+                "check_mode": "snapshot",
                 "evidence": {"divergence": rec["divergence"], "unsupported": len(rec["unsupported"])},
             },
         )

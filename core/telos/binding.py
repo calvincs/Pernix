@@ -173,6 +173,9 @@ def run_binding_monitor(store: TelosStore) -> dict:
                     "target": g.id,
                     "level": level,
                     "state": "open",
+                    # This monitor re-checks and clears its own alarms; the
+                    # discharge pass must leave them alone.
+                    "check_mode": "live",
                     "evidence": sig,
                     "windows": 1,
                     "window_advanced_at": _now_iso(),

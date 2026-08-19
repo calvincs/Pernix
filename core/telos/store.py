@@ -83,6 +83,10 @@ ALARM_TYPES = ("binding", "hevel", "divergence", "acedia")
 # an acked alarm stays the same alarm so the escalation ladder keeps its
 # place instead of minting a fresh L1 on the next monitor pass.
 LIVE_ALARM_STATES = ("open", "acknowledged")
+# A cleared alarm is *discharged*: the condition measurably stopped holding
+# (its own monitor, or the E3 discharge pass's N spaced clean re-checks).
+# Distinct from acknowledged — evidence retired, not notification silenced.
+CLOSED_ALARM_STATES = ("cleared",)
 
 _SLUG_RE = re.compile(r"[^a-z0-9_]+")
 
