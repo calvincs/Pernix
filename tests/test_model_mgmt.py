@@ -107,3 +107,94 @@ def test_call_model_openrouter_shaped_id_is_attempted_not_prevalidated(monkeypat
     # No running loop here → the chat dispatch fails and is reported as Error:.
     out = call_model("qwen/qwen3-coder-next", "review this")
     assert out.startswith("Error:")
+
+
+# ---------------------------------------------------------------------------
+# call_model — fallback_model semantics (E6). A transient primary failure
+# (empty body observed with kimi-k2.5, 2026-08-19) dispatches the fallback
+# once; a fatal one (bad model id) never does.
+# ---------------------------------------------------------------------------
+
+
+def _loop_in_thread():
+    """The loop tool calls normally receive via _context['_loop']."""
+    import asyncio
+    import threading
+
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    return loop
+
+
+def _chatting_client(replies: dict[str, object]):
+    """A client whose registry knows every id and whose chat() answers per
+    model: a string reply, "" for an empty body, or an Exception to raise."""
+    fake = MagicMock()
+    fake.router.registry.resolve_model_id = lambda m: m
+    fake.router.registry.get_model_info = lambda m: MagicMock()
+    fake.calls = []
+
+    async def chat(messages, model="", max_tokens=0):
+        fake.calls.append(model)
+        reply = replies[model]
+        if isinstance(reply, Exception):
+            raise reply
+        resp = MagicMock()
+        resp.content, resp.model, resp.provider = reply, model, "test"
+        return resp
+
+    fake.chat = chat
+
+    async def list_models():
+        return []
+
+    fake.list_models = list_models
+    return fake
+
+
+def test_call_model_empty_primary_dispatches_fallback_and_returns_its_result(monkeypatch):
+    import core.llm.client as llm_client
+
+    client = _chatting_client({"a/primary": "", "b/fallback": "the answer"})
+    monkeypatch.setattr(llm_client, "get_llm_client", lambda: client)
+    loop = _loop_in_thread()
+    try:
+        out = call_model("a/primary", "q", fallback_model="b/fallback", _context={"_loop": loop})
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+    assert client.calls == ["a/primary", "b/fallback"]
+    assert "the answer" in out
+    assert "empty response" in out  # the primary's failure stays visible
+    assert not out.startswith("Error:")  # the fallback answered
+
+
+def test_call_model_fatal_primary_never_dispatches_fallback(monkeypatch):
+    import core.llm.client as llm_client
+
+    client = _chatting_client({"a/primary": Exception("404 - model not found"), "b/fallback": "unused"})
+    monkeypatch.setattr(llm_client, "get_llm_client", lambda: client)
+    loop = _loop_in_thread()
+    try:
+        out = call_model("a/primary", "q", fallback_model="b/fallback", _context={"_loop": loop})
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+    assert client.calls == ["a/primary"]
+    assert out.startswith("Error:")
+    assert "[fatal]" in out
+
+
+def test_call_model_transient_failure_without_fallback_is_classified(monkeypatch):
+    import core.llm.client as llm_client
+
+    client = _chatting_client({"a/primary": ""})
+    monkeypatch.setattr(llm_client, "get_llm_client", lambda: client)
+    loop = _loop_in_thread()
+    try:
+        out = call_model("a/primary", "q", _context={"_loop": loop})
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+    assert out.startswith("Error:")
+    assert "[transient]" in out

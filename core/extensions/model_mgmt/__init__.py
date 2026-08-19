@@ -15,6 +15,34 @@ logger = logging.getLogger("pernix.ext.model")
 # consecutive call_model 404s on hallucinated Qwen ids).
 _BAD_MODEL_ERR = ("404", "400", "not found", "no endpoints", "no allowed providers", "not a valid model")
 
+# Error classes for call_model failures. A `fatal` error (bad model id) cannot
+# be fixed by retrying — with the same model or a fallback — so the fallback
+# is never dispatched for it. Everything else is `transient`: empty body,
+# timeout, 5xx, connection failure.
+_FATAL = "fatal"
+_TRANSIENT = "transient"
+
+
+def _dispatch_chat(client, loop, model: str, messages: list) -> tuple[str, str | None]:
+    """One chat attempt. Returns (text, None) on success or (reason, class)
+    on failure, where class is `_FATAL` or `_TRANSIENT`.
+
+    A 200 with an empty body is a failure here, not a success: a provider
+    returning no content (observed with kimi-k2.5, 2026-08-19) used to come
+    back as "[model via provider]\\n" — success-shaped nothing the agent
+    could not distinguish from an answer.
+    """
+    try:
+        future = asyncio.run_coroutine_threadsafe(client.chat(messages, model=model, max_tokens=4096), loop)
+        resp = future.result(timeout=120)
+    except Exception as e:
+        msg = str(e) or e.__class__.__name__
+        cls = _FATAL if any(tok in msg.lower() for tok in _BAD_MODEL_ERR) else _TRANSIENT
+        return f"calling {model} failed — {msg}", cls
+    if not (resp.content or "").strip():
+        return f"calling {model} returned an empty response", _TRANSIENT
+    return f"[{resp.model} via {resp.provider}]\n{resp.content}", None
+
 
 def _available_model_ids(client, loop, cap: int = 30) -> str:
     """Best-effort one-line hint of callable model ids for error messages."""
@@ -55,8 +83,20 @@ def list_available_models(_context: dict | None = None) -> str:
     return "\n".join(lines)
 
 
-def call_model(model: str, prompt: str, system: str = "", image_path: str = "", _context: dict | None = None) -> str:
-    """Make a one-shot call to a specific model. Supports vision via image_path."""
+def call_model(
+    model: str,
+    prompt: str,
+    system: str = "",
+    image_path: str = "",
+    fallback_model: str = "",
+    _context: dict | None = None,
+) -> str:
+    """Make a one-shot call to a specific model. Supports vision via image_path.
+
+    `fallback_model` is dispatched once when the primary fails transiently
+    (empty body, timeout, connection); a fatal failure (bad model id) returns
+    immediately — no fallback could fix it.
+    """
     from core.llm.client import get_llm_client
 
     client = get_llm_client()
@@ -121,20 +161,21 @@ def call_model(model: str, prompt: str, system: str = "", image_path: str = "", 
     else:
         messages.append({"role": "user", "content": prompt})
 
-    try:
-        future = asyncio.run_coroutine_threadsafe(client.chat(messages, model=model, max_tokens=4096), loop)
-        resp = future.result(timeout=120)
-
-        return f"[{resp.model} via {resp.provider}]\n{resp.content}"
-    except Exception as e:
-        msg = str(e)
-        # "Error:" prefix so the executor records was_error (feeds stuck
-        # detection). A model-not-found/invalid error is unrecoverable by
-        # retrying with a different guess — surface the real options so the
-        # agent self-corrects instead of looping on hallucinated ids.
-        if any(tok in msg.lower() for tok in _BAD_MODEL_ERR):
-            return f"Error: calling {model} failed — {msg}\n{_available_model_ids(client, loop)}"
-        return f"Error: calling {model} failed — {msg}"
+    text, err_class = _dispatch_chat(client, loop, model, messages)
+    if err_class is None:
+        return text
+    # "Error:" prefix so the executor records was_error (feeds stuck
+    # detection). A model-not-found/invalid error is unrecoverable by
+    # retrying with a different guess — surface the real options so the
+    # agent self-corrects instead of looping on hallucinated ids.
+    if err_class == _FATAL:
+        return f"Error: {text} [{_FATAL}]\n{_available_model_ids(client, loop)}"
+    if fallback_model and fallback_model != model:
+        fb_text, fb_class = _dispatch_chat(client, loop, fallback_model, messages)
+        if fb_class is None:
+            return f"(primary {text} [{_TRANSIENT}]; answered by fallback {fallback_model})\n{fb_text}"
+        return f"Error: {text} [{_TRANSIENT}]; fallback {fb_text} [{fb_class}]"
+    return f"Error: {text} [{_TRANSIENT}]"
 
 
 def switch_model(model: str, reason: str = "", scope: str = "turn", _context: dict | None = None) -> str:
@@ -270,6 +311,11 @@ def register(reg) -> None:
                 "prompt": {"type": "string", "description": "Prompt text"},
                 "system": {"type": "string", "description": "System prompt (optional)"},
                 "image_path": {"type": "string", "description": "Path to image file in workspace (for vision models)"},
+                "fallback_model": {
+                    "type": "string",
+                    "description": "Model ID to try once if the primary fails transiently "
+                    "(empty response, timeout). Not dispatched on a bad model id.",
+                },
             },
             "required": ["model", "prompt"],
         },
