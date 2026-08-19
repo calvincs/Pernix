@@ -1091,20 +1091,8 @@ body.fp-resizing #main { pointer-events: none; }
     margin-top: var(--sp-1);
 }
 
-/* Mobile: larger touch target for the tab desc toggle */
-@media (max-width: 768px) {
-    .fp-tab-desc-toggle {
-        padding: 4px 2px;
-        font-size: 10px;
-        opacity: 0.8;
-    }
-    .fp-tab-desc-brief > span {
-        font-size: 11px;
-    }
-    .fp-tab-desc-full {
-        font-size: 11px;
-    }
-}
+/* The mobile tab-desc touch targets moved to mobile.css — a bare
+   `max-width: 768px` cannot see an iPad. See the header of mobile.css. */
 
 /* ── Run Dangerously mode banner (Explorer → Tools) ─────────── */
 .fp-danger-mode-banner {

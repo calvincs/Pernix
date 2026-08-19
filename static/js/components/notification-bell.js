@@ -114,7 +114,10 @@ function _permissionBanner() {
     const perm = getPermission();
     if (perm === 'granted' || perm === 'unsupported') return null;
 
-    const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+    // Not a UA test: on an iPad in desktop mode the UA says "Macintosh", so the
+    // Home Screen instructions below — the only route to notifications on iOS —
+    // never appeared on the device that needs them. touch-boot.js owns this.
+    const isIOS = document.documentElement.hasAttribute('data-touch-ui');
     const isStandalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
     if (isIOS && !isStandalone) {
         return el('div', { class: 'bell-perm-banner' }, [
