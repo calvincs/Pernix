@@ -149,6 +149,7 @@ async def run_step(is_cancelled) -> dict:
                 except Exception as e:
                     logger.warning("dream: %s archival failed: %s", kind, e)
             _check_queue_health(pending)
+            _check_promotion_health()
             db.set_snooze_state("dream_journal_prune", today)
 
     return stats
@@ -195,3 +196,47 @@ def _check_queue_health(pending: list[dict]) -> None:
         )
     except Exception as e:
         logger.warning("dream: queue health notification failed: %s", e)
+
+
+def _check_promotion_health() -> None:
+    """The other half of the absolute-health question: do VALIDATED rows
+    reach promotion?
+
+    The pending-queue check above cannot see this stall — on 2026-08-19 the
+    validation loop was perfectly healthy while 55 validated rows sat parked
+    for three days, because inflow (~18/day) had outrun the veto-window
+    drain (10/day) and the per-producer proposal cap. That state logged one
+    INFO line per cycle and alarmed nowhere. Waiting on review is normal;
+    waiting longer than the stall threshold means inflow and drain have
+    diverged and the queue will only grow — say so out loud, once a day,
+    from the same daily slot as the pending check.
+    """
+    from datetime import datetime, timezone
+
+    validated = db.list_dream_hypotheses(status="validated", limit=100, oldest_first=True)
+    if not validated:
+        return
+    oldest = min((r.get("created_at") or "") for r in validated)
+    if not oldest:
+        return
+    try:
+        age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(oldest)).days
+    except ValueError:
+        return
+    if age_days < _STALL_DAYS:
+        return
+    try:
+        db.add_notification(
+            title="Dream: validated findings are not reaching promotion",
+            body=(
+                f"The oldest validated hypothesis is {age_days} days old and {len(validated)} "
+                "are waiting. Promotion is backpressured by the adaptive proposal queue "
+                "(adaptive_max_pending_per_producer) and the veto-window drain "
+                "(adaptive_max_auto_approvals_per_day) — a backlog this old means findings "
+                "are being minted faster than they are applied. Drain the review queue, or "
+                "reduce inflow, or raise the drain caps."
+            ),
+            urgency="normal",
+        )
+    except Exception as e:
+        logger.warning("dream: promotion health notification failed: %s", e)
