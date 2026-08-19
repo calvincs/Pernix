@@ -131,6 +131,25 @@ def test_sweep_archives_only_the_terminal_classes(store):
     assert events and events[-1]["count"] == 4
 
 
+def test_sweep_reads_the_reachable_boolean_before_the_reason_string(store):
+    """A mint-time `reachable: false` verdict (E7) is authoritative even when
+    the reason string would not prefix-match — the sweep no longer depends on
+    the probe's error-message format. `reachable: true` grants no immunity:
+    the reason string still classifies (an evaluator dead-end is terminal
+    regardless of what the mint probe thought)."""
+    unreachable = _pooled(store, "eig 0.6 cleared, coverage 1/6", reachable=False)
+    reachable_kept = _pooled(store, "eig 0.3 below floor 0.15", reachable=True)
+    reachable_dead = _pooled(store, "inconclusive x2: no such ledger", reachable=True)
+
+    result = archive_untestable_pool(store)
+    assert result["archived"] == 2
+    assert result["classes"]["observable absent from the records"] == 1
+
+    assert {h.id for h in store.list_hypotheses()} == {reachable_kept.id}
+    assert store.read_archived("hypothesis", unreachable.id).get("status") == "untestable"
+    assert store.read_archived("hypothesis", reachable_dead.id).get("status") == "untestable"
+
+
 def test_sweep_leaves_the_pool_at_the_expected_size(store):
     """Proportional replay of the live pool: 265 eig-floor + 17 admitted stay,
     the 264 terminal entries go. The agent predicted ~262 of 526 surviving a

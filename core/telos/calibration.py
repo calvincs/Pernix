@@ -158,14 +158,21 @@ def eig_calibration(store: TelosStore, days: int = _WINDOW_DAYS) -> dict:
         row["_res"] += realized
     for b, row in per_band.items():
         bn = row.pop("n")
+        resolved = int(row.pop("_res"))
         row.update(
             n=bn,
             brier=round(row.pop("_sq") / bn, 4),
             mean_eig=round(row.pop("_eig") / bn, 3),
-            resolve_rate=round(row.pop("_res") / bn, 3),
+            resolve_rate=round(resolved / bn, 3),
         )
         row["overclaim"] = round(row["mean_eig"] - row["resolve_rate"], 3)
+        # Every pooled sample passed the mint-time coverage probe and still
+        # produced nothing a judge could score — the probe-leak count the E4
+        # calibration review tracks per band.
+        row["n_resolved"] = resolved
+        row["n_pooled"] = bn - resolved
 
+    resolved_total = int(sum(realized for _, realized in pairs))
     calib = {
         "n": n,
         "brier": round(brier, 4),
@@ -173,6 +180,8 @@ def eig_calibration(store: TelosStore, days: int = _WINDOW_DAYS) -> dict:
         "resolve_rate": round(resolve_rate, 3),
         "overclaim": round(overclaim, 3),
         "discount": discount,
+        "n_resolved": resolved_total,
+        "n_pooled": n - resolved_total,
         "per_band": per_band,
     }
     _export_per_band(store, calib, days)
