@@ -32,6 +32,7 @@ const SHELL_ASSETS = [
     '/static/vendor/fonts/fonts.css',
     '/static/vendor/marked.min.js',
     '/static/vendor/purify.min.js',
+    '/static/js/touch-boot.js',
     '/static/js/pwa.js',
     '/static/js/app.js',
     '/static/js/store.js',

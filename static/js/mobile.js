@@ -1,10 +1,16 @@
 // Pernix — Mobile support: detection, sidebar drawer, swipe gestures, keyboard handling
 
 const MOBILE_BP = 768;
-// Match narrow viewports OR touch-primary devices (tablets like iPad that are wider than the
-// width breakpoint but should still use the drawer-style mobile UI).
+// Narrow viewports OR touch-primary devices. This query alone does NOT see an
+// iPad: iPadOS desktop-class browsing (the default in Safari and Chrome both)
+// reports `hover: hover` and `pointer: fine`. touch-boot.js does the detection
+// that works there and stamps <html data-touch-ui>; it is the single source of
+// truth, and this ORs its verdict in. The attribute never changes after boot,
+// so it is read once.
 const mq = window.matchMedia(`(max-width: ${MOBILE_BP}px), (hover: none) and (pointer: coarse)`);
-let _mobile = mq.matches;
+const FORCED_TOUCH = document.documentElement.hasAttribute('data-touch-ui');
+const _touchUI = () => mq.matches || FORCED_TOUCH;
+let _mobile = _touchUI();
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -13,10 +19,13 @@ let _mobile = mq.matches;
 export function isMobile() { return _mobile; }
 
 export function initMobile() {
-    _apply(mq.matches);
-    mq.addEventListener('change', (e) => {
-        _apply(e.matches);
-        if (e.matches) {
+    _apply(_touchUI());
+    mq.addEventListener('change', () => {
+        // On a forced-touch device the verdict never flips back to desktop —
+        // rotating an iPad must not tear down the drawer.
+        const on = _touchUI();
+        _apply(on);
+        if (on) {
             _enterMobile();
         } else {
             _exitMobile();

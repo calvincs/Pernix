@@ -15,7 +15,11 @@ export function initSigil(canvas) {
     const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const small = matchMedia('(max-width: 768px)').matches;
     const cores = navigator.hardwareConcurrency || 2;
+    // The UA test misses an iPad in desktop mode — it says "Macintosh" there,
+    // and iPads report 8+ cores, so tablets landed on the 60fps/high-filament
+    // tier and ran hot. data-touch-ui (touch-boot.js) does see them.
     const lowPower = small || cores <= 4 ||
+        document.documentElement.hasAttribute('data-touch-ui') ||
         /Android|webOS|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
     const TIER = lowPower ? 'low' : 'high';
     const MAX_DPR = TIER === 'low' ? 1.5 : 2;

@@ -56,7 +56,20 @@
     <link rel="stylesheet" href="/static/css/modals.css">
     <link rel="stylesheet" href="/static/css/jobs.css">
     <link rel="stylesheet" href="/static/css/file-panel.css">
-    <link rel="stylesheet" href="/static/css/mobile.css">
+    <!-- mobile.css carries its touch gate HERE, on the link, instead of in an
+         @media inside the file — because JavaScript has to be able to override
+         it. iPadOS defaults to desktop-class browsing in Safari and Chrome
+         alike (Chrome on iOS is WebKit), and in that mode the browser reports
+         `hover: hover`, `pointer: fine` and a layout width over 768px, so no
+         media query can see an iPad. touch-boot.js flips this to media="all"
+         when it finds one. -->
+    <link rel="stylesheet" href="/static/css/mobile.css"
+          media="(max-width: 768px), (hover: none) and (pointer: coarse)">
+    <!-- Must come after that link (it mutates it) and stay in <head> so the
+         switch happens before first paint — no flash of the desktop layout.
+         A separate file rather than inline: the CSP above is `script-src
+         'self'` with no 'unsafe-inline'. -->
+    <script src="/static/js/touch-boot.js"></script>
 </head>
 <body>
     <div id="app">

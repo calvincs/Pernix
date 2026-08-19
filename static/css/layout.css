@@ -1,7 +1,14 @@
 /* Pernix — Layout */
 #app {
     display: flex;
+    /* body is `overflow: hidden; height: 100dvh` (tokens.css). On iOS 100vh is
+       TALLER than that — it measures the viewport as if the browser toolbars
+       were hidden — so #app overflowed a clipped body and the status bar and
+       composer were cut off the bottom with no way to scroll to them. dvh is
+       the visible viewport; the 100vh line stays as the fallback for browsers
+       without it. */
     height: 100vh;
+    height: 100dvh;
 }
 
 
@@ -2269,12 +2276,11 @@
     :root { --sidebar-w: 220px; }
 }
 
-@media (max-width: 768px), (hover: none) and (pointer: coarse) {
-    #sidebar { display: none; }
-    #sidebar-toggle { display: none; }
-    :root { --chat-max-w: 100%; }
-    #input-wrapper { padding: var(--sp-2) var(--sp-3) var(--sp-3); }
-}
+/* The touch overrides that used to live here moved to mobile.css. This copy of
+   `(max-width: 768px), (hover: none) and (pointer: coarse)` never matched on an
+   iPad — iPadOS desktop-class browsing reports hover/fine and a width over
+   768px — and mobile.css is the only stylesheet whose gate JavaScript can
+   reach. See the header of mobile.css and touch-boot.js. */
 
 
 /* ======================================================================
