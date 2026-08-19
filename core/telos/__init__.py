@@ -117,6 +117,16 @@ async def run_slow_loops(force_weekly: bool = False) -> dict:
     except Exception as e:
         logger.warning("telos: binding monitor failed: %s", e)
 
+    # Daily: evidence-based alarm discharge (E3) — alarms whose type has no
+    # live monitor of its own (divergence) close after N spaced clean
+    # re-checks, so a condition that stopped holding stops alarming.
+    try:
+        from core.telos.discharge import run_alarm_discharge
+
+        stats["alarm_discharge"] = run_alarm_discharge(store)
+    except Exception as e:
+        logger.warning("telos: alarm discharge failed: %s", e)
+
     # Daily: release adaptive slots this layer no longer has evidence for.
     # Minting without retiring wedges the per-kind cap, at which point every
     # further supported claim is rejected and the loop looks like a loop with
