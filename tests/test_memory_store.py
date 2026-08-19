@@ -598,3 +598,54 @@ def test_at_tags_filter_is_real(store):
     assert len(hits) == 1 and "beta" in hits[0].entry.tags
     only_tag = store.search("@tags: alpha", mode="bm25", limit=5)
     assert len(only_tag) == 1 and "alpha" in only_tag[0].entry.tags
+
+
+# ---------------------------------------------------------------------------
+# Exact-duplicate gate (2026-08-19)
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT = (
+    "US Market data for May 4, 2026 from CNBC: Dow Jones at 49,499.27 (-0.31%), "
+    "S&P 500 at 7,230.12. Notable news: Spirit Airlines ceasing operations."
+)
+
+
+def test_exact_duplicate_is_refused_even_when_search_misses(store, monkeypatch):
+    """The regression that put 409 redundant copies in the live store.
+
+    find_duplicate's similarity gate is only as good as search RANKING: it
+    inspects the top-3 candidates, and in a file of near-identical market
+    snapshots the byte-identical twin can rank fourth (or the hybrid channel
+    can degrade entirely when the embed endpoint is down — the box logged
+    both on 2026-08-19, and dream flagged three of the resulting copies as a
+    data-ingestion bug). Search returning NOTHING is the worst case of that
+    failure; the exact-equality pre-gate must hold regardless.
+    """
+    r1 = store.add_entry(_SNAPSHOT, file_name="market.snapshots", source="distill")
+    assert r1.startswith("Saved")
+    monkeypatch.setattr(store, "search", lambda *a, **k: [])
+    r2 = store.add_entry(_SNAPSHOT, file_name="market.snapshots", source="distill")
+    assert "duplicate of market.snapshots@" in r2
+    # And the file really has one copy, not two.
+    assert store.read_file("market.snapshots").count("Dow Jones at 49,499.27") == 1
+
+
+def test_exact_duplicate_refused_via_supersede_path(store, monkeypatch):
+    """distill writes through add_or_supersede_entry — identical content is
+    not a correction, so it must be refused there too, not rewritten."""
+    store.add_entry(_SNAPSHOT, file_name="market.snapshots", source="distill")
+    monkeypatch.setattr(store, "search", lambda *a, **k: [])
+    r = store.add_or_supersede_entry(_SNAPSHOT, file_name="market.snapshots", source="distill")
+    assert "duplicate of" in r
+    assert store.read_file("market.snapshots").count("Dow Jones at 49,499.27") == 1
+
+
+def test_near_duplicate_still_goes_through_the_similarity_gate(store):
+    """The pre-gate is byte-exact by design — cosmetic edits stay the
+    similarity gate's job, and genuinely new content still saves."""
+    store.add_entry(_SNAPSHOT, file_name="market.snapshots", source="distill")
+    novel = (
+        "The weekend brief job schedule moved from 12-hour cadence to weekly "
+        "execution after the workspace review on May 9."
+    )
+    assert store.add_entry(novel, file_name="market.snapshots", source="distill").startswith("Saved")

@@ -552,10 +552,21 @@ class MemoryStore:
     def find_duplicate(self, content: str, threshold: float = 0.70) -> SearchResult | None:
         """Multi-signal dedup check. Returns the matched existing entry, or None.
 
-        Checks top-3 BM25 results with both SequenceMatcher and bag-of-words
-        Jaccard similarity. Catches semantic duplicates that single-result
-        SequenceMatcher misses.
+        An exact-equality lookup runs FIRST, straight against the index table,
+        because the similarity gate below is only as good as search RANKING:
+        it inspects the top-3 candidates, and in a file full of near-identical
+        entries (dozens of market snapshots differing only in numbers) the
+        byte-identical twin can rank fourth. That is not hypothetical — the
+        live box accumulated 409 redundant exact copies (371 from distill,
+        epochs seconds apart) with this gate in place, and dream flagged three
+        of them as a data-ingestion bug before we measured the rest. The
+        equality check is immune to ranking, to the 0.70 threshold, and to
+        embedding availability (the hybrid channel degrades when the embed
+        endpoint is down, which the box also logged the same day).
         """
+        exact = self._find_exact(content)
+        if exact is not None:
+            return exact
         candidates = self.search(content, limit=3, _track_hits=False)
         if not candidates:
             return None
@@ -580,6 +591,35 @@ class MemoryStore:
     def is_duplicate(self, content: str, threshold: float = 0.70) -> bool:
         """True if content duplicates an existing entry (see find_duplicate)."""
         return self.find_duplicate(content, threshold) is not None
+
+    def _find_exact(self, content: str) -> SearchResult | None:
+        """Byte-exact content match against the index. Ranking-independent.
+
+        Byte equality is the deliberate scope: callers sanitize before the
+        gate and the index stores sanitized content, so a writer repeating
+        itself produces byte-identical rows — the observed failure. Near-
+        duplicates with cosmetic edits remain the similarity gate's job.
+        """
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT file_name, content, epoch, entry_type, weight, source "
+                "FROM memory_fts WHERE content = ? LIMIT 1",
+                (content,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        entry = MemoryEntry(
+            file_name=row[0],
+            content=row[1],
+            epoch=int(row[2]),
+            entry_type=row[3] or "note",
+            weight=row[4] or "normal",
+            source=row[5] or "",
+        )
+        return SearchResult(entry=entry, score=1.0, source="bm25")
 
     # ------------------------------------------------------------------
     # Entry-level mutations (update / delete)

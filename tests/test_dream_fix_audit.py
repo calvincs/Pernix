@@ -61,3 +61,36 @@ def test_djia_alias_is_covered():
     # Found live: a DJIA closing-value note fell to KEEP because the regex
     # knew "Dow" but not "DJIA".
     assert classify("Inconsistent DJIA closing values, with one entry citing 51,561.93 on June 4.") == "REMOVE"
+
+
+def test_exact_dupes_collect_keeps_oldest(monkeypatch):
+    """Grouping contract for scripts/memory_exact_dupes.py: same-file,
+    whitespace-normalized identity; oldest copy survives."""
+    import core.memory.format as fmt
+    from scripts.memory_exact_dupes import collect
+
+    class _Entry:
+        def __init__(self, epoch, content, source="distill"):
+            self.epoch, self.content, self.source = epoch, content, source
+
+    class _File:
+        name = "market.snapshots"
+
+    class _Store:
+        def list_files(self):
+            return [_File()]
+
+        def read_file(self, name):
+            return "nonempty"
+
+    entries = [
+        _Entry(100, "Dow at 49,499.27  (-0.31%)"),
+        _Entry(101, "Dow at 49,499.27 (-0.31%)"),  # whitespace-only difference
+        _Entry(102, "S&P closed at 7,230.12"),
+    ]
+    monkeypatch.setattr(fmt, "parse_entries_from_markdown", lambda name, md: entries)
+
+    groups = collect(_Store())
+    assert len(groups) == 1
+    assert groups[0]["keep_epoch"] == 100
+    assert groups[0]["delete_epochs"] == [101]
