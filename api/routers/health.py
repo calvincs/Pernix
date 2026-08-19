@@ -372,28 +372,44 @@ async def set_api_key(body: dict):
     return {"updated": key_name, "is_set": bool(value), "persisted": True}
 
 
+# Both token endpoints are protected by _AuthMiddleware alone — neither path is
+# in _PUBLIC_EXACT/_PUBLIC_PREFIXES, so a caller must already present the valid
+# token (or be a trusted loopback client) to reach them.
+#
+# They used to add an is_local_client() check on top. That made them
+# unreachable in the deployment that needs them most: is_local_client
+# deliberately treats Docker-bridge sources as remote, so under `docker
+# compose` with a published port NO browser can satisfy it — not even one on
+# the server itself — and the Settings UI could only 403. The only route left
+# was `docker exec`.
+#
+# Dropping it costs nothing real. The boundary only ever stood between a caller
+# holding a valid token and a secret that caller already has (remote clients
+# keep it in localStorage), and the same token authorises the agent's shell
+# tool, which can read settings.json outright. Rotation is likewise not an
+# escalation: anyone who can rotate the token could already act as the agent.
+
+
 @router.get("/api/settings/auth-token")
 async def get_auth_token(request: Request):
-    """Return the auth token. Localhost only."""
-    client_host = request.client.host if request.client else ""
-    if not is_local_client(client_host):
-        raise HTTPException(403, detail="Auth token access restricted to localhost")
+    """Return the auth token. Requires a valid token (see note above)."""
     return {"token": settings.auth_token or "", "network_enabled": settings.network_enabled}
 
 
 @router.post("/api/settings/auth-token/regenerate")
 async def regenerate_auth_token(request: Request):
-    """Regenerate the auth token. Localhost only."""
-    client_host = request.client.host if request.client else ""
-    if not is_local_client(client_host):
-        raise HTTPException(403, detail="Auth token access restricted to localhost")
+    """Mint a new auth token, invalidating every device using the old one.
+
+    The new token is returned so the caller can adopt it immediately — without
+    that, rotating would log out the very browser that asked for it.
+    """
     import secrets
 
     settings.auth_token = secrets.token_urlsafe(32)
     settings.save()
     return {
         "token": settings.auth_token,
-        "message": "Token regenerated. Existing remote sessions will need the new token.",
+        "message": "Token regenerated. Every other device must be signed in again.",
     }
 
 

@@ -1,7 +1,7 @@
 // Pernix — Settings modal with tabs
 
 import { el, text, clear, setSanitizedSvg } from '../../render.js';
-import { get, post } from '../../api.js';
+import { get, post, setAuthToken } from '../../api.js';
 import { getPermission, requestPermission } from '../../notifications.js';
 import { runVoiceTest } from '../../voice.js';
 
@@ -444,8 +444,6 @@ function _updateNetworkVisibility() {
     if (originsSection) originsSection.style.display = isEnabled ? '' : 'none';
     // QR section only shows when network is already active (not just toggled on — needs restart first)
     if (qrSection) qrSection.style.display = (_original.network_enabled && _original.auth_token_set) ? '' : 'none';
-    const revokeEl = document.getElementById('revoke-access-section');
-    if (revokeEl) revokeEl.style.display = (_original.network_enabled && _original.auth_token_set) ? '' : 'none';
 }
 
 function _wireNetworkSection() {
@@ -1339,10 +1337,19 @@ function buildNetworkTab(settings) {
     }, [
         el('h3', {}, [
             text('Remote Access'),
-            buildHelpIcon('Scan the QR code with a mobile device to connect automatically. The link contains your auth token.'),
+            buildHelpIcon(
+                'Scan the QR code with a mobile device to connect automatically, or copy the '
+                + 'token to sign a device in by hand. Both carry the same access token. '
+                + 'Regenerating mints a new one and signs every other device out.'
+            ),
         ]),
-        el('div', { style: 'display:flex; gap:0.5rem; align-items:center;' }, [
+        el('div', { style: 'display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;' }, [
             _buildQRButton(),
+            _buildShowTokenButton(),
+            // Destructive, but it lives here rather than in a separate section:
+            // this is where you come looking for it, and a "Danger Zone" further
+            // down the page was missed entirely by the one person using it.
+            _buildRegenerateButton(),
         ]),
     ]);
 
@@ -1363,22 +1370,7 @@ function buildNetworkTab(settings) {
         _buildOriginsEditor(settings.cors_origins || []),
     ]);
 
-    // --- Revoke Remote Access section (visible when network enabled + token set) ---
-    const revokeSection = el('div', {
-        class: 'settings-section',
-        id: 'revoke-access-section',
-        style: (settings.network_enabled && settings.auth_token_set) ? '' : 'display:none',
-    }, [
-        el('h3', {}, [
-            text('Danger Zone'),
-            buildHelpIcon('Regenerate the auth token to immediately invalidate all existing remote sessions. Local access is unaffected.'),
-        ]),
-        el('div', { style: 'display:flex; gap:0.5rem; align-items:center;' }, [
-            _buildRevokeButton(),
-        ]),
-    ]);
-
-    return el('div', {}, [section, qrSection, revokeSection, originsSection]);
+    return el('div', {}, [section, qrSection, originsSection]);
 }
 
 // --- QR Code button + overlay ---
@@ -1455,33 +1447,154 @@ function _buildQRButton() {
 
 // --- Revoke Remote Access button ---
 
-function _buildRevokeButton() {
+// --- Token reveal + copy ---
+
+/* Copy with a fallback, because the primary path is not always available where
+   it matters most. navigator.clipboard requires a secure context, and a LAN box
+   served over a self-signed certificate does not reliably qualify on iOS — the
+   exact device this button exists for. execCommand is deprecated and still the
+   only thing that works there. */
+async function _copyText(value, srcInput) {
+    try {
+        await navigator.clipboard.writeText(value);
+        return true;
+    } catch { /* fall through */ }
+    try {
+        srcInput.removeAttribute('readonly');
+        srcInput.select();
+        srcInput.setSelectionRange(0, value.length);
+        const ok = document.execCommand('copy');
+        srcInput.setAttribute('readonly', '');
+        return ok;
+    } catch {
+        return false;
+    }
+}
+
+/* Shared by "Show Token" and by the confirmation that follows a regenerate —
+   after rotating you want the new token in front of you, not a second click
+   away. */
+function _openTokenOverlay(token, { title, note }) {
+    const overlay = el('div', { class: 'modal-overlay' });
+    // Wide enough for a 43-char urlsafe token at 16px mono. Narrower and the
+    // value scrolls out of sight, which defeats the point of showing it.
+    const card = el('div', { class: 'modal-card', style: 'max-width:520px; padding:1.5rem;' });
+
+    const field = el('input', {
+        type: 'text',
+        readonly: '',
+        value: token,
+        // 16px is not cosmetic: iOS zooms the page in on focus for any input
+        // below it and never zooms back.
+        style: 'width:100%; font-family:var(--mono); font-size:16px; padding:0.5rem;'
+             + 'background:var(--bg-surface); color:var(--text-bright);'
+             + 'border:1px solid var(--border); border-radius:var(--radius);',
+    });
+    field.addEventListener('focus', () => field.select());
+
+    const copyBtn = el('button', {
+        class: 'btn-secondary',
+        style: 'padding:0.4rem 0.8rem; cursor:pointer;',
+    }, [text('Copy')]);
+    copyBtn.addEventListener('click', async () => {
+        const ok = await _copyText(token, field);
+        copyBtn.textContent = ok ? 'Copied' : 'Select and copy manually';
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
+    });
+
+    const closeBtn = el('button', {
+        class: 'btn-primary',
+        style: 'padding:0.4rem 0.8rem; cursor:pointer;',
+    }, [text('Done')]);
+
+    const row = el('div', {
+        style: 'display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1rem;',
+    }, [copyBtn, closeBtn]);
+
+    card.append(
+        el('h2', { style: 'font-size:var(--text-lg); margin-bottom:0.75rem;' }, [text(title)]),
+        el('p', {
+            style: 'font-family:var(--mono); font-size:var(--text-sm); color:var(--text-dim);'
+                 + 'margin-bottom:1rem; line-height:1.5;',
+        }, [text(note)]),
+        field,
+        row,
+    );
+    overlay.append(card);
+    document.body.append(overlay);
+
+    const close = () => overlay.remove();
+    closeBtn.addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    document.addEventListener('keydown', function esc(e) {
+        if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+    });
+}
+
+function _buildShowTokenButton() {
     const btn = el('button', {
         class: 'btn-secondary',
-        style: 'font-family:var(--mono); font-size:var(--text-sm); padding:0.4rem 0.8rem; cursor:pointer; border-color:var(--error, #e55); color:var(--error, #e55);',
-    }, [text('Revoke Remote Access')]);
+        style: 'font-family:var(--mono); font-size:var(--text-sm); padding:0.4rem 0.8rem; cursor:pointer;',
+    }, [text('Show Token')]);
+
+    btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const label = btn.textContent;
+        btn.textContent = 'Loading\u2026';
+        try {
+            const data = await get('/api/settings/auth-token');
+            if (!data.token) {
+                _showToast('No access token is set — enable Network mode first.', 'error');
+                return;
+            }
+            _openTokenOverlay(data.token, {
+                title: 'Access Token',
+                note: 'Paste this into the sign-in box on another device. Anyone holding it '
+                    + 'has full access to this agent — treat it like a password.',
+            });
+        } catch (e) {
+            _showToast(`Could not read the token: ${e.message}`, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = label;
+        }
+    });
+
+    return btn;
+}
+
+// --- Regenerate token (destructive) ---
+
+function _buildRegenerateButton() {
+    const btn = el('button', {
+        class: 'btn-secondary',
+        style: 'font-family:var(--mono); font-size:var(--text-sm); padding:0.4rem 0.8rem;'
+             + 'cursor:pointer; border-color:var(--error, #e55); color:var(--error, #e55);',
+    }, [text('Regenerate Token')]);
 
     btn.addEventListener('click', () => {
         const overlay = el('div', { class: 'modal-overlay' });
-        const card = el('div', {
-            class: 'modal-card',
-            style: 'max-width:340px; padding:1.5rem;',
-        });
+        const card = el('div', { class: 'modal-card', style: 'max-width:380px; padding:1.5rem;' });
         const title = el('h2', {
             style: 'font-size:var(--text-lg); margin-bottom:0.75rem;',
-        }, [text('Revoke Remote Access?')]);
+        }, [text('Regenerate access token?')]);
         const body = el('p', {
-            style: 'font-family:var(--mono); font-size:var(--text-sm); color:var(--text-dim); margin-bottom:1.25rem; line-height:1.5;',
-        }, [text('This will regenerate the auth token. All existing remote sessions (QR links, shared URLs) will stop working immediately. Local access is unaffected.')]);
+            style: 'font-family:var(--mono); font-size:var(--text-sm); color:var(--text-dim);'
+                 + 'margin-bottom:1.25rem; line-height:1.5;',
+        }, [text(
+            'Every other signed-in device is signed out immediately — phones, tablets, '
+            + 'and any QR link or shared URL you handed out. They will each need the new '
+            + 'token to get back in. This browser stays signed in.'
+        )]);
         const btnRow = el('div', { style: 'display:flex; gap:0.5rem; justify-content:flex-end;' });
         const cancelBtn = el('button', {
-            class: 'btn-secondary',
-            style: 'padding:0.4rem 0.8rem; cursor:pointer;',
+            class: 'btn-secondary', style: 'padding:0.4rem 0.8rem; cursor:pointer;',
         }, [text('Cancel')]);
         const confirmBtn = el('button', {
             class: 'btn-primary',
-            style: 'padding:0.4rem 0.8rem; cursor:pointer; background:var(--error, #e55); border-color:var(--error, #e55);',
-        }, [text('Revoke')]);
+            style: 'padding:0.4rem 0.8rem; cursor:pointer;'
+                 + 'background:var(--error, #e55); border-color:var(--error, #e55);',
+        }, [text('Regenerate')]);
 
         btnRow.append(cancelBtn, confirmBtn);
         card.append(title, body, btnRow);
@@ -1497,17 +1610,29 @@ function _buildRevokeButton() {
 
         confirmBtn.addEventListener('click', async () => {
             confirmBtn.disabled = true;
-            confirmBtn.textContent = 'Revoking\u2026';
+            confirmBtn.textContent = 'Regenerating\u2026';
             try {
-                await post('/api/settings/auth-token/regenerate');
+                const data = await post('/api/settings/auth-token/regenerate');
+                // Adopt the new token here first. The old one is dead the moment
+                // the server saves it, so without this the browser that pressed
+                // the button is the next thing to be signed out.
+                if (data.token) setAuthToken(data.token);
                 close();
-                _showToast('Remote access token regenerated. Existing remote sessions are now invalid.', 'success');
+                _openTokenOverlay(data.token, {
+                    title: 'New access token',
+                    note: 'All other devices are now signed out. Copy this to sign them back '
+                        + 'in, or use Show QR Code.',
+                });
             } catch (e) {
                 confirmBtn.disabled = false;
-                confirmBtn.textContent = 'Revoke';
+                confirmBtn.textContent = 'Regenerate';
                 let errEl = card.querySelector('.revoke-error');
                 if (!errEl) {
-                    errEl = el('div', { class: 'revoke-error', style: 'color:var(--error, #e55); font-family:var(--mono); font-size:var(--text-xs); margin-top:0.75rem;' });
+                    errEl = el('div', {
+                        class: 'revoke-error',
+                        style: 'color:var(--error, #e55); font-family:var(--mono);'
+                             + 'font-size:var(--text-xs); margin-top:0.75rem;',
+                    });
                     card.append(errEl);
                 }
                 errEl.textContent = `Error: ${e.message}`;

@@ -37,14 +37,61 @@ async def test_settings_apikey():
     assert resp.status_code in (200, 400)
 
 
-async def test_get_settings_auth_token_non_localhost():
+async def test_get_settings_auth_token_serves_any_authorised_caller():
+    """No localhost gate on the endpoint itself.
+
+    It used to 403 anything is_local_client() rejected, which under `docker
+    compose` with a published port is EVERY browser — including one on the
+    server — because Docker-bridge sources are deliberately not local. The
+    Settings UI could only ever 403. _AuthMiddleware is the gate now: the path
+    is absent from _PUBLIC_EXACT/_PUBLIC_PREFIXES, so reaching the handler
+    already required the token this endpoint returns.
+    """
     from api.routers import health
 
     app = _make_app(health.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/settings/auth-token")
-    # Restricted to localhost
-    assert resp.status_code in (200, 403)
+    assert resp.status_code == 200
+    assert "token" in resp.json()
+
+
+async def test_auth_token_endpoints_are_not_public_paths():
+    """The middleware is the only thing guarding these, so it must actually run.
+
+    If either path ever drifts into the public list the token becomes readable,
+    and rotatable, by anyone who can reach the port.
+    """
+    from api.app import _PUBLIC_EXACT, _PUBLIC_PREFIXES
+
+    for path in ("/api/settings/auth-token", "/api/settings/auth-token/regenerate"):
+        assert path not in _PUBLIC_EXACT
+        assert not any(path.startswith(prefix) for prefix in _PUBLIC_PREFIXES)
+
+
+async def test_regenerate_auth_token_replaces_and_returns_it(monkeypatch):
+    """The new token must come back in the body.
+
+    The caller has to adopt it in the same breath — the old token dies the
+    moment settings.save() lands, so a client that does not swap it is the next
+    device signed out by its own button press.
+    """
+    from api.routers import health
+    from config import settings
+
+    # monkeypatch, not a bare assignment: settings is module-global and xdist
+    # reuses a worker across tests, so a leaked token would follow us.
+    # conftest's isolate_data already points SETTINGS_PATH at tmp_path, so the
+    # save() below cannot touch the real data/settings.json.
+    monkeypatch.setattr("config.settings.auth_token", "original-token-value")
+    app = _make_app(health.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/settings/auth-token/regenerate")
+
+    assert resp.status_code == 200
+    minted = resp.json()["token"]
+    assert minted and minted != "original-token-value"
+    assert settings.auth_token == minted
 
 
 async def test_env_vars():
@@ -124,8 +171,6 @@ async def test_chat_inject_stamps_turn_root_when_loop_live():
     """Mid-turn injections must carry parent_user_msg_id = the active turn's
     root so compile_context sorts them inside the turn instead of permanently
     after every reply (session b23ffafde5ba re-acknowledgment loop)."""
-    import json
-
     from api.routers import chat
     from db import models as db
     from sessions import state_v2 as sv2
