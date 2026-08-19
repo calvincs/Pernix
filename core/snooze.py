@@ -537,15 +537,14 @@ class SnoozeRunner:
         # snooze_state under dream_* keys. Gated on dream_enabled — fully
         # absent from the cycle when off.
         if not self._is_cancelled() and settings.dream_enabled and self._llm_ready():
-            detail = "Dreaming: examining memory and outcome evidence for hypotheses"
-            _announce(bus, "dream", detail)
-            # Journal the step marker directly instead of via the bus
-            # listener: an instant verdict inside the step would win the
-            # race against the listener's queue and print above its own
-            # "→" header.
-            from core.dream.journal import append as journal_append
-
-            await journal_append(f"→ {detail}")
+            # Announce to the live bus only — no journal marker. The "→
+            # Dreaming: examining..." line said nothing (the step that
+            # follows always writes its own content: a 🌘 evidence-pack
+            # header when generating, a verdict line when validating) and at
+            # ~60 cycles/day it was 61 of the 2026-08-19 journal's 201
+            # lines. A journal where every line carries content is the
+            # feature; the cadence marker was noise.
+            _announce(bus, "dream", "Dreaming: examining memory and outcome evidence for hypotheses")
             await self._dream_step()
 
         # Activity 14b: Distillation coverage audit — the feedback loop on

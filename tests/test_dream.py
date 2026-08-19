@@ -738,3 +738,41 @@ async def test_validate_refutes_when_judge_does_not_hold(store, dream_on, monkey
     row = db.list_dream_hypotheses()[0]
     assert row["status"] == "refuted"
     assert json.loads(row["validation_json"])["method"] == "evidence_judge"
+
+
+# ---------------------------------------------------------------------------
+# Promotion-side queue health (2026-08-19)
+# ---------------------------------------------------------------------------
+
+
+def test_promotion_health_alarms_on_stalled_validated_queue():
+    """The pending-queue check cannot see this stall: on 2026-08-19 the
+    validator was healthy while 55 VALIDATED rows sat parked for days behind
+    the proposal cap and the 10/day veto-window drain, logging one INFO line
+    per cycle and alarming nowhere."""
+    from core.dream import _STALL_DAYS, _check_promotion_health
+    from db.database import connect_sessions
+
+    hid = db.add_dream_hypothesis("contradiction", "Old finding parked beyond the stall line.", "[]")
+    db.update_dream_hypothesis(hid, status="validated")
+    # Backdate created_at past the threshold (the update stamps updated_at
+    # only). Timezone-aware ISO like production stamps — sqlite's
+    # datetime('now') would write a naive string the age math cannot subtract.
+    from datetime import datetime, timedelta, timezone
+
+    backdated = (datetime.now(timezone.utc) - timedelta(days=_STALL_DAYS + 1)).isoformat()
+    with connect_sessions() as conn:
+        conn.execute("UPDATE dream_hypotheses SET created_at = ? WHERE id = ?", (backdated, hid))
+    _check_promotion_health()
+    titles = [n.get("title", "") for n in db.get_notifications()]
+    assert any("not reaching promotion" in t for t in titles)
+
+
+def test_promotion_health_quiet_on_fresh_validated_rows():
+    hid = db.add_dream_hypothesis("contradiction", "Fresh finding, still inside the window.", "[]")
+    db.update_dream_hypothesis(hid, status="validated")
+    from core.dream import _check_promotion_health
+
+    _check_promotion_health()
+    titles = [n.get("title", "") for n in db.get_notifications()]
+    assert not any("not reaching promotion" in t for t in titles)
