@@ -41,6 +41,13 @@ _DISPATCH_GRACE = 60
 # flight at the deadline, salvage synthesis, and result bookkeeping.
 _BUDGET_GRACE = 120.0
 
+# Extra slack granted (but not required) by the pre-run budget guard. The
+# session clock keeps running between ensure_session_budget's top-up and the
+# session_seconds_remaining re-measure, so an exact grant always re-measures
+# a fraction below `needed` and the guard refuses a run it just funded
+# (session c87e64f87fae: "~1920s left, but needs up to 1920s — refused").
+_GUARD_SLACK = 30.0
+
 # continue_from targets root-level run dirs only (mint_run_dir: token_hex(4)).
 _RUN_ID_RE = re.compile(r"^[0-9a-f]{8}$")
 
@@ -495,7 +502,7 @@ def rlm_process(task: str, source, model: str = "", continue_from: str = "", _co
     if sid:
         needed = float(settings.rlm_timeout_seconds) + _BUDGET_GRACE
         try:
-            ensure_session_budget(sid, needed)
+            ensure_session_budget(sid, needed + _GUARD_SLACK)
             remaining = session_seconds_remaining(sid)
         except Exception as e:
             # Fail open: the budget guard is an availability protection, and a
