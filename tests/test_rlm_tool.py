@@ -407,11 +407,12 @@ def test_rlm_process_budget_preflight_refuses_without_staging(monkeypatch, mock_
 
 
 def test_rlm_process_budget_preflight_tops_up_and_proceeds(monkeypatch, mock_llm_client):
-    """The pre-flight requests the run's full window (timeout + grace) via
-    ensure_session_budget — relative-to-the-clock semantics, so back-to-back
-    runs in one turn each get their full window — and proceeds once the
-    top-up takes."""
-    from core.extensions.rlm import _BUDGET_GRACE
+    """The pre-flight requests the run's full window (timeout + grace) plus
+    _GUARD_SLACK via ensure_session_budget — relative-to-the-clock semantics,
+    so back-to-back runs in one turn each get their full window — and
+    proceeds once the top-up takes. The slack is granted but not required:
+    the refusal check still compares against timeout + grace only."""
+    from core.extensions.rlm import _BUDGET_GRACE, _GUARD_SLACK
 
     monkeypatch.setattr(settings, "rlm_enabled", True)
     asked: list[tuple[str, float]] = []
@@ -429,7 +430,37 @@ def test_rlm_process_budget_preflight_tops_up_and_proceeds(monkeypatch, mock_llm
     out = rlm_process("q?", "inline text body", _context={"_loop": object(), "session_id": "sess-budget-ok"})
     text = out[0] if isinstance(out, tuple) else out
     assert "the topped-up answer" in text and "completed" in text
-    assert asked == [("sess-budget-ok", float(settings.rlm_timeout_seconds) + _BUDGET_GRACE)]
+    assert asked == [("sess-budget-ok", float(settings.rlm_timeout_seconds) + _BUDGET_GRACE + _GUARD_SLACK)]
+
+
+def test_rlm_process_budget_preflight_tolerates_clock_drift(monkeypatch, mock_llm_client):
+    """Regression for session c87e64f87fae: the session clock keeps running
+    between ensure_session_budget's top-up and the session_seconds_remaining
+    re-measure, so an exact grant re-measures a fraction below `needed` and
+    the guard refused every run on a session whose clock had started
+    ("~1920s left, but needs up to 1920s — refused"). With _GUARD_SLACK
+    granted on top, a sub-slack drift must not refuse the run."""
+    from core.extensions.rlm import _BUDGET_GRACE
+
+    monkeypatch.setattr(settings, "rlm_enabled", True)
+    granted: dict[str, float] = {}
+
+    def fake_ensure(sid, min_remaining):
+        granted["v"] = min_remaining
+        return min_remaining
+
+    monkeypatch.setattr("core.llm.client.ensure_session_budget", fake_ensure)
+    # Re-measure returns the grant minus sub-second drift — the real clock's
+    # behavior. Under the old exact grant this landed below `needed` and
+    # refused; with _GUARD_SLACK granted on top it must proceed.
+    monkeypatch.setattr("core.llm.client.session_seconds_remaining", lambda sid: granted["v"] - 0.4)
+
+    canned = RLMRunResult(answer="drift-tolerant answer", status="completed", iterations=1, subcalls=0, duration=1.0)
+    monkeypatch.setattr("core.extensions.rlm.engine.RLMEngine.run", lambda self: canned)
+
+    out = rlm_process("q?", "inline text body", _context={"_loop": object(), "session_id": "sess-budget-drift"})
+    text = out[0] if isinstance(out, tuple) else out
+    assert "drift-tolerant answer" in text and "completed" in text
 
 
 # =============================================================================
