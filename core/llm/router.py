@@ -116,6 +116,7 @@ class ProviderRouter:
             "openrouter": self._openrouter_semaphore,
             "openai": self._openai_semaphore,
         }
+        self._warned_downgrades: set[str] = set()
 
     def _fallback_eligible(self, provider) -> bool:
         """Transient remote-provider failures fall back to local Ollama."""
@@ -126,8 +127,23 @@ class ProviderRouter:
         model = model or settings.llm_model
         provider_name = self.registry.resolve_provider(model)
         provider = self._providers.get(provider_name)
-        if provider is not None and provider_name != "ollama" and provider.available:
-            return provider
+        if provider is not None and provider_name != "ollama":
+            if provider.available:
+                return provider
+            # This downgrade used to be silent, and it hid a whole outage:
+            # every call for the model detoured to Ollama, 404'd there, and
+            # failed over to the paid remote — with nothing in the log tying
+            # cause to effect (2026-08-19, lost OPENAI_API_KEY). Warn once
+            # per provider+model; availability is static within a process.
+            key = f"{provider_name}:{model}"
+            if key not in self._warned_downgrades:
+                self._warned_downgrades.add(key)
+                logger.warning(
+                    "Provider '%s' resolved for model '%s' but reports unavailable "
+                    "(missing API key?) — downgrading to Ollama, which likely cannot serve it",
+                    provider_name,
+                    model,
+                )
         return self._ollama
 
     def get_semaphore(self, provider=None) -> SessionAwareLLMScheduler:

@@ -2,12 +2,13 @@
 
 import pytest
 
+from config import settings
 from core.llm.providers.openai import OpenAIProvider, _parse_usage
 from core.llm.types import ProviderConfig
 
 
-def _provider(key: str = "sk-test") -> OpenAIProvider:
-    return OpenAIProvider(ProviderConfig(name="openai", base_url="https://api.openai.com/v1", api_key=key))
+def _provider(key: str = "sk-test", base_url: str = "https://api.openai.com/v1") -> OpenAIProvider:
+    return OpenAIProvider(ProviderConfig(name="openai", base_url=base_url, api_key=key))
 
 
 # ---------------------------------------------------------------------------
@@ -15,9 +16,20 @@ def _provider(key: str = "sk-test") -> OpenAIProvider:
 # ---------------------------------------------------------------------------
 
 
-def test_available_requires_key():
+def test_available_requires_key_for_api_openai_com():
     assert _provider().available
     assert not _provider(key="").available
+
+
+def test_available_without_key_when_base_url_is_self_hosted():
+    """A self-hosted endpoint (vLLM, llama.cpp) typically runs keyless;
+    gating on OPENAI_API_KEY alone made the provider silently vanish when
+    the key was lost (2026-08-19 outage: chat detoured ollama → 404 →
+    paid remote). A custom base_url is availability intent on its own."""
+    assert _provider(key="", base_url="http://aibox.ventibean.com:8000/v1").available
+    assert _provider(key="", base_url="").available is False
+    # A key still wins regardless of URL.
+    assert _provider(key="sk-x", base_url="http://aibox.ventibean.com:8000/v1").available
 
 
 def test_parse_usage_openai_shape():
@@ -190,3 +202,26 @@ def test_openai_format_providers_constant():
     assert "openrouter" in OPENAI_FORMAT_PROVIDERS
     assert "openai" in OPENAI_FORMAT_PROVIDERS
     assert "ollama" not in OPENAI_FORMAT_PROVIDERS
+
+
+def test_router_unavailable_provider_downgrade_warns_once(caplog, monkeypatch):
+    """The unavailable→Ollama downgrade must not be silent: it hid a whole
+    outage (2026-08-19, lost OPENAI_API_KEY — every chat detoured Ollama,
+    404'd, and failed over to the paid remote with no log tying cause to
+    effect). One warning per provider+model, not one per call."""
+    import logging
+
+    from core.llm.router import ProviderRouter
+
+    router = ProviderRouter()
+    router.registry._models.clear()
+    router.registry._populated = True
+    monkeypatch.setattr(type(router._openai), "available", property(lambda self: False), raising=True)
+    monkeypatch.setattr(settings, "openai_models", ["Qwen/Qwen3.8-27B-FP8"])
+
+    with caplog.at_level(logging.WARNING, logger="pernix.llm.router"):
+        assert router.get_provider("Qwen/Qwen3.8-27B-FP8") is router._ollama
+        assert router.get_provider("Qwen/Qwen3.8-27B-FP8") is router._ollama
+    warnings = [r for r in caplog.records if "downgrading to Ollama" in r.message]
+    assert len(warnings) == 1
+    assert "openai" in warnings[0].message and "Qwen/Qwen3.8-27B-FP8" in warnings[0].message
