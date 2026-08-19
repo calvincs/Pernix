@@ -1,0 +1,33 @@
+# Reconstructed 2026-08-19 from `docker inspect pernix` after the box-local
+# original was lost to a cleanup. One deliberate change from the original:
+# API keys moved out of this file into a box-local .env (gitignored) so this
+# file can live in git.
+services:
+  pernix:
+    build: .
+    image: pernix:latest
+    container_name: pernix
+    init: true
+    user: "1000:1000"
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./data:/app/data
+      - ./data/ssh:/home/ubuntu/.ssh:ro
+    env_file:
+      - .env  # OPENROUTER_API_KEY, TAVILY_API_KEY — box-local, never committed
+    environment:
+      - TZ=America/Chicago
+      - OPENROUTER_MODELS=anthropic/claude-opus-4.6,anthropic/claude-sonnet-4.6,x-ai/grok-4.1-fast,moonshotai/kimi-k2.5,qwen/qwen3.6-plus-preview:free,anthropic/claude-haiku-4.5
+    command: ["python", "run.py", "--dangerous"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,ssl; ctx=ssl._create_unverified_context(); urllib.request.urlopen('https://localhost:8090/api/health',context=ctx,timeout=5)
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
