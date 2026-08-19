@@ -144,8 +144,13 @@ Kind-specific rules:
 - contradiction: the question is ONLY whether the quoted entries make incompatible claims \
 about the same thing. That one entry is factually wrong does NOT refute the contradiction — \
 it CONFIRMS it (the wrong entry is the one to flag). Refute only if the claims are actually \
-compatible (different subjects, different time scopes, no real conflict).
-- memory_stale: holds only if newer operational evidence genuinely contradicts the entry.
+compatible (different subjects, different time scopes, no real conflict). Dated snapshots of \
+a time-varying quantity (a market price, an index level, weather, a headline) taken on \
+different dates are compatible by definition — the newer supersedes the older; refute those.
+- memory_stale: holds only if the entry asserts something DURABLE — a procedure, a \
+configuration, a source recommendation, a schedule, a standing fact — that newer operational \
+evidence contradicts. A dated snapshot of a time-varying quantity is superseded by newer \
+data, not stale; refute those.
 
 Output strictly JSON, no fences:
 {"verdict": "holds" | "does_not_hold", "note": "one sentence — if a specific entry is the wrong one, name it"}

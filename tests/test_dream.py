@@ -684,3 +684,57 @@ async def test_chat_rejected_in_dream_journal_session():
         assert "read-only" in r.json()["detail"]
         r2 = await client.post("/api/chat/inject", json={"session_id": sid, "message": "context"})
         assert r2.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Time-series rule (2026-08-19)
+# ---------------------------------------------------------------------------
+
+
+def test_prompts_carry_the_time_series_rule():
+    """Dated snapshots of time-varying facts are records, not claims.
+
+    Without this rule, every remembered market brief validated as
+    contradiction/memory_stale — "S&P was X on May 6" vs "S&P was Y on May 31"
+    — and 9 of the 18 findings validated on 2026-08-19 were this class, each
+    one flowing through auto-approval into a weight-high corrective note in a
+    memory file. The judge's old memory_stale rule ("newer evidence contradicts
+    the entry") GUARANTEED a price series validates as stale.
+
+    Pinned at both ends because generation adherence is best-effort on the
+    background model; the judge is the enforcement point. This test is the
+    contract that a future prompt edit cannot silently drop the rule.
+    """
+    from core.dream.hypothesize import DREAM_PROMPT
+    from core.dream.validate import EVIDENCE_JUDGE_PROMPT
+
+    for prompt in (DREAM_PROMPT, EVIDENCE_JUDGE_PROMPT):
+        assert "time-varying" in prompt
+        assert "supersede" in prompt  # supersedes / superseded
+    assert "NEVER a contradiction" in DREAM_PROMPT
+    # The judge must be told to refute BOTH noisy kinds, durability being the test.
+    assert "refute those" in EVIDENCE_JUDGE_PROMPT
+    assert "DURABLE" in EVIDENCE_JUDGE_PROMPT
+
+
+async def test_validate_refutes_when_judge_does_not_hold(store, dream_on, monkeypatch):
+    """does_not_hold → refuted, method recorded, and the row stays dead.
+
+    The refute path had no direct test; it matters more now that it is the
+    time-series enforcement point.
+    """
+    _seed_memory(store)
+    ev = [_mem_evidence(store, "pernix.config", 1000), _mem_evidence(store, "pernix.config", 2000)]
+    db.add_dream_hypothesis(
+        "memory_stale",
+        "The S&P level recorded on May 6 is stale relative to the May 31 close.",
+        json.dumps(ev),
+    )
+    fake = FakeLLMClient(responses=[_resp('{"verdict": "does_not_hold", "note": "dated snapshots; newer supersedes"}')])
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
+
+    outcome, expired = await validate_one(store, db.list_dream_hypotheses(status="pending"), _never_cancelled)
+    assert outcome == "refuted" and expired == 0
+    row = db.list_dream_hypotheses()[0]
+    assert row["status"] == "refuted"
+    assert json.loads(row["validation_json"])["method"] == "evidence_judge"
