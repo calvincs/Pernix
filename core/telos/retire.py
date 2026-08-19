@@ -188,7 +188,13 @@ def archive_untestable_pool(store: TelosStore) -> dict:
             reason = str(h.get("archive_reason") or label)
         elif status == "soup":
             terminal = "untestable"
-            label = terminal_gate_class(str(h.get("gate_reason") or ""))
+            # The mint-time probe verdict (E7) is authoritative when present;
+            # the gate_reason prefix match remains for pre-E7 files, whose
+            # frontmatter has no `reachable` field.
+            if h.get("reachable") is False:
+                label = "observable absent from the records"
+            else:
+                label = terminal_gate_class(str(h.get("gate_reason") or ""))
             if label is None:
                 continue
             reason = f"backfill sweep: {label}"

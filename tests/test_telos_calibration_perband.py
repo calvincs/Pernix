@@ -71,6 +71,20 @@ def test_describe_carries_the_per_band_clause(store):
     assert "telos_eig_perband.json" in line
 
 
+def test_resolved_and_pooled_counts_expose_the_probe_leak(store):
+    """Every pooled sample passed the mint probe and still couldn't be judged
+    (E7): the export carries the split so the calibration review reads the
+    probe-leak per band instead of re-deriving it from resolve_rate."""
+    _score_events(store)
+    calib = eig_calibration(store)
+
+    assert calib["n_resolved"] == 1 and calib["n_pooled"] == 3
+    pb = calib["per_band"]
+    assert pb["near"]["n_resolved"] == 1 and pb["near"]["n_pooled"] == 1
+    assert pb["mid"]["n_resolved"] == 0 and pb["mid"]["n_pooled"] == 1
+    assert all(row["n_resolved"] + row["n_pooled"] == row["n"] for row in pb.values())
+
+
 def test_empty_store_unchanged(store):
     calib = eig_calibration(store)
     assert calib["n"] == 0 and "per_band" not in calib

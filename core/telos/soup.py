@@ -179,6 +179,11 @@ def gate(h: dict, eig_discount: float = 1.0, evidence_probe=None) -> tuple[bool,
         try:
             evidence = evidence_probe(h) or ""
             covered, detail = observable_coverage(h, evidence)
+            # The probe's verdict becomes a first-class field (E7): downstream
+            # consumers (the backfill sweep, the calibration review) read the
+            # boolean instead of prefix-matching the reason string. Absent
+            # means "probe never ran", which is not the same as reachable.
+            h["reachable"] = covered
             if not covered:
                 return False, f"observable absent from records ({detail}) — evaluation could only be inconclusive"
         except Exception as e:  # a probe failure must not block generation
@@ -454,12 +459,16 @@ async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
         if is_cancelled():
             break
         admitted, reason = gate(h, eig_discount=discount, evidence_probe=_probe)
+        # None when the probe never ran (pre-probe reject or probe failure) —
+        # recorded as unknown rather than defaulted either way.
+        reachable = h.get("reachable")
         obj = TelosObject(
             id=store.mint_id("hypothesis"),
             kind="hypothesis",
             meta={
                 "question": q.id,
                 "band": h["band"],
+                "reachable": reachable,
                 "statement": h["statement"],
                 "mapping": {
                     "source_domain": h["source_domain"],
@@ -496,6 +505,7 @@ async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
                 "reason": reason,
                 "eig": h["eig"],
                 "eig_discount": discount,
+                "reachable": reachable,
             },
         )
 

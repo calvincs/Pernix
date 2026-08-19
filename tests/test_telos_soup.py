@@ -84,6 +84,25 @@ def test_gate_requires_falsifier_cost_eig():
     assert not costly and "cost" in reason
 
 
+def test_gate_stamps_the_probe_verdict_as_reachable(monkeypatch):
+    """The coverage probe's boolean becomes a first-class field (E7) — the
+    sweep and the calibration review read it instead of prefix-matching the
+    reason string. Absent means the probe never ran, not reachable."""
+    covered = _hyp()
+    admitted, _ = gate(covered, evidence_probe=lambda _c: "p99 latency under load: 38ms observed")
+    assert admitted and covered["reachable"] is True
+
+    uncovered = _hyp()
+    admitted, reason = gate(uncovered, evidence_probe=lambda _c: "tool reliability statistics only")
+    assert not admitted and "observable absent" in reason
+    assert uncovered["reachable"] is False
+
+    # Pre-probe reject: the probe never ran, so no verdict is stamped.
+    unprobed = _hyp(falsifier=False)
+    gate(unprobed, evidence_probe=lambda _c: "anything")
+    assert "reachable" not in unprobed
+
+
 # --- scheduler -------------------------------------------------------------
 
 
