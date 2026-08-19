@@ -414,12 +414,31 @@ class OpenAIProvider:
         """Invalidate the cached model list so next fetch hits the API."""
         self._models_cache = None
 
-    def _model_info(self, model_id: str) -> ModelInfo:
-        ctx = 128_000
-        for prefix, length in _CONTEXT_HINTS.items():
-            if model_id == prefix or model_id.startswith(prefix + "-"):
-                ctx = length
+    # Self-hosted OpenAI-compatible servers advertise the real context window
+    # in their /v1/models entries under various names (vLLM: max_model_len;
+    # others: context_length / context_window / max_context_length).
+    # api.openai.com sends none of these — the name-hint table below covers it.
+    _CTX_FIELDS = ("max_model_len", "context_length", "context_window", "max_context_length")
+
+    def _model_info(self, model_id: str, entry: dict | None = None) -> ModelInfo:
+        # Server-advertised window first: it is the serving truth, not a
+        # guess. Ignoring it cost half the real window on the aibox vLLM
+        # deploy — the adapter fetched max_model_len=262,144 and defaulted
+        # the unrecognized id to 128K anyway (2026-08-19).
+        ctx = 0
+        for field in self._CTX_FIELDS:
+            try:
+                ctx = int((entry or {}).get(field) or 0)
+            except (TypeError, ValueError):
+                ctx = 0
+            if ctx > 0:
                 break
+        if ctx <= 0:
+            ctx = 128_000
+            for prefix, length in _CONTEXT_HINTS.items():
+                if model_id == prefix or model_id.startswith(prefix + "-"):
+                    ctx = length
+                    break
         return ModelInfo(
             id=model_id,
             provider=self.name,
@@ -428,7 +447,13 @@ class OpenAIProvider:
         )
 
     async def get_model_info(self, model: str) -> ModelInfo:
-        return self._model_info(self._model(model))
+        model_id = self._model(model)
+        entry = None
+        try:
+            entry = next((m for m in await self._fetch_models() if m.get("id") == model_id), None)
+        except Exception:
+            pass  # cache miss/network failure — fall back to hints below
+        return self._model_info(model_id, entry)
 
     async def list_models(self) -> list[ModelInfo]:
         models_data = await self._fetch_models()
@@ -438,7 +463,7 @@ class OpenAIProvider:
             mid = m.get("id", "")
             if not mid or (allowed and mid not in allowed):
                 continue
-            results.append(self._model_info(mid))
+            results.append(self._model_info(mid, m))
         return results
 
     # ------------------------------------------------------------------
