@@ -32,6 +32,40 @@ def test_available_without_key_when_base_url_is_self_hosted():
     assert _provider(key="sk-x", base_url="http://aibox.ventibean.com:8000/v1").available
 
 
+def test_model_info_prefers_server_advertised_context():
+    """A self-hosted server's /v1/models entry carries the real window
+    (vLLM: max_model_len). Ignoring it cost half the window on the aibox
+    deploy — an unrecognized id silently defaulted to 128K while the server
+    advertised 262,144."""
+    p = _provider(key="", base_url="http://aibox.ventibean.com:8000/v1")
+    info = p._model_info("Qwen/Qwen3.8-27B-FP8", {"id": "Qwen/Qwen3.8-27B-FP8", "max_model_len": 262144})
+    assert info.context_length == 262144
+    # Alternate field names other servers use.
+    assert p._model_info("m", {"context_length": 32768}).context_length == 32768
+    assert p._model_info("m", {"context_window": 16384}).context_length == 16384
+
+
+def test_model_info_falls_back_to_hints_then_default():
+    p = _provider()
+    # api.openai.com entries carry no context field — name hints still apply.
+    assert p._model_info("gpt-4o", {"id": "gpt-4o"}).context_length == 128_000
+    assert p._model_info("o4-mini", None).context_length == 200_000
+    # Unknown id, no advertised field, garbage values → 128K default.
+    assert p._model_info("mystery-model", None).context_length == 128_000
+    assert p._model_info("mystery-model", {"max_model_len": "not-a-number"}).context_length == 128_000
+
+
+@pytest.mark.asyncio
+async def test_get_model_info_reads_the_cached_server_entry():
+    p = _provider(key="", base_url="http://aibox.ventibean.com:8000/v1")
+    p._models_cache = [{"id": "Qwen/Qwen3.8-27B-FP8", "max_model_len": 262144}]
+    info = await p.get_model_info("Qwen/Qwen3.8-27B-FP8")
+    assert info.context_length == 262144
+    # A model absent from the server list still resolves via hints/default.
+    info = await p.get_model_info("mystery-model")
+    assert info.context_length == 128_000
+
+
 def test_parse_usage_openai_shape():
     usage = _parse_usage(
         {
