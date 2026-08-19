@@ -95,11 +95,14 @@ The token can be passed three ways:
 |---|---|
 | `Authorization: Bearer <token>` header | API clients, scripts |
 | `pernix_auth` cookie | Browser sessions (set automatically on first login) |
-| `?token=<token>` query parameter | QR-code login links, one-time URL sharing |
+| `#token=<token>` URL fragment | QR-code login links, one-time URL sharing |
+| `?token=<token>` query parameter | Legacy links; ad-hoc `curl` |
 
 The token comparison is constant-time, so a wrong token reveals nothing about the right one through response timing.
 
-> **The `?token=` parameter ends up in logs.** Query strings are recorded by access logs, proxies, and browser history. It exists because `EventSource` cannot set request headers and because QR onboarding needs a single scannable URL — but treat any token you have shared that way as disclosed, and rotate it when you are done onboarding.
+> **Onboarding links use the URL fragment, not the query string.** A browser never transmits the part after `#`, so `/#token=<token>` cannot reach an access log, a reverse-proxy log, or a `Referer` header. The query form used to, and wrote a working credential into `docker compose logs` on every scan.
+>
+> `?token=` is still accepted, because links handed out before this change are still in circulation and it is convenient for `curl`. Pernix redacts it from its own access log (`_TokenRedactFilter` in `run.py`, applied to `uvicorn.access` before anything else sees the record), but that is a backstop, not a guarantee: a reverse proxy in front of Pernix keeps its own logs, and browser history still records the full URL. Prefer the fragment, and treat a token you have shared as a query string as disclosed.
 
 ### Localhost Bypasses Auth (by default)
 
@@ -116,8 +119,8 @@ in `data/settings.json` (or from Settings in the UI). It takes effect immediatel
 ### Token-from-URL Login Flow (Mobile / LAN Access)
 
 1. From localhost, call `GET /api/settings/access-qr` — returns a QR code image
-2. The QR encodes `https://<LAN-IP>:<port>/?token=<token>`
-3. Scan it on your phone — the token is extracted from the URL and stored in `localStorage`
+2. The QR encodes `https://<LAN-IP>:<port>/#token=<token>` — the token is in the fragment, so the server never receives it
+3. Scan it on your phone — the token is read from `location.hash`, stored in `localStorage`, and stripped from the address bar
 4. Subsequent requests from that browser use the `Authorization` header automatically
 5. Use `--qr` on startup as a shortcut: `python run.py --qr` prints the URL and QR code to the terminal
 

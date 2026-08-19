@@ -67,16 +67,32 @@ function scrollToBottom(force = false) {
 // ---------------------------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', async () => {
-    // Auto-extract auth token from URL (shared link / QR code onboarding)
+    // Auto-extract auth token from URL (shared link / QR code onboarding).
+    //
+    // The fragment is the carrier, not the query string: browsers never send a
+    // fragment to the server, so it cannot reach an access log, a proxy log or
+    // a Referer header. `?token=` used to be written verbatim into uvicorn's
+    // access log — a live credential in `docker compose logs`, readable by
+    // anyone with log access and preserved anywhere those logs get shipped.
+    //
+    // The query form is still accepted because links and QR codes handed out
+    // before the change are still in circulation; run.py redacts that form on
+    // the way into the log. Both are stripped from the address bar below, so a
+    // shoulder-surfer or a screenshot does not catch it either.
+    const _hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
     const _urlParams = new URLSearchParams(window.location.search);
-    const _urlToken = _urlParams.get('token');
+    const _urlToken = _hashParams.get('token') || _urlParams.get('token');
     if (_urlToken) {
         setAuthToken(_urlToken);
+        _hashParams.delete('token');
         _urlParams.delete('token');
-        const _cleanUrl = _urlParams.toString()
-            ? `${window.location.pathname}?${_urlParams}`
-            : window.location.pathname;
-        history.replaceState(null, '', _cleanUrl);
+        const _q = _urlParams.toString();
+        const _h = _hashParams.toString();
+        history.replaceState(
+            null,
+            '',
+            window.location.pathname + (_q ? `?${_q}` : '') + (_h ? `#${_h}` : ''),
+        );
     } else {
         // Restore pernix_auth cookie from sessionStorage on page reload.
         // setAuthToken() sets both storage AND cookie, but on reload only storage

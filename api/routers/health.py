@@ -413,27 +413,46 @@ async def regenerate_auth_token(request: Request):
     }
 
 
+def build_access_url() -> str:
+    """The onboarding URL handed to a new device, token included.
+
+    The token rides in the FRAGMENT (`/#token=...`), never the query string. A
+    browser does not transmit a fragment, so it cannot reach an access log, a
+    reverse-proxy log, or a Referer header. The query form used to write a live
+    credential into `docker compose logs` on every scan.
+
+    Base is the first configured CORS origin when there is one; otherwise the
+    LAN address this host would use to reach the internet.
+    """
+    if settings.cors_origins:
+        base = settings.cors_origins[0].rstrip("/")
+        return f"{base}/#token={settings.auth_token}"
+
+    import socket
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        lan_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        lan_ip = "localhost"
+    return f"https://{lan_ip}:{settings.port}/#token={settings.auth_token}"
+
+
+# The access URL carries the token in the FRAGMENT, not the query string. A
+# fragment is never sent to the server, so it cannot land in an access log, a
+# reverse-proxy log, or a Referer header — the query form used to write a live
+# credential into `docker compose logs` on every scan. app.js reads it from
+# location.hash and still accepts the old `?token=` form, which run.py's
+# _TokenRedactFilter scrubs on the way into the log.
 @router.get("/api/settings/access-qr")
 async def access_qr(request: Request):
     """Return an SVG QR code for remote access. Requires auth (via middleware)."""
     if not settings.network_enabled or not settings.auth_token:
         raise HTTPException(404, detail="Network mode not enabled")
 
-    # Build access URL: use first cors_origin if configured, else LAN IP
-    if settings.cors_origins:
-        base = settings.cors_origins[0].rstrip("/")
-        access_url = f"{base}/?token={settings.auth_token}"
-    else:
-        import socket
-
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            lan_ip = s.getsockname()[0]
-            s.close()
-        except Exception:
-            lan_ip = "localhost"
-        access_url = f"https://{lan_ip}:{settings.port}/?token={settings.auth_token}"
+    access_url = build_access_url()
 
     try:
         import io as _io

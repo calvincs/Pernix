@@ -79,13 +79,18 @@ Three ways to send the token:
 |---|---|
 | `Authorization: Bearer <token>` header | API clients, scripts, mobile apps |
 | `pernix_auth` cookie | Browser sessions (set automatically after token-from-URL login) |
-| `?token=<token>` query parameter | QR-code login links, one-time URL sharing |
+| `#token=<token>` URL fragment | QR-code login links, one-time URL sharing |
+| `?token=<token>` query parameter | Legacy links; ad-hoc `curl` |
 
-Localhost connections (`127.0.0.1`, `::1`) bypass authentication by default, even in network mode. This prevents you from locking yourself out and lets `POST /api/admin/restart`, `POST /api/settings/auth-token/regenerate`, and similar admin endpoints stay accessible.
+Localhost connections (`127.0.0.1`, `::1`) bypass authentication by default, even in network mode. This prevents you from locking yourself out and keeps admin endpoints such as `POST /api/admin/restart` reachable.
+
+Note that under Docker with a published port, nothing is loopback — traffic through the port is remote to the container, so no browser can use this bypass, not even one on the server itself. `GET /api/settings/auth-token` and `POST /api/settings/auth-token/regenerate` are therefore gated on the token alone rather than on localhost; the Settings UI could not otherwise reach them on a containerised deployment.
 
 **Behind a reverse proxy, set `trust_local_requests: false`.** A proxy terminating TLS on the same host reaches Pernix over loopback, so every proxied request — wherever it actually came from — looks like `127.0.0.1` and skips the token. With the setting off, the proxy must forward `Authorization: Bearer <token>` like any other client. The change is read per-request, so it applies immediately without a restart.
 
-Token comparison is constant-time. Note that `?token=` lands in access logs and browser history — rotate after using it for onboarding.
+Token comparison is constant-time.
+
+Onboarding links put the token in the URL **fragment** (`/#token=`), which browsers never send to the server — so it cannot land in an access log. The older `?token=` query form still authenticates, and Pernix scrubs it from its own access log, but a reverse proxy in front of Pernix keeps its own logs and browser history records the full URL either way. Rotate a token you have shared as a query string.
 
 ---
 
@@ -93,9 +98,9 @@ Token comparison is constant-time. Note that `?token=` lands in access logs and 
 
 Easiest way to log in from your phone:
 
-1. **Generate the URL.** From localhost, hit `GET /api/settings/access-qr` (or run `python run.py --qr` on startup). You get a URL like `https://192.168.1.50:8090/?token=<32-byte-token>`.
+1. **Generate the URL.** Hit `GET /api/settings/access-qr` (or run `python run.py --qr` on startup). You get a URL like `https://192.168.1.50:8090/#token=<32-byte-token>`. Settings → Network → Remote Access has the same thing as a button, alongside **Show Token** to copy it by hand.
 2. **Scan it on your phone.** The QR encodes the URL; any camera app reads it.
-3. **The browser opens, extracts `?token=<...>` from the URL, and stores it in `localStorage`.** Subsequent requests use the `Authorization` header automatically.
+3. **The browser opens, reads the token from `location.hash`, and stores it in `localStorage`.** Subsequent requests use the `Authorization` header automatically. Because it travelled in the fragment, the server never saw it.
 
 After login, the URL bar shows just the host — the token is no longer in the URL, so you can share screenshots safely.
 

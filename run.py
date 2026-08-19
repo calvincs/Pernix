@@ -6,7 +6,9 @@ Usage:
 """
 
 import argparse
+import logging
 import os
+import re
 import shutil
 import signal
 import sys
@@ -14,6 +16,48 @@ import time
 from pathlib import Path
 
 from config import settings
+
+# Query-string carriers for the access token. `token` is the onboarding param
+# the auth middleware accepts; `access_token` is not used today and is matched
+# so a future rename cannot silently reopen the hole.
+_TOKEN_QS_RE = re.compile(r"""(?i)([?&](?:token|access_token)=)[^&\s"']*""")
+
+
+def _redact_tokens(value: str) -> str:
+    """Replace any ?token=<secret> value in a string with a placeholder."""
+    return _TOKEN_QS_RE.sub(r"\1REDACTED", value)
+
+
+class _TokenRedactFilter(logging.Filter):
+    """Keep access tokens out of the access log.
+
+    QR codes and shared links used to carry `/?token=<secret>`, which uvicorn
+    writes verbatim: `GET /?token=<a working credential> HTTP/1.1 200`. On the
+    Docker deployment stdout IS the log, so `docker compose logs` handed out
+    live credentials to anyone who could read it, and to anywhere those logs
+    get shipped. Deleting the line later does not help — a token that has been
+    written down is already disclosed.
+
+    Onboarding links now carry the token in the URL FRAGMENT, which browsers
+    never transmit, so nothing reaches the server to log. This filter covers
+    what that cannot: links already handed out, which must keep working.
+
+    uvicorn.access formats as '%s - "%s %s HTTP/%s" %d' with the path in
+    args[2], so the path is rewritten in place rather than the rendered
+    message — that leaves _PollFilter's matching, and any structured handler,
+    working on the normal shape.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            if "token=" in args[2].lower():
+                patched = list(args)
+                patched[2] = _redact_tokens(args[2])
+                record.args = tuple(patched)
+        elif isinstance(record.msg, str) and "token=" in record.msg.lower():
+            record.msg = _redact_tokens(record.msg)
+        return True
 
 
 def rebuild_start():
@@ -208,10 +252,10 @@ def main():
     if settings.network_enabled and settings.auth_token and args.qr:
         if settings.cors_origins:
             base = settings.cors_origins[0].rstrip("/")
-            access_url = f"{base}/?token={settings.auth_token}"
+            access_url = f"{base}/#token={settings.auth_token}"
         else:
             lan_ip = _get_lan_ip()
-            access_url = f"{scheme}://{lan_ip}:{port}/?token={settings.auth_token}"
+            access_url = f"{scheme}://{lan_ip}:{port}/#token={settings.auth_token}"
         print(f"  Auth token: {settings.auth_token}")
         print(f"  Access URL: {access_url}")
         try:
@@ -254,6 +298,9 @@ def main():
                 return False
             return True
 
+    # Redaction goes on before _PollFilter so nothing downstream — including
+    # any handler added later — can ever see an un-redacted path.
+    logging.getLogger("uvicorn.access").addFilter(_TokenRedactFilter())
     logging.getLogger("uvicorn.access").addFilter(_PollFilter())
 
     # Suppress expected CancelledError tracebacks during graceful shutdown.
