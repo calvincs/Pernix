@@ -134,3 +134,10 @@ opencode.json
 .Trashes
 Icon?
 Thumbs.db
+
+# Runtime state the app grows on the box (like sessions.db above) — never committed.
+data/adaptive/
+data/candor/
+data/kernels/
+data/telos/
+data/settings.json.bak*
