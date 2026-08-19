@@ -114,7 +114,17 @@ class OpenAIProvider:
 
     @property
     def available(self) -> bool:
-        return bool(self._config.api_key)
+        # A key proves intent for api.openai.com; a self-hosted base_url
+        # (vLLM, llama.cpp, LiteLLM) proves it on its own — such servers
+        # typically run keyless, and gating on OPENAI_API_KEY alone made the
+        # provider silently vanish when the key was lost (2026-08-19: a
+        # container rebuild dropped the app-written /app/.env and every chat
+        # detoured ollama → 404 → paid remote fallback). The Bearer header
+        # is sent either way; keyless self-hosted servers ignore it.
+        if self._config.api_key:
+            return True
+        base = (self._config.base_url or "").strip()
+        return bool(base) and "api.openai.com" not in base
 
     def _build_payload(
         self,
