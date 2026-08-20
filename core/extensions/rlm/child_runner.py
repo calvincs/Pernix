@@ -34,6 +34,7 @@ import os  # noqa: E402
 import signal  # noqa: E402
 import socket  # noqa: E402
 import struct  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 import traceback  # noqa: E402
 
@@ -450,16 +451,38 @@ def _format_cell_error(e: BaseException) -> str:
     return "".join(lines)
 
 
-def _set_pdeathsig():
-    """Best-effort: die with the parent (Linux only)."""
-    try:
-        import ctypes
+def _arm_parent_watch():
+    """Best-effort: die with the parent PROCESS.
 
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        PR_SET_PDEATHSIG = 1
-        libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
-    except Exception:
-        pass
+    This used to be prctl(PR_SET_PDEATHSIG, SIGKILL) — which is scoped to the
+    spawning THREAD, not the process (documented in prctl(2), easy to miss).
+    Any child spawned from a short-lived thread was SIGKILLed the moment that
+    thread exited, with the parent process alive and the child mid-protocol:
+    the parent's next round-trip surfaced as "connection lost mid-cell:
+    Connection reset by peer" with an empty child.log, because SIGKILL leaves
+    no time to write one. Production mostly dodged it by luck — repl kernels
+    ride the immortal pernix-tool pool threads and result-binding rides the
+    loop's default executor — but the two test_repl_tool binding tests spawn
+    inside asyncio.run(), whose teardown retires the executor thread, and
+    they died on exactly this (~0.8s after the round, exit -9).
+
+    A ppid poll has the semantics the docstring always claimed: when the
+    parent PROCESS dies we are reparented (init or the nearest subreaper),
+    getppid() changes, and we exit. The 2s cadence is fine for orphan
+    hygiene — the socket-timeout watchdogs already stop a vanished parent
+    from hanging a cell (see the frame-timeout notes above).
+    """
+    parent = os.getppid()
+    if parent <= 1:  # already orphaned at startup; nothing to watch
+        return
+
+    def _watch():
+        while True:
+            time.sleep(2.0)
+            if os.getppid() != parent:
+                os._exit(0)
+
+    threading.Thread(target=_watch, daemon=True, name="parent-watch").start()
 
 
 def main() -> int:
@@ -469,7 +492,7 @@ def main() -> int:
     parser.add_argument("--scaffold", choices=("rlm", "plain"), default="rlm")
     args = parser.parse_args()
 
-    _set_pdeathsig()
+    _arm_parent_watch()
     # Default handler so the parent's SIGINT raises KeyboardInterrupt in a
     # running cell (aborting the cell, preserving the namespace).
     signal.signal(signal.SIGINT, signal.default_int_handler)
