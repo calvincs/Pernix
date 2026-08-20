@@ -215,3 +215,45 @@ def test_registry_purge_state(tmp_path):
     assert state_dir.exists()
     reg.shutdown_session("purge-1", snapshot=False, purge_state=True)
     assert not state_dir.exists()
+
+
+def test_child_survives_its_spawning_threads_death(monkeypatch, tmp_path):
+    """The child must be tied to the parent PROCESS, not the spawning thread.
+
+    child_runner used to arm prctl(PR_SET_PDEATHSIG, SIGKILL), which prctl(2)
+    scopes to the THREAD that spawned the child: a kernel created from any
+    short-lived thread was SIGKILLed the moment that thread exited (exit -9,
+    empty child.log, next round-trip = "connection lost mid-cell"). The two
+    test_repl_tool binding tests hit exactly this — execute_tool_round runs
+    binding via asyncio.to_thread inside asyncio.run(), whose teardown
+    retires the worker thread. Production dodged it only because tool-pool
+    and default-executor threads happen to be immortal on a live server.
+    The replacement is a ppid watcher in the child: process semantics.
+    """
+    import threading
+    import time as _time
+
+    import core.kernel as kernel_mod
+    from core.kernel import SessionKernel, get_kernel_registry
+
+    monkeypatch.setattr(kernel_mod, "KERNEL_STATE_ROOT", tmp_path / "kernels")
+    monkeypatch.setattr(SessionKernel, "_interpreter", lambda self: sys.executable)
+    monkeypatch.setattr("config.settings.session_kernel_enabled", True)
+
+    box = {}
+
+    def _spawn():
+        k = get_kernel_registry().get_or_create("thread-death-1")
+        k.bind_variable("v1", "DATA-" + "z" * 500 + "-END")
+        box["k"] = k
+
+    t = threading.Thread(target=_spawn)
+    t.start()
+    t.join()
+    _time.sleep(1.5)  # the old pdeathsig kill landed well inside this window
+
+    k = box["k"]
+    assert k.alive, "child died with its spawning thread (pdeathsig regression)"
+    result, _ = k.execute("print(len(v1))", timeout=15)
+    assert "509" in result.stdout
+    get_kernel_registry().shutdown_session("thread-death-1", snapshot=False)
