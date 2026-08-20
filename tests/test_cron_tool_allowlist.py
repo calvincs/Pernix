@@ -202,8 +202,8 @@ def test_session_brief_unconstrained_has_no_block():
 
 
 def test_build_session_brief_reads_live_allowlist(monkeypatch):
-    from db import models as db
     from core.scout.runner import build_session_brief
+    from db import models as db
 
     sid = db.create_session()
     live = AgentSession(session_id=sid)
@@ -304,6 +304,7 @@ def test_update_scheduled_job_preserves_extra_meta(monkeypatch, tmp_path):
     """Regression: update_scheduled_job re-added the job without extra_meta,
     stripping allowed_tools/last_fired_at/session_mode from any job it touched."""
     import json as _json
+
     from core.extensions import scheduling
 
     cron_path = tmp_path / "cron_jobs.json"

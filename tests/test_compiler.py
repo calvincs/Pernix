@@ -415,7 +415,9 @@ def test_injected_midturn_message_sorts_before_later_replies():
         "INJECTED use port 8137",
         metadata=json.dumps({"injected": True, "parent_user_msg_id": root}),
     )
-    db.add_message(sid, "assistant", "REPLY-2 acknowledged, port 8137", metadata=json.dumps({"parent_user_msg_id": root}))
+    db.add_message(
+        sid, "assistant", "REPLY-2 acknowledged, port 8137", metadata=json.dumps({"parent_user_msg_id": root})
+    )
 
     payload = compile_context(sid, turn_user_msg_id=root)
     order = [m["content"] for m in payload.messages if isinstance(m.get("content"), str)]
