@@ -102,8 +102,7 @@ def run_alarm_discharge(store: TelosStore) -> dict:
 
         if len(checks) >= n_required and span_h >= settings.telos_alarm_autoclose_window_hours:
             reason = (
-                f"closed-by-discharge: condition not holding in "
-                f"{len(checks)} consecutive checks over {span_h:.0f}h"
+                f"closed-by-discharge: condition not holding in " f"{len(checks)} consecutive checks over {span_h:.0f}h"
             )
             was_acknowledged = alarm.get("state") == "acknowledged"
             store.update(alarm, state="cleared", cleared_reason=reason, clean_checks=checks, checked_evidence=seen)

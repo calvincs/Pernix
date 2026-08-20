@@ -1000,7 +1000,9 @@ def update_scheduled_job(
         # last_fired_at, session_mode and created_at from the job (field case:
         # a cron_expr edit dropped the curiosity deep-dive's allow-list).
         extra = {k: v for k, v in current.items() if k not in _ENTRY_STRUCTURAL_KEYS}
-        _add_job_internal(name, new_cron, new_prompt, session_id=current.get("session_id"), model=new_model, extra_meta=extra)
+        _add_job_internal(
+            name, new_cron, new_prompt, session_id=current.get("session_id"), model=new_model, extra_meta=extra
+        )
         # Restore paused state if it was paused
         if was_paused:
             scheduler.pause_job(name)
