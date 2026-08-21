@@ -77,6 +77,40 @@ class ToolExecutionResult:
     metadata: dict = field(default_factory=dict)
 
 
+# Policy refusals — a disabled tool, a retry exclusion, a scheduled job's
+# allow-list, a session type that may not use the tool, the approval gate —
+# are errors for the MODEL (it must stop calling) but say nothing about the
+# TOOL. They are tagged so the turn summary, reflect, candor and telos count
+# them apart from failures: on the live box 15 charter refusals in one week
+# were graded as tool failures, dragging candor's tool_ok for bash/glob down
+# and minting telos hypotheses about tools that never ran.
+REFUSAL_MARKER = "refused"
+_REFUSAL_CONTENT_HINTS = (
+    "is not permitted in this scheduled run",
+    "is disabled for this retry attempt",
+    "cannot be used in",
+    "requires explicit user approval",
+    "The approved scope (",
+    "is disabled. Enable it in Explorer",
+)
+
+
+def _refusal(name: str, content: str) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        tool_name=name, content=content, was_error=True, latency_ms=0, metadata={REFUSAL_MARKER: True}
+    )
+
+
+def is_policy_refusal(result: ToolExecutionResult) -> bool:
+    """True when the harness declined the call on policy, not when the tool failed."""
+    if not result.was_error:
+        return False
+    if (result.metadata or {}).get(REFUSAL_MARKER):
+        return True
+    body = result.content or ""
+    return body.startswith("Error:") and any(h in body for h in _REFUSAL_CONTENT_HINTS)
+
+
 # Grace added on top of a resolved dispatch timeout. The tool's own internal
 # timeout (e.g. bash's process.communicate) must fire FIRST so the model gets
 # the tool's own diagnostic instead of the executor's generic timeout error,
@@ -223,12 +257,7 @@ async def _execute_single(
             latency_ms=0,
         )
     if registry.is_disabled(name):
-        return ToolExecutionResult(
-            tool_name=name,
-            content=(f"Error: Tool '{name}' is disabled. " "Enable it in Explorer > Tools before use."),
-            was_error=True,
-            latency_ms=0,
-        )
+        return _refusal(name, f"Error: Tool '{name}' is disabled. Enable it in Explorer > Tools before use.")
 
     # Enforce denied_session_types (plan §5, generalizing worker_allowed):
     # workers can't spawn sub-workers; canaries can't write memory; etc.
@@ -247,15 +276,11 @@ async def _execute_single(
     # catches a model that calls one anyway.
     _retry_excluded = turn_state(s).retry_excluded_tools if sid and s else None
     if _retry_excluded and name in _retry_excluded:
-        return ToolExecutionResult(
-            tool_name=name,
-            content=(
-                f"Error: Tool '{name}' is disabled for this retry attempt — the previous "
-                "attempt failed because of how it was used. Follow the retry strategy "
-                "without it."
-            ),
-            was_error=True,
-            latency_ms=0,
+        return _refusal(
+            name,
+            f"Error: Tool '{name}' is disabled for this retry attempt — the previous "
+            "attempt failed because of how it was used. Follow the retry strategy "
+            "without it.",
         )
 
     # Scheduled-job allow-list (E1): backstop for the schema-side intersection
@@ -263,25 +288,16 @@ async def _execute_single(
     # schema no longer offers. Same two-point enforcement as retry_excluded.
     _allowlist = getattr(s, "tool_allowlist", None) if sid and s else None
     if _allowlist and name not in _allowlist:
-        return ToolExecutionResult(
-            tool_name=name,
-            content=(
-                f"Error: Tool '{name}' is not permitted in this scheduled run — the job's "
-                f"charter restricts this session to: {', '.join(sorted(_allowlist))}. "
-                "Complete the task with the permitted tools, or log the need in your "
-                "proposals instead of executing."
-            ),
-            was_error=True,
-            latency_ms=0,
+        return _refusal(
+            name,
+            f"Error: Tool '{name}' is not permitted in this scheduled run — the job's "
+            f"charter restricts this session to: {', '.join(sorted(_allowlist))}. "
+            "Complete the task with the permitted tools, or log the need in your "
+            "proposals instead of executing.",
         )
 
     if session_type and session_type in tool.denied_session_types:
-        return ToolExecutionResult(
-            tool_name=name,
-            content=f"Error: Tool '{name}' cannot be used in {session_type} sessions.",
-            was_error=True,
-            latency_ms=0,
-        )
+        return _refusal(name, f"Error: Tool '{name}' cannot be used in {session_type} sessions.")
 
     # Enforce safety_level="dangerous" gate.
     # Both parent and worker sessions must pass — workers cannot escalate

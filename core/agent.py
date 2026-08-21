@@ -1470,6 +1470,56 @@ async def _execute_round(parsed_calls: list[dict], *, session: AgentSession, ses
     )
 
 
+def record_tool_outcome(turn, result) -> None:
+    """Fold one tool result into the turn's cumulative and per-attempt summaries.
+
+    `failures` means the tool ran and failed. A policy refusal — the harness
+    declining the call (job allow-list, retry exclusion, disabled tool,
+    approval gate; see core.tools.executor.is_policy_refusal) — is counted as
+    `refusals` with its own `refusal_errors` previews and never as a failure:
+    candor's tool_ok, telos' anomaly scan, synthesis and the reflect summary
+    all read `failures` as "the tool is unreliable", which a refusal is not.
+    The stuck detector still sees refusals (a model that keeps calling a
+    forbidden tool IS stuck) — that is handled by the caller.
+    """
+    from core.tools.executor import is_policy_refusal
+
+    refused = is_policy_refusal(result)
+    entry = turn.tool_summary.setdefault(
+        result.tool_name,
+        {"calls": 0, "failures": 0, "refusals": 0, "errors": [], "total_latency_ms": 0},
+    )
+    entry.setdefault("refusals", 0)  # summaries restored from before this key existed
+    entry["calls"] += 1
+    entry["total_latency_ms"] += result.latency_ms
+    if refused:
+        entry["refusals"] += 1
+        preview = result.content[:300] if result.content else "refused"
+        previews = entry.setdefault("refusal_errors", [])
+        if preview not in previews:
+            previews.append(preview)
+    elif result.was_error:
+        entry["failures"] += 1
+        err_preview = result.content[:500] if result.content else "unknown"
+        if err_preview not in entry["errors"]:
+            entry["errors"].append(err_preview)
+
+    # Per-attempt view (C2): reflect_count is the number of retries granted
+    # so far, so it doubles as this attempt's zero-based index — it is
+    # incremented by _maybe_reflect BEFORE the retry attempt re-enters here.
+    attempt_idx = turn.reflect_count
+    attempts = turn.tool_summary_attempts
+    while len(attempts) <= attempt_idx:
+        attempts.append({})
+    a_entry = attempts[attempt_idx].setdefault(result.tool_name, {"calls": 0, "failures": 0, "refusals": 0})
+    a_entry.setdefault("refusals", 0)
+    a_entry["calls"] += 1
+    if refused:
+        a_entry["refusals"] += 1
+    elif result.was_error:
+        a_entry["failures"] += 1
+
+
 async def _record_round_results(
     parsed_calls: list[dict],
     results: list,
@@ -1558,30 +1608,9 @@ async def _record_round_results(
             was_error=result.was_error,
         )
 
-        # Cumulative tool execution summary for reflect diagnostics
-        entry = session.turn.tool_summary.setdefault(
-            result.tool_name,
-            {"calls": 0, "failures": 0, "errors": [], "total_latency_ms": 0},
-        )
-        entry["calls"] += 1
-        entry["total_latency_ms"] += result.latency_ms
-        if result.was_error:
-            entry["failures"] += 1
-            err_preview = result.content[:500] if result.content else "unknown"
-            if err_preview not in entry["errors"]:
-                entry["errors"].append(err_preview)
-
-        # Per-attempt view (C2): reflect_count is the number of retries granted
-        # so far, so it doubles as this attempt's zero-based index — it is
-        # incremented by _maybe_reflect BEFORE the retry attempt re-enters here.
-        attempt_idx = session.turn.reflect_count
-        attempts = session.turn.tool_summary_attempts
-        while len(attempts) <= attempt_idx:
-            attempts.append({})
-        a_entry = attempts[attempt_idx].setdefault(result.tool_name, {"calls": 0, "failures": 0})
-        a_entry["calls"] += 1
-        if result.was_error:
-            a_entry["failures"] += 1
+        # Cumulative + per-attempt tool execution summary for reflect,
+        # candor, telos and synthesis.
+        record_tool_outcome(session.turn, result)
 
         # Dynamic tool expansion via discover_tools
         if result.tool_name == "discover_tools" and not result.was_error:

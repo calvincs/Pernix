@@ -81,6 +81,8 @@ RULES:
 - Use the TOOL EXECUTION SUMMARY to identify failure patterns. If a tool failed 2+ times with the same error, the retry strategy MUST suggest a different tool or approach.
 - SELF-REPORTED COUNTS ARE NOT A RUBRIC INPUT: the agent cannot see the TOOL EXECUTION SUMMARY and, on a retry, cannot see prior attempts' totals — so a mismatch between the agent's own stated tool count and the summary is NOT, by itself, dishonesty or a retry cause. Grade what the agent DID against the summary and transcript; ignore its arithmetic about itself. (Actual misuse of a forbidden tool remains gradeable — from the summary, not from the agent's count.)
 - TOOL CALL FACTS ARE NOT NEGOTIABLE. The TOOL EXECUTION SUMMARY is observed truth, not interpretation. Before claiming the agent did NOT use a tool, verify: if the tool name appears in the summary with calls > 0, the agent DID call it. Do NOT write "agent did not call X" or "agent failed to use X" or "X was skipped" if X.calls > 0 in the summary. If you believe the call was *ineffective* (tool ran but didn't produce the expected result), say that — but do not deny the call happened. Hallucinating absence of a call that the summary records as present is a verifier-side correctness failure.
+- REFUSALS ARE NOT FAILURES: "policy refusal(s)" and REFUSED lines in the summary are the harness declining a call (job allow-list, retry exclusion, disabled tool, approval gate). They say nothing about the tool's reliability and must never be written up as "the tool failed" or as an env problem. They DO show the agent called a tool it was told not to use: grade that as a rule breach only when the user or the job charter forbade it; otherwise note it in what_failed and move on.
+- A REQUIREMENT ATTRIBUTED TO THE USER MUST QUOTE THE USER: before a non-pass verdict says "the user asked for X" or "the user explicitly called out X", find X in USER REQUEST (or a TURN SCOPE block) and quote it in reasoning. A requirement that appears only in SCOUT DELIVERABLES PLAN, PLANNED APPROACH or TOOL RATIONALE is the planner's, not the user's — by the plan-literalism rule above it cannot justify retry or escalate. Field case: a deferred escalate on a correct reply cited two memory entries "the user explicitly called out" that appeared only in the scout plan.
 - EVIDENCE PRIMACY. The transcript's tool RESULTS are ground truth. When a tool result body in the transcript supports or contradicts a claim in the agent's final response, that body outranks your priors about the topic. If the agent fetched URL X and the transcript shows the fetch returned real content, do NOT call hallucination just because your training data doesn't recognize X. Verify against what the tools actually returned, not what you "know" about the topic. The verifier-side failure mode this prevents: dismissing a fact as fabricated when the session contains real evidence for it.
 - GROUNDING CHECK IS A FLAG, NOT A VERDICT: when the evidence ends with a GROUNDING CHECK section, it lists (a) identifiers the final response cites that appear in NO tool result this attempt and not in the user's message, and (b) markdown table rows that pair an identifier with a name or id that no SINGLE tool result shows together. A factual table or id→content mapping whose rows are flagged under (b) is "factually false" under the materiality bar — verdict retry, failure_cause agent, and quote the flagged rows verbatim in what_failed — UNLESS the response itself labels those cells as inferred / not retrieved. One incidental token under (a) (an example, a typo, a name the agent coined) is NOT a retry; name it in what_failed. Never grade a reconstructed mapping above confidence 0.6 while any of its rows is flagged.
 - TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
@@ -713,12 +715,16 @@ def _build_compact_evidence(
         )
         summary_lines = [f"TOOL EXECUTION SUMMARY{scope_note}:"]
         for tool_name, stats in sorted(tool_summary.items()):
+            refusals = int(stats.get("refusals") or 0)
             summary_lines.append(
                 f"- {tool_name}: {stats['calls']} call(s), "
                 f"{stats['failures']} failure(s), {stats['total_latency_ms']}ms total"
+                + (f", {refusals} policy refusal(s) — not tool failures" if refusals else "")
             )
             for err in stats.get("errors", [])[:5]:
                 summary_lines.append(f"    ERROR: {err}")
+            for err in stats.get("refusal_errors", [])[:3]:
+                summary_lines.append(f"    REFUSED: {err}")
         parts.append("\n".join(summary_lines))
 
     # Current attempt's own calls (C2): the scope-sensitive rules (THRASHING's
@@ -729,7 +735,11 @@ def _build_compact_evidence(
         cur_lines = [f"CURRENT ATTEMPT (#{attempt}) TOOL CALLS — this attempt only:"]
         if cur:
             for tool_name, stats in sorted(cur.items()):
-                cur_lines.append(f"- {tool_name}: {stats['calls']} call(s), {stats['failures']} failure(s)")
+                refusals = int(stats.get("refusals") or 0)
+                cur_lines.append(
+                    f"- {tool_name}: {stats['calls']} call(s), {stats['failures']} failure(s)"
+                    + (f", {refusals} policy refusal(s)" if refusals else "")
+                )
         else:
             cur_lines.append("(no tool calls this attempt)")
         parts.append("\n".join(cur_lines))
