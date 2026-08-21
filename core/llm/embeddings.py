@@ -18,6 +18,7 @@ Two call shapes, deliberately different:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -53,9 +54,36 @@ _failing_since: float = 0.0  # monotonic; 0 = healthy
 _failing_since_wall: str = ""
 _last_notified_at: float = 0.0
 
+# Local fallback state (see core/llm/local_embed.py). While `_degraded_since`
+# is set, active_model() names the local model: queries embed on the CPU and
+# snooze re-embeds the corpus under that name. Recovery needs the remote to
+# answer a probe for `embedding_fallback_recover_minutes` (hysteresis — a
+# flapping server must not trigger a corpus re-embed every few minutes).
+_degraded_since: float = 0.0
+_remote_ok_since: float = 0.0
+_PROBE_TIMEOUT_S = 120.0
+
 
 def enabled() -> bool:
     return bool(settings.embedding_model)
+
+
+def local_model_name() -> str:
+    return f"local:{settings.embedding_fallback_model}"
+
+
+def degraded() -> bool:
+    return bool(_degraded_since)
+
+
+def active_model() -> str:
+    """The model whose vectors search reads and snooze writes — the remote
+    one, or the local fallback while the remote is degraded. Every consumer
+    of `settings.embedding_model` that touches the vectors table goes
+    through here, so the two spaces never mix."""
+    if _degraded_since and settings.embedding_fallback_model:
+        return local_model_name()
+    return settings.embedding_model
 
 
 def content_hash(text: str) -> str:
@@ -85,6 +113,89 @@ def _note_success() -> None:
     _failing_since_wall = ""
 
 
+def _maybe_degrade(now: float) -> None:
+    """Switch to the local fallback once the remote has failed long enough."""
+    global _degraded_since, _remote_ok_since
+    if _degraded_since or not settings.embedding_fallback_model:
+        return
+    if now - _failing_since < max(1, settings.embedding_fallback_after_minutes) * 60:
+        return
+    from core.llm import local_embed
+
+    if not local_embed.available():
+        return
+    _degraded_since = now
+    _remote_ok_since = 0.0
+    logger.warning(
+        "Embeddings: remote %s failing since %s — switching to local fallback %s",
+        settings.embedding_model,
+        _failing_since_wall,
+        local_model_name(),
+    )
+    try:
+        from db import models as db
+
+        db.add_notification(
+            title="Embeddings switched to the local CPU fallback",
+            body=(
+                f"{_native_base()}/api/embed ({settings.embedding_model}) has failed since {_failing_since_wall}. "
+                f"Queries and snooze re-embedding now use {local_model_name()} on this box's CPU; semantic "
+                "recall covers the corpus again as it re-embeds (a few hundred entries per idle cycle). "
+                f"Pernix switches back once the remote answers for {settings.embedding_fallback_recover_minutes} "
+                "minutes — that re-embeds the corpus once more. Fix the remote server to shorten both."
+            ),
+            urgency="normal",
+        )
+    except Exception as e:
+        logger.debug("fallback notification failed: %s", e)
+
+
+def check_remote_recovery() -> bool:
+    """While degraded: probe the remote once (long timeout, so a cold load
+    completes) and switch back after it has answered for the recovery
+    window. Called from snooze's embed sweep. Returns True when recovered."""
+    global _degraded_since, _remote_ok_since
+    if not _degraded_since:
+        return False
+    import httpx
+
+    now = time.monotonic()
+    try:
+        httpx.post(
+            f"{_native_base()}/api/embed",
+            json={"model": settings.embedding_model, "input": ["probe"]},
+            timeout=_PROBE_TIMEOUT_S,
+        ).raise_for_status()
+    except Exception as e:
+        _remote_ok_since = 0.0
+        logger.info("Embeddings: remote still failing while on local fallback: %s", _describe(e)[:160])
+        return False
+    if not _remote_ok_since:
+        _remote_ok_since = now
+        return False
+    if now - _remote_ok_since < max(1, settings.embedding_fallback_recover_minutes) * 60:
+        return False
+    _degraded_since = 0.0
+    _remote_ok_since = 0.0
+    _note_success()
+    logger.warning("Embeddings: remote %s recovered — switching back from the local fallback", settings.embedding_model)
+    try:
+        from db import models as db
+
+        db.add_notification(
+            title="Embeddings back on the remote server",
+            body=(
+                f"{_native_base()}/api/embed ({settings.embedding_model}) has answered for "
+                f"{settings.embedding_fallback_recover_minutes} minutes; queries use it again and snooze "
+                "re-embeds the corpus under it over the next idle cycles."
+            ),
+            urgency="normal",
+        )
+    except Exception as e:
+        logger.debug("recovery notification failed: %s", e)
+    return True
+
+
 def _note_failure(err: Exception) -> None:
     """Track the failure episode; notify the operator once it is sustained."""
     global _failing_since, _failing_since_wall, _last_notified_at
@@ -98,6 +209,7 @@ def _note_failure(err: Exception) -> None:
     # `_last_notified_at` / `_last_warm_at` are 0.0 until first use, and
     # time.monotonic() is small on a freshly booted box — "now - 0.0 < window"
     # would silently swallow the first notice for up to a day.
+    _maybe_degrade(now)
     if now - _failing_since < _NOTIFY_AFTER_S or (_last_notified_at and now - _last_notified_at < _NOTIFY_EVERY_S):
         return
     _last_notified_at = now
@@ -151,7 +263,15 @@ def embed_query_sync(text: str) -> list[float] | None:
     global _last_failure_at
     if not enabled():
         return None
-    if time.monotonic() - _last_failure_at < _FAILURE_BACKOFF_S:
+    if degraded():
+        from core.llm import local_embed
+
+        try:
+            return local_embed.embed([text])[0]
+        except Exception as e:
+            logger.warning("Local query embedding failed: %s", e)
+            return None
+    if _last_failure_at and time.monotonic() - _last_failure_at < _FAILURE_BACKOFF_S:
         return None
     import httpx
 
@@ -181,6 +301,14 @@ async def embed_texts(texts: list[str]) -> list[list[float]] | None:
     None on failure."""
     if not enabled() or not texts:
         return None
+    if degraded():
+        from core.llm import local_embed
+
+        try:
+            return await asyncio.to_thread(local_embed.embed, texts)
+        except Exception as e:
+            logger.warning("Local batch embedding failed: %s", e)
+            return None
     from core.llm.client import get_llm_client
     from core.llm.semaphore import PRIORITY_BACKGROUND
 
@@ -217,24 +345,42 @@ async def embed_pending(store, max_entries: int = 256) -> int:
     """
     if not enabled():
         return 0
-    pending = store.pending_embeddings(limit=max_entries)
+    if degraded():
+        await asyncio.to_thread(check_remote_recovery)  # may switch active_model() back
+    backlog = store.pending_embeddings(limit=100_000)  # the real count, not the slice
+    pending = backlog[:max_entries]
     if not pending:
         return 0
 
     stored = 0
+    failed_batches = 0
+    consecutive_failures = 0
     batch_size = max(1, int(settings.embedding_batch_size))
     for i in range(0, len(pending), batch_size):
         batch = pending[i : i + batch_size]
         vectors = await embed_texts([p["content"] for p in batch])
         if vectors is None:
-            break  # Ollama unhappy — stop the sweep, retry next cycle
+            # One refused batch (an entry the model cannot take, a transient
+            # 500) must not park the rest of the backlog behind it — it did:
+            # one poison batch at the head held ~1,100 entries for a day.
+            # Three in a row means the server, not the batch: stop the sweep.
+            failed_batches += 1
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                break
+            continue
+        consecutive_failures = 0
         rows = [(p["file_name"], p["epoch"], p["content_hash"], vec) for p, vec in zip(batch, vectors)]
         stored += store.store_embeddings(rows)
-    if stored:
+    if stored or failed_batches:
         logger.info(
-            "Embedded %d memory entr%s (%d still pending)",
+            "Embedded %d memory entr%s with %s (%d skipped in %d failed batch%s; %d still pending)",
             stored,
             "y" if stored == 1 else "ies",
-            max(0, len(pending) - stored),
+            active_model(),
+            failed_batches * batch_size if failed_batches else 0,
+            failed_batches,
+            "" if failed_batches == 1 else "es",
+            max(0, len(backlog) - stored),
         )
     return stored

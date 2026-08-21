@@ -29,3 +29,4 @@ trafilatura==2.*       # HTML-to-markdown content extraction for browse_web
 tavily-python==0.5.*   # primary web search (needs API key)
 numpy>=1.26
 dill==0.3.*          # per-variable kernel state snapshots (adaptation plan 2a)
+fastembed>=0.4  # local CPU embedding fallback (core/llm/local_embed.py); optional at runtime
