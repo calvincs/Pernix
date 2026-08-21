@@ -182,8 +182,9 @@ Idle-time introspection: during snooze the agent examines its own memory, Candor
 | Setting | Default | Description |
 |---|---|---|
 | `dream_enabled` | `false` | Master switch. Off removes the dream activity from the snooze cycle entirely. |
-| `dream_hypotheses_per_cycle` | `3` | Cap on new hypotheses per dream step. |
-| `dream_validation_replays_per_day` | `4` | Budget for counterfactual scout replays (the most expensive validation). `0` disables replay validation. |
+| `dream_hypotheses_per_cycle` | `6` | Cap on new hypotheses per dream step. |
+| `dream_max_pending` | `200` | Validation backlog cap — above it, generation pauses until validation drains. |
+| `dream_validation_replays_per_day` | `8` | Budget for counterfactual scout replays (the most expensive validation). `0` disables replay validation. |
 | `dream_report_interval_days` | `7` | Cadence for `workspace/dreams/DREAM-<date>.md` reports. |
 | `dream_journal_retention_days` | `14` | Days of Dream journal sessions kept (one per day). |
 | `dream_rlm_probe` | `false` | Deep cross-file probes over the whole memory corpus via [RLM](internals/rlm.md) — also requires `rlm_enabled`. |
@@ -257,15 +258,15 @@ A governed, machine-editable policy store — routing hints and prompt notes the
 | `adaptive_enabled` | `false` | Master switch for the store, the producers, and the compiler/scout consumption. |
 | `adaptive_auto_apply` | `true` | Auto-apply low-risk kinds (`routing_hint`, `prompt_note`) during idle windows; high-risk kinds always route through the proposal queue. Run the canary suite for at least a week before relying on this. |
 | `adaptive_auto_rollback` | `false` | Promote a canary-regression tripwire hit to automatic rollback. Off until the metric earns trust — a hit otherwise only flags the batch `suspect`. |
-| `adaptive_max_entries_per_kind` | `12` | Cap on active entries per kind. |
-| `adaptive_max_auto_applies_per_day` | `6` | Cap on auto-applied batches per day. |
+| `adaptive_max_entries_per_kind` | `24` | Cap on active entries per kind. |
+| `adaptive_max_auto_applies_per_day` | `24` | Cap on auto-applied batches per day. |
 | `adaptive_edit_cooldown_hours` | `24` | Minimum hours between machine edits to the same entry. |
 | `adaptive_tripwire_window_turns` | `20` | Organic turns after a batch over which post-mortem retry drift is watched (the passive tripwire; canary-stamped post-mortems excluded). |
-| `adaptive_max_pending_proposals` | `40` | Review-queue cap; at the cap new proposals are refused (the producer re-raises once the queue drains). `0` = unbounded. |
-| `adaptive_max_pending_per_producer` | `12` | One producer's share of the queue, so a chatty producer cannot silence the quieter ones. `0` = unbounded. |
+| `adaptive_max_pending_proposals` | `200` | Review-queue cap; at the cap new proposals are refused (the producer re-raises once the queue drains). `0` = unbounded. |
+| `adaptive_max_pending_per_producer` | `60` | One producer's share of the queue, so a chatty producer cannot silence the quieter ones. `0` = unbounded. |
 | `adaptive_proposal_ttl_days` | `30` | Pending proposals lapse (`expired`) after this — a proposal is a snapshot of evidence, and the producer re-raises it from current evidence if it still holds. `0` = never. |
 | `adaptive_auto_approve_after_hours` | `24` | The veto window. A proposal still pending after this many hours is approved by the system itself — same apply path as a human approval, journaled, swept, rollback-able, resolved as `auto_approved` for the audit trail. Canary-suite proposals are excluded (they keep their human gate; `canary_auto_admit` is their autonomy path). `0` = human approval only. |
-| `adaptive_max_auto_approvals_per_day` | `10` | Cap on veto-window auto-approvals per rolling 24h. |
+| `adaptive_max_auto_approvals_per_day` | `40` | Cap on veto-window auto-approvals per rolling 24h. |
 
 ---
 
@@ -305,6 +306,9 @@ Approvals are **per-invocation by default** — approving `bash` for `ps aux` do
 | `memory_recall` | `true` | Search memory at the start of each turn and inject relevant entries into the system prompt. |
 | `embedding_model` | *(empty)* | Ollama embedding model (e.g. `nomic-embed-text`) for semantic memory retrieval — setting it **is** the switch; empty keeps every search purely lexical (BM25). Vectors live in a rebuildable sidecar next to the FTS index. See [guides/memory-and-recall.md](guides/memory-and-recall.md#semantic-retrieval). |
 | `embedding_batch_size` | `16` | Texts per `/api/embed` call during the background embedding sweeps that run in Snooze. |
+| `embedding_fallback_model` | `BAAI/bge-small-en-v1.5` | Local CPU model (fastembed/ONNX, pulled once into `data/models/fastembed`) used while the remote embedding server is down. Its vectors live under the name `local:<model>`, so the two spaces never mix; search and the snooze sweep read whichever model is active. Empty disables the fallback; it is also inert when `fastembed` is not installed. |
+| `embedding_fallback_after_minutes` | `30` | Continuous remote failure before switching to the local model (the corpus then re-embeds locally, a few hundred entries per idle cycle). |
+| `embedding_fallback_recover_minutes` | `60` | The remote must answer the snooze sweep's probe for this long before Pernix switches back (and re-embeds under the remote model again). Hysteresis against a flapping server. |
 
 ---
 

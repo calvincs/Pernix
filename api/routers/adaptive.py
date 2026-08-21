@@ -46,7 +46,7 @@ async def list_batches(status: str = "", limit: int = 100):
     return {"batches": rows}
 
 
-PROPOSAL_STATUSES = ("pending", "approved", "auto_approved", "rejected", "expired")
+PROPOSAL_STATUSES = ("pending", "approved", "auto_approved", "auto_applied", "rejected", "expired")
 
 
 @router.get("/api/adaptive/proposals")

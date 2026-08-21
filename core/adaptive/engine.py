@@ -584,8 +584,10 @@ def approve_proposal(proposal_id: int, actor: str = "user", resolution: str = "a
 
     `resolution` is the terminal status written to the proposal row —
     "approved" for a human decision, "auto_approved" when the veto-window
-    drain (auto_approve_stale_proposals) is the caller. One code path, two
-    labels, so the audit trail keeps who-decided without a schema change.
+    drain (auto_approve_stale_proposals) is the caller, "auto_applied" when
+    dream promotion applies a validated memory correction on the spot (no
+    veto window — see core/dream/promote.py). One code path, three labels,
+    so the audit trail keeps who-decided without a schema change.
     """
     prop = db.adaptive_get_proposal(proposal_id)
     if prop is None:
@@ -637,7 +639,7 @@ def approve_proposal(proposal_id: int, actor: str = "user", resolution: str = "a
                     statement=str(e.get("statement") or ""),
                     source_ref=f"dream:{e.get('hypothesis_id', '')[:12]}",
                     kind=str(e.get("kind") or "contradiction"),
-                    approved_by="auto" if resolution == "auto_approved" else "human",
+                    approved_by={"auto_approved": "auto", "auto_applied": "dream"}.get(resolution, "human"),
                 )
             except Exception as ce:
                 logger.warning("memory correction failed for proposal %s: %s", proposal_id, ce)
