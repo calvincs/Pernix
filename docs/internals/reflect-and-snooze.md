@@ -24,6 +24,21 @@ Reflect sees the **current attempt's transcript** with verbatim tool result bodi
 
 This is what lets reflect verify factual claims against what the tools actually returned, instead of grading them against its own training-data priors.
 
+### Refusals are not failures
+
+The TOOL EXECUTION SUMMARY counts `failures` (the tool ran and failed) apart
+from `refusals` (the harness declined the call: a scheduled job's
+allow-list, a retry exclusion, a disabled tool, the approval gate). The
+executor tags refusals at the source (`core.tools.executor.is_policy_refusal`)
+and `core.agent.record_tool_outcome` keeps them out of `failures`, so reflect,
+candor's `tool_ok`, telos' anomaly scan and synthesis never read "bash
+failed 7 times" for seven calls bash was told not to make. Reflect still
+sees them — as `policy refusal(s)` and REFUSED lines — and grades a breach
+only when the user or the charter forbade the tool. The rubric also requires
+that any requirement a non-pass verdict attributes to the user be quoted
+from USER REQUEST; a requirement found only in the scout plan cannot justify
+retry or escalate (a deferred escalate on a correct reply did exactly that).
+
 ### The grounding check
 
 The evidence blob ends with a mechanical **GROUNDING CHECK**, computed in
