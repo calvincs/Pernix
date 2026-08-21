@@ -1380,13 +1380,31 @@ Output valid JSON only. No markdown fences. /no_think"""
                 self._bump("adaptive_proposals_auto_approved", len(ids))
                 from db import models as db
 
+                # One line per proposal: what it was, where it landed, how to
+                # undo it. Bare ids sent the reader (and the agent asked to
+                # explain them) hunting — and the old text promised a batch
+                # rollback that memory corrections never have.
+                lines = auto.get("summaries") or [f"#{i}" for i in ids]
+                results = auto.get("results") or []
+                any_batch = any(r.get("batch_id") for r in results)
+                any_correction = any(r.get("corrections_written") is not None for r in results)
+                tail = []
+                if any_batch:
+                    tail.append(
+                        "Tripwire + canary sweeps watch the applied batch(es); roll one back in the Adaptive panel if you disagree."
+                    )
+                if any_correction:
+                    tail.append(
+                        "Memory corrections create no batch — the Adaptive panel has nothing to roll back for them; undo by deleting the tagged memory entry."
+                    )
                 db.add_notification(
                     title="Adaptive layer: proposals auto-approved",
                     body=(
                         f"{len(ids)} proposal(s) past the "
                         f"{settings.adaptive_auto_approve_after_hours}h veto window applied at idle "
-                        f"({', '.join(f'#{i}' for i in ids)}). The tripwire and canary sweeps watch the "
-                        "result; roll back any batch in the Adaptive panel if you disagree."
+                        f"({', '.join(f'#{i}' for i in ids)}).\n"
+                        + "\n".join(f"• {line}" for line in lines)
+                        + ("\n" + " ".join(tail) if tail else "")
                     ),
                     urgency="normal",
                 )

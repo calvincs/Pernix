@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -81,6 +82,7 @@ RULES:
 - SELF-REPORTED COUNTS ARE NOT A RUBRIC INPUT: the agent cannot see the TOOL EXECUTION SUMMARY and, on a retry, cannot see prior attempts' totals — so a mismatch between the agent's own stated tool count and the summary is NOT, by itself, dishonesty or a retry cause. Grade what the agent DID against the summary and transcript; ignore its arithmetic about itself. (Actual misuse of a forbidden tool remains gradeable — from the summary, not from the agent's count.)
 - TOOL CALL FACTS ARE NOT NEGOTIABLE. The TOOL EXECUTION SUMMARY is observed truth, not interpretation. Before claiming the agent did NOT use a tool, verify: if the tool name appears in the summary with calls > 0, the agent DID call it. Do NOT write "agent did not call X" or "agent failed to use X" or "X was skipped" if X.calls > 0 in the summary. If you believe the call was *ineffective* (tool ran but didn't produce the expected result), say that — but do not deny the call happened. Hallucinating absence of a call that the summary records as present is a verifier-side correctness failure.
 - EVIDENCE PRIMACY. The transcript's tool RESULTS are ground truth. When a tool result body in the transcript supports or contradicts a claim in the agent's final response, that body outranks your priors about the topic. If the agent fetched URL X and the transcript shows the fetch returned real content, do NOT call hallucination just because your training data doesn't recognize X. Verify against what the tools actually returned, not what you "know" about the topic. The verifier-side failure mode this prevents: dismissing a fact as fabricated when the session contains real evidence for it.
+- GROUNDING CHECK IS A FLAG, NOT A VERDICT: when the evidence ends with a GROUNDING CHECK section, it lists (a) identifiers the final response cites that appear in NO tool result this attempt and not in the user's message, and (b) markdown table rows that pair an identifier with a name or id that no SINGLE tool result shows together. A factual table or id→content mapping whose rows are flagged under (b) is "factually false" under the materiality bar — verdict retry, failure_cause agent, and quote the flagged rows verbatim in what_failed — UNLESS the response itself labels those cells as inferred / not retrieved. One incidental token under (a) (an example, a typo, a name the agent coined) is NOT a retry; name it in what_failed. Never grade a reconstructed mapping above confidence 0.6 while any of its rows is flagged.
 - TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
 - CEILING LOOP → ESCALATE: If TERMINATION HISTORY shows the same blocking reason (e.g. round_ceiling, budget_exhausted, compaction_failed) on the current turn AND at least one prior turn, the agent is hitting the same hard wall — another retry will hit it again. Verdict MUST be 'escalate'. In `missing`, name the wall: e.g. 'round_ceiling on consecutive attempts; agent cannot finish within max_tool_rounds — split the task or raise the limit.'
 - THRASHING → ESCALATE: When a CURRENT ATTEMPT TOOL CALLS section is present (retry attempts), judge thrashing from THAT section only — the cumulative summary includes prior attempts' tools, and a focused retry must not inherit a scattered first attempt's diversity. If the (scoped) summary shows ≥4 distinct tools used with no forward progress (empty outputs repeated, same files re-read, error count growing, or the agent drifting across unrelated checks), the agent is thrashing, not pursuing a coherent-but-wrong strategy. Prefer "escalate" with a clear "missing" field over "retry" — another round of the same thrashing will not help. A single failing tool being tried with sibling tools is NOT thrashing; reserve "escalate" for cases where the agent lost the thread.
@@ -168,6 +170,14 @@ class ReflectResult:
     # Schema documented in REFLECT_PROMPT; sanitized by _sanitize_experience.
     experience: dict = field(default_factory=dict)
 
+    # Mechanical grounding flags (advisory): identifiers the final response
+    # cites that no tool result this attempt contains, and table rows pairing
+    # identifiers no single tool result shows together. Computed in Python
+    # from the transcript, never by the model — see _grounding_check. Field
+    # case dce9a6de7f81: a 5-row id→policy table with every cell real and
+    # every pairing invented passed at 0.95 because nothing checked pairings.
+    grounding: dict = field(default_factory=dict)
+
 
 # Tools whose successful execution has one-shot, externally visible effects —
 # re-running them on a reflect retry duplicates the action (a second push
@@ -212,6 +222,16 @@ def build_retry_context(
         parts.append(f"What failed (DO NOT repeat): {result.what_failed}")
     if result.strategy:
         parts.append(f"Strategy for this attempt: {result.strategy}")
+    flagged = (result.grounding or {}).get("ungrounded") or []
+    rows = (result.grounding or {}).get("unverified_rows") or []
+    if flagged or rows:
+        parts.append(
+            "GROUNDING FLAGS FROM PRIOR ATTEMPT (mechanical): "
+            + (f"identifiers no tool result contained: {', '.join(flagged[:12])}. " if flagged else "")
+            + (f"table rows no single tool result supported: {'; '.join(rows[:8])}. " if rows else "")
+            + "This attempt must take each of these from a tool result verbatim, or state "
+            "'not retrieved — would need <call>' instead of reconstructing it."
+        )
 
     # Prior turn_digest — the structured record reflect built from the previous
     # attempt's transcript. Scout reads this to know what was actually tried
@@ -362,6 +382,142 @@ _REFLECT_CONTEXT_BUDGET = 100_000
 _PER_TOOL_RESULT_CHAR_CAP = 5000
 
 
+_GROUNDING_ID_PATTERNS = (
+    re.compile(r"#\d{2,}"),  # proposal / issue / message numbers
+    re.compile(r"\bab-[0-9a-f]{12}\b"),  # adaptive batch ids
+    re.compile(r"(?<![\w-])[0-9a-f]{12}(?![\w-])"),  # session / hypothesis ids (not a batch id's tail)
+)
+_GROUNDING_SLUG_PATTERN = re.compile(r"`([^`\n]{6,80})`")  # backticked names
+_GROUNDING_MAX_LISTED = 12
+
+
+def _grounding_tokens(text: str) -> tuple[list[str], list[str]]:
+    """(id-like tokens, slug-like tokens) cited in `text`, first-seen order, deduped."""
+    ids: list[str] = []
+    slugs: list[str] = []
+    seen: set[str] = set()
+    for pat in _GROUNDING_ID_PATTERNS:
+        for m in pat.finditer(text):
+            tok = m.group(0)
+            if tok not in seen:
+                seen.add(tok)
+                ids.append(tok)
+    for m in _GROUNDING_SLUG_PATTERN.finditer(text):
+        tok = m.group(1).strip()
+        # Names, paths, slugs — not code snippets or prose in backticks.
+        if " " in tok or not re.search(r"[-_./]", tok) or tok in seen:
+            continue
+        seen.add(tok)
+        slugs.append(tok)
+    return ids, slugs
+
+
+def _token_positions(tok: str, haystack: str) -> list[int]:
+    if tok.startswith("#"):
+        return [m.start() for m in re.finditer(rf"(?<![\w.]){re.escape(tok[1:])}(?![\w.])", haystack)]
+    return [m.start() for m in re.finditer(re.escape(tok), haystack)]
+
+
+def _token_in(tok: str, haystack: str) -> bool:
+    return bool(_token_positions(tok, haystack))
+
+
+# How close two identifiers must sit inside ONE tool result to count as
+# "shown together". A proposal row in the API JSON spans a few hundred chars;
+# a 16K-char file dump that happens to contain "189" in one paragraph and a
+# policy name in another is not evidence they belong in the same table row
+# (on the live replay that coincidence hid one of five invented rows).
+_GROUNDING_PAIR_WINDOW = 1500
+
+
+def _pair_in(a: str, b: str, haystack: str) -> bool:
+    pa = _token_positions(a, haystack)
+    if not pa:
+        return False
+    pb = _token_positions(b, haystack)
+    return any(abs(x - y) <= _GROUNDING_PAIR_WINDOW for x in pa for y in pb)
+
+
+def _grounding_check(final_assistant: str, attempt_msgs: list[dict], user_request: str) -> dict:
+    """Mechanical grounding flags for the final response. Advisory by design.
+
+    Two checks, both against what this attempt's tools actually returned
+    (plus the user's own message, which is a legitimate source):
+
+    * ``ungrounded`` — identifiers the response cites that appear in no
+      source at all (an invented batch id, a file that was never listed).
+    * ``unverified_rows`` — markdown table rows pairing an identifier with a
+      name/other identifier that no SINGLE source contains together (within
+      ``_GROUNDING_PAIR_WINDOW`` chars of each other). This
+      is the shape of the live failure: every token real, every pairing
+      reconstructed (#189 ↔ `hard-stop-after-write`, when #189 was a memory
+      correction the agent never fetched).
+
+    Returns {"checked": n, "ungrounded": [...], "unverified_rows": [...]}.
+    The rubric decides what the flags mean; a model cannot be overruled by
+    a regex, only informed by it.
+    """
+    if not final_assistant:
+        return {"checked": 0, "ungrounded": [], "unverified_rows": []}
+    # Tool results and the user's own message are evidence. The scout's plan
+    # is not — it routinely repeats the ids it was asked about ("enumerate
+    # #189-#194"), which would ground exactly the rows the check exists for.
+    sources: list[str] = [user_request or ""]
+    for m in attempt_msgs:
+        if m.get("role") == "tool":
+            sources.append(m.get("content") or "")
+    everything = "\n".join(sources)
+
+    ids, slugs = _grounding_tokens(final_assistant)
+    ungrounded = [t for t in ids + slugs if not _token_in(t, everything)]
+
+    unverified_rows: list[str] = []
+    for line in final_assistant.splitlines():
+        if not line.lstrip().startswith("|") or line.count("|") < 3:
+            continue
+        if re.fullmatch(r"[\s|:\-]+", line):
+            continue  # header separator
+        row_ids, row_slugs = _grounding_tokens(line)
+        tokens = row_ids + row_slugs
+        if len(tokens) < 2:
+            continue
+        # The row's claim is its first pairing: the id and the name beside
+        # it. Secondary tokens in a description cell (`file_write`, a path)
+        # co-occur with ids everywhere and must not vouch for the row.
+        anchor, partner = tokens[0], tokens[1]
+        if any(_pair_in(anchor, partner, src) for src in sources):
+            continue
+        unverified_rows.append(f"{anchor} ↔ {partner}")
+    return {
+        "checked": len(ids) + len(slugs),
+        "ungrounded": ungrounded[:_GROUNDING_MAX_LISTED],
+        "unverified_rows": unverified_rows[:_GROUNDING_MAX_LISTED],
+    }
+
+
+def _format_grounding(g: dict) -> str:
+    checked = g.get("checked", 0)
+    if not checked:
+        return ""
+    lines = ["GROUNDING CHECK (mechanical, advisory — a flag, not a verdict):"]
+    ung = g.get("ungrounded") or []
+    rows = g.get("unverified_rows") or []
+    if ung:
+        lines.append(
+            f"- {len(ung)} of {checked} identifiers in the final response appear in NO tool result "
+            f"and not in the user's message: {', '.join(ung)}"
+        )
+    if rows:
+        lines.append(
+            f"- {len(rows)} table row(s) pair identifiers that no single tool result shows together: " + "; ".join(rows)
+        )
+    if not ung and not rows:
+        lines.append(
+            f"- all {checked} cited identifiers appear in a tool result or the user's message; no table row flagged"
+        )
+    return "\n".join(lines)
+
+
 def _messages_since_attempt_start(messages: list[dict], turn_user_msg_id: int | None = None) -> list[dict]:
     """Slice messages to the current attempt's transcript.
 
@@ -448,6 +604,7 @@ def _build_compact_evidence(
     termination_reason: str | None = None,
     prior_termination_reasons: list[str] | None = None,
     turn_user_msg_id: int | None = None,
+    grounding_out: dict | None = None,
 ) -> str:
     """Build the evidence blob for reflect.
 
@@ -604,6 +761,18 @@ def _build_compact_evidence(
 
     parts.append(f"AGENT FINAL RESPONSE:\n{final_assistant or '(no final assistant message)'}")
 
+    # Mechanical grounding flags over the same attempt slice the transcript
+    # above was built from. Appended last so the model reads the response
+    # first and the flags second, as a reviewer would.
+    grounding = _grounding_check(
+        final_assistant, _messages_since_attempt_start(messages, turn_user_msg_id), user_request
+    )
+    if grounding_out is not None:
+        grounding_out.update(grounding)
+    section = _format_grounding(grounding)
+    if section:
+        parts.append(section)
+
     return "\n\n".join(parts)
 
 
@@ -616,6 +785,7 @@ def _build_evidence(
     termination_reason: str | None = None,
     prior_termination_reasons: list[str] | None = None,
     tool_summary_attempts: list | None = None,
+    grounding_out: dict | None = None,
 ) -> tuple[str, str]:
     """Build evidence for reflect verification.
 
@@ -665,6 +835,7 @@ def _build_evidence(
         termination_reason=termination_reason,
         prior_termination_reasons=prior_termination_reasons,
         turn_user_msg_id=turn_user_msg_id,
+        grounding_out=grounding_out,
     )
     return user_request, evidence
 
@@ -1012,6 +1183,8 @@ def _write_post_mortem(
             payload["turn_digest"] = result.turn_digest
         if result.experience:
             payload["experience"] = result.experience
+        if (result.grounding or {}).get("ungrounded") or (result.grounding or {}).get("unverified_rows"):
+            payload["grounding"] = result.grounding
         if extra_payload:
             payload.update(extra_payload)
         # Canary isolation (plan §5): stamp the payload so downstream
@@ -1150,6 +1323,7 @@ async def reflect_on_session(
         ReflectResult with verdict and optional lessons
     """
     # Off-loop: evidence assembly loads the full transcript from the DB.
+    grounding: dict = {}
     user_request, evidence = await asyncio.to_thread(
         _build_evidence,
         session_id,
@@ -1160,6 +1334,7 @@ async def reflect_on_session(
         termination_reason=termination_reason,
         prior_termination_reasons=prior_termination_reasons,
         tool_summary_attempts=tool_summary_attempts,
+        grounding_out=grounding,
     )
     if not user_request or not evidence:
         r = ReflectResult(verdict="pass", reasoning="No user request found to verify")
@@ -1291,6 +1466,7 @@ async def reflect_on_session(
                     raise
 
             result = _result_from_data(data, model, latency_ms)
+            result.grounding = dict(grounding)
 
             # Defensive ceiling-loop guard: if the agent hit round_ceiling on
             # this turn AND on at least one prior turn, retry is provably

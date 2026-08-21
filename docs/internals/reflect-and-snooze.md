@@ -24,6 +24,29 @@ Reflect sees the **current attempt's transcript** with verbatim tool result bodi
 
 This is what lets reflect verify factual claims against what the tools actually returned, instead of grading them against its own training-data priors.
 
+### The grounding check
+
+The evidence blob ends with a mechanical **GROUNDING CHECK**, computed in
+Python from the same attempt slice the transcript was built from — never by
+the model. It lists (a) identifiers the final response cites (`#ids`,
+`ab-` batch ids, 12-hex session/hypothesis ids, backticked names) that
+appear in no tool result and not in the user's message, and (b) markdown
+table rows whose first pairing — the id and the name beside it — no single
+tool result shows within ~1500 chars. The scout's plan is deliberately not
+a source: it repeats the ids it was asked about, which would vouch for
+exactly the rows the check exists to catch.
+
+It is a flag, not a verdict. The rubric treats a table whose rows are
+flagged as factually false under the materiality bar (retry,
+`failure_cause: agent`, rows quoted in `what_failed`) unless the response
+labels those cells as inferred / not retrieved; one incidental token is
+not a retry; a reconstructed mapping cannot be graded above 0.6 while a row
+is flagged. The flags are stored on the post-mortem (`payload.grounding`)
+and quoted into the next attempt's retry context as GROUNDING FLAGS FROM
+PRIOR ATTEMPT. Origin: box session dce9a6de7f81, where a five-row
+id→policy table with every token real and every pairing invented passed at
+0.95 — replayed, all five rows flag.
+
 ### Outputs — three verdicts plus a turn digest
 
 | Verdict | Meaning | What happens |

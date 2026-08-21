@@ -677,7 +677,15 @@ DEL  /api/adaptive/entries/{entry_id}                      Release valve: soft-d
                                                            producers can otherwise only ever fill
 GET  /api/adaptive/events?batch_id=&entry_id=&limit=100    Append-only event journal (before/after snapshots)
 GET  /api/adaptive/batches?status=&limit=100               Apply batches and their tripwire status
-GET  /api/adaptive/proposals?status=pending&limit=100      High-risk edit proposals awaiting review
+GET  /api/adaptive/proposals?status=pending&limit=100      Proposals by status: pending | approved |
+                                                           auto_approved | rejected | expired | all. An
+                                                           unknown status is a 400 that names the enum —
+                                                           never a silent []. ?id=N fetches one row whatever
+                                                           its status. Every row carries `summary` (producer,
+                                                           what it is, target), `auto_approve_exempt`
+                                                           (canary proposals wait for a human) and
+                                                           `auto_approve_after` (when the veto window closes)
+GET  /api/adaptive/proposals/{id}                          One proposal, any status; 404 if unknown
 POST /api/adaptive/proposals/{id}/approve                  Apply-on-approve: executes the batch through the
                                                            same apply engine as auto-applies and enqueues a
                                                            batch-tagged canary sweep

@@ -1583,8 +1583,17 @@ def adaptive_add_proposal(
         return cur.lastrowid
 
 
-def adaptive_count_pending_proposals() -> int:
+def adaptive_count_pending_proposals(producer: str | None = None) -> int:
+    """Pending proposals overall, or just one producer's (the per-producer
+    share in adaptive_add_proposal is checked against the latter)."""
     with connect_sessions() as conn:
+        if producer:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending' AND producer = ?",
+                    (producer,),
+                ).fetchone()[0]
+            )
         return int(conn.execute("SELECT COUNT(*) FROM adaptive_proposals WHERE status = 'pending'").fetchone()[0])
 
 

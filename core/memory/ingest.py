@@ -386,11 +386,32 @@ def ingest_document_sync(
         return asyncio.run(ingest_document(text, source_name, min_section_length, use_llm))
 
 
+def correction_preamble(kind: str, approved_by: str = "human", source_ref: str = "") -> str:
+    """The provenance stamp on a corrective memory entry.
+
+    `approved_by` is "human" for a click in the Adaptive panel and "auto" for
+    the veto-window drain. Entries used to say "human-approved" for both,
+    which misattributed every auto-approved correction to the operator.
+    """
+    from config import settings
+
+    label = "STALE-INFO CORRECTION" if kind == "memory_stale" else "CONTRADICTION RESOLVED"
+    if approved_by == "auto":
+        provenance = (
+            f"auto-approved after the {settings.adaptive_auto_approve_after_hours}h veto window, adaptive review"
+        )
+    else:
+        provenance = "human-approved via adaptive review"
+    ref = f", {source_ref}" if source_ref else ""
+    return f"{label} ({provenance}{ref})"
+
+
 def apply_memory_correction(
     files: list[str],
     statement: str,
     source_ref: str = "",
     kind: str = "contradiction",
+    approved_by: str = "human",
 ) -> list[str]:
     """Write a corrective entry into each cited memory file (audit P5).
 
@@ -404,7 +425,7 @@ def apply_memory_correction(
     statement = (statement or "").strip()
     if not statement:
         return []
-    label = "STALE-INFO CORRECTION" if kind == "memory_stale" else "CONTRADICTION RESOLVED"
+    preamble = correction_preamble(kind, approved_by, source_ref)
     store = get_memory_store()
     written: list[str] = []
     for fname in files:
@@ -413,8 +434,7 @@ def apply_memory_correction(
         try:
             result = store.add_entry(
                 content=(
-                    f"{label} (human-approved via adaptive review"
-                    f"{', ' + source_ref if source_ref else ''}): {statement[:1200]} "
+                    f"{preamble}: {statement[:1200]} "
                     f"— treat this note as overriding any conflicting older entries in this file."
                 ),
                 file_name=fname,
