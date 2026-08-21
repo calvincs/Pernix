@@ -237,7 +237,7 @@ def search_vector(conn, query_vec: list[float], limit: int = 5) -> list[SearchRe
     thousands, not millions; no ANN dependency. Only rows embedded by the
     CURRENT model participate, so a model change can never mix spaces.
     """
-    from config import settings as _s
+    from core.llm.embeddings import active_model
 
     try:
         import numpy as np
@@ -247,7 +247,7 @@ def search_vector(conn, query_vec: list[float], limit: int = 5) -> list[SearchRe
     try:
         rows = conn.execute(
             "SELECT file_name, epoch, dim, vec FROM vectors WHERE model = ?",
-            (_s.embedding_model,),
+            (active_model(),),
         ).fetchall()
     except Exception as e:
         logger.debug("Vector search unavailable: %s", e)

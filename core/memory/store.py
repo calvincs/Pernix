@@ -1144,9 +1144,10 @@ class MemoryStore:
         Staleness is judged in Python against the stored content_hash — the
         markdown is truth and the vector must describe the current text.
         """
+        from core.llm.embeddings import active_model
         from core.llm.embeddings import content_hash as _hash
 
-        model = settings.embedding_model
+        model = active_model()
         if not model:
             return []
         with self._lock:
@@ -1181,7 +1182,9 @@ class MemoryStore:
         """Persist (file_name, epoch, content_hash, vector) rows. Returns count."""
         import struct
 
-        model = settings.embedding_model
+        from core.llm.embeddings import active_model
+
+        model = active_model()
         if not model or not rows:
             return 0
         with self._lock:
