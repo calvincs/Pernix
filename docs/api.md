@@ -678,7 +678,9 @@ DEL  /api/adaptive/entries/{entry_id}                      Release valve: soft-d
 GET  /api/adaptive/events?batch_id=&entry_id=&limit=100    Append-only event journal (before/after snapshots)
 GET  /api/adaptive/batches?status=&limit=100               Apply batches and their tripwire status
 GET  /api/adaptive/proposals?status=pending&limit=100      Proposals by status: pending | approved |
-                                                           auto_approved | rejected | expired | all. An
+                                                           auto_approved | auto_applied (dream memory
+                                                           corrections, applied on promotion) | rejected |
+                                                           expired | all. An
                                                            unknown status is a 400 that names the enum —
                                                            never a silent []. ?id=N fetches one row whatever
                                                            its status. Every row carries `summary` (producer,

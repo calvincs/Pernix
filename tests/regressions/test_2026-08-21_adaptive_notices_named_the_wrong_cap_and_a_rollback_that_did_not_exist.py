@@ -222,7 +222,7 @@ async def test_proposals_api_documents_its_statuses_and_rejects_unknown_ones():
         # The default is still pending — the UI depends on it.
         default = (await client.get("/api/adaptive/proposals")).json()
         assert {p["id"] for p in default["proposals"]} == {pending, canary}
-        assert default["statuses"] == ["pending", "approved", "auto_approved", "rejected", "expired"]
+        assert default["statuses"] == ["pending", "approved", "auto_approved", "auto_applied", "rejected", "expired"]
 
         # A wrong guess is a 400 that names the enum, not an empty list.
         bad = await client.get("/api/adaptive/proposals?status=applied")

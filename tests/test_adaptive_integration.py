@@ -120,16 +120,22 @@ async def test_dream_promotion_mapping():
     assert all(json.loads(p["payload_json"]) for p in props)
 
 
-async def test_effectorless_finding_is_reported_not_queued():
-    """A validated hypothesis with a citable file still becomes a proposal."""
+async def test_effectorless_finding_is_reported_not_queued(monkeypatch):
+    """A validated hypothesis with a citable file still becomes a proposal —
+    applied on the spot since 2026-08-21, so it is found under auto_applied."""
     from core.dream.promote import promote_validated
 
+    monkeypatch.setattr(
+        "core.memory.ingest.apply_memory_correction",
+        lambda files, statement, source_ref="", kind="", approved_by="human": list(files),
+    )
+    monkeypatch.setattr("core.dream.journal.append_sync", lambda text: None)
     ev = json.dumps([{"type": "memory", "file": "pernix.config", "epoch": 1, "hash": "abc"}])
     hid = db.add_dream_hypothesis("contradiction", "two entries disagree about the port", ev)
     db.update_dream_hypothesis(hid, status="validated")
 
     assert await promote_validated(limit=10) == 1
-    props = db.adaptive_list_proposals(status="pending")
+    props = db.adaptive_list_proposals(status="auto_applied")
     assert len(props) == 1
     payload = json.loads(props[0]["payload_json"])
     assert payload[0]["action"] == "memory_correction"
@@ -619,23 +625,14 @@ async def test_candor_does_not_mint_hints_for_names_that_are_not_tools(monkeypat
     assert queued == ["tool-http_get-degraded"]
 
 
-async def test_memory_correction_effector_writes_on_approve(monkeypatch, tmp_path):
-    """Approved dream contradiction findings with cited memory files write a
-    corrective entry instead of dead-ending (audit P5: 72/75 pending
-    proposals on the live box had no effector)."""
+async def test_memory_correction_effector_writes_on_promotion(monkeypatch, tmp_path):
+    """A validated dream contradiction with cited memory files writes its
+    corrective entry when it is PROMOTED — no review queue in between. The
+    proposal row is still minted for the audit trail, resolved `auto_applied`
+    (audit P5 gave corrections an effector; 2026-08-21 removed the wait)."""
     import json as _json
 
     from core.dream.promote import promote_validated
-
-    evidence = _json.dumps([{"type": "memory", "file": "test.corrections", "epoch": 1}])
-    hid = db.add_dream_hypothesis("contradiction", "Entry A contradicts entry B about worker limits", evidence)
-    db.update_dream_hypothesis(hid, status="validated")
-
-    assert await promote_validated(limit=5) == 1
-    prop = db.adaptive_list_proposals(status="pending")[0]
-    payload = _json.loads(prop["payload_json"])
-    assert payload and payload[0]["action"] == "memory_correction"
-    assert payload[0]["files"] == ["test.corrections"]
 
     written_calls = []
 
@@ -646,13 +643,21 @@ async def test_memory_correction_effector_writes_on_approve(monkeypatch, tmp_pat
     import core.memory.ingest as ingest_mod
 
     monkeypatch.setattr(ingest_mod, "apply_memory_correction", _fake_correction)
+    monkeypatch.setattr("core.dream.journal.append_sync", lambda text: None)
 
-    from core.adaptive import approve_proposal
+    evidence = _json.dumps([{"type": "memory", "file": "test.corrections", "epoch": 1}])
+    hid = db.add_dream_hypothesis("contradiction", "Entry A contradicts entry B about worker limits", evidence)
+    db.update_dream_hypothesis(hid, status="validated")
 
-    result = approve_proposal(prop["id"])
-    assert result.get("corrections_written") == ["test.corrections"]
-    assert written_calls == [(("test.corrections",), "contradiction", "human")]
-    assert db.adaptive_get_proposal(prop["id"])["status"] == "approved"
+    assert await promote_validated(limit=5) == 1
+    assert db.adaptive_list_proposals(status="pending") == []
+    prop = db.adaptive_list_proposals(status="auto_applied")[0]
+    payload = _json.loads(prop["payload_json"])
+    assert payload and payload[0]["action"] == "memory_correction"
+    assert payload[0]["files"] == ["test.corrections"]
+    assert written_calls == [(("test.corrections",), "contradiction", "dream")]
+    rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
+    assert rows[hid]["promoted_ref"] == f"proposal:{prop['id']}"
 
 
 # ---------------------------------------------------------------------------
@@ -743,10 +748,17 @@ async def test_paraphrased_tool_findings_promote_once():
     assert len(db.adaptive_list_proposals(status="pending")) == 1
 
 
-async def test_same_file_correction_is_not_proposed_twice():
-    """One conflicted memory file produced four separate proposals live."""
+async def test_same_file_correction_is_not_proposed_twice(monkeypatch):
+    """One conflicted memory file produced four separate proposals live. With
+    corrections applying on promotion the dedup looks at what was applied
+    this week, not just at what is pending (which is now momentary)."""
     from core.dream.promote import promote_validated
 
+    monkeypatch.setattr(
+        "core.memory.ingest.apply_memory_correction",
+        lambda files, statement, source_ref="", kind="", approved_by="human": list(files),
+    )
+    monkeypatch.setattr("core.dream.journal.append_sync", lambda text: None)
     ev = json.dumps([{"type": "memory", "file": "pernix.versions", "epoch": 1, "hash": "a"}])
     a = db.add_dream_hypothesis("contradiction", "two entries disagree about the version", ev)
     b = db.add_dream_hypothesis("contradiction", "the recorded version numbers are inconsistent", ev)
@@ -754,7 +766,8 @@ async def test_same_file_correction_is_not_proposed_twice():
         db.update_dream_hypothesis(hid, status="validated")
 
     assert await promote_validated(limit=10) == 1
-    assert len(db.adaptive_list_proposals(status="pending")) == 1
+    assert len(db.adaptive_list_proposals(status="auto_applied")) == 1
+    assert db.adaptive_list_proposals(status="pending") == []
     rows = {r["id"]: r for r in db.list_dream_hypotheses(status="promoted", limit=10)}
     assert rows[b]["promoted_ref"] == "reported:duplicate-evidence"
 

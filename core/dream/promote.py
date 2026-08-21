@@ -22,13 +22,14 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from config import settings
 from db import models as db
 
 logger = logging.getLogger("pernix.dream")
 
-_PROMOTE_LIMIT_PER_STEP = 3
+_PROMOTE_LIMIT_PER_STEP = 10
 # promoted_ref for a validated hypothesis that had nothing to propose. It is
 # a terminal marker, so the row leaves the promotion queue instead of being
 # retried forever, and it is distinguishable from a real proposal in the
@@ -70,6 +71,7 @@ async def promote_validated(limit: int = _PROMOTE_LIMIT_PER_STEP) -> int:
     rows = db.list_dream_hypotheses(status="validated", limit=50, oldest_first=True)
     promoted = 0
     deferred = 0
+    applied: list[dict] = []
     for row in rows:
         if promoted >= limit:
             break
@@ -80,7 +82,7 @@ async def promote_validated(limit: int = _PROMOTE_LIMIT_PER_STEP) -> int:
             elif kind == "lesson_ineffective":
                 ref = _promote_edit(row, "policy")
             elif kind in ("contradiction", "memory_stale"):
-                ref = _promote_memory_review(row)
+                ref = _promote_memory_review(row, applied)
             else:
                 continue  # open_question is report material, never promoted
             if ref:
@@ -99,7 +101,46 @@ async def promote_validated(limit: int = _PROMOTE_LIMIT_PER_STEP) -> int:
         # per-row detail is at DEBUG in the promoters. This is the signal a
         # human can act on: the review queue needs draining in the UI.
         logger.info("dream: %d validated hypotheses waiting on proposal review (queue full or refused)", deferred)
+    if applied:
+        _announce_applied_corrections(applied)
     return promoted
+
+
+def _announce_applied_corrections(applied: list[dict]) -> None:
+    """Every applied correction goes to the dream journal; the operator gets
+    one notification per day (the first pass that applies anything), because
+    an auto-applied correction is observable, not actionable — the undo is
+    deleting the tagged entry, which nobody does per notice."""
+    lines = [
+        f"#{a['pid']} {a['kind']} → {', '.join(a['written']) or 'no file accepted it'}: {a['statement'][:140]}"
+        for a in applied
+    ]
+    try:
+        from core.dream.journal import append_sync
+
+        for line in lines:
+            append_sync(f"memory correction applied on validation: {line}")
+    except Exception as e:  # the journal is narration, never a reason to fail
+        logger.debug("dream journal append failed: %s", e)
+    marker = f"dream_corrections_notice:{time.strftime('%Y-%m-%d', time.gmtime())}"
+    try:
+        if db.get_snooze_state(marker):
+            return
+        db.add_notification(
+            title=f"Dream: {len(applied)} memory correction(s) applied",
+            body=(
+                "Validated dream findings now write their corrective entry when they are promoted — no "
+                "veto window, because a correction is additive (the disputed entries stay; recall surfaces "
+                "the correction beside them). Undo one by deleting the entry tagged dream:<id> in that "
+                "memory file. Further corrections today go to the Dream journal only.\n"
+                + "\n".join(f"• {line}" for line in lines[:12])
+                + (f"\n(+{len(lines) - 12} more in the journal)" if len(lines) > 12 else "")
+            ),
+            urgency="normal",
+        )
+        db.set_snooze_state(marker, "1")
+    except Exception as e:
+        logger.warning("dream: corrections notification failed: %s", e)
 
 
 def _evidence_already_promoted(row: dict) -> bool:
@@ -177,16 +218,35 @@ def _memory_files_from_evidence(row: dict) -> list[str]:
     return files[:3]
 
 
+_CORRECTION_DEDUP_WINDOW_S = 7 * 86400
+
+
 def _correction_already_pending(kind: str | None, files: list[str]) -> bool:
-    """True when the same file is already awaiting the same kind of correction.
+    """True when the same file already got (or awaits) the same kind of
+    correction recently.
 
     Dream re-derives a contradiction every time it re-samples the file that
     holds it, so one genuinely-conflicted memory file produced four separate
     proposals. They are not alternatives a reviewer chooses between — they
-    are the same finding, and approving any one of them writes the note.
+    are the same finding, and applying any one of them writes the note. Now
+    that corrections apply on promotion, "pending" is momentary, so the
+    check also covers corrections applied in the last week.
     """
     target = {kind, *files}
-    for p in db.adaptive_list_proposals(status="pending", limit=200):
+    cutoff = time.time() - _CORRECTION_DEDUP_WINDOW_S
+    from datetime import datetime
+
+    rows = db.adaptive_list_proposals(status="pending", limit=200) + db.adaptive_list_proposals(
+        status="auto_applied", limit=500
+    )
+    for p in rows:
+        if p.get("status") == "auto_applied":
+            try:
+                resolved = datetime.fromisoformat(str(p.get("resolved_at") or "")).timestamp()
+            except ValueError:
+                resolved = 0.0
+            if resolved < cutoff:
+                continue
         try:
             edits = json.loads(p.get("payload_json") or "[]")
         except (TypeError, ValueError):
@@ -199,12 +259,17 @@ def _correction_already_pending(kind: str | None, files: list[str]) -> bool:
     return False
 
 
-def _promote_memory_review(row: dict) -> str | None:
-    """contradiction/memory_stale → an approvable memory correction
-    (audit P5). The old empty-payload proposal dead-ended: 72/75 pending
-    proposals on the live box had no effector. Approving now writes a
-    corrective entry into each cited file — additive and non-destructive,
-    the human approval is the gate.
+def _promote_memory_review(row: dict, applied: list[dict] | None = None) -> str | None:
+    """contradiction/memory_stale → a memory correction, APPLIED ON PROMOTION.
+
+    The effector (audit P5) writes a corrective entry into each cited file —
+    additive and non-destructive: the disputed entries stay, recall surfaces
+    the correction beside them. That made the veto window pure latency: on
+    the live box 280 validated-or-pending hypotheses sat behind a 12-row
+    per-producer share and a 10-a-day drain, and the operator's decision
+    was never "no" — so the proposal row is still minted (audit trail,
+    `auto_applied`), but it bypasses the queue caps and applies at once.
+    `applied` collects what landed for the pass's journal/notification.
 
     With no cited files there is no effector, so **no proposal is minted**.
     The effectorless variant was not merely useless, it was corrosive: 62 of
@@ -252,15 +317,29 @@ def _promote_memory_review(row: dict) -> str | None:
             f"{', '.join(files)}] Dream {row.get('kind')} hypothesis (validated): "
             f"{(row.get('statement') or '').strip()[:500]}"
         ),
-        max_pending=settings.adaptive_max_pending_proposals,
-        max_pending_per_producer=settings.adaptive_max_pending_per_producer,
+        max_pending=0,  # corrections bypass the review-queue caps (applied below)
+        max_pending_per_producer=0,
     )
     if pid is None:
-        # Queue full: leave the row `validated` so it is reconsidered once a
-        # human drains the backlog. Unlike the no-effector case this is a
-        # transient refusal, and the finding is worth re-raising. DEBUG, not
-        # INFO: this fires for every parked row on every cycle while the
-        # queue stays full — promote_validated logs the one-line summary.
-        logger.debug("dream: proposal queue full, deferring %s hypothesis %s", row.get("kind"), row["id"][:8])
+        logger.debug("dream: correction for %s refused by the store", row["id"][:8])
         return None
+    prop = db.adaptive_get_proposal(pid)
+    if prop is not None and prop.get("status") == "pending":
+        from core.adaptive import AdaptiveError, approve_proposal
+
+        try:
+            result = approve_proposal(pid, actor="auto", resolution="auto_applied")
+        except AdaptiveError as e:
+            logger.warning("dream: correction #%s could not be applied: %s", pid, e)
+            return f"proposal:{pid}"
+        if applied is not None:
+            applied.append(
+                {
+                    "pid": pid,
+                    "kind": row.get("kind"),
+                    "files": files,
+                    "written": list(result.get("corrections_written") or []),
+                    "statement": (row.get("statement") or "").strip(),
+                }
+            )
     return f"proposal:{pid}"

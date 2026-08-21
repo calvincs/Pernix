@@ -79,6 +79,15 @@ class Settings:
     # on the write path.
     embedding_model: str = ""
     embedding_batch_size: int = 16  # texts per /api/embed call during snooze sweeps
+    # Local CPU fallback (fastembed/ONNX) for when the remote embedding server
+    # is down for a while: after `embedding_fallback_after_minutes` of
+    # continuous failure the active model switches to "local:<model>" — the
+    # corpus re-embeds locally over snooze cycles and queries go local — and
+    # switches back once the remote has answered for
+    # `embedding_fallback_recover_minutes`. Empty model = no fallback.
+    embedding_fallback_model: str = "BAAI/bge-small-en-v1.5"
+    embedding_fallback_after_minutes: int = 30
+    embedding_fallback_recover_minutes: int = 60
     llm_max_concurrent: int = 1  # Max concurrent Ollama requests (semaphore slots)
     llm_session_timeout: int = 1800  # Max seconds any session may hold LLM slots (0 = unlimited)
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
@@ -350,14 +359,14 @@ class Settings:
     # Promote a canary-regression tripwire hit to automatic rollback. Off
     # until the metric earns trust; a hit only flags the batch 'suspect'.
     adaptive_auto_rollback: bool = False
-    adaptive_max_entries_per_kind: int = 12
-    adaptive_max_auto_applies_per_day: int = 6
+    adaptive_max_entries_per_kind: int = 24
+    adaptive_max_auto_applies_per_day: int = 24
     adaptive_edit_cooldown_hours: int = 24
     # Passive tripwire: post-mortem retry drift over this many organic turns
     # after a batch (canary-stamped post-mortems excluded).
     adaptive_tripwire_window_turns: int = 20
-    adaptive_max_pending_proposals: int = 40  # review queue cap (0 = unbounded)
-    adaptive_max_pending_per_producer: int = 12  # one producer's share of it (0 = unbounded)
+    adaptive_max_pending_proposals: int = 200  # review queue cap (0 = unbounded)
+    adaptive_max_pending_per_producer: int = 60  # one producer's share of it (0 = unbounded)
     adaptive_proposal_ttl_days: int = 30  # pending proposals lapse after this (0 = never)
     # The review queue is a VETO WINDOW, not an approval gate: a pending
     # proposal older than this many hours is approved by the system itself —
@@ -371,7 +380,7 @@ class Settings:
     # proposals never auto-approve — admitting a new canary has its own
     # graduated-autonomy path (canary_auto_admit) and a human invariant (I6).
     adaptive_auto_approve_after_hours: int = 24
-    adaptive_max_auto_approvals_per_day: int = 10
+    adaptive_max_auto_approvals_per_day: int = 40
 
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
@@ -411,9 +420,9 @@ class Settings:
     # Fully inert when off: snooze Activity 14 is skipped and no dream tables
     # are read or written. All call sites gate on dream_enabled at runtime.
     dream_enabled: bool = False
-    dream_hypotheses_per_cycle: int = 3  # cap on new hypotheses per dream step
-    dream_max_pending: int = 60  # validation backlog cap: above it, generation pauses
-    dream_validation_replays_per_day: int = 4  # counterfactual scout-replay budget
+    dream_hypotheses_per_cycle: int = 6  # cap on new hypotheses per dream step
+    dream_max_pending: int = 200  # validation backlog cap: above it, generation pauses
+    dream_validation_replays_per_day: int = 8  # counterfactual scout-replay budget
     dream_report_interval_days: int = 7  # dream report cadence
     dream_journal_retention_days: int = 14  # journal sessions kept (1/day)
     dream_rlm_probe: bool = False  # deep cross-file probes via RLM (needs rlm_enabled)

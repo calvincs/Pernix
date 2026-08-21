@@ -400,6 +400,8 @@ def correction_preamble(kind: str, approved_by: str = "human", source_ref: str =
         provenance = (
             f"auto-approved after the {settings.adaptive_auto_approve_after_hours}h veto window, adaptive review"
         )
+    elif approved_by == "dream":
+        provenance = "auto-applied on validation — dream finding, no veto window; adaptive review"
     else:
         provenance = "human-approved via adaptive review"
     ref = f", {source_ref}" if source_ref else ""

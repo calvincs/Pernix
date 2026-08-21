@@ -322,6 +322,19 @@ same reason `/api/adaptive/proposals` documents its status enum, serves
 `status=all` and `?id=`, and answers an unknown status with a 400 rather
 than an empty list that reads as "those rows are gone".
 
+**Memory corrections skip the queue (2026-08-21).** A validated dream
+contradiction / stale-memory finding is additive — approving it writes a
+corrective entry beside the disputed ones, deletes nothing — so the veto
+window protected nothing and only delayed it: 280 hypotheses queued behind
+a 12-row per-producer share and a 10-a-day drain. Promotion now mints the
+proposal row for the audit trail and applies it at once (`auto_applied`,
+provenance "auto-applied on validation — dream finding, no veto window"),
+bypassing `adaptive_max_pending_*`. Every applied correction is narrated in
+the dream journal; the operator gets one notification per day. The same
+(kind, file) correction is not re-applied within a week. Undo = delete the
+entry tagged `dream:<id>` in the memory file. Policy and routing-hint
+promotions still go through the queue.
+
 **Rollback is exact.** Every apply is an append-only event with full
 before/after snapshots; `rollback(batch_id | event_id)` walks the events in
 reverse and restores each entry byte-for-byte (or deletes what the batch
