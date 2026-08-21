@@ -418,7 +418,7 @@ def _notify_proposal_queue_full(producer: str) -> None:
             reason = (
                 f"{producer} has {mine} proposals pending — its per-producer share "
                 f"({share}, adaptive_max_pending_per_producer) — so new ones from {producer} "
-                f"are being refused. {pending} are pending overall (global cap {cap})."
+                f"are being refused. {pending} are pending overall (global cap {cap} — not the cap that tripped)."
             )
         else:
             reason = (
