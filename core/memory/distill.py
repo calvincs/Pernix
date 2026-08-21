@@ -9,11 +9,90 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 
 from config import settings
 
 logger = logging.getLogger("pernix.memory.distill")
+
+
+_SAVED_RE = re.compile(r"\b(?:SAVED|UPDATED) file=([A-Za-z0-9_.\-]+) epoch=(\d+)")
+_ENUMERATION_RE = re.compile(r"(?:^|\s)(?:[1-9]\)|[1-9]\.|\([1-9]\))\s")
+_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_\-']{2,}")
+_STOP = frozenset(
+    "the and for with that this from into over under about after before when while where which "
+    "what have has had was were are been being not but nor its their they them then than also "
+    "into onto via per each every both all any some such only just more most less very".split()
+)
+
+
+def _agent_saved_entries(messages: list[dict], store) -> list[tuple[str, str, str]]:
+    """(file, type, content) for every entry the agent itself wrote during the
+    session, read back from the store — the tool results carry their ids."""
+    out: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, int]] = set()
+    for m in messages:
+        if m.get("role") != "tool":
+            continue
+        for file_name, epoch in _SAVED_RE.findall(m.get("content") or ""):
+            key = (file_name, int(epoch))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                entry = store.get_entry(file_name, int(epoch))
+            except Exception:
+                entry = None
+            if entry is not None and getattr(entry, "content", ""):
+                out.append((file_name, str(getattr(entry, "entry_type", "") or ""), entry.content))
+    return out
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in _WORD_RE.findall((text or "").lower()) if w not in _STOP}
+
+
+def _restates(
+    candidate: str, candidate_file: str, candidate_type: str, saved: list[tuple[str, str, str]]
+) -> tuple[str, str] | None:
+    """The agent-saved entry a distilled candidate restates, if any.
+
+    Similarity is the overlap coefficient (shared content words over the
+    smaller vocabulary): a paraphrase that invents half its specifics still
+    shares its topic words with the original, which Jaccard under-reads (the
+    live fabricated top-6 scored 0.14 Jaccard against the real list). Same
+    file needs a modest overlap — less when the entry type matches too, a
+    second "decision" about the same list being the exact failure — while
+    another file needs a strong one.
+    """
+    cw = _content_words(candidate)
+    if not cw:
+        return None
+    for file_name, entry_type, content in saved:
+        sw = _content_words(content)
+        if not sw:
+            continue
+        overlap = len(cw & sw) / min(len(cw), len(sw))
+        same_file = file_name == candidate_file
+        same_type = bool(candidate_type) and candidate_type == entry_type
+        if same_file and (overlap >= 0.25 or (same_type and overlap >= 0.15)):
+            return file_name, content
+        if overlap >= 0.6:
+            return file_name, content
+    return None
+
+
+def _trigram_grounding(candidate: str, transcript: str) -> float:
+    """Share of the candidate's word trigrams that occur verbatim in the
+    transcript. Paraphrase lowers it, so it is only read when the candidate
+    is an enumeration — lists of specifics are where invention shows."""
+    words = _WORD_RE.findall((candidate or "").lower())
+    if len(words) < 6:
+        return 1.0
+    hay = " ".join(_WORD_RE.findall((transcript or "").lower()))
+    grams = [" ".join(words[i : i + 3]) for i in range(len(words) - 2)]
+    return sum(1 for g in grams if g in hay) / len(grams)
 
 
 def _is_saved(result: str) -> bool:
@@ -111,6 +190,18 @@ async def distill_session(
     file_list_str = _build_file_catalog(store)
     prompt = DISTILL_PROMPT.format(existing_files=file_list_str)
 
+    # Entries the agent wrote itself this session are authoritative: the
+    # distiller must not restate, extend or re-list them (told here, and
+    # enforced by _restates below — the prompt alone did not stop a second
+    # "decision" entry with an invented list on the live box).
+    agent_saved = await asyncio.to_thread(_agent_saved_entries, messages, store)
+    if agent_saved:
+        prompt += (
+            "\n\nENTRIES THE AGENT ALREADY SAVED THIS SESSION (authoritative — do NOT restate, "
+            "summarize, extend or re-list them; omit any candidate that covers the same decision, "
+            "finding or list):\n" + "\n".join(f"- [{f} · {t or 'note'}] {c[:600]}" for f, t, c in agent_saved[:12])
+        )
+
     # LLM extraction
     client = get_llm_client()
     model = settings.background_model or settings.llm_model
@@ -141,12 +232,32 @@ async def distill_session(
     saved = 0
     superseded = 0
     skipped_dup = 0
+    skipped_restated = 0
     for entry in entries:
         content = entry.get("content", "")
         if not content:
             continue
 
+        restated = _restates(content, entry.get("file") or "", str(entry.get("type") or ""), agent_saved)
+        if restated is not None:
+            skipped_restated += 1
+            logger.info(
+                "Distill: dropped a candidate for %s that restates the agent's own entry in %s",
+                entry.get("file") or "?",
+                restated[0],
+            )
+            continue
+
         tags = entry.get("tags", "")
+        if _ENUMERATION_RE.search(content):
+            grounding = _trigram_grounding(content, transcript)
+            if grounding < 0.1:
+                tags = f"{tags},unverified-distill" if tags else "unverified-distill"
+                logger.info(
+                    "Distill: enumerated candidate for %s has %.0f%% verbatim grounding in the transcript — tagged unverified-distill",
+                    entry.get("file") or "?",
+                    grounding * 100,
+                )
         # Add date tag
         tags = f"{tags},{time.strftime('%Y-%m-%d')}" if tags else time.strftime("%Y-%m-%d")
         if session_type == "worker":
@@ -181,11 +292,12 @@ async def distill_session(
             skipped_dup += 1
 
     logger.info(
-        "Distilled session %s: %d saved, %d superseded, %d deduped",
+        "Distilled session %s: %d saved, %d superseded, %d deduped, %d dropped as restating the agent's own entries",
         session_id,
         saved,
         superseded,
         skipped_dup,
+        skipped_restated,
     )
 
 
