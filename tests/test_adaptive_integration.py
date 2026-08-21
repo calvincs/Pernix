@@ -639,8 +639,8 @@ async def test_memory_correction_effector_writes_on_approve(monkeypatch, tmp_pat
 
     written_calls = []
 
-    def _fake_correction(files, statement, source_ref="", kind=""):
-        written_calls.append((tuple(files), kind))
+    def _fake_correction(files, statement, source_ref="", kind="", approved_by="human"):
+        written_calls.append((tuple(files), kind, approved_by))
         return list(files)
 
     import core.memory.ingest as ingest_mod
@@ -651,7 +651,7 @@ async def test_memory_correction_effector_writes_on_approve(monkeypatch, tmp_pat
 
     result = approve_proposal(prop["id"])
     assert result.get("corrections_written") == ["test.corrections"]
-    assert written_calls == [(("test.corrections",), "contradiction")]
+    assert written_calls == [(("test.corrections",), "contradiction", "human")]
     assert db.adaptive_get_proposal(prop["id"])["status"] == "approved"
 
 

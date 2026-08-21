@@ -13,12 +13,16 @@ the markdown mirror is render-only and never read back.
 
 from core.adaptive.engine import (
     AdaptiveError,
+    annotate_proposal,
     apply_batch,
     approve_proposal,
     auto_approve_stale_proposals,
     compute_risk,
     delete_entry,
+    describe_proposal,
+    describe_resolution,
     drain_pending,
+    is_canary_proposal,
     queue_edits,
     rollback,
     validate_edit,
@@ -27,6 +31,7 @@ from core.adaptive.render import build_adaptive_block, build_routing_hints_block
 
 __all__ = [
     "AdaptiveError",
+    "annotate_proposal",
     "apply_batch",
     "approve_proposal",
     "auto_approve_stale_proposals",
@@ -34,7 +39,10 @@ __all__ = [
     "build_routing_hints_block",
     "compute_risk",
     "delete_entry",
+    "describe_proposal",
+    "describe_resolution",
     "drain_pending",
+    "is_canary_proposal",
     "queue_edits",
     "render_mirror",
     "rollback",

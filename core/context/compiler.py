@@ -449,6 +449,8 @@ def _build_server_context() -> str:
     scheme = "https" if settings.network_enabled else "http"
     port = settings.port
     base_url = f"{scheme}://localhost:{port}"
+    db_path = Path(settings.db_path).resolve()
+    code_root = Path(__file__).resolve().parents[2]
     return "\n".join(
         [
             "[SERVER CONTEXT]",
@@ -458,6 +460,17 @@ def _build_server_context() -> str:
             'When you create a file in the workspace (e.g. "myproject/app.html"), you',
             f"can open or examine it in a browser at: {base_url}/workspace/myproject/app.html",
             "Substitute the actual relative path for any artifact you want to verify or share.",
+            "",
+            "SELF-INSPECTION — questions about Pernix's own state (notifications, adaptive",
+            "proposals and batches, cron runs, dream, telos, canaries, other sessions):",
+            f"- The store is the SQLite file {db_path} (python3 sqlite3 from bash or repl) and this API.",
+            f"- GET {base_url}/openapi.json lists every route with its query params and their DEFAULTS.",
+            "  Read it before guessing an endpoint. A list route that defaults to one status hides the",
+            f"  rest: e.g. {base_url}/api/adaptive/proposals?status=all or ?id=<n> for a resolved proposal.",
+            f"- The code that produced the behaviour is under {code_root} (e.g. core/adaptive/engine.py,",
+            "  core/snooze.py). Read the function before asserting WHY something happened.",
+            "- When a lookup fails, write 'not retrieved — would need <call>'. Never rebuild an id→content",
+            "  mapping from timestamps or proximity; reflect flags table rows no tool result supports.",
         ]
     )
 

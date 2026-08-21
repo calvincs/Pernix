@@ -304,6 +304,24 @@ proposals are the exception and never auto-approve: materializing a canary
 keeps its human invariant (I6), and graduated autonomy for canaries lives in
 `canary_auto_admit` instead.
 
+The two notifications this produces are written for whoever has to act on
+them — including the agent, when a user pastes one back and asks what it
+meant (box session dce9a6de7f81 is the case that shaped them). The
+**auto-approved** notice lists each proposal: what it was, where it landed,
+and how to undo it — "roll back batch ab-…" for edit batches; "delete the
+entry tagged `dream:<id>` in `<file>`" for memory corrections, which create
+no batch and nothing the Adaptive panel can roll back; nothing for
+review-only rows. The **queue-full** notice names the cap that actually
+refused the insert — the per-producer share
+`adaptive_max_pending_per_producer` trips far more often than the global
+cap — and says how many pending rows are canary proposals waiting on a
+human. Corrective memory entries carry their approver in the preamble
+(`human-approved via adaptive review` vs `auto-approved after the 24h veto
+window`), so "what did a human actually approve" stays answerable. For the
+same reason `/api/adaptive/proposals` documents its status enum, serves
+`status=all` and `?id=`, and answers an unknown status with a 400 rather
+than an empty list that reads as "those rows are gone".
+
 **Rollback is exact.** Every apply is an append-only event with full
 before/after snapshots; `rollback(batch_id | event_id)` walks the events in
 reverse and restores each entry byte-for-byte (or deletes what the batch

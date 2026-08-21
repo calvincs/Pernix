@@ -50,6 +50,108 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _payload_of(prop: dict):
+    try:
+        return json.loads(prop.get("payload_json") or "[]")
+    except (TypeError, ValueError):
+        return []
+
+
+def is_canary_proposal(prop: dict) -> bool:
+    """Canary-suite proposals carry a dict payload, not an edit list. They are
+    the one class the veto-window drain never takes (invariant I6)."""
+    payload = _payload_of(prop)
+    return isinstance(payload, dict) and bool(payload.get("canary"))
+
+
+def _is_memory_correction(payload) -> bool:
+    return (
+        isinstance(payload, list)
+        and bool(payload)
+        and all(isinstance(e, dict) and e.get("action") == "memory_correction" for e in payload)
+    )
+
+
+def describe_proposal(prop: dict) -> str:
+    """One line a reader can act on: producer, what kind of change, its target.
+
+    Proposal ids in a notification are useless on their own — the row that
+    explains #189 is in adaptive_proposals, and the agent asked to explain a
+    notification has to find it (it guessed wrong on the live box). So the
+    description travels with the id everywhere ids are shown.
+    """
+    payload = _payload_of(prop)
+    producer = prop.get("producer") or "?"
+    if isinstance(payload, dict) and payload.get("canary"):
+        name = (payload.get("canary") or {}).get("name") or "?"
+        return f"{producer}: new canary '{name}' (waits for a human approve/reject; never auto-approves)"
+    if _is_memory_correction(payload):
+        files = sorted({f for e in payload for f in (e.get("files") or []) if f})
+        kinds = sorted({str(e.get("kind") or "contradiction") for e in payload})
+        return f"{producer}: memory correction ({'/'.join(kinds)}) into {', '.join(files) or '?'}"
+    if isinstance(payload, list) and payload:
+        parts = []
+        for e in payload[:3]:
+            if isinstance(e, dict):
+                target = e.get("entry_id") or e.get("title") or "?"
+                parts.append(f"{e.get('action', '?')} {e.get('kind', '?')} '{target}'")
+        more = f" (+{len(payload) - 3} more)" if len(payload) > 3 else ""
+        return f"{producer}: {'; '.join(parts)}{more}"
+    return f"{producer}: review-only (approving acknowledges, applies nothing)"
+
+
+def annotate_proposal(prop: dict) -> dict:
+    """The proposal row plus what a reader needs to predict the drain:
+    `summary` (describe_proposal), `auto_approve_exempt` (canary), and
+    `auto_approve_after` (when the veto window closes, pending rows only)."""
+    row = dict(prop)
+    exempt = is_canary_proposal(prop)
+    row["auto_approve_exempt"] = exempt
+    row["auto_approve_after"] = None
+    window = settings.adaptive_auto_approve_after_hours
+    if prop.get("status") == "pending" and not exempt and window > 0 and prop.get("created_at"):
+        try:
+            created = datetime.fromisoformat(str(prop["created_at"]))
+            row["auto_approve_after"] = (created + timedelta(hours=window)).isoformat()
+        except ValueError:
+            pass
+    row["summary"] = describe_proposal(prop)
+    return row
+
+
+def describe_resolution(prop: dict, result: dict) -> str:
+    """What approving `prop` actually did, and the undo path — one line.
+
+    Three shapes come out of approve_proposal: a batch (undo = roll back the
+    batch), a memory correction (no batch; undo = delete the tagged entry in
+    the memory file), or review-only (nothing to undo). The auto-approve
+    notice used to say "roll back any batch" for all three.
+    """
+    pid = prop.get("id")
+    what = describe_proposal(prop)
+    if result.get("corrections_written") is not None:
+        payload = _payload_of(prop)
+        tags = sorted({f"dream:{str(e.get('hypothesis_id') or '')[:12]}" for e in payload if isinstance(e, dict)})
+        written = result.get("corrections_written") or []
+        if not written:
+            return f"#{pid} {what} → no entry written (every cited file refused it); nothing to undo"
+        return (
+            f"#{pid} {what} → wrote a corrective entry into {', '.join(written)}. "
+            f"No batch — undo by deleting the entry tagged {', '.join(tags) or 'dream:?'} in that memory file"
+        )
+    if result.get("canary_written"):
+        return f"#{pid} {what} → canary '{result['canary_written']}' materialized; a vetting run is queued"
+    if result.get("batch_id"):
+        applied = len(result.get("applied") or [])
+        refused = len(result.get("rejected") or [])
+        tail = f", {refused} refused" if refused else ""
+        return (
+            f"#{pid} {what} → batch {result['batch_id']}: {applied} edit(s) applied{tail}. "
+            f"Undo: roll back {result['batch_id']} in the Adaptive panel"
+        )
+    return f"#{pid} {what} → acknowledged; nothing applied, nothing to undo"
+
+
 def slugify(title: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")
     return slug[:64] or f"entry-{uuid.uuid4().hex[:8]}"
@@ -293,16 +395,36 @@ def _apply_one(edit: dict, producer: str, actor: str, batch_id: str, proposal_id
 
 
 def _notify_proposal_queue_full(producer: str) -> None:
-    """The review queue is full, so this producer's output is being dropped.
+    """The review queue refused this producer, so its output is being dropped.
 
-    Deduped by day: a full queue stays full until a human drains it, and a
-    notification per producer pass would itself become noise.
+    Two caps can refuse an insert (adaptive_add_proposal): the global
+    `adaptive_max_pending_proposals` and the per-producer share
+    `adaptive_max_pending_per_producer`. The notice names the one that
+    actually tripped — on the live box dream hit its 12-row share while the
+    queue sat at 13/40, and a notice that said "at the 40-proposal cap" sent
+    the reader (and the agent asked to explain it) hunting for a phantom
+    soft threshold. Deduped per producer per day: a full queue stays full
+    until it drains, and a notification per producer pass would be noise.
     """
-    marker = f"adaptive_queue_full:{_now_iso()[:10]}"
+    marker = f"adaptive_queue_full:{_now_iso()[:10]}:{producer}"
     try:
         if db.get_snooze_state(marker):
             return
         pending = db.adaptive_count_pending_proposals()
+        mine = db.adaptive_count_pending_proposals(producer)
+        cap = settings.adaptive_max_pending_proposals
+        share = settings.adaptive_max_pending_per_producer
+        if share > 0 and mine >= share and (cap <= 0 or pending < cap):
+            reason = (
+                f"{producer} has {mine} proposals pending — its per-producer share "
+                f"({share}, adaptive_max_pending_per_producer) — so new ones from {producer} "
+                f"are being refused. {pending} are pending overall (global cap {cap})."
+            )
+        else:
+            reason = (
+                f"{pending} proposals are pending, at the {cap}-proposal cap "
+                f"(adaptive_max_pending_proposals), so new ones from {producer} are being refused."
+            )
         if settings.adaptive_auto_approve_after_hours > 0:
             drain_hint = (
                 f"They drain on their own: each auto-approves "
@@ -315,14 +437,15 @@ def _notify_proposal_queue_full(producer: str) -> None:
                 "Approve or reject in the Adaptive tab — pending proposals "
                 f"also lapse on their own after {settings.adaptive_proposal_ttl_days} days."
             )
+        human_gated = sum(1 for p in db.adaptive_list_proposals(status="pending", limit=500) if is_canary_proposal(p))
+        if human_gated:
+            drain_hint += (
+                f" {human_gated} of the pending are canary proposals, which never auto-approve — "
+                "they wait for your approve/reject."
+            )
         db.add_notification(
             title="Adaptive layer: review queue is full",
-            body=(
-                f"{pending} proposals are pending, at the "
-                f"{settings.adaptive_max_pending_proposals}-proposal cap "
-                "(adaptive_max_pending_proposals), so new ones from "
-                f"{producer} are being refused. " + drain_hint
-            ),
+            body=f"{reason} {drain_hint}",
             urgency="normal",
         )
         db.set_snooze_state(marker, "1")
@@ -514,6 +637,7 @@ def approve_proposal(proposal_id: int, actor: str = "user", resolution: str = "a
                     statement=str(e.get("statement") or ""),
                     source_ref=f"dream:{e.get('hypothesis_id', '')[:12]}",
                     kind=str(e.get("kind") or "contradiction"),
+                    approved_by="auto" if resolution == "auto_approved" else "human",
                 )
             except Exception as ce:
                 logger.warning("memory correction failed for proposal %s: %s", proposal_id, ce)
@@ -562,7 +686,7 @@ def auto_approve_stale_proposals() -> dict:
     are never taken — materializing a canary keeps its human invariant (I6)
     and its own graduated-autonomy path (canary_auto_admit).
     """
-    out: dict = {"approved": [], "skipped_canary": 0, "deferred": 0, "results": []}
+    out: dict = {"approved": [], "skipped_canary": 0, "deferred": 0, "results": [], "summaries": []}
     window_hours = settings.adaptive_auto_approve_after_hours
     if not settings.adaptive_enabled or window_hours <= 0:
         return out
@@ -608,6 +732,7 @@ def auto_approve_stale_proposals() -> dict:
             result = approve_proposal(int(prop["id"]), actor="auto", resolution="auto_approved")
             out["approved"].append(int(prop["id"]))
             out["results"].append(result)
+            out["summaries"].append(describe_resolution(prop, result))
             budget -= 1
         except AdaptiveError as e:
             logger.warning("Adaptive auto-approve skipped proposal %s: %s", prop.get("id"), e)
