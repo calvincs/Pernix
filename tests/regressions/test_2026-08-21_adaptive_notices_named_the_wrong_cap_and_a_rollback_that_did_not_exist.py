@@ -90,7 +90,7 @@ def test_queue_full_notice_names_the_per_producer_share_when_that_is_what_trippe
     body = _latest_notification()["body"]
     assert "per-producer share" in body and "adaptive_max_pending_per_producer" in body
     assert "dream has 1 proposals pending" in body
-    assert "2 are pending overall (global cap 40)" in body
+    assert "2 are pending overall (global cap 40 — not the cap that tripped)" in body
     assert "at the 40-proposal cap" not in body  # the old, wrong claim
     assert "1 of the pending are canary proposals, which never auto-approve" in body
 

@@ -33,6 +33,26 @@ _QUERY_TIMEOUT_S = 5.0
 _FAILURE_BACKOFF_S = 60.0
 _last_failure_at: float = 0.0
 
+# A cold model is the one case the 5s query timeout makes WORSE: Ollama
+# cancels a model load when the requesting client disconnects ("timed out
+# waiting for llama-server to start: context canceled"), so a client that
+# always gives up at 5s never lets the load finish and every later query is
+# cold too. One detached long-timeout embed breaks that loop.
+_WARM_TIMEOUT_S = 300.0
+_WARM_COOLDOWN_S = 600.0
+_last_warm_at: float = 0.0
+
+# Sustained failure is an operator event, not a log line. On the live box
+# every embed failed for a whole day — recall was lexical-only and the only
+# trace was a WARNING per search that said "for 60s". After
+# _NOTIFY_AFTER_S of continuous failure a notification lands, once per
+# _NOTIFY_EVERY_S, and a success clears the episode.
+_NOTIFY_AFTER_S = 1800.0
+_NOTIFY_EVERY_S = 86400.0
+_failing_since: float = 0.0  # monotonic; 0 = healthy
+_failing_since_wall: str = ""
+_last_notified_at: float = 0.0
+
 
 def enabled() -> bool:
     return bool(settings.embedding_model)
@@ -44,6 +64,85 @@ def content_hash(text: str) -> str:
 
 def _native_base() -> str:
     return settings.llm_base_url.rstrip("/").replace("/v1", "")
+
+
+def _describe(err: Exception) -> str:
+    """Error text with the response body when there is one. An HTTP 500's
+    str() is just its status line; the body carried the actual cause
+    ("vk::Device::allocateMemory: ErrorOutOfDeviceMemory") for a day while
+    the log said "500"."""
+    text = str(err)
+    resp = getattr(err, "response", None)
+    body = (getattr(resp, "text", "") or "").strip() if resp is not None else ""
+    if body:
+        text = f"{text} — {body[:200]}"
+    return text
+
+
+def _note_success() -> None:
+    global _failing_since, _failing_since_wall
+    _failing_since = 0.0
+    _failing_since_wall = ""
+
+
+def _note_failure(err: Exception) -> None:
+    """Track the failure episode; notify the operator once it is sustained."""
+    global _failing_since, _failing_since_wall, _last_notified_at
+    now = time.monotonic()
+    if not _failing_since:
+        _failing_since = now
+        from datetime import datetime, timezone
+
+        _failing_since_wall = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return
+    # `_last_notified_at` / `_last_warm_at` are 0.0 until first use, and
+    # time.monotonic() is small on a freshly booted box — "now - 0.0 < window"
+    # would silently swallow the first notice for up to a day.
+    if now - _failing_since < _NOTIFY_AFTER_S or (_last_notified_at and now - _last_notified_at < _NOTIFY_EVERY_S):
+        return
+    _last_notified_at = now
+    try:
+        from db import models as db
+
+        db.add_notification(
+            title="Embeddings unavailable — memory recall is lexical-only",
+            body=(
+                f"Every embedding call to {_native_base()}/api/embed (model {settings.embedding_model}) "
+                f"has failed since {_failing_since_wall}; latest error: {_describe(err)[:300]}. Memory recall, "
+                "dedup and dream/candor semantic search run on keyword matching only until it recovers. "
+                "Check the embedding server; a model that was evicted needs one request that waits out "
+                "the cold load. This notice repeats at most once a day; a successful embed clears it."
+            ),
+            urgency="normal",
+        )
+    except Exception as e:  # never let observability break the search path
+        logger.debug("embedding outage notification failed: %s", e)
+
+
+def _warm_model_detached() -> None:
+    """Fire one long-timeout embed on a daemon thread so a cold model's load
+    actually completes; rate-limited so a dead server is not hammered."""
+    global _last_warm_at
+    now = time.monotonic()
+    if _last_warm_at and now - _last_warm_at < _WARM_COOLDOWN_S:
+        return
+    _last_warm_at = now
+    import threading
+
+    def _warm() -> None:
+        import httpx
+
+        try:
+            httpx.post(
+                f"{_native_base()}/api/embed",
+                json={"model": settings.embedding_model, "input": ["warm"]},
+                timeout=_WARM_TIMEOUT_S,
+            ).raise_for_status()
+            logger.info("Embedding model warmed after a cold-load timeout")
+        except Exception as e:
+            logger.warning("Embedding warm-up failed: %s", e)
+
+    threading.Thread(target=_warm, name="pernix-embed-warm", daemon=True).start()
 
 
 def embed_query_sync(text: str) -> list[float] | None:
@@ -65,11 +164,15 @@ def embed_query_sync(text: str) -> list[float] | None:
         resp.raise_for_status()
         embeddings = resp.json().get("embeddings", [])
         if embeddings:
+            _note_success()
             return embeddings[0]
         raise ValueError("empty embeddings response")
     except Exception as e:
         _last_failure_at = time.monotonic()
-        logger.warning("Query embedding failed (lexical-only for %ds): %s", int(_FAILURE_BACKOFF_S), e)
+        logger.warning("Query embedding failed (lexical-only for %ds): %s", int(_FAILURE_BACKOFF_S), _describe(e))
+        _note_failure(e)
+        if isinstance(e, httpx.TimeoutException):
+            _warm_model_detached()
         return None
 
 
@@ -94,9 +197,12 @@ async def embed_texts(texts: list[str]) -> list[list[float]] | None:
     # from 30 minutes of uptime until the next restart.
     await sem.acquire(session_id="", session_created_at=float("inf"), priority=PRIORITY_BACKGROUND)
     try:
-        return await provider.embed(settings.embedding_model, texts)
+        vectors = await provider.embed(settings.embedding_model, texts)
+        _note_success()
+        return vectors
     except Exception as e:
-        logger.warning("Batch embedding failed: %s", e)
+        logger.warning("Batch embedding failed: %s", _describe(e))
+        _note_failure(e)
         return None
     finally:
         sem.release()
