@@ -83,14 +83,14 @@ def prune_old_journals_sync() -> int:
     today_title = f"Dream journal — {datetime.now(timezone.utc).astimezone().strftime('%Y-%m-%d')}"
     deleted = 0
     try:
-        for s in db.list_sessions(limit=500):
-            if (
-                s.get("session_type") == "snooze"
-                and s.get("title") != today_title
-                and (s.get("updated_at") or "") < cutoff
-            ):
-                db.delete_session(s["id"])
-                deleted += 1
+        # Direct query by type and age: list_sessions(500) only showed the
+        # newest 500 rows, so an old journal beyond them was never pruned.
+        for sid in db.list_session_ids_by_type_before("snooze", cutoff):
+            s = db.get_session(sid)
+            if s is None or s.get("title") == today_title:
+                continue
+            db.delete_session(sid)
+            deleted += 1
     except Exception as e:
         logger.warning("dream journal prune failed: %s", e)
     if deleted:

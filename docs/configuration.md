@@ -172,6 +172,8 @@ Recursive Language Models (arXiv 2512.24601): the agent processes inputs far bey
 | `rlm_max_concurrent_subcalls` | `3` | Parallel sub-calls (the global LLM scheduler still applies underneath). |
 | `rlm_timeout_seconds` | `900` | Wall clock per run; the child process group is killed at the deadline. |
 | `rlm_run_retention_days` | `30` | Age after which snooze purges `data/workspace/rlm/<run_id>/` dirs and their DB rows. |
+| `worker_session_retention_days` | `30` | Worker sessions (spawn_worker) not updated within this window are deleted, except any a parent is still waiting on. The worker's result already lives in the parent transcript. Previously never pruned. |
+| `dream_hypothesis_retention_days` | `90` | Dream hypotheses in a terminal status (refuted, expired, archived, promoted) older than this are deleted; pending and validated rows are never touched. Previously never pruned (~57 rows/day on the live box). |
 
 ---
 

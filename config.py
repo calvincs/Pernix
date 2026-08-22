@@ -413,6 +413,14 @@ class Settings:
     rlm_max_concurrent_subcalls: int = 3
     rlm_timeout_seconds: int = 900  # wall clock per run
     rlm_run_retention_days: int = 30  # workspace/rlm/<run_id> purge age
+    # Worker sessions (spawned by spawn_worker) had no retention at all: the
+    # live box held 36, eleven older than a month, with 7 MB of messages.
+    worker_session_retention_days: int = 30
+    # Dream hypotheses accumulate ~57/day on the live box and nothing pruned
+    # them; the readers cap their scans at 500 rows, so old rows also fell
+    # out of dedup/evidence silently. Terminal statuses only (refuted,
+    # expired, archived, promoted) — pending and validated rows are work.
+    dream_hypothesis_retention_days: int = 90
 
     # --- Dream (idle-time introspection add-on, off by default) ---
     # Hypothesis generation over memory/Candor/post-mortems, validated against

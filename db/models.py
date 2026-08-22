@@ -1,3 +1,5 @@
+import json
+
 """Pernix — Database query helpers organized by table."""
 
 import logging
@@ -1736,6 +1738,47 @@ def clear_cron_runs(job_name: str | None = None) -> int:
             cur = conn.execute(
                 "DELETE FROM cron_runs WHERE status NOT IN ('running')",
             )
+        return cur.rowcount
+
+
+def list_session_ids_by_type_before(session_type: str, cutoff_iso: str) -> list[str]:
+    """Ids of every session of one type not updated since the cutoff — a
+    direct query, oldest first. The retention sweeps used to walk
+    list_sessions(500), the 500 most RECENTLY updated rows, so once the
+    table passed 500 the oldest sessions — the ones due for pruning — were
+    the ones the sweep could not see."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT id FROM sessions WHERE session_type = ? AND updated_at < ? ORDER BY updated_at",
+            (session_type, cutoff_iso),
+        ).fetchall()
+        return [r["id"] for r in rows]
+
+
+def watched_worker_ids() -> set[str]:
+    """Worker ids some parent is still waiting on (state awaiting_workers)."""
+    out: set[str] = set()
+    with connect_sessions() as conn:
+        rows = conn.execute("SELECT watched_worker_ids FROM sessions WHERE state_v2 = 'awaiting_workers'").fetchall()
+    for r in rows:
+        try:
+            out.update(str(x) for x in json.loads(r["watched_worker_ids"] or "[]"))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def delete_old_dream_hypotheses(cutoff_iso: str, statuses: tuple[str, ...]) -> int:
+    """Delete hypotheses in the given (terminal) statuses created before the
+    cutoff. Returns the row count."""
+    if not statuses:
+        return 0
+    placeholders = ",".join("?" * len(statuses))
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            f"DELETE FROM dream_hypotheses WHERE status IN ({placeholders}) AND created_at < ?",
+            (*statuses, cutoff_iso),
+        )
         return cur.rowcount
 
 
