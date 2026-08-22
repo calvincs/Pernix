@@ -96,14 +96,9 @@ async def prune_canary_runs(retention_days: int | None = None) -> tuple[int, int
     Returns (rows_deleted, sessions_deleted).
     """
     days = max(int((retention_days if retention_days is not None else settings.canary_retention_days) or 0), 1)
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     try:
         deleted = await asyncio.to_thread(db.prune_canary_runs, days)
-        pruned_sessions = 0
-        for s in await asyncio.to_thread(db.list_sessions, 500):
-            if s.get("session_type") == "canary" and (s.get("updated_at") or "") < cutoff:
-                await asyncio.to_thread(db.delete_session, s["id"])
-                pruned_sessions += 1
+        pruned_sessions = await prune_sessions_of_type("canary", days)
     except Exception as e:
         logger.warning("Snooze canary cleanup failed: %s", e)
         return 0, 0
@@ -115,6 +110,64 @@ async def prune_canary_runs(retention_days: int | None = None) -> tuple[int, int
             days,
         )
     return deleted, pruned_sessions
+
+
+async def prune_sessions_of_type(session_type: str, retention_days: int, *, keep: set[str] | None = None) -> int:
+    """Delete sessions of one type not updated within the retention window.
+
+    A direct query by type and age — never a window over the newest rows.
+    The old loop over list_sessions(500) could not see the oldest sessions
+    once the table passed 500 rows (161 outside the window on the live box,
+    one journal already past its retention with no way to be pruned).
+    """
+    days = max(int(retention_days or 0), 1)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    ids = await asyncio.to_thread(db.list_session_ids_by_type_before, session_type, cutoff)
+    pruned = 0
+    for sid in ids:
+        if keep and sid in keep:
+            continue
+        try:
+            await asyncio.to_thread(db.delete_session, sid)
+            pruned += 1
+        except Exception as e:
+            logger.warning("Retention: could not delete %s session %s: %s", session_type, sid, e)
+    return pruned
+
+
+async def prune_worker_sessions(retention_days: int | None = None) -> int:
+    """Worker sessions past worker_session_retention_days, except any a
+    parent is still waiting on. The worker's result already lives in the
+    parent's transcript; the worker transcript is debugging residue."""
+    days = retention_days if retention_days is not None else settings.worker_session_retention_days
+    try:
+        keep = await asyncio.to_thread(db.watched_worker_ids)
+        pruned = await prune_sessions_of_type("worker", days, keep=keep)
+    except Exception as e:
+        logger.warning("Snooze worker-session cleanup failed: %s", e)
+        return 0
+    if pruned:
+        logger.info("Snooze worker cleanup: %d worker session(s) older than %dd", pruned, max(int(days or 0), 1))
+    return pruned
+
+
+_TERMINAL_HYPOTHESIS_STATUSES = ("refuted", "expired", "archived", "promoted")
+
+
+def prune_dream_hypotheses(retention_days: int | None = None) -> int:
+    """Dream hypotheses in a terminal status older than
+    dream_hypothesis_retention_days. Pending and validated rows are never
+    touched — they are work, not residue."""
+    days = max(int(retention_days if retention_days is not None else settings.dream_hypothesis_retention_days), 1)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        deleted = db.delete_old_dream_hypotheses(cutoff, _TERMINAL_HYPOTHESIS_STATUSES)
+    except Exception as e:
+        logger.warning("Snooze dream-hypothesis cleanup failed: %s", e)
+        return 0
+    if deleted:
+        logger.info("Snooze dream cleanup: %d terminal hypothesis row(s) older than %dd", deleted, days)
+    return deleted
 
 
 async def nudge_stale_canaries(max_age_days: int = 90) -> int:

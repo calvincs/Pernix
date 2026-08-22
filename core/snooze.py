@@ -1070,11 +1070,15 @@ Output valid JSON only. No markdown fences. /no_think"""
         self._bump("post_mortems_pruned", retention.prune_post_mortems())
 
     async def _cleanup_canary_runs(self) -> None:
-        """Activity 12c — canary run/session retention plus the staleness nudge."""
+        """Activity 12c — canary run/session retention plus the staleness
+        nudge, and the two retention sweeps that had no home: worker sessions
+        and terminal dream hypotheses."""
         from core import retention
 
         await retention.prune_canary_runs()
         await retention.nudge_stale_canaries()
+        self._bump("worker_sessions_pruned", await retention.prune_worker_sessions())
+        self._bump("dream_hypotheses_pruned", await asyncio.to_thread(retention.prune_dream_hypotheses))
 
     async def _canary_maintain(self) -> None:
         """Activity 12d — one canary auto-maintenance sweep. Never raises."""
