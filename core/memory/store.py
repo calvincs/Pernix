@@ -115,6 +115,11 @@ def _supersede_reason(new_content: str, old_content: str) -> str:
     return ""
 
 
+def _entry_body(section: str) -> str:
+    """An entry section minus the merge-bookkeeping headers, for twin detection."""
+    return "\n".join(line for line in section.splitlines() if not line.startswith("<!-- @merged_")).strip()
+
+
 class MemoryStore:
     """Persistent memory with markdown files + FTS5 search.
 
@@ -1313,6 +1318,7 @@ class MemoryStore:
                 all_epochs = {int(m) for m in epoch_re.findall(raw)}
                 sections = raw.split("\n---\n")
                 seen: set[int] = set()
+                bodies: dict[int, str] = {}
                 new_sections = []
                 changed = 0
 
@@ -1322,6 +1328,17 @@ class MemoryStore:
                         new_sections.append(section)
                         continue
                     epoch = int(m.group(1))
+                    if epoch in seen and _entry_body(section) == bodies.get(epoch):
+                        # An identical twin — the same entry merged into this
+                        # file twice by two consolidation passes (only the
+                        # @merged_from/@merged_at bookkeeping differs). Two
+                        # distinct epochs would turn one duplicate into two
+                        # real entries; drop the copy instead. delete_entry
+                        # refuses such twins ("legacy collision") and the
+                        # exact-duplicate sweep cannot see them (one index
+                        # row per epoch), so this is the only place they die.
+                        changed += 1
+                        continue
                     if epoch in seen:
                         new_epoch = epoch
                         while new_epoch in seen or new_epoch in all_epochs:
@@ -1331,6 +1348,7 @@ class MemoryStore:
                         epoch = new_epoch
                         changed += 1
                     seen.add(epoch)
+                    bodies[epoch] = _entry_body(section)
                     new_sections.append(section)
 
                 if not changed:
