@@ -481,6 +481,7 @@ async def _execute_single(
         else:
             registry.metrics[name].record_success(latency)
 
+        _credit_long_call(context, latency)
         return ToolExecutionResult(
             tool_name=name,
             content=result,
@@ -491,6 +492,7 @@ async def _execute_single(
     except asyncio.TimeoutError:
         latency = int((time.monotonic() - start) * 1000)
         registry.metrics[name].record_timeout(latency)
+        _credit_long_call(context, latency)
         # The worker thread is still blocked in the tool and cannot be
         # cancelled. Kill any subprocess it spawned so it unwinds instead of
         # holding a tool-executor thread for the child's full runtime.
@@ -519,6 +521,35 @@ async def _execute_single(
             was_error=True,
             latency_ms=latency,
         )
+
+
+_LONG_CALL_CREDIT_THRESHOLD_MS = 30_000
+_LONG_CALL_MIN_REMAINING_S = 600.0
+
+
+def _credit_long_call(context: dict | None, latency_ms: int) -> None:
+    """Long tool execution must not silently spend the LLM wall budget.
+
+    The per-session LLM time budget (llm_session_timeout, wall-clock from the
+    first LLM acquire, reset only at a new user turn) keeps ticking while a
+    tool runs — and a worker's whole life is one turn. Field case
+    c93232a0521b: a 30-minute bash search consumed the entire 1800s budget
+    without a single LLM token, the turn soft-landed as budget_exhausted, and
+    the retry the (sync) reflect asked for was refused for lack of budget.
+    After any tool call >= 30s, guarantee at least 10 minutes of LLM budget
+    remain so the agent can act on the result it just paid for.
+    """
+    if latency_ms < _LONG_CALL_CREDIT_THRESHOLD_MS:
+        return
+    sid = (context or {}).get("session_id", "")
+    if not sid:
+        return
+    try:
+        from core.llm.client import ensure_session_budget
+
+        ensure_session_budget(sid, _LONG_CALL_MIN_REMAINING_S)
+    except Exception as e:  # pragma: no cover - diagnostics only
+        logger.debug("long-call budget credit failed for %s: %s", sid[:12], e)
 
 
 async def execute_tool_round(
