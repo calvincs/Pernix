@@ -1788,6 +1788,27 @@ async def _end_turn_on_stream_error(
     session.error = error
     session.termination_reason = "error"
     session.emit_event({"type": "stream.error", "error": error})
+    # A stream error kills the turn AND its grade: errored sessions skip
+    # reflect, so nothing downstream ever says what happened (field case
+    # ae952f40e3d1: 61 rounds of work ended mid-flight with no final message,
+    # no verdict, no notification — the session just went quiet). Leave a
+    # durable trace a human will actually see.
+    try:
+        sess_row = await asyncio.to_thread(db.get_session, session_id)
+        title = (sess_row or {}).get("title") or session_id[:12]
+        await asyncio.to_thread(
+            db.add_notification,
+            session_id=session_id,
+            title=f"{title}: turn ended on a stream error",
+            body=(
+                f"The LLM stream failed after retries and fallback: {error[:300]} — "
+                "the turn's partial work is in the transcript, but it was not graded "
+                "(reflect skips errored turns). Reply in the session to resume."
+            ),
+            urgency="high",
+        )
+    except Exception as _ne:
+        logger.debug("stream-error notification failed for %s: %s", session_id, _ne)
 
 
 async def _continue_after_length_truncation(

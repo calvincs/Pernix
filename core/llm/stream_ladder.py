@@ -57,6 +57,12 @@ _RETRYABLE_MARKERS = (
     "ReadTimeout",
     "ConnectTimeout",
     "Connection refused",
+    # A stream that produced no tokens at all is an upstream flake, not a
+    # config problem — the request was well-formed and the provider simply
+    # sent nothing back. Field case ae952f40e3d1: one "Provider returned an
+    # empty response" from the fallback model killed a 61-round turn dead
+    # (classified non-retryable, fallback rung already spent).
+    "empty response",
 )
 
 
@@ -245,10 +251,11 @@ async def stream_with_failover(
             retries = 0
             current_model = fallback
             logger.warning(
-                "%s retries exhausted for session %s, switching to fallback model: %s",
+                "%s failing over for session %s to fallback model %s (error was: %s)",
                 label,
                 session_id,
                 fallback,
+                err,
             )
             emit({"type": "stream.fallback", "model": fallback})
             fb_provider = client.resolve_provider(fallback)

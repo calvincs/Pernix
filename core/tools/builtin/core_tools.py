@@ -625,6 +625,12 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
     env["PATH"] = f"{workspace_venv_bin}:/usr/local/bin:/usr/bin:/bin"
     env["HOME"] = str(workspace)
     env["VIRTUAL_ENV"] = str(workspace / ".venv")
+    # Python block-buffers stdout when it isn't a tty, so a long-running
+    # script's progress prints sit in an unflushed buffer — and the
+    # [partial output before timeout] block comes back empty exactly when
+    # it matters most (field case c93232a0521b: a 30-minute search printed
+    # progress the whole way and the timeout returned none of it).
+    env["PYTHONUNBUFFERED"] = "1"
 
     try:
         import resource
