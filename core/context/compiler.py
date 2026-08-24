@@ -799,7 +799,41 @@ def _build_telos_drive_block() -> str:
         return ""
 
 
-def _build_volatile_tail(resource_status: str, goal_burn: str = "", telos_block: str = "") -> str:
+def _build_watched_workers_block(session_id: str) -> str:
+    """Outstanding watched workers, for the volatile tail.
+
+    A user message legitimately preempts AWAITING_WORKERS — but the resumed
+    turn then had no view of the worker it was still watching. Field case
+    ae952f40e3d1: the agent read check_workers ("0/1 done ... processing"),
+    concluded its worker had been "suspended", and spawned a duplicate doing
+    the same job. The tail now names each watched worker and says the one
+    thing that matters: it is still running, do not respawn it.
+    """
+    try:
+        import json as _json
+
+        sess = db.get_session(session_id)
+        raw = (sess or {}).get("watched_worker_ids") or "[]"
+        ids = _json.loads(raw) if isinstance(raw, str) else list(raw)
+        if not ids:
+            return ""
+        lines = ["[WORKERS YOU ARE WATCHING]"]
+        for wid in ids[:8]:
+            w = db.get_session(wid) or {}
+            lines.append(f"- {wid} \"{w.get('title', '?')}\": {w.get('state_v2') or w.get('state') or '?'}")
+        lines.append(
+            "These workers are STILL RUNNING and belong to this session. Do NOT spawn "
+            "a replacement for the same job — await_workers resumes waiting, "
+            "get_worker_result collects a finished one."
+        )
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _build_volatile_tail(
+    resource_status: str, goal_burn: str = "", telos_block: str = "", workers_block: str = ""
+) -> str:
     """Per-call state that goes in a trailing system message, NOT the head.
 
     Everything here changes between LLM calls (clock, tool rounds remaining).
@@ -822,6 +856,8 @@ def _build_volatile_tail(resource_status: str, goal_burn: str = "", telos_block:
         lines.append(goal_burn)
     if telos_block:
         lines.append(telos_block)
+    if workers_block:
+        lines.append(workers_block)
     return "\n".join(lines)
 
 
@@ -1004,6 +1040,7 @@ def compile_context(
         resource_status,
         goal_burn=_build_goal_burn(session_id) if goal_block else "",
         telos_block=_build_telos_drive_block(),
+        workers_block=_build_watched_workers_block(session_id),
     )
     # Head is stable across the rounds of a turn — cached count. The tail is
     # tiny and changes per call, so it's counted raw.
