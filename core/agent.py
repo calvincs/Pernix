@@ -39,6 +39,8 @@ logger = logging.getLogger("pernix.agent")
 # ---------------------------------------------------------------------------
 
 _FILE_TOOLS = {"file_edit", "file_write", "file_read", "file_append"}
+# Tools whose success changes what an identical follow-up call would do.
+_MUTATING_TOOLS = frozenset({"file_write", "file_edit", "multiedit", "repl"})
 
 # Empirically-verified tool-name hallucinations with compatible argument schemas.
 # Rewrite silently (logged) instead of burning a round on the difflib hint path.
@@ -109,6 +111,13 @@ class StuckDetector:
 
     content_history: deque = field(default_factory=lambda: deque(maxlen=5))
     tool_call_history: deque = field(default_factory=lambda: deque(maxlen=10))
+    # Monotonic counter bumped by every successful workspace mutation
+    # (file_write/file_edit/multiedit/repl). Signal 2 compares against it:
+    # an identical call is only a cycle when NOTHING changed in between —
+    # "edit the script, rerun the same command" is iteration, not a loop
+    # (field case c93232a0521b: 4 false 'repeating tool calls' nudges on an
+    # edit→rerun solver workflow with zero failed calls).
+    mutation_epoch: int = 0
     # Per-result observations: (tool_name, host_or_query_token, low_info_bool, body_size)
     # Bounded so a long turn doesn't grow it without limit.
     web_result_history: deque = field(default_factory=lambda: deque(maxlen=12))
@@ -129,13 +138,15 @@ class StuckDetector:
             score += 0.5
             self.behavioral_flags.add("content_repeat")
 
-        # Signal 2: Tool call cycle
+        # Signal 2: Tool call cycle — same calls with NO intervening
+        # workspace mutation. A verbatim rerun after a file edit or repl
+        # execution is legitimate iteration and must not count.
         if tool_calls:
             sig = tuple(sorted(f"{tc.get('name','')}:{_hash_args(tc.get('arguments',''))}" for tc in tool_calls))
-            if sig in self.tool_call_history:
+            if any(s == sig and e == self.mutation_epoch for s, e in self.tool_call_history):
                 score += 0.4
                 self.behavioral_flags.add("tool_cycle")
-            self.tool_call_history.append(sig)
+            self.tool_call_history.append((sig, self.mutation_epoch))
 
         # Signal 3: Error-retry without change
         if tool_calls:
@@ -280,6 +291,8 @@ class StuckDetector:
         """
         self.has_unresolved_failure = False
         self.unresolved_failure_rounds = 0
+        if tool_name in _MUTATING_TOOLS:
+            self.mutation_epoch += 1
         if tool_name:
             self.tool_failure_counts.pop(tool_name, None)
         if tool_name in _FILE_TOOLS and args:
