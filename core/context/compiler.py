@@ -373,11 +373,16 @@ genuine decisions, missing information, or destructive actions the user has
 not clearly requested."""
 
 
-_BASE_SYSTEM_PROMPT_TAIL = """RESOURCE MANAGEMENT: The [RESOURCE STATUS] section shows your remaining tool rounds
-and token usage. If rounds are low, prioritize completing the core deliverable over
-gathering more context. You can delegate data-heavy subtasks (web browsing, bulk
-processing) to workers via spawn_worker to preserve your tool budget for synthesis
-and user-facing output."""
+_BASE_SYSTEM_PROMPT_TAIL = """RESOURCE MANAGEMENT: The [RESOURCE STATUS] numbers mean different things.
+"Context window" is how full your prompt is; the harness compacts it automatically —
+never stop, rush, or degrade your work because of it. "Session spend" is the lifetime
+token total across all calls; it re-counts the conversation every round, grows quickly
+by design, and is informational only — it is NOT a budget and passing any threshold
+is not a reason to stop, hurry, or skip verification. "Tool rounds remaining" is the
+ONLY binding limit: when rounds run low, prioritize completing the core deliverable
+over gathering more context. You can delegate data-heavy subtasks (web browsing, bulk
+processing) to workers via spawn_worker to preserve rounds for synthesis and
+user-facing output."""
 
 
 def _build_base_system_prompt() -> str:

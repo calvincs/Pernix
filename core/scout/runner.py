@@ -211,6 +211,23 @@ _SCOUT_GATE_RULE = (
 )
 
 
+# Injected only when settings.session_kernel_enabled (repl only exists then).
+# Field case 17683100ecf8: the agent drove a live game environment through
+# ~20 cold bash heredocs — new process, new anonymous API session, state
+# re-fetched every round — while the persistent kernel sat unused. repl is a
+# builtin (never listed in recommended_tools), so the steering must live in
+# approach_guidance.
+_SCOUT_KERNEL_RULE = (
+    "- STATEFUL ENVIRONMENTS: When the task means driving an interactive or "
+    "stateful resource across many steps (a game/simulation environment, a live "
+    "API or DB session, an object built up incrementally), approach_guidance "
+    "MUST tell the agent to hold the live object in the repl kernel — variables "
+    "persist across tool rounds and turns — instead of re-creating it in a "
+    "fresh bash process each round. bash is for one-shot commands; repeated "
+    "bash heredocs that rebuild the same session lose state and waste rounds."
+)
+
+
 def _scout_system_prompt() -> str:
     """SCOUT_SYSTEM_PROMPT plus conditional rules, keeping /no_think last."""
     rules = []
@@ -218,6 +235,8 @@ def _scout_system_prompt() -> str:
         rules.append(_SCOUT_RLM_RULE)
     if settings.gates_enabled:
         rules.append(_SCOUT_GATE_RULE)
+    if settings.session_kernel_enabled:
+        rules.append(_SCOUT_KERNEL_RULE)
     if not rules:
         return SCOUT_SYSTEM_PROMPT
     block = "\n".join(rules)

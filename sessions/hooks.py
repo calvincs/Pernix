@@ -820,6 +820,37 @@ async def _deferred_candor(snap: _DeferredGrade, result) -> None:
         logger.warning("Deferred Candor emission failed for %s: %s", snap.session_id, e)
 
 
+def _deferred_verdict_notification(session_id: str, result) -> None:
+    """Surface a non-pass deferred verdict — the grade alone has no effector.
+
+    Deferred reflect is observe-only by design: it can conclude "retry" with a
+    concrete finish strategy, but nothing acts on it (field case 17683100ecf8:
+    a correct 3-round finish plan sat unread in post_mortems while the session
+    idled). This turns that dead end into a notification carrying the strategy;
+    the same strategy still reaches the next scout via build_retry_context when
+    the user replies in the session.
+    """
+    if result.verdict not in ("retry", "escalate"):
+        return
+    strategy = (result.strategy or result.missing or result.reasoning or "").strip()
+    if len(strategy) > 700:
+        strategy = strategy[:700] + "…"
+    try:
+        session = db.get_session(session_id) or {}
+        _broadcast_reflect_notification(
+            session_id,
+            session,
+            title=f"Turn graded '{result.verdict}' after delivery",
+            body=(
+                "The background grade found the last turn incomplete "
+                "(observe-only — no retry ran). Suggested finish: "
+                f"{strategy} — reply in the session to have the agent act on it."
+            ),
+        )
+    except Exception as e:
+        logger.warning("Deferred verdict notification failed for %s: %s", session_id, e)
+
+
 async def _run_deferred_reflect(session_obj, snap: _DeferredGrade) -> None:
     """Grade the snapshotted turn, observe-only.
 
@@ -876,6 +907,7 @@ async def _run_deferred_reflect(session_obj, snap: _DeferredGrade) -> None:
         await _deferred_candor(snap, result)
 
         session_obj.emit_event({"type": "reflect.deferred", **reflect_event})
+        _deferred_verdict_notification(session_id, result)
         logger.info(
             "Deferred reflect verdict=%s for session %s (observe-only): %s",
             result.verdict,

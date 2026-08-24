@@ -863,6 +863,11 @@ async def run_agent(
     _length_continuation_count = 0
     LENGTH_CONTINUATION_LIMIT = 2
 
+    # Last compiled prompt size (F13, field case 17683100ecf8): the only
+    # token number the window actually constrains. One round stale by
+    # construction — the status is built before this round's compile.
+    _last_context_tokens: int | None = None
+
     tool_round = 0
     while tool_round < settings.max_tool_rounds:
         # --- Pre-round checks ---
@@ -892,7 +897,12 @@ async def run_agent(
         # round, this was the single heaviest synchronous block on the loop.
         effective_budget = session.context_budget_override or _model_budget or settings.context_budget
         resource_status = await asyncio.to_thread(
-            _build_resource_status, session_id, estimator, tool_round, context_budget=effective_budget
+            _build_resource_status,
+            session_id,
+            estimator,
+            tool_round,
+            context_budget=effective_budget,
+            context_tokens=_last_context_tokens,
         )
         payload = await asyncio.to_thread(
             compile_context,
@@ -907,6 +917,8 @@ async def run_agent(
             model_name=effective_model,
             turn_user_msg_id=_turn_user_msg_id,
         )
+
+        _last_context_tokens = payload.token_count
 
         # Context health check
         utilization = payload.token_count / max(effective_budget, 1)
@@ -1988,16 +2000,42 @@ def _build_hallucinated_tool_hint(bad_name: str, registry) -> str:
     )
 
 
-def _build_resource_status(session_id: str, estimator, tool_round: int = 0, context_budget: int | None = None) -> str:
-    """Build resource status for system prompt."""
+def _build_resource_status(
+    session_id: str,
+    estimator,
+    tool_round: int = 0,
+    context_budget: int | None = None,
+    context_tokens: int | None = None,
+) -> str:
+    """Build resource status for system prompt.
+
+    Two token numbers in DIFFERENT units (field case 17683100ecf8): the old
+    display divided lifetime session spend — which re-counts the re-sent
+    context on every call — by the context window, so any long tool loop
+    read "over budget" within a dozen rounds (that session showed 1,299%
+    while its largest prompt filled 36% of the window). The agent
+    panic-quit 2-3 rounds short of a win over a number that constrained
+    nothing. Now: context fullness is the window-relative percentage,
+    lifetime spend is a plain informational count, and tool rounds are
+    named as the only binding limit.
+    """
     usage = db.get_session_usage(session_id)
     total_tokens = usage.get("total", 0)
+    calls = usage.get("calls", 0)
     budget = context_budget if context_budget is not None else settings.context_budget
-    pct = (total_tokens / budget * 100) if budget else 0
+    if context_tokens is not None and budget:
+        window = (
+            f"Context window: {context_tokens:,}/{budget:,} tokens "
+            f"({context_tokens / budget * 100:.0f}% full, auto-compacted)"
+        )
+    else:
+        window = f"Context window: {budget:,} tokens (auto-compacted)"
     remaining = settings.max_tool_rounds - tool_round
     base = (
-        f"[RESOURCE STATUS] Session tokens: {total_tokens:,} ({pct:.0f}% of budget) | "
-        f"Tool rounds remaining: {remaining}/{settings.max_tool_rounds}"
+        f"[RESOURCE STATUS] {window} | "
+        f"Session spend so far: {total_tokens:,} tokens over {calls} LLM call(s) "
+        f"(informational only — not a limit) | "
+        f"Tool rounds remaining: {remaining}/{settings.max_tool_rounds} (the only binding limit)"
     )
     if remaining == 1:
         base += (
