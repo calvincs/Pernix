@@ -106,3 +106,13 @@ def test_round_cap_continuation_setting_exists():
     from config import settings
 
     assert settings.round_cap_auto_continue >= 1
+
+
+def test_settings_bounds_accept_deep_work_values():
+    """Calvin's 500-round and 500-iteration edits were 'rejected by the
+    server and reverted' — the bounds table still capped both at 100 from
+    the pre-campaign era. Deep ARC-style work needs the headroom."""
+    from api.routers.health import _SETTING_BOUNDS
+
+    assert _SETTING_BOUNDS["max_tool_rounds"][1] >= 500
+    assert _SETTING_BOUNDS["rlm_max_iterations"][1] >= 500

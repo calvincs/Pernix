@@ -144,7 +144,10 @@ _SETTING_BOUNDS = {
     # 0 = uncapped; otherwise must be a plausible window.
     "ollama_num_ctx_cap": (0, 2_000_000),
     "compaction_keep_tokens": (1000, 500_000),
-    "max_tool_rounds": (1, 100),
+    # Raised 100->1000 (Calvin, 2026-08-25): deep ARC-style work made 100
+    # rounds the binding constraint; the UI rejected his 500. The floor and
+    # the round-cap-continuation machinery keep runaway risk bounded.
+    "max_tool_rounds": (1, 1000),
     "llm_max_concurrent": (1, 20),
     "openrouter_max_concurrent": (1, 20),
     "max_concurrent_workers": (1, 20),
@@ -159,7 +162,7 @@ _SETTING_BOUNDS = {
     "port": (1024, 65535),
     "post_mortem_retention_days": (7, 3650),
     "candor_max_obs_per_turn": (10, 10_000),
-    "rlm_max_iterations": (3, 100),
+    "rlm_max_iterations": (3, 1000),  # raised 100->1000 with max_tool_rounds (same request)
     "rlm_max_depth": (1, 3),
     "rlm_max_subcalls": (5, 500),
     "rlm_max_concurrent_subcalls": (1, 8),
