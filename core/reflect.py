@@ -928,8 +928,17 @@ def _try_repair_json(raw: str) -> dict | None:
 
 def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
     """Build ReflectResult from parsed JSON data."""
+    # A grade with NO verdict field at all is a malformed grade, not a pass.
+    # Same precedent as the invalid-verdict coercion below: defaulting absent
+    # data to "pass" makes a broken grader look like a confident approval
+    # (ARC-3 sweep: contentless confidence-0.0 passes on substantial turns).
+    _verdict = data.get("verdict")
+    if not _verdict:
+        logger.warning("Reflect grade missing verdict field — coercing to retry")
+        _verdict = "retry"
+        data.setdefault("reasoning", "(malformed grade: no verdict field — coerced to retry)")
     result = ReflectResult(
-        verdict=data.get("verdict", "pass"),
+        verdict=_verdict,
         reasoning=data.get("reasoning", ""),
         diagnostic=data.get("diagnostic", ""),
         what_worked=data.get("what_worked", ""),
@@ -1476,6 +1485,30 @@ async def reflect_on_session(
                     raise
 
             result = _result_from_data(data, model, latency_ms)
+
+            # Contentless-pass guard (ARC-3 sweep): a "pass" with zero
+            # analysis on a turn with real tool work is a lazy grade, not a
+            # considered one. Spend one re-prompt like the parse-failure
+            # path; if the grader stays silent, accept but say so loudly in
+            # the record instead of looking like a confident approval.
+            try:
+                _work = sum(
+                    (v.get("calls", 0) if isinstance(v, dict) else int(v or 0)) for v in (tool_summary or {}).values()
+                )
+            except (TypeError, ValueError):
+                _work = 0
+            if result.verdict == "pass" and not (result.reasoning or "").strip() and _work >= 5:
+                if inner_attempt < INNER_REPROMPT_LIMIT:
+                    logger.warning(
+                        "Reflect returned a contentless pass for session %s "
+                        "(%d tool calls) — reprompting (inner_attempt=%d)",
+                        session_id,
+                        _work,
+                        inner_attempt,
+                    )
+                    continue
+                result.reasoning = "(grader returned no analysis after re-ask — treat this pass as low-confidence)"
+
             result.grounding = dict(grounding)
 
             # Defensive ceiling-loop guard: if the agent hit round_ceiling on

@@ -30,11 +30,20 @@ async def answer_question(question_id: str, body: dict):
     answer = body.get("answer", "")
     session_id = question["session_id"]
 
-    # Delete first (atomic guard) — if another request already handled it, stop
+    # Mark answered first (atomic guard) — if another request already handled
+    # it, stop. Rows are KEPT as an audit trail (ARC-3 sweep: the table was
+    # always empty because answers deleted the row, so every ask_user
+    # exchange survived only inside message text); prune_old_questions ages
+    # them out after its retention window.
+    from datetime import datetime, timezone
+
     from db.database import connect_sessions
 
     with connect_sessions() as conn:
-        cur = conn.execute("DELETE FROM questions WHERE id = ?", (question_id,))
+        cur = conn.execute(
+            "UPDATE questions SET answer = ?, answered_at = ? WHERE id = ? AND answered_at IS NULL",
+            (answer, datetime.now(timezone.utc).isoformat(), question_id),
+        )
         if cur.rowcount == 0:
             raise HTTPException(409, detail="Question already handled")
 

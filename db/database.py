@@ -953,6 +953,14 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
                    ON jobs(session_id, created_at)""",
         ],
     ),
+    (
+        28,
+        "questions become an audit trail (answer + answered_at; rows kept)",
+        [
+            "ALTER TABLE questions ADD COLUMN answer TEXT",
+            "ALTER TABLE questions ADD COLUMN answered_at TEXT",
+        ],
+    ),
 ]
 
 

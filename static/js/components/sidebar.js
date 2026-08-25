@@ -415,7 +415,12 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
     if (isWorker) {
         titleChildren.push(el('span', { class: 'worker-prefix' }, [text('\u21B3')]));
     }
-    const isActive = session.state && session.state !== 'idle';
+    // Active = the session is doing something right now. state_v2 is the
+    // real state machine; the legacy `state` column stopped updating when v2
+    // landed (it reads 'idle' even mid-turn), which silently killed the slow
+    // blink on active dots. RLM view sessions still use the legacy field.
+    const _sv = session.state_v2 || session.state;
+    const isActive = !!_sv && !['idle', 'idle_ready', 'awaiting_user', 'error'].includes(_sv);
     const dotCls = `session-dot ${typeDef.cls}${isActive ? ' active-pulse' : ''}`;
     titleChildren.push(el('span', { class: dotCls }));
     titleChildren.push(el('span', { class: 'session-title-text' }, [text(titleText)]));

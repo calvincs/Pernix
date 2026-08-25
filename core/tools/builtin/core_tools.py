@@ -282,6 +282,38 @@ def _rm_targets_are_safe_caches(command: str) -> bool:
     return True
 
 
+def _collapse_repeated_lines(output: str, threshold: int = 6, keep: int = 3) -> str:
+    """Collapse runs of identical lines that appear `threshold`+ times.
+
+    ARC-3 sweep: library banners (e.g. 54 identical 'Got anonymous API key'
+    INFO lines in one session) drowned the agent's own solver output — one
+    agent said so verbatim. Keeps the first `keep` occurrences of any line
+    repeated threshold+ times and replaces the rest with a count marker.
+    Order-preserving; only exact duplicates collapse."""
+    lines = output.split("\n")
+    if len(lines) < threshold:
+        return output
+    from collections import Counter
+
+    counts = Counter(line for line in lines if line.strip())
+    noisy = {line for line, c in counts.items() if c >= threshold}
+    if not noisy:
+        return output
+    out: list[str] = []
+    seen: dict[str, int] = {}
+    omitted: dict[str, int] = {}
+    for line in lines:
+        if line in noisy:
+            seen[line] = seen.get(line, 0) + 1
+            if seen[line] > keep:
+                omitted[line] = omitted.get(line, 0) + 1
+                continue
+        out.append(line)
+    for line, n in omitted.items():
+        out.append(f"[{n} more identical lines omitted: {line[:80]!r}]")
+    return "\n".join(out)
+
+
 def _rm_targets_are_in_workspace(command: str) -> bool:
     """True iff every non-flag `rm` target clearly resolves inside the agent
     workspace. Approved exception (Calvin, 2026-08-25): the workspace is the
@@ -772,6 +804,8 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
             if output:
                 output += "\n"
             output += stderr
+
+        output = _collapse_repeated_lines(output)
 
         if len(output) > MAX_OUTPUT:
             output, _meta = truncate_output(output, "bash")

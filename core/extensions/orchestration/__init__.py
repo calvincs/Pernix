@@ -175,6 +175,19 @@ def spawn_worker(
     if model:
         system_prompt += f"\nYou are running on model: {model}\n"
 
+    # ARC-3 sweep finding #1: across nine solver workers, repl use was ZERO —
+    # parents' "run script X" handoffs read as bash work, and every worker
+    # paid the cold-start tax the kernel exists to remove. The steering the
+    # main session gets from scout now rides the worker charter too.
+    if settings.session_kernel_enabled:
+        system_prompt += (
+            "\nIf your task drives a live or stateful environment, or builds "
+            "up state across steps (game engines, simulations, incremental "
+            "computation), hold the live objects in your persistent repl "
+            "kernel — variables survive across rounds and turns — and use "
+            "bash only for one-shot commands and heavy subprocess compute.\n"
+        )
+
     # Spec gates attach to the worker session before its first prompt — the
     # post-task hook path runs them like any session's gates, and the
     # reflect clamp holds the worker to them (plan 3a machinery, unchanged).

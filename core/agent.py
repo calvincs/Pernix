@@ -204,13 +204,28 @@ class StuckDetector:
             import json as _json
 
             for tc in tool_calls:
-                if tc.get("name") not in ("file_read", "grep"):
+                name = tc.get("name")
+                if name not in ("file_read", "grep", "bash"):
                     continue
                 try:
                     args = _json.loads(tc.get("arguments") or "{}")
                 except (ValueError, TypeError):
                     continue
-                path = args.get("path") or args.get("file") or ""
+                if name == "bash":
+                    # Agents read big files through bash (cat/sed/grep/head),
+                    # which the tool-level counters never saw — the ARC sweep
+                    # found 21 sessions grinding sources this way with the
+                    # rlm hint unable to fire. Count the first path-looking
+                    # token in read-ish commands.
+                    import re as _re
+
+                    cmd = args.get("command") or ""
+                    if not _re.search(r"\b(?:cat|sed|grep|head|tail|less|awk)\b", cmd):
+                        continue
+                    m = _re.search(r"[\w./-]+\.(?:py|md|json|txt|log|csv)\b", cmd)
+                    path = m.group(0) if m else ""
+                else:
+                    path = args.get("path") or args.get("file") or ""
                 if not path:
                     continue
                 self.file_read_counts[path] = self.file_read_counts.get(path, 0) + 1
@@ -916,6 +931,14 @@ async def run_agent(
     _length_continuation_count = 0
     LENGTH_CONTINUATION_LIMIT = 2
 
+    # Round-cap continuation (ARC-3 sweep finding #2): the 100-round ceiling
+    # became the binding constraint on deep work — agents burn cognition
+    # budgeting rounds and abandon debuggable paths near the cap. A turn that
+    # exhausts its rounds while healthy (tools ran, no error, no stuck spiral)
+    # gets settings.round_cap_auto_continue fresh budgets, mirroring the
+    # length-truncation continuation above.
+    _round_cap_continues = 0
+
     # Last compiled prompt size (F13, field case 17683100ecf8): the only
     # token number the window actually constrains. One round stale by
     # construction — the status is built before this round's compile.
@@ -1234,6 +1257,39 @@ async def run_agent(
         collected_content = ""
         collected_tool_calls = []
         tool_round += 1
+        if (
+            tool_round >= settings.max_tool_rounds
+            and _round_cap_continues < int(getattr(settings, "round_cap_auto_continue", 0) or 0)
+            and did_tool_calls
+            and not session.cancel_requested
+            and session.error is None
+            and stuck.repeat_count < 3
+        ):
+            _round_cap_continues += 1
+            logger.info(
+                "Session %s: round cap reached mid-task — granting continuation %d/%d",
+                session_id,
+                _round_cap_continues,
+                int(settings.round_cap_auto_continue),
+            )
+            try:
+                from core.llm.client import extend_session_budget
+
+                base = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else 0.0
+                if base > 0:
+                    extend_session_budget(session_id, base)
+            except Exception as _ext_err:
+                logger.debug("Round-cap continuation budget extend failed: %s", _ext_err)
+            await asyncio.to_thread(
+                db.add_message,
+                session_id,
+                "system",
+                f"[round cap reached — the harness granted one continuation "
+                f"({settings.max_tool_rounds} more rounds). Use it to FINISH: "
+                "complete the task or wrap up honestly with verified state. "
+                "No further continuations follow this one.]",
+            )
+            tool_round = 0
 
     # If we exit the tool loop without returning (max rounds hit, or stuck break),
     # make one final response call with tools=None to get a clean text answer.
