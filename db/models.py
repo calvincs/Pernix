@@ -886,14 +886,16 @@ def add_question(
 
 
 def get_questions(session_id: str | None = None) -> list[dict]:
+    """Pending (unanswered) questions. Answered rows stay in the table as an
+    audit trail until pruned; queue consumers must not see them."""
     with connect_sessions() as conn:
         if session_id:
             rows = conn.execute(
-                "SELECT * FROM questions WHERE session_id = ? ORDER BY created_at",
+                "SELECT * FROM questions WHERE session_id = ? AND answered_at IS NULL ORDER BY created_at",
                 (session_id,),
             ).fetchall()
         else:
-            rows = conn.execute("SELECT * FROM questions ORDER BY created_at").fetchall()
+            rows = conn.execute("SELECT * FROM questions WHERE answered_at IS NULL ORDER BY created_at").fetchall()
         return [dict(r) for r in rows]
 
 

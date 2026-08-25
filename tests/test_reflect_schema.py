@@ -112,12 +112,14 @@ def test_valid_verdicts_pass_through_unchanged():
         assert r.verdict == good
 
 
-def test_missing_verdict_defaults_to_pass():
-    """When verdict is absent from the JSON entirely, the historical default
-    is 'pass' (assume success when unspecified). This is the correct null
-    default — only out-of-schema VALUES coerce to retry."""
-    r = _result_from_data({"reasoning": "no verdict in the JSON"}, "m", 0)
-    assert r.verdict == "pass"
+def test_missing_verdict_coerces_to_retry():
+    """Contract CHANGED 2026-08-25 (second ARC-3 sweep): a grade with no
+    verdict field is a malformed grade, and defaulting it to "pass" made a
+    broken grader look like a confident approval (field case: contentless
+    confidence-0.0 passes). Missing verdict now coerces to retry, matching
+    the invalid-verdict precedent."""
+    r = _result_from_data({"reasoning": "did stuff"}, "m", 1)
+    assert r.verdict == "retry"
 
 
 # ---------------------------------------------------------------------------

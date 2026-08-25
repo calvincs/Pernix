@@ -168,6 +168,10 @@ class Settings:
     # forced the goal-continuation machinery to paper over it. Goal token/time
     # budgets and the stuck detector are the real spend guards.
     max_tool_rounds: int = 50
+    # Extra full round-budgets a healthy turn may receive when it exhausts
+    # max_tool_rounds mid-task (tools ran, no error, no stuck spiral). 0
+    # disables. ARC-3 sweep: the cap was the binding constraint on deep work.
+    round_cap_auto_continue: int = 1
     # (max_continuations removed in plan 3b — it was referenced nowhere in
     #  core logic; goal continuation_budget is the real, per-goal knob.)
 
