@@ -293,6 +293,27 @@ class KernelRegistry:
         lock = getattr(repl, "_rt_lock", None)
         return bool(lock is not None and lock.locked())
 
+    # A kernel can look idle while its SESSION is mid-turn: a long bash call
+    # (e.g. a 10-minute solver run) keeps the agent away from the repl past
+    # kernel_idle_seconds, and reaping then loses every live unpicklable
+    # object (sockets, game envs) to the snapshot. Field case: cd82 session
+    # 41e10cf3c7bd — kernel reaped at idle 1524s during a solver bash call,
+    # the live env didn't survive the snapshot, and the agent paid a
+    # NameError plus a full env rebuild. Sessions actively processing a turn
+    # therefore protect their kernel regardless of kernel idleness. On any
+    # lookup error we allow the reap (snapshot still preserves picklable
+    # state) rather than risk kernels that can never be collected.
+    @staticmethod
+    def _session_mid_turn(session_id: str) -> bool:
+        try:
+            from db import models as db
+
+            row = db.get_session(session_id)
+            return bool(row and row.get("state_v2") == "processing")
+        except Exception:
+            logger.debug("kernel: mid-turn check failed for %s", session_id[:12], exc_info=True)
+            return False
+
     def get_or_create(self, session_id: str) -> SessionKernel:
         with self._lock:
             kernel = self._kernels.get(session_id)
@@ -313,7 +334,10 @@ class KernelRegistry:
         overflow = len(live) + 1 - cap  # +1 for the kernel about to start
         if overflow <= 0:
             return []
-        idle_lru = sorted((k for k in live if not self._is_busy(k)), key=lambda k: k.last_used)
+        idle_lru = sorted(
+            (k for k in live if not self._is_busy(k) and not self._session_mid_turn(k.session_id)),
+            key=lambda k: k.last_used,
+        )
         picked = idle_lru[:overflow]
         if len(picked) < overflow:
             logger.info(
@@ -335,6 +359,10 @@ class KernelRegistry:
             candidates = [
                 k for k in self._kernels.values() if k.alive and now - k.last_used > max_idle and not self._is_busy(k)
             ]
+        # Off the registry lock (sqlite read per candidate); any_reapable()
+        # stays cheap on the event loop and may say yes spuriously — this is
+        # the authoritative check.
+        candidates = [k for k in candidates if not self._session_mid_turn(k.session_id)]
         for kernel in candidates:
             logger.info("Reaping idle kernel %s (idle %.0fs)", kernel.session_id[:12], now - kernel.last_used)
             kernel.shutdown(snapshot=True)
