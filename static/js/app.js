@@ -1419,7 +1419,10 @@ async function _seedWorkerStrip(sid) {
         const data = await get(`/api/sessions/${sid}/workers`);
         const now = Date.now();
         for (const w of (data.workers || [])) {
-            if (w.state === 'idle_ready') continue;  // finished
+            // Defensive: only real workers belong in the worker-chip path
+            // (RLM view sessions get their own pink chips from /api/rlm/runs).
+            if (w.session_type && w.session_type !== 'worker') continue;
+            if (w.state === 'idle_ready' || w.state === 'idle') continue;  // finished
             const started = w.created_at ? Date.parse(w.created_at + 'Z') || now : now;
             _activeWorkers.set(w.id, {
                 title: w.title,
