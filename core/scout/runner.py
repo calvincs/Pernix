@@ -229,6 +229,16 @@ _SCOUT_KERNEL_RULE = (
 )
 
 
+_SCOUT_JOBS_RULE = (
+    "- LONG COMPUTE: When the task will need heavy compute that runs for "
+    "minutes (brute-force/BFS solver searches, big builds, dataset crunching), "
+    "approach_guidance MUST point the agent at the background job tools: "
+    "job_start launches the compute detached (it survives the turn) and the "
+    "agent keeps thinking while polling job_status/job_tail — instead of "
+    "blocking a 10-30 minute bash call that times out and loses the work."
+)
+
+
 def _scout_system_prompt() -> str:
     """SCOUT_SYSTEM_PROMPT plus conditional rules, keeping /no_think last."""
     rules = []
@@ -238,6 +248,8 @@ def _scout_system_prompt() -> str:
         rules.append(_SCOUT_GATE_RULE)
     if settings.session_kernel_enabled:
         rules.append(_SCOUT_KERNEL_RULE)
+    if settings.jobs_enabled:
+        rules.append(_SCOUT_JOBS_RULE)
     if not rules:
         return SCOUT_SYSTEM_PROMPT
     block = "\n".join(rules)
@@ -1633,6 +1645,39 @@ async def _run_scout_llm(
             logger.debug("Scout adaptive hints failed: %s", e)
             return None
 
+    def _gather_workspace_state() -> str | None:
+        # Bless the convention the agents invented (ARC-3 campaign):
+        # *_STATUS.md / *_NOTES.md / *_NEXT.md checkpoint files let a
+        # successor session resume without re-deriving hard-won state — but
+        # successors never FOUND them (field case 8d411d30d12d lost a whole
+        # retry re-discovering a fact its predecessor had written down).
+        # Surface them the way memory hits are surfaced. Bounded: one
+        # two-level glob, newest 5, names+age only.
+        try:
+            from pathlib import Path as _Path
+
+            from core.tools.paths import workspace as _ws
+
+            root = _ws()
+            hits = []
+            for pattern in ("*_STATUS.md", "*_NOTES.md", "*_NEXT.md", "*/*_STATUS.md", "*/*_NOTES.md", "*/*_NEXT.md"):
+                hits.extend(root.glob(pattern))
+            if not hits:
+                return None
+            import time as _time
+
+            hits = sorted(set(hits), key=lambda f: f.stat().st_mtime, reverse=True)[:5]
+            _step("workspace", f"Found {len(hits)} workspace status files")
+            lines = ["", "WORKSPACE STATE (checkpoint files from prior work — read before re-deriving anything):"]
+            for f in hits:
+                age_h = (_time.time() - f.stat().st_mtime) / 3600
+                age = f"{age_h:.0f}h ago" if age_h >= 1 else f"{age_h * 60:.0f}m ago"
+                lines.append(f"- {f.relative_to(root)} (updated {age})")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.debug("Scout workspace-state scan failed: %s", e)
+            return None
+
     gathered = await asyncio.gather(
         asyncio.to_thread(_gather_memory_baseline),
         asyncio.to_thread(_gather_deep_memory),
@@ -1640,6 +1685,7 @@ async def _run_scout_llm(
         asyncio.to_thread(_gather_tool_discovery),
         asyncio.to_thread(_gather_skill_discovery),
         asyncio.to_thread(_gather_lessons),
+        asyncio.to_thread(_gather_workspace_state),
         _gather_models(),
         _gather_candor_intel(),
         asyncio.to_thread(_gather_adaptive_hints),

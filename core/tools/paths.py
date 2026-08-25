@@ -182,6 +182,8 @@ def allowed_read_roots() -> list[Path]:
     against the workspace rather than being captured by a later root.
     """
     roots = [workspace()]
+    if WORKSPACE_OVERRIDE.get() is None:
+        roots.append(Path("/tmp").resolve())
     skills = Path(settings.skills_dir).resolve()
     if skills not in roots:
         roots.append(skills)
@@ -198,8 +200,20 @@ def allowed_read_roots() -> list[Path]:
 
 
 def allowed_write_roots() -> list[Path]:
-    """Directories that file_write/file_edit may access (workspace only)."""
-    return [workspace()]
+    """Directories that file_write/file_edit may access.
+
+    /tmp is included deliberately in DEFAULT mode: bash has always been able
+    to write there freely, so refusing it in the file tools bought no
+    containment — only mid-task "Path not within allowed directories"
+    surprises (field case: bp35 solver scratch files). Approved by Calvin
+    2026-08-25. Under a session workspace_override (canary runs, isolated
+    tasks) the override stays the ONLY root: isolation is the whole point
+    there, and pytest/canary sandboxes themselves live under /tmp.
+    """
+    roots = [workspace()]
+    if WORKSPACE_OVERRIDE.get() is None:
+        roots.append(Path("/tmp").resolve())
+    return roots
 
 
 def check_protected(resolved: Path, roots: list[Path]) -> None:

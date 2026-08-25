@@ -212,6 +212,14 @@ class Settings:
     # Was hardcoded to 100 MB; raised to 2 GB so legitimate downloads (model
     # files, video, build artifacts) work while still catching dd-loop runaways.
     shell_fsize_limit_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GB
+    # --- Background jobs (job_start/job_status/job_tail/job_kill) ---
+    # Detached long-compute processes with captured output; born from the
+    # ARC-3 campaign where blocking bash calls burned 15+ timeouts on solver
+    # searches. Jobs share bash's rlimit knobs above.
+    jobs_enabled: bool = True
+    jobs_max_concurrent: int = 3  # running jobs per session
+    jobs_default_timeout_s: int = 7200  # wall-clock cap via coreutils timeout
+    jobs_max_timeout_s: int = 21600  # ceiling for caller-supplied caps
     # Max bytes for file_write / file_edit / multiedit per call. 0 = no cap.
     max_file_write_size: int = 100 * 1024 * 1024  # 100 MB
     # Max file size for file_edit's whole-file fuzzy-match path. Above this the
@@ -394,6 +402,10 @@ class Settings:
     kernel_idle_seconds: int = 1500
     kernel_snapshot_max_bytes: int = 256 * 1024 * 1024
     kernel_max_concurrent: int = 3  # live kernels across all sessions (LRU reap beyond)
+    # Warn the agent inside repl results when the kernel child's RSS passes
+    # this watermark (field case: 7.4GB child, then in-cell MemoryErrors —
+    # the crash arrived with no warning). 0 disables.
+    kernel_rss_warn_bytes: int = 4 * 1024 * 1024 * 1024  # 4 GB
     # Tool results larger than this (chars) are loaded into the kernel as
     # tool_result_<n> variables with only a head/tail stub in context
     # (prompt-as-a-variable, plan 2c). Every tool except the small exclusion

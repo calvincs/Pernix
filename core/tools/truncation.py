@@ -92,9 +92,25 @@ def truncate_output(
         f"({max_bytes:,} of {len(output):,} chars). "
         f"You are missing content. To read more, call:\n"
         f'  file_read(path="{rel_path}", offset={shown_lines}, limit=200)\n'
-        f"---\n"
+        + (
+            "For WHOLE-file analysis (summarize, extract structure, answer "
+            "questions across all of it), rlm_process handles inputs this "
+            "size in one call instead of many windowed reads.\n"
+            if _rlm_available()
+            else ""
+        )
+        + "---\n"
     ) + preview
 
     metadata["truncated"] = True
     metadata["output_path"] = rel_path
     return preview, metadata
+
+
+def _rlm_available() -> bool:
+    try:
+        from config import settings
+
+        return bool(settings.rlm_enabled)
+    except Exception:
+        return False

@@ -93,7 +93,10 @@ SHELL_DENYLIST = [
     re.compile(r"mount\s+"),
     re.compile(r"chown\s+root"),
     re.compile(r">\s*/etc/"),
-    re.compile(r"python3?\s+-c\s+.*exec\("),
+    # exec( alone is routine compute (approved narrowing, 2026-08-25 —
+    # the broad form blocked a legit ARC solver run); only the
+    # obfuscated-payload shape stays blocked.
+    re.compile(r"python3?\s+-c\s+(?=.*exec\()(?=.*(?:base64|b64decode|fromhex|\\\\x[0-9a-f]{2}))"),
     re.compile(r"--break-system-packages"),
     re.compile(r"pip3?\s+install\s+.*--target\s+/"),
     re.compile(r"pip3?\s+install\s+.*--prefix\s+/"),
@@ -123,7 +126,10 @@ REDIRECT_DENYLIST = [
     re.compile(r"curl.*\|\s*(?:ba|da|z|k)?sh\b"),
     re.compile(r"wget.*\|\s*(?:ba|da|z|k)?sh\b"),
     re.compile(r":\(\)\s*\{"),  # fork bomb
-    re.compile(r"python3?\s+-c\s+.*exec\("),
+    # exec( alone is routine compute (approved narrowing, 2026-08-25 —
+    # the broad form blocked a legit ARC solver run); only the
+    # obfuscated-payload shape stays blocked.
+    re.compile(r"python3?\s+-c\s+(?=.*exec\()(?=.*(?:base64|b64decode|fromhex|\\\\x[0-9a-f]{2}))"),
 ]
 
 
@@ -276,6 +282,43 @@ def _rm_targets_are_safe_caches(command: str) -> bool:
     return True
 
 
+def _rm_targets_are_in_workspace(command: str) -> bool:
+    """True iff every non-flag `rm` target clearly resolves inside the agent
+    workspace. Approved exception (Calvin, 2026-08-25): the workspace is the
+    agent's own scratch tree — refusing `rm -rf arc3/old_solvers` there forced
+    error-prone workarounds (field case 8d411d30d12d). Conservative: env
+    interpolation, parent traversal, and glob-leading targets all fail the
+    check; a glob later in the path is allowed because expansion happens with
+    cwd=workspace and the literal prefix already pins the tree."""
+    from core.tools.paths import workspace
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens or tokens[0] != "rm":
+        return False
+    ws = workspace()
+    targets = [t for t in tokens[1:] if not t.startswith("-")]
+    if not targets:
+        return False
+    for t in targets:
+        if "$" in t or ".." in t.split("/"):
+            return False
+        first_seg = t.lstrip("/").split("/", 1)[0]
+        if any(ch in first_seg for ch in "*?["):
+            return False  # `rm -rf *` — too broad even inside the workspace
+        literal = t.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0]
+        base = Path(literal) if literal.startswith("/") else ws / literal
+        try:
+            resolved = base.resolve()
+        except OSError:
+            return False
+        if not (resolved.is_relative_to(ws) and resolved != ws):
+            return False
+    return True
+
+
 def _check_command_security(command: str) -> str | None:
     """Check command against security rules. Returns error string or None if OK.
 
@@ -323,10 +366,13 @@ def _check_command_security(command: str) -> str | None:
                 # have no system-level consequence.
                 if _rm_targets_are_safe_caches(command):
                     return None
+                if _rm_targets_are_in_workspace(command):
+                    return None
                 return (
                     "Error: Command blocked by security policy: 'rm -rf' is "
                     "denylisted because it can recursively destroy files. "
-                    "Allowed exceptions: 'rm -rf <cache>' where <cache> is one "
+                    "Allowed exceptions: paths inside the agent workspace "
+                    "(data/workspace), or 'rm -rf <cache>' where <cache> is one "
                     "of " + ", ".join(sorted(_SAFE_CACHE_DIRS)) + ". For other "
                     "targets, delete files individually (e.g. 'rm file1 file2') "
                     "or use 'find ... -delete' for narrowly-scoped cleanup."
@@ -343,7 +389,7 @@ def _check_command_security(command: str) -> str | None:
             return (
                 "Error: Command blocked by security policy: matched "
                 "redirect/pipe denylist (writes to /etc, /dev/sd*, "
-                "curl|sh / wget|sh, fork bombs, python -c ...exec()). "
+                "curl|sh / wget|sh, fork bombs, obfuscated python -c payloads). "
                 f"Pattern: {pattern.pattern!r}"
             )
 
@@ -854,7 +900,10 @@ def register(reg) -> None:
             "To start a long-lived background process (server, daemon), fully "
             "detach it so it survives cancellation and group cleanup: "
             "`(setsid cmd </dev/null >app.log 2>&1 &)` — then verify it with a "
-            "separate short command (curl/pgrep) in a follow-up call."
+            "separate short command (curl/pgrep) in a follow-up call. "
+            "For heavy COMPUTE that needs minutes (solver searches, builds), "
+            "prefer job_start instead — it runs detached with captured output "
+            "and progress polling via job_status/job_tail."
         ),
         parameters={
             "type": "object",

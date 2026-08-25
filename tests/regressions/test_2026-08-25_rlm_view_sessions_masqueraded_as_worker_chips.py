@@ -18,12 +18,8 @@ from db import models as db
 
 def test_rlm_view_sessions_are_not_listed_as_workers():
     parent = db.create_session(title="ARC parent")
-    worker = db.create_session(
-        title="solver", session_type="worker", parent_session_id=parent
-    )
-    rlm_view = db.create_session(
-        title="RLM: digest the game source", session_type="rlm", parent_session_id=parent
-    )
+    worker = db.create_session(title="solver", session_type="worker", parent_session_id=parent)
+    rlm_view = db.create_session(title="RLM: digest the game source", session_type="rlm", parent_session_id=parent)
 
     out = asyncio.run(list_workers(parent))
     ids = [w["id"] for w in out["workers"]]
@@ -34,9 +30,7 @@ def test_rlm_view_sessions_are_not_listed_as_workers():
 
 def test_plain_worker_listing_still_works():
     parent = db.create_session(title="plain parent")
-    worker = db.create_session(
-        title="only child", session_type="worker", parent_session_id=parent
-    )
+    worker = db.create_session(title="only child", session_type="worker", parent_session_id=parent)
     out = asyncio.run(list_workers(parent))
     assert [w["id"] for w in out["workers"]] == [worker]
     assert out["workers"][0]["title"] == "only child"

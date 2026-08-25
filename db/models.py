@@ -2769,3 +2769,57 @@ def list_post_mortems_since(created_after: str, limit: int = 20) -> list[dict]:
             (created_after, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Background jobs (job_start / job_status / job_tail / job_kill)
+# ---------------------------------------------------------------------------
+
+
+def create_job(
+    job_id: str,
+    session_id: str,
+    name: str,
+    command: str,
+    pid: int,
+    log_path: str,
+    deadline_s: int,
+) -> None:
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO jobs (id, session_id, name, command, pid, state,
+                                 created_at, deadline_s, log_path)
+               VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
+            (job_id, session_id, name, command, pid, now, deadline_s, log_path),
+        )
+
+
+def update_job(job_id: str, **kwargs) -> None:
+    allowed = {"state", "exit_code", "finished_at", "pid"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return
+    sets = ", ".join(f"{k} = ?" for k in updates)
+    with connect_sessions() as conn:
+        conn.execute(f"UPDATE jobs SET {sets} WHERE id = ?", (*updates.values(), job_id))
+
+
+def get_job(job_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_jobs(session_id: str | None = None, limit: int = 20) -> list[dict]:
+    with connect_sessions() as conn:
+        if session_id:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
