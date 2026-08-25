@@ -747,6 +747,16 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
                 msg = f"Error: Command timed out after {effective_timeout}s"
                 if partial:
                     msg += f"\n[partial output before timeout]\n{partial[-2000:]}"
+                # Pointer at the moment of pain (ARC-3 retest field case: two
+                # solver timeouts, 600s and 1800s, with job_start never
+                # considered — scout-time steering alone doesn't reach the
+                # moment of need).
+                if settings.jobs_enabled:
+                    msg += (
+                        "\n[harness hint] For compute that needs longer than this "
+                        "timeout, job_start runs it detached with no wall limit on "
+                        "your turn — poll job_status/job_tail while you keep working."
+                    )
                 return msg
             finally:
                 if _session and _proc_handle is not None:

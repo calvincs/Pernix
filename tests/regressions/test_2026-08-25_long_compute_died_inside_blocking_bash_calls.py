@@ -108,3 +108,21 @@ def test_status_and_tail_register_non_idempotent():
     assert reg.get("job_status").idempotent is False
     assert reg.get("job_tail").idempotent is False
     assert reg.get("job_start") is not None and reg.get("job_kill") is not None
+
+
+def test_bash_timeout_error_points_at_job_start(monkeypatch):
+    """Field case (cn04 retest, 2026-08-25): two solver timeouts — 600s with
+    partial output and a full 1800s — and the agent never considered
+    job_start. The scout-time LONG COMPUTE rule doesn't reach the moment of
+    need; the timeout error itself now carries the pointer."""
+    monkeypatch.setattr("config.settings.jobs_enabled", True)
+    from core.tools.builtin.core_tools import bash
+
+    out = bash("sleep 30", timeout=1, _context={"session_id": "timeout-hint-test"})
+    assert "timed out" in out
+    assert "job_start" in out
+
+    monkeypatch.setattr("config.settings.jobs_enabled", False)
+    out = bash("sleep 30", timeout=1, _context={"session_id": "timeout-hint-test"})
+    assert "timed out" in out
+    assert "job_start" not in out
