@@ -204,7 +204,37 @@ class SessionKernel:
             self._repl = None
             raise KernelError(f"kernel cell failed: {e}") from e
         self.last_used = time.monotonic()
+        note = self._append_rss_warning(note)
         return result, note
+
+    def _append_rss_warning(self, note: str | None) -> str | None:
+        """Early warning before in-kernel MemoryError: when the child's RSS
+        passes settings.kernel_rss_warn_bytes, tell the agent to offload
+        heavy compute (subprocess / background job) instead of crashing at
+        the 8GB address-space cap with no warning (ARC-3 field case)."""
+        try:
+            warn_at = int(getattr(settings, "kernel_rss_warn_bytes", 0) or 0)
+            repl = self._repl
+            if warn_at <= 0 or repl is None or repl.popen is None:
+                return note
+            rss_kb = 0
+            with open(f"/proc/{repl.popen.pid}/status") as fh:
+                for line in fh:
+                    if line.startswith("VmRSS:"):
+                        rss_kb = int(line.split()[1])
+                        break
+            if rss_kb * 1024 < warn_at:
+                return note
+            cap = int(getattr(settings, "shell_address_space_limit_bytes", 0) or 0)
+            cap_txt = f"/{cap / 1024**3:.0f}GB cap" if cap else ""
+            warning = (
+                f"[kernel memory {rss_kb / 1024**2:.1f}GB{cap_txt} — offload heavy "
+                "compute to a subprocess or background job (job_start) and free "
+                "large variables (del x) before the kernel hits MemoryError]"
+            )
+            return f"{note}\n{warning}" if note else warning
+        except (OSError, ValueError):
+            return note
 
     def bind_variable(self, name: str, text: str) -> None:
         """Load a text payload into the kernel namespace (plan 2c binding).

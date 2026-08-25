@@ -23,10 +23,13 @@ def _global_ws() -> Path:
 
 
 def test_workspace_default_unchanged():
-    """No override -> byte-identical behavior to before 1g."""
+    """No override -> the global workspace leads the roots. /tmp rides along
+    in default mode only (approved 2026-08-25 — bash always wrote there, the
+    file-tool jail bought no containment); override mode excludes it, which
+    test_safe_write_path_confined_to_override enforces."""
     assert paths.WORKSPACE_OVERRIDE.get() is None
     assert paths.workspace() == _global_ws()
-    assert paths.allowed_write_roots() == [_global_ws()]
+    assert paths.allowed_write_roots() == [_global_ws(), Path("/tmp").resolve()]
 
 
 def test_workspace_honors_override(tmp_path):

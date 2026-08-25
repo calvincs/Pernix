@@ -311,6 +311,24 @@ CREATE TABLE IF NOT EXISTS vectors_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Background jobs (job_start/job_status/job_tail/job_kill). Rows outlive the
+-- process: the exit code is written by the job's wrapper shell to a sidecar
+-- file, and job_status lazily reconciles state from pid + sidecar.
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    command TEXT NOT NULL,
+    pid INTEGER,
+    state TEXT NOT NULL DEFAULT 'running',
+    exit_code INTEGER,
+    created_at TEXT NOT NULL,
+    deadline_s INTEGER NOT NULL DEFAULT 0,
+    finished_at TEXT,
+    log_path TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_id, created_at);
 """
 
 # ---------------------------------------------------------------------------
@@ -912,6 +930,27 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_session_goals_one_active
                    ON session_goals(session_id)
                    WHERE status IN ('active', 'paused', 'budget_limited')""",
+        ],
+    ),
+    (
+        27,
+        "background jobs table (job_start/job_status/job_tail/job_kill)",
+        [
+            """CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                command TEXT NOT NULL,
+                pid INTEGER,
+                state TEXT NOT NULL DEFAULT 'running',
+                exit_code INTEGER,
+                created_at TEXT NOT NULL,
+                deadline_s INTEGER NOT NULL DEFAULT 0,
+                finished_at TEXT,
+                log_path TEXT NOT NULL
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_jobs_session
+                   ON jobs(session_id, created_at)""",
         ],
     ),
 ]

@@ -128,6 +128,14 @@ class StuckDetector:
     unresolved_failure_rounds: int = 0
     file_failure_counts: dict = field(default_factory=dict)  # (tool_name, file_path) → int
     tool_failure_counts: dict = field(default_factory=dict)  # tool_name → consecutive-failure count
+    # Signal 12 state: windowed reads/greps of the same file this turn.
+    # ARC-3 field pattern: 12 sessions ground obfuscated 2,800-4,500-line
+    # game sources through 50KB-truncated file_read windows and grep, while
+    # rlm_process — built for exactly that — sat unused (1 use in 13
+    # sessions, and it was the campaign's best single move). ≥5 windowed
+    # passes over one file queues a one-time RLM pointer.
+    file_read_counts: dict = field(default_factory=dict)  # path → count
+    pending_hints: list = field(default_factory=list)  # one-time system hints
 
     def evaluate(self, content: str, tool_calls: list[dict] | None, tool_failures: dict, registry) -> tuple[float, int]:
         """Evaluate stuck signals. Returns (score 0-1, repeat_count)."""
@@ -186,6 +194,38 @@ class StuckDetector:
                 score += 0.4
                 self.behavioral_flags.add("file_edit_loop")
                 break
+
+        # Signal 12: Big-file grind — the same file read/grepped over and
+        # over (windowed reads evade every exact-args check because offset
+        # changes each call). Not a stuck score: the agent IS making
+        # progress, just expensively. Queues a one-time rlm_process pointer
+        # instead of a score bump.
+        if tool_calls:
+            import json as _json
+
+            for tc in tool_calls:
+                if tc.get("name") not in ("file_read", "grep"):
+                    continue
+                try:
+                    args = _json.loads(tc.get("arguments") or "{}")
+                except (ValueError, TypeError):
+                    continue
+                path = args.get("path") or args.get("file") or ""
+                if not path:
+                    continue
+                self.file_read_counts[path] = self.file_read_counts.get(path, 0) + 1
+                if self.file_read_counts[path] == 5 and "rlm_hint" not in self.behavioral_flags:
+                    from config import settings as _settings
+
+                    if getattr(_settings, "rlm_enabled", False):
+                        self.behavioral_flags.add("rlm_hint")
+                        self.pending_hints.append(
+                            f"[harness hint] You have read/grepped '{path}' 5+ times "
+                            "this turn. For whole-file analysis (summarize, extract "
+                            "structure/mechanics, answer questions across all of it), "
+                            "one rlm_process call handles the entire file and returns "
+                            "the digest — usually cheaper than more windowed reads."
+                        )
 
         # Signal 11: Same NON-file tool failing repeatedly with varied args.
         # Generalises Signal 7 beyond file tools — catches loops like call_model
@@ -1111,6 +1151,12 @@ async def run_agent(
 
         # Stuck detection
         score, repeats = stuck.evaluate(collected_content, collected_tool_calls, tool_failures, registry)
+        # One-time capability pointers queued by the detector (Signal 12's
+        # rlm_process hint). Informational, not stuck-flow: they must not
+        # touch score/repeats or the nudge budget.
+        for _hint in stuck.pending_hints:
+            await asyncio.to_thread(db.add_message, session_id, "system", _hint)
+        stuck.pending_hints.clear()
         _stuck_action, _stuck_ask_user_continues = await _handle_stuck_signals(
             session_id=session_id,
             score=score,

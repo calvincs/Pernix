@@ -79,7 +79,9 @@ def test_extract_malformed_quoting():
         "mount /dev/sda /mnt",
         "chown root /tmp/file",
         "> /etc/hosts",
-        "python -c 'exec(bad_code)'",
+        # Plain exec( is legitimate compute since the 2026-08-25 narrowing;
+        # only the obfuscated-payload shape stays blocked.
+        "python -c 'import base64; exec(base64.b64decode(payload))'",
     ],
 )
 def test_security_blocked(cmd):
