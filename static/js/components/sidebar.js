@@ -195,7 +195,8 @@ export function renderSessionList(sessions, activeSid) {
         if (!group.length) continue;
 
         const hasActive = group.some(s => s.id === activeSid) ||
-            group.some(s => (childrenByParent[s.id] || []).some(w => w.id === activeSid));
+            group.some(s => (childrenByParent[s.id] || []).some(w => w.id === activeSid ||
+                (childrenByParent[w.id] || []).some(g => g.id === activeSid)));
         // User's saved choice wins over hasActive — otherwise clicking to
         // collapse the group containing the active session "un-toggles"
         // itself on the next SSE redraw because hasActive forces uncollapsed.
@@ -270,7 +271,9 @@ function _renderSessionWithWorkers(session, container, activeSid, childrenByPare
     const collapsed = wasCollapsed ?? true;
 
     const nWorkers = children.filter(c => c.session_type === 'worker').length;
-    const nRlm = children.length - nWorkers;
+    const nGrandRlm = children.reduce(
+        (acc, c) => acc + (childrenByParent[c.id] || []).length, 0);
+    const nRlm = children.length - nWorkers + nGrandRlm;
     const parts = [];
     if (nWorkers) parts.push(`${nWorkers} worker${nWorkers > 1 ? 's' : ''}`);
     if (nRlm) parts.push(`${nRlm} RLM run${nRlm > 1 ? 's' : ''}`);
@@ -291,11 +294,20 @@ function _renderSessionWithWorkers(session, container, activeSid, childrenByPare
     container.appendChild(summary);
     for (const w of children) {
         _renderSessionItem(w, group, activeSid, true);
+        // Grandchildren: RLM runs owned by a worker nest under that worker
+        // (one extra indent level) instead of falling to the orphan list.
+        const grand = childrenByParent[w.id];
+        if (grand && grand.length) {
+            delete childrenByParent[w.id];
+            for (const g of grand) {
+                _renderSessionItem(g, group, activeSid, true, 2);
+            }
+        }
     }
     container.appendChild(group);
 }
 
-function _renderSessionItem(session, container, activeSid, isWorker) {
+function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) {
     const typeKey = _getTypeKey(session);
     const typeDef = SESSION_TYPES[typeKey];
 
@@ -393,6 +405,7 @@ function _renderSessionItem(session, container, activeSid, isWorker) {
     const classes = ['session-item'];
     if (session.id === activeSid) classes.push('active');
     if (isWorker) classes.push('worker');
+    if (depth > 1) classes.push('depth-2');
     if (typeKey === 'cron') classes.push('cron-session');
     if (typeKey === 'snooze') classes.push('snooze-session');
     if (typeKey === 'rlm') classes.push('rlm-session');

@@ -2266,6 +2266,9 @@ function sessionTypeDot(sessionType) {
         normal: 'chat',
         worker: 'worker',
         cron: 'cron',
+        rlm: 'rlm',
+        snooze: 'snooze',
+        canary: 'canary',
     };
     const cls = typeMap[sessionType] || 'chat';
     return el('span', { class: `session-dot ${cls}`, title: sessionType || 'session' });

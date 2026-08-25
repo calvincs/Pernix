@@ -379,6 +379,10 @@
 .session-item.worker .session-title {
     opacity: 0.8;
 }
+/* Second nesting level: RLM runs owned by a worker */
+.session-item.depth-2 {
+    padding-left: calc(var(--sp-3) + 32px);
+}
 .worker-prefix {
     color: var(--text-faint);
     margin-right: 4px;

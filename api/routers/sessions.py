@@ -113,6 +113,13 @@ async def list_workers(session_id: str):
     manager = get_manager()
     out = []
     for r in rows:
+        # get_worker_sessions returns ALL children; RLM view sessions
+        # (session_type='rlm') are read-only trace anchors, not workers —
+        # listing them here made the strip draw them as teal worker chips
+        # that never retired (their finished state is 'idle', not
+        # 'idle_ready'). The strip gets its RLM chips from /api/rlm/runs.
+        if (r.get("session_type") or "worker") != "worker":
+            continue
         w = manager.get(r["id"])
         state = sv2._current_state(w).value if w is not None else (r.get("state_v2") or r.get("state") or "unknown")
         out.append(
