@@ -1934,6 +1934,24 @@ class SessionManager:
             return
         watched: set = getattr(parent, "_watched_worker_ids", set())
         if worker_session.session_id not in watched:
+            # Unwatched worker (spawned without auto_resume_parent). If the
+            # parent is watching nothing and already sits idle — typically a
+            # turn that hit the round cap and ended while the worker flew on
+            # (field case: cd82 parent 41e10cf3c7bd, worker ef7758503a20) —
+            # the finished result would otherwise land nowhere: no resume,
+            # no notification, the parent never learns. Route it through the
+            # documented Gap-1 idle-resume instead. A parent that is mid-turn,
+            # awaiting the user, or deliberately watching OTHER workers keeps
+            # the old semantics.
+            from sessions import state_v2 as sv2
+
+            if not watched and sv2._current_state(parent) is sv2.SessionStateV2.IDLE_READY:
+                logger.info(
+                    "Unwatched worker %s finished with parent %s idle — Gap-1 resume",
+                    worker_session.session_id[:12],
+                    parent_id[:12],
+                )
+                await self._resume_from_workers(parent)
             return
         watched.discard(worker_session.session_id)
         self._persist_watched(parent)
