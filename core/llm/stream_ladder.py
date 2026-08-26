@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -96,6 +97,47 @@ class StreamOutcome:
     # itself. Returned rather than raised so the ladder still reports whether
     # it had already burned the fallback before the overflow hit.
     context_overflow: FailoverError | None = None
+
+
+# --- Quota circuit breaker state -------------------------------------------
+# model -> monotonic deadline until which failover TO that model is refused.
+# Populated when a stream attempt dies on an exhausted-quota error (OpenRouter
+# daily key cap 403, billing hard limits). Field case 2026-08-25/26: the
+# fallback 403'd its daily cap every time, so each failover paid one doomed
+# request and masked the primary's real error — killing two workers and a
+# turn before anyone saw the word "budget".
+_quota_block_until: dict[str, float] = {}
+
+_QUOTA_ERR_RE = re.compile(
+    r"key limit exceeded|quota exceeded|insufficient[_ ]quota|billing hard limit",
+    re.IGNORECASE,
+)
+
+
+def _is_budget_exhaustion(err: str) -> bool:
+    """True for the per-session LLM time-limit error (semaphore.py)."""
+    return "exceeded the" in err and "LLM time limit" in err
+
+
+def _is_quota_error(err: str) -> bool:
+    return bool(_QUOTA_ERR_RE.search(err))
+
+
+def _note_quota_block(model: str) -> None:
+    cooldown = float(getattr(settings, "provider_quota_cooldown_s", 600) or 0)
+    if cooldown > 0:
+        _quota_block_until[model] = time.monotonic() + cooldown
+
+
+def _quota_block_remaining(model: str) -> float:
+    until = _quota_block_until.get(model)
+    if until is None:
+        return 0.0
+    remaining = until - time.monotonic()
+    if remaining <= 0:
+        _quota_block_until.pop(model, None)
+        return 0.0
+    return remaining
 
 
 async def stream_with_failover(
@@ -225,6 +267,17 @@ async def stream_with_failover(
         if err is None:
             return outcome
 
+        if _is_quota_error(err):
+            _note_quota_block(current_model)
+
+        # Budget exhaustion is not a provider fault. Switching models cannot
+        # buy time on a spent per-session clock, and the fallback's own
+        # failure then MASKS the budget error so the agent loop's soft-land
+        # (_terminate_stream_error -> BUDGET_EXHAUSTED) never runs and the
+        # turn hard-errors. Propagate untouched.
+        if _is_budget_exhaustion(err):
+            return outcome
+
         if retries < len(STREAM_BACKOFFS) and is_stream_retryable(err):
             wait = STREAM_BACKOFFS[retries]
             retries += 1
@@ -247,6 +300,17 @@ async def stream_with_failover(
         # silently had no failover at all.
         fallback = settings.fallback_model
         if fallback and not tried_fallback and fallback != current_model:
+            _blocked = _quota_block_remaining(fallback)
+            if _blocked > 0:
+                logger.warning(
+                    "%s NOT failing over for session %s: fallback %s is quota-capped "
+                    "for another %.0fs — returning the original error",
+                    label,
+                    session_id,
+                    fallback,
+                    _blocked,
+                )
+                return outcome
             tried_fallback = True
             retries = 0
             current_model = fallback

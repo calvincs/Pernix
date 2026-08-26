@@ -2312,6 +2312,35 @@ def finish_rlm_run(
         )
 
 
+def get_unsurfaced_rlm_runs(session_id: str, limit: int = 3) -> list[dict]:
+    """Terminal depth-0 runs whose outcome never reached the agent.
+
+    A completed run's answer returns through the rlm_process call that made
+    it (and is marked surfaced when that tool result is saved), so only
+    non-completed terminal runs can be orphans. Nested runs (depth > 0)
+    report to their parent engine, never to the session transcript.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT * FROM rlm_runs
+               WHERE session_id = ? AND depth = 0
+                 AND finished_at IS NOT NULL AND surfaced_at IS NULL
+                 AND status NOT IN ('running', 'completed')
+               ORDER BY finished_at DESC LIMIT ?""",
+            (session_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_rlm_run_surfaced(run_id: str) -> None:
+    """Record that the run's outcome reached the agent's transcript."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE rlm_runs SET surfaced_at = ? WHERE run_id = ? AND surfaced_at IS NULL",
+            (_now(), run_id),
+        )
+
+
 def fail_orphaned_rlm_runs() -> int:
     """Mark rlm_runs rows stuck at status='running' as 'orphaned'.
 

@@ -961,6 +961,16 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE questions ADD COLUMN answered_at TEXT",
         ],
     ),
+    (
+        29,
+        "rlm_runs learn whether their outcome ever reached the agent "
+        "(orphan surfacing; history backfilled as already-seen)",
+        [
+            "ALTER TABLE rlm_runs ADD COLUMN surfaced_at TEXT",
+            """UPDATE rlm_runs SET surfaced_at = COALESCE(finished_at, created_at)
+               WHERE status != 'running'""",
+        ],
+    ),
 ]
 
 

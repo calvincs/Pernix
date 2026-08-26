@@ -249,15 +249,7 @@ async def distill_session(
             continue
 
         tags = entry.get("tags", "")
-        if _ENUMERATION_RE.search(content):
-            grounding = _trigram_grounding(content, transcript)
-            if grounding < 0.1:
-                tags = f"{tags},unverified-distill" if tags else "unverified-distill"
-                logger.info(
-                    "Distill: enumerated candidate for %s has %.0f%% verbatim grounding in the transcript — tagged unverified-distill",
-                    entry.get("file") or "?",
-                    grounding * 100,
-                )
+        content, tags = _apply_grounding_guard(content, tags, entry, transcript)
         # Add date tag
         tags = f"{tags},{time.strftime('%Y-%m-%d')}" if tags else time.strftime("%Y-%m-%d")
         if session_type == "worker":
@@ -333,3 +325,33 @@ def _parse_entries(text: str) -> list[dict]:
     except json.JSONDecodeError:
         logger.debug("Failed to parse distillation JSON: %s", text[:200])
     return []
+
+
+def _apply_grounding_guard(content: str, tags: str, entry: dict, transcript: str) -> tuple[str, str]:
+    """Down-rank enumerated candidates the transcript does not verbatim support.
+
+    Tagging alone was not enough: the recall renderer never showed tags, so a
+    1%-grounded candidate that opened with "Solved ARC2 136b0064" at
+    @weight:high was read as authoritative by the next worker (field case
+    pernix.arc_agi_game_completion_protocols @1787694955). Verification
+    status belongs in the claim text itself, and an unsupported claim must
+    not carry high weight.
+    """
+    if not _ENUMERATION_RE.search(content):
+        return content, tags
+    grounding = _trigram_grounding(content, transcript)
+    if grounding >= 0.1:
+        return content, tags
+    tags = f"{tags},unverified-distill" if tags else "unverified-distill"
+    logger.info(
+        "Distill: enumerated candidate for %s has %.0f%% verbatim grounding in the transcript — tagged unverified-distill",
+        entry.get("file") or "?",
+        grounding * 100,
+    )
+    content = (
+        f"UNVERIFIED (distilled at {grounding:.0%} verbatim grounding — "
+        f"treat as hypothesis, not established fact): {content}"
+    )
+    if entry.get("weight") == "high":
+        entry["weight"] = "normal"
+    return content, tags
