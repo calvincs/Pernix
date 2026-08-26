@@ -143,9 +143,20 @@ Configure in Settings:
 3. Set `OPENROUTER_MODELS` in `.env` to the model IDs you want available (comma-separated), or leave it empty to show all models on your account. Reasonable starting set: `anthropic/claude-sonnet-4.6,anthropic/claude-haiku-4.5,x-ai/grok-4.1-fast`
 4. In Settings, set `llm_model` to an OpenRouter model ID (e.g. `anthropic/claude-sonnet-4.6`)
 
+### OpenAI & OpenAI-Compatible Servers (Cloud or Self-Hosted, Optional)
+
+A native provider for the OpenAI API — and, because the base URL is overridable, for **any OpenAI-compatible server**: vLLM, LM Studio, or a llama.cpp server.
+
+1. Set `OPENAI_API_KEY=sk-...` in `.env` (the key is env-only by design — it never lands in `data/settings.json`). Self-hosted servers that don't check keys still work; just set the URL
+2. In Settings, point `openai_base_url` at the server — `https://api.openai.com/v1` (default), or e.g. `http://your-box:8000/v1` for vLLM
+3. List the models this server provides in `openai_models` (or the `OPENAI_MODELS` env var). This matters: bare names like `gpt-4o` otherwise route to Ollama — the whitelist wins over that heuristic and keeps the model dropdown curated
+4. Set `llm_model` (or `background_model` / `fallback_model`) to one of those names
+
+Full routing rules and walkthroughs: [docs/deployment/llm-providers.md](docs/deployment/llm-providers.md).
+
 ### Using Both Simultaneously
 
-Pernix can use Ollama and OpenRouter at the same time. You can use a cloud model as your Primary (`llm_model`) and a local Ollama model as your Backup (`fallback_model`) — if OpenRouter is rate-limited, Pernix switches to Ollama automatically. Backup doesn't have to cross providers, though: a second Ollama model is a perfectly good backup for an Ollama primary, and failover still works.
+Pernix can use Ollama, OpenRouter, and the OpenAI provider at the same time. You can use a cloud model as your Primary (`llm_model`) and a local Ollama model as your Backup (`fallback_model`) — if OpenRouter is rate-limited, Pernix switches to Ollama automatically. Backup doesn't have to cross providers, though: a second Ollama model is a perfectly good backup for an Ollama primary, and failover still works.
 
 When both providers have a model with the same name, Ollama wins (local, free, lower latency). To use the OpenRouter version of a model, add it explicitly to `OPENROUTER_MODELS` in your `.env`.
 
