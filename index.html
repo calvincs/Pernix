@@ -13,21 +13,21 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pernix — A self-hosted agent harness</title>
-<meta name="description" content="A self-hosted agent harness with persistent memory and durable workflows. Build the work loop once and swap models freely — local with Ollama, cloud via OpenRouter, or both. You own the model, the memory, the machine.">
+<meta name="description" content="A self-hosted agent harness with persistent memory and long-running autonomy. Build the work loop once and swap models freely — local with Ollama, cloud via OpenRouter, or both. You own the model, the memory, the machine.">
 <link rel="canonical" href="https://pernix.cc/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Pernix">
 <meta property="og:locale" content="en_US">
 <meta property="og:url" content="https://pernix.cc/">
 <meta property="og:title" content="Pernix — A self-hosted agent harness">
-<meta property="og:description" content="Persistent memory, durable workflows, swappable models. Local with Ollama, cloud via OpenRouter, or both. You own the model, the memory, the machine.">
+<meta property="og:description" content="Persistent memory, long-running autonomy, swappable models. Local with Ollama, cloud via OpenRouter, or both. You own the model, the memory, the machine.">
 <meta property="og:image" content="https://pernix.cc/img/og.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Pernix — a self-hosted agent harness. Golden filament sigil on black.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Pernix — A self-hosted agent harness">
-<meta name="twitter:description" content="Persistent memory, durable workflows, swappable models. Local with Ollama, cloud via OpenRouter, or both.">
+<meta name="twitter:description" content="Persistent memory, long-running autonomy, swappable models. Local with Ollama, cloud via OpenRouter, or both.">
 <meta name="twitter:image" content="https://pernix.cc/img/og.jpg">
 <link rel="icon" type="image/png" href="img/favicon.png">
 <link rel="apple-touch-icon" href="img/sigil.png">
@@ -47,7 +47,8 @@
   "operatingSystem": "Linux, macOS",
   "license": "https://opensource.org/license/mit",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-  "description": "A self-hosted agent harness with persistent memory and durable workflows. Runs locally with Ollama or in the cloud via OpenRouter.",
+  "softwareVersion": "3.0.0",
+  "description": "A self-hosted agent harness with persistent memory and long-running autonomy. Runs locally with Ollama or in the cloud via OpenRouter.",
   "codeRepository": "https://github.com/calvincs/Pernix"
 }
 </script>
@@ -87,6 +88,7 @@
       <a href="#api">api</a>
       <a href="#identity">soul</a>
       <a href="#start">start</a>
+      <a href="#release">v3.0.0</a>
       <a href="https://github.com/calvincs/Pernix/tree/main/docs" target="_blank" rel="noopener">docs ↗</a>
       <a class="ghub" href="https://github.com/calvincs/Pernix" target="_blank" rel="noopener">github ↗</a>
     </nav>
@@ -144,7 +146,7 @@
     <article class="vow reveal">
       <span class="vow-num">I</span>
       <h3>The model</h3>
-      <p>Local with Ollama, cloud via your own OpenRouter key, or both — mixed freely. A fast model scouts and plans. A capable one executes. A lighter one handles background work. Workers pick whichever model fits their task. The workflow doesn't care which brain is inside: swap freely, your keys, your routing, your call.</p>
+      <p>Local with Ollama, cloud via your own OpenRouter key, or both — mixed freely. A fast model scouts and plans. A capable one executes. A lighter one handles background work. Workers pick whichever model fits their task. The loop doesn't care which brain is inside: swap freely, your keys, your routing, your call.</p>
     </article>
     <article class="vow reveal">
       <span class="vow-num">II</span>
@@ -188,8 +190,8 @@
         <span class="window-url">localhost:8090</span>
       </div>
       <img class="window-shot" src="img/app.png" loading="lazy" width="1360" height="850"
-           alt="The Pernix web UI: a session where the agent has just built and cron-scheduled a morning-brief workflow, with model, context, and state readouts in the status bar.">
-      <p class="window-caption">An unedited session: asked for a morning brief, the agent built a three-step workflow and put it on cron. Local model, one take.</p>
+           alt="The Pernix web UI: a session where the agent has just drafted and cron-scheduled a morning brief, with model, context, and state readouts in the status bar.">
+      <p class="window-caption">An unedited session: asked for a morning brief, the agent drafted the procedure and put it on cron. Local model, one take.</p>
     </div>
   </div>
 </section>
@@ -336,8 +338,8 @@
     <article class="layer reveal">
       <header class="layer-h">
         <span class="layer-key">layer 03</span>
-        <h3>Workflows</h3>
-        <p class="layer-tag">repeatable markdown recipes</p>
+        <h3>Autonomy</h3>
+        <p class="layer-tag">a finish line, not a step graph</p>
       </header>
       <svg class="layer-viz" viewBox="0 0 220 110" aria-hidden="true">
         <line x1="30" y1="22" x2="100" y2="55" stroke="rgba(212,168,67,0.4)" stroke-width="1"/>
@@ -353,12 +355,12 @@
         <rect x="162" y="80" width="16" height="16" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
         <rect x="192" y="47" width="16" height="16" fill="#d4a843"/>
       </svg>
-      <p class="layer-body">A workflow is a <code>WORKFLOW.md</code> recipe in <code>data/workflows/</code> — YAML-frontmatter steps with explicit dependencies and parallel waves. Describe a job you do every Monday and the agent can draft the workflow itself, submitted for your approval before it ever runs. The same recipe runs unchanged whether the brain inside is a local model, a frontier API, or a mix of both.</p>
+      <p class="layer-body">A <strong>goal</strong> is intent that outlives a turn — budgeted in tokens, time, and continuations, auto-resumed when a turn hits its ceiling. A <strong>gate</strong> is a deterministic shell check the model cannot talk its way past. <strong>Heartbeats</strong> steer running work without interrupting it. Declare the finish line, not the step graph — the agent decides each next step from what the last one actually returned.</p>
       <ul class="layer-bits">
-        <li>frontmatter steps with depends_on</li>
-        <li>parallel waves auto-dispatched</li>
-        <li>agent-drafted, user-approved</li>
-        <li>model-agnostic by design</li>
+        <li>gates: pass/fail by exit code</li>
+        <li>goals with budgets + continuations</li>
+        <li>heartbeats at round boundaries</li>
+        <li>unattended multi-hour runs</li>
       </ul>
     </article>
 
@@ -387,9 +389,9 @@
         <text x="168" y="58" font-family="DM Mono" font-size="6" fill="#5a5040">tue</text>
         <text x="168" y="83" font-family="DM Mono" font-size="6" fill="#d4a843">now</text>
       </svg>
-      <p class="layer-body">Put a session or a whole workflow on a schedule. Each run gets its own session — the morning brief is built before you wake, the weekly digest writes itself, the watchdog never sleeps. When something needs you, the agent can ping your phone through the PWA's push notifications or a webhook.</p>
+      <p class="layer-body">Put a standing prompt on a schedule. Each run gets its own session — the morning brief is built before you wake, the weekly digest writes itself, the watchdog never sleeps. When something needs you, the agent can ping your phone through the PWA's push notifications or a webhook.</p>
       <ul class="layer-bits">
-        <li>schedule sessions or workflows</li>
+        <li>every run in its own session</li>
         <li>cron presets in the UI</li>
         <li>runs unattended, results in workspace</li>
         <li>push / webhook alerts</li>
@@ -398,7 +400,7 @@
   </div>
 
   <p class="layer-foot reveal">
-    <em>One conversation. Many workers. Many recipes. A clock above them all.</em> &nbsp; Pernix is happiest when you use all four.
+    <em>One conversation. Many workers. A finish line. A clock above them all.</em> &nbsp; Pernix is happiest when you use all four.
   </p>
 </section>
 
@@ -473,20 +475,20 @@
   <p class="state-foot reveal">Edges drawn from the table in <code>sessions/state_v2.py</code>. Two housekeeping reasons are omitted for legibility: <code>reaper-unstick</code> and <code>cancel-timeout</code> return any stuck state to <code>idle_ready</code> — explicit rows in the table, not a generic force.</p>
 </section>
 
-<!-- ========== DURABLE WORKFLOW THESIS ========== -->
+<!-- ========== DURABLE LOOP THESIS ========== -->
 <section class="durable" id="durable">
   <p class="section-label reveal">VI. The thesis</p>
   <h2 class="section-title reveal">Build the loop once.<br><em>Swap the brain freely.</em></h2>
-  <p class="section-sub reveal">A chatbot is where you ask for help. A harness is where work happens — a job to do, a place to run, memory of what came before, and enough structure that the model can change without the workflow noticing.</p>
+  <p class="section-sub reveal">A chatbot is where you ask for help. A harness is where work happens — a job to do, a place to run, memory of what came before, and enough structure that the model can change without the work noticing.</p>
 
   <div class="durable-trio">
     <div class="durable-col reveal">
       <h4>The loop is stable</h4>
-      <p>Define the workflow once — steps, tools, retries, schedule. It runs the same today and next quarter. <em>The loop outlives the brain.</em></p>
+      <p>Define the job once — the skill, the gates, the schedule. It runs the same today and next quarter. <em>The loop outlives the brain.</em></p>
     </div>
     <div class="durable-col reveal">
       <h4>The brain is swappable</h4>
-      <p>Cheap local passes, frontier reasoning, a vision specialist in one worker and a code model in the next. <em>The workflow doesn't care which brain is inside.</em></p>
+      <p>Cheap local passes, frontier reasoning, a vision specialist in one worker and a code model in the next. <em>The loop doesn't care which brain is inside.</em></p>
     </div>
     <div class="durable-col reveal">
       <h4>The memory is yours</h4>
@@ -529,7 +531,7 @@
       <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="24" cy="24" r="16" fill="none" stroke="currentColor" stroke-width="1"/><line x1="24" y1="14" x2="24" y2="24" stroke="currentColor" stroke-width="1"/><line x1="24" y1="24" x2="32" y2="28" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="24" r="1.5" fill="currentColor"/></svg>
       <h4>Cron scheduling</h4>
       <p>Run agents on a schedule. Morning brief, weekly digest, watchdog scripts — all built in.</p>
-      <p class="cap-tools">schedule_job · schedule_workflow · list_scheduled_jobs</p>
+      <p class="cap-tools">schedule_job · list_scheduled_jobs · pause / resume</p>
     </article>
     <article class="cap reveal">
       <svg class="cap-icon" viewBox="0 0 48 48"><path d="M10 24 Q 24 8, 38 24" fill="none" stroke="currentColor" stroke-width="1"/><path d="M10 24 Q 24 40, 38 24" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="24" r="4" fill="none" stroke="currentColor" stroke-width="1"/></svg>
@@ -546,19 +548,19 @@
     <article class="cap reveal">
       <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="16" cy="24" r="6" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="32" cy="24" r="6" fill="none" stroke="currentColor" stroke-width="1"/><line x1="22" y1="24" x2="26" y2="24" stroke="currentColor" stroke-width="1"/><line x1="10" y1="14" x2="6" y2="14" stroke="currentColor" stroke-width="0.6"/><line x1="38" y1="14" x2="42" y2="14" stroke="currentColor" stroke-width="0.6"/></svg>
       <h4>A model per role</h4>
-      <p>Different model for primary, scout, fallback, and background work. Ollama, OpenRouter, or both. Auto-fallback to your local model when the cloud rate-limits, times out, or hiccups.</p>
+      <p>Three roles — Primary, Background, Backup — across Ollama, OpenRouter, or any OpenAI-compatible server. Auto-fallback to your backup model when the cloud rate-limits, times out, or hiccups.</p>
       <p class="cap-tools">switch_model · list_available_models · call_model</p>
     </article>
     <article class="cap reveal">
       <svg class="cap-icon" viewBox="0 0 48 48"><path d="M8 24 Q 24 10, 40 24 Q 24 38, 8 24 Z" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="24" r="5" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="24" r="1.5" fill="currentColor"/><path d="M12 38 Q 18 34, 24 38 Q 30 42, 36 38" fill="none" stroke="currentColor" stroke-width="0.7" opacity="0.6"/></svg>
       <h4>Sees, hears, reads</h4>
-      <p>Attach images for vision models, audio in any common format — transcoded to WAV automatically — and PDFs, extracted to text the agent can read and search.</p>
-      <p class="cap-tools">images · audio → wav · pdf → text</p>
+      <p>Attach images for vision models, audio in any common format — transcoded to WAV automatically — and PDFs, extracted to text the agent can read and search. With <code>view_image</code>, the agent can also look at images it renders itself.</p>
+      <p class="cap-tools">images · audio → wav · pdf → text · view_image</p>
     </article>
     <article class="cap reveal">
       <svg class="cap-icon" viewBox="0 0 48 48"><rect x="16" y="8" width="16" height="32" rx="2" fill="none" stroke="currentColor" stroke-width="1"/><line x1="21" y1="12" x2="27" y2="12" stroke="currentColor" stroke-width="0.8"/><circle cx="24" cy="35" r="1.5" fill="none" stroke="currentColor" stroke-width="0.8"/><path d="M36 14 Q 40 19, 36 24" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.7"/><path d="M12 14 Q 8 19, 12 24" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.7"/></svg>
       <h4>In your pocket</h4>
-      <p>The web UI is an installable PWA with a mobile-first layout and browser push notifications. In network mode, a QR code on the console gets your phone onto it in seconds.</p>
+      <p>The web UI is an installable PWA with a mobile-first layout, browser push notifications, and voice input — four dictation engines, each labeled with where your audio goes. In network mode, a QR code on the console gets your phone onto it in seconds.</p>
       <p class="cap-tools">pwa · web push · run.py --qr</p>
     </article>
     <article class="cap reveal">
@@ -591,6 +593,24 @@
       <p>Left alone, the agent raises hypotheses about its own memory — contradictions, stale lessons, tool patterns — then tries to <em>refute</em> them against recorded outcomes. A read-only journal narrates each day. Off by default.</p>
       <p class="cap-tools">workspace/dreams/ · dream journal</p>
     </article>
+    <article class="cap reveal">
+      <svg class="cap-icon" viewBox="0 0 48 48"><rect x="8" y="14" width="32" height="20" rx="2" fill="none" stroke="currentColor" stroke-width="1"/><polyline points="12,24 18,24 21,18 25,30 28,24 36,24" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="16" y1="40" x2="32" y2="40" stroke="currentColor" stroke-width="0.8" opacity="0.6"/></svg>
+      <h4>Long compute</h4>
+      <p>Detached background jobs for work that outlives a turn: output captured to a log, completion durable across restarts, wall-clock caps, whole-group kill. The agent starts a solver, keeps working, and reads the log when it lands.</p>
+      <p class="cap-tools">job_start · job_tail · job_kill</p>
+    </article>
+    <article class="cap reveal">
+      <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="24" cy="24" r="15" fill="none" stroke="currentColor" stroke-width="1"/><path d="M24 9 V 24 L 33 30" fill="none" stroke="currentColor" stroke-width="0.8"/><rect x="18" y="18" width="12" height="12" fill="none" stroke="currentColor" stroke-width="0.7" opacity="0.6"/></svg>
+      <h4>A REPL that remembers</h4>
+      <p>An optional persistent per-session Python kernel. Variables survive tool rounds, turns, compaction — and restarts, via snapshots. Huge tool results bind as variables instead of flooding the context window. Off by default.</p>
+      <p class="cap-tools">repl · session kernel · snapshots</p>
+    </article>
+    <article class="cap reveal">
+      <svg class="cap-icon" viewBox="0 0 48 48"><polyline points="8,36 16,30 24,32 32,22 40,14" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="40" cy="14" r="2.5" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="8" y1="40" x2="40" y2="40" stroke="currentColor" stroke-width="0.6" opacity="0.5"/></svg>
+      <h4>Gets better, provably</h4>
+      <p>Golden tasks re-run headlessly measure whether the agent is actually improving; a governed policy store applies low-risk edits with a veto window, full history, and one-click rollback — and a tripwire flags any batch that makes things worse. Off by default.</p>
+      <p class="cap-tools">canary suite · adaptive layer · telos</p>
+    </article>
   </div>
 </section>
 
@@ -622,7 +642,7 @@
       </div>
       <div class="swagger-body">
         <div class="swagger-h">
-          <span class="swagger-name">Pernix API <span class="swagger-ver">v0.x.x</span></span>
+          <span class="swagger-name">Pernix API <span class="swagger-ver">v3.0.0</span></span>
         </div>
         <div class="swagger-route get">
           <span class="verb get">GET</span>
@@ -681,7 +701,7 @@ requests.post(<span class="str">"http://localhost:8090/api/chat"</span>, json={
           <span class="route-desc">Hybrid BM25 search across memories</span>
         </div>
         <div class="swagger-foot">
-          <span class="muted">+ 89 more endpoints · openapi.json</span>
+          <span class="muted">+ 117 more endpoints · openapi.json</span>
         </div>
       </div>
     </div>
@@ -827,7 +847,7 @@ and communicate clearly.
       <li class="reveal"><span class="step-n">01</span><div><h4>Install the prerequisites</h4><p>Python 3.11+. <a class="link" href="https://ollama.ai" target="_blank" rel="noopener">Ollama</a> if you want local models — pull a current Qwen 3 release. An OpenRouter key works too; Ollama is optional.</p></div></li>
       <li class="reveal"><span class="step-n">02</span><div><h4>Clone & install</h4><p>Standard Python: clone, venv, <code>pip install -r requirements.txt</code>. Optional: copy <code>.env.example</code> for OpenRouter or Tavily keys.</p></div></li>
       <li class="reveal"><span class="step-n">03</span><div><h4>Run it</h4><p><code>python run.py</code>. Open <code>localhost:8090</code>. Pick a model in Settings. Say hello — and open <code>/docs</code> in another tab to watch the API.</p></div></li>
-      <li class="reveal"><span class="step-n">04</span><div><h4>Make it yours</h4><p>Edit <code>SOUL.md</code>. Write a skill. Save a workflow. Schedule it on cron. Read the code in <code>core/</code> — it fits in your head.</p></div></li>
+      <li class="reveal"><span class="step-n">04</span><div><h4>Make it yours</h4><p>Edit <code>SOUL.md</code>. Write a skill. Set a goal behind a gate. Schedule it on cron. Read the code in <code>core/</code> — it fits in your head.</p></div></li>
     </ol>
 
     <div class="terminal reveal">
@@ -849,9 +869,45 @@ and communicate clearly.
   </div>
 </section>
 
+<!-- ========== RELEASE v3.0.0 ========== -->
+<section class="honest" id="release">
+  <p class="section-label reveal">XI. The release</p>
+  <h2 class="section-title reveal">New in <em>v3.0.0</em>.</h2>
+  <p class="section-sub reveal">Everything since v2.9.0 under one tag — two months of field campaigns, distilled. The full story is in the <a class="link" href="https://github.com/calvincs/Pernix/blob/main/CHANGELOG.md" target="_blank" rel="noopener">changelog</a>; upgrade notes in the <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md" target="_blank" rel="noopener">upgrade guide</a>.</p>
+
+  <div class="honest-grid">
+    <article class="honest-col is-for reveal">
+      <p class="honest-h">What's new…</p>
+      <ul>
+        <li><strong>Long-running autonomy.</strong> Deterministic gates, persistent goals with budgets and auto-continuations, heartbeats steered into running work — unattended multi-hour tasks that finish.</li>
+        <li><strong>The session kernel &amp; background jobs.</strong> A per-session Python REPL whose variables survive turns, compaction, and restarts — plus detached jobs for compute that outlives a turn.</li>
+        <li><strong>Recursive processing, visible.</strong> RLM analyzes inputs far larger than any context window — and every run now streams a live, read-only trace session in the sidebar.</li>
+        <li><strong>Semantic recall.</strong> Hybrid BM25 + vector memory search with wiki-links between entries, and a local CPU fallback when the embedding server is down.</li>
+        <li><strong>The self-improvement stack.</strong> A golden-task canary suite measures drift; a governed adaptive layer applies policy edits with veto windows and rollback; Telos keeps the drive pointed at questions worth asking.</li>
+        <li><strong>Sees and hears more.</strong> Voice input with four engines, clipboard paste, and <code>view_image</code> — the agent can look at images it renders itself.</li>
+        <li><strong>Simpler model plumbing.</strong> A native OpenAI-compatible provider (vLLM, LM Studio, llama.cpp), three model roles instead of six, prompt-cache breakpoints, and smarter failover.</li>
+      </ul>
+    </article>
+
+    <article class="honest-col isnt-for reveal">
+      <p class="honest-h">…and what's gone</p>
+      <ul>
+        <li><strong>The workflow engine.</strong> Removed whole: <code>run_workflow</code>, its sibling tools, the routes, the Explorer tab. It was never used — zero invocations, ever — and a step graph declared before the work begins is the one assumption an agent lets you drop. Skills, workers, gates, goals, and cron cover everything it did.</li>
+        <li><strong>schedule_workflow.</strong> A thin wrapper whose metadata never persisted. Use <code>schedule_job</code>.</li>
+        <li><strong>The six-role model scheme.</strong> <code>scout_model</code>, <code>reflect_model</code>, <code>critical_model</code> and friends collapsed into Primary / Background / Backup.</li>
+        <li><strong>Nothing of yours.</strong> Migrations v20–v29 run automatically; no data is deleted; every removed surface has a documented replacement.</li>
+      </ul>
+    </article>
+  </div>
+
+  <p class="honest-foot reveal">
+    Built by Calvin (<a class="link" href="https://github.com/calvincs" target="_blank" rel="noopener">calvincs</a>) with Claude (Anthropic) — and Pernix itself, whose own deployment ran the field campaigns that shaped this release.
+  </p>
+</section>
+
 <!-- ========== HONEST FRAMING ========== -->
 <section class="honest">
-  <p class="section-label reveal">XI. Honest about what this is</p>
+  <p class="section-label reveal">XII. Honest about what this is</p>
   <h2 class="section-title reveal">A tool for <em>integrations and recurring work</em>.</h2>
   <p class="section-sub reveal">Pernix is alpha. Actively developed. Things will change. Reading what it's <em>for</em> and what it <em>isn't</em> will save you the wrong expectation.</p>
 
@@ -861,9 +917,9 @@ and communicate clearly.
       <ul>
         <li><strong>Vertical work loops.</strong> Build a loop tied to one job and keep running it. Email triage, incident response, research digests, meeting-to-action pipelines, voice-memo-to-notes, weekly operations summaries. The product isn't an agent — it's the loop you build around a recurring job.</li>
         <li><strong>A headless agent substrate.</strong> A FastAPI server with full REST coverage. Wire it into other systems, drive it from scripts, build a custom client, run it as the brain behind a calendar agent or research bot. The web UI is one front-end among many possible.</li>
-        <li><strong>Recurring work.</strong> Workflows + cron + memory. The morning brief, the weekly digest, the watchdog, the recurring research crawl — running reliably whether you're watching or not, with a push notification to your phone when something needs you.</li>
+        <li><strong>Recurring work.</strong> Skills + cron + memory. The morning brief, the weekly digest, the watchdog, the recurring research crawl — running reliably whether you're watching or not, with a push notification to your phone when something needs you.</li>
         <li><strong>An agent in your pocket.</strong> The web UI installs as a PWA. Send it a task from your phone over the LAN, drop a photo, an audio file, or a PDF on it, and check back when the agent pings you. Network mode is HTTPS with token auth — your house, your rules.</li>
-        <li><strong>Model-independent pipelines.</strong> Build once with a local model, swap to a frontier API when the task demands it, fall back automatically when it rate-limits. The workflow keeps running — you decide the routing.</li>
+        <li><strong>Model-independent pipelines.</strong> Build once with a local model, swap to a frontier API when the task demands it, fall back automatically when it rate-limits. The loop keeps running — you decide the routing.</li>
         <li><strong>Tinkering &amp; learning.</strong> One Python codebase, every layer auditable. A working harness to read, fork, and rebuild your own ideas on top of.</li>
       </ul>
     </article>
@@ -910,6 +966,9 @@ and communicate clearly.
       </div>
       <p class="footer-fine"><em>per&middot;nix</em> — Latin, <em>nimble</em>. A familiar that lives on your hardware.</p>
 
+      <p class="footer-legal">
+        v3.0.0 · Built by Calvin (<a class="dim" href="https://github.com/calvincs" target="_blank" rel="noopener">calvincs</a>) with Claude (Anthropic) — and Pernix itself.
+      </p>
       <p class="footer-legal">
         © 2026 Pernix contributors. Released under the MIT license.
       </p>
