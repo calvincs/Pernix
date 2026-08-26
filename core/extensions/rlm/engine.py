@@ -189,7 +189,13 @@ class RLMEngine:
         except RLMBudgetExhausted as e:
             result = self._salvage("budget_exhausted", e, start)
         except RLMRunError as e:  # RLMChildDied, root-call failures
-            result = self._salvage("failed", e, start)
+            # A cancel tears the turn down around the engine: the session's
+            # kill path reaps the child, and the next child.send dies with a
+            # broken pipe BEFORE the loop reaches its cooperative
+            # _check_cancel. That is a user cancel, not an engine failure —
+            # reporting it as "failed" buried an 88-iteration run's real
+            # ending (field case 2ccb9af9).
+            result = self._salvage(_status_for_run_error(self._cancel_check), e, start)
         finally:
             if self._heartbeat_stop is not None:
                 self._heartbeat_stop.set()
@@ -496,3 +502,14 @@ class RLMEngine:
         except RuntimeError:
             return
         raise RuntimeError("RLMEngine.run() must not be called on the event loop — use a tool executor thread")
+
+
+def _status_for_run_error(cancel_check) -> str:
+    """Terminal status for an RLMRunError: a run that died while its session
+    was being cancelled ended because of the cancel, not on its own."""
+    try:
+        if cancel_check is not None and cancel_check():
+            return "cancelled"
+    except Exception:
+        pass
+    return "failed"

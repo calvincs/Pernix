@@ -97,6 +97,18 @@ _LOW_INFO_RESULT_RE = re.compile(
 )
 
 
+_FALSIFIED_FIT_RE = re.compile(
+    r"(?:\bno (?:match|formula|fit|clean pattern|linear (?:formula|pattern|fit))\b"
+    r"|\bdoes not (?:fit|match|reproduce)\b"
+    r"|\binconsistent\b"
+    r"|\bFAIL(?:ED)?\b"
+    r"|\b0 solutions\b"
+    r"|\bnone (?:fit|match(?:ed)?)\b"
+    r"|\bunsolved\b)",
+    re.IGNORECASE,
+)
+
+
 @dataclass
 class StuckDetector:
     """Multi-signal stuck state detection (10 signals).
@@ -135,6 +147,9 @@ class StuckDetector:
     # sessions, and it was the campaign's best single move). ≥5 windowed
     # passes over one file queues a one-time RLM pointer.
     file_read_counts: dict = field(default_factory=dict)  # path → count
+    # Signal 13 state: consecutive repl/bash results that each falsified
+    # another candidate fit (>=2 marker matches per result body).
+    falsified_fit_streak: int = 0
     pending_hints: list = field(default_factory=list)  # one-time system hints
 
     def evaluate(self, content: str, tool_calls: list[dict] | None, tool_failures: dict, registry) -> tuple[float, int]:
@@ -242,6 +257,28 @@ class StuckDetector:
                             "the digest — usually cheaper than more windowed reads."
                         )
 
+        # Signal 13: Hypothesis grind — a long unbroken streak of repl/bash
+        # results that each falsify another candidate fit. ARC-2 field case
+        # (c00f6c4db9ff): ~30 rounds of "no match / no formula / FAIL" over
+        # per-object column formulas while the answer lived in a different
+        # hypothesis CLASS entirely (a chained path — each element placed
+        # relative to the previous one). Signal 12 watches file re-reads and
+        # never fired. Not a stuck score: the agent is working, just inside
+        # the wrong class. Queue a one-time class-escalation pointer.
+        if self.falsified_fit_streak >= 8 and "hypothesis_grind_hint" not in self.behavioral_flags:
+            self.behavioral_flags.add("hypothesis_grind_hint")
+            self.pending_hints.append(
+                "[harness hint] Your last several computational checks each falsified "
+                "another candidate fit. Before more parameter search inside the same "
+                "family, consider changing the CLASS of hypothesis: per-element rules "
+                "-> relational rules (pairs/neighbors) -> sequential/recursive rules "
+                "(each element depends on the previous output state) -> global "
+                "constraint rules. Cheap structure probes often reveal the class in "
+                "one pass: adjacency/chaining between output elements, symmetry, "
+                "count conservation. Rendering the data another way (transpose, "
+                "side-by-side panels) beats re-fitting."
+            )
+
         # Signal 11: Same NON-file tool failing repeatedly with varied args.
         # Generalises Signal 7 beyond file tools — catches loops like call_model
         # 404-ing on a series of guessed model ids, where each call has a unique
@@ -300,6 +337,15 @@ class StuckDetector:
 
         Called per tool result, not per LLM round. Cheap — just bookkeeping.
         """
+        # Signal 13 bookkeeping: falsified-fit streak over compute results.
+        # Errors neither extend nor reset the streak — a traceback mid-grind
+        # is not evidence the hypothesis class changed.
+        if tool_name in ("repl", "bash") and not was_error:
+            if len(_FALSIFIED_FIT_RE.findall(content or "")) >= 2:
+                self.falsified_fit_streak += 1
+            else:
+                self.falsified_fit_streak = 0
+
         if tool_name not in _WEB_TOOLS:
             return
         body = content or ""
@@ -943,6 +989,31 @@ async def run_agent(
     # token number the window actually constrains. One round stale by
     # construction — the status is built before this round's compile.
     _last_context_tokens: int | None = None
+
+    # Surface RLM runs that ended after their turn died. A cancel or budget
+    # teardown abandons the in-flight rlm_process dispatch, so the engine's
+    # result — partial answer, iteration count, continue_from pointer — lands
+    # nowhere (field case 2ccb9af9: 88 iterations visible only as a sidebar
+    # "failed" chip). One compact system note per orphaned depth-0 run.
+    if getattr(settings, "rlm_enabled", False):
+        try:
+            for _orphan in await asyncio.to_thread(db.get_unsurfaced_rlm_runs, session_id):
+                _preview = (_orphan.get("answer_preview") or "").strip()
+                _note = (
+                    f"[background note] rlm_process run {_orphan['run_id']} ended after a "
+                    f"previous turn was torn down: status={_orphan['status']}, "
+                    f"{_orphan['iterations']} iterations, {_orphan['subcalls']} sub-calls."
+                )
+                if _preview:
+                    _note += f" Partial answer preview: {_preview[:400]}"
+                _note += (
+                    f" (full trace: {_orphan['run_dir']}/trace.jsonl; to build on the partial "
+                    f'work call rlm_process with continue_from="{_orphan["run_id"]}")'
+                )
+                await asyncio.to_thread(db.add_message, session_id, "system", _note)
+                await asyncio.to_thread(db.mark_rlm_run_surfaced, _orphan["run_id"])
+        except Exception:
+            logger.debug("orphaned-RLM surfacing failed", exc_info=True)
 
     tool_round = 0
     while tool_round < settings.max_tool_rounds:
@@ -1704,6 +1775,19 @@ async def _record_round_results(
             latency_ms=result.latency_ms,
             metadata=tool_meta,
         )
+        # rlm_process results carry their run id in the header; a result that
+        # reached save_turn_msg IS surfaced — mark the row so the orphan
+        # sweep above never re-announces a run the agent already saw.
+        if result.tool_name == "rlm_process":
+            import re as _re_rlm
+
+            _rm = _re_rlm.search(r"RLM run ([0-9a-f]{6,})", stored_content or "")
+            if _rm:
+                try:
+                    await asyncio.to_thread(db.mark_rlm_run_surfaced, _rm.group(1))
+                except Exception:
+                    logger.debug("mark_rlm_run_surfaced failed", exc_info=True)
+
         event_data = {
             "type": "tool.call",
             "name": result.tool_name,

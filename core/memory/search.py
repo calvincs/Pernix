@@ -47,6 +47,12 @@ def format_result_line(result: SearchResult, char_cap: int = 0) -> str:
     src = getattr(e, "source", "")
     if src:
         parts.append(f"source={src}")
+    # unverified-distill was only ever a tag, and tags never reached this
+    # header — so a low-grounding distill claim rendered indistinguishably
+    # from a verified fact (ARC-2 field case: a worker treated a "Solved ..."
+    # distill entry as authoritative). Say it in the line the model reads.
+    if "unverified-distill" in (getattr(e, "tags", None) or []):
+        parts.append("UNVERIFIED-DISTILL")
     content = e.content or ""
     if char_cap and len(content) > char_cap:
         content = content[:char_cap]

@@ -90,6 +90,12 @@ class Settings:
     embedding_fallback_recover_minutes: int = 60
     llm_max_concurrent: int = 1  # Max concurrent Ollama requests (semaphore slots)
     llm_session_timeout: int = 1800  # Max seconds any session may hold LLM slots (0 = unlimited)
+    # After a provider rejects a call for exhausted quota (daily key cap,
+    # billing hard limit), the stream ladder refuses to fail over TO that
+    # model for this many seconds. Each failover attempt otherwise pays one
+    # doomed request and — worse — replaces the original error with the
+    # quota 403, masking what actually went wrong (0 disables the breaker).
+    provider_quota_cooldown_s: int = 600
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_max_concurrent: int = 4  # Max concurrent OpenRouter requests
     openrouter_models: list = field(default_factory=list)

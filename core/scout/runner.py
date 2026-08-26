@@ -1646,34 +1646,13 @@ async def _run_scout_llm(
             return None
 
     def _gather_workspace_state() -> str | None:
-        # Bless the convention the agents invented (ARC-3 campaign):
-        # *_STATUS.md / *_NOTES.md / *_NEXT.md checkpoint files let a
-        # successor session resume without re-deriving hard-won state — but
-        # successors never FOUND them (field case 8d411d30d12d lost a whole
-        # retry re-discovering a fact its predecessor had written down).
-        # Surface them the way memory hits are surfaced. Bounded: one
-        # two-level glob, newest 5, names+age only.
         try:
-            from pathlib import Path as _Path
-
             from core.tools.paths import workspace as _ws
 
-            root = _ws()
-            hits = []
-            for pattern in ("*_STATUS.md", "*_NOTES.md", "*_NEXT.md", "*/*_STATUS.md", "*/*_NOTES.md", "*/*_NEXT.md"):
-                hits.extend(root.glob(pattern))
-            if not hits:
-                return None
-            import time as _time
-
-            hits = sorted(set(hits), key=lambda f: f.stat().st_mtime, reverse=True)[:5]
-            _step("workspace", f"Found {len(hits)} workspace status files")
-            lines = ["", "WORKSPACE STATE (checkpoint files from prior work — read before re-deriving anything):"]
-            for f in hits:
-                age_h = (_time.time() - f.stat().st_mtime) / 3600
-                age = f"{age_h:.0f}h ago" if age_h >= 1 else f"{age_h * 60:.0f}m ago"
-                lines.append(f"- {f.relative_to(root)} (updated {age})")
-            return "\n".join(lines)
+            part = gather_workspace_state(_ws())
+            if part:
+                _step("workspace", "Found workspace status files")
+            return part
         except Exception as e:
             logger.debug("Scout workspace-state scan failed: %s", e)
             return None
@@ -2182,3 +2161,47 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
         from_fallback=True,
         fallback_reason=reason,
     )
+
+
+# Checkpoint-file surfacing (module level so the glob contract is testable).
+# Bless the convention the agents invented (ARC-3 campaign): *_STATUS.md /
+# *_NOTES.md / *_NEXT.md checkpoint files let a successor session resume
+# without re-deriving hard-won state — but successors never FOUND them (field
+# case 8d411d30d12d lost a whole retry re-discovering a written-down fact).
+# The ARC-2 campaign then dropped the prefix and wrote plain arc2/STATUS.md,
+# which the original *_STATUS.md-only glob silently missed — the "fresh
+# context" session got zero workspace-state blocks with the checkpoint
+# sitting right there. Both spellings are the convention now. Bounded: one
+# two-level glob, newest 5, names+age only.
+_WORKSPACE_STATE_PATTERNS = (
+    "*_STATUS.md",
+    "*_NOTES.md",
+    "*_NEXT.md",
+    "STATUS.md",
+    "NOTES.md",
+    "NEXT.md",
+    "*/*_STATUS.md",
+    "*/*_NOTES.md",
+    "*/*_NEXT.md",
+    "*/STATUS.md",
+    "*/NOTES.md",
+    "*/NEXT.md",
+)
+
+
+def gather_workspace_state(root) -> str | None:
+    """Render the WORKSPACE STATE block for checkpoint files under root."""
+    import time as _time
+
+    hits = []
+    for pattern in _WORKSPACE_STATE_PATTERNS:
+        hits.extend(root.glob(pattern))
+    if not hits:
+        return None
+    hits = sorted(set(hits), key=lambda f: f.stat().st_mtime, reverse=True)[:5]
+    lines = ["", "WORKSPACE STATE (checkpoint files from prior work — read before re-deriving anything):"]
+    for f in hits:
+        age_h = (_time.time() - f.stat().st_mtime) / 3600
+        age = f"{age_h:.0f}h ago" if age_h >= 1 else f"{age_h * 60:.0f}m ago"
+        lines.append(f"- {f.relative_to(root)} (updated {age})")
+    return "\n".join(lines)
