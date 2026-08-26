@@ -31,13 +31,14 @@ The agent organizes outputs into subdirectories by project where it can.
 
 ## Reading and writing — what the agent can and can't do
 
-Three file tools are always loaded:
+Four file tools are always loaded:
 
 | Tool | What it does | Restrictions |
 |---|---|---|
 | `file_read` | Read a file | Workspace, `data/skills/` |
 | `file_write` | Write a file (full overwrite) | Workspace only |
 | `file_edit` | In-place edit (string replace, regex, fuzzy whole-file merge) | Workspace only |
+| `view_image` | Look at an image file — routes it into the model's sight on the next round | Same read roots as `file_read`; vision models only; size-budgeted |
 
 All three honor `max_file_write_size` (default 100 MB) and `max_edit_read_size` (default 5 MB) to prevent runaway tool calls.
 
@@ -80,7 +81,7 @@ Two ways to give the agent a file:
 1. **Drag-drop into the UI** — uploads to the active session's workspace and adds a reference to the next message you send.
 2. **Manually drop into `data/workspace/`** — the agent can read it once you mention the path.
 
-The agent will use `file_read` (or, for images/PDFs attached in chat, the model's own multimodal input) to inspect what's there.
+The agent will use `file_read` (or, for images/PDFs attached in chat, the model's own multimodal input) to inspect what's there. For an image already on disk — including plots and renders the agent produced itself — `view_image(path)` puts the actual pixels in front of a vision model instead of leaving the agent to reason blind about its own output.
 
 ---
 

@@ -6,7 +6,39 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
-## 2026-08 (recent)
+## v3.0.0 — 2026-08-26
+
+The first tagged release since v2.9.0, and the biggest. The quick tour of what's new, then what's gone. Everything new that changes agent behavior ships **off by default** unless noted.
+
+**Long-running autonomy.** Deterministic **gates** (shell checks the Reflect quality gate cannot overrule), persistent **goals** with token/time/continuation budgets, and **heartbeats** — recurring instructions steered into running work. Composes into unattended multi-hour tasks. See [internals/autonomy.md](internals/autonomy.md).
+
+**The session kernel.** An optional persistent per-session Python REPL (`repl` tool): variables survive rounds, turns, compaction, and — via snapshots — restarts. Huge tool results auto-bind as variables instead of flooding context. See [internals/autonomy.md](internals/autonomy.md).
+
+**Background jobs** (on by default, `jobs_enabled`). `job_start` / `job_status` / `job_tail` / `job_kill` make detached long compute first-class: output captured to a log, completion durable across server restarts, wall-clock caps, whole-group kill.
+
+**`view_image`.** The agent can look at images it renders or downloads: on a vision model, `view_image(path)` routes a workspace image into the next round's context as real pixels.
+
+**Semantic memory retrieval.** Set `embedding_model` and memory search becomes hybrid BM25 + vector with `[[wiki-link]]` expansion at recall. A local CPU embedding fallback keeps recall alive when the remote embedding model goes down.
+
+**The self-improvement stack.** The golden-task **canary suite** measures whether the agent is actually getting better or worse; the governed **adaptive layer** applies low-risk policy edits with a veto window, full history, and one-click rollback; **Telos** adds a non-convergent drive with correction machinery. See [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md) and [internals/telos.md](internals/telos.md).
+
+**RLM grows up.** Every `rlm_process` run now gets a live, read-only trace session nested in the sidebar; a run whose result was orphaned by a turn teardown is surfaced on the next turn instead of vanishing; cancels report as cancels, not failures.
+
+**Voice input.** A mic button with four engines — local whisper, remote whisper, model-direct audio, browser dictation — each labeled with exactly where your audio goes. Plus: paste a screenshot straight into chat.
+
+**Three model roles instead of six.** **Primary** (`llm_model`), **Background** (`background_model`), **Backup** (`fallback_model`). If you had a distinct `scout_model`, copy it to `background_model`; stale keys are ignored, not fatal. See [deployment/llm-providers.md](deployment/llm-providers.md).
+
+**Native OpenAI-compatible provider.** Point `openai_base_url` at api.openai.com, vLLM, LM Studio, or llama.cpp; key via `OPENAI_API_KEY`.
+
+**Defaults modernized.** `max_tool_rounds` 10 → 50, and a healthy turn that exhausts it now auto-continues once (`round_cap_auto_continue`); the context budget derives from the model's real window; prompt-cache breakpoints for Anthropic models via OpenRouter; Ollama reasoning mode is a per-role setting.
+
+**Removed: the workflow engine.** Never used — literally zero invocations — and structurally at odds with how an agent works. Skills + workers + gates + goals + `schedule_job` cover everything it did; conversion table in [upgrade.md](upgrade.md#2026-08-12--the-workflow-engine-was-removed). Also removed: the `schedule_workflow` tool and the six-role model scheme.
+
+The DB schema lands at **v29** (from v19); all ten migrations run automatically on first start. Action items, if any apply to you, are in [upgrade.md](upgrade.md#2026-08-26--v300).
+
+*Credits: built by Calvin ([@calvincs](https://github.com/calvincs)) with Claude (Anthropic) pair-programming — and Pernix itself, whose reference deployment ran the field campaigns that surfaced and validated most of these changes.*
+
+## 2026-08
 
 **The workflow engine was removed.** `run_workflow` and its eight sibling tools, the `/api/workflows` routes, the Explorer's Workflows tab and `WORKFLOW.md` parsing are gone. It was never used — zero invocations across the reference deployment's entire history — and a step graph you have to declare before the work begins is the one assumption an agent lets you drop. Everything it did is still available from its parts: write the procedure as a **skill**, run steps with `spawn_worker` / `await_workers`, pass data through workspace files, enforce hard pass/fail with **gates**, schedule with `schedule_job`, bound long runs with **goals**. Your `data/workflows/` directory is left alone and no migration runs. If a cron job or skill of yours calls `run_workflow` by name, rewrite its prompt. Full rationale and a conversion table in [upgrade.md](upgrade.md#2026-08-12--the-workflow-engine-was-removed).
 
@@ -84,7 +116,7 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ## Database migrations (chronological)
 
-The DB schema is at v19. Each migration runs automatically on next start. Unless you've made manual changes to `data/sessions.db`, you don't need to do anything — Pernix migrates forward in place.
+The DB schema is at v29. Each migration runs automatically on next start. Unless you've made manual changes to `data/sessions.db`, you don't need to do anything — Pernix migrates forward in place.
 
 | Version | Description |
 |---|---|
@@ -107,6 +139,16 @@ The DB schema is at v19. Each migration runs automatically on next start. Unless
 | 17 | Add pinned flag on sessions for sidebar pinning |
 | 18 | Add rlm_runs audit index for RLM (recursive processing) runs |
 | 19 | Add dream_hypotheses and dream_reports for Dream (introspection) |
+| 20 | RLM run view sessions (`rlm_runs.ui_session_id`) |
+| 21 | `cron_runs.fire_time` — claim-before-deliver cron scheduling |
+| 22 | `gates` table for deterministic gates |
+| 23 | `session_goals` + `token_usage.goal_id` for persistent goals |
+| 24 | `canary_runs` for the golden-task canary suite |
+| 25 | `adaptive_*` tables for the adaptive layer |
+| 26 | One-active-goal-per-session unique index (older duplicates retired) |
+| 27 | `jobs` table for background jobs (`job_start`/`job_status`/`job_tail`/`job_kill`) |
+| 28 | Questions become an audit trail (`answer`, `answered_at`; rows kept) |
+| 29 | `rlm_runs.surfaced_at` — orphaned-run surfacing (history backfilled) |
 
 ---
 

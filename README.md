@@ -43,6 +43,8 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Cron scheduling** — run agents on a schedule for recurring tasks
 - **Reflect & retry** — a quality gate verifies each response and automatically retries if the agent missed the intent
 - **Session kernel** — an optional persistent per-session Python REPL (`repl` tool) whose variables survive turns, compaction, and restarts; huge tool results auto-bind as variables instead of flooding context
+- **Background jobs** — detached long-running compute via `job_start` / `job_status` / `job_tail` / `job_kill`: output captured to a log, completion durable across server restarts, wall-clock caps, whole-group kill
+- **Vision on demand** — `view_image` lets the agent look at images it has rendered or downloaded (vision models), instead of reasoning blind about its own plots and screenshots
 - **Long-running autonomy** — deterministic gates (shell checks Reflect can't overrule), persistent goals with budgets and auto-continuations, and heartbeats steered into running work — composing into unattended multi-hour tasks ([docs](docs/internals/autonomy.md))
 
 ### Experimental Add-ons (all off by default)
@@ -60,6 +62,8 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Local mode** — binds to localhost with no auth (default)
 - **Network mode** — HTTPS + Bearer token for LAN access from other devices
 - **Push notifications** — browser push via service worker when the agent needs your attention
+- **Voice input** — a mic button with four selectable engines (local whisper, remote whisper, model-direct audio, browser dictation), each labeled with exactly where your audio goes
+- **Clipboard paste** — paste a screenshot or file anywhere in the app and it becomes a chat attachment
 
 ---
 
@@ -237,6 +241,12 @@ Most-visited entry points:
 | [docs/guides/recipes.md](docs/guides/recipes.md) | Runnable end-to-end examples |
 | [docs/faq.md](docs/faq.md) | Common gotchas |
 | [LICENSE](LICENSE) | MIT license |
+
+---
+
+## Credits
+
+Pernix is built by Calvin ([@calvincs](https://github.com/calvincs)) with **Claude** (Anthropic) as pair programmer — and with **Pernix itself** in the loop: the reference deployment runs the field campaigns, surfaces its own failures, and validates the fixes that shape each release. The v3.0.0 release is the work of all three.
 
 ---
 
