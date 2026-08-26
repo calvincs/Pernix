@@ -428,7 +428,6 @@ Esc cancels a recording without transcribing.
 |---|---|---|
 | `max_pending_messages` | `10` | Maximum messages that can queue for a busy session. If a session is processing and more than this many messages arrive, further messages are rejected with a `session.queue_full` event. |
 | `max_concurrent_workers` | `5` | Maximum simultaneously-running worker sub-agents per parent session. |
-| `stall_threshold` | `120` | Seconds of inactivity before a worker is flagged as stalled (surfaced in the UI and by `await_workers`). |
 | `cron_dispatch_timeout` | `3600` | Wall-clock ceiling (seconds) on one scheduled dispatch — a cron fire or a heartbeat idle tick. A wedged unattended job fails and notifies within the hour instead of holding its slot for the old implicit `tool_timeout` × `max_tool_rounds` product. |
 
 ---
