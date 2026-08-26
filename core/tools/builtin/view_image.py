@@ -69,7 +69,26 @@ def view_image(path: str, _context: dict | None = None) -> str:
         "view_image tool — not a human message. The agent asked to look at "
         f"this rendered image:\n[attached: {resolved}]"
     )
-    db.add_message(session_id, "user", note)
+    # Stamp EXACTLY like /api/chat/inject: without metadata.injected the
+    # compiler's turn-scoping filter reads this row as a QUEUED next-turn
+    # message and excludes it from the current compile — the model never
+    # received the note or the image (field case 66cc9f8865ae: smoke test
+    # answered "Red" for a yellow PNG; prompt-token delta proved no image
+    # was inlined; sessions f586/1aec were vision-blind all along). The
+    # parent stamp also sorts the note chronologically inside the turn.
+    import json as _json
+
+    meta: dict = {"injected": True}
+    try:
+        from sessions.manager import get_manager
+
+        _s = get_manager().get(session_id)
+        _turn_root = getattr(_s, "current_turn_user_msg_id", None) if _s else None
+        if _turn_root is not None:
+            meta["parent_user_msg_id"] = _turn_root
+    except Exception:
+        pass  # stamp what we can — injected:True alone unblocks the filter
+    db.add_message(session_id, "user", note, metadata=_json.dumps(meta))
     logger.info("view_image queued %s (%d bytes) for session %s", resolved, size, session_id[:12])
     return (
         f"Image queued: {resolved} ({size} bytes). From your NEXT round it appears "

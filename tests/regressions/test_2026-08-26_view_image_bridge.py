@@ -48,6 +48,23 @@ def test_view_image_injects_expandable_user_note(ws_png):
     note = _last_user_message(sid)
     assert note is not None and note.startswith("[view_image]")
     assert "not a human message" in note, "reflect must never quote this as the user"
+
+    # The note MUST carry metadata.injected — without it the compiler's
+    # turn-scoping filter drops the row as a queued next-turn message and
+    # the model never sees the image (the smoke-test-said-"Red"-for-a-
+    # yellow-PNG bug: every leg passed in isolation while the live payload
+    # grew by text-only tokens).
+    import json as _json
+
+    from db.database import connect_sessions
+
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT metadata FROM messages WHERE session_id=? AND role='user' ORDER BY id DESC LIMIT 1",
+            (sid,),
+        ).fetchone()
+    meta = _json.loads(row[0]) if row and row[0] else {}
+    assert meta.get("injected") is True, "note must be stamped injected for the turn-scoping filter"
     # Round-trip: the compiler's own parser must find the reference.
     names = _extract_attached_filenames(note)
     assert names and names[0] == str(ws_png)
