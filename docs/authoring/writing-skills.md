@@ -189,6 +189,17 @@ data/skills/my-skill-name/
 
 Reference scripts in your SKILL.md instructions. The agent runs them via the `bash` tool from within the workspace directory context.
 
+You can also declare scripts in the frontmatter with a `scripts:` list — each entry a mapping with a `path` (required) plus optional `purpose` and `usage`. Declared entries are rendered into the skill's injected instructions when it loads, so the agent knows the invocation shape without reading the file first:
+
+```yaml
+scripts:
+  - path: scripts/process.py
+    purpose: Normalize the raw export into rows
+    usage: python scripts/process.py <input.csv>
+```
+
+Entries without a `path` are ignored.
+
 ### Tips for Effective Skills
 
 - **Keep `description` short and specific** — this is what the scout reads to decide whether to load the skill. "Fetches weather forecasts from the National Weather Service API for US locations" is better than "weather tool."
@@ -198,4 +209,4 @@ Reference scripts in your SKILL.md instructions. The agent runs them via the `ba
 
 ### Skill Discovery
 
-The agent automatically discovers all skills in `data/skills/` at the start of each planning phase. You do not need to restart the server after adding a skill — it will appear on the next agent turn. Syntax errors in a skill's YAML frontmatter will cause that skill to be skipped (the error is logged).
+Pernix scans `data/skills/` once, at server startup — a skill directory you drop in by hand is **not** picked up automatically on the next agent turn. To register it without a restart, trigger a rescan: open (or refresh) the Skills panel — listing skills via the API rescans the directory — or wait for a snooze cycle, which also rescans. Skills created through the agent's own skill tools register immediately. Syntax errors in a skill's YAML frontmatter will cause that skill to be skipped (the error is logged).

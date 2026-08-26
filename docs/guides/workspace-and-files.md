@@ -35,12 +35,12 @@ Four file tools are always loaded:
 
 | Tool | What it does | Restrictions |
 |---|---|---|
-| `file_read` | Read a file | Workspace, `data/skills/` |
-| `file_write` | Write a file (full overwrite) | Workspace only |
-| `file_edit` | In-place edit (string replace, regex, fuzzy whole-file merge) | Workspace only |
-| `view_image` | Look at an image file — routes it into the model's sight on the next round | Same read roots as `file_read`; vision models only; size-budgeted |
+| `file_read` | Read a file | Workspace, `/tmp`, `data/skills/`, the tool-output spill tree, and the kernel payload tree |
+| `file_write` | Write a file (full overwrite) | Workspace and `/tmp` |
+| `file_edit` | In-place edit (string replace, regex, fuzzy whole-file merge) | Workspace and `/tmp` |
+| `view_image` | Look at an image file — routes it into the model's sight on the next round | Same read roots as `file_read`; needs a vision model to actually see the pixels; size-budgeted |
 
-All three honor `max_file_write_size` (default 100 MB) and `max_edit_read_size` (default 5 MB) to prevent runaway tool calls.
+Size caps prevent runaway tool calls: `file_write` and `file_edit` honor `max_file_write_size` (default 100 MB), `file_edit` additionally caps how much it reads back with `max_edit_read_size` (default 5 MB), `file_read` truncates output at its own limit, and `view_image` is budgeted by `max_inline_attach_bytes`.
 
 **Protected paths** — the agent cannot write or edit any of these, regardless of where they appear:
 
@@ -48,7 +48,7 @@ All three honor `max_file_write_size` (default 100 MB) and `max_edit_read_size` 
 - `data/sessions.db`
 - `data/settings.json`
 - `data/agent/SOUL.md`, `RULES.md`, `SESSIONS.md` (it can ask you to edit these via `ask_user`, but it won't edit them directly)
-- Anything outside `data/workspace/` (and the readable directories listed above)
+- Anything outside the write roots — `data/workspace/` and `/tmp` (the other readable directories listed above are read-only)
 
 If you ever see the agent claiming it edited a protected file, that's a bug — file an issue.
 

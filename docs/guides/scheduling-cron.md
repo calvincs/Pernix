@@ -23,9 +23,8 @@ If you want to specify the cron expression yourself:
 ```python
 schedule_job(
     name="morning-brief",
-    description="Daily news brief at 8 AM",
-    cron_expression="0 8 * * 1-5",
-    session_instructions="Search for top tech news today. Summarize the three most relevant items. Save to data/workspace/projects/daily-brief/.",
+    cron_expr="0 8 * * 1-5",
+    prompt="Search for top tech news today. Summarize the three most relevant items. Save to data/workspace/projects/daily-brief/.",
 )
 ```
 
@@ -33,17 +32,17 @@ Cron expression is the standard 5-field syntax: `minute hour day month weekday`.
 
 | Schedule | Meaning |
 |---|---|
-| `0 8 * * 1-5` | 8:00 AM, Monday through Friday |
+| `0 8 * * 1-5` | 8:00 UTC, Monday through Friday |
 | `*/15 * * * *` | Every 15 minutes |
-| `0 0 1 * *` | First of every month at midnight |
-| `30 14 * * 0` | Sundays at 2:30 PM |
+| `0 0 1 * *` | First of every month at midnight UTC |
+| `30 14 * * 0` | Sundays at 14:30 UTC |
 
 ---
 
 ## What happens when a job fires
 
 1. The scheduler creates a new session at the cron time.
-2. `session_instructions` is sent as the first user message.
+2. `prompt` is sent as the first user message.
 3. The session runs through scout → agent loop → reflect → finalize, just like any chat session.
 4. Output (text response, files, memory entries) lands as you'd expect.
 
@@ -105,10 +104,11 @@ If you want to know when a cron job did something:
 
 ## Limits and gotchas
 
-- **Max 5 concurrent workers** (`max_concurrent_workers`) applies to cron sessions too. If your daily brief spawns 10 parallel research workers, they'll queue.
+- **Max 5 concurrent workers** (`max_concurrent_workers`) applies to cron sessions too. If your daily brief tries to spawn 10 parallel research workers, the spawns past the cap fail immediately with an error — there's no queue — until earlier workers complete.
 - **`llm_session_timeout`** (default 1800 seconds) caps a cron session's total LLM time. A long-running cron session that would blow the budget gets terminated cleanly.
 - **No retry semantics** — if a cron job fails (network error, model down), it just fails for that run. The next run fires on schedule. Build retry into your prompt if you need it.
-- **Time zone** — cron times use the server's local time zone. `data/agent/SESSIONS.md` typically records your timezone for the agent's awareness, but the scheduler reads `TZ` from the host.
+- **Crash safety** — each run's row is claimed in the DB before the prompt is dispatched, and any ticks missed while the server was down are coalesced into a single catch-up run at startup rather than replayed one by one.
+- **Time zone** — cron times are UTC. The scheduler and every trigger are pinned to UTC regardless of the host's `TZ`, so convert your local times when writing expressions. `data/agent/SESSIONS.md` typically records your timezone for the agent's awareness, but the scheduler itself doesn't use it.
 
 ---
 

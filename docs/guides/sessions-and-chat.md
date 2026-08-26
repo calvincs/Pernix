@@ -112,7 +112,7 @@ Three triggers fire compaction:
 You can intervene mid-turn at three granularities:
 
 - **Cancel** — stops the entire turn. Ends in `CANCELLING → IDLE_READY` typically within seconds. The cancelled turn's tool results so far are kept in history, but no further work happens.
-- **Pause a worker** — if the agent has spawned workers (sub-agents), you can pause individual ones at the next round boundary. The parent session enters `PAUSE_REQUESTED → PAUSED`. Resume later when ready. See [workers.md](workers.md).
+- **Pause a worker** — if the agent has spawned workers (sub-agents), you can pause individual ones at the next round boundary. The worker session enters `PAUSE_REQUESTED → PAUSED`; the parent is untouched. Resume later when ready. See [workers.md](workers.md).
 - **Don't intervene; just wait** — most "stuck" sessions are reclaimed by the reaper within minutes. See [../faq.md#my-session-is-stuck-in-processing-what-do-i-do](../faq.md#my-session-is-stuck-in-processing-what-do-i-do).
 
 ---

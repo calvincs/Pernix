@@ -76,7 +76,7 @@ The loop:
 2. Stream a response from the LLM
 3. If the response includes tool calls, execute them, append results to the conversation, and loop back to step 1
 4. If the response is a final text answer (no tool calls), the loop exits
-5. If the loop hits `max_tool_rounds` (default 50), it terminates with a "round ceiling" reason. The ceiling is a backstop, not a budget — the real spend guards are the per-goal token/time budgets and the stuck detector
+5. If the loop hits `max_tool_rounds` (default 50) while the turn is still healthy (tools were called, no error, not stuck), `round_cap_auto_continue` (default 1) grants a fresh round budget first; once continuations are spent, it terminates with a "round ceiling" reason. The ceiling is a backstop, not a budget — the real spend guards are the per-goal token/time budgets and the stuck detector
 
 While running, the loop emits SSE events: every token, every tool call, every tool result. The UI uses these to show real-time progress.
 
@@ -84,17 +84,17 @@ The main agent is defined in `core/agent.py`.
 
 ### 4. Reflect — the quality gate
 
-After the main agent loop ends, **Reflect** checks whether the user's intent was actually fulfilled. It's a separate LLM call that sees the **current attempt's transcript** with verbatim tool result bodies — sliced from the most recent `scout` role marker forward — alongside the user's original ask, scout's plan, and a tool-execution summary. Tool result bodies are kept verbatim up to a 5000-char cap so reflect can verify factual claims against what the tools actually returned, not against its own training-data priors.
+After the main agent loop ends, **Reflect** checks whether the user's intent was actually fulfilled. For normal interactive sessions the check is deferred (`reflect_deferred_normal`, default true): the session finalizes immediately and the grade runs observe-only in the background, `reflect_defer_idle_s` (default 300s) after the session reaches `IDLE_READY`; cron, worker, and canary sessions keep the in-turn gate. It's a separate LLM call that sees the **current attempt's transcript** with verbatim tool result bodies — sliced from the most recent `scout` role marker forward — alongside the user's original ask, scout's plan, and a tool-execution summary. Tool result bodies are kept verbatim up to a 5000-char cap so reflect can verify factual claims against what the tools actually returned, not against its own training-data priors.
 
 It produces a verdict — one of three values:
 
 | Verdict | Meaning |
 |---|---|
 | `pass` | The agent fulfilled the request. Done. |
-| `retry` | The agent missed the intent. Try again with these lessons. |
+| `retry` | The agent missed the intent. Cron/worker/canary sessions try again with these lessons; a normal session's deferred grade is observe-only — no verdict re-runs the turn, a non-pass raises a notification instead. |
 | `escalate` | Cannot fix automatically — surface this to the user. |
 
-On `retry` or `escalate`, Reflect also emits a structured **turn digest** alongside the verdict (scout plan summary, tool calls with verbatim `result_excerpt` per call, key findings, what was tried). The digest is persisted inside the post-mortem and carried forward to the *next* Scout invocation as `PRIOR ATTEMPT DIGEST` — so Scout-N+1 plans against real evidence from the previous attempt, not just a free-form summary. Reflect-N never sees attempt-(N-1)'s transcript directly; only the digest crosses the boundary. This is bounded by `reflect_max_retries` (default 2), so a single user request can result in up to three Scout/Agent/Reflect cycles before giving up.
+On `retry` or `escalate`, Reflect also emits a structured **turn digest** alongside the verdict (scout plan summary, tool calls with verbatim `result_excerpt` per call, key findings, what was tried). The digest is persisted inside the post-mortem and carried forward to the *next* Scout invocation as `PRIOR ATTEMPT DIGEST` — so Scout-N+1 plans against real evidence from the previous attempt, not just a free-form summary. Reflect-N never sees attempt-(N-1)'s transcript directly; only the digest crosses the boundary. This is bounded by `reflect_max_retries` (default 2), so a single cron/worker/canary request can result in up to three Scout/Agent/Reflect cycles before giving up; a normal session gets one cycle plus a later observe-only grade.
 
 Reflect also classifies the *cause* of any failure (scout / agent / skill / task / env). This data feeds into Snooze for offline analysis.
 
@@ -135,7 +135,7 @@ Everything above is governed by a 10-state state machine (defined in `sessions/s
 | `AWAITING_USER` | Agent paused via `ask_user` and is waiting for input |
 | `AWAITING_WORKERS` | Parent session blocked on one or more spawned workers |
 
-The enum also defines several **terminal/error markers** (`COMPLETE`, `ROUND_CEILING`, `COMPACTION_FAILED`, `CANCELLED`, `ERROR`, `SCOUT_ERROR`, `BUDGET_EXHAUSTED`) used as turn outcomes rather than active session states.
+A separate `TerminationReason` enum defines the **terminal/error markers** (`COMPLETE`, `ROUND_CEILING`, `COMPACTION_FAILED`, `CANCELLED`, `ERROR`, `SCOUT_ERROR`, `BUDGET_EXHAUSTED`) used as turn outcomes rather than active session states.
 
 ### A typical turn (the happy path)
 
@@ -201,7 +201,7 @@ The maintenance heartbeat runs every 60 seconds; the reaper fires every 5 ticks 
 | `PAUSE_REQUESTED` | Unstick → `IDLE_READY` | 60s idle |
 | `PAUSED` | Safety net cancel | 24h idle or parent deleted |
 | `AWAITING_USER` | Unstick → `IDLE_READY` (if no question row exists) | 1800s idle |
-| `AWAITING_WORKERS` | Resume or timeout | 3600s idle |
+| `AWAITING_WORKERS` | Force-unstick → `IDLE_READY` (only if the watch-set is empty) | 1800s idle |
 | `IDLE_READY` | Reap from memory | 1800s idle, no subscribers |
 
 The `FINALIZING` and `PROCESSING` checks both guard with `not session.has_background_tasks` — post-hooks (reflect, distillation, auto-title) hold a background reference while running, so the reaper never cuts them short.
@@ -248,7 +248,7 @@ Every message in a session is stored in `data/sessions.db`. The agent sees these
 ### Long-term: the memory store
 Persistent facts, decisions, and lessons live as **markdown files** in `data/memories/`. Each file groups related entries (e.g., `user.profile.md`, `pernix.decisions.md`, `pernix.debugging.md`).
 
-Memory is searched at the start of each turn via BM25 full-text search. Top-scoring entries get injected into the system prompt. The agent can also read or write entries directly using memory tools.
+Memory is searched at the start of each turn — hybrid BM25 + embedding search by default when an `embedding_model` is set, BM25 full-text search otherwise. Top-scoring entries get injected into the system prompt. The agent can also read or write entries directly using memory tools.
 
 The memory store is **human-readable and append-by-default**. New entries are appended to topic files; the agent can correct or remove a specific entry through the `update_memory` and `forget` tools (epochs stay stable across updates). You can also open the markdown files in any editor and edit or delete them directly — they're just files.
 
@@ -262,7 +262,7 @@ Compaction has three triggers:
 
 | Trigger | When | What happens |
 |---|---|---|
-| **Proactive** | Context utilization > 75% | Background — compacted next turn |
+| **Proactive** | Context utilization > 75% | In-line — compacted mid-round, before the next LLM call |
 | **Critical** | Context utilization > 85% | Mid-turn — compact immediately to make room |
 | **Overflow** | Provider returns "context too long" error | Reactive — compact and retry the same request |
 
@@ -283,12 +283,12 @@ Implementation: `core/context/compaction.py` and `core/context/compiler.py`.
 Pernix supports multiple providers simultaneously. The router (`core/llm/router.py`) decides which provider handles each request based on:
 
 1. **Model name** — `anthropic/claude-sonnet-4.6` clearly maps to OpenRouter; `qwen3:32b` maps to Ollama
-2. **Registry** — a runtime catalog populated from both providers' `/v1/models` endpoints
-3. **Conflict policy** — when both providers have a model with the same name, Ollama wins (local, free, lower latency) unless you've explicitly added the model to `openrouter_models`
+2. **Registry** — a runtime catalog populated from all three providers' model lists (Ollama, OpenRouter, and the OpenAI-compatible provider)
+3. **Conflict policy** — when two providers have a model with the same name, Ollama wins (local, free, lower latency) unless you've explicitly added the model to `openrouter_models` or `openai_models`
 
 If a cloud provider returns a rate-limit, quota, or overload error, the router falls back to your configured `fallback_model` (the **Backup** role) on Ollama. Above the router, the agent loop can also switch a whole turn to the Backup model once its retry budget is spent — and there a *different model on the same provider* counts, so an all-Ollama setup has real failover too. Every non-streaming call (compaction, reflect, titles, eval, distill) gets a one-shot Backup retry as well. All of this is automatic — the user doesn't see the failure. Context overflow deliberately does **not** fail over; it triggers a compaction retry instead.
 
-Concurrency is controlled per-provider via semaphores: `llm_max_concurrent` for Ollama, `openrouter_max_concurrent` for OpenRouter. Workers and the main session all share these slots fairly.
+Concurrency is controlled per-provider via semaphores: `llm_max_concurrent` for Ollama, `openrouter_max_concurrent` for OpenRouter, `openai_max_concurrent` (default 4) for the OpenAI-compatible provider. Workers and the main session all share these slots fairly.
 
 ---
 
@@ -323,10 +323,10 @@ Key event types:
 - `session.state_changed` — every state transition
 - `scout.start` / `scout.done` — scout phase boundaries
 - `stream.token` — every streamed text token
-- `tool.call.start` / `tool.call.result` — every tool invocation
+- `tool.start` / `tool.call` — every tool invocation
 - `turn.complete` — turn finished
-- `ask_user` — agent is waiting for input
-- `worker.*` — worker lifecycle (spawned, done, error, paused, resumed)
+- `dialog.question` — agent is waiting for input
+- `worker.started` / `worker.done` / `worker.failed` — worker lifecycle
 
 Every event has a `_seq` (monotonically increasing sequence number). On reconnect, the client sends `Last-Event-ID: <last_seq>` and the server replays anything it missed.
 

@@ -11,7 +11,7 @@ Pernix is provided under the MIT license with **no warranty of any kind**. You a
 Understanding what an AI agent can actually do is the first step to deploying it safely:
 
 - **Execute shell commands** on the host machine via the `bash` tool
-- **Read and write files** anywhere within the configured workspace directory
+- **Read and write files** — writes anywhere within the configured workspace directory plus `/tmp`; reads additionally cover the skills directory, the tool-output spill tree (`data/.tool_output`), and kernel snapshot payloads
 - **Make outbound HTTP requests** — web searches, page fetches, and calls to LLM APIs
 - **Store persistent data** in SQLite databases and markdown memory files on disk
 - **Spawn sub-agents** (workers) that can do all of the above in parallel
@@ -26,7 +26,7 @@ None of this is hidden or unusual — it is the entire point of an agentic syste
 - **Run on a dedicated, non-production machine** — a spare box, a VM, or a container
 - **Do not expose to the public internet** without a hardened reverse proxy in front of it
 - **Start with `auto_approve_dangerous = false`** (the default) — the agent will ask before running destructive commands
-- **Review `shell_allowlist`** — restrict which shell commands are permitted if you want tighter control (note: the RLM child REPL is a Python interpreter, not the bash tool, so the shell allowlist does not apply to it — the container/VM is its containment layer)
+- **Review `shell_allowlist`** — restrict which shell commands are permitted if you want tighter control. The allowlist is enforced only when `shell_security_mode = "strict"`; under the default `"permissive"` mode only the denylist scan applies (note: the RLM child REPL is a Python interpreter, not the bash tool, so the shell allowlist does not apply to it — the container/VM is its containment layer)
 - **Back up `data/` periodically** — it contains your sessions, memory, and workspace
 
 ---
@@ -48,8 +48,8 @@ When `network_enabled = true`, Pernix binds to `0.0.0.0` (all network interfaces
 | **HTTPS enforced** | TLS certificate required; HTTP is not available |
 | **Bearer token required** | All API requests must include a valid token |
 | **LLM base URLs locked** | Cannot be changed remotely (prevents SSRF via provider redirect) |
-| **Shell security settings locked** | `shell_security_mode`, `shell_allowlist`, `shell_env_*` cannot be changed remotely |
-| **`auto_approve_dangerous` locked** | Cannot be toggled remotely |
+
+The shell security settings (`shell_security_mode`, `shell_allowlist`, `shell_env_*`) and `auto_approve_dangerous` are locked against the settings API **unconditionally** — in local mode too, not just when the network engages. See [Locked Settings](#locked-settings) below.
 
 **How to enable network mode:**
 
@@ -87,16 +87,16 @@ To use custom certificates:
 
 ### How It Works
 
-In network mode, every request (except `GET /`, `/static/*`, `/api/health`, and the service worker endpoint) must include a valid bearer token. The token is a randomly-generated 32-byte base64url string stored in `data/settings.json`.
+In network mode, every request (except `GET /`, `/static/*`, `/favicon.ico`, `/api/health`, and the service worker endpoint) must include a valid bearer token. The token is a randomly-generated 32-byte base64url string stored in `data/settings.json`.
 
-The token can be passed three ways:
+The server accepts the token exactly three ways; a fourth, client-side form exists for onboarding links:
 
 | Method | When to use |
 |---|---|
 | `Authorization: Bearer <token>` header | API clients, scripts |
 | `pernix_auth` cookie | Browser sessions (set automatically on first login) |
-| `#token=<token>` URL fragment | QR-code login links, one-time URL sharing |
 | `?token=<token>` query parameter | Legacy links; ad-hoc `curl` |
+| `#token=<token>` URL fragment | QR-code login links, one-time URL sharing — **not a server auth path**: the fragment never leaves the browser; the page reads it from `location.hash` and authenticates with the header/cookie |
 
 The token comparison is constant-time, so a wrong token reveals nothing about the right one through response timing.
 
@@ -106,7 +106,7 @@ The token comparison is constant-time, so a wrong token reveals nothing about th
 
 ### Localhost Bypasses Auth (by default)
 
-Requests originating from `127.0.0.1` or `::1` are not challenged, even in network mode. This prevents you from locking yourself out and keeps localhost-only admin endpoints reachable.
+Requests originating from loopback are not challenged, even in network mode — the check accepts `127.0.0.1`, `::1`, the literal `localhost`, and IPv6-mapped `::ffff:127.*` forms. This prevents you from locking yourself out and keeps localhost-only admin endpoints reachable.
 
 **If you put Pernix behind a reverse proxy, turn this off.** A proxy terminating TLS on the same host connects to Pernix over loopback, so *every* proxied request — including ones from the internet — arrives as `127.0.0.1` and skips the token entirely. Set:
 
@@ -127,7 +127,7 @@ in `data/settings.json` (or from Settings in the UI). It takes effect immediatel
 ### Rotating the Token
 
 ```bash
-# From localhost only:
+# Any authenticated client may rotate — valid token, or trusted loopback:
 curl -X POST http://localhost:8090/api/settings/auth-token/regenerate
 ```
 
@@ -135,16 +135,16 @@ After regeneration, all existing sessions (other browsers, API clients) must re-
 
 ---
 
-## Locked Settings in Network Mode
+## Locked Settings
 
-The following settings cannot be changed via the Settings UI or API while `network_enabled = true`. They can only be modified locally (by editing `data/settings.json` directly, or from localhost):
+Most locked settings are locked **unconditionally**: `POST /api/settings` rejects them in local mode too, regardless of where the request comes from — the check is not client-address-aware. Only the LLM base URLs are network-mode-conditional. To change an unconditionally locked setting, edit `data/settings.json` directly with the server stopped (except `auto_approve_dangerous`, which cannot be set that way either — see below):
 
-| Setting | Why it's locked |
-|---|---|
-| `llm_base_url`, `openrouter_base_url` | Prevents an attacker from redirecting LLM traffic to an internal service (SSRF) |
-| `shell_security_mode`, `shell_allowlist`, `shell_env_*` | Prevents privilege escalation via shell settings |
-| `auto_approve_dangerous` | Prevents remote disabling of the dangerous-tool confirmation gate |
-| `auth_token` | Must use the dedicated `/regenerate` endpoint; cannot be set directly |
+| Setting | When locked | Why it's locked |
+|---|---|---|
+| `llm_base_url`, `openrouter_base_url` | Network mode only | Prevents an attacker from redirecting LLM traffic to an internal service (SSRF) |
+| `shell_security_mode`, `shell_allowlist`, `shell_env_*` | Always | Prevents privilege escalation via shell settings |
+| `auto_approve_dangerous` | Always | Runtime-only: stripped on save and skipped on load, so neither the API nor `data/settings.json` can set it — the `--dangerous` startup flag is the only activation path |
+| `auth_token` | Always | Must use the dedicated `/regenerate` endpoint; cannot be set directly |
 
 ---
 
@@ -152,7 +152,7 @@ The following settings cannot be changed via the Settings UI or API while `netwo
 
 Server-Side Request Forgery (SSRF) is a class of attack where a server is tricked into making requests to internal resources. Pernix includes:
 
-- **`http_get` IP filtering**: Requests to RFC-1918 private IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x) are always blocked. Loopback is additionally blocked in network mode (in localhost mode the agent may fetch loopback, e.g. its own workspace file server)
+- **`http_get` IP filtering**: Requests to RFC-1918 private IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x) are always blocked. Loopback is additionally blocked in network mode, with one carve-out: the harness's own listen port is always reachable over loopback — the agent owns this server and needs to test workspace files it just wrote. Other loopback ports may be co-tenant services and stay blocked. (In localhost mode the agent may fetch loopback freely, e.g. its own workspace file server)
 - **Locked LLM base URLs**: Cannot be redirected to internal addresses remotely
 - **Playwright SSRF intercept**: `browse_web` also filters internal address requests at the page-load level
 
@@ -160,14 +160,15 @@ Server-Side Request Forgery (SSRF) is a class of attack where a server is tricke
 
 ## Admin Endpoints (Localhost-Only)
 
-These endpoints are only accessible from `127.0.0.1` or `::1`, regardless of auth token:
+These endpoints are only accessible from loopback (`127.0.0.1`, `::1`, the literal `localhost`, or `::ffff:127.*` mapped forms), regardless of auth token:
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health/detailed` | Full system diagnostics (providers, DB, tools) |
-| `GET /api/settings/auth-token` | View the current token value |
-| `POST /api/settings/auth-token/regenerate` | Rotate the token |
+| `POST /api/admin/snooze-cycle` | Run one snooze cycle now (skips only the cadence gate) |
 | `POST /api/admin/restart` | Graceful server restart |
+
+The token endpoints (`GET /api/settings/auth-token`, `POST /api/settings/auth-token/regenerate`) are deliberately **not** localhost-gated — they are ordinary token-gated endpoints. The localhost check made them unreachable in the deployment that needs them most (under `docker compose`, bridge-network sources are treated as remote), and it never stood between an attacker and anything: a caller must already hold a valid token to reach them, and that same token authorizes the agent's shell tool, which can read `settings.json` outright.
 
 ---
 
@@ -208,7 +209,7 @@ The agent must go through a two-step handshake for every distinct dangerous acti
 
 Approved scopes are persisted to `data/tool_approvals.json`. If you've confirmed an action before (e.g. "run ps aux to list processes"), the `ask_user` step is skipped automatically on future occurrences. View and clear remembered approvals in **Settings → Security**.
 
-Workers spawned from interactive sessions face the same gate — the agent cannot escalate privilege by spawning sub-agents. The exception is unattended runs: cron-scheduled sessions (and workers spawned from them) skip the gate, because no user is present to answer `ask_user` prompts.
+Workers spawned from interactive sessions face the same gate — the agent cannot escalate privilege by spawning sub-agents. The exception is unattended runs: cron-scheduled and canary sessions (and workers spawned from them) skip the gate, because no user is present to answer `ask_user` prompts.
 
 ### Run Dangerously mode (`--dangerous` startup flag)
 
@@ -310,6 +311,6 @@ Data leaves your machine **only** when the agent explicitly:
 - Keep `network_enabled = false` unless you need LAN access
 - If enabling network mode: use mkcert, rotate tokens, set explicit `cors_origins`
 - Never expose Pernix directly to the internet; put it behind a reverse proxy if needed
-- Review `shell_allowlist` and tighten it for your use case
+- Review `shell_allowlist` and tighten it for your use case (enforced only when `shell_security_mode = "strict"`)
 - Keep `auto_approve_dangerous = false`
 - Back up `data/` regularly — it contains all your sessions, memory, and workspace

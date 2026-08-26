@@ -58,7 +58,7 @@ PROCESSING       → AWAITING_WORKERS  reason=workers-dispatched
 AWAITING_WORKERS → SCOUTING          reason=workers-complete
 AWAITING_WORKERS → IDLE_READY        reason=worker-timeout
 AWAITING_WORKERS → CANCELLING        reason=cancel-requested
-(any)            → IDLE_READY        reason=reaper-unstick     (explicit escape hatch, logged)
+(6 states)       → IDLE_READY        reason=reaper-unstick     (SCOUTING, PROCESSING, PAUSE_REQUESTED, PAUSED, AWAITING_USER, AWAITING_WORKERS — no such edge from COMPACTING, CANCELLING, FINALIZING or IDLE_READY)
 (any active)     → IDLE_READY        reason=cancel-timeout     (cancel raced the turn's own exit)
 ```
 
@@ -70,7 +70,7 @@ No more `force_state()`. If a situation needs to "force," the edge is in the gra
 
 Table: `session_state_log` (append-only). Columns: `session_id, turn_id, parent_turn_id, retry_index, compaction_count, from_state, to_state, reason, termination_reason, reflect_count, eval_count, timestamp_ms, elapsed_ms`.
 
-- `turn_id` increments on `prompt-arrived` and `answer-received`. An answer turn gets `parent_turn_id = <previous turn_id>` so the UI can group multi-round dialogs.
+- `turn_id` increments on `prompt-arrived`, `answer-received` and `workers-complete`. An answer turn gets `parent_turn_id = <previous turn_id>` so the UI can group multi-round dialogs.
 - `retry_index` increments on `reflect-retry` and `eval-retry`; all rows in a retry share the same `turn_id`.
 - `compaction_count` increments each time PROCESSING → COMPACTING happens within a retry.
 - Retention: `retention.prune_cron()` (`core/retention.py:33-54`) prunes rows older than 30 days while keeping the most recent 500 per session, so the last turn of every session stays inspectable regardless of age. Snooze's Activity 7 (`cron_cleanup`) and maintenance's 24h fallback own the cadence; the sweep itself lives in `core/retention.py`, not `core/snooze.py`.
@@ -83,12 +83,12 @@ Table: `session_state_log` (append-only). Columns: `session_id, turn_id, parent_
 
 Existing payload-detail events (`scout.start`, `stream.token`, `tool.call.*`, `context.compacting`, `reflect.*`, `turn.complete`, `worker.started`) remain and continue to fire. Later additions on the same stream:
 
-- `reflect.circuit_breaker {attempts, signature, reasoning}` (`sessions/hooks.py:806-817`) — a reflect `retry` was refused because the last two attempts failed identically.
-- `goal.budget_exceeded {reason}` (`core/agent.py:662`) — the in-turn budget checkpoint tripped mid-round; the loop breaks with `termination_reason="budget_exhausted"`.
-- `goal.continuation {goal_id, ordinal, budget}` (`sessions/manager.py:609`) — an auto-continuation turn was enqueued for the active goal.
-- `context.view_pruned {stubbed}` (`core/context/compiler.py:1005`) — budget-gated view pruning stubbed N oversized tool results out of the compiled view.
-- `session.message_combine_skipped {message_id, reason}` (`sessions/manager.py:1021`) — a rapid-fire message could not be folded into the in-flight turn and was queued instead.
-- `gates.done {attempt, total, failed, names_failed}` (`sessions/hooks.py:376`) — deterministic goal gates finished.
+- `reflect.circuit_breaker {attempts, signature, reasoning}` (`sessions/hooks.py:1275`) — a reflect `retry` was refused because the last two attempts failed identically.
+- `goal.budget_exceeded {reason}` (`core/agent.py:1460`) — the in-turn budget checkpoint tripped mid-round; the loop breaks with `termination_reason="budget_exhausted"`.
+- `goal.continuation {goal_id, ordinal, budget}` (`sessions/manager.py:676`) — an auto-continuation turn was enqueued for the active goal.
+- `context.view_pruned {stubbed}` (`core/context/compiler.py:1201`) — budget-gated view pruning stubbed N oversized tool results out of the compiled view.
+- `session.message_combine_skipped {message_id, reason}` (`sessions/manager.py:1109`) — a rapid-fire message could not be folded into the in-flight turn and was queued instead.
+- `gates.done {attempt, total, failed, names_failed}` (`sessions/hooks.py:407`) — deterministic goal gates finished.
 
 Every one of these must also appear in `EVENT_TYPES` in `static/js/sse.js`: `EventSource` only dispatches to listeners registered by exact name, so an unlisted event is silently dropped, `_lastSeq` never advances for it, and the client's gap detection fires a spurious soft reload on the next subscribed event.
 
@@ -126,14 +126,14 @@ Sessions/manager.py `reap_idle_sessions()`:
 | CANCELLING | Force IDLE_READY (cancel-timeout) at 30s |
 | FINALIZING | Force IDLE_READY (finalize-error) at 120s |
 | AWAITING_USER | Never reap for inactivity. Force IDLE_READY only if the question row is gone and `idle > max_idle` |
-| AWAITING_WORKERS | Resume or force IDLE_READY when watched workers settle, or after 3600s idle as a safety timeout |
+| AWAITING_WORKERS | Auto-resumes when watched workers settle; forced IDLE_READY only when the watch-set is empty and idle ≥ `max_idle` (1800s) |
 
 ### 0.8 API / observability
 
 - `GET /api/sessions/{id}/status` — now includes `state` (new 10-value enum, defined in `sessions/state_v2.py:SessionStateV2`), `compat_status` (legacy 3-value for CLI compat), `turn_id`, `retry_index`, `termination_reason`.
 - `GET /api/sessions/{id}/state-log?since_id=<id>&limit=<n>` — paginated replay of the transition log.
 - `POST /api/sessions/{id}/workers/{wid}/pause` / `/resume` — HTTP wrappers over the state-machine-aware `pause_worker` / `resume_worker` tools.
-- Frontend timeline drawer (`static/js/app.js:_toggleTimelineDrawer`) reads from `/state-log` and subscribes to `session.state_changed` for live updates.
+- Frontend timeline drawer (`openTimeline()` in `static/js/components/modals/timeline.js:57`) reads from `/state-log` and subscribes to `session.state_changed` for live updates.
 
 ---
 
@@ -157,9 +157,9 @@ Three ways a request lands in a session:
 
 - **REST** — `POST /api/chat` at `api/routers/chat.py:149-184` → `Manager.get_or_create()` (`sessions/manager.py:32-47`) → stores user message → `Manager.prompt()`
 - **Cron / snooze** — idle-time scheduler creates sessions with `session_type="cron"` for memory consolidation/distillation
-- **Worker spawn** — a parent session calls `spawn_worker` (`core/extensions/orchestration/__init__.py:27-182`) which creates a child session with `session_type="worker"` and `parent_session_id` set
+- **Worker spawn** — a parent session calls `spawn_worker` (`core/extensions/orchestration/__init__.py:49`) which creates a child session with `session_type="worker"` and `parent_session_id` set
 
-### 1.2 The lock and the queue (`manager.py:107-176`)
+### 1.2 The lock and the queue (`manager.py:804`)
 
 `Manager.prompt()` acquires `session.lock` (asyncio.Lock at `state.py:80`), then:
 
@@ -180,7 +180,7 @@ prompt() arrives
       ├─ IDLE/ERROR? → reset flags, launch _run_agent_safe   (manager.py:126, 147-176)
       └─ else → enqueue or reject (queue_full)
 
-_run_agent_safe:                                  (manager.py:178-331)
+_run_agent_safe:                                  (manager.py:1124)
   IDLE → SCOUTING                                 (manager.py:188)
        → run_scout                                [scout.start / scout.done]
   SCOUTING → PROCESSING                           (manager.py:228)
@@ -221,9 +221,11 @@ _run_agent_safe:                                  (manager.py:178-331)
     _process_pending()                             (manager.py:330-331)
 ```
 
+> **Archival note.** The `ERROR` branch drawn above is the pre-v2 shape — that state was deleted; errors now land in `FINALIZING` with `termination_reason="error"` (see §0.1).
+
 ### 1.4 Reflect: a retry-loop INSIDE the turn
 
-When reflect returns `retry`, `_run_agent_retry()` (`manager.py:434-501`) re-enters `SCOUTING → PROCESSING → IDLE` **within the same user turn**, re-feeding `reflect_lessons` into the scout (`manager.py:452-454`). Bounded by `reflect_max_retries` (or `reflect_max_retries_worker` — tighter — for workers: `manager.py:265-269`). Eval retries have their own independent budget (`settings.eval_max_retries`) with the same mechanic. So a single user turn can cycle `IDLE → SCOUTING → PROCESSING → IDLE` up to `1 + reflect_retries + eval_retries` times before settling.
+When reflect returns `retry`, `_run_agent_retry()` (`manager.py:1834`) re-enters `SCOUTING → PROCESSING → IDLE` **within the same user turn**, re-feeding `reflect_lessons` into the scout (`manager.py:452-454`). Bounded by `reflect_max_retries` (or `reflect_max_retries_worker` — tighter — for workers: `manager.py:265-269`). Eval retries have their own independent budget (`settings.eval_max_retries`) with the same mechanic. So a single user turn can cycle `IDLE → SCOUTING → PROCESSING → IDLE` up to `1 + reflect_retries + eval_retries` times before settling.
 
 ### 1.5 Reflect verdicts and how they manifest
 
@@ -257,7 +259,7 @@ The turn genuinely terminates; nothing is blocked waiting. `waiting_for_input` s
 Snooze (`core/snooze.py`) is a singleton background runner doing memory consolidation, user-insight extraction, dedup, and FTS5 reconciliation. It is NOT a session state. Interaction points:
 
 - Any user message arrival cancels snooze (`manager.py:118-121`: `get_snooze().request_cancel()`)
-- Snooze skips cycles when any session is non-idle (`snooze.py:69-80` checks every session's `state.name != "IDLE"`; `manager.py:628-639` provides `has_active_work()` which also trips on `has_background_tasks`)
+- Snooze skips cycles when any session is non-idle (`core/snooze.py:165-179` checks every session against the v2 enum — `IDLE_READY`, `AWAITING_USER` and `AWAITING_WORKERS` count as idle; `manager.py:2435` provides `has_active_work()` which also trips on `has_background_tasks`)
 - When snooze is distilling a specific session it acquires `session.add_background_ref()` (`manager.py:527`) so the reaper won't sweep the session out from under it
 - Uses `settings.background_model` exclusively — no primary-model cost
 
@@ -269,7 +271,7 @@ Snooze (`core/snooze.py`) is a singleton background runner doing memory consolid
 - `finally` block **skips post-hooks entirely** (`manager.py:263`: `if not _was_cancelled and not session.cancel_requested`)
 - skips `_process_pending()` too (`manager.py:330`) — queued messages don't auto-run after a cancel
 
-### 1.9 Reaper (background correction, `manager.py:645-698`)
+### 1.9 Reaper (background correction, `reap_idle_sessions` at `manager.py:2475`)
 
 Not part of a normal turn, but part of the lifecycle:
 
@@ -315,13 +317,15 @@ Not part of a normal turn, but part of the lifecycle:
                                           (ERROR accepts new prompts)
 ```
 
+> **Archival note.** The `ERROR` state in this diagram is pre-v2 — it was deleted; errors are now `FINALIZING` with `termination_reason="error"` (see §0.1).
+
 ---
 
 ## 2. Agent Turn Loop (tool calls within a session)
 
 ### 2.1 The loop (`core/agent.py:256-514`)
 
-Iterates while `tool_round < settings.max_tool_rounds` (default 50):
+Iterates while `tool_round < settings.max_tool_rounds` (default 50); when the cap is hit on a healthy turn (tools were called, no error, not stuck), `round_cap_auto_continue` (default 1) grants one fresh round budget before `round_ceiling`:
 
 1. **Pre-round gates** (`agent.py:333-341`) — check `session.cancel_requested`, await `session.pause_event` (for worker pause/resume)
 2. **Compile context** (`agent.py:347-355`) — `compile_context()` in `core/context/compiler.py` returns compacted messages + active tool schemas + scout-report section + resource header (rounds left, token budget). Compaction runs as a view transform; stored messages are never mutated.
@@ -329,7 +333,7 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 50):
 4. **Response check** (`agent.py:502-514`)
    - No tool calls → save assistant message, `termination_reason="complete"`, exit
    - Tool calls → proceed to validate + execute
-5. **Dedup + stuck detection** (`agent.py:78-186, 522-553`) — hash-dedup exact repeats; semantic dedup for expensive tools in `_SEMANTIC_DEDUP_TOOLS = {"call_model"}` (same model + same images = near-duplicate regardless of prompt wording — `agent.py:220-241`). `StuckDetector` evaluates **seven signals** per round:
+5. **Dedup + stuck detection** (`agent.py:113-405`; dedup in `_ToolCallGate`, `agent.py:523`) — hash-dedup exact repeats; semantic dedup for expensive tools in `_SEMANTIC_DEDUP_TOOLS = {"call_model"}` (same model + same images = near-duplicate regardless of prompt wording — `agent.py:441`). `StuckDetector` evaluates **10 signals** per round:
 
    | # | Signal | Weight | Detection |
    | - | ------ | ------ | --------- |
@@ -347,21 +351,21 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 50):
 ### 2.2 Scout agent (`core/scout/runner.py`)
 
 - **Model** — the Background role, `settings.background_model` (fast, cheap; empty ⇒ `llm_model`), **fresh context** (no main convo history — session brief only). When scout exhausts its retries it makes one last attempt on the Backup role, `settings.fallback_model` (`runner.py:1265-1290`), before falling through to a deterministic stub report
-- **Tools** — read-only discovery: `search_memory`, `search_skills`, `search_tools`, `read_skill_instructions`, `submit_report`
-- **Budget** — 5 rounds max; must call `submit_report` by round 4 (`runner.py:104`)
+- **Tools** — read-only discovery, 8 tools: `search_memory`, `search_sessions`, `search_post_mortems`, `search_adaptive`, `search_skills`, `search_tools`, `read_skill_instructions`, `submit_report` (`runner.py:270-395`)
+- **Budget** — 6 rounds max (`SCOUT_MAX_ROUNDS`, `runner.py:957`); must call `submit_report` by round 5 (`runner.py:150`)
 - **Output** — `ScoutReport` with `recommended_tools`, `recommended_skills` (0-3), `approach_guidance`, `deliverables_plan` (used by Reflect), optional `recommended_model`. SOUL.md/RULES.md/SESSIONS.md are NOT part of the report: the context compiler injects those files whole into the fixed prefix of every system prompt (`_build_agent_directives_block`) — scout reads them to shape its plan but never retypes them
 - **Caching** — report cached on `session.last_scout_report`; retries (reflect/eval) re-run scout with `reflect_lessons` prepended
 
 ### 2.3 Tool routing (`core/tools/registry.py`, `core/extensions/`)
 
-- ~13 **core tools** always registered (`file_read`, `file_write`, `bash`, `call_model`, `ask_user`, `spawn_worker`, `get_worker_result`, etc.)
+- 36 **builtin tools** always registered (`file_read`, `file_write`, `bash`, `ask_user`, etc.); `call_model` is a model_mgmt extension, and `spawn_worker` / `get_worker_result` are orchestration extensions
 - **Extensions** conditionally registered by feature flag: browser, vcs, orchestration, planning, skillmaker, toolmaker
 - Agent sees only the schema slice for `active_tools` — scout-picked plus a monotonically-growing allowlist (`agent.py:349`)
 - `discover_tools()` during the loop can expand `active_tools` mid-turn (`agent.py:802-803`)
 
-### 2.4 Safety gate (`core/tools/executor.py:65-81`)
+### 2.4 Safety gate (`core/tools/executor.py:302-320`)
 
-Each `ToolDef` carries `safety_level ∈ {safe, caution, dangerous}`. Dangerous tools require `ask_user` confirmation **unless** `auto_approve_dangerous=true`. **Workers hit the exact same check — no privilege escalation.** Workers also have an additional gate: `worker_allowed=False` tools (e.g. `spawn_worker` itself) are blocked for worker sessions (`executor.py:50-63`).
+Each `ToolDef` carries `safety_level ∈ {safe, caution, dangerous}`. Dangerous tools require `ask_user` confirmation **unless** `auto_approve_dangerous=true`. **Workers hit the exact same check — no privilege escalation.** Workers also have an additional gate: tools listing `"worker"` in `denied_session_types` (e.g. `spawn_worker` itself) are blocked for worker sessions (`executor.py:262-300`).
 
 ### 2.5 Reflect + post-hooks (`core/reflect.py`, `sessions/hooks.py`)
 
@@ -434,9 +438,9 @@ Every event carries `_seq` for gap detection, `timestamp`, `session_id`. Types i
 
 - `scout.start`, `scout.done`
 - `stream.token`, `stream.done`, `stream.error`
-- `tool.call.start`, `tool.call.result`
+- `tool.start`, `tool.call`
 - `context.compacting`
-- `worker.started`, `worker.completed`
+- `worker.started`, `worker.done`, `worker.failed`
 - `session.queued`, `session.queue_full`
 - `turn.complete` — fires AFTER post-hooks, signals `post_hooks_complete=True`
 - `dialog.answered` — on user answer to `ask_user` (`questions.py:60-63`)
@@ -456,7 +460,7 @@ A **child session** spawned by a parent. Properties:
 - Results surfaced through a stable API (`get_worker_result`, `get_worker_transcript`)
 - **Cannot spawn sub-workers** (flat hierarchy, enforced in executor)
 
-### 3.2 Spawn flow (`core/extensions/orchestration/__init__.py:27-182`)
+### 3.2 Spawn flow (`core/extensions/orchestration/__init__.py:49`)
 
 1. **LLM-slot saturation check** (`:46-59`) — count parent's active workers vs. `_get_semaphore_stats()["capacity"]`; if already saturated, return a warning string *before* creating a session ("additional workers will queue and likely timeout")
 2. **Validate `model`** (if specified) — resolve + check provider routing before creating anything (`:64-81`). A bare name routed to Ollama is rejected if Ollama doesn't have the model (avoids a non-obvious wrong-backend hit)
@@ -477,20 +481,20 @@ This is the only mechanism by which the worker becomes aware of attachments — 
 
 ### 3.4 Full worker-management tool catalog
 
-All orchestration tools are registered with `worker_allowed=False` (`:695`) so a worker cannot call any of them — hierarchy stays flat.
+All orchestration tools are registered with `denied_session_types={"worker"}` (`:1334`) so a worker cannot call any of them — hierarchy stays flat.
 
 | Tool | File | Purpose |
 | ---- | ---- | ------- |
-| `spawn_worker` | `:27-182` | Create a new worker session. Returns worker ID. Safety: `caution`. |
-| `check_workers` | `:191-260` | Status of all workers. A worker is "done" only when `state ∈ {idle, unknown} AND post_hooks_complete=True` (`:224`). Annotates "finalizing (reflect/post-hooks)" when `state==idle` but `post_hooks_complete==False` (`:230-231`). Triggers cross-pollination (§3.6) if some workers are done and others still running. |
-| `await_workers` | `:435-507` | Block up to 30 min (hardcoded `max_wait=1800`, `:457`). Polls every 3 s using `asyncio.run_coroutine_threadsafe(asyncio.sleep(3), loop).result(3.5)` — never blocks the event loop (`:500-505`). Snapshots `worker_ids` per iteration (`:463`) to avoid `RuntimeError` if the loop appends while iterating. Returns early if any worker is stalled past `stale_threshold` (default 120 s). |
-| `get_worker_result` | `:283-358` | Final summary with quality-gate header (see §1.5). Lookup order: per-worker summary file → legacy `summary.md` → last assistant message. Max 3000 chars read. If the summary file already starts with `#` (sentinel from `_finalize_worker`), returned as-is — avoids double-stamping. |
-| `get_worker_transcript` | `:361-432` | Full message stream, one line per message: `[role] content`, truncated to `max_chars` (default 30k). Role-aware formatting for `assistant:tool_calls`, `tool`, `reflect` (parses verdict), `scout` (parses approach), `system`, `user`. |
-| `message_worker` | `:510-524` | Fire-and-forget follow-up message into a running worker — internally just `manager.prompt(worker_id, message)` so the worker either picks it up on its current turn (queued) or starts a new turn. Safety: `caution`. |
-| `cancel_worker` | `:527-537` | Calls `session.task.cancel()` which raises `CancelledError` in the worker's `_run_agent_safe`. Worker's post-hooks are **skipped entirely** (`manager.py:263`) — no reflect, no auto-stamp, `termination_reason="cancelled"`. Safety: `caution`. |
-| `pause_worker` | `:540-547` | Calls `session.pause_event.clear()`. Agent loop awaits the event at its pre-round gate (`agent.py:333-341`), so the worker pauses **at the next tool-round boundary**, not mid-tool. |
-| `resume_worker` | `:550-557` | Calls `session.pause_event.set()`. Worker resumes from the awaited gate. |
-| `retry_worker` | `:560-589` | Cancel the old worker, then `spawn_worker` with a composed task that embeds the old worker's output (truncated to 2000 chars) + optional `reason` + `new_instructions`. Useful for UNVERIFIED/ESCALATED workers. |
+| `spawn_worker` | `:49` | Create a new worker session. Returns worker ID. Safety: `caution`. |
+| `check_workers` | `:359` | Status of all workers. A worker is "done" only when `state ∈ {idle, unknown} AND post_hooks_complete=True` (`:224`). Annotates "finalizing (reflect/post-hooks)" when `state==idle` but `post_hooks_complete==False` (`:230-231`). Triggers cross-pollination (§3.6) if some workers are done and others still running. |
+| `await_workers` | `:657` | Block up to 30 min (hardcoded `max_wait=1800`, `:457`). Polls every 3 s using `asyncio.run_coroutine_threadsafe(asyncio.sleep(3), loop).result(3.5)` — never blocks the event loop (`:500-505`). Snapshots `worker_ids` per iteration (`:463`) to avoid `RuntimeError` if the loop appends while iterating. Returns early if any worker is stalled past `stale_threshold` (default 120 s). |
+| `get_worker_result` | `:487` | Final summary with quality-gate header (see §1.5). Lookup order: per-worker summary file → legacy `summary.md` → last assistant message. Max 3000 chars read. If the summary file already starts with `#` (sentinel from `_finalize_worker`), returned as-is — avoids double-stamping. |
+| `get_worker_transcript` | `:586` | Full message stream, one line per message: `[role] content`, truncated to `max_chars` (default 30k). Role-aware formatting for `assistant:tool_calls`, `tool`, `reflect` (parses verdict), `scout` (parses approach), `system`, `user`. |
+| `message_worker` | `:982` | Fire-and-forget follow-up message into a running worker — internally just `manager.prompt(worker_id, message)` so the worker either picks it up on its current turn (queued) or starts a new turn. Safety: `caution`. |
+| `cancel_worker` | `:1034` | Calls `session.task.cancel()` which raises `CancelledError` in the worker's `_run_agent_safe`. Worker's post-hooks are **skipped entirely** (`manager.py:263`) — no reflect, no auto-stamp, `termination_reason="cancelled"`. Safety: `caution`. |
+| `pause_worker` | `:1048` | Calls `session.pause_event.clear()`. Agent loop awaits the event at its pre-round gate (`agent.py:333-341`), so the worker pauses **at the next tool-round boundary**, not mid-tool. |
+| `resume_worker` | `:1083` | Calls `session.pause_event.set()`. Worker resumes from the awaited gate. |
+| `retry_worker` | `:1125` | Cancel the old worker, then `spawn_worker` with a composed task that embeds the old worker's output (truncated to 2000 chars) + optional `reason` + `new_instructions`. Useful for UNVERIFIED/ESCALATED workers. |
 
 ### 3.5 Why `post_hooks_complete` matters here
 
@@ -498,7 +502,7 @@ All orchestration tools are registered with `worker_allowed=False` (`:695`) so a
 
 ### 3.6 Cross-pollination — sharing findings between live siblings
 
-`cross_pollinate()` (`orchestration:592-690`) is a LogAct-inspired supervisor pattern: when one worker finishes, inject its finding into the conversation history of any still-running siblings, so they don't redo the same discovery.
+`cross_pollinate()` (`orchestration:1157`) is a LogAct-inspired supervisor pattern: when one worker finishes, inject its finding into the conversation history of any still-running siblings, so they don't redo the same discovery.
 
 **Triggered naturally** from `check_workers()` (`:252-258`) when there's a mix of done + running workers — **not on a polling timer**.
 
@@ -519,7 +523,7 @@ Mechanics:
 
 ### 3.9 Same safety gate, no privilege escalation
 
-`executor.py:69-81` runs for both parent and worker sessions; dangerous tools without `auto_approve_dangerous` are refused regardless of `session_type`. Workers **cannot** bypass the gate by virtue of being "internal." Additionally, workers hit the `worker_allowed` gate (`executor.py:50-63`) which blocks all orchestration tools so the hierarchy stays flat.
+`executor.py:302-320` runs for both parent and worker sessions; dangerous tools without `auto_approve_dangerous` are refused regardless of `session_type`. Workers **cannot** bypass the gate by virtue of being "internal." Additionally, workers hit the `denied_session_types` gate (`executor.py:262-300`) which blocks all orchestration tools so the hierarchy stays flat.
 
 ---
 
@@ -534,20 +538,14 @@ A worker runs the **identical** pipeline as a user-facing session: `_run_agent_s
 - Worker typically has no queued user messages (it gets one prompt and completes)
 - Worker's system prompt includes task description + summary-file convention (`orchestration:103-145`)
 
-### 4.2 Sub-worker recursion is blocked (`executor.py:50-63`)
+### 4.2 Sub-worker recursion is blocked (`executor.py:262-300`)
 
 ```python
-is_worker = bool(s and s.session_type == "worker")
-if not tool.worker_allowed and is_worker:
-    return ToolExecutionResult(
-        tool_name=name,
-        content=f"Error: Tool '{name}' cannot be used in worker sessions.",
-        was_error=True,
-        latency_ms=0,
-    )
+if session_type and session_type in tool.denied_session_types:
+    return _refusal(name, f"Error: Tool '{name}' cannot be used in {session_type} sessions.")
 ```
 
-Tools with `worker_allowed=False`: `spawn_worker`, `await_workers`, `check_workers`, `get_worker_result`, `get_worker_transcript`. This enforces a flat hierarchy — parent → workers, no deeper nesting.
+Tools with `"worker"` in `denied_session_types`: every orchestration tool (`spawn_worker`, `await_workers`, `check_workers`, `get_worker_result`, `get_worker_transcript`, …). This enforces a flat hierarchy — parent → workers, no deeper nesting.
 
 ### 4.3 What a worker can use
 
@@ -573,20 +571,20 @@ Workers are typically single-turn (spawn → complete). But nothing stops a pare
 | Session lifecycle      | `sessions/state_v2.py`, `sessions/manager.py`    | 10-state machine + asyncio.Lock + `pending_messages` deque (see §0)            |
 | Session data           | `sessions/state.py`                              | `AgentSession`: event plumbing, cooperative-cancel bool, pause event, retry counters; state itself lives in `_state_v2` |
 | Agent loop             | `core/agent.py:256-514`                          | compile_context → stream → dedup/stuck → execute → cancel/ask_user checks      |
-| Stuck detection        | `core/agent.py:78-186`                           | Seven weighted signals; score > 0.3 with repeat_count ≥ 3 triggers help/break |
+| Stuck detection        | `core/agent.py:113-405`                          | Seven weighted signals; score > 0.3 with repeat_count ≥ 3 triggers help/break |
 | Compaction             | `core/context/compaction.py`, `core/context/compiler.py` | Non-destructive 3-phase view: prune → orphan-filter → `role="compaction"` summary marker; metadata in `messages.metadata` (v5+) |
-| LLM router             | `core/llm/router.py`, `core/llm/client.py`       | Ollama + OpenRouter; per-provider semaphores; typed `FailoverError`; OpenRouter rate-limit → Ollama fallback; CONTEXT_OVERFLOW → compaction-retry |
-| Scout                  | `core/scout/runner.py`                           | Fresh-context fast model, 5-round budget, emits `ScoutReport` + `deliverables_plan` |
+| LLM router             | `core/llm/router.py`, `core/llm/client.py`       | Ollama + OpenRouter + OpenAI-compatible; per-provider semaphores; typed `FailoverError`; remote rate-limit → Ollama fallback; CONTEXT_OVERFLOW → compaction-retry |
+| Scout                  | `core/scout/runner.py`                           | Fresh-context fast model, 6-round budget, emits `ScoutReport` + `deliverables_plan` |
 | Tool registry          | `core/tools/registry.py`, `core/extensions/`     | ~13 core + discoverable extensions; `active_tools` slice per turn              |
-| Safety gate            | `core/tools/executor.py:65-81`                   | `safety_level` check; workers not exempt; `worker_allowed` gates flat hierarchy |
+| Safety gate            | `core/tools/executor.py:302-320`                 | `safety_level` check; workers not exempt; `denied_session_types` gates flat hierarchy |
 | Reflect                | `core/reflect.py`, `sessions/hooks.py`           | verdict ∈ {pass, retry, escalate}; retry bounded by `reflect_max_retries[_worker]` |
 | Reflect retry loop     | `sessions/manager.py:272-295`                    | re-enters SCOUTING→PROCESSING within one user turn until verdict passes or cap |
 | ask_user               | `core/tools/builtin/dialog_tools.py`, `api/routers/questions.py` | Transitions to `AWAITING_USER`, terminates turn; answer = new prompt           |
 | Snooze                 | `core/snooze.py`                                 | Process-global; cancelled by user msg; gates on every session being IDLE       |
 | Reaper                 | `sessions/manager.py` `reap_idle_sessions`       | Per-state timeouts (§0.7); unsticks stuck PROCESSING, reaps idle SCOUTING      |
-| Workers — spawn        | `orchestration:27-182`                           | `_spawn_lock` atomic slot; LLM-slot warning; attachment-visibility hint         |
-| Workers — lifecycle    | `orchestration:191-589`                          | `check_workers`, `await_workers`, `get_worker_result`, `get_worker_transcript`, `message_worker`, `cancel_worker`, `pause_worker`, `resume_worker`, `retry_worker` |
-| Cross-pollination      | `orchestration:592-690`                          | Reflect=pass findings from completed workers injected as `system` msg into running siblings; dedup via `session_messages` table |
+| Workers — spawn        | `orchestration:49`                               | `_spawn_lock` atomic slot; LLM-slot warning; attachment-visibility hint         |
+| Workers — lifecycle    | `orchestration:359-1155`                         | `check_workers`, `await_workers`, `get_worker_result`, `get_worker_transcript`, `message_worker`, `cancel_worker`, `pause_worker`, `resume_worker`, `retry_worker` |
+| Cross-pollination      | `orchestration:1157`                             | Reflect=pass findings from completed workers injected as `system` msg into running siblings; dedup via `session_messages` table |
 | Events                 | `core/events.py`, `sessions/state.py:153-173`    | Single SSE stream with `_seq` gap detection                                    |
 | Deletion               | `sessions/manager.py:83-101`                     | `delete_session` cancels task, cascades workers, removes summary files         |
 

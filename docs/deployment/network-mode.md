@@ -31,9 +31,9 @@ On restart, Pernix:
 | Protocol | HTTP | HTTPS |
 | Auth | None | Bearer token required |
 | `llm_base_url`, `openrouter_base_url` | Editable from UI | Locked (must edit `data/settings.json` from localhost) |
-| `shell_security_mode`, `shell_allowlist`, `shell_env_*` | Editable | Locked (same) |
-| `auto_approve_dangerous` | Editable | Locked (same) |
-| `cors_origins` | Editable, takes effect immediately | Editable, requires restart to take effect |
+| `shell_security_mode`, `shell_allowlist`, `shell_env_*` | Locked via the API (edit `data/settings.json` directly, then restart) | Locked (same) |
+| `auto_approve_dangerous` | Locked — runtime-only via the `--dangerous` startup flag | Locked (same) |
+| `cors_origins` | Editable, requires restart to take effect | Editable (same) |
 | `auth_token` | Optional | Required (auto-generated if empty) |
 | Admin endpoints | Available | Restricted to localhost connections |
 
@@ -53,7 +53,7 @@ Two options for the cert:
 
 ### Self-signed (default)
 
-On first start in network mode, Pernix calls `openssl` to generate an RSA-2048 self-signed certificate valid for 365 days. It's stored at `data/certs/cert.pem` and `data/certs/key.pem` with restrictive perms (directory `0700`, key file `0600`).
+On first start in network mode, Pernix calls `openssl` to generate an RSA-2048 self-signed certificate valid for 365 days. It's stored at `data/certs/self_signed.crt` and `data/certs/self_signed.key` with restrictive perms (directory `0700`, key file `0600`).
 
 Browsers will show "untrusted certificate" warnings — click through to proceed. **Limitation:** mobile browsers and Web Push require a trusted certificate; self-signed won't work for those.
 
@@ -112,7 +112,7 @@ After login, the URL bar shows just the host — the token is no longer in the U
 curl -X POST http://localhost:8090/api/settings/auth-token/regenerate
 ```
 
-This is **localhost-only**. After regeneration, every existing client (browser tabs, scripts, mobile apps) must re-authenticate with the new token. Useful if you suspect a token has leaked.
+This is **token-gated, not localhost-only** — a remote client can call it too by sending the current token (see above). After regeneration, every existing client (browser tabs, scripts, mobile apps) must re-authenticate with the new token. Useful if you suspect a token has leaked.
 
 ---
 

@@ -37,7 +37,7 @@ This is the canonical local CI. It runs:
 1. `black --check` — code formatting
 2. `ruff check` — lint (selects E, F, W, I rule families)
 3. `flake8` — additional style checks
-4. `pytest` — full test suite, requires ≥60% coverage to pass
+4. `pytest` — full test suite, requires ≥63% coverage to pass
 
 The `--fix` flag applies black and ruff auto-fixes before running checks:
 
@@ -62,9 +62,9 @@ Two pytest markers are defined: `slow` and `integration`. Most tests run in seco
 
 ### Coverage
 
-`./check.sh` enforces ≥60%. Coverage **omits** `tests/`, `data/`, `static/`, `extensions/`, `run.py`, and `certs.py` (paths that are either themselves tests, runtime data, or thin entry/glue layers).
+`./check.sh` enforces ≥63%. Coverage **omits** `tests/`, the virtualenvs (`.venv/`, `venv/`), `data/`, `static/`, `docs/`, `run.py`, and `core/certs.py` (paths that are either themselves tests, runtime data, or thin entry/glue layers). `core/extensions/*` is deliberately **not** omitted — it holds some of the largest, most concurrent code in the repo, and the gate must see it.
 
-If your change drops coverage below 60%, write tests until it's back over.
+If your change drops coverage below 63%, write tests until it's back over.
 
 ---
 

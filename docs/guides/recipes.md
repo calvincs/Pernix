@@ -128,7 +128,7 @@ If you find yourself prompting the same procedure more than 2–3 times — same
 > *4. Combine into a 600-word brief with these sections: 'Snapshot', 'Recent financials', 'Material recent events', 'Watchlist questions'.*
 > *5. Save to `data/workspace/projects/companies/{ticker}.md`.*
 >
-> *Make this into a reusable skill called `company-brief` so I can invoke it next time with `/skill company-brief AAPL`. Use the skillmaker extension."*
+> *Make this into a reusable skill called `company-brief` so next time I can just say "use the company-brief skill on AAPL". Use the skillmaker extension."*
 
 The agent calls `create_skill` with the procedure as the L2 instruction body. After the next turn, the skill is loaded and discoverable.
 

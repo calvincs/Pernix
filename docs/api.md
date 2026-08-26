@@ -37,7 +37,7 @@ curl -b "pernix_auth=<your-token>" https://host:8090/api/sessions
 curl "https://host:8090/api/sessions?token=<your-token>"
 ```
 
-Retrieve your token from the Settings UI or from `GET /api/settings/auth-token` (localhost-only). Rotate it with `POST /api/settings/auth-token/regenerate` (localhost-only).
+Retrieve your token from the Settings UI or from `GET /api/settings/auth-token`. Rotate it with `POST /api/settings/auth-token/regenerate`. In network mode both require a valid Bearer token like every other endpoint — the old localhost-only restriction on them was deliberately removed.
 
 ---
 
@@ -67,19 +67,47 @@ Returns a paginated list of sessions, most recent first.
 ```
 GET /api/sessions/{session_id}
 ```
-Returns the full session object including all messages.
+Returns the full session object including all messages. Pass `?limit=N` to get only the newest N plus `total_messages` / `has_more`.
 
 ### Get Session Status
 ```
 GET /api/sessions/{session_id}/status
 ```
-Returns lightweight status: state, active model, current turn ID, retry index, termination reason. Useful for polling.
+Returns lightweight status: `state` (the 10-value enum), `compat_status` (legacy 3-value), model override (null unless one was set), current turn ID, retry index, termination reason. Useful for polling.
 
 ### Get State Log
 ```
 GET /api/sessions/{session_id}/state-log
 ```
-Returns the append-only state machine transition history for the session. Every state change is recorded with a timestamp, the triggering event, and optional metadata.
+Returns the append-only state machine transition history for the session. Every state change is recorded with a timestamp, the triggering event, and optional metadata. Accepts `since_id`, `before_id`, `limit` (1–5000), and `tail`.
+
+### Search Sessions
+```
+GET /api/sessions/search?q=<query>&limit=20
+```
+FTS5 full-text search across all sessions' message content.
+
+### Update Session Metadata
+```
+PATCH /api/sessions/{session_id}
+```
+```json
+{ "title": "New title", "pinned": true, "model_override": "qwen3:32b" }
+```
+Any subset of the three keys.
+
+### Pause / Resume a Session
+```
+POST /api/sessions/{session_id}/pause
+POST /api/sessions/{session_id}/resume
+```
+Pausing takes effect at the next round boundary; mid-tool-call work is not interrupted.
+
+### Pending Message Queue
+```
+GET    /api/sessions/{session_id}/pending                   List queued (not yet processed) messages
+DELETE /api/sessions/{session_id}/pending/{message_id}      Remove one queued message
+```
 
 ### Delete a Session
 ```
@@ -117,7 +145,7 @@ Returns immediately with a confirmation. The agent processes the request asynchr
 
 If the session is currently processing, the message is queued and you will receive a `session.queued` event.
 
-`idempotency_key` is optional. If you provide one, a duplicate submission with the same key within the same session is silently ignored (the original is still processed). Useful for retrying a failed HTTP request without double-submitting.
+`idempotency_key` is optional. If you provide one, a duplicate submission with the same key is silently ignored (the original is still processed). The check is global — not per-session — so make keys unique per request, not per session. Useful for retrying a failed HTTP request without double-submitting.
 
 ### Inject a Message
 ```
@@ -126,11 +154,10 @@ POST /api/chat/inject
 ```json
 {
   "session_id": "abc123",
-  "message": "Additional context to inject",
-  "role": "user"
+  "message": "Additional context to inject"
 }
 ```
-Injects a message directly into the running context without triggering a new agent turn. Used to supply additional information mid-turn.
+Injects a user message directly into the running context mid-turn (the role is always `user`). If the session is not mid-turn (processing / awaiting workers / compacting), the message is handled as a normal prompt instead and the response is `{"status": "queued"}`.
 
 ### Retry Last Turn
 ```
@@ -154,13 +181,13 @@ Erases all messages in the session while preserving the session's metadata (titl
 ```
 POST /api/compact/{session_id}
 ```
-Triggers context compaction immediately (rather than waiting for `compaction_threshold` to be reached).
+Triggers context compaction immediately (rather than waiting for `compaction_threshold` to be reached). The session must be `idle_ready` — a busy session returns `409`.
 
 ### Get Partial Response
 ```
 GET /api/partial/{session_id}
 ```
-Returns whatever streamed text has accumulated for the current turn, before the turn completes. Useful for showing in-progress responses to clients that aren't using SSE.
+Returns `{has_partial, message_id, content_preview}` — a short preview of the last persisted partial response. It is not a live token stream; use SSE for that.
 
 ### Get Token Usage
 ```
@@ -180,20 +207,21 @@ GET /api/sessions/{session_id}/events
 
 This is a persistent, long-lived HTTP connection. The server pushes events as they occur.
 
-**Reconnection:** Include `Last-Event-ID: <last_seq>` on reconnect to receive any events you missed. The client should reconcile by checking for gaps in `_seq` (a monotonically increasing sequence number on every event).
+**Reconnection:** Include `Last-Event-ID: <last_seq>` on reconnect (or a `?last_event_id=` query parameter) to receive any events you missed. The client should reconcile by checking for gaps in `seq` (a monotonically increasing sequence number on every event).
 
 ### Connecting (JavaScript example)
 ```javascript
 const evtSource = new EventSource(`/api/sessions/${sessionId}/events`);
-evtSource.onmessage = (e) => {
-  const event = JSON.parse(e.data);
-  console.log(event.type, event);
-};
+// Every event is sent with a named `event:` line, so `onmessage` never fires.
+// Register a listener per event type you care about:
+for (const type of ["stream.token", "tool.call", "session.state_changed", "turn.complete"]) {
+  evtSource.addEventListener(type, (e) => console.log(type, JSON.parse(e.data)));
+}
 ```
 
 ### Event Catalog
 
-Every event includes `_seq` (sequence number), `session_id`, and `timestamp`.
+Every event includes `seq` (sequence number), `session_id`, and `timestamp`. The catalog below covers the primary events; the complete list the UI consumes — including `session.title`, `stream.retry`, `stream.length_continuation`, `stream.budget_exhausted`, `message.injected`, `model.override`, `partial.saved`, `reflect.deferred`, `browse.start`/`browse.done`, `job.started`/`job.completed`/`job.error`, and the `snooze.*` family — is enumerated in `static/js/sse.js` (`EVENT_TYPES`).
 
 #### Session Lifecycle
 | Event | Description |
@@ -291,13 +319,13 @@ Returns a list of all memory files with entry counts and sizes.
 ```
 GET /api/memory/files/{filename}
 ```
-Returns the raw markdown content of the file.
+Returns `{"name", "content"}` as JSON.
 
 ### Search Memory
 ```
-GET /api/memory/search?q=your+query&limit=10
+GET /api/memory/search?q=your+query&limit=5&after=<epoch>
 ```
-BM25 full-text search across all memory entries. Returns entries with relevance scores.
+Full-text search across all memory entries — BM25, or hybrid BM25 + vector when `embedding_model` is set. `limit` defaults to 5; `after` filters to entries newer than the given epoch. Returns entries with relevance scores.
 
 ### Memory Maintenance
 ```
@@ -326,11 +354,11 @@ Serves the file with auto-detected content type. Works for HTML, images, JSON, t
 ### Write a File
 ```
 PUT /workspace/{path}
-Content-Type: text/plain (or application/json, etc.)
+Content-Type: application/json
 
-<file contents>
+{ "content": "<file contents>" }
 ```
-Creates parent directories automatically.
+The body is JSON with a `content` field (a raw text body is a 422). Creates parent directories automatically.
 
 ### Delete a File
 ```
@@ -350,13 +378,19 @@ Max 250MB. Filenames are sanitized. Blocked extensions: `.exe`, `.sh`, `.php`, `
 ```
 GET /api/datafiles
 ```
-Returns a directory listing of `data/` (excluding the SQLite database, certs, and other sensitive files). Useful for inspecting the agent's persistent state.
+Returns a directory listing of `data/` excluding the SQLite database files and secret-bearing config (`settings.json`, `.env`, credential files). Useful for inspecting the agent's persistent state.
 
 ---
 
 ## Workers
 
 Workers are sub-agents spawned from a parent session. Pause/resume operations apply at the next round boundary (mid-tool-call work is not interrupted).
+
+### List Workers
+```
+GET /api/sessions/{session_id}/workers
+```
+Returns the session's worker children with their state and models.
 
 ### Pause a Worker
 ```
@@ -422,7 +456,7 @@ Sets a per-session model override (does not change global settings).
 ```
 GET /api/health
 ```
-Returns `{"status": "ok"}` when the server is running. Includes active session count and current primary model.
+Returns `{"status": "healthy", ...}` with the release version, active session count, and current primary model.
 
 ### Detailed Diagnostics *(localhost-only)*
 ```
@@ -454,23 +488,29 @@ Content-Type: application/json
 ```
 Persists an API key to the `.env` file. Set `value` to an empty string to clear a key.
 
-### Auth Token *(localhost-only)*
+### Auth Token
 ```
 GET  /api/settings/auth-token              View the current Bearer token
 POST /api/settings/auth-token/regenerate   Rotate the token
 ```
 
-### Access QR Code *(localhost-only, network mode)*
+### Access QR Code *(network mode)*
 ```
 GET /api/settings/access-qr
 ```
 Returns a QR code image encoding `https://<LAN-IP>:<port>/#token=<token>`. Scan with a phone to log in. The token is in the URL fragment, which browsers do not transmit, so it never appears in a server access log.
 
-### Environment Variables *(localhost-only)*
+### Environment Variables
 ```
 GET /api/env-vars
 ```
 Returns the names of detected environment variables (values redacted) — useful for verifying API keys are loaded correctly.
+
+### Tool Approvals
+```
+GET    /api/settings/tool-approvals     List remembered dangerous-tool approvals
+DELETE /api/settings/tool-approvals     Clear them
+```
 
 ### Graceful Restart *(localhost-only)*
 ```
@@ -525,6 +565,14 @@ PUT /api/skills/{name}
 Content-Type: text/plain
 
 <full SKILL.md content>
+```
+
+### Enable / Disable a Skill
+```
+PATCH /api/skills/{name}
+```
+```json
+{ "enabled": false }
 ```
 
 ### Delete a Skill
@@ -592,7 +640,7 @@ DELETE /api/jobs/{name}       Delete a job
 PUT    /api/jobs/{name}       Update a job
 POST   /api/jobs/{name}/pause Pause a job
 POST   /api/jobs/{name}/resume Resume a paused job
-GET    /api/jobs/runs         History of past runs
+GET    /api/jobs/runs?limit=&offset=&job_name=   Paginated run history ({items, total, limit, offset})
 DELETE /api/jobs/runs         Clear run history
 GET    /api/jobs/status       Current scheduler status
 GET    /api/jobs/events       SSE stream of job events
@@ -705,6 +753,34 @@ Neither the adaptive layer nor the canary suite emits SSE events. Both are polle
 
 ---
 
+## Telos
+
+Surfaces for the teleological layer — see [internals/telos.md](internals/telos.md). Read endpoints work even when `telos_enabled` is off.
+
+```
+GET  /api/telos                          Layer status summary
+GET  /api/telos/questions                Open questions
+GET  /api/telos/hypotheses               SOUP hypotheses
+GET  /api/telos/goals                    The goal DAG
+GET  /api/telos/claims                   Committed claims
+GET  /api/telos/trace                    Append-only trace ledger
+POST /api/telos/run                      Run the telos machinery on demand
+POST /api/telos/alarms/{alarm_id}/ack    Acknowledge an alarm (silences the notification, keeps the ladder's place)
+```
+
+---
+
+## Voice
+
+Speech-to-text for the chat mic button — engines and their privacy labels are configured in Settings → Voice Input.
+
+```
+GET  /api/voice/status        Availability of the configured engine
+POST /api/voice/transcribe    multipart audio in, {"text": ...} out, via the configured engine
+```
+
+---
+
 ## Kernel
 
 ### Kernel Status
@@ -749,7 +825,7 @@ Content-Type: application/json
 
 ## User Questions (ask_user)
 
-When the agent needs input mid-turn, it emits an `ask_user` SSE event and pauses. The UI displays a dialog; API clients should answer programmatically.
+When the agent needs input mid-turn (the `ask_user` tool), it emits a `dialog.question` SSE event and pauses. The UI displays a dialog; API clients should answer programmatically.
 
 ### List Pending Questions
 ```
@@ -799,11 +875,14 @@ curl -s -X POST http://localhost:8090/api/chat \
   -H "Content-Type: application/json" \
   -d "{\"session_id\":\"$SESSION\",\"message\":\"What is 2+2?\"}"
 
-# 3. Poll status until turn completes
+# 3. Poll status until the turn completes.
+#    Use `state` (the 10-value enum) — the legacy `compat_status` maps
+#    awaiting_user/awaiting_workers to "idle" too, which can end a naive
+#    loop while the session is parked on a question rather than finished.
 while true; do
-  STATE=$(curl -s "http://localhost:8090/api/sessions/$SESSION/status" | jq -r '.status')
+  STATE=$(curl -s "http://localhost:8090/api/sessions/$SESSION/status" | jq -r '.state')
   echo "State: $STATE"
-  [ "$STATE" = "idle" ] && break
+  case "$STATE" in idle_ready|awaiting_user) break;; esac
   sleep 1
 done
 

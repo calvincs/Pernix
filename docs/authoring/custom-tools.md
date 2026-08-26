@@ -65,7 +65,7 @@ Custom tools are **excluded from formatters and git** (per the project's `.gitig
 Tools that need pip packages install into `data/workspace/.venv/` (a separate venv from the project venv at `.venv/`). The `install_package` tool takes care of this:
 
 ```python
-install_package(name="openweathermap-py")
+install_package(package="openweathermap-py")
 ```
 
 Packages installed here persist across server restarts. After a `--rebuild` (which wipes the workspace, including this venv), use `restore_tool_packages(name)` to reinstall what a custom tool depends on — each tool's package list is tracked in a `custom_<name>.requirements.txt` file next to the tool.
