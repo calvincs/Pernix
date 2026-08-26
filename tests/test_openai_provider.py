@@ -55,6 +55,22 @@ def test_model_info_falls_back_to_hints_then_default():
     assert p._model_info("mystery-model", {"max_model_len": "not-a-number"}).context_length == 128_000
 
 
+def test_model_info_vision_override_covers_self_hosted_models():
+    """vision_model_overrides must apply on the openai path too — the aibox
+    vLLM serves Qwen3.8-27B (natively multimodal) under an id no OpenAI
+    prefix matches, so without the override images were silently dropped
+    from the compiled context (ollama honored it; openai did not)."""
+    p = _provider(key="", base_url="http://aibox.ventibean.com:8000/v1")
+    assert not p._model_info("Qwen/Qwen3.8-27B", None).supports_vision
+    settings.vision_model_overrides.append("Qwen/Qwen3.8-27B")
+    try:
+        assert p._model_info("Qwen/Qwen3.8-27B", None).supports_vision
+    finally:
+        settings.vision_model_overrides.remove("Qwen/Qwen3.8-27B")
+    # Prefix detection still stands on its own.
+    assert p._model_info("gpt-4o", None).supports_vision
+
+
 @pytest.mark.asyncio
 async def test_get_model_info_reads_the_cached_server_entry():
     p = _provider(key="", base_url="http://aibox.ventibean.com:8000/v1")
