@@ -5,6 +5,7 @@ import { get, post } from '../api.js';
 import { getPermission, requestPermission } from '../notifications.js';
 
 let _overlay = null;
+let _selectSessionFn = null;  // set by initBell — jump-to-session for item chips
 let _pollTimer = null;
 let _items = [];  // merged list of questions + notifications
 let _hadItemsWhileOpen = false;  // for auto-close when last item is cleared
@@ -13,7 +14,8 @@ let _hadItemsWhileOpen = false;  // for auto-close when last item is cleared
 // Init + polling
 // ---------------------------------------------------------------------------
 
-export function initBell() {
+export function initBell({ selectSession } = {}) {
+    _selectSessionFn = selectSession || null;
     document.getElementById('notification-bell').addEventListener('click', openBellPanel);
     _poll();
     _pollTimer = setInterval(_poll, 5000);
@@ -183,6 +185,24 @@ function _renderItems() {
     });
 }
 
+/**
+ * Session chip for an item header: the session id as a link that closes the
+ * panel and opens that session. Without it a notification says something
+ * happened but not WHERE — the user had to hunt the sidebar for the source.
+ */
+function _sessionChip(sessionId) {
+    if (!sessionId) return null;
+    return el('a', {
+        class: 'notif-session-link',
+        title: 'Open this session',
+        onClick: (e) => {
+            e.preventDefault();
+            closeBellPanel();
+            if (_selectSessionFn) _selectSessionFn(sessionId);
+        },
+    }, [text(sessionId)]);
+}
+
 function _renderQuestion(q) {
     const answerInput = el('textarea', {
         class: 'question-answer',
@@ -194,7 +214,10 @@ function _renderQuestion(q) {
     const row = el('div', { class: 'notif-item notif-question', 'data-qid': q.id }, [
         el('div', { class: 'notif-item-header' }, [
             el('span', { class: 'notif-item-type' }, [text(q.session_title ? `Question from: ${q.session_title}` : 'Agent Question')]),
-            el('span', { class: 'notif-item-time' }, [text(_timeAgo(q.created_at))]),
+            el('span', { class: 'notif-item-meta' }, [
+                _sessionChip(q.session_id),
+                el('span', { class: 'notif-item-time' }, [text(_timeAgo(q.created_at))]),
+            ].filter(Boolean)),
         ]),
         el('div', { class: 'notif-item-text' }, [text(q.question)]),
         q.context ? el('div', { class: 'notif-item-context' }, [text(q.context)]) : null,
@@ -222,7 +245,10 @@ function _renderNotification(n) {
     return el('div', { class: 'notif-item notif-notification' }, [
         el('div', { class: 'notif-item-header' }, [
             el('span', { class: 'notif-item-type' }, [text(n.title || 'Notification')]),
-            el('span', { class: 'notif-item-time' }, [text(_timeAgo(n.created_at))]),
+            el('span', { class: 'notif-item-meta' }, [
+                _sessionChip(n.session_id),
+                el('span', { class: 'notif-item-time' }, [text(_timeAgo(n.created_at))]),
+            ].filter(Boolean)),
         ]),
         n.body ? el('div', { class: 'notif-item-text' }, [text(n.body)]) : null,
         el('div', { class: 'notif-item-actions' }, [

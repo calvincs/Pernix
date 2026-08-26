@@ -164,7 +164,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         _openModelMenu();
     });
     initFilePanel({ selectSession });
-    initBell();
+    initBell({ selectSession });
 
     // Keyboard shortcuts: Ctrl/Cmd+F → transcript search (with a session
     // open), Ctrl/Cmd+K → session switcher palette.

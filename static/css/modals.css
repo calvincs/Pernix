@@ -965,3 +965,23 @@
     text-align: center;
 }
 
+
+/* Session chip in bell items — the id links back to the source session */
+.notif-item-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-2);
+    flex-shrink: 0;
+}
+.notif-session-link {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.72rem;
+    color: var(--accent, #7aa2f7);
+    cursor: pointer;
+    text-decoration: none;
+    opacity: 0.85;
+}
+.notif-session-link:hover {
+    text-decoration: underline;
+    opacity: 1;
+}
