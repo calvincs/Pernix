@@ -190,8 +190,8 @@
         <span class="window-url">localhost:8090</span>
       </div>
       <img class="window-shot" src="img/app.png" loading="lazy" width="1360" height="850"
-           alt="The Pernix web UI: a session where the agent has just drafted and cron-scheduled a morning brief, with model, context, and state readouts in the status bar.">
-      <p class="window-caption">An unedited session: asked for a morning brief, the agent drafted the procedure and put it on cron. Local model, one take.</p>
+           alt="The Pernix web UI: a session where the agent has just scheduled a weekday morning brief on cron — sidebar session list, streamed answer, and model, context, and state readouts in the status bar.">
+      <p class="window-caption">An unedited 2.x-era session: asked for a morning brief, the agent assembled it and put it on a weekday cron. Local model, one take. (It calls its plan a “workflow” — in 3.0 the same ask lands as a skill plus a scheduled job.)</p>
     </div>
   </div>
 </section>
@@ -228,7 +228,7 @@
         <p>A small fast model in a fresh context plans the approach — recalls what you've told it before, picks tools, loads only the relevant skills.</p>
         <span class="phase-model">fast model</span>
       </li>
-      <li class="phase reveal" data-phase="3" tabindex="0" data-log="tool_call · search_web(&quot;…&quot;) → 8 results &nbsp;·&nbsp; round 2 of 20 &nbsp;·&nbsp; streaming">
+      <li class="phase reveal" data-phase="3" tabindex="0" data-log="tool_call · search_web(&quot;…&quot;) → 8 results &nbsp;·&nbsp; round 2 of 50 &nbsp;·&nbsp; streaming">
         <div class="phase-node"><span>03</span></div>
         <h4>Loop</h4>
         <p>The main model executes. Streams tokens, calls tools, reads results, calls more tools — until done. If the cloud rate-limits, it falls back to your local model mid-loop.</p>
@@ -271,7 +271,7 @@
 <section class="layers" id="layers">
   <p class="section-label reveal">IV. The orchestration</p>
   <h2 class="section-title reveal">Four layers <em>between</em> you and the work.</h2>
-  <p class="section-sub reveal">A conversation, a swarm, a recipe, a standing order. Each one a different way to put the agent to use — chat, parallelize, automate, schedule.</p>
+  <p class="section-sub reveal">A conversation, a swarm, a finish line, a standing order. Each one a different way to put the agent to work — chat, parallelize, let it run, schedule.</p>
 
   <div class="layer-grid">
     <article class="layer reveal">
@@ -531,12 +531,12 @@
       <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="24" cy="24" r="16" fill="none" stroke="currentColor" stroke-width="1"/><line x1="24" y1="14" x2="24" y2="24" stroke="currentColor" stroke-width="1"/><line x1="24" y1="24" x2="32" y2="28" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="24" r="1.5" fill="currentColor"/></svg>
       <h4>Cron scheduling</h4>
       <p>Run agents on a schedule. Morning brief, weekly digest, watchdog scripts — all built in.</p>
-      <p class="cap-tools">schedule_job · list_scheduled_jobs · pause / resume</p>
+      <p class="cap-tools">schedule_job · update_scheduled_job · list_scheduled_jobs</p>
     </article>
     <article class="cap reveal">
       <svg class="cap-icon" viewBox="0 0 48 48"><path d="M10 24 Q 24 8, 38 24" fill="none" stroke="currentColor" stroke-width="1"/><path d="M10 24 Q 24 40, 38 24" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="24" r="4" fill="none" stroke="currentColor" stroke-width="1"/></svg>
       <h4>Reflect & retry</h4>
-      <p>When enabled, each response is graded against the original intent. Missed it? The turn re-runs with the lesson appended — bounded retries before surfacing.</p>
+      <p>On by default: each response is graded against the original intent. Missed it? The turn re-runs with the lesson appended — two retries, then it surfaces honestly.</p>
       <p class="cap-tools">core/reflect.py · pass | retry | escalate</p>
     </article>
     <article class="cap reveal">
@@ -698,7 +698,7 @@ requests.post(<span class="str">"http://localhost:8090/api/chat"</span>, json={
         <div class="swagger-route get">
           <span class="verb get">GET</span>
           <span class="route">/api/memory/search</span>
-          <span class="route-desc">Hybrid BM25 search across memories</span>
+          <span class="route-desc">Hybrid BM25 + vector memory search</span>
         </div>
         <div class="swagger-foot">
           <span class="muted">+ 117 more endpoints · openapi.json</span>
@@ -844,7 +844,7 @@ and communicate clearly.
 
   <div class="start-grid">
     <ol class="steps">
-      <li class="reveal"><span class="step-n">01</span><div><h4>Install the prerequisites</h4><p>Python 3.11+. <a class="link" href="https://ollama.ai" target="_blank" rel="noopener">Ollama</a> if you want local models — pull a current Qwen 3 release. An OpenRouter key works too; Ollama is optional.</p></div></li>
+      <li class="reveal"><span class="step-n">01</span><div><h4>Install the prerequisites</h4><p>Python 3.11+. <a class="link" href="https://ollama.ai" target="_blank" rel="noopener">Ollama</a> if you want local models — pull a current Qwen 3 release. An OpenRouter key or any OpenAI-compatible server (vLLM, LM Studio) works too; Ollama is optional.</p></div></li>
       <li class="reveal"><span class="step-n">02</span><div><h4>Clone & install</h4><p>Standard Python: clone, venv, <code>pip install -r requirements.txt</code>. Optional: copy <code>.env.example</code> for OpenRouter or Tavily keys.</p></div></li>
       <li class="reveal"><span class="step-n">03</span><div><h4>Run it</h4><p><code>python run.py</code>. Open <code>localhost:8090</code>. Pick a model in Settings. Say hello — and open <code>/docs</code> in another tab to watch the API.</p></div></li>
       <li class="reveal"><span class="step-n">04</span><div><h4>Make it yours</h4><p>Edit <code>SOUL.md</code>. Write a skill. Set a goal behind a gate. Schedule it on cron. Read the code in <code>core/</code> — it fits in your head.</p></div></li>
@@ -859,6 +859,7 @@ and communicate clearly.
 <span class="ln"><span class="prompt">$</span> cd pernix</span>
 <span class="ln"><span class="prompt">$</span> python3 -m venv .venv && source .venv/bin/activate</span>
 <span class="ln"><span class="prompt">$</span> pip install -r requirements.txt</span>
+<span class="ln"><span class="prompt">$</span> playwright install chromium  <span class="cmt"># browser for browse_web</span></span>
 <span class="ln"><span class="prompt">$</span> cp .env.example .env  <span class="cmt"># add API keys if you have any</span></span>
 <span class="ln"><span class="prompt">$</span> ollama pull <span class="path">&lt;your-current-qwen3&gt;</span>  <span class="cmt"># or any modern frontier model</span></span>
 <span class="ln"><span class="prompt">$</span> python run.py</span>
@@ -892,7 +893,7 @@ and communicate clearly.
     <article class="honest-col isnt-for reveal">
       <p class="honest-h">…and what's gone</p>
       <ul>
-        <li><strong>The workflow engine.</strong> Removed whole: <code>run_workflow</code>, its sibling tools, the routes, the Explorer tab. It was never used — zero invocations, ever — and a step graph declared before the work begins is the one assumption an agent lets you drop. Skills, workers, gates, goals, and cron cover everything it did.</li>
+        <li><strong>The workflow engine.</strong> Removed whole: <code>run_workflow</code>, its sibling tools, the routes, and the Workflows tab inside the Explorer. It was never used — zero invocations, ever — and a step graph declared before the work begins is the one assumption an agent lets you drop. Skills, workers, gates, goals, and cron cover everything it did.</li>
         <li><strong>schedule_workflow.</strong> A thin wrapper whose metadata never persisted. Use <code>schedule_job</code>.</li>
         <li><strong>The six-role model scheme.</strong> <code>scout_model</code>, <code>reflect_model</code>, <code>critical_model</code> and friends collapsed into Primary / Background / Backup.</li>
         <li><strong>Nothing of yours.</strong> Migrations v20–v29 run automatically; no data is deleted; every removed surface has a documented replacement.</li>
