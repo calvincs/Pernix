@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from config import Settings, settings
+from config import APP_VERSION, Settings, settings
 
 router = APIRouter(tags=["health"])
 
@@ -22,7 +22,7 @@ async def health():
     return {
         "status": "healthy",
         "model": settings.llm_model or "(not set)",
-        "version": "2.9.0",
+        "version": APP_VERSION,
         "build": BUILD_ID,
         "sessions_active": manager.active_count(),
         "maintenance": maint.get_stats(),
@@ -69,7 +69,7 @@ async def health_detailed(request: Request):
     return {
         "status": "healthy",
         "model": settings.llm_model or "(not set)",
-        "version": "2.9.0",
+        "version": APP_VERSION,
         "providers": provider_health,
         "sessions": {
             "active": manager.active_count(),

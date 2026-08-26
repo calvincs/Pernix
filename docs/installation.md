@@ -108,7 +108,7 @@ Before you can have a conversation, you need to tell Pernix which model to use:
 3. Set **`background_model`** — the fast/offline tier (scout planning, titles, memory work). A small, fast model works well (e.g. `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter). You can leave it empty to use the Primary model while getting started.
 4. Click **Save**
 
-> **Verify:** Navigate to `http://localhost:8090/api/health` — it should return `{"status": "ok", ...}`.
+> **Verify:** Navigate to `http://localhost:8090/api/health` — it should return `{"status": "healthy", ...}`.
 
 > **Tip:** Open `http://localhost:8090/docs` in your browser. Pernix is built on FastAPI, so a live Swagger UI is auto-generated for every endpoint. ReDoc is also available at `/redoc`. These are the easiest way to explore what the API can do without reading [api.md](api.md) end to end.
 
@@ -150,9 +150,7 @@ Without ffmpeg the original `.mp3` (or other non-WAV) attachment marker stays in
 
 Without tiktoken, Pernix estimates token counts using a character-based heuristic. The estimate is conservative and works fine in practice, but tiktoken gives exact counts for OpenAI-compatible tokenizers.
 
-```bash
-pip install tiktoken
-```
+`tiktoken` is already pinned in `requirements.txt` and installed by the standard `pip install -r requirements.txt` step — no extra install needed.
 
 ### Tavily — Web Search
 
@@ -167,9 +165,7 @@ AI-powered web search with summaries alongside results. Requires an account at [
 
 Prints a QR code to the terminal when you run `python run.py --qr`, useful for scanning with a phone to get the LAN access URL.
 
-```bash
-pip install qrcode
-```
+`qrcode` is already in `requirements.txt` and installed by the standard step — no extra install needed.
 
 ---
 
@@ -222,7 +218,7 @@ Before your first conversation, verify:
 
 - [ ] `llm_model` is set in Settings
 - [ ] `background_model` is set (or left empty to use Primary)
-- [ ] `http://localhost:8090/api/health` returns `{"status": "ok"}`
+- [ ] `http://localhost:8090/api/health` returns `{"status": "healthy", ...}`
 - [ ] If using Ollama: `ollama list` shows the model you configured
 - [ ] If using OpenRouter: `OPENROUTER_API_KEY` is in `.env`
 
@@ -243,21 +239,13 @@ VirtualBox, Proxmox, and VMware all work well. Allocate at least 2GB RAM and wha
 
 ### Container
 
-Any Python 3.11+ container image works. Pernix does not include an official Dockerfile, but the standard setup runs cleanly in something like `python:3.12-slim`:
+Pernix ships a `Dockerfile` and `docker-compose.yml` at the repo root. The image builds on Playwright's Python base (`mcr.microsoft.com/playwright/python`), so Chromium for `browse_web` is already included:
 
-```
-# Rough outline — adapt to your environment
-FROM python:3.12-slim
-RUN apt-get update && apt-get install -y git openssl
-WORKDIR /app
-COPY . .
-RUN python -m venv .venv && .venv/bin/pip install -r requirements.txt
-RUN .venv/bin/playwright install chromium --with-deps
-EXPOSE 8090
-CMD [".venv/bin/python", "run.py"]
+```bash
+docker compose up -d
 ```
 
-Mount `data/` as a volume so your sessions and memory persist across container restarts.
+API keys come from `.env` via `env_file` — secrets stay in the uncommitted `.env`, never in the compose file or the image. The compose file mounts `data/` as a volume so your sessions and memory persist across container restarts. Review the `command:` line before deploying — as committed it starts the server with `--dangerous` (the reference deployment runs unattended); remove the flag to keep the approval gate.
 
 ### Separate Physical Machine
 

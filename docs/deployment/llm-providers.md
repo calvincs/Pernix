@@ -64,7 +64,7 @@ Setup:
 | Setting | Default | Notes |
 |---|---|---|
 | `openrouter_base_url` | `https://openrouter.ai/api/v1` | Locked in network mode |
-| `openrouter_max_concurrent` | `2` | Max simultaneous OpenRouter requests |
+| `openrouter_max_concurrent` | `4` | Max simultaneous OpenRouter requests |
 | `openrouter_models` | empty list | Whitelist; if set, only these models appear in the UI picker |
 | `vision_model_overrides` | empty list | Force `supports_vision=true` on listed models if auto-detection misses |
 
@@ -91,7 +91,7 @@ For a self-hosted OpenAI-compatible server, additionally point `openai_base_url`
 | Setting | Default | Notes |
 |---|---|---|
 | `openai_base_url` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint |
-| `openai_max_concurrent` | `2` | Max simultaneous requests to this provider |
+| `openai_max_concurrent` | `4` | Max simultaneous requests to this provider |
 | `openai_models` | empty list | Whitelist; routes bare names here and curates the UI picker |
 
 Resolution and fallback work like OpenRouter's: a whitelisted bare name routes here (on a name collision with a local model, Ollama wins unless the name is whitelisted), and rate-limit/overload/timeout failures fall back to your local `fallback_model` with the same message sanitization. Cached prompt tokens reported by the API (`prompt_tokens_details.cached_tokens`) surface as cache reads in the cost tooltip.
@@ -166,7 +166,7 @@ There are three layers, all of them landing on the Backup role.
 3. The message stream is **sanitized for the fallback** — `core/llm/router.py:sanitize_for_fallback()` strips vision content blocks and converts tool messages to text, since most local models don't support those formats.
 4. The user-facing response continues without interruption. The UI may show a small badge indicating which provider answered.
 
-Router-level failover is **not** triggered for transient network errors or for the provider being down entirely (those bubble up as errors), and `CONTEXT_OVERFLOW` deliberately does not fail over — it triggers a compaction retry instead.
+Router-level failover also covers a provider that's down entirely: a connection failure (`httpx.ConnectError`) is an explicit failover branch in both the chat and streaming paths (mid-stream only if nothing has been emitted yet). `CONTEXT_OVERFLOW` deliberately does not fail over — it triggers a compaction retry instead.
 
 **2. Agent-loop model failover.** Above the router, the streaming agent loop retries with backoff and then switches to `fallback_model` outright, emitting a `stream.fallback` event. The only requirement is that the backup differs from the model currently in flight — **a different model on the same provider counts**, so an Ollama-primary / Ollama-backup setup has real failover. (Requiring a *different provider* used to mean such a configuration silently had none.)
 

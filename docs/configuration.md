@@ -1,6 +1,6 @@
 # Configuration Reference
 
-All Pernix settings are persisted to `data/settings.json` and can be changed at any time through the **Settings UI** or via `POST /api/settings`. API keys are stored separately in your `.env` file and are never written to `settings.json`.
+Nearly all Pernix settings are persisted to `data/settings.json` and can be changed at any time through the **Settings UI** or via `POST /api/settings`. API keys are stored separately in your `.env` file and are never written to `settings.json`. Three exceptions: machine-local fields (`db_path`, `host`, `port`, and the `*_dir` paths) are never persisted; `auto_approve_dangerous` is runtime-only — set by the `--dangerous` CLI flag, never saved to or loaded from disk; and a set of security-critical fields (`shell_security_mode`, `shell_allowlist`, `shell_env_*`, `auth_token` — plus the LLM base URLs in network mode) is rejected by `POST /api/settings` regardless of where the request comes from (see [security.md](security.md#locked-settings)).
 
 Some settings (marked **requires restart**) only take effect when the server is restarted. Everything else applies immediately on save.
 
@@ -131,6 +131,9 @@ After each agent turn, a lightweight reflect pass verifies that the agent actual
 | `reflect_enabled` | `true` | Enable/disable the reflect quality gate. |
 | `reflect_max_retries` | `2` | Maximum number of automatic retries reflect can trigger per turn. |
 | `reflect_min_messages` | `3` | Minimum messages in a conversation before reflect runs. Short exchanges (e.g., a simple one-liner) skip it. |
+| `reflect_deferred_normal` | `true` | Interactive sessions finalize immediately and get their grade later, observe-only — lessons, post-mortems, and experience records are written exactly as before, but no verdict can retry the turn. Off restores synchronous, retry-capable reflect on interactive turns. Cron/worker/canary sessions always keep the synchronous, retry-capable path, and deterministic gates still run (and clamp) in-line. |
+| `reflect_defer_idle_s` | `300` | Quiet seconds before a deferred grade runs. Only the latest completed turn is graded — a turn superseded inside this window never is. |
+| `reflect_experience` | `true` | Parse reflect's per-turn experience read (sentiment, friction, user observations) and feed it to Candor, post-mortems, and user-profile memory. |
 
 ---
 
@@ -154,6 +157,9 @@ Integration with the Candor memory substrate: calibrated reliability tracking fo
 | `candor_enabled` | `false` | Master switch. Turn-end emission, snooze maintenance, and the scout brief toggle hot; the agent tools (`predict_reliability`, `why_reliability`, `reliability_questions`) register at startup only, so enabling them needs a restart. |
 | `candor_scout_brief` | `true` | Inject the `[OPERATIONAL INTEL]` exception report (degraded tools, discovered conditions, open questions) into scout's pre-load context. |
 | `candor_max_obs_per_turn` | `200` | Safety valve on how many observations one turn may emit. |
+| `fetch_routing_enabled` | `true` | Candor-driven fetch rerouting (needs `candor_enabled`): `http_get` consults the calibrated per-domain `fetch_ok` rate and refuses domains that historically fail, pointing the agent at `browse_web` instead of burning a timeout on a bot wall. `force=true` on the call overrides. |
+| `fetch_routing_min_obs` | `8` | Minimum observations on a domain before rerouting — below this the rate is noise and never reroutes. |
+| `fetch_routing_threshold` | `0.40` | Reroute when the calibrated probability of `fetch_ok` falls below this. |
 
 The store lives at `data/candor/` (machine-local, not in `settings.json`).
 
@@ -211,12 +217,16 @@ A non-convergent drive with correction machinery over the whole loop: turn anoma
 | `telos_max_gated_backlog` | `12` | Above this many gated hypotheses, every idle step evaluates instead of generating. |
 | `telos_max_eval_tokens` | `20000` | Gate ceiling on a hypothesis's estimated evaluation cost. |
 | `telos_question_max_attempts` | `3` | Dry generation passes before a question is abandoned. |
+| `telos_anomaly_remint_cooldown_days` | `7` | One anomaly line of inquiry per source (`tool:X`, `reflect:retry`, …) per window — stops the same flaky tool minting a near-identical question every day. `0` disables. |
 | `telos_soup_context_entries` | `10` | Memory entries in the band-sampled SOUP context. |
 | `telos_soup_retention_days` | `30` | Age after which an unexamined pooled hypothesis is archived `expired` into `soup/archive/` — moved out of the loop's scans, never deleted. 0 = keep it in the pool forever. |
 | `telos_soup_archive_retention_days` | `180` | Hard-delete horizon for `soup/archive/` — the only place a hypothesis file is unlinked. Long by design: the archive is the calibration review's forensic record. 0 = keep forever. |
 | `telos_budget_share_max` | `0.35` | Binding Monitor: 7-day budget share above which the Goodhart signature can fire. |
 | `telos_claims_floor_per_window` | `1` | Binding Monitor: new-claims floor — below it (with the other three conditions) the signature holds. |
 | `telos_divergence_max` | `0.15` | Ledger reconciliation: unsupported-autobiography-claims share that raises a divergence alarm. |
+| `telos_alarm_autoclose` | `true` | Let the discharge pass close alarms that survive repeated clean re-checks. |
+| `telos_alarm_autoclose_checks` | `3` | Consecutive clean re-checks required to discharge an alarm. |
+| `telos_alarm_autoclose_window_hours` | `24` | Minimum first-to-last clean-check span (hours) before autoclose. |
 
 ---
 
@@ -251,6 +261,12 @@ Golden-task canaries: canned tasks with deterministic gates, run headlessly thro
 | `canary_retention_days` | `30` | Age after which Snooze prunes `canary_runs` rows and their sessions. |
 | `canary_baseline_runs` | `3` | Trailing scheduled sweeps a post-batch sweep's pass rate is compared against. |
 | `canary_regression_delta` | `0.15` | Pass-rate drop (vs. the baseline) that counts as a regression and trips the Adaptive tripwire. |
+| `canary_auto_admit` | `true` | Auto-admit machine-proposed canaries whose gate commands pass an allowlist proof plus the vetting runs; specs the machine can't prove safe still queue for human review. |
+| `canary_auto_maintain` | `true` | Maintenance sweep: promotes vetted canaries, tags flapping ones flaky, retires long-green ones to `.retired/` quarantine. A canary whose latest run failed is never auto-mutated — only a pass streak or a human moves it. |
+| `canary_vetting_runs` | `3` | Consistent runs required to promote a canary out of vetting. |
+| `canary_retire_after_passes` | `25` | Consecutive passes before a canary is auto-retired. |
+| `canary_purge_after_days` | `30` | Quarantined (retired) canaries older than this are deleted. |
+| `canary_max_suite` | `24` | Auto-admission stops at this suite size (the human path stays open). |
 
 ---
 
@@ -282,8 +298,8 @@ A governed, machine-editable policy store — routing hints and prompt notes the
 | Setting | Default | Description |
 |---|---|---|
 | `auto_approve_dangerous` | `false` | **Read-only via API.** When `false`, dangerous tools require explicit per-invocation user approval (see below). Can only be set to `true` at startup via the `--dangerous` flag — it cannot be changed while the server is running. |
-| `shell_security_mode` | `"permissive"` | `"permissive"`: only `shell_allowlist` applies. `"restrictive"`: additional syscall-level restrictions. |
-| `shell_allowlist` | *(large default list)* | Commands the agent is permitted to run. The default includes common development tools (`python3`, `git`, `grep`, `curl`, `npm`, etc.). Edit to restrict or expand. |
+| `shell_security_mode` | `"permissive"` | `"permissive"` (default): commands are screened by the denylist scan — the command denylist (system-altering commands like `dd`, `mkfs`, `systemctl`), `sudo`, and an `rm -rf` pattern check; `shell_allowlist` is not consulted. `"strict"`: the command's first word must be in `shell_allowlist`. |
+| `shell_allowlist` | *(large default list)* | First-word allowlist of commands the agent may run — consulted **only when `shell_security_mode = "strict"`**; inert under the default permissive mode. The default includes common development tools (`python3`, `git`, `grep`, `curl`, `npm`, etc.). Edit to restrict or expand. |
 | `shell_timeout` | `30` | Seconds before a shell command is killed. |
 | `tool_timeout` | `300` | Seconds before any tool call is killed (covers file ops, HTTP, etc.). |
 | `shell_address_space_limit_bytes` | `8589934592` | Virtual address space cap (8GB) applied per shell process via `RLIMIT_AS`. Set to `0` to disable. |
@@ -322,6 +338,8 @@ Detached long-compute processes via the `job_start` / `job_status` / `job_tail` 
 | Setting | Default | Description |
 |---|---|---|
 | `memory_recall` | `true` | Search memory at the start of each turn and inject relevant entries into the system prompt. |
+| `distill_audit_enabled` | `true` | Distillation coverage audit (a Snooze activity): sampled re-derivation of a distilled session's durable facts, checked against the store — misses are recorded and repaired instead of staying invisible to every downstream consumer. |
+| `distill_audit_per_day` | `2` | Sessions sampled per UTC day. `0` disables. |
 | `embedding_model` | *(empty)* | Ollama embedding model (e.g. `nomic-embed-text`) for semantic memory retrieval — setting it **is** the switch; empty keeps every search purely lexical (BM25). Vectors live in a rebuildable sidecar next to the FTS index. See [guides/memory-and-recall.md](guides/memory-and-recall.md#semantic-retrieval). |
 | `embedding_batch_size` | `16` | Texts per `/api/embed` call during the background embedding sweeps that run in Snooze. |
 | `embedding_fallback_model` | `BAAI/bge-small-en-v1.5` | Local CPU model (fastembed/ONNX, pulled once into `data/models/fastembed`) used while the remote embedding server is down. Its vectors live under the name `local:<model>`, so the two spaces never mix; search and the snooze sweep read whichever model is active. Empty disables the fallback; it is also inert when `fastembed` is not installed. |
@@ -411,6 +429,7 @@ Esc cancels a recording without transcribing.
 | `max_pending_messages` | `10` | Maximum messages that can queue for a busy session. If a session is processing and more than this many messages arrive, further messages are rejected with a `session.queue_full` event. |
 | `max_concurrent_workers` | `5` | Maximum simultaneously-running worker sub-agents per parent session. |
 | `stall_threshold` | `120` | Seconds of inactivity before a worker is flagged as stalled (surfaced in the UI and by `await_workers`). |
+| `cron_dispatch_timeout` | `3600` | Wall-clock ceiling (seconds) on one scheduled dispatch — a cron fire or a heartbeat idle tick. A wedged unattended job fails and notifies within the hour instead of holding its slot for the old implicit `tool_timeout` × `max_tool_rounds` product. |
 
 ---
 
@@ -443,6 +462,9 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `max_file_write_size` | `104857600` | Max bytes per `file_write` / `file_edit` / `multiedit` call (100 MB). `0` disables. |
 | `max_edit_read_size` | `5242880` | Max file size for `file_edit`'s whole-file fuzzy-match path (5 MB). `0` disables. |
 | `audio_model_overrides` | *(empty list)* | Force `supports_audio = true` for models where auto-detection misses audio capability. |
+| `backup_keep_count` | `7` | Timestamped snapshots kept in `data/backups` by the 24h backup tier. Rotation is per-artifact (DB snapshots and memory corpora rotate independently), so a restore always has a matching pair. Clamped to 0–90 at use time; `0` disables scheduled backups. |
+| `tool_executor_workers` | `32` | Threads in the tool-call pool. Tools run on their own pool so they can never occupy asyncio's default executor, which every API route needs for its DB reads. Occupants are blocked on IO, so raising it costs memory and PIDs rather than throughput. |
+| `background_executor_workers` | `8` | Threads for long-running idle-time background work (dream deep probes, canary maintenance, synthesis, backups, memory dedup). Small on purpose: occupants are heavyweight and idle-time-only. |
 
 ---
 

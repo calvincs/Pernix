@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from config import settings
+from config import APP_VERSION, settings
 from db.database import init_db
 
 logger = logging.getLogger("pernix.api")
@@ -321,7 +321,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
-app = FastAPI(title="Pernix", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="Pernix", version=APP_VERSION, lifespan=lifespan)
 
 # CORS middleware — adjust for network vs localhost mode.
 # This is configured once at startup. Runtime changes to network_enabled require

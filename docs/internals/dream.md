@@ -88,17 +88,22 @@ cycle-generated hypotheses — no special write powers.
 
 ## What it deliberately doesn't do
 
-- **No direct promotion, and nothing auto-applies.** Validated conclusions
-  never reach scout or the live prompt from here; they route through the
-  [Adaptive Layer](canary-and-adaptive.md) (when `adaptive_enabled`), where
-  **every** dream promotion waits for human approval — including
-  mechanically-validated tool patterns. `promote.py` always sets
-  `scope="global"`, and `compute_risk` escalates `source == "dream" and
-  scope == "global"` to high risk unconditionally, so there is no
-  auto-apply path out of the dream. That is deliberate: dream is the most
-  speculative producer in the stack. With the adaptive layer off, the
-  dream's entire observable output remains the journal, the report, and
-  sidecar rows.
+- **No direct promotion — and the proposal queue is a veto window, not an
+  approval gate.** Validated conclusions never reach scout or the live
+  prompt from here; they route through the
+  [Adaptive Layer](canary-and-adaptive.md) (when `adaptive_enabled`). A
+  validated contradiction / stale-memory finding applies immediately on
+  promotion: the proposal row is still minted for the audit trail
+  (resolution `auto_applied`), but the correction itself is additive — a
+  corrective note written beside the disputed entries, nothing edited or
+  deleted — narrated in the dream journal, with at most one operator
+  notification per day. Other dream proposals wait in the queue, where a
+  pending row self-approves after `adaptive_auto_approve_after_hours`
+  (default 24 h) unless you veto it first; every application is journaled
+  and rollback-able. Only *validated* hypotheses promote at all — dream is
+  the most speculative producer in the stack. With the adaptive layer off,
+  the dream's entire observable output remains the journal, the report,
+  and sidecar rows.
 - **No permanent shelf space.** Promoted entries are retired again when
   their evidence stops holding — the originating hypothesis is gone or
   unpromoted, the cited Candor facts recovered above the degradation line,

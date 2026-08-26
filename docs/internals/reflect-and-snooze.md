@@ -11,7 +11,7 @@ Both are off the critical path of any single user request, but they shape how Pe
 
 ## Reflect — the post-turn quality gate
 
-Defined in `core/reflect.py`. Runs after the main agent loop completes, before the session returns to `IDLE_READY`.
+Defined in `core/reflect.py`. Runs after the main agent loop completes. Cron, worker, and canary sessions keep it in-turn, before the session settles; for normal sessions the grade is deferred (`reflect_deferred_normal`, default true) and runs observe-only in the background, `reflect_defer_idle_s` (default 300s) after the session reaches `IDLE_READY`.
 
 ### Inputs
 
@@ -67,7 +67,7 @@ id→policy table with every token real and every pairing invented passed at
 | Verdict | Meaning | What happens |
 |---|---|---|
 | `pass` | The agent fulfilled the request | Done. Session goes to FINALIZING → IDLE_READY. |
-| `retry` | The agent missed the intent | Re-run the turn from scout, with reflect's lessons + the prior turn-digest appended to the system prompt. |
+| `retry` | The agent missed the intent | Cron/worker/canary: re-run the turn from scout, with reflect's lessons + the prior turn-digest appended to the system prompt. A normal session's deferred grade is observe-only — no re-run, a notification is raised instead (deterministic gates can still clamp). |
 | `escalate` | Cannot fix automatically | Surface to the user with reflect's analysis. |
 
 When the verdict is `retry` or `escalate`, reflect emits a structured **turn digest** alongside the verdict. The digest is reflect's own record of what happened during the attempt: scout's plan summary, the tool calls that mattered (with verbatim `result_excerpt` of each), the agent's final response, key findings, and a one-line "what was tried." It is stored inside the post-mortem's `payload_json` and carried forward to the *next* scout invocation as `PRIOR ATTEMPT DIGEST` — so scout-N+1 can plan around real evidence, not just reflect's free-form summary. On `pass`, the digest is omitted by default (set `reflect_emit_digest_on_pass = true` to opt in for debugging or audit).
@@ -78,7 +78,7 @@ Alongside the verdict, a `retry` may carry **`retry_without_tools`** — up to f
 
 ### Bounded retries
 
-Each `retry` increments `retry_index` on the same `turn_id`. When `retry_index` reaches `reflect_max_retries` (default 2), retries stop — total of 3 attempts. The next reflect verdict at that point can only be `pass` or `escalate`.
+Each `retry` increments `retry_index` on the same `turn_id`. When `retry_index` reaches `reflect_max_retries` (default 2), retries stop — total of 3 attempts. The next reflect verdict at that point can only be `pass` or `escalate`. This applies to cron/worker/canary sessions; a normal session's deferred grade is observe-only, so it gets zero reflect-driven retries by default.
 
 For worker sessions, `reflect_max_retries_worker` is a separate cap (default 2). Workers run on tighter budgets so you might want fewer retries there.
 
@@ -116,6 +116,8 @@ The cause feeds into Snooze for offline analysis. Repeated `agent`-class failure
 | `reflect_max_retries` | `2` | Tighten if your provider is expensive, loosen if you tolerate slower turns for higher quality |
 | `reflect_max_retries_worker` | `2` | Set lower for workers if they're cheap to fail-fast |
 | `reflect_min_messages` | `3` | Lower if even short turns deserve verification |
+| `reflect_deferred_normal` | `true` | Defer the grade for normal sessions to an observe-only background pass; set `false` to restore the in-turn retry-capable gate for them |
+| `reflect_defer_idle_s` | `300` | Quiet period after the session reaches `IDLE_READY` before a deferred grade runs |
 | `reflect_emit_digest_on_pass` | `false` | Have reflect emit a turn digest even on `pass` verdicts (audit/debug). Default off — pass turns omit the digest to save output tokens. |
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Defensive trim at parse time regardless of what the model emits. |
 | `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op. |
@@ -154,8 +156,10 @@ Each cycle walks an ordered ladder of activities. `core/snooze.py` owns the life
 | 12a | RLM run cleanup | Delete `data/workspace/rlm/<run_id>/` dirs + `rlm_runs` rows older than `rlm_run_retention_days` (default 30). Running runs are never touched. |
 | 12b | Candor maintenance | When `candor_enabled`: run the admission gate, drain the observation buffer, checkpoint the store. When `adaptive_enabled` too: queue `routing_hint` edits for tools whose calibrated reliability regressed (the Candor producer). |
 | 12c | Canary cleanup | When `canary_enabled`: prune `canary_runs` rows and their sessions past `canary_retention_days` (default 30), and nudge once per canary whose `last_reviewed` is over 90 days old. Never dispatches sweeps — those are enqueued for the next idle window. |
+| 12d | Canary suite auto-maintenance | When `canary_auto_maintain`: promote vetted auto-admitted canaries, tag flapping ones flaky, retire long-green ones to quarantine, purge the quarantine (no LLM). A failing canary is never auto-mutated. |
 | 13 | Refine pass | Whole-session refine (`core/refine.py`) — the single session-improvement rung: skill-edit proposals + lessons from any idle session, not gated on the reflect verdict. |
 | 14 | Dream step | Idle-time introspection (`core/dream/`) — see [dream.md](dream.md). Only when `dream_enabled`. |
+| 14b | Distillation coverage audit | When `distill_audit_enabled`: audit distillation coverage against one sampled raw transcript per run, under a daily budget; misses land in Candor and are written back to memory (`core/memory/audit.py`). |
 | 16 | Telos step | The teleological slow loops (`core/telos/`) — see [telos.md](telos.md). Only when `telos_enabled`. |
 | 15 | Adaptive layer | When `adaptive_enabled`: drain pending auto-applies (safe here — the idle window means no session's cached prefix is mid-turn), enqueue post-batch canary sweeps, evaluate the tripwire (no LLM) — see [canary-and-adaptive.md](canary-and-adaptive.md). |
 
@@ -206,7 +210,7 @@ This is the slow feedback loop. You won't see it move the needle on a single tur
 
 ## Observability
 
-- **Reflect activity** is emitted as `reflect.start` / `reflect.done` SSE events (the verdict rides on `reflect.done`), plus `reflect.skipped`, `reflect.retry`, `reflect.escalate`, `reflect.exhausted`, `reflect.budget_exhausted` and `reflect.circuit_breaker` markers. The UI's timeline drawer shows them inline with the turn.
+- **Reflect activity** is emitted as `reflect.start` / `reflect.done` SSE events (the verdict rides on `reflect.done`), plus `reflect.skipped`, `reflect.retry`, `reflect.escalate`, `reflect.exhausted`, `reflect.budget_exhausted`, `reflect.circuit_breaker`, `reflect.deferred_scheduled` and `reflect.deferred` markers. The UI's timeline drawer shows them inline with the turn.
 - **Snooze cycle output** is logged to `data/logs/pernix.log`. Each cycle records what it ran and how long it took.
 - **`POST /api/memory/maintenance`** runs the memory-index health check and returns the result inline.
 

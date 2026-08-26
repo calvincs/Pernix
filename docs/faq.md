@@ -193,6 +193,6 @@ Use the OpenRouter dashboard — Pernix doesn't have a built-in per-month limit.
 
 - `OPENROUTER_MODELS` whitelist — restrict which models the UI even shows.
 - `llm_session_timeout` — caps how long any single session can hold an LLM slot.
-- If RLM is enabled, it is the biggest single-call spend vector (one `rlm_process` run can fire up to `rlm_max_subcalls` sub-calls, default 50). Point the **RLM Sub-call Model** role at a local/Ollama model to keep runs free, and tune `rlm_max_subcalls`, `rlm_max_concurrent_subcalls`, and `rlm_timeout_seconds` in Settings → General → RLM.
+- If RLM is enabled, it is the biggest single-call spend vector (one `rlm_process` run can fire up to `rlm_max_subcalls` sub-calls, default 50). Sub-calls run on the **Background** model (`background_model`; the root runs on Primary), so point that at a local/Ollama model to keep runs free, and tune `rlm_max_subcalls`, `rlm_max_concurrent_subcalls`, and `rlm_timeout_seconds` in Settings → General → RLM.
 
 For hard limits, configure them on OpenRouter's side.

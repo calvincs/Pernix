@@ -18,9 +18,9 @@ The agent calls `spawn_worker` with a prompt and optional model override:
 
 ```python
 spawn_worker(
-    prompt="Research the latest changes to X. Output a 200-word summary.",
-    model_override="anthropic/claude-haiku-4.5",
-    session_timeout=600,  # optional, seconds
+    task_description="Research the latest changes to X. Output a 200-word summary.",
+    title="research-x",                   # optional label
+    model="anthropic/claude-haiku-4.5",   # optional model override
 )
 ```
 
@@ -56,14 +56,14 @@ Each worker finishes with a final response. The parent can pull it via `get_work
 
 The parent receives a `worker.done` event when a worker settles. The UI shows a worker badge on the parent session.
 
-If a worker errors out, the parent receives `worker.error`. Errors don't crash the parent — they're just one more tool result to handle.
+If a worker fails to start, the parent receives `worker.failed` (the other events are `worker.started` and `worker.done`). Errors don't crash the parent — they're just one more tool result to handle.
 
 ---
 
 ## Limits
 
 - `max_concurrent_workers` (default 5) caps how many workers a parent can have running simultaneously. Subsequent `spawn_worker` calls fail until earlier workers complete.
-- `stall_threshold` (default 120 seconds) flags a worker as stalled if it shows no activity for this long. Stalled workers are surfaced in the UI.
+- `await_workers` flags a worker as stalled if it shows no activity for longer than its `stale_threshold` argument (default 120 seconds). Stalled workers are surfaced in the UI.
 - Workers respect the same dangerous-tool gate as their parent. **Cron-spawned workers** (where the parent is itself an unattended cron session) skip the gate; chat-spawned workers do not.
 
 ---
@@ -78,7 +78,7 @@ set_worker_state(worker_id, paused=true)
 
 The worker observes the pause at its next round boundary and parks in the `PAUSED` state. It stops consuming LLM time. Resume later with `set_worker_state(worker_id, paused=false)`, or use the REST endpoints `POST /api/sessions/{id}/workers/{worker_id}/pause` and `.../resume`.
 
-Paused workers are not reaped for inactivity. The only safety net is a 24-hour timeout if the parent session is deleted.
+Paused workers are not reaped for inactivity. Two independent safety nets apply: 24 hours of idleness, or the parent session being deleted — either one force-cancels the paused worker.
 
 ---
 

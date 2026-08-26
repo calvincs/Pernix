@@ -130,14 +130,23 @@ Custom tools install packages into the workspace venv (`data/workspace/.venv/`),
 
 `core/extensions/evaluation/__init__.py`
 
-Mostly internal. Auto-evaluates outcomes when `eval_auto = true` (default `false`). Settings:
+Auto-evaluates outcomes when `eval_auto = true` (default `false`) — but it is not tool-less: `register()` also contributes the deterministic-gate tools and an on-demand evaluator.
+
+| Tool | Safety | Gated on |
+|---|---|---|
+| `add_gate` | dangerous | `gates_enabled` |
+| `list_gates` | safe | `gates_enabled` |
+| `remove_gate` | safe | `gates_enabled` |
+| `evaluate` | safe | always |
+
+The gate tools are the agent surface of [deterministic gates](autonomy.md); `evaluate` scores planned features against acceptance criteria. Settings:
 
 - `eval_auto` — enable automatic evaluation
 - `eval_threshold` (default 0.7) — pass threshold
 - `eval_max_retries` (default 2) — eval-driven retries per turn
 - `eval_browser_verify` (default `false`) — use a headless browser to verify outcomes (useful for frontend changes)
 
-Most users leave this off. Reflect (the always-on quality gate) covers most of the value.
+Most users leave auto-evaluation off. Reflect (the always-on quality gate) covers most of the value.
 
 ### `model_mgmt`
 
@@ -195,7 +204,7 @@ The teleological layer's agent surface (off by default): read the drive state, m
 | session_tools | on | none |
 | skillmaker | on | none |
 | toolmaker | on | none |
-| evaluation | mostly off | `eval_auto` |
+| evaluation | `evaluate` on; auto-eval and gate tools off | `eval_auto`, `gates_enabled` |
 | model_mgmt | on | none |
 | candor | off | `candor_enabled` (tool registration restart-gated) |
 | rlm — `rlm_process` | off | `rlm_enabled` (tool registration restart-gated) |

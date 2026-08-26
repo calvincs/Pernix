@@ -28,7 +28,7 @@ You can also invoke a skill explicitly:
 
 > *"Use the linkedin-post-formatter skill to write me a post about ..."*
 
-Or, in the UI, type `/skill <name>` to give the agent a strong hint.
+There's no slash command for skills — asking in plain language, as above, is the explicit route; otherwise scout surfaces matching skills automatically.
 
 Once invoked, the agent calls `load_skill(name)` to pull the full instruction body (level 2). Scripts in the skill's `scripts/` directory run via `bash` — there are no dynamic Python imports.
 

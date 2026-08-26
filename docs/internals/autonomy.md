@@ -23,7 +23,7 @@ With `gates_enabled`, the agent (or a canary, or a worker spec) registers
 gates via three tools:
 
 - `add_gate(name, command, watch_paths?, cwd?, scope?)` — register a check on
-  this session. Creating one is a `caution`-level action: a gate is shell you
+  this session. Creating one is a `dangerous`-level action: a gate is shell you
   authored that will run automatically from now on. `scope` is `session`
   (default) or `goal`; a goal-scoped gate additionally blocks `goal_complete`.
 - `list_gates` / `remove_gate` — inspect and retire them.
@@ -204,11 +204,15 @@ registered **read** root, so the pointer is not dead on arrival — `file_read`
 and `rlm_process(source=…)` can re-open the whole payload later.
 
 Binding is an **exclusion set, not an allowlist**: everything binds except
-`repl`, `rlm_process`, `ask_user`, `notify_user` and `notify_parent`. So
-`bash`, `grep` and `glob` — the three tools most likely to produce a
-multi-megabyte result — bind, and any tool added later gets binding by
-default rather than being silently forgotten. Errored results are never
-bound.
+eleven names — `repl` (its output is already kernel-side), `rlm_process`
+(a synthesized answer, nothing to slice), the conversational tools
+(`ask_user`, `notify_user`, `notify_parent`), and readers whose output is
+already managed context and must be read whole (`load_skill`,
+`read_skill_instructions`, `read_skill_resource`, `discover_tools`,
+`get_worker_result`, `get_worker_transcript`). So `bash`, `grep` and
+`glob` — the three tools most likely to produce a multi-megabyte result —
+bind, and any tool added later gets binding by default rather than being
+silently forgotten. Errored results are never bound.
 
 The agent slices megabytes with code instead of re-reading them into context
 — which is exactly what keeps a many-hour goal from drowning in its own tool

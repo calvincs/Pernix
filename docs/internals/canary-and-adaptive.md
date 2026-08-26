@@ -255,8 +255,8 @@ is a payload action, not one of the three entry actions.
   idle; global edits apply only inside a snooze cycle that passed the idle
   gate, because a global edit invalidates every session's cached prompt
   prefix and must never land mid-turn.
-- **Caps** — `adaptive_max_entries_per_kind` (12),
-  `adaptive_max_auto_applies_per_day` (6), `adaptive_edit_cooldown_hours`
+- **Caps** — `adaptive_max_entries_per_kind` (24),
+  `adaptive_max_auto_applies_per_day` (24), `adaptive_edit_cooldown_hours`
   (24) per entry.
 - **Notification** — auto-applies are never silent ("adaptive: 2 routing
   hints applied — review"), and neither is a cap rejection ("Adaptive layer:
