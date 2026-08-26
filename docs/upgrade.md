@@ -94,7 +94,7 @@ Restoring a snapshot taken by an **older** Pernix is fine — migrations run for
 
 ## DB migrations
 
-The schema is at v26. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
+The schema is at v29. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
 
 If you ever need to downgrade Pernix to an older version (and therefore an older schema), the safe path is:
 
@@ -109,6 +109,17 @@ Running newer Pernix against an older DB is fine — that's just a normal upgrad
 ## Breaking changes worth knowing about
 
 These are the upgrade points where something the user might have set up needs attention. Each is dated.
+
+### 2026-08-26 — v3.0.0
+
+This is the release where everything since v2.9.0 lands under one tag — including every dated entry below down to 2026-07. Migrations **v27–v29** ship with it and run automatically: v27 adds the `jobs` table, v28 makes answered questions an audit trail (`answer`/`answered_at` columns; rows are kept instead of deleted), v29 adds `rlm_runs.surfaced_at` (history backfilled). Nothing to do for any of them.
+
+Two behavior changes are **on by default** and worth knowing:
+
+- **Background jobs** (`jobs_enabled = true`): the agent gains `job_start` / `job_status` / `job_tail` / `job_kill` for detached long-running compute. Set `jobs_enabled = false` if you don't want the tools registered (restart required).
+- **Round-cap auto-continuation** (`round_cap_auto_continue = 1`): a turn that exhausts `max_tool_rounds` while healthy (tools ran, no errors, no stuck spiral) gets one fresh round budget with a transcript notice. Set to `0` to restore the hard stop.
+
+Smaller notes: `view_image` is a new safe tool (vision models only); the settings ceilings for `max_tool_rounds` and `rlm_max_iterations` rose to 1000 (defaults unchanged); a provider that 403s on an exhausted quota is excluded from failover for `provider_quota_cooldown_s` (default 600s).
 
 ### 2026-08-12 — The workflow engine was removed
 

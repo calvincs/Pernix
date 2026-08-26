@@ -321,7 +321,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
-app = FastAPI(title="Pernix", lifespan=lifespan)
+app = FastAPI(title="Pernix", version="3.0.0", lifespan=lifespan)
 
 # CORS middleware — adjust for network vs localhost mode.
 # This is configured once at startup. Runtime changes to network_enabled require

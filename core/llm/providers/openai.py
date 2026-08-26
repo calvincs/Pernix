@@ -443,10 +443,7 @@ class OpenAIProvider:
             id=model_id,
             provider=self.name,
             context_length=ctx,
-            supports_vision=(
-                model_id.startswith(_VISION_PREFIXES)
-                or model_id in settings.vision_model_overrides
-            ),
+            supports_vision=(model_id.startswith(_VISION_PREFIXES) or model_id in settings.vision_model_overrides),
         )
 
     async def get_model_info(self, model: str) -> ModelInfo:

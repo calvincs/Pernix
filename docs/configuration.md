@@ -35,6 +35,7 @@ These are the most important settings to configure before first use.
 | `background_model` | *(empty)* | **Background** role — the fast/offline tier: scout planning, session auto-titling, memory distillation and ingest, refine input prep, LLM-backed Snooze activities, Dream, Telos, and RLM sub-calls. Quality-critical calls (compaction, reflect, eval) run on Primary instead. Empty falls back to `llm_model`. |
 | `llm_max_concurrent` | `1` | Maximum simultaneous requests to Ollama. Increase only if your hardware supports parallel inference. |
 | `llm_session_timeout` | `1800` | Maximum wall-clock seconds a session may hold an LLM slot. Prevents hung sessions from blocking others. Set to `0` for unlimited. |
+| `provider_quota_cooldown_s` | `600` | When a model 403s on an exhausted quota, failover *to* that model is refused for this many seconds — so a dead key can't mask the real error. |
 
 ### OpenRouter
 
@@ -104,6 +105,7 @@ This used to be an unconditional hardcode: every tool result over 300 characters
 | Setting | Default | Description |
 |---|---|---|
 | `max_tool_rounds` | `50` | Maximum number of tool-call cycles in a single turn. A backstop against infinite tool loops — not a spend cap. Goal token/time budgets and the stuck detector are the real guards. (Raised from `10` in the 2026-08 refactor; ten rounds manufactured its own failures on ordinary long tasks.) |
+| `round_cap_auto_continue` | `1` | Fresh round budgets granted when a turn exhausts `max_tool_rounds` while healthy (tools ran, no errors, no stuck spiral). Each grant leaves a transcript notice. `0` restores the hard stop. |
 
 ---
 
@@ -232,6 +234,7 @@ The long-running-autonomy substrate: deterministic gates Reflect cannot overrule
 | `kernel_snapshot_max_bytes` | `268435456` | Cap (256 MB) on a kernel's dill snapshot; oversized namespaces skip the offending variables and report them. |
 | `kernel_max_concurrent` | `3` | Live kernels across all sessions; beyond the cap the least-recently-used idle kernel is snapshotted and reaped. |
 | `large_result_bind_threshold` | `20000` | Tool results larger than this (chars) are loaded into the kernel as `tool_result_<n>` variables, with only a head/tail stub in context. Applies to every tool except `repl`, `rlm_process`, and the conversational ones. |
+| `kernel_rss_warn_bytes` | `4294967296` | Kernel RSS above this (4 GB) appends a memory-watermark warning to cell results, so the agent sees the pressure before the hard 8 GB rlimit kills the process. |
 
 ---
 
@@ -298,6 +301,19 @@ When `auto_approve_dangerous` is `false` (the default), every tool marked `dange
 Approvals are **per-invocation by default** — approving `bash` for `ps aux` does not cover a later `mv /etc/passwd`. Pass `persistent=True` only for genuinely repetitive low-risk actions (e.g. browsing several pages during research) where re-asking each call would be noise.
 
 **Previously approved scopes are remembered** in `data/tool_approvals.json`. The next time the agent calls `approve_dangerous_tool()` with the same scope, the `ask_user` step is skipped automatically. You can view and clear this file in **Settings → Security → Remembered Approvals**.
+
+---
+
+## Background Jobs
+
+Detached long-compute processes via the `job_start` / `job_status` / `job_tail` / `job_kill` tools: output captured to a log file, completion durable across server restarts (exit-code sidecar), wall-clock capped via coreutils `timeout`, whole process group killed on `job_kill`. Jobs run under the same rlimits as `bash`.
+
+| Setting | Default | Description |
+|---|---|---|
+| `jobs_enabled` | `true` | Register the four job tools at startup. Restart required for a change to take effect. |
+| `jobs_max_concurrent` | `3` | Running jobs per session. Further `job_start` calls are refused until one finishes. |
+| `jobs_default_timeout_s` | `7200` | Wall-clock cap when the caller doesn't pass one (2 h). |
+| `jobs_max_timeout_s` | `21600` | Ceiling for caller-supplied caps (6 h). |
 
 ---
 

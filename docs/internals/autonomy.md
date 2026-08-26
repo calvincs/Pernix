@@ -220,6 +220,26 @@ outlives its session as an orphan process), and at most
 `kernel_max_concurrent` (3) are alive at once, LRU-reaped beyond that.
 `GET /api/kernel/status` shows live counts.
 
+## Background jobs — compute that outlives the turn
+
+A blocking `bash` call ties a tool round to the lifetime of the process it
+spawned — a 30-minute solver means a 30-minute round, or more often a
+timeout. With `jobs_enabled` (default **on**), the agent instead gets:
+
+- `job_start(command, ...)` — spawn a detached process group. Output goes to
+  a log file; an exit-code sidecar makes completion durable, so a finished
+  job is still reported correctly after a server restart.
+- `job_status` / `job_tail` — poll state and read the log tail. Both are
+  exempt from result-dedup caching, so repeated polls always see fresh data.
+- `job_kill` — kill the whole process group, not just the leader.
+
+Jobs are wall-clock capped via coreutils `timeout`
+(`jobs_default_timeout_s`, 2 h default; callers can raise it to
+`jobs_max_timeout_s`), capped at `jobs_max_concurrent` (3) running jobs per
+session, and run under the same rlimits as `bash`. The pattern composes with
+everything above: start the solver as a job, keep working the goal, read the
+log when the gate is ready to check it.
+
 ## How the pieces compose
 
 A long-running autonomous task is not one feature — it is:
