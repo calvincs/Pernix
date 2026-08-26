@@ -534,7 +534,6 @@ class Settings:
 
     # --- Orchestration (extension) ---
     max_concurrent_workers: int = 5
-    stall_threshold: int = 120
 
     # --- Web Search ---
     web_search_enabled: bool = True  # search_web tool only active when True

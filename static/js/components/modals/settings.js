@@ -288,7 +288,6 @@ const SECTIONS = [
         description: 'Controls for multi-worker task decomposition. Max workers limits parallel sub-agents. Stall threshold detects stuck workers. Plan review timeout is how long you have to approve a generated plan before it auto-proceeds.',
         fields: [
             { key: 'max_concurrent_workers', label: 'Max Workers', type: 'number' },
-            { key: 'stall_threshold', label: 'Stall Threshold (s)', type: 'number' },
             { key: 'plan_review_timeout', label: 'Plan Review Timeout (s)', type: 'number' },
         ],
     },

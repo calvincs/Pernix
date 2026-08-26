@@ -20,7 +20,9 @@ services:
     environment:
       - TZ=America/Chicago
       - OPENROUTER_MODELS=anthropic/claude-opus-4.6,anthropic/claude-sonnet-4.6,x-ai/grok-4.1-fast,moonshotai/kimi-k2.5,qwen/qwen3.6-plus-preview:free,anthropic/claude-haiku-4.5
-    command: ["python", "run.py", "--dangerous"]
+    # Add "--dangerous" here only on a fully trusted box: it disables the
+    # dangerous-tool approval gate for every session.
+    command: ["python", "run.py"]
     healthcheck:
       test:
         - CMD

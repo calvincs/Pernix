@@ -245,7 +245,7 @@ Pernix ships a `Dockerfile` and `docker-compose.yml` at the repo root. The image
 docker compose up -d
 ```
 
-API keys come from `.env` via `env_file` — secrets stay in the uncommitted `.env`, never in the compose file or the image. The compose file mounts `data/` as a volume so your sessions and memory persist across container restarts. Review the `command:` line before deploying — as committed it starts the server with `--dangerous` (the reference deployment runs unattended); remove the flag to keep the approval gate.
+API keys come from `.env` via `env_file` — secrets stay in the uncommitted `.env`, never in the compose file or the image. The compose file mounts `data/` as a volume so your sessions and memory persist across container restarts. As committed, the `command:` line starts the server with the dangerous-tool approval gate ON. Add `--dangerous` to that line only on a fully trusted box that runs unattended.
 
 ### Separate Physical Machine
 

@@ -1,18 +1,23 @@
-"""Pernix — Dream promotion (adaptation plan 4d): validated hypotheses →
-adaptive layer. The phase dream-plan.md deferred on 2026-07-31, shipped with
-prime-agent's rails.
+"""Pernix — Dream promotion: validated hypotheses → adaptive layer.
 
 Mapping by kind:
-  tool_pattern        → routing_hint edit. Dream's global-scope edits are
-                        proposal-gated per plan 4b (the escalation rule wins
-                        over 4d's "auto-eligible" phrasing — Dream is the
-                        most speculative producer; compute_risk enforces it).
-  lesson_ineffective  → policy edit (high-risk kind, gated regardless).
+  tool_pattern        → routing_hint proposal. Dream's global-scope edits
+                        mint proposals (compute_risk escalates dream+global
+                        to high risk); the queue is a veto window — pending
+                        proposals self-approve after
+                        adaptive_auto_approve_after_hours (24h) unless
+                        rejected first.
+  lesson_ineffective  → policy edit proposal (high-risk kind, same veto
+                        window).
   contradiction /
-  memory_stale        → memory-edit proposals rendered for human review —
-                        no engine payload; approving acknowledges, a human
-                        edits memory (no machine memory-edit path exists,
-                        and building one is out of scope, I3).
+  memory_stale        → memory corrections apply immediately on promotion:
+                        the proposal row is minted for the audit trail and
+                        auto-approved (resolution "auto_applied"), and
+                        apply_memory_correction appends an additive
+                        corrective note beside the disputed entries —
+                        nothing is deleted, the dream journal narrates it,
+                        and the operator gets at most one notification per
+                        day.
 
 Every promotion stamps status='promoted' + promoted_ref so a hypothesis is
 promoted exactly once. Refuted/expired rows never promote.
