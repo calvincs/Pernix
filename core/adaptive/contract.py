@@ -39,7 +39,20 @@ a recurring delegated-task shape worth templating -> "worker_spec"
 (always human-reviewed; content is YAML with keys `instructions`,
 optional `model`, optional `gates: [{name, command, watch_paths}]`).
 For update/delete include "entry_id" and the "baseline_version" you
-observed. Emit at most 2 edits and only for durable, cross-session signal —
+observed. Include "confidence": 0.0-1.0 per edit; skip anything below 0.6.
+
+Content must be an INSTRUCTION — what to do and when — not an observation.
+  Bad:  "Despite stored lessons, the agent repeatedly fails to verify files
+         before claiming completion."
+  Good: "Before asserting a deliverable is complete: read the target file
+         on disk and confirm the claimed content is present."
+Do NOT capture: narrative findings about behavior; negative claims about
+tools without the fix ("X does not work" hardens into a refusal the agent
+cites against itself long after the problem is fixed — capture the
+alternative or the repair step); environment-dependent or transient
+failures.
+
+Emit at most 2 edits and only for durable, cross-session signal —
 a one-off fix belongs in lessons, not here. If an edit would contradict the
 user's RULES.md, still emit it but add "conflicts_with_rules": true so it
 routes to human review with the conflict flagged."""
@@ -52,8 +65,10 @@ def queue_producer_edits(edits: list, producer: str, session_id: str = "", ratio
         return empty
     try:
         from core.adaptive.engine import queue_edits
+        from core.adaptive.lint import lint_edit
 
         cleaned = []
+        linted_out = []
         for e in edits:
             if not isinstance(e, dict):
                 continue
@@ -65,8 +80,17 @@ def queue_producer_edits(edits: list, producer: str, session_id: str = "", ratio
             # the model forgot to echo refs.
             if session_id and f"session:{session_id}" not in e["evidence"]:
                 e["evidence"].append(f"session:{session_id}")
+            # The actionability floor: every machine producer passes through
+            # here, so this is where narrative findings stop becoming prompt
+            # content. Human authorship uses the direct create path and is
+            # deliberately unlinted.
+            reason = lint_edit(e)
+            if reason:
+                linted_out.append({"edit": e, "reason": f"lint: {reason}"})
+                continue
             cleaned.append(e)
         result = queue_edits(cleaned, producer, rationale=rationale)
+        result["rejected"] = linted_out + result["rejected"]
         if result["rejected"]:
             for r in result["rejected"]:
                 logger.info("adaptive edit rejected (%s): %s", producer, r["reason"])

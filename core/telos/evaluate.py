@@ -204,31 +204,33 @@ async def evaluate_one(store: TelosStore, gated: list[TelosObject], is_cancelled
     )
 
     # Output port into the adaptive layer (audit P5 port 2): a supported,
-    # evidence-backed claim is a routing-hint candidate. This is the
-    # difference between "telos noticed" and "telos changed behavior" — the
-    # engine's existing risk gating and caps apply unchanged.
+    # evidence-backed claim is a routing-hint candidate — but only when the
+    # claim reads as routing guidance. The old "Supported hypothesis (c_X,
+    # confidence Y): ..." framing shipped diagnostic prose into the scout
+    # prompt; the adaptive lint is the bar now, and a claim that fails it
+    # simply stands as a claim (committed above) with no hint. Zero LLM.
     if verdict == "supported" and evidence and parsed["confidence"] >= 0.65:
         try:
             from core.adaptive.contract import queue_producer_edits
+            from core.adaptive.lint import lint_edit
 
-            queue_producer_edits(
-                [
-                    {
-                        "action": "create",
-                        "kind": "routing_hint",
-                        "scope": "global",
-                        "title": f"telos: {str(h.get('statement') or '')[:70]}",
-                        "content": (
-                            f"Supported hypothesis ({claim.id}, confidence "
-                            f"{parsed['confidence']:.2f}): {str(h.get('statement') or '')[:280]} "
-                            f"— {parsed['note'][:120]}"
-                        ),
-                        "evidence": [claim.id, h.id, str(h.get("question", ""))],
-                    }
-                ],
-                producer="telos",
-                rationale=f"TELOS supported claim {claim.id} (falsifier-gated, judge-confirmed)",
-            )
+            edit = {
+                "action": "create",
+                "kind": "routing_hint",
+                "scope": "global",
+                "title": f"telos: {str(h.get('statement') or '')[:70]}",
+                "content": (f"{str(h.get('statement') or '').strip()[:280]} ({parsed['note'][:120]})"),
+                "evidence": [claim.id, h.id, str(h.get("question", ""))],
+            }
+            reason = lint_edit(edit)
+            if reason:
+                logger.info("telos: supported claim %s stays claim-only (%s)", claim.id, reason)
+            else:
+                queue_producer_edits(
+                    [edit],
+                    producer="telos",
+                    rationale=f"TELOS supported claim {claim.id} (falsifier-gated, judge-confirmed)",
+                )
         except Exception as e:
             logger.debug("telos: adaptive port skipped: %s", e)
 

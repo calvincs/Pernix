@@ -235,6 +235,22 @@ def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], 
         adaptive_edits = []
     if not isinstance(canary_proposals, list):
         canary_proposals = []
+    # The contract's confidence floor and 2-edit cap, enforced mechanically —
+    # prompt prose alone held neither. Edits without a confidence field
+    # (older outputs) pass; an explicit low confidence does not.
+    kept = []
+    for e in adaptive_edits:
+        if not isinstance(e, dict):
+            continue
+        try:
+            conf = float(e["confidence"]) if "confidence" in e else None
+        except (TypeError, ValueError):
+            conf = None
+        if conf is not None and conf < PROPOSAL_CONFIDENCE_FLOOR:
+            logger.info("refine: adaptive edit below confidence floor (%.2f) dropped", conf)
+            continue
+        kept.append(e)
+    adaptive_edits = kept[:2]
     nothing_actionable = bool(data.get("nothing_actionable"))
     return proposals, lessons, adaptive_edits, canary_proposals, nothing_actionable
 

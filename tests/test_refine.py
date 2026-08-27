@@ -150,6 +150,28 @@ def test_parse_refine_output_malformed_returns_empty():
     assert na is False
 
 
+def test_parse_refine_output_enforces_confidence_floor_and_edit_cap():
+    """The contract's 'skip below 0.6' and 'at most 2 edits' were prompt
+    prose only — now mechanical. Edits without a confidence field (older
+    model outputs) pass; an explicit low confidence does not."""
+    from core.refine import _parse_refine_output
+
+    raw = json.dumps(
+        {
+            "proposals": [],
+            "lessons": [],
+            "adaptive_edits": [
+                {"action": "create", "kind": "prompt_note", "title": "low", "content": "x", "confidence": 0.4},
+                {"action": "create", "kind": "prompt_note", "title": "a", "content": "x", "confidence": 0.9},
+                {"action": "create", "kind": "prompt_note", "title": "legacy-no-conf", "content": "x"},
+                {"action": "create", "kind": "prompt_note", "title": "capped-out", "content": "x", "confidence": 0.8},
+            ],
+        }
+    )
+    _, _, edits, _, _ = _parse_refine_output(raw)
+    assert [e["title"] for e in edits] == ["a", "legacy-no-conf"]  # floor dropped 'low', cap dropped the 4th
+
+
 # ---------------------------------------------------------------------------
 # run_for_session — no reflect verdict path (broader gate than snooze_reflect)
 # ---------------------------------------------------------------------------
