@@ -283,17 +283,17 @@ async def _execute_single(
             "without it.",
         )
 
-    # Scheduled-job allow-list (E1): backstop for the schema-side intersection
-    # in core/agent.py — catches a model that fabricates a call to a tool its
-    # schema no longer offers. Same two-point enforcement as retry_excluded.
+    # Session allow-list (E1 scheduled-job charters, canary sandbox):
+    # backstop for the schema-side intersection in core/agent.py — catches a
+    # model that fabricates a call to a tool its schema no longer offers.
+    # Same two-point enforcement as retry_excluded.
     _allowlist = getattr(s, "tool_allowlist", None) if sid and s else None
     if _allowlist and name not in _allowlist:
         return _refusal(
             name,
-            f"Error: Tool '{name}' is not permitted in this scheduled run — the job's "
-            f"charter restricts this session to: {', '.join(sorted(_allowlist))}. "
-            "Complete the task with the permitted tools, or log the need in your "
-            "proposals instead of executing.",
+            f"Error: Tool '{name}' is not permitted in this constrained session — "
+            f"it is restricted to: {', '.join(sorted(_allowlist))}. "
+            "Complete the task with the permitted tools.",
         )
 
     if session_type and session_type in tool.denied_session_types:

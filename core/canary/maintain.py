@@ -405,6 +405,10 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
         "parked": [],
         "unparked": [],
         "probes_retired": [],
+        "skills_changed": [],
+        "verify_synced": [],
+        "verify_retired": [],
+        "verify_unsafe": [],
         "purged": [],
         "reviewed": [],
         "unhealthy": [],
@@ -414,6 +418,18 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
     base = base or canaries_dir()
 
     from core.canary.parser import scan_canaries
+
+    # Skills bridge first: watermark scan + verify-block sync may add,
+    # rewrite or retire canaries, and the rest of the sweep should see the
+    # post-sync suite.
+    if not is_cancelled():
+        try:
+            from core.canary.skill_verify import sync_and_detect
+
+            for k, v in sync_and_detect(canaries_base=base, is_cancelled=is_cancelled).items():
+                stats[k] = v
+        except Exception as e:
+            logger.warning("Skill verify-sync failed: %s", e)
 
     suite = list(scan_canaries(base))
 
@@ -455,9 +471,10 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
         summary = "; ".join(f"{k}: {', '.join(_describe(i) for i in v)}" for k, v in changed.items())
         logger.info("Canary maintenance: %s", summary)
     # 'unhealthy' is reported by _report_suite_health with its own urgency and
-    # its own dedupe, and each retired probe already got its own summary
-    # notification; folding either in here would double-notify.
-    mutations = {k: v for k, v in changed.items() if k not in ("unhealthy", "probes_retired")}
+    # its own dedupe, each retired probe already got its own summary
+    # notification, and unsafe verify blocks notify once per content hash;
+    # folding any of them in here would double-notify.
+    mutations = {k: v for k, v in changed.items() if k not in ("unhealthy", "probes_retired", "verify_unsafe")}
     if mutations:
         try:
             db.add_notification(

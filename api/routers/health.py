@@ -311,6 +311,16 @@ async def update_settings(body: dict):
         except Exception:
             pass  # Non-critical — next startup will pick it up
 
+    # A different llm_model is a different agent: re-baseline the whole
+    # canary suite (parked included). Same hook as POST /api/models/switch.
+    if "llm_model" in updated:
+        try:
+            from core.extensions.scheduling import enqueue_full_sweep
+
+            enqueue_full_sweep("model-swap", delay_s=60)
+        except Exception:
+            pass  # Non-critical — the nightly heartbeat still measures
+
     restart_required = bool(_RESTART_FIELDS & set(updated))
 
     # Validate SSL config when network is being enabled

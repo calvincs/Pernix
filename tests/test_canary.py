@@ -480,6 +480,37 @@ async def test_run_canary_noop_failure_is_not_a_gate_fail(monkeypatch):
     assert db.list_canary_runs(task="mini-noop")[0]["outcome"] == "noop"
 
 
+async def test_canary_session_runs_under_the_tool_allowlist(monkeypatch):
+    """Every canary session is workspace-jailed: computation and reads only.
+    Canary prompts carry machine-authored content (auto-admitted tasks,
+    injected SKILL.md bodies), so mutating tools are fenced off for the
+    whole session type — and the fence comes down with the session."""
+    from core.canary import runner as runner_mod
+    from core.canary.parser import CanaryDef
+
+    mgr = _runner_manager(monkeypatch, lambda ws: (ws / "hello.txt").write_text("hi\n"))
+    seen = {}
+    orig_prompt = mgr.prompt
+
+    async def spy_prompt(sid, message):
+        seen["allowlist"] = mgr.get(sid).tool_allowlist
+        await orig_prompt(sid, message)
+
+    mgr.prompt = spy_prompt
+    c = CanaryDef(
+        name="jailed",
+        prompt="write hello.txt",
+        gates=[{"name": "g", "command": "test -f hello.txt", "watch_paths": []}],
+        timeout=60,
+    )
+    result = await runner_mod.run_canary(c, trigger="manual")
+    assert seen["allowlist"] == runner_mod.CANARY_TOOL_ALLOWLIST
+    assert "bash" in seen["allowlist"] and "load_skill" in seen["allowlist"]
+    for denied in ("create_skill", "update_skill", "create_tool", "spawn_worker", "schedule_job", "notify_user", "remember"):
+        assert denied not in seen["allowlist"]
+    assert mgr.get(result.session_id).tool_allowlist is None  # cleared with the run
+
+
 async def test_run_canary_missing_name():
     from core.canary.runner import run_canary
 

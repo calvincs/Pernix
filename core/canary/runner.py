@@ -33,6 +33,42 @@ logger = logging.getLogger("pernix.canary")
 # give up waiting and score the run as-is (failed).
 _CANCEL_GRACE_S = 30
 _POLL_INTERVAL_S = 1.0
+
+# The canary sandbox: every canary session runs under this tool allowlist
+# (enforced at the agent schema intersection, scout filtering, and the
+# executor backstop — the same three points as scheduled-job charters).
+# Canary prompts include machine-authored content — auto-admitted tasks,
+# skill-verify runs whose injected SKILL.md may instruct mutating actions —
+# so the session gets computation and reads only: workspace/file/search
+# tools, memory RECALL (recall quality is part of what's measured; writes
+# stay denied by the denied_session_types belt), and read-only skill/tool
+# discovery so a skill-verify canary can load the skill under test. No
+# workers, no jobs, no notifications, no skill/tool/memory mutation. Bash
+# remains — the seed tasks need it — so this is a strong fence, not a jail;
+# the verify-gate allowlist proof narrows what machine-authored canaries
+# can make of it.
+CANARY_TOOL_ALLOWLIST = frozenset(
+    {
+        "bash",
+        "file_read",
+        "file_write",
+        "file_edit",
+        "multiedit",
+        "glob",
+        "grep",
+        "repl",
+        "view_image",
+        "recall",
+        "deep_recall",
+        "list_skills",
+        "discover_skills",
+        "load_skill",
+        "read_skill_resource",
+        "discover_tools",
+        "get_tool_schema",
+        "list_gates",
+    }
+)
 # Only used on the degraded no-task-handle path in _wait_for_turn_end: how long
 # to give a turn to visibly leave IDLE_READY before assuming it already ended.
 _START_GRACE_S = 5.0
@@ -191,6 +227,7 @@ async def run_canary(
         result.session_id = sid
         session = manager.get(sid)
         session.workspace_override = str(tmp)
+        session.tool_allowlist = CANARY_TOOL_ALLOWLIST
         if canary.model:
             session.model_override = canary.model
 
@@ -239,6 +276,7 @@ async def run_canary(
             if s is not None:
                 s.workspace_override = None
                 s.model_override = None
+                s.tool_allowlist = None
         except Exception:
             pass
         # Only reclaim the workspace once the turn is genuinely over. Deleting
