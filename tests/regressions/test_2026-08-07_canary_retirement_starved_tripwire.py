@@ -47,6 +47,7 @@ _SPEC = {
 @pytest.fixture(autouse=True)
 def _canaries_tmp(monkeypatch, tmp_path):
     monkeypatch.setattr("config.settings.canaries_dir", str(tmp_path / "canaries"))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
     monkeypatch.setattr("config.settings.canary_enabled", True)
     monkeypatch.setattr("config.settings.canary_auto_maintain", True)
     monkeypatch.setattr("config.settings.canary_park_after_passes", 5)

@@ -200,14 +200,42 @@ async def lifespan(app: FastAPI):
         from core.extensions.scheduling import ensure_canary_schedule, ensure_telos_schedule, init_scheduler
 
         init_scheduler()
-        # Canary nightly sweep (plan 3.5): derived from settings each boot,
-        # never persisted — a no-op while canary_enabled is off.
+        # Canary nightly heartbeat: derived from settings each boot, never
+        # persisted — a no-op while canary_enabled is off.
         ensure_canary_schedule()
         # TELOS daily slow loops (ordo/binding + weekly audits): same
         # transient pattern — a no-op while telos_enabled is off.
         ensure_telos_schedule()
     except Exception as e:
         logger.warning("Scheduler init failed: %s", e)
+
+    # 4b. Deploy detection: a new version means new code drove the agent, so
+    # the whole canary suite re-baselines. APP_VERSION plus the git sha when
+    # one is obtainable (the baked image usually has no .git — the version
+    # string alone still catches releases). Never allowed to fail the boot.
+    try:
+        from core.extensions.scheduling import enqueue_full_sweep
+        from db import models as _db
+
+        _sha = ""
+        try:
+            import subprocess
+
+            _sha = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+        except Exception:
+            pass
+        _stamp = f"{APP_VERSION}+{_sha}" if _sha else APP_VERSION
+        _seen = _db.get_snooze_state("app_version_seen")
+        if _seen != _stamp:
+            _db.set_snooze_state("app_version_seen", _stamp)
+            # First boot ever (no stamp) is a fresh install, not a deploy.
+            if _seen and settings.canary_enabled:
+                logger.info("Deploy detected (%s -> %s): full canary sweep queued", _seen, _stamp)
+                enqueue_full_sweep("deploy", delay_s=300)
+    except Exception as e:
+        logger.warning("Deploy detection failed (continuing): %s", e)
 
     # 5. Maintenance heartbeat
     from maintenance import get_maintenance

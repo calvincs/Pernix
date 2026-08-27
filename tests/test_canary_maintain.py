@@ -24,6 +24,9 @@ _SPEC = {
 @pytest.fixture(autouse=True)
 def _canaries_tmp(monkeypatch, tmp_path):
     monkeypatch.setattr("config.settings.canaries_dir", str(tmp_path / "canaries"))
+    # run_maintenance sweeps the skills bridge too — keep it off the real
+    # data/skills or its verify blocks leak canaries into these tests.
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
     monkeypatch.setattr("config.settings.canary_enabled", True)
     monkeypatch.setattr("config.settings.canary_auto_maintain", True)
     monkeypatch.setattr("config.settings.canary_vetting_runs", 3)

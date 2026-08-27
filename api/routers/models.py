@@ -169,6 +169,18 @@ async def switch_model(body: dict):
 
     Path("data/model_pref.txt").write_text(model)
 
+    # The model IS the agent: a swap invalidates every canary's green
+    # history, so the whole suite (parked included) re-baselines. Delayed a
+    # minute so the router/registry settle first; must_run so nothing in
+    # flight eats it.
+    if model != old_model:
+        try:
+            from core.extensions.scheduling import enqueue_full_sweep
+
+            enqueue_full_sweep("model-swap", delay_s=60)
+        except Exception:
+            pass  # Non-critical — the nightly heartbeat still measures
+
     return {
         "switched": True,
         "from": old_model,

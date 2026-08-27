@@ -48,7 +48,9 @@ async def test_executor_refuses_tool_outside_allowlist(monkeypatch):
 
     result = await _execute_single("bash", {}, {"session_id": "cron-test"}, reg)
     assert result.was_error
-    assert "not permitted in this scheduled run" in result.content
+    # Wording generalized in v3.1: the same allowlist now fences canary
+    # sessions, not only scheduled-job charters.
+    assert "not permitted in this constrained session" in result.content
     # The permitted set is named so the model can reroute instead of retrying.
     assert "recall" in result.content
 
