@@ -480,6 +480,10 @@ def _notify_capped(producer: str, rejected: list[dict]) -> None:
                 "or raise the cap; until then this producer's output is being discarded."
             ),
             urgency="normal",
+            # A wedged kind + a chatty producer used to mean one identical
+            # notification per drained batch, forever. Once per producer per
+            # day says the same thing without the pile.
+            dedup_key=f"adaptive_capped:{producer}",
         )
     except Exception as e:
         logger.warning("Adaptive cap notification failed: %s", e)
@@ -656,6 +660,15 @@ def approve_proposal(proposal_id: int, actor: str = "user", resolution: str = "a
     db.adaptive_create_batch(batch_id, prop["producer"], prop["payload_json"], status="pending")
     result = apply_batch(batch_id, actor=actor, proposal_id=proposal_id)
     db.adaptive_resolve_proposal(proposal_id, resolution)
+    if result.get("status") == "rejected":
+        # Audit honesty: the proposal row reads "approved" while the batch it
+        # minted applied nothing (every edit refused — cap, version fence).
+        # Annotate the rationale so "what did that approval actually do"
+        # stays answerable without cross-referencing the batch.
+        try:
+            db.adaptive_annotate_proposal(proposal_id, " [approved; no edit landed — all refused at apply]")
+        except Exception:
+            pass
 
     try:
         from core.extensions.scheduling import enqueue_post_batch_sweep

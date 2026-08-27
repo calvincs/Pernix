@@ -1064,10 +1064,12 @@ Output valid JSON only. No markdown fences. /no_think"""
         _db.set_snooze_state("last_cron_cleanup", str(time.time()))
 
     async def _cleanup_post_mortems(self) -> None:
-        """Activity 11 — drop synthesized post-mortems past their TTL."""
+        """Activity 11 — drop synthesized post-mortems past their TTL, and
+        notifications past theirs (the bell is a surface, not an archive)."""
         from core import retention
 
         self._bump("post_mortems_pruned", retention.prune_post_mortems())
+        self._bump("notifications_pruned", await asyncio.to_thread(retention.prune_notifications))
 
     async def _cleanup_canary_runs(self) -> None:
         """Activity 12c — canary run/session retention plus the staleness
@@ -1460,6 +1462,35 @@ Output valid JSON only. No markdown fences. /no_think"""
                 logger.info("Adaptive: expired %d stale pending proposal(s)", expired)
         except Exception as e:
             logger.warning("Adaptive proposal expiry failed: %s", e)
+
+        if self._is_cancelled():
+            return
+        # The usage sweep (v3.1): entries that rendered into prompts for the
+        # whole retire window without one recorded use go. Soft-deletes,
+        # journaled, one aggregated once-a-day notification with the undo.
+        try:
+            from db import models as db
+            from core.adaptive.retire import retire_unused_entries
+
+            swept = await asyncio.to_thread(retire_unused_entries)
+            if swept["retired"]:
+                self._bump("adaptive_unused_retired", len(swept["retired"]))
+                lines = [f"• {eid} — {swept['reasons'].get(eid, '')}" for eid in swept["retired"][:12]]
+                await asyncio.to_thread(
+                    db.add_notification,
+                    "",
+                    "Adaptive: unused entries retired",
+                    (
+                        "These rendered into prompts for the whole retire window without one "
+                        "recorded use (scout/reflect citations). Each deletion is journaled — "
+                        "roll any back from the Adaptive tab.\n" + "\n".join(lines)
+                        + (f"\n(+{len(swept['retired']) - 12} more)" if len(swept["retired"]) > 12 else "")
+                    ),
+                    "normal",
+                    "adaptive_usage_sweep",
+                )
+        except Exception as e:
+            logger.warning("Adaptive usage sweep failed: %s", e)
 
         try:
             from core.adaptive.tripwire import evaluate_tripwire

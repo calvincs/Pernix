@@ -305,6 +305,11 @@ class MaintenanceRunner:
                 pruned = db.prune_old_questions(max_age_days=7)
                 if pruned:
                     logger.info("Questions cleanup: %d rows pruned", pruned)
+                # This tier runs even with snooze disabled — same reason the
+                # cron cleanup lives here too.
+                from core import retention
+
+                retention.prune_notifications()
             except Exception as e:
                 logger.warning("Data hygiene cleanup failed: %s", e)
 
