@@ -93,7 +93,9 @@ def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool,
     regressed_tasks: list[str] = []
     confirmed_tasks: list[str] = []
     for task, rows in sorted(per_task.items()):
-        usable = [r for r in rows if r.get("outcome") in ("pass", "gate_fail") or (not r.get("outcome") and r.get("passed"))]
+        usable = [
+            r for r in rows if r.get("outcome") in ("pass", "gate_fail") or (not r.get("outcome") and r.get("passed"))
+        ]
         if not usable:
             continue  # nothing but timeouts/errors/noops — measures the harness, not the batch
         history = [r for r in db.list_canary_runs(task=task, limit=200) if (r.get("created_at") or "") < applied_at]
@@ -125,7 +127,9 @@ def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool,
         return (False, True, f"canary verdicts clean ({judged} task(s) judged, {len(post)} post-batch runs)")
     parts = []
     for task in regressed_tasks:
-        parts.append(f"{task} ({'confirmed, 2 gate_fails' if task in confirmed_tasks else 'unconfirmed, rerun missing'})")
+        parts.append(
+            f"{task} ({'confirmed, 2 gate_fails' if task in confirmed_tasks else 'unconfirmed, rerun missing'})"
+        )
     return (True, bool(confirmed_tasks), "canary regression: " + ", ".join(parts))
 
 

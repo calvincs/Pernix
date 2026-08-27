@@ -47,8 +47,12 @@ files:
         assert add(2, 2) == 4
 model: ""            # optional model override
 timeout: 600         # optional per-run wall clock (seconds)
-tags: [coding, debug]
+tags: [coding, debug]  # 'sentinel' = rides along on every post-batch probe
+covers: []           # change surfaces this canary tests, e.g. [skill:foo, kind:prompt_note]
 flaky: false         # flaky canaries inform, never trip the tripwire
+parked: false        # parked = off the heartbeat; still coverage/full/manual-run
+max_runs: 0          # probe: auto-retire after N total runs (0 = never)
+expires: ""          # probe: auto-retire after this ISO date
 last_reviewed: 2026-08-06
 ---
 Checks that the agent can localize a one-line arithmetic bug from a failing
@@ -60,8 +64,10 @@ without gates cannot be scored. The optional `files:` map seeds the run's
 workspace with deterministic fixtures (workspace-relative paths only), so
 canaries are self-contained: fixtures over live URLs, per the flakiness
 discipline. Gates locally deterministic; anything that can't be, tag `flaky`
-— flaky canaries inform but never feed the tripwire. Invalid files log a
-warning and are skipped; one bad canary never sinks a sweep.
+— flaky canaries inform but never feed the tripwire. `covers:` is the
+targeting index: change-driven triggers (below) select canaries whose
+`covers` matches what changed. Invalid files log a warning and are skipped;
+one bad canary never sinks a sweep.
 
 ### How a run works
 
@@ -71,9 +77,15 @@ skips what real turns exercise measures nothing. The workspace is a temp
 directory per run (seeded from `files:`), the gates materialize as
 canary-scoped rows for the run and are deleted after, and the score is the
 gates re-run against the final workspace state. A run that triggered reflect
-retries scores the final attempt; the retry count is recorded. Results land
-in the `canary_runs` table (gate results, pass/fail, retries, tokens,
-duration) and in the Explorer's **Canary** tab.
+retries scores the final attempt; the retry count is recorded.
+
+Every run records an **outcome**: `pass`, `gate_fail` (the agent ran and
+the work was wrong), `timeout` (killed at the wall clock), `error` (the
+harness broke), or `noop` (zero tokens, sub-second — the agent never
+executed). Only `gate_fail` is evidence about the agent; the rest are
+suite-health trouble, and the tripwire ignores them. Results land in the
+`canary_runs` table (gate results, outcome, error, pass/fail, retries,
+tokens, duration) and in the Explorer's **Canary** tab.
 
 ### Isolation guarantees
 
@@ -91,17 +103,30 @@ to guard. The isolation is an enumerated predicate list, not a vibe:
 - **Snooze-transparent** — canary sessions neither cancel a snooze cycle nor
   block its idle gate, so the nightly sweep and idle housekeeping coexist.
 - **Hidden from the session sidebar** like Dream journals.
+- **Tool-allowlisted** — every canary session runs under
+  `CANARY_TOOL_ALLOWLIST` (computation and reads only: file/search/repl
+  tools, memory *recall*, read-only skill and tool discovery), enforced at
+  the same three points as scheduled-job charters. Canary prompts carry
+  machine-authored content — auto-admitted tasks, injected SKILL.md bodies
+  during skill-verify runs — so workers, jobs, notifications, and every
+  skill/tool/memory mutation are fenced off for the whole session type.
 
-### Triggers
+### Triggers — change-driven, not wall-clock
+
+Canaries run when something they cover **changes**; the only standing
+schedule is a small heartbeat. This replaced the original nightly-full-suite
++ full-post-batch design after a live audit showed 80% of run volume
+re-testing tasks nothing had touched, at a 99% pass rate.
 
 | Trigger | When |
 |---|---|
-| `scheduled` | The nightly sweep (`canary_schedule`, default `0 3 * * *`) — this builds the baseline. |
-| `post_batch` | Enqueued after every adaptive apply (auto **or** approved proposal), tagged with the batch id — this is the tripwire's active probe. Enqueued for the next idle window, never dispatched inline. |
-| `manual` | The `canary_run(name)` tool, `POST /api/canary/run`, or the Canary tab's run buttons — needed to vet a newly approved canary. `canary_status` reads recent results. |
+| `scheduled` | The nightly **heartbeat** (`canary_schedule`, default `0 3 * * *`): the `canary_heartbeat_per_night` (2) least-recently-run non-parked canaries. Keeps every active canary's history warm enough that a post-change failure is provably the change's fault. |
+| `post_batch` | Enqueued after every adaptive apply (auto **or** approved proposal), tagged with the batch id — the tripwire's active probe. **Targeted**: canaries whose `covers` matches the batch's edit kinds first, `sentinel`-tagged ones riding along, capped at `canary_post_batch_max` (4), resolved at execution time. A non-flaky `gate_fail` is immediately **confirm-rerun once** in the same sweep — two rows is what the tripwire calls confirmed. Enqueued for the next idle window, never dispatched inline. |
+| `manual` | The `canary_run(name)` tool, `POST /api/canary/run`, the Canary tab's run buttons, or a coverage-triggered targeted sweep (e.g. a skill edit). `canary_status` reads recent results. |
+| `full` | The-world-changed sweeps: a model swap (both switch paths), a deploy (the boot version stamp), or the tab's "Run all". Runs **everything including parked canaries** and carries `must_run`, so a sweep already in flight defers it instead of eating it (the lock is otherwise skip-not-queue). |
 
-At most `canary_max_concurrent` (1) canary sessions run at once; Snooze
-prunes runs past `canary_retention_days` (30).
+One sweep runs at a time; Snooze prunes runs past
+`canary_retention_days` (30).
 
 ### Growing the suite
 
@@ -128,18 +153,61 @@ they inform but cannot trip the tripwire until `canary_vetting_runs`
 consistent passes promote them. Set `canary_auto_admit=false` if you want
 every canary to pass under your eye first.
 
-**Long-green canaries are demoted, not retired.** After
-`canary_retire_after_passes` consecutive passes a canary's `cadence` doubles
-(capped at 12), so it runs on every Nth *scheduled* sweep instead of every
-one. It stays in the suite deliberately: the tripwire's baseline pass rate is
-computed from scheduled runs of these same tasks, so deleting the stable
-canaries would shrink the denominator of the only signal allowed to
-auto-roll-back a batch. Post-batch and manual sweeps ignore `cadence` and run
-everything.
+**Long-green canaries are parked, never removed.** After
+`canary_park_after_passes` (25) consecutive passes, maintenance writes
+`parked: true`: the canary leaves the heartbeat rotation but stays in the
+suite — coverage triggers, full sweeps and manual runs still fire it, and
+**any red run auto-unparks it** (the one mutation allowed while a canary is
+red, because it amplifies the alarm instead of silencing it). It is never
+deleted: the per-task tripwire only lets a canary testify against a batch
+when its trailing runs were green, so removing the stable canaries would
+disarm exactly the signal they feed. (This replaced cadence demotion, which
+replaced retirement — same invariant, third mechanism.)
+
+**Full lifecycle control** lives in the Canary tab and the API: create
+(raw CANARY.md or structured spec — gate commands are checked against the
+auto-admission allowlist proof and the verdicts returned as *warnings*,
+never blockers), edit (`PUT`, validated round-trip), park/unpark
+(`PATCH`), mark reviewed, and retire (`DELETE` — the directory moves to
+`.retired/` and is purged only after `canary_purge_after_days`, so a
+retirement is reversible for the whole window).
+
+**One-off probes**: a canary with `max_runs: N` or an `expires:` date is a
+probe — "occasionally test something" without suite residue. Maintenance
+retires an exhausted probe with a pass/fail tally notification;
+retirement-with-the-tally IS the probe's report, so this pass is
+deliberately exempt from the Goodhart lock (nothing is silenced — the red
+runs are in the tally). The tab has a one-click probe template.
+
+**Skill verify blocks** (`core/canary/skill_verify.py`): a skill may embed
+its own behavioral test in SKILL.md frontmatter —
+
+```yaml
+verify:
+  prompt: |
+    Use the technique this skill teaches on the seeded fixture...
+  gates:
+    - name: check
+      command: python -m pytest tests/test_expected.py -q
+  files: { ... }       # optional fixtures
+  timeout: 600         # optional
+```
+
+Maintenance materializes it as the MANAGED canary `skill--<name>` with
+`covers: [skill:<name>]`, resyncs it whenever the skill changes, and
+retires it when the block (or the skill) goes away. A sha256 watermark over
+each SKILL.md (`snooze_state['skill_hash:<name>']`, the `skill_reqs_hash`
+precedent) detects every mutation path including hand edits; a changed
+skill fires one targeted sweep of its covering canaries at the next idle
+window. **Security boundary**: verify-gate commands execute on the host and
+SKILL.md is machine-editable, so every gate must pass the same allowlist
+proof as canary auto-admission — a skill whose gates fail the proof gets a
+once-per-content notification and no canary.
 
 Staleness is curated, not automated away: 90 days past a canary's
 `last_reviewed` date, Snooze nudges you with a notification. Bump the date
-after reviewing; the nudge re-arms when it goes stale again.
+(the tab's *Reviewed ✓* button) after reviewing; the nudge re-arms when it
+goes stale again.
 
 ---
 
@@ -348,14 +416,24 @@ days, so the anchor is the earliest non-rollback journal event for the batch
 (events are read ascending), falling back to `created_at` only when nothing
 landed.
 
-- *Primary (active)*: the batch's post-batch canary sweep vs. the trailing
-  `canary_baseline_runs` scheduled sweeps that ran *before* the apply — a
-  pass-rate drop ≥ `canary_regression_delta` (0.15) is a regression. Canaries
-  detected as flaky are excluded.
+- *Primary (active)*: **per-task verdicts** from the batch's post-batch
+  canary sweep. A non-flaky canary whose trailing `canary_baseline_runs`
+  (5) runs before the apply were all green — the *green precondition* — and
+  which records `gate_fail` post-batch with no pass, has regressed;
+  because the sweep confirm-reruns every gate_fail, a **confirmed**
+  regression shows two gate_fail rows for the (batch, task) pair, while a
+  single row (the rerun itself died) flags but can never auto-roll-back.
+  Timeouts, errors, noop runs and pre-v30 legacy rows neither trip nor
+  certify — with nothing usable to judge, the signal reports unavailable
+  rather than issuing a false all-clear. (The original aggregate
+  pass-rate-delta form had a structural dead zone — one failure among 8
+  canaries was a 12.5% drop against a 15% delta, so it never fired once in
+  production — and was replaced in v3.1.)
 - *Secondary (passive)*: organic post-mortem reflect-retry drift over the
   `adaptive_tripwire_window_turns` (20) turns after the apply, compared
   against the 20 organic turns immediately before it (canary-stamped
-  post-mortems excluded, so the probe can't contaminate the signal).
+  post-mortems excluded, so the probe can't contaminate the signal); drift
+  ≥ `canary_regression_delta` (0.15) flags.
 
 The "after" window is fetched **oldest-first from the apply timestamp**, and
 the sweep simply waits until that many organic turns exist. Slicing the
@@ -367,11 +445,12 @@ Either signal flags the batch **`suspect`** — surfaced in the Adaptive tab,
 cleared by human dismiss (`POST /api/adaptive/batches/{id}/dismiss`, the
 *Dismiss flag* button) or a subsequent clean sweep. **Dismissal is durable**:
 it stamps `cleared_at`, and the sweep skips any batch that has one, so the
-same evidence can never re-raise a flag you already looked at. Only the
-primary (canary) signal can promote to automatic rollback, and only with
-`adaptive_auto_rollback` on (off by default) — the passive post-mortem signal
-never rolls anything back on its own. Leave auto-rollback off until the
-metric has earned that trust on your suite.
+same evidence can never re-raise a flag you already looked at. Only a
+**confirmed** primary (canary) verdict can promote to automatic rollback,
+and only with `adaptive_auto_rollback` on (off by default) — an unconfirmed
+gate_fail and the passive post-mortem signal never roll anything back on
+their own. Leave auto-rollback off until the metric has earned that trust
+on your suite.
 
 Neither the adaptive layer nor the canary suite emits SSE. Both surface
 through the polled REST endpoints, plus a high-urgency notification row when
@@ -384,9 +463,9 @@ the tripwire flags or auto-rolls-back a batch.
 The pair is safe *because* measurement precedes actuation. Turn things on in
 this order:
 
-1. **`canary_enabled` first, alone, for at least a week.** Nightly sweeps
-   build a stable baseline; you learn which canaries are flaky before
-   anything depends on them.
+1. **`canary_enabled` first, alone, for at least a week.** Heartbeats build
+   each canary's green history (the tripwire's per-task precondition); you
+   learn which canaries are flaky before anything depends on them.
 2. **Then `adaptive_enabled` with `adaptive_auto_apply` off.** Producers
    emit, everything routes through proposals, approved applies mint batch
    ids and post-batch sweeps — batch-tagged data accumulates while you watch
