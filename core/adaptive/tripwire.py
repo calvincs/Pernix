@@ -1,22 +1,32 @@
 """Pernix — Adaptive tripwire (plan 4f): did a batch make the agent worse?
 
 Two signals per applied batch:
-  primary (active)  — the post-batch canary sweep (canary_runs joined on
-                      batch_id) vs. the trailing scheduled sweeps' baseline;
-                      a pass-rate drop >= canary_regression_delta flags the
-                      batch. Flaky canaries inform, never trip.
+  primary (active)  — PER-TASK verdicts from the post-batch canary sweep
+                      (canary_runs joined on batch_id). A non-flaky canary
+                      whose trailing canary_baseline_runs runs before the
+                      apply were all green, now recording gate_fail with no
+                      pass, has regressed; the sweep's confirm-rerun means a
+                      CONFIRMED regression shows two gate_fail rows for the
+                      (batch, task) pair. Only outcome='gate_fail' counts —
+                      timeouts, harness errors and noop runs are suite-health
+                      concerns and can neither trip nor certify a batch.
+                      (The old aggregate pass-rate-delta form had a dead
+                      zone: one failure among 8 canaries was a 12.5% drop,
+                      under the 15% delta, so the signal could never fire.)
   secondary (passive) — organic post-mortem retry drift over
                       adaptive_tripwire_window_turns turns after the apply
                       vs. the same window before (canary-stamped rows
-                      excluded — §5 landed that stamp for exactly this).
+                      excluded — §5 landed that stamp for exactly this);
+                      drift >= canary_regression_delta flags.
 
 Either signal → status='suspect' + a notification. A later clean comparison
 clears the flag (status back to 'applied', cleared_at stamped) — the other
 clear path is human dismiss via the API. cleared_at is TERMINAL either way:
 a cleared batch drops out of the sweep, so a dismiss is not re-litigated on
 the next cycle against the very evidence it dismissed. adaptive_auto_rollback
-promotes a PRIMARY hit to automatic rollback once that metric has earned
-trust; the passive signal never auto-rolls-back (too noisy by construction).
+promotes a CONFIRMED primary hit to automatic rollback; an unconfirmed hit
+(the rerun itself died) flags but never rolls back, and the passive signal
+never auto-rolls-back (too noisy by construction).
 """
 
 from __future__ import annotations
@@ -39,12 +49,6 @@ def _flaky_tasks() -> set[str]:
         return set()
 
 
-def _pass_rate(rows: list[dict]) -> float | None:
-    if not rows:
-        return None
-    return sum(1 for r in rows if r.get("passed")) / len(rows)
-
-
 def _applied_at(batch: dict) -> str:
     """Wall-clock of the APPLY, not the queue.
 
@@ -63,42 +67,66 @@ def _applied_at(batch: dict) -> str:
     return batch.get("created_at") or ""
 
 
-def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool, str] | None:
-    """(regressed, detail) from the post-batch sweep, or None when no sweep
-    data exists yet (batch stays as-is; the sweep may still be queued)."""
+def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool, bool, str] | None:
+    """(regressed, confirmed, detail) — per-task verdicts from the post-batch
+    sweep — or None when no usable sweep data exists yet (batch stays as-is;
+    the sweep may still be queued).
+
+    A task testifies against the batch only when it has earned the right to:
+    its trailing runs before the apply must all be green (the precondition).
+    Only outcome='gate_fail' rows count as failures — timeouts, errors and
+    noop runs are suite-health trouble, and legacy pre-v30 rows (outcome
+    NULL) can only ever count as passes, never as evidence of regression.
+    `confirmed` means the sweep's confirm-rerun also gate-failed (>= 2 rows);
+    a single unconfirmed gate_fail flags but must never auto-roll-back.
+    """
     post = [r for r in db.list_canary_runs(batch_id=batch["batch_id"], limit=500) if r["task"] not in flaky]
     if not post:
         return None
-    tasks = {r["task"] for r in post}
-    per_task = max(1, settings.canary_baseline_runs)
-    baseline_rows: list[dict] = []
-    for task in tasks:
-        rows = [
-            r
-            for r in db.list_canary_runs(task=task, limit=200)
-            if r.get("trigger") == "scheduled" and (r.get("created_at") or "") < applied_at
-        ]
-        baseline_rows.extend(rows[:per_task])  # list is newest-first
-    base = _pass_rate(baseline_rows)
-    now = _pass_rate(post)
-    if base is None or now is None:
-        return None
-    if base == 0.0:
-        # A baseline of 0% is not a strict baseline, it is a broken suite.
-        # `drop = base - now` can only ever come out <= 0 against it, so every
-        # batch would be certified clean by a measurement substrate that is
-        # measuring nothing. Report "no usable signal" instead of a false
-        # all-clear; core/canary/maintain.py raises the outage separately.
+
+    per_task: dict[str, list[dict]] = {}
+    for r in post:
+        per_task.setdefault(r["task"], []).append(r)
+
+    window = max(1, settings.canary_baseline_runs)
+    judged = 0
+    regressed_tasks: list[str] = []
+    confirmed_tasks: list[str] = []
+    for task, rows in sorted(per_task.items()):
+        usable = [r for r in rows if r.get("outcome") in ("pass", "gate_fail") or (not r.get("outcome") and r.get("passed"))]
+        if not usable:
+            continue  # nothing but timeouts/errors/noops — measures the harness, not the batch
+        history = [r for r in db.list_canary_runs(task=task, limit=200) if (r.get("created_at") or "") < applied_at]
+        history = history[:window]  # newest-first
+        if len(history) < min(3, window) or not all(r.get("passed") for r in history):
+            continue  # no green precondition — this task cannot testify
+        judged += 1
+        fails = sum(1 for r in usable if r.get("outcome") == "gate_fail")
+        if fails == 0 or any(r.get("passed") for r in usable):
+            continue
+        regressed_tasks.append(task)
+        if fails >= 2:
+            confirmed_tasks.append(task)
+
+    if judged == 0:
+        # Every post-batch row was either unusable or belonged to a task with
+        # no green history. That is a statement about the suite, not the
+        # batch — report "no usable signal" instead of a false all-clear;
+        # core/canary/maintain.py raises suite outages separately.
         logger.warning(
-            "Tripwire: canary baseline for batch %s is 0%% over %d runs — suite health, not batch quality. "
-            "Treating the canary signal as unavailable.",
+            "Tripwire: no canary task could testify for batch %s (%d post-batch rows) — "
+            "treating the canary signal as unavailable.",
             batch.get("batch_id"),
-            len(baseline_rows),
+            len(post),
         )
         return None
-    drop = base - now
-    detail = f"canary pass rate {now:.0%} vs baseline {base:.0%} ({len(post)} post-batch, {len(baseline_rows)} baseline runs)"
-    return (drop >= settings.canary_regression_delta, detail)
+
+    if not regressed_tasks:
+        return (False, True, f"canary verdicts clean ({judged} task(s) judged, {len(post)} post-batch runs)")
+    parts = []
+    for task in regressed_tasks:
+        parts.append(f"{task} ({'confirmed, 2 gate_fails' if task in confirmed_tasks else 'unconfirmed, rerun missing'})")
+    return (True, bool(confirmed_tasks), "canary regression: " + ", ".join(parts))
 
 
 def _post_mortem_signal(batch: dict, applied_at: str) -> tuple[bool, str] | None:
@@ -164,8 +192,10 @@ def evaluate_tripwire() -> list[dict]:
             applied_at = _applied_at(batch)
             canary = _canary_signal(batch, flaky, applied_at)
             pm = _post_mortem_signal(batch, applied_at)
-            regressed = (canary is not None and canary[0]) or (pm is not None and pm[0])
-            details = "; ".join(d for s in (canary, pm) if s is not None for d in [s[1]])
+            canary_regressed = canary is not None and canary[0]
+            canary_confirmed = canary_regressed and canary[1]
+            regressed = canary_regressed or (pm is not None and pm[0])
+            details = "; ".join(d for d in ((canary[2] if canary else ""), (pm[1] if pm else "")) if d)
 
             if regressed and batch["status"] == "applied":
                 db.adaptive_update_batch(bid, status="suspect", flagged_reason=details)
@@ -175,7 +205,7 @@ def evaluate_tripwire() -> list[dict]:
                     body=f"Batch {bid}: {details}. Review in the Adaptive panel.",
                     urgency="high",
                 )
-                if settings.adaptive_auto_rollback and canary is not None and canary[0]:
+                if settings.adaptive_auto_rollback and canary_confirmed:
                     from core.adaptive.engine import rollback
 
                     rollback(batch_id=bid, actor="tripwire")

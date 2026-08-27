@@ -494,6 +494,51 @@ async def test_run_sweep_respects_enabled_flag(monkeypatch):
     assert await run_sweep() == []
 
 
+async def test_post_batch_sweep_confirm_reruns_a_gate_fail(monkeypatch):
+    """A post-batch gate_fail earns exactly one immediate rerun inside the
+    same sweep — two rows for the (batch, task) pair is what lets the
+    tripwire call a regression confirmed. Flaky canaries never rerun."""
+    import time as _time
+
+    from core.canary import runner as runner_mod
+    from core.canary.parser import CanaryDef
+
+    monkeypatch.setattr("config.settings.canary_enabled", True)
+    # Sleep past the 1s noop threshold so the failure scores gate_fail.
+    _runner_manager(monkeypatch, lambda ws: _time.sleep(1.05))
+    gate = [{"name": "g", "command": "test -f made-up.txt", "watch_paths": []}]
+    steady = CanaryDef(name="cr-steady", prompt="x", gates=gate, timeout=60)
+    flappy = CanaryDef(name="cr-flappy", prompt="x", gates=gate, timeout=60, flaky=True)
+    monkeypatch.setattr(runner_mod, "scan_canaries", lambda *a, **k: [steady, flappy])
+
+    results = await runner_mod.run_sweep(trigger="post_batch", batch_id="b-cr")
+    assert [r.task for r in results] == ["cr-steady", "cr-flappy", "cr-steady"]
+    assert len(db.list_canary_runs(task="cr-steady", batch_id="b-cr")) == 2
+    assert len(db.list_canary_runs(task="cr-flappy", batch_id="b-cr")) == 1
+
+
+async def test_scheduled_sweep_never_confirm_reruns(monkeypatch):
+    """The rerun is the tripwire's confirmation probe — heartbeat and manual
+    sweeps record a failure once and let maintenance judge it."""
+    import time as _time
+
+    from core.canary import runner as runner_mod
+    from core.canary.parser import CanaryDef
+
+    monkeypatch.setattr("config.settings.canary_enabled", True)
+    _runner_manager(monkeypatch, lambda ws: _time.sleep(1.05))
+    c = CanaryDef(
+        name="cr-sched",
+        prompt="x",
+        gates=[{"name": "g", "command": "test -f made-up.txt", "watch_paths": []}],
+        timeout=60,
+    )
+    monkeypatch.setattr(runner_mod, "scan_canaries", lambda *a, **k: [c])
+    results = await runner_mod.run_sweep(trigger="manual", names=["cr-sched"])
+    assert len(results) == 1
+    assert len(db.list_canary_runs(task="cr-sched")) == 1
+
+
 # ---------------------------------------------------------------------------
 # Triggers
 # ---------------------------------------------------------------------------
