@@ -218,12 +218,16 @@ def _scheduled_runs(name: str, window: int) -> list[dict]:
 def _is_noop_run(row: dict) -> bool:
     """True when the gates scored a workspace the agent never touched.
 
-    A real canary turn costs tokens and takes seconds. A run that consumed
-    zero tokens and finished in well under a second did not execute the
-    agent at all — the gates ran against the seeded fixtures and every one
-    of them 'failed'. That is a harness break, and it is worth separating
-    from an honest failure because the remedy is completely different.
+    Since v30 the runner records this directly as outcome='noop'. Rows from
+    before the column existed (outcome NULL) fall back to the original
+    heuristic: a real canary turn costs tokens and takes seconds, so zero
+    tokens and a sub-second finish mean the agent never executed — the gates
+    ran against the seeded fixtures and every one of them 'failed'. That is
+    a harness break, worth separating from an honest failure because the
+    remedy is completely different.
     """
+    if row.get("outcome"):
+        return row["outcome"] == "noop"
     return not row.get("passed") and int(row.get("tokens") or 0) == 0 and float(row.get("duration_s") or 0.0) < 1.0
 
 

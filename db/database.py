@@ -971,6 +971,24 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
                WHERE status != 'running'""",
         ],
     ),
+    (
+        30,
+        "canary run outcomes: separate timeout/error/noop from honest gate failures",
+        [
+            # outcome ∈ pass | gate_fail | timeout | error | noop. Before this,
+            # a run killed at its wall clock and a run that genuinely failed
+            # its gates both landed as passed=0 — the tripwire and suite-health
+            # heuristics had to reverse-engineer the difference from tokens
+            # and duration. Legacy failed rows where that distinction is
+            # unrecoverable keep outcome NULL; consumers must treat NULL
+            # failures conservatively (they never feed the per-task tripwire).
+            "ALTER TABLE canary_runs ADD COLUMN outcome TEXT",
+            "ALTER TABLE canary_runs ADD COLUMN error TEXT",
+            "UPDATE canary_runs SET outcome = 'pass' WHERE passed = 1",
+            """UPDATE canary_runs SET outcome = 'noop'
+               WHERE passed = 0 AND IFNULL(tokens, 0) = 0 AND IFNULL(duration_s, 0) < 1.0""",
+        ],
+    ),
 ]
 
 

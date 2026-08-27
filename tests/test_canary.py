@@ -430,6 +430,56 @@ async def test_run_canary_fail_records_gate_detail(monkeypatch):
     assert gates and gates[0]["passed"] is False
 
 
+def test_outcome_taxonomy():
+    """outcome separates the four failure shapes the DB used to conflate."""
+    from core.canary.runner import CanaryRunResult
+
+    def r(**kw):
+        return CanaryRunResult(task="t", passed=False, trigger="manual", **kw)
+
+    assert CanaryRunResult(task="t", passed=True, trigger="manual").outcome == "pass"
+    assert r(error="timeout after 300s").outcome == "timeout"
+    assert r(error="boom").outcome == "error"
+    assert r(tokens=0, duration_s=0.2).outcome == "noop"
+    assert r(tokens=1200, duration_s=14.0).outcome == "gate_fail"
+
+
+async def test_run_canary_records_outcome_and_error(monkeypatch):
+    """The canary_runs row carries the derived outcome (v30 columns)."""
+    from core.canary.parser import CanaryDef
+    from core.canary.runner import run_canary
+
+    _runner_manager(monkeypatch, lambda ws: (ws / "hello.txt").write_text("hi\n"))
+    c = CanaryDef(
+        name="mini-outcome",
+        prompt="write hello.txt",
+        gates=[{"name": "exists", "command": "test -f hello.txt", "watch_paths": []}],
+        timeout=60,
+    )
+    result = await run_canary(c, trigger="manual")
+    rows = db.list_canary_runs(task="mini-outcome")
+    assert result.passed is True
+    assert rows[0]["outcome"] == "pass" and rows[0]["error"] is None
+
+
+async def test_run_canary_noop_failure_is_not_a_gate_fail(monkeypatch):
+    """A failed run with zero tokens and a sub-second turn records outcome
+    'noop' — a harness break, not evidence the agent got worse."""
+    from core.canary.parser import CanaryDef
+    from core.canary.runner import run_canary
+
+    _runner_manager(monkeypatch, lambda ws: None)  # agent never acts
+    c = CanaryDef(
+        name="mini-noop",
+        prompt="write hello.txt",
+        gates=[{"name": "exists", "command": "test -f hello.txt", "watch_paths": []}],
+        timeout=60,
+    )
+    result = await run_canary(c, trigger="manual")
+    assert result.passed is False
+    assert db.list_canary_runs(task="mini-noop")[0]["outcome"] == "noop"
+
+
 async def test_run_canary_missing_name():
     from core.canary.runner import run_canary
 
