@@ -33,6 +33,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import ClassVar
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,7 +55,9 @@ EPISTEMIC_CAPS = {
     "observation_of_self": 0.99,
 }
 
-QUESTION_STATES = ("open", "narrowed", "closed", "abandoned")
+# 'closed' was removed in the v3.1 carve: it was declared but no code path
+# ever wrote it, and two (now-deleted) detectors counted the phantom event.
+QUESTION_STATES = ("open", "narrowed", "abandoned")
 
 # Terminal hypothesis statuses. Both live in soup/archive/ and neither comes
 # back: there is no un-archive path, because a hypothesis still worth asking
@@ -74,9 +77,10 @@ QUESTION_STATES = ("open", "narrowed", "closed", "abandoned")
 # those entries.
 ARCHIVED_HYPOTHESIS_STATES = ("untestable", "expired")
 HYPOTHESIS_STATES = ("soup", "gated", "running", "supported", "refuted") + ARCHIVED_HYPOTHESIS_STATES
-GOAL_KINDS = ("root", "dream", "milestone", "task")
-GOAL_STATES = ("active", "suspended", "completed", "vapor")
-ALARM_TYPES = ("binding", "hevel", "divergence", "acedia")
+# v3.1 carve: the goal DAG is gone (only g_root survives, as the question
+# tree's anchor), and with it the binding/hevel/divergence alarm minters.
+GOAL_KINDS = ("root",)
+ALARM_TYPES = ("acedia",)
 
 # An alarm is *live* while its signature is still on the books. Operator
 # acknowledgement silences the notification, it does not retire the evidence:
@@ -130,6 +134,8 @@ class TelosStore:
     root: Path
     _seq_cache: dict = field(default_factory=dict)
 
+    # ledgers/first_person left with the reconciliation carve (v3.1); an
+    # existing directory on disk is simply never written again.
     _DIRS = (
         "config",
         "questions",
@@ -137,9 +143,12 @@ class TelosStore:
         "goals",
         "claims",
         "alarms",
-        "ledgers/first_person",
         "ledgers/trace",
     )
+    # open() used to re-mkdir every directory on every call — and it is
+    # called per compile, per turn, per API hit. Ensure once per process
+    # (keyed by root path, so tests with per-test tmp dirs still ensure).
+    _dirs_ensured: ClassVar[set] = set()
 
     _KIND_DIRS = {
         "question": "questions",
@@ -159,8 +168,11 @@ class TelosStore:
     def open(cls) -> "TelosStore":
         root = Path(settings.telos_dir)
         store = cls(root=root)
-        for d in cls._DIRS:
-            (root / d).mkdir(parents=True, exist_ok=True)
+        key = str(root)
+        if key not in cls._dirs_ensured:
+            for d in cls._DIRS:
+                (root / d).mkdir(parents=True, exist_ok=True)
+            cls._dirs_ensured.add(key)
         return store
 
     # ------------------------------------------------------------------
@@ -368,9 +380,6 @@ class TelosStore:
         soup/archive/ and never appear here — see `list_archived`."""
         return self.list("hypothesis", **({"status": status} if status else {}))
 
-    def list_goals(self, **filters) -> list[TelosObject]:
-        return self.list("goal", **filters)
-
     def list_alarms(self, open_only: bool = True) -> list[TelosObject]:
         """open_only keeps the *live* alarms — open and acknowledged both.
         Acknowledgement is an operator note, not a resolution; only 'cleared'
@@ -499,37 +508,6 @@ class TelosStore:
         self.trace_append("root_seeded", {"text": settings.telos_root_text})
         return root
 
-    def ensure_db_goal(self, goal_id: int, objective: str) -> TelosObject:
-        """Mirror a live session_goals row as a telos goal (audit P5 port 1).
-
-        Anomaly-minted questions used to hardcode parent_goal="g_root", which
-        collapsed the goal DAG: the binding monitor iterates non-root goals,
-        so it was structurally unfireable. Binding questions and spend to the
-        goal the system is actually executing makes ordo/binding/hevel operate
-        on real objectives. Naming: g_db_<id> ties back to session_goals.id.
-        """
-        gid = f"g_db_{int(goal_id)}"
-        existing = self.read("goal", gid)
-        if existing is not None:
-            return existing
-        self.ensure_root()
-        obj = TelosObject(
-            id=gid,
-            kind="goal",
-            meta={
-                "kind": "task",
-                "text": str(objective or "")[:500],
-                "state": "active",
-                "completable": True,
-                "parent": "g_root",
-                "db_goal_id": int(goal_id),
-            },
-            body=f"Mirror of session_goals row #{int(goal_id)}. Spend attribution "
-            "spans telos trace events and db token_usage.goal_id.",
-        )
-        self.write(obj)
-        self.trace_append("goal_mirrored", {"id": gid, "db_goal_id": int(goal_id)})
-        return obj
 
     def _write_config_provenance(self) -> None:
         """config/telos.yaml — the readable provenance tier (spec §6). The
@@ -541,16 +519,8 @@ class TelosStore:
                 "serendipity_budget": settings.telos_serendipity_budget,
                 "soup_bands": {"near": 0.50, "mid": 0.30, "far": 0.20},
                 "gate": {"eig_floor": settings.telos_eig_floor, "require_falsifier": True},
-                "binding": {
-                    "window_d": 7,
-                    "budget_share_max": settings.telos_budget_share_max,
-                    "freeze_after_windows": 2,
-                },
-                "hevel": {"min_samples": 3, "discharge_floor": 0.10, "vapor_budget_discount": 0.5},
-                "ledger": {"autobiography_cadence": "weekly", "divergence_max": settings.telos_divergence_max},
                 "humility": {"self_report_cap": EPISTEMIC_CAPS["self_report"]},
                 "entropy": {"novelty_floor": 0.20, "far_band_min": 0.10},
-                "ordo": {"cadence": "daily"},
                 "provenance": {
                     "installed_by": "operator",
                     "installed_at": _now_iso(),
@@ -637,11 +607,13 @@ class TelosStore:
         self.trace_append("question_minted", {"id": obj.id, "text": obj.get("text"), "origin": origin})
         return obj
 
-    def question_is_duplicate(self, text: str, threshold: float = 0.85) -> bool:
+    def question_is_duplicate(self, text: str, threshold: float = 0.85, questions: list | None = None) -> bool:
+        """`questions` lets a caller that already scanned the corpus reuse it —
+        the turn-end hook used to trigger up to six full directory scans."""
         from difflib import SequenceMatcher
 
         norm = text.lower().strip()
-        for q in self.list_questions():
+        for q in questions if questions is not None else self.list_questions():
             if SequenceMatcher(None, norm, str(q.get("text", "")).lower()).ratio() >= threshold:
                 return True
         return False

@@ -121,14 +121,6 @@ export async function renderTelosTab(container) {
         ]),
     ]));
 
-    // --- Goals ---
-    container.appendChild(sectionTitle('Goal DAG'));
-    container.appendChild(el('div', { class: 'adaptive-entry' }, [
-        el('div', { class: 'adaptive-entry-meta' }, [
-            text(`${countLine(overview.goals)} · ${overview.goals_suspended || 0} suspended · vapor classes: ${(overview.vapor_classes || []).join(', ') || 'none'}`),
-        ]),
-    ]));
-
     // --- Recent questions + hypotheses ---
     let qs, hs;
     try {
@@ -173,14 +165,4 @@ export async function renderTelosTab(container) {
         });
     }
 
-    // --- Coherence series ---
-    const series = overview.coherence_series || [];
-    if (series.length) {
-        container.appendChild(sectionTitle('Ledger coherence (divergence by week — lower is better)'));
-        container.appendChild(el('div', { class: 'adaptive-entry' }, [
-            el('div', { class: 'adaptive-entry-meta' }, [
-                text(series.map(p => `${p.week}: ${(p.divergence * 100).toFixed(0)}%`).join(' · ')),
-            ]),
-        ]));
-    }
 }

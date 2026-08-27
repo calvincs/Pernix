@@ -509,8 +509,7 @@ async def generate_for_next_question(store: TelosStore, is_cancelled) -> dict:
             },
         )
 
-    # The question advances regardless of yield: attempts feed abandonment,
-    # spawned ids feed the hevel audit's quality-weighted question count.
+    # The question advances regardless of yield: attempts feed abandonment.
     attempts = int(q.get("attempts", 0)) + 1
     store.update(q, spawned=spawned, attempts=attempts)
 
