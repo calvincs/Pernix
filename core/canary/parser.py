@@ -12,9 +12,12 @@ Format (mirrors SKILL.md, reusing the same frontmatter helper):
         watch_paths: [src/]
     model: ""            # optional model override
     timeout: 600         # optional per-run wall clock (seconds)
-    tags: [coding, debug]
+    tags: [coding, debug]  # 'sentinel' = always in the post-batch probe
+    covers: [skill:foo, kind:prompt_note]  # change surfaces this canary tests
     flaky: false         # flaky canaries inform, never trip the tripwire
-    cadence: 1           # run on every Nth scheduled sweep (1 = every sweep)
+    parked: false        # parked = off the heartbeat; still coverage-run
+    max_runs: 0          # probe: auto-retire after N total runs (0 = never)
+    expires: ""          # probe: auto-retire after this ISO date
     last_reviewed: 2026-08-06
     ---
     Free-form notes for humans reviewing this canary.
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from config import settings
@@ -32,10 +36,6 @@ from core.skills.parser import parse_frontmatter_md
 logger = logging.getLogger("pernix.canary")
 
 DEFAULT_TIMEOUT_S = 600
-# Ceiling on the scheduled-sweep cadence. A canary that ran once every 13
-# nightly sweeps would take a fortnight to contribute one baseline row, which
-# is functionally the retirement this field replaces.
-MAX_CADENCE = 12
 
 
 class CanaryParseError(Exception):
@@ -50,12 +50,22 @@ class CanaryDef:
     model: str = ""
     timeout: int = DEFAULT_TIMEOUT_S
     tags: list[str] = field(default_factory=list)
+    # Change surfaces this canary tests, as `<domain>:<name>` strings —
+    # `skill:stateful-env-reverse-engineering`, `kind:prompt_note`. Coverage
+    # triggers (a skill edit, an adaptive batch) select canaries by these.
+    covers: list[str] = field(default_factory=list)
     flaky: bool = False
-    # Scheduled-sweep cadence: run on every Nth sweep. Long-green canaries are
-    # demoted to a higher number instead of being retired — the tripwire's
-    # baseline is computed from scheduled runs of these same tasks, so
-    # removing the stable ones shrinks the denominator of the only signal
-    # allowed to auto-rollback. Post-batch sweeps ignore cadence entirely.
+    # Parked = long-green and off the heartbeat rotation. Still visible,
+    # still runs on coverage triggers, full sweeps and manual runs; a red
+    # run auto-unparks it. Written by auto-maintenance, editable by hand.
+    parked: bool = False
+    # Probe fields: a canary with max_runs > 0 (total runs) or a past
+    # `expires` date is auto-retired by maintenance with a summary
+    # notification — "occasionally test something" without suite residue.
+    max_runs: int = 0
+    expires: str = ""
+    # Legacy (pre-parking cadence demotion). Parsed so old files stay valid
+    # and hand-authored values survive rewrites; nothing reads it any more.
     cadence: int = 1
     last_reviewed: str = ""
     body: str = ""
@@ -113,13 +123,27 @@ def parse_canary_md(path: Path) -> CanaryDef:
         raise CanaryParseError(f"{path}: 'timeout' must be an integer (seconds)") from None
 
     try:
-        cadence = int(fm.get("cadence") or 1)
+        cadence = max(1, int(fm.get("cadence") or 1))
     except (TypeError, ValueError):
-        raise CanaryParseError(f"{path}: 'cadence' must be an integer (run every Nth scheduled sweep)") from None
-    if cadence < 1:
-        raise CanaryParseError(f"{path}: 'cadence' must be >= 1")
-    if cadence > MAX_CADENCE:
-        raise CanaryParseError(f"{path}: 'cadence' above {MAX_CADENCE} would starve the tripwire baseline")
+        cadence = 1  # legacy field, nothing reads it — never fail a file over it
+
+    covers = fm.get("covers") or []
+    if isinstance(covers, str):
+        covers = [c.strip() for c in covers.split(",") if c.strip()]
+    if not isinstance(covers, list):
+        raise CanaryParseError(f"{path}: 'covers' must be a list of '<domain>:<name>' strings")
+
+    try:
+        max_runs = max(0, int(fm.get("max_runs") or 0))
+    except (TypeError, ValueError):
+        raise CanaryParseError(f"{path}: 'max_runs' must be an integer (0 = no limit)") from None
+
+    expires = str(fm.get("expires") or "").strip()
+    if expires:
+        try:
+            datetime.fromisoformat(expires)
+        except ValueError:
+            raise CanaryParseError(f"{path}: 'expires' must be an ISO date, got '{expires}'") from None
 
     return CanaryDef(
         name=name,
@@ -128,7 +152,11 @@ def parse_canary_md(path: Path) -> CanaryDef:
         model=str(fm.get("model") or ""),
         timeout=max(60, timeout),
         tags=[str(t) for t in tags],
+        covers=[str(c) for c in covers],
         flaky=bool(fm.get("flaky", False)),
+        parked=bool(fm.get("parked", False)),
+        max_runs=max_runs,
+        expires=expires,
         cadence=cadence,
         last_reviewed=str(fm.get("last_reviewed") or ""),
         body=body,

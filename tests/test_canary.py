@@ -620,6 +620,124 @@ def test_enqueue_helpers(monkeypatch):
     assert sched.enqueue_post_batch_sweep("batch-2") is False
 
 
+def test_enqueue_targeted_and_full_sweeps(monkeypatch):
+    import core.extensions.scheduling as sched
+
+    jobs = {}
+
+    class _S:
+        def add_job(self, func, trigger=None, id=None, kwargs=None, **opts):
+            jobs[id] = SimpleNamespace(func=func, trigger=trigger, kwargs=kwargs)
+
+    monkeypatch.setattr(sched, "_scheduler", _S())
+    monkeypatch.setattr("config.settings.canary_enabled", True)
+
+    assert sched.enqueue_targeted_sweep(["a", "b"], reason="skill-foo")
+    meta = jobs["_canary_targeted_skill-foo"].kwargs["meta"]
+    assert meta["names"] == ["a", "b"] and meta["must_run"] is True and meta["trigger"] == "manual"
+
+    assert sched.enqueue_full_sweep("model-swap", delay_s=60)
+    meta = jobs["_canary_full_model-swap"].kwargs["meta"]
+    assert meta["trigger"] == "full" and meta["must_run"] is True
+
+    assert sched.enqueue_targeted_sweep([], reason="empty") is False
+    monkeypatch.setattr("config.settings.canary_enabled", False)
+    assert sched.enqueue_full_sweep("off") is False
+
+
+async def test_must_run_sweep_defers_on_a_held_lock(monkeypatch):
+    """The lock is skip-not-queue for heartbeats, but a must_run sweep (model
+    swap, deploy, coverage trigger) reschedules instead of being eaten."""
+    import core.extensions.scheduling as sched
+
+    jobs = {}
+
+    class _S:
+        def add_job(self, func, trigger=None, id=None, kwargs=None, **opts):
+            jobs[id] = SimpleNamespace(func=func, trigger=trigger, kwargs=kwargs)
+
+    monkeypatch.setattr(sched, "_scheduler", _S())
+    monkeypatch.setattr("config.settings.canary_enabled", True)
+
+    async with sched._canary_sweep_lock:
+        # Plain sweep: silently skipped, nothing queued.
+        await sched._execute_canary_sweep_job({"trigger": "scheduled"})
+        assert jobs == {}
+        # must_run sweep: reschedules itself under its own job id.
+        await sched._execute_canary_sweep_job(
+            {"trigger": "full", "must_run": True, "job_id": "_canary_full_deploy"}
+        )
+        assert jobs["_canary_full_deploy"].kwargs["meta"]["lock_attempts"] == 1
+
+
+def test_post_batch_targets_covered_then_sentinels_capped(monkeypatch):
+    """Post-batch probes run the canaries covering the batch's edit kinds
+    first, sentinels ride along, capped at canary_post_batch_max."""
+    import core.extensions.scheduling as sched
+    from core.canary.parser import CanaryDef
+
+    gate = [{"name": "g", "command": "true", "watch_paths": []}]
+    defs = [
+        CanaryDef(name="covers-note", prompt="x", gates=gate, covers=["kind:prompt_note"]),
+        CanaryDef(name="covers-other", prompt="x", gates=gate, covers=["kind:worker_spec"]),
+        CanaryDef(name="sent-a", prompt="x", gates=gate, tags=["sentinel"]),
+        CanaryDef(name="sent-b", prompt="x", gates=gate, tags=["sentinel"]),
+        CanaryDef(name="bystander", prompt="x", gates=gate),
+    ]
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: defs)
+    monkeypatch.setattr("config.settings.canary_post_batch_max", 2)
+
+    db.adaptive_create_batch(
+        "ab-t", "refine", json.dumps([{"kind": "prompt_note", "action": "create"}]), status="applied"
+    )
+    # Covered canary outranks the sentinels when the cap bites.
+    assert sched._post_batch_targets("ab-t") == ["covers-note", "sent-a"]
+
+    # Missing batch row → sentinels only.
+    assert sched._post_batch_targets("ab-nope") == ["sent-a", "sent-b"]
+
+    # No coverage and no sentinels → active non-flaky fallback, never blind.
+    plain = [CanaryDef(name="only", prompt="x", gates=gate)]
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: plain)
+    assert sched._post_batch_targets("ab-nope") == ["only"]
+
+
+async def test_heartbeat_picks_least_recently_run(monkeypatch):
+    """The nightly heartbeat runs the k least-recently-run active canaries —
+    never-run first, parked never."""
+    from core.canary import runner as runner_mod
+    from core.canary.parser import CanaryDef
+
+    gate = [{"name": "g", "command": "true", "watch_paths": []}]
+    fresh = CanaryDef(name="ran-today", prompt="x", gates=gate)
+    stale = CanaryDef(name="ran-long-ago", prompt="x", gates=gate)
+    never = CanaryDef(name="never-ran", prompt="x", gates=gate)
+    parked = CanaryDef(name="parked-never-ran", prompt="x", gates=gate, parked=True)
+
+    db.add_canary_run("ran-today", "scheduled", None, "[]", True, outcome="pass")
+    db.add_canary_run("ran-long-ago", "scheduled", None, "[]", True, outcome="pass")
+    from db.database import connect_sessions
+
+    with connect_sessions() as conn:
+        conn.execute("UPDATE canary_runs SET created_at = '2026-01-01T00:00:00+00:00' WHERE task = 'ran-long-ago'")
+
+    ran = []
+
+    async def _fake_run(c, trigger="manual", batch_id=None):
+        ran.append(c.name)
+        from core.canary.runner import CanaryRunResult
+
+        return CanaryRunResult(task=c.name, passed=True, trigger=trigger)
+
+    monkeypatch.setattr(runner_mod, "run_canary", _fake_run)
+    monkeypatch.setattr(runner_mod, "scan_canaries", lambda *a, **k: [fresh, stale, never, parked])
+    monkeypatch.setattr("config.settings.canary_enabled", True)
+    monkeypatch.setattr("config.settings.canary_heartbeat_per_night", 2)
+
+    await runner_mod.run_sweep(trigger="scheduled")
+    assert ran == ["never-ran", "ran-long-ago"]
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------

@@ -339,32 +339,45 @@ class Settings:
 
     # --- Golden-task canary suite (plan 3.5, off by default) ---
     # Canned tasks + deterministic gates run headlessly through the full
-    # pipeline in session_type="canary" sessions. The Phase 4 tripwire's
-    # primary signal. Zero rows, zero behavior change while off.
+    # pipeline in session_type="canary" sessions. The tripwire's primary
+    # signal. Zero rows, zero behavior change while off.
+    #
+    # Canaries are CHANGE-DRIVEN: they run when something they cover changes
+    # (an adaptive batch, a skill edit, a model swap, a deploy), not on a
+    # wall clock. The only standing schedule is a small heartbeat — the
+    # canary_heartbeat_per_night least-recently-run active canaries per
+    # night — which keeps every canary's history warm enough that a failure
+    # right after a change is provably the change's fault.
     canary_enabled: bool = False
     canaries_dir: str = "data/canaries"
-    canary_schedule: str = "0 3 * * *"  # nightly sweep cron expression
-    canary_max_concurrent: int = 1
+    canary_schedule: str = "0 3 * * *"  # heartbeat cron expression
+    canary_heartbeat_per_night: int = 2
     canary_retention_days: int = 30
-    # Regression detection (consumed by the Phase 4 tripwire): compare a
-    # post-batch sweep's pass rate against the trailing N scheduled sweeps;
-    # a drop larger than the delta is a tripwire signal.
-    canary_baseline_runs: int = 3
+    # Per-task tripwire (core/adaptive/tripwire.py): a canary may testify
+    # against a batch only when its trailing canary_baseline_runs runs before
+    # the apply were all green. canary_regression_delta now feeds only the
+    # PASSIVE post-mortem drift signal.
+    canary_baseline_runs: int = 5
     canary_regression_delta: float = 0.15
+    # The post-batch probe: covering canaries (matched via `covers:`) plus
+    # the sentinel-tagged ones, capped here. Sentinels are the cheap, broad
+    # tasks that ride along on every probe.
+    canary_post_batch_max: int = 4
     # Graduated autonomy (suite self-management, active only under
     # canary_enabled). Auto-admission replaces the human approval click with
     # mechanical gates: an allowlist proof over the gate commands plus vetting
     # runs; specs the machine can't prove safe still queue for human review.
     # The maintenance sweep promotes vetted canaries, tags flapping ones
-    # flaky, retires long-green ones to .retired/ quarantine, and purges the
-    # quarantine after a retention window. Hard invariant (enforced in
-    # core/canary/maintain.py): a canary whose latest run failed is never
+    # flaky, PARKS long-green ones (off the heartbeat, still coverage-run,
+    # auto-unparked by a red run), retires exhausted probes, and purges the
+    # .retired/ quarantine after a retention window. Hard invariant (enforced
+    # in core/canary/maintain.py): a canary whose latest run failed is never
     # auto-mutated — only a pass streak or a human moves it.
     canary_auto_admit: bool = True
     canary_auto_maintain: bool = True
     canary_vetting_runs: int = 3  # consistent runs required to promote out of vetting
-    canary_retire_after_passes: int = 25  # consecutive passes before auto-retirement
-    canary_purge_after_days: int = 30  # quarantined canaries older than this are deleted
+    canary_park_after_passes: int = 25  # consecutive passes before auto-parking
+    canary_purge_after_days: int = 30  # retired canaries older than this are deleted
     canary_max_suite: int = 24  # auto-admission stops at this suite size (human path stays open)
 
     # --- Adaptive Layer (plan §6, off by default) ---
