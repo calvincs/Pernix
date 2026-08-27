@@ -32,7 +32,7 @@ const EVENT_TYPES = [
     'stream.fallback', 'stream.retry', 'stream.length_continuation',
     'stream.budget_exhausted',
     // Tools / context / scout
-    'tool.start', 'tool.call',
+    'tool.start', 'tool.call', 'tool.call.intercepted',
     'context.compacting', 'context.compacted', 'context.reset',
     'context.view_pruned',
     'scout.start', 'scout.step', 'scout.done',
@@ -48,7 +48,7 @@ const EVENT_TYPES = [
     // Injected mid-turn messages
     'message.injected',
     // Workers
-    'worker.started', 'worker.done', 'worker.failed',
+    'worker.started', 'worker.done', 'worker.failed', 'worker.resumed',
     // RLM runs (recursive processing — live progress on the parent's stream)
     'rlm.started', 'rlm.activity', 'rlm.heartbeat', 'rlm.done',
     // Partial save (mid-stream persistence)
@@ -72,6 +72,8 @@ const EVENT_TYPES = [
     'model.divider', 'model.override',
     // Turn boundary (safety-net for button reset)
     'turn.complete',
+    // Forced follow-up (harness kept an idling agent working in-turn)
+    'turn.forced_followup',
 ];
 
 window.addEventListener('pernix:offline', () => {

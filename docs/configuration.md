@@ -106,6 +106,8 @@ This used to be an unconditional hardcode: every tool result over 300 characters
 |---|---|---|
 | `max_tool_rounds` | `50` | Maximum number of tool-call cycles in a single turn. A backstop against infinite tool loops — not a spend cap. Goal token/time budgets and the stuck detector are the real guards. (Raised from `10` in the 2026-08 refactor; ten rounds manufactured its own failures on ordinary long tasks.) |
 | `round_cap_auto_continue` | `1` | Fresh round budgets granted when a turn exhausts `max_tool_rounds` while healthy (tools ran, no errors, no stuck spiral). Each grant leaves a transcript notice. `0` restores the hard stop. |
+| `forced_followup_enabled` | `true` | When a reply ends by announcing more work ("Next, I'll…") with no tool calls, inject one in-turn nudge naming the unfinished item instead of ending the turn. The trigger is narrow: future-intent tail only, trailing questions and courtesy closers never fire it. |
+| `forced_followup_max_per_turn` | `1` | Cap on forced follow-up nudges per turn (bounds 0–5). Keeps a genuinely finished task from being looped. |
 
 ---
 

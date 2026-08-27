@@ -516,8 +516,143 @@ def _is_meta_commentary(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Forced follow-up (spec Feature 9): keep an under-ambitious agent working
+# ---------------------------------------------------------------------------
+
+_FUTURE_INTENT_RE = re.compile(
+    r"\b(?:i(?:'ll| will)|let me|i'?m going to|i am going to|next,? i|now i(?:'ll| will)"
+    r"|proceed(?:ing)? to|going to (?:start|run|write|create|implement|check|fix|update))\b",
+    re.IGNORECASE,
+)
+# A reply that ends by offering help is a finished answer, not abandoned work.
+_COURTESY_CLOSER_RE = re.compile(
+    r"let me know|feel free|if you (?:need|want|have|would like)|happy to help" r"|any (?:other )?questions",
+    re.IGNORECASE,
+)
+
+
+def _announces_future_work(text: str) -> bool:
+    """True when the reply's TAIL promises more work instead of doing it.
+
+    Scoped to the last two sentences on purpose: an "I'll" three paragraphs
+    up followed by a completed deliverable must not trigger. A trailing
+    question or a courtesy closer means the model handed the turn back
+    deliberately.
+    """
+    stripped = (text or "").strip()
+    if not stripped or stripped.endswith("?"):
+        return False
+    sentences = re.split(r"(?<=[.!\n])\s+", stripped)
+    tail = " ".join(sentences[-2:])[-300:]
+    if _COURTESY_CLOSER_RE.search(tail):
+        return False
+    return bool(_FUTURE_INTENT_RE.search(tail))
+
+
+def _build_followup_nudge(session_id: str, content: str, attempt: int, cap: int) -> str:
+    """Data-driven nudge: name the unfinished thing, never a generic 'continue'.
+
+    Runs in a thread (DB read)."""
+    target = ""
+    try:
+        goal = db.get_active_goal(session_id)
+        if goal and goal.get("status") == "active":
+            target = f"The active goal is still open: {(goal.get('objective') or '')[:200]}"
+    except Exception:
+        pass
+    if not target:
+        window = content[-400:]
+        m = _FUTURE_INTENT_RE.search(window)
+        quoted = window[m.start() :][:160].strip() if m else content.strip()[-160:]
+        target = f'You announced: "{quoted}"'
+    return (
+        f"[forced follow-up {attempt}/{cap}] You stopped calling tools but the turn "
+        f"looks unfinished. {target}. Do that work NOW with concrete tool calls — or, "
+        "if the task genuinely is complete, state that plainly and why no further "
+        "action is needed."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool-call admission
 # ---------------------------------------------------------------------------
+
+# JSON-schema scalar type → accepted Python types. bool is checked before int
+# everywhere below because bool subclasses int.
+_JSON_TYPE_CHECKS: dict[str, tuple] = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list,),
+    "object": (dict,),
+}
+
+
+def _coerce_json_type(value, expected: str):
+    """Try to convert `value` to the schema type. Returns (ok, new_value).
+
+    Only the benign, unambiguous conversions models actually produce: numeric
+    strings for number/integer, "true"/"false" for booleans, scalars for
+    string parameters. Anything else fails and the caller rejects the call.
+    """
+    try:
+        if expected == "integer" and isinstance(value, str) and value.strip().lstrip("+-").isdigit():
+            return True, int(value.strip())
+        if expected == "integer" and isinstance(value, float) and value.is_integer():
+            return True, int(value)
+        if expected == "number" and isinstance(value, str):
+            return True, float(value.strip())
+        if expected == "boolean" and isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            return True, value.strip().lower() == "true"
+        if expected == "string" and isinstance(value, (int, float, bool)):
+            return True, json.dumps(value) if isinstance(value, bool) else str(value)
+    except (ValueError, TypeError):
+        pass
+    return False, value
+
+
+def _validate_arg_types(tool_def, parsed_args: dict, notes) -> str | None:
+    """Validate provided args against the tool's JSON schema, in place.
+
+    Three outcomes per argument: passes as-is; coerced (noted via `notes`);
+    or uncoercible — the whole call is rejected by returning an error string.
+    Unknown parameters are dropped with a note instead of reaching the tool,
+    where they would either TypeError or be silently swallowed.
+    """
+    props = (tool_def.parameters or {}).get("properties") or {}
+    if not props:
+        return None
+
+    unknown = [k for k in parsed_args if k not in props]
+    if unknown and (tool_def.parameters or {}).get("additionalProperties") is not True:
+        for k in unknown:
+            parsed_args.pop(k, None)
+        notes(f"[note: ignored unknown parameter(s): {', '.join(sorted(unknown))}]")
+
+    coerced: list[str] = []
+    for key, value in list(parsed_args.items()):
+        expected = props.get(key, {}).get("type")
+        # Union types ({"type": ["string","null"]}) and typeless properties:
+        # accept as-is — precision there isn't worth false rejections.
+        if not isinstance(expected, str) or expected not in _JSON_TYPE_CHECKS:
+            continue
+        if value is None:
+            continue  # let the tool's own default/None handling decide
+        accepted = _JSON_TYPE_CHECKS[expected]
+        if isinstance(value, bool) and expected not in ("boolean", "string"):
+            ok, new_value = False, value
+        elif isinstance(value, accepted):
+            continue
+        else:
+            ok, new_value = _coerce_json_type(value, expected)
+        if not ok:
+            return f"parameter '{key}' expects {expected}, got {type(value).__name__} ({str(value)[:80]!r})"
+        parsed_args[key] = new_value
+        coerced.append(f"{key} ({type(value).__name__}→{expected})")
+    if coerced:
+        notes(f"[note: coerced parameter type(s): {', '.join(coerced)}]")
+    return None
 
 
 class _ToolCallGate:
@@ -551,16 +686,43 @@ class _ToolCallGate:
         self._tool_failures = tool_failures
         # hash → (round_num, truncated_result) for the cross-round hard dedup.
         self._cross_round: dict[str, tuple[int, str]] = {}
+        # call id → correction notes (alias rewrites, coercions, dropped
+        # params). Reset per admit(); read back by _record_round_results.
+        self._notes: dict[str, list[str]] = {}
 
-    async def admit(self, calls: list[dict], active_tools: list[str]) -> tuple[list[dict], dict[str, tuple[str, str]]]:
-        """Return (executable calls, alias notes keyed by tool_call id).
+    async def admit(self, calls: list[dict], active_tools: list[str]) -> tuple[list[dict], dict[str, list[str]]]:
+        """Return (executable calls, correction notes keyed by tool_call id).
 
         Each executable entry is {"tc": <raw call>, "parsed_args": <dict>}.
+        Notes record what the gate rewrote (aliased name, coerced argument
+        types, stripped unknown parameters); the caller prefixes them onto the
+        eventual tool result so the model sees its call was corrected — a
+        mid-conversation role=system note would be stripped by provider
+        normalization, tool-role messages survive.
         """
+        self._notes: dict[str, list[str]] = {}
         unique = await self._dedup(calls)
         unique = await self._semantic_dedup(unique)
-        valid, aliased_by_id = await self._correct_names(unique, active_tools)
-        return await self._parse_and_validate(valid), aliased_by_id
+        valid = await self._correct_names(unique, active_tools)
+        return await self._parse_and_validate(valid), self._notes
+
+    def _note(self, tc: dict, text: str) -> None:
+        self._notes.setdefault(tc.get("id", ""), []).append(text)
+
+    def _emit_intercepted(self, name: str, action: str, reason: str) -> None:
+        """tool.call.intercepted: the gate acted on a call before execution.
+
+        action ∈ aliased | coerced | stripped_params | rejected. Rejections
+        also emit the usual tool.call error event (via _reject); this event is
+        the gate-level signal the UI/adaptive layer can aggregate."""
+        self._session.emit_event(
+            {
+                "type": "tool.call.intercepted",
+                "name": name,
+                "action": action,
+                "reason": reason[:300],
+            }
+        )
 
     def remember_success(self, tool_name: str, raw_args, round_num: int, content: str) -> None:
         """Cache a successful call so an identical one next round short-circuits.
@@ -635,18 +797,15 @@ class _ToolCallGate:
             out.extend(kept)
         return out
 
-    async def _correct_names(
-        self, calls: list[dict], active_tools: list[str]
-    ) -> tuple[list[dict], dict[str, tuple[str, str]]]:
+    async def _correct_names(self, calls: list[dict], active_tools: list[str]) -> list[dict]:
         """H1: rewrite known hallucinated names, reject unknown ones.
 
-        Aliases are tracked by call id so the caller can prefix the correction
-        onto the eventual tool result — a role=system mid-conversation note is
-        stripped by normalize_for_openrouter (and Ollama's one-system rule),
-        so the correction has to travel back on the tool-role message that the
-        provider keeps verbatim.
+        Aliases are recorded as notes keyed by call id so the caller can prefix
+        the correction onto the eventual tool result — a role=system
+        mid-conversation note is stripped by normalize_for_openrouter (and
+        Ollama's one-system rule), so the correction has to travel back on the
+        tool-role message that the provider keeps verbatim.
         """
-        aliased_by_id: dict[str, tuple[str, str]] = {}
         valid: list[dict] = []
         for tc in calls:
             tc["name"] = tc["name"].strip()
@@ -667,17 +826,19 @@ class _ToolCallGate:
                 original_name = tc["name"]
                 logger.info("tool.aliased: %s -> %s", original_name, aliased)
                 tc["name"] = aliased
-                aliased_by_id[tc.get("id", "")] = (original_name, aliased)
+                self._note(tc, f"[note: tool name aliased {original_name} → {aliased}]")
+                self._emit_intercepted(aliased, "aliased", f"model called '{original_name}'")
             if not self._registry.exists(tc["name"]):
                 logger.warning("Hallucinated tool '%s' — not in registry", tc["name"])
                 hint = _build_hallucinated_tool_hint(tc["name"], self._registry)
                 full_error = f"Error: Tool '{tc['name']}' does not exist. {hint}"
                 # The user benefits from seeing the full hint the agent was
                 # given, not just "does not exist" — so the event carries it too.
+                self._emit_intercepted(tc["name"], "rejected", "unknown tool name")
                 await self._reject(tc, transcript_msg=full_error, event_msg=full_error, event_args={})
                 continue
             valid.append(tc)
-        return valid, aliased_by_id
+        return valid
 
     async def _parse_and_validate(self, calls: list[dict]) -> list[dict]:
         """C3 (JSON arguments parse) + H4 (required parameters present)."""
@@ -725,6 +886,30 @@ class _ToolCallGate:
                         event_args=_summarize_args(parsed_args),
                     )
                     continue
+
+                # Argument type validation against the LIVE schema (spec
+                # Feature 3, stage 1). Wrong-typed args used to reach the tool
+                # and fail there — one whole round burned on a TypeError-shaped
+                # error. Coerce the benign cases (numeric strings, "true");
+                # reject the uncoercible with the expected type spelled out so
+                # the model can fix the call in the same round.
+                _notes_before = len(self._notes.get(tc.get("id", ""), []))
+                type_error = _validate_arg_types(tool_def, parsed_args, notes=lambda t: self._note(tc, t))
+                if type_error:
+                    self._emit_intercepted(tc["name"], "rejected", type_error)
+                    await self._reject(
+                        tc,
+                        transcript_msg=(
+                            f"Error: Tool '{tc['name']}' argument type mismatch — {type_error}. "
+                            "Retry with correctly typed arguments."
+                        ),
+                        event_msg=f"Error: Argument type mismatch: {type_error}",
+                        event_args=_summarize_args(parsed_args),
+                    )
+                    continue
+                for _new_note in self._notes.get(tc.get("id", ""), [])[_notes_before:]:
+                    action = "stripped_params" if "unknown parameter" in _new_note else "coerced"
+                    self._emit_intercepted(tc["name"], action, _new_note)
 
             parsed_calls.append({"tc": tc, "parsed_args": parsed_args})
         return parsed_calls
@@ -985,6 +1170,11 @@ async def run_agent(
     # length-truncation continuation above.
     _round_cap_continues = 0
 
+    # Forced follow-ups used this turn (spec Feature 9). Bounded by
+    # settings.forced_followup_max_per_turn so a genuinely finished task is
+    # never looped.
+    _forced_followups = 0
+
     # Last compiled prompt size (F13, field case 17683100ecf8): the only
     # token number the window actually constrains. One round stale by
     # construction — the status is built before this round's compile.
@@ -1213,6 +1403,45 @@ async def run_agent(
 
         # --- Response analysis ---
         if not collected_tool_calls:
+            # Forced follow-up (spec Feature 9): the model narrated future work
+            # ("Next, I'll…") and then went quiet. Ending the turn here means
+            # paying for a full reflect retry to recover; one in-turn nudge is
+            # strictly cheaper. The trigger is deliberately narrow — see
+            # _announces_future_work — and bounded per turn.
+            _followup_cap = max(0, int(getattr(settings, "forced_followup_max_per_turn", 1) or 0))
+            if (
+                getattr(settings, "forced_followup_enabled", False)
+                and _forced_followups < _followup_cap
+                and tool_round < settings.max_tool_rounds - 2
+                and not session.cancel_requested
+                and collected_content
+                and _announces_future_work(collected_content)
+            ):
+                _forced_followups += 1
+                await _save_turn_msg("assistant", collected_content)
+                _nudge_text = await asyncio.to_thread(
+                    _build_followup_nudge, session_id, collected_content, _forced_followups, _followup_cap
+                )
+                await asyncio.to_thread(db.add_message, session_id, "system", _nudge_text)
+                session.emit_event(
+                    {
+                        "type": "turn.forced_followup",
+                        "attempt": _forced_followups,
+                        "max": _followup_cap,
+                    }
+                )
+                logger.info(
+                    "Session %s: forced follow-up %d/%d at round %d (model idled with future-intent tail)",
+                    session_id,
+                    _forced_followups,
+                    _followup_cap,
+                    tool_round,
+                )
+                session.touch()
+                collected_content = ""
+                tool_round += 1
+                continue
+
             # No tool calls — model has responded. Save and finish.
             if collected_content:
                 await _save_turn_msg("assistant", collected_content)
@@ -1270,7 +1499,7 @@ async def run_agent(
             break
 
         # Filter, correct and validate before anything executes.
-        parsed_calls, aliased_by_id = await gate.admit(collected_tool_calls, active_tools)
+        parsed_calls, notes_by_id = await gate.admit(collected_tool_calls, active_tools)
 
         # Save assistant message with ONLY validated tool_calls (prevents DB orphans).
         # Persist round latency so post-hoc diagnosis (which model is slow,
@@ -1301,7 +1530,7 @@ async def run_agent(
             parsed_calls,
             results,
             session=session,
-            aliased_by_id=aliased_by_id,
+            notes_by_id=notes_by_id,
             save_turn_msg=_save_turn_msg,
             nudges_fired=nudges_fired,
             tool_failures=tool_failures,
@@ -1723,7 +1952,7 @@ async def _record_round_results(
     results: list,
     *,
     session: AgentSession,
-    aliased_by_id: dict[str, tuple[str, str]],
+    notes_by_id: dict[str, list[str]],
     save_turn_msg,
     nudges_fired: set[str],
     tool_failures: dict[str, list[str]],
@@ -1747,15 +1976,15 @@ async def _record_round_results(
         tc = item["tc"]
         tool_meta = json.dumps({"was_error": result.was_error, "latency_ms": result.latency_ms})
 
-        # If this call had its name aliased, prefix the correction onto the
-        # tool result so the model sees the rewrite on its next turn. (A
-        # separate role=system note would be stripped by
-        # normalize_for_openrouter; tool-role messages are preserved.)
+        # If the gate corrected this call (aliased name, coerced argument
+        # types, dropped unknown params), prefix the notes onto the tool
+        # result so the model sees the rewrite on its next turn. (A separate
+        # role=system note would be stripped by normalize_for_openrouter;
+        # tool-role messages are preserved.)
         stored_content = result.content
-        alias_pair = aliased_by_id.get(tc.get("id", ""))
-        if alias_pair is not None:
-            _orig, _new = alias_pair
-            stored_content = f"[note: tool name aliased {_orig} → {_new}]\n" + stored_content
+        gate_notes = notes_by_id.get(tc.get("id", ""))
+        if gate_notes:
+            stored_content = "\n".join(gate_notes) + "\n" + stored_content
 
         # Harness-side mid-turn nudge: if this tool result matches a known
         # failure signature (bot detection, 4xx/5xx from public web, SSRF block

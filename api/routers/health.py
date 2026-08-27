@@ -148,6 +148,9 @@ _SETTING_BOUNDS = {
     # rounds the binding constraint; the UI rejected his 500. The floor and
     # the round-cap-continuation machinery keep runaway risk bounded.
     "max_tool_rounds": (1, 1000),
+    # 0 effectively disables even when the bool is on; >5 would defeat the
+    # "genuinely finished tasks are never looped" contract.
+    "forced_followup_max_per_turn": (0, 5),
     "llm_max_concurrent": (1, 20),
     "openrouter_max_concurrent": (1, 20),
     "max_concurrent_workers": (1, 20),

@@ -332,6 +332,26 @@ class SessionManager:
         except (ValueError, TypeError) as e:
             logger.warning("Could not parse watched_worker_ids for %s: %s", session_id, e)
 
+        # Restore a worker's persisted identity (migration v31): its pinned
+        # model and its typed kind's exclusive tool allowlist. Without this a
+        # rehydrated worker (restart, reap, resume_worker) silently ran on the
+        # default model with the full tool surface — the kind's confinement
+        # evaporated exactly when nobody was watching.
+        if session.session_type == "worker":
+            _model = db_session.get("model_override")
+            if _model:
+                session.model_override = _model
+            _kind_name = db_session.get("worker_kind")
+            if _kind_name:
+                try:
+                    from core.extensions.orchestration.kinds import resolve_kind
+
+                    _kind = resolve_kind(_kind_name)
+                    if _kind is not None and _kind.tool_allowlist:
+                        session.tool_allowlist = frozenset(_kind.tool_allowlist)
+                except Exception as e:
+                    logger.warning("Worker kind restore failed for %s: %s", session_id, e)
+
         self._sessions[session_id] = session
         return session
 
