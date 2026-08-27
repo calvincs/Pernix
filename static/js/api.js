@@ -132,3 +132,4 @@ export const get = (path) => apiJson('GET', path);
 export const post = (path, body) => apiJson('POST', path, body);
 export const del = (path) => apiJson('DELETE', path);
 export const patch = (path, body) => apiJson('PATCH', path, body);
+export const put = (path, body) => apiJson('PUT', path, body);

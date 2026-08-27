@@ -148,6 +148,79 @@ def _purge_quarantine(base: Path) -> list[str]:
     return purged
 
 
+def retire_canary(c: CanaryDef, base: Path, reason: str, by: str) -> bool:
+    """Move a canary into the `.retired/` quarantine with a dated marker.
+
+    Not deletion: the quarantine keeps the directory for
+    canary_purge_after_days (the purge pass drains it), so a retirement is
+    reversible by moving the directory back for the whole grace window.
+    """
+    if c.path is None:
+        return False
+    src = c.path.parent
+    dest = retired_dir(base) / c.name
+    try:
+        if dest.exists():
+            dest = retired_dir(base) / f"{c.name}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+        (dest / _RETIRED_MARKER).write_text(
+            json.dumps({"retired_at": datetime.now(timezone.utc).isoformat(), "reason": reason, "by": by})
+        )
+        return True
+    except Exception as e:
+        logger.warning("Canary retirement failed for '%s': %s", c.name, e)
+        return False
+
+
+def _retire_exhausted_probes(suite: list[CanaryDef], base: Path, stats: dict) -> None:
+    """Retire probes that have delivered: max_runs total runs recorded, or
+    the expires date passed.
+
+    Deliberately EXEMPT from the Goodhart lock (which guards the pass above,
+    not this one): a probe's contract is "run N times and report", and
+    retirement-with-a-summary IS the report — holding a probe open because
+    its last run was red would turn "occasionally test something" into
+    permanent suite residue. The tally in the notification carries the red
+    runs; nothing is silenced.
+    """
+    for c in suite:
+        if c.max_runs <= 0 and not c.expires:
+            continue
+        runs = db.list_canary_runs(task=c.name, limit=_RUN_SCAN_LIMIT)
+        exhausted = c.max_runs > 0 and len(runs) >= c.max_runs
+        expired = False
+        if c.expires:
+            try:
+                exp = datetime.fromisoformat(c.expires)
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                expired = datetime.now(timezone.utc) >= exp
+            except ValueError:
+                pass  # parser normally rejects this; never retire on a guess
+        if not (exhausted or expired):
+            continue
+        window = runs[: c.max_runs] if c.max_runs > 0 else runs
+        passed = sum(1 for r in runs if r.get("passed"))
+        why = f"probe exhausted ({len(runs)} runs)" if exhausted else f"probe expired ({c.expires})"
+        if retire_canary(c, base, reason=why, by="maintenance"):
+            stats["probes_retired"].append(c.name)
+            last = window[0] if window else None
+            try:
+                db.add_notification(
+                    title=f"Canary probe retired: {c.name}",
+                    body=(
+                        f"{why}: {passed}/{len(runs)} runs passed"
+                        + (f", final outcome {last.get('outcome') or ('pass' if last.get('passed') else 'fail')}" if last else "")
+                        + f". The directory sits in .retired/ for {settings.canary_purge_after_days} days "
+                        "if you want it back."
+                    ),
+                    urgency="normal",
+                )
+            except Exception:
+                pass
+
+
 def _maintain_one(c: CanaryDef, base: Path, stats: dict) -> None:
     """Apply at most one mutation to one canary. The I-fail lock is the
     first check: nothing below it can ever touch a failing canary."""
@@ -331,6 +404,7 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
         "flaky_tagged": [],
         "parked": [],
         "unparked": [],
+        "probes_retired": [],
         "purged": [],
         "reviewed": [],
         "unhealthy": [],
@@ -342,6 +416,18 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
     from core.canary.parser import scan_canaries
 
     suite = list(scan_canaries(base))
+
+    # Probe retirement runs first and prunes the suite list — a retired
+    # probe must not be promoted/parked/reviewed in the same breath.
+    if not is_cancelled():
+        try:
+            _retire_exhausted_probes(suite, base, stats)
+            if stats["probes_retired"]:
+                gone = set(stats["probes_retired"])
+                suite = [c for c in suite if c.name not in gone]
+        except Exception as e:
+            logger.warning("Canary probe retirement failed: %s", e)
+
     for c in suite:
         if is_cancelled():
             return stats
@@ -369,9 +455,9 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
         summary = "; ".join(f"{k}: {', '.join(_describe(i) for i in v)}" for k, v in changed.items())
         logger.info("Canary maintenance: %s", summary)
     # 'unhealthy' is reported by _report_suite_health with its own urgency and
-    # its own dedupe; folding it in here would double-notify and bury a
-    # measurement outage under routine bookkeeping.
-    mutations = {k: v for k, v in changed.items() if k != "unhealthy"}
+    # its own dedupe, and each retired probe already got its own summary
+    # notification; folding either in here would double-notify.
+    mutations = {k: v for k, v in changed.items() if k not in ("unhealthy", "probes_retired")}
     if mutations:
         try:
             db.add_notification(
