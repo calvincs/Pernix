@@ -722,6 +722,9 @@ def _build_goal_burn(session_id: str) -> str:
 # did an alarm open" exactly as well as a fresh one.
 _TELOS_BASELINE_TTL_S = 60
 _telos_baseline_cache: tuple[float, str] = (0.0, "")
+# (monotonic stamp, telos_dir, block) — dir-keyed so a redirected store
+# (tests, config change) never serves another store's stale block.
+_telos_drive_cache: tuple[float, str, str | None] = (0.0, "", None)
 
 
 def _telos_baseline_line(store) -> str:
@@ -767,9 +770,22 @@ def _build_telos_drive_block() -> str:
     tail (audit P5 port 3). The agent used to be unaware of its own drive
     state unless it voluntarily called telos_status. Byte-identical output
     (empty string) when telos is disabled; capped to three questions to bound
-    tail churn."""
+    tail churn.
+
+    The WHOLE block is behind the 60s TTL now, not just the baseline line:
+    the question and alarm scans used to run raw on every compile — up to
+    max_tool_rounds full directory globs + YAML parses per turn, for FYI
+    content where 60 seconds of staleness costs nothing.
+    """
     if not settings.telos_enabled:
         return ""
+    import time as _time
+
+    global _telos_drive_cache
+    stamp, cached_dir, cached = _telos_drive_cache
+    now = _time.monotonic()
+    if cached is not None and cached_dir == settings.telos_dir and now - stamp < _TELOS_BASELINE_TTL_S:
+        return cached
     try:
         from core.telos.store import TelosStore
 
@@ -790,7 +806,9 @@ def _build_telos_drive_block() -> str:
                 )
         if alarms:
             lines.append(f"Open telos alarms: {len(alarms)} (see telos_status)")
-        return "\n".join(lines)
+        block = "\n".join(lines)
+        _telos_drive_cache = (now, settings.telos_dir, block)
+        return block
     except Exception:
         return ""
 

@@ -1002,7 +1002,7 @@ def ensure_canary_schedule() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TELOS slow loops: daily ordo/binding, weekly hevel/reconcile/entropy
+# TELOS slow loops: daily retirement sweeps, weekly entropy control
 # ---------------------------------------------------------------------------
 
 _telos_slow_lock = asyncio.Lock()

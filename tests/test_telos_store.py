@@ -17,7 +17,8 @@ def store(monkeypatch):
 
 
 def test_open_creates_layout(store):
-    for d in ("config", "questions", "soup", "goals", "claims", "alarms", "ledgers/first_person", "ledgers/trace"):
+    # ledgers/first_person left with the v3.1 reconciliation carve.
+    for d in ("config", "questions", "soup", "goals", "claims", "alarms", "ledgers/trace"):
         assert (store.root / d).is_dir()
 
 

@@ -1,19 +1,23 @@
-"""Pernix — TELOS: a teleological operational layer over the task loop.
+"""Pernix — TELOS: the operational question-and-hypothesis loop.
 
-Design: docs/dev/telos-spec.md (derived from the "Intelligence, Knowledge,
-Purpose, and Personhood" source material). TELOS wraps the Pernix loop with
-a non-convergent drive and its correction machinery:
+Design: docs/dev/telos-spec.md, carved down in v3.1. What remains is the
+loop that produced real diagnoses on the live box:
 
   fast loop  — anomaly → Question → SOUP hypotheses → testability gate →
                evidence → claim (snooze Activity 16, one bounded unit/cycle)
-  slow loops — Ordo Pass (daily re-ranking), Binding Monitor (Goodhart
-               detector), Hevel Audit (discharge measurement), dual-ledger
-               reconciliation, Entropy Control (acedia detector) — all run
-               from the daily telos cron with weekly watermarks.
+  slow loops — retirement sweeps daily; Entropy Control (the acedia
+               detector, hypothesis-coupled not goal-coupled) weekly.
+
+The goal-DAG machinery (Ordo re-ranking, the Binding/Goodhart monitor, the
+Hevel discharge audit, autobiography reconciliation and its divergence-
+alarm discharge — ~950 LOC) was deleted in the v3.1 audit: with a goal
+tree that only ever held the root, ordo/binding/hevel were provably total
+no-ops, and reconciliation spent the layer's only weekly LLM call
+narrating routine bookkeeping to itself. The root object stays as the
+question tree's anchor.
 
 All state is markdown with YAML frontmatter under data/telos/ (greppable,
-diffable, Provenas-style ids), plus an append-only JSONL trace ledger that
-is authoritative over the agent's first-person autobiography — always.
+diffable, Provenas-style ids), plus an append-only JSONL trace ledger.
 
 Write-permission rule (enforced by construction): this package writes only
 data/telos/** and snooze_state telos_* keys. The trace ledger is append-only
@@ -85,9 +89,8 @@ async def run_step(is_cancelled) -> dict:
 
 
 async def run_slow_loops(force_weekly: bool = False) -> dict:
-    """Daily slow-loop pass (telos cron): Ordo Pass + Binding Monitor every
-    run; Hevel rollup, ledger reconciliation, and Entropy Control weekly
-    (watermarked); dream-register review monthly. Never raises upward."""
+    """Daily slow-loop pass (telos cron): retirement sweeps every run;
+    Entropy Control weekly (watermarked). Never raises upward."""
     stats: dict = {}
     if not settings.telos_enabled:
         return stats
@@ -100,32 +103,6 @@ async def run_slow_loops(force_weekly: bool = False) -> dict:
     store = TelosStore.open()
     store.ensure_root()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    # Daily: Ordo Pass — re-ranking, never a purge.
-    try:
-        from core.telos.ordo import run_ordo_pass
-
-        stats["ordo"] = run_ordo_pass(store)
-    except Exception as e:
-        logger.warning("telos: ordo pass failed: %s", e)
-
-    # Daily: Binding Monitor — the idolatry/Goodhart detector.
-    try:
-        from core.telos.binding import run_binding_monitor
-
-        stats["binding"] = run_binding_monitor(store)
-    except Exception as e:
-        logger.warning("telos: binding monitor failed: %s", e)
-
-    # Daily: evidence-based alarm discharge (E3) — alarms whose type has no
-    # live monitor of its own (divergence) close after N spaced clean
-    # re-checks, so a condition that stopped holding stops alarming.
-    try:
-        from core.telos.discharge import run_alarm_discharge
-
-        stats["alarm_discharge"] = run_alarm_discharge(store)
-    except Exception as e:
-        logger.warning("telos: alarm discharge failed: %s", e)
 
     # Daily: release adaptive slots this layer no longer has evidence for.
     # Minting without retiring wedges the per-kind cap, at which point every
@@ -173,36 +150,12 @@ async def run_slow_loops(force_weekly: bool = False) -> dict:
     week = datetime.now(timezone.utc).strftime("%G-W%V")
     if force_weekly or db.get_snooze_state("telos_weekly") != week:
         try:
-            from core.telos.hevel import run_hevel_rollup
-
-            stats["hevel"] = run_hevel_rollup(store)
-        except Exception as e:
-            logger.warning("telos: hevel rollup failed: %s", e)
-        try:
-            from core.telos.reconcile import run_reconciliation
-
-            stats["reconcile"] = await run_reconciliation(store)
-        except Exception as e:
-            logger.warning("telos: reconciliation failed: %s", e)
-        try:
             from core.telos.entropy import run_entropy_control
 
             stats["entropy"] = run_entropy_control(store)
         except Exception as e:
             logger.warning("telos: entropy control failed: %s", e)
         db.set_snooze_state("telos_weekly", week)
-
-    # Monthly: dream register review (capability-gap test, successor minting
-    # is operator work — this pass only flags, never demotes silently).
-    month = today[:7]
-    if db.get_snooze_state("telos_dream_review") != month:
-        try:
-            from core.telos.ordo import review_dream_register
-
-            stats["dream_register"] = review_dream_register(store)
-        except Exception as e:
-            logger.warning("telos: dream register review failed: %s", e)
-        db.set_snooze_state("telos_dream_review", month)
 
     store.trace_append("slow_loops", {"date": today, "stats": {k: v for k, v in stats.items() if v}})
     return stats

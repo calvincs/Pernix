@@ -366,15 +366,13 @@ const SECTIONS = [
     },
     {
         title: 'Telos (Teleological Layer)',
-        description: 'A non-convergent drive with correction machinery: turn anomalies mint questions, the SOUP generates cross-domain hypotheses at idle (only falsifiable ones execute), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (ordo), detecting Goodhart binding, measuring goal discharge (hevel), reconciling the agent\'s self-story against its append-only trace, and keeping exploration entropy above floor. State lives in data/telos/ as markdown. Enabling the agent tools needs a restart; everything else applies immediately.',
+        description: 'The operational question loop (carved down in v3.1): turn anomalies the rest of the system cannot explain mint questions, the SOUP generates falsifiable hypotheses at idle, supported claims can become scout routing hints, and a weekly entropy control keeps exploration from going stale. State lives in data/telos/ as markdown. Enabling the agent tools needs a restart; everything else applies immediately.',
         fields: [
             { key: 'telos_enabled', label: 'Telos Enabled', type: 'bool', restart: RESTART_TOOLS },
             { key: 'telos_schedule', label: 'Slow-loop Schedule (cron)', type: 'text' },
             { key: 'telos_serendipity_budget', label: 'Serendipity Budget', type: 'number', step: 0.05 },
             { key: 'telos_eig_floor', label: 'Gate EIG Floor', type: 'number', step: 0.05 },
             { key: 'telos_hypotheses_per_question', label: 'Hypotheses / Question', type: 'number' },
-            { key: 'telos_budget_share_max', label: 'Binding Budget-share Max', type: 'number', step: 0.05 },
-            { key: 'telos_divergence_max', label: 'Ledger Divergence Alarm', type: 'number', step: 0.05 },
         ],
     },
     {

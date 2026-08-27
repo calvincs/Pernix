@@ -208,9 +208,6 @@ _SETTING_BOUNDS = {
     # only the archive's own horizon deletes, so long values are cheap.
     "telos_soup_retention_days": (0, 3650),
     "telos_soup_archive_retention_days": (0, 3650),
-    "telos_budget_share_max": (0.1, 0.9),
-    "telos_claims_floor_per_window": (0, 20),
-    "telos_divergence_max": (0.01, 1.0),
 }
 
 
