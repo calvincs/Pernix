@@ -109,9 +109,7 @@ def test_candor_tracked_tools_never_mint_questions():
     for the 16-of-18-abandoned 'why did tool X fail' class on the live box."""
     from core.telos.anomaly import extract_turn_anomalies
 
-    tracked = extract_turn_anomalies(
-        {"x": {"calls": 3, "failures": 2}}, None, False, "normal", priors={"x": 0.9}
-    )
+    tracked = extract_turn_anomalies({"x": {"calls": 3, "failures": 2}}, None, False, "normal", priors={"x": 0.9})
     assert not any("tool 'x'" in a["text"] for a in tracked)
     novel = extract_turn_anomalies({"x": {"calls": 3, "failures": 2}}, None, False, "normal", priors={})
     assert any("tool 'x'" in a["text"] for a in novel)

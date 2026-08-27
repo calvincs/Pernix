@@ -208,9 +208,9 @@ A non-convergent drive with correction machinery over the whole loop: turn anoma
 
 | Setting | Default | Description |
 |---|---|---|
-| `telos_enabled` | `false` | Master switch. Off: no directories created, snooze Activity 16 skipped, cron never installs, post-task hook inert. Registers the `telos_status` / `telos_ask` / `telos_goal_add` / `telos_goal_complete` tools (restart). |
+| `telos_enabled` | `false` | Master switch. Off: no directories created, snooze Activity 16 skipped, cron never installs, post-task hook inert. Registers the `telos_status` / `telos_ask` tools (restart). |
 | `telos_root_text` | `"What is actually going on here, and what is it for?"` | The root objective — a question with no satisfaction predicate. Re-expressing it is an operator-only edit. |
-| `telos_schedule` | `0 4 * * *` | Daily slow-loop cron (UTC): Ordo Pass + Binding Monitor, with weekly Hevel/reconciliation/entropy blocks watermarked inside it. |
+| `telos_schedule` | `0 4 * * *` | Daily slow-loop cron (UTC): retirement sweeps, with the weekly entropy-control block watermarked inside it. |
 | `telos_serendipity_budget` | `0.15` | Share of scheduler throughput reserved for high-surprise questions with no goal relevance. |
 | `telos_eig_floor` | `0.15` | Testability-gate admission floor on expected information gain. |
 | `telos_hypotheses_per_question` | `3` | SOUP output cap per generation pass. |
@@ -221,12 +221,6 @@ A non-convergent drive with correction machinery over the whole loop: turn anoma
 | `telos_soup_context_entries` | `10` | Memory entries in the band-sampled SOUP context. |
 | `telos_soup_retention_days` | `30` | Age after which an unexamined pooled hypothesis is archived `expired` into `soup/archive/` — moved out of the loop's scans, never deleted. 0 = keep it in the pool forever. |
 | `telos_soup_archive_retention_days` | `180` | Hard-delete horizon for `soup/archive/` — the only place a hypothesis file is unlinked. Long by design: the archive is the calibration review's forensic record. 0 = keep forever. |
-| `telos_budget_share_max` | `0.35` | Binding Monitor: 7-day budget share above which the Goodhart signature can fire. |
-| `telos_claims_floor_per_window` | `1` | Binding Monitor: new-claims floor — below it (with the other three conditions) the signature holds. |
-| `telos_divergence_max` | `0.15` | Ledger reconciliation: unsupported-autobiography-claims share that raises a divergence alarm. |
-| `telos_alarm_autoclose` | `true` | Let the discharge pass close alarms that survive repeated clean re-checks. |
-| `telos_alarm_autoclose_checks` | `3` | Consecutive clean re-checks required to discharge an alarm. |
-| `telos_alarm_autoclose_window_hours` | `24` | Minimum first-to-last clean-check span (hours) before autoclose. |
 
 ---
 
@@ -273,7 +267,7 @@ Golden-task canaries: canned tasks with deterministic gates, run headlessly thro
 
 ## Adaptive Layer
 
-A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies/worker specs that route through the proposal queue: a **veto window**, not an approval gate. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Adaptive Layer; entries, events, and proposals surface in the Explorer's Adaptive tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies that route through the proposal queue: a **veto window**, not an approval gate. Content is gated at the mouth (v3.1): every machine edit passes an actionability lint (instructions in, narrative out), per-entry usage is measured (scout and reflect citations), unused entries retire on their own, and both you and the agent have direct authorship paths. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Adaptive Layer; entries, events, and proposals surface in the Explorer's Adaptive tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -289,6 +283,10 @@ A governed, machine-editable policy store — routing hints and prompt notes the
 | `adaptive_proposal_ttl_days` | `30` | Pending proposals lapse (`expired`) after this — a proposal is a snapshot of evidence, and the producer re-raises it from current evidence if it still holds. `0` = never. |
 | `adaptive_auto_approve_after_hours` | `24` | The veto window. A proposal still pending after this many hours is approved by the system itself — same apply path as a human approval, journaled, swept, rollback-able, resolved as `auto_approved` for the audit trail. Canary-suite proposals are excluded (they keep their human gate; `canary_auto_admit` is their autonomy path). `0` = human approval only. |
 | `adaptive_max_auto_approvals_per_day` | `40` | Cap on veto-window auto-approvals per rolling 24h. |
+| `adaptive_usage_retire_days` | `45` | Entries with zero recorded uses over this many *instrumented* days (counted from the usage epoch, stamped on the sweep's first run) are retired — journaled soft-deletes, one aggregate notification, one-click rollback. Candor-owned and human-authored entries exempt. `0` disables. |
+| `adaptive_prompt_note_ttl_days` | `90` | Backstop TTL for `prompt_note` (the kind with no producer-side retirement loop). `0` = keep forever. |
+| `adaptive_suspect_ttl_days` | `7` | A suspect flag raised by the passive post-mortem signal alone can never self-clear (its windows are frozen at the apply); it auto-clears with an annotation after this many days. Canary-confirmed flags are exempt. `0` = flags wait for your dismiss. |
+| `adaptive_agent_notes_enabled` | `false` | The `adaptive_note` tool: the live agent may mint `prompt_note`/`routing_hint` edits the moment it learns something — content lint applies, 2/day, normal pipeline + tripwire, never `policy`. Registration needs a restart. |
 
 ---
 
@@ -451,6 +449,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Enforced at parse time. |
 | `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op kept for back-compat. |
 | `post_mortem_retention_days` | `90` | Days to keep synthesized post-mortem records before snooze cleans them. |
+| `notification_retention_days` | `30` | Notifications older than this are pruned (snooze Activity 11 + the maintenance 24h tier) — the bell is a recent-events surface, not an archive. `0` = keep forever. |
 | `notify_webhook_timeout` | `10` | HTTP timeout for `notify_webhook_url` POST (seconds). |
 | `snooze_max_cycle_seconds` | `900` | Hang backstop per Snooze cycle — runaway protection, not a budget. Cycles run until the activity ladder completes; user activity cancels them instantly. Local (Ollama) background models get 4x headroom. |
 | `snooze_cooldown_minutes` | `5` | Minimum idle time before Snooze starts running. |

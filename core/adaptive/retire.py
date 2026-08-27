@@ -141,10 +141,7 @@ def retire_unused_entries() -> dict:
     rows: list[dict] = []
     for kind in _USAGE_SWEEP_KINDS:
         rows.extend(db.adaptive_list_entries(kind=kind))
-    usage = {
-        s["subject"]: s
-        for s in db.get_signals_by_subjects([("adaptive_entry", r["id"]) for r in rows])
-    }
+    usage = {s["subject"]: s for s in db.get_signals_by_subjects([("adaptive_entry", r["id"]) for r in rows])}
     for r in rows:
         if r.get("status") != "active" or r.get("source") in _USAGE_EXEMPT_SOURCES:
             continue

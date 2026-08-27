@@ -1,7 +1,7 @@
 """Pernix — Producer contract (plan 4d): the shared adaptive_edits shape.
 
-Refine and snooze_reflect append ADAPTIVE_EDITS_PROMPT to their system
-prompt (same chat call, same parse pass) only while the layer is enabled;
+Refine appends ADAPTIVE_EDITS_PROMPT to its system prompt (same chat
+call, same parse pass) only while the layer is enabled;
 queue_producer_edits() normalizes and queues whatever came back. Dream and
 Candor construct edits programmatically and call the same entry point.
 """

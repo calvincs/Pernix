@@ -1034,7 +1034,7 @@ class MemoryStore:
     def search_lessons(self, query: str, limit: int = 10, _track_hits: bool = True) -> list[SearchResult]:
         """Search lesson-type memory entries with age-based decay.
 
-        Lessons are operational workarounds extracted by snooze_reflect from
+        Lessons are operational workarounds extracted by the refine pass from
         failed sessions. Tagged `lesson` and stored with entry_type='lesson'.
 
         Age decay: lessons reference a code state at the time they were

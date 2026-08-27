@@ -1469,8 +1469,8 @@ Output valid JSON only. No markdown fences. /no_think"""
         # whole retire window without one recorded use go. Soft-deletes,
         # journaled, one aggregated once-a-day notification with the undo.
         try:
-            from db import models as db
             from core.adaptive.retire import retire_unused_entries
+            from db import models as db
 
             swept = await asyncio.to_thread(retire_unused_entries)
             if swept["retired"]:
@@ -1483,7 +1483,8 @@ Output valid JSON only. No markdown fences. /no_think"""
                     (
                         "These rendered into prompts for the whole retire window without one "
                         "recorded use (scout/reflect citations). Each deletion is journaled — "
-                        "roll any back from the Adaptive tab.\n" + "\n".join(lines)
+                        "roll any back from the Adaptive tab.\n"
+                        + "\n".join(lines)
                         + (f"\n(+{len(swept['retired']) - 12} more)" if len(swept["retired"]) > 12 else "")
                     ),
                     "normal",

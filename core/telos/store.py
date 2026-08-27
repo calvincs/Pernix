@@ -1,26 +1,25 @@
 """TELOS object store: markdown files with YAML frontmatter under data/telos/.
 
-Layout (spec §1):
+Layout (post-v3.1 carve):
     data/telos/
       config/telos.yaml          layer provenance record (readable tier)
       questions/q_*.md           Question objects
       soup/h_*.md                hypotheses: speculation pool + gated + resolved
       soup/archive/h_*.md        terminal hypotheses, out of the scan path
-      goals/g_*.md               root, dreams, milestones, tasks
+      goals/g_root.md            the root question (the only goal object)
       claims/c_*.md              committed claims with epistemic class caps
-      alarms/a_*.md              binding | hevel | divergence | acedia
-      ledgers/first_person/      autobiography (agent-writable, weekly)
+      alarms/a_*.md              acedia (entropy control's alarm)
       ledgers/trace/             append-only JSONL, one file per UTC day
 
 Markdown-as-database on purpose: BM25/ripgrep is the query layer and every
 state transition is a diffable file edit. Acceptable at single-operator
 scale; revisit past ~10^3 questions/week (spec §8).
 
-The trace is authoritative over the autobiography (spec §5.4). Filesystem
-mounts are out of reach here, so the authority ordering is enforced at the
-API surface instead: nothing in this package exposes a trace-rewrite path,
-trace_append is the only writer, and the agent-facing tools get no write
-access to ledgers/trace/.
+The trace is authoritative (spec §5.4). Filesystem mounts are out of reach
+here, so the authority ordering is enforced at the API surface instead:
+nothing in this package exposes a trace-rewrite path, trace_append is the
+only writer, and the agent-facing tools get no write access to
+ledgers/trace/.
 """
 
 from __future__ import annotations
@@ -33,9 +32,9 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import ClassVar
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import ClassVar
 
 import yaml
 
@@ -507,7 +506,6 @@ class TelosStore:
         self._write_config_provenance()
         self.trace_append("root_seeded", {"text": settings.telos_root_text})
         return root
-
 
     def _write_config_provenance(self) -> None:
         """config/telos.yaml — the readable provenance tier (spec §6). The
