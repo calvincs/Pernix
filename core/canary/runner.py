@@ -339,6 +339,23 @@ async def run_sweep(
     results: list[CanaryRunResult] = []
     for d in defs:
         results.append(await run_canary(d, trigger=trigger, batch_id=batch_id))
+
+    # Confirm-rerun: the tripwire's active probe demands two independent
+    # gate_fails before a batch can be auto-rolled-back, and the rerun has to
+    # happen HERE — inside the sweep job, under the sweep lock — because the
+    # lock is skip-not-queue: a rerun enqueued from the (read-only) tripwire
+    # would be silently dropped while any sweep was running. Only honest
+    # gate_fails earn a rerun; timeouts and harness breaks are suite-health
+    # concerns and re-running them proves nothing about the batch.
+    if trigger == "post_batch":
+        by_name = {d.name: d for d in defs}
+        for r in list(results):
+            d = by_name.get(r.task)
+            if d is None or d.flaky or r.outcome != "gate_fail":
+                continue
+            logger.info("Canary '%s' gate-failed post-batch — confirm-rerun", r.task)
+            results.append(await run_canary(d, trigger=trigger, batch_id=batch_id))
+
     passed = sum(1 for r in results if r.passed)
     logger.info("Canary sweep complete: %d/%d passed (trigger=%s)", passed, len(results), trigger)
     return results

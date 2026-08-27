@@ -271,17 +271,25 @@ def test_scout_search_adaptive_tool():
 # ---------------------------------------------------------------------------
 
 
-def _seed_canary_history(batch_id, baseline_pass=True, post_pass=False):
+def _seed_canary_history(batch_id, baseline_pass=True, post_pass=False, confirm=True):
     # Trailing scheduled baseline (3 runs) strictly BEFORE the batch, then
     # the batch's post_batch sweep (backdating avoids same-second ties).
+    # A failing sweep normally carries its confirm-rerun row too — two
+    # gate_fails is what the per-task tripwire calls a confirmed regression.
     from db.database import connect_sessions
 
     for _ in range(3):
-        db.add_canary_run("t1", "scheduled", None, "[]", baseline_pass)
+        db.add_canary_run(
+            "t1", "scheduled", None, "[]", baseline_pass, outcome="pass" if baseline_pass else "gate_fail"
+        )
     with connect_sessions() as conn:
         conn.execute("UPDATE canary_runs SET created_at = '2026-01-01T00:00:00+00:00' WHERE trigger = 'scheduled'")
     db.adaptive_create_batch(batch_id, "refine", "[]", status="applied")
-    db.add_canary_run("t1", "post_batch", None, "[]", post_pass, batch_id=batch_id)
+    db.add_canary_run(
+        "t1", "post_batch", None, "[]", post_pass, batch_id=batch_id, outcome="pass" if post_pass else "gate_fail"
+    )
+    if not post_pass and confirm:
+        db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id, outcome="gate_fail")
 
 
 def test_tripwire_flags_canary_regression(monkeypatch):
@@ -297,11 +305,13 @@ def test_tripwire_flags_canary_regression(monkeypatch):
 
 
 def test_tripwire_refuses_to_judge_against_a_zero_baseline(monkeypatch):
-    """A 0% baseline means the suite is broken, not that the bar is strict.
+    """A task that was already red before the apply cannot testify.
 
-    `drop = base - now` against base=0 can only come out <= 0, so every batch
-    would be certified clean by a suite measuring nothing — the exact state
-    the box was in for five days. The signal must report unavailable.
+    Under the old aggregate math a 0% baseline certified every batch clean
+    (drop could never go positive) — the exact state the box was in for five
+    days. The per-task form keeps the same guarantee via the green
+    precondition: no green history, no verdict, and the signal reports
+    unavailable rather than issuing a false all-clear.
     """
     from core.adaptive.tripwire import evaluate_tripwire
 
@@ -332,21 +342,61 @@ def test_tripwire_auto_rollback_when_enabled(monkeypatch):
 
     monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
     monkeypatch.setattr("config.settings.adaptive_auto_rollback", True)
-    # A real applied batch with an entry, then a regressing sweep.
+    # A real applied batch with an entry, then a CONFIRMED regressing sweep:
+    # the original gate_fail plus its confirm-rerun gate_fail.
     batch_id = _apply_hint(title="regressor", content="bad hint")
     for _ in range(3):
-        db.add_canary_run("t1", "scheduled", None, "[]", True)
+        db.add_canary_run("t1", "scheduled", None, "[]", True, outcome="pass")
     # Backdate the scheduled baseline strictly before the batch's created_at.
     from db.database import connect_sessions
 
     with connect_sessions() as conn:
         conn.execute("UPDATE canary_runs SET created_at = '2026-01-01T00:00:00+00:00' WHERE trigger = 'scheduled'")
-    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id)
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id, outcome="gate_fail")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id, outcome="gate_fail")
 
     actions = evaluate_tripwire()
     assert any(a["action"] == "auto_rolled_back" for a in actions)
     assert db.adaptive_get_entry("regressor") is None  # create reversed = hard delete
     assert db.adaptive_get_batch(batch_id)["status"] == "rolled_back"
+
+
+def test_tripwire_unconfirmed_gate_fail_flags_but_never_rolls_back(monkeypatch):
+    """One gate_fail with no confirm-rerun row = the rerun itself died.
+    Suspicion is warranted; an automatic rollback is not."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    monkeypatch.setattr("config.settings.adaptive_auto_rollback", True)
+    _seed_canary_history("ab-lone", baseline_pass=True, post_pass=False, confirm=False)
+    actions = evaluate_tripwire()
+    assert any(a["action"] == "flagged" and a["batch_id"] == "ab-lone" for a in actions)
+    assert not any(a["action"] == "auto_rolled_back" for a in actions)
+    assert db.adaptive_get_batch("ab-lone")["status"] == "suspect"
+
+
+def test_tripwire_ignores_timeouts_errors_and_legacy_failures(monkeypatch):
+    """Timeout/error/noop outcomes and pre-v30 NULL-outcome failures are
+    suite-health trouble, never evidence against a batch — with nothing else
+    to judge, the signal reports unavailable instead of flagging."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    from db.database import connect_sessions
+
+    for _ in range(3):
+        db.add_canary_run("t1", "scheduled", None, "[]", True, outcome="pass")
+    with connect_sessions() as conn:
+        conn.execute("UPDATE canary_runs SET created_at = '2026-01-01T00:00:00+00:00' WHERE trigger = 'scheduled'")
+    db.adaptive_create_batch("ab-noise", "refine", "[]", status="applied")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id="ab-noise", outcome="timeout")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id="ab-noise", outcome="error")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id="ab-noise", outcome="noop")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id="ab-noise")  # legacy NULL
+
+    actions = evaluate_tripwire()
+    assert not [a for a in actions if a["batch_id"] == "ab-noise"]
+    assert db.adaptive_get_batch("ab-noise")["status"] == "applied"
 
 
 def _backdate(table, created_at, where, params=()):
@@ -401,9 +451,10 @@ def test_tripwire_anchors_on_apply_time_not_queue_time(monkeypatch):
     # Baseline runs land BETWEEN queue and apply — only an apply-anchored
     # boundary admits them, and without a baseline there is no signal at all.
     for _ in range(3):
-        db.add_canary_run("t1", "scheduled", None, "[]", True)
+        db.add_canary_run("t1", "scheduled", None, "[]", True, outcome="pass")
     _backdate("canary_runs", "2026-01-02T00:00:00+00:00", "trigger = 'scheduled'")
-    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id)
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id, outcome="gate_fail")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id, outcome="gate_fail")
 
     actions = evaluate_tripwire()
     assert any(a["action"] == "flagged" and a["batch_id"] == batch_id for a in actions)
