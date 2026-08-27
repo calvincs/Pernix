@@ -417,6 +417,13 @@ class Settings:
     # many days it auto-clears with an annotation; canary-confirmed flags are
     # exempt. 0 = flags persist until human dismiss (the pre-v3.1 behavior).
     adaptive_suspect_ttl_days: int = 7
+    # The agent's own authorship valve: the adaptive_note tool lets the live
+    # agent mint prompt_note/routing_hint edits the moment it learns
+    # something, instead of hoping refine distills it later. Full guardrails:
+    # the content lint applies, the normal batch pipeline + tripwire watch
+    # it, 2 mints/day, never policy/worker_spec. Off by default per house
+    # convention (flip on where wanted).
+    adaptive_agent_notes_enabled: bool = False
     # The review queue is a VETO WINDOW, not an approval gate: a pending
     # proposal older than this many hours is approved by the system itself —
     # same apply path as a human approval, journaled, post-batch-swept and

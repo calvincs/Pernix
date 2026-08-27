@@ -23,7 +23,7 @@ adaptive layer — durable POLICY, distinct from memory (facts) and skills
   "adaptive_edits": [
     {
       "action": "create|update|delete",
-      "kind": "prompt_note|routing_hint|policy|worker_spec",
+      "kind": "prompt_note|routing_hint|policy",
       "scope": "global",
       "title": "short stable title (becomes the entry id)",
       "content": "the note/hint/rule text (prompt_note <= 400 chars)",
@@ -34,10 +34,7 @@ adaptive layer — durable POLICY, distinct from memory (facts) and skills
 
 Mappings: user corrections about HOW to behave -> "prompt_note";
 technique / tool-selection patterns -> "routing_hint"; sequencing or
-control-flow rules -> "policy" (always human-reviewed before applying);
-a recurring delegated-task shape worth templating -> "worker_spec"
-(always human-reviewed; content is YAML with keys `instructions`,
-optional `model`, optional `gates: [{name, command, watch_paths}]`).
+control-flow rules -> "policy" (always human-reviewed before applying).
 For update/delete include "entry_id" and the "baseline_version" you
 observed. Include "confidence": 0.0-1.0 per edit; skip anything below 0.6.
 

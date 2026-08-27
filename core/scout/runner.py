@@ -375,14 +375,14 @@ _SCOUT_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_adaptive",
-            "description": "Search the adaptive layer (machine-curated routing hints, prompt notes, policies) by keyword. Use when the preloaded [ADAPTIVE ROUTING HINTS] block looks relevant but truncated, or to check for policy on a specific tool/skill/topic.",
+            "description": "Search the adaptive layer (machine-curated routing hints, prompt notes, policies) by keyword. Use when the preloaded [ADAPTIVE ROUTING HINTS] block ends with a '+N more hints' marker and the task might match one of the unrendered hints, or to check for policy on a specific tool/skill/topic.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Keywords to match against titles and content"},
                     "kind": {
                         "type": "string",
-                        "enum": ["routing_hint", "prompt_note", "policy", "worker_spec"],
+                        "enum": ["routing_hint", "prompt_note", "policy"],
                         "description": "Optional kind filter",
                     },
                 },

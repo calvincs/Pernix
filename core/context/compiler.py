@@ -496,10 +496,23 @@ def _build_server_context() -> str:
 # at write time — per-turn context is the wrong place to absorb it.
 _DIRECTIVE_FILE_GUARD_CHARS = 32_000
 _directive_guard_warned: set[str] = set()
+# mtime-keyed content cache: compile_context runs once per TOOL ROUND (up
+# to max_tool_rounds per turn) and read these files fresh every time —
+# SOUL.md twice per compile (directives + temporal). The files change on
+# human edits, which mtime catches.
+_directive_cache: dict[str, tuple[float, str]] = {}
 
 
 def _read_directive_file(path: Path) -> str:
-    """Read one directive file, applying the accident guard with a loud log."""
+    """Read one directive file, mtime-cached, with the accident guard."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return ""
+    key = str(path)
+    cached = _directive_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
     content = path.read_text()
     if len(content) > _DIRECTIVE_FILE_GUARD_CHARS:
         if path.name not in _directive_guard_warned:
@@ -513,7 +526,9 @@ def _read_directive_file(path: Path) -> str:
                 _DIRECTIVE_FILE_GUARD_CHARS,
             )
         content = content[:_DIRECTIVE_FILE_GUARD_CHARS]
-    return content.strip()
+    content = content.strip()
+    _directive_cache[key] = (mtime, content)
+    return content
 
 
 def _build_agent_directives_block() -> str:
@@ -600,27 +615,6 @@ def _build_adaptive_block(session_id: str) -> str:
         return ""
 
 
-def _build_worker_specs_block(session_id: str) -> str:
-    """[WORKER SPECS] catalog — empty for workers, disabled layer, or an
-    empty store. Never shifts bytes when there is nothing to show."""
-    try:
-        from config import settings as _settings
-
-        if not _settings.adaptive_enabled:
-            return ""
-        from db import models as _db
-
-        sess = _db.get_session(session_id) or {}
-        if sess.get("session_type") == "worker":
-            return ""
-        from core.adaptive.specs import build_worker_specs_block
-
-        return build_worker_specs_block()
-    except Exception as e:
-        logger.warning("Worker specs block unavailable: %s", e)
-        return ""
-
-
 def _build_temporal_context() -> str:
     """Build the STATIC temporal guidance section (birthdate + how to use time).
 
@@ -635,7 +629,9 @@ def _build_temporal_context() -> str:
     try:
         soul = Path("data/agent/SOUL.md")
         if soul.exists():
-            m = _re.search(r"<!-- @birthdate:\s*(.+?)\s*-->", soul.read_text())
+            # Through the mtime cache — the directives block reads the same
+            # file in the same compile, and this used to be a second raw read.
+            m = _re.search(r"<!-- @birthdate:\s*(.+?)\s*-->", _read_directive_file(soul))
             if m:
                 dt = datetime.fromisoformat(m.group(1))
                 birthdate = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -996,14 +992,6 @@ def compile_context(
     adaptive_block = _build_adaptive_block(session_id)
     if adaptive_block:
         system_parts.append(adaptive_block)
-
-    # Approved worker_spec catalog (follow-on: worker_spec consumption).
-    # Suppressed for worker sessions — they can't spawn workers, and the
-    # extra bytes would fork their prefix from the parent's. Stable between
-    # idle-window applies like the adaptive block.
-    specs_block = _build_worker_specs_block(session_id)
-    if specs_block:
-        system_parts.append(specs_block)
 
     # Static skill catalog — cache-stable across turns; placed before the
     # per-turn scout report so prompt cache hits the same prefix every turn.

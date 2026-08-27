@@ -51,17 +51,12 @@ def spawn_worker(
     title: str = "",
     model: str = "",
     auto_resume_parent: bool = False,
-    spec: str = "",
     _context: dict | None = None,
 ) -> str:
     """Spawn a worker session for a subtask. Returns worker session ID.
 
     If model is specified, the worker runs on that model instead of the default.
     Useful for delegating to specialized models (e.g. vision, code).
-
-    spec: optional worker_spec id from the [WORKER SPECS] catalog (an
-    approved adaptive-layer template). Supplies instructions, a model, and a
-    gate set; explicit model=/title= arguments override the spec's.
 
     auto_resume_parent: if True, this worker is added to the parent's watch-set
     so the parent auto-resumes when all watched workers complete. Use together
@@ -75,18 +70,6 @@ def spawn_worker(
     from sessions.manager import get_manager
 
     manager = get_manager()
-
-    # Resolve the spec FIRST (plan follow-on: worker_spec consumption) so a
-    # spec-supplied model flows through the normal validation below and an
-    # unknown spec fails before any session exists.
-    spec_data = None
-    if spec:
-        from core.adaptive.specs import load_worker_spec
-
-        spec_data = load_worker_spec(spec)
-        if spec_data is None:
-            return f"Error: No active worker_spec '{spec}'. See the [WORKER SPECS] catalog for valid ids."
-        model = model or spec_data.get("model", "")
 
     # State precondition: spawning is only legal during an active agent
     # turn (PROCESSING). Any other state (AWAITING_WORKERS, FINALIZING,
@@ -164,11 +147,8 @@ def spawn_worker(
         )
 
     summary_file = f".worker_{worker_id[:12]}_summary.md"
-    spec_instructions = ""
-    if spec_data and spec_data.get("instructions"):
-        spec_instructions = f"Your role (from the '{spec_data['entry_id']}' template):\n{spec_data['instructions']}\n\n"
     system_prompt = (
-        f"You are a focused worker agent. {spec_instructions}Your task:\n{task_description}\n\n"
+        f"You are a focused worker agent. Your task:\n{task_description}\n\n"
         "Complete the task using tools as needed.\n"
         f"When done, write a {summary_file} file in the workspace with what you accomplished.\n"
     )
@@ -187,23 +167,6 @@ def spawn_worker(
             "kernel — variables survive across rounds and turns — and use "
             "bash only for one-shot commands and heavy subprocess compute.\n"
         )
-
-    # Spec gates attach to the worker session before its first prompt — the
-    # post-task hook path runs them like any session's gates, and the
-    # reflect clamp holds the worker to them (plan 3a machinery, unchanged).
-    if spec_data and spec_data.get("gates"):
-        gate_names = []
-        for g in spec_data["gates"]:
-            try:
-                db.add_gate(worker_id, g["name"], g["command"], watch_paths=g.get("watch_paths") or [], scope="session")
-                gate_names.append(g["name"])
-            except Exception as e:
-                logger.warning("Worker spec gate '%s' failed to attach: %s", g.get("name"), e)
-        if gate_names:
-            system_prompt += (
-                f"\nYour work is verified by deterministic gates: {', '.join(gate_names)}. "
-                "They must pass for the task to count as done.\n"
-            )
 
     # Attachment visibility: workers CAN read attachment bytes from the shared
     # workspace (file_read / bash), but images are only auto-inlined as vision
@@ -1359,13 +1322,6 @@ def register(reg) -> None:
                 "auto_resume_parent": {
                     "type": "boolean",
                     "description": "Add worker to parent watch-set for auto-resume (default false)",
-                },
-                "spec": {
-                    "type": "string",
-                    "description": (
-                        "Optional worker_spec id from the [WORKER SPECS] catalog. Supplies role "
-                        "instructions, a model, and verification gates; explicit model/title override it."
-                    ),
                 },
             },
             "required": ["task_description"],

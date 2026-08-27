@@ -34,6 +34,25 @@ async def list_entries(kind: str = "", status: str = "active", limit: int = 200)
     return {"enabled": settings.adaptive_enabled, "auto_apply": settings.adaptive_auto_apply, "entries": rows}
 
 
+@router.post("/api/adaptive/entries")
+async def create_entry_route(body: dict = {}):
+    """Direct authorship (v3.1): the human writes an entry; being the human
+    IS the approval step — no proposal detour, no lint (the lint substitutes
+    for this judgment, not the other way around). Journaled like any edit."""
+    from core.adaptive import AdaptiveError, create_entry
+
+    try:
+        return await _asyncio.to_thread(
+            create_entry,
+            str(body.get("kind") or ""),
+            str(body.get("title") or ""),
+            str(body.get("content") or ""),
+            str(body.get("scope") or "global"),
+        )
+    except AdaptiveError as e:
+        raise HTTPException(400, detail=str(e)) from e
+
+
 @router.delete("/api/adaptive/entries/{entry_id}")
 async def delete_entry_route(entry_id: str):
     """Release valve: soft-delete an entry (journaled, rollback-able) so a

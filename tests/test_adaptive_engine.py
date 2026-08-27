@@ -57,7 +57,6 @@ def test_compute_risk_tiers():
     assert compute_risk("routing_hint", "global", "create", "refine") == "low"
     assert compute_risk("prompt_note", "session:x", "update", "candor") == "low"
     assert compute_risk("policy", "global", "create", "refine") == "high"
-    assert compute_risk("worker_spec", "global", "create", "user") == "high"
     # Delete of another producer's entry escalates.
     assert compute_risk("routing_hint", "global", "delete", "refine", entry_source="candor") == "high"
     assert compute_risk("routing_hint", "global", "delete", "refine", entry_source="refine") == "low"
