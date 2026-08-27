@@ -27,10 +27,14 @@ from db import models as db
 
 logger = logging.getLogger("pernix.adaptive")
 
-KINDS = frozenset({"prompt_note", "routing_hint", "policy", "worker_spec"})
+# worker_spec was carved in v3.1: fully-built consumption, zero live rows,
+# and no reachable producer (high-risk gating meant a human approving YAML
+# refine would first have to spontaneously emit). Legacy rows are inert —
+# per-kind queries never ask for the kind again.
+KINDS = frozenset({"prompt_note", "routing_hint", "policy"})
 ACTIONS = frozenset({"create", "update", "delete"})
 SOURCES = frozenset({"refine", "dream", "candor", "telos", "user", "agent"})
-HIGH_RISK_KINDS = frozenset({"policy", "worker_spec"})
+HIGH_RISK_KINDS = frozenset({"policy"})
 
 PROMPT_NOTE_MAX_CHARS = 400
 CONTENT_MAX_CHARS = 2000
@@ -160,7 +164,7 @@ def slugify(title: str) -> str:
 def compute_risk(kind: str, scope: str, action: str, source: str, entry_source: str | None = None) -> str:
     """Risk tier from (kind, scope, action, source) — plan 4b, stored for audit.
 
-    High: policy/worker_spec always; any delete of ANOTHER producer's entry;
+    High: policy always; any delete of ANOTHER producer's entry;
     any global-scope edit originating from Dream.
     """
     if kind in HIGH_RISK_KINDS:
@@ -763,8 +767,75 @@ def auto_approve_stale_proposals() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Delete (human release valve)
+# Create (direct authorship) + Delete (human release valve)
 # ---------------------------------------------------------------------------
+
+
+def create_entry(
+    kind: str,
+    title: str,
+    content: str,
+    scope: str = "global",
+    source: str = "user",
+    actor: str = "user",
+) -> dict:
+    """Create one active entry outside the batch machinery.
+
+    The authorship valve (v3.1): the layer's SOURCES always named `user`,
+    but no path ever minted one — a human could veto, reject, and delete,
+    never write. Same validation as producer edits (validate_edit), same
+    journaled create event, immediately active — the human IS the approval
+    step, so there is no proposal detour. Deliberately unlinted: the lint
+    substitutes for human judgment, not the other way around.
+    """
+    edit = {
+        "action": "create",
+        "kind": kind,
+        "scope": scope,
+        "title": title,
+        "content": content,
+        "evidence": [f"{source} authored via direct create"],
+    }
+    err = validate_edit(edit, source)
+    if err:
+        raise AdaptiveError(err)
+    entry_id = _entry_id_for(edit)
+    if db.adaptive_get_entry(entry_id) is not None:
+        raise AdaptiveError(f"entry '{entry_id}' already exists (titles slugify to ids — pick a distinct title)")
+    if db.adaptive_entry_count(kind) >= settings.adaptive_max_entries_per_kind:
+        raise AdaptiveError(
+            f"kind '{kind}' is at the {settings.adaptive_max_entries_per_kind}-entry cap — retire one first"
+        )
+
+    now = _now_iso()
+    row = {
+        "id": entry_id,
+        "kind": kind,
+        "scope": scope,
+        "title": title.strip(),
+        "content": content.strip(),
+        "risk": "low",
+        "version": 1,
+        "status": "active",
+        "source": source,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db.adaptive_put_entry(row)
+    event_id = db.adaptive_add_event(
+        entry_id=entry_id,
+        action="create",
+        before_json=None,
+        after_json=_snapshot(row),
+        evidence_json=json.dumps(edit["evidence"]),
+        actor=actor,
+    )
+
+    from core.adaptive.render import render_mirror
+
+    render_mirror()
+    logger.info("Adaptive entry %s created by %s (event %s)", entry_id, actor, event_id)
+    return {"entry_id": entry_id, "status": "active", "version": 1, "event_id": event_id}
 
 
 def delete_entry(entry_id: str, actor: str = "human") -> dict:

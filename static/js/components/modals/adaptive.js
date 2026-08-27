@@ -97,7 +97,44 @@ export async function renderAdaptiveTab(container) {
 
     // --- Active entries by kind ---
     const entries = (entriesRes.entries || []).filter(e => e.status === 'active');
+    const entriesHead = el('div', { class: 'adaptive-head' }, []);
+    const addBtn = el('button', { class: 'adaptive-btn' }, [text('+ New entry')]);
+    entriesHead.appendChild(addBtn);
     container.appendChild(section(`Active entries (${entries.length})`));
+    container.appendChild(entriesHead);
+    const formSlot = el('div');
+    container.appendChild(formSlot);
+    addBtn.addEventListener('click', () => {
+        clear(formSlot);
+        const kindSel = el('select', { class: 'adaptive-input' }, []);
+        for (const k of ['prompt_note', 'routing_hint', 'policy']) {
+            kindSel.appendChild(el('option', { value: k }, [text(k)]));
+        }
+        const titleIn = el('input', { class: 'adaptive-input', placeholder: 'short stable title (becomes the id)' });
+        const contentIn = el('textarea', {
+            class: 'adaptive-input',
+            placeholder: 'the instruction — what to do and when',
+            style: { width: '100%', minHeight: '80px' },
+        });
+        const save = el('button', { class: 'adaptive-btn' }, [text('Create')]);
+        save.addEventListener('click', async () => {
+            save.disabled = true;
+            try {
+                await post('/api/adaptive/entries', { kind: kindSel.value, title: titleIn.value, content: contentIn.value });
+                await refresh();
+            } catch (err) {
+                alert(`Create failed: ${err.message || err}`);
+                save.disabled = false;
+            }
+        });
+        const cancel = el('button', { class: 'adaptive-btn' }, [text('Cancel')]);
+        cancel.addEventListener('click', refresh);
+        formSlot.appendChild(el('div', { class: 'adaptive-card' }, [
+            el('div', { class: 'adaptive-card-head' }, [text('New adaptive entry (yours — applies immediately, journaled)')]),
+            kindSel, titleIn, contentIn,
+            el('div', { class: 'adaptive-card-actions' }, [save, cancel]),
+        ]));
+    });
     const byKind = {};
     for (const e of entries) (byKind[e.kind] = byKind[e.kind] || []).push(e);
     for (const kind of Object.keys(byKind).sort()) {
