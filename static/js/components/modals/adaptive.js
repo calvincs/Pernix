@@ -27,7 +27,7 @@ function badge(label, cls = '') {
     return el('span', { class: `adaptive-badge ${cls}` }, [text(label)]);
 }
 
-async function actionBtn(label, fn, refresh) {
+export async function actionBtn(label, fn, refresh) {
     const btn = el('button', { class: 'adaptive-btn' }, [text(label)]);
     btn.addEventListener('click', async () => {
         btn.disabled = true;

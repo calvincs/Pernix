@@ -134,6 +134,49 @@ def test_red_run_unparks_a_parked_canary():
     assert c.flaky is False
 
 
+def _mk_probe(name: str, max_runs: int = 2) -> None:
+    _mk(name, vetting=False)
+    md = _base() / name / "CANARY.md"
+    md.write_text(md.read_text().replace("flaky: false", f"flaky: false\nmax_runs: {max_runs}", 1))
+
+
+def test_probe_retires_after_max_runs_with_a_summary():
+    _mk_probe("probe-x", max_runs=2)
+    _run("probe-x", True)
+    stats = run_maintenance()
+    assert stats["probes_retired"] == []  # 1/2 runs — still live
+
+    _run("probe-x", True)
+    stats = run_maintenance()
+    assert stats["probes_retired"] == ["probe-x"]
+    assert load_canary("probe-x", base=_base()) is None
+    assert (retired_dir(_base()) / "probe-x" / "retired.json").is_file()
+    notes = [n for n in db.get_notifications() if "probe retired" in n["title"]]
+    assert notes and "2/2 runs passed" in notes[0]["body"]
+
+
+def test_probe_retirement_is_exempt_from_the_goodhart_lock():
+    """A probe's contract is 'run N times and report' — retirement WITH the
+    tally is the report, even when the last run was red. Nothing is
+    silenced: the notification carries the failures."""
+    _mk_probe("probe-red", max_runs=2)
+    _run("probe-red", True)
+    _run("probe-red", False)  # newest run failed
+    stats = run_maintenance()
+    assert stats["probes_retired"] == ["probe-red"]
+    notes = [n for n in db.get_notifications() if "probe-red" in n["title"]]
+    assert notes and "1/2 runs passed" in notes[0]["body"]
+
+
+def test_expired_probe_retires_even_without_runs():
+    _mk("probe-old", vetting=False)
+    md = _base() / "probe-old" / "CANARY.md"
+    md.write_text(md.read_text().replace("flaky: false", "flaky: false\nexpires: '2020-01-01'", 1))
+    stats = run_maintenance()
+    assert stats["probes_retired"] == ["probe-old"]
+    assert load_canary("probe-old", base=_base()) is None
+
+
 def test_purge_after_retention_window(monkeypatch):
     """Auto-maintenance no longer quarantines; the purge still drains what
     earlier versions (or a human) left in .retired/."""
