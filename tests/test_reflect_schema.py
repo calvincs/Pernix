@@ -184,3 +184,20 @@ def test_experience_disabled_by_setting(monkeypatch):
     monkeypatch.setattr("config.settings.reflect_experience", False)
     r = _result_from_data({"verdict": "pass", "experience": {"user_sentiment": "satisfied"}}, "m", 0)
     assert r.experience == {}
+
+
+def test_cited_policies_parsed_capped_and_sanitized():
+    r = _result_from_data(
+        {
+            "verdict": "pass",
+            "cited_policies": ["[verify-on-disk]", "plain-id", "", 42, "a", "b", "c", "d"],
+        },
+        "m",
+        0,
+    )
+    # Brackets stripped, empties/non-strings dropped, capped at 5.
+    assert r.cited_policies[0] == "verify-on-disk"
+    assert "plain-id" in r.cited_policies
+    assert len(r.cited_policies) == 5
+    # Absent → empty default (the honest common case).
+    assert _result_from_data({"verdict": "pass"}, "m", 0).cited_policies == []

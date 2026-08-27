@@ -128,7 +128,7 @@ When [OPERATIONAL INTEL] is present (calibrated reliability from logged outcome 
 - The percentages are calibrated from real observation counts. Weigh them by evidence: a wide credible interval or few obs is weak evidence; many obs is strong. An [unstable] or [under_specified] tag means the rate is context-dependent — flag that uncertainty in your plan rather than trusting the point estimate.
 - When reliability is central to the task, add predict_reliability / why_reliability / reliability_questions to recommended_tools so the main agent can query live calibrated numbers and their evidence chains.
 
-When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
+When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations, and echo the [id] of each hint that actually shaped your plan in the report's used_hints array. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
 
 When [MODEL ROUTING INTEL] is present (observed verdict rates by model and task category): it is an exception report — a model absent from it has no known problem. Steer recommended_model away from listed (model, category) pairs when a viable alternative exists; never report a model's absence as a concern.
 
@@ -164,6 +164,7 @@ REPORT FIELD GUIDANCE:
 - approach_guidance: Step-by-step plan for approaching this task. Number each step, name tools/skills, flag risks, incorporate lessons from memory/past sessions. Max 500 tokens. **MEMORY-FIRST ORDERING**: If the baseline MEMORY SEARCH RESULTS or cross-session findings substantively cover the user's request, step 1 of approach_guidance MUST synthesize from those findings before any external research. Treat search_web/browse_web as supplementation for verification or gap-filling, not the default first move. Only when memory baseline is empty or clearly insufficient should external search lead the plan.
 - deliverables_plan: Array of concrete work items the agent is expected to produce (0-6). Each item has a "description" (the artifact or outcome, e.g. "Write summary.md with key findings") and an optional "execution_hint" (inline | task | worker). Leave empty for pure Q&A. Reflect will check each item at turn end, so be specific and measurable.
 - execution_mode: Overall approach — "inline" (default, single-agent work) or "tasks" (multi-step sequential via task system).
+- used_hints: Array of [id] values from the ADAPTIVE ROUTING HINTS block whose guidance actually shaped this plan. Empty array when none did (the honest default) — do not echo every hint.
 
 RULES:
 - Be terse. Every token costs the main agent context space.
@@ -451,6 +452,11 @@ _SCOUT_TOOLS = [
                         "enum": ["inline", "tasks"],
                         "description": "Overall execution approach. Default 'inline' for simple tasks.",
                     },
+                    "used_hints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Ids from [ADAPTIVE ROUTING HINTS] that shaped this plan; empty if none did.",
+                    },
                 },
                 "required": ["recommended_tools", "approach_guidance"],
             },
@@ -672,6 +678,11 @@ def _extract_report(args: dict) -> ScoutReport:
         approach_guidance=str(args.get("approach_guidance", "")),
         deliverables_plan=deliverables,
         execution_mode=mode,
+        used_hints=(
+            [str(h)[:64] for h in args.get("used_hints", []) if h][:24]
+            if isinstance(args.get("used_hints"), list)
+            else []
+        ),
     )
 
 
@@ -1182,7 +1193,30 @@ def _get_cached(message: str, brief: SessionBrief) -> ScoutReport | None:
 MAX_CACHE_SIZE = 500
 
 
+def _count_hint_usage(report: ScoutReport) -> None:
+    """Record which adaptive routing hints shaped a FRESH scout plan.
+
+    Called from _put_cache — the one seam every fresh report passes and no
+    cache read does, so a single LLM claim is counted exactly once (cache
+    reuse hands the same report object back for CACHE_TTL). Citations are
+    sanitized against the live hint ids: the model can only credit hints
+    that exist, and over-echo can at worst delay a retirement, never cause
+    one. Never raises — counting is telemetry, not control flow.
+    """
+    if not report.used_hints or not settings.adaptive_enabled:
+        return
+    try:
+        live = {e["id"] for e in db.adaptive_list_entries(kind="routing_hint", status="active", limit=200)}
+        kept = [h for h in dict.fromkeys(h.strip("[] ") for h in report.used_hints) if h in live]
+        report.used_hints = kept
+        for hid in kept:
+            db.upsert_signal("adaptive_entry", hid)
+    except Exception as e:
+        logger.debug("adaptive hint-usage count failed: %s", e)
+
+
 def _put_cache(message: str, brief: SessionBrief, report: ScoutReport) -> None:
+    _count_hint_usage(report)
     with _cache_lock:
         now = time.time()
         # Evict expired entries when cache is getting large

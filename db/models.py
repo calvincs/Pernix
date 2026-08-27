@@ -2160,11 +2160,16 @@ def upsert_signal(
     delta_successes: int = 0,
     delta_failures: int = 0,
     payload_json: str = "{}",
+    delta_reinforcements: int = 1,
 ) -> None:
-    """Upsert a signal row. Increments reinforcements by 1; adds deltas.
+    """Upsert a signal row. Adds deltas; reinforcements default to +1.
 
     Call once per observation (e.g. once per post-mortem that touches this
-    subject). Does not touch user_approved.
+    subject). Pass delta_reinforcements=0 when adding outcome deltas to a
+    subject whose usage was already counted elsewhere — adaptive_entry
+    usage counts at scout submit-time, outcomes at synthesis time, and
+    double-counting the observation would inflate the denominator every
+    retirement decision divides by. Does not touch user_approved.
     """
     now = _now()
     with connect_sessions() as conn:
@@ -2172,14 +2177,23 @@ def upsert_signal(
             """INSERT INTO scout_signals (
                 signal_type, subject, reinforcements, successes, failures,
                 first_seen_at, last_reinforced_at, payload_json
-            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(signal_type, subject) DO UPDATE SET
-                reinforcements = reinforcements + 1,
+                reinforcements = reinforcements + excluded.reinforcements,
                 successes = successes + excluded.successes,
                 failures = failures + excluded.failures,
                 last_reinforced_at = excluded.last_reinforced_at,
                 payload_json = excluded.payload_json""",
-            (signal_type, subject, int(delta_successes), int(delta_failures), now, now, payload_json),
+            (
+                signal_type,
+                subject,
+                int(delta_reinforcements),
+                int(delta_successes),
+                int(delta_failures),
+                now,
+                now,
+                payload_json,
+            ),
         )
 
 

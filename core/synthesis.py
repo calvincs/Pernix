@@ -34,6 +34,11 @@ class Attribution:
     subject: str
     delta_successes: int = 0
     delta_failures: int = 0
+    # adaptive_entry outcome attributions set this to 0: their usage was
+    # already counted at the source (scout submit-time for hints; this pass
+    # for cited policies), and double-counting the observation inflates the
+    # denominator retirement divides by.
+    delta_reinforcements: int = 1
     # Short, free-form note describing *why* this attribution was made.
     # Stored in signal payload for UI / debugging.
     rationale: str = ""
@@ -176,6 +181,49 @@ def attribute(pm_row: dict) -> list[Attribution]:
                 )
             )
 
+    # --- Adaptive-entry attribution (v3.1 usefulness signal) ---
+    # Hints: usage was counted at scout submit-time; here only the OUTCOME
+    # lands (pass → success; retry blamed on planning → failure), so
+    # delta_reinforcements=0. Policies: reflect's citation is both the usage
+    # and the outcome in one observation — reinforcement + success on pass,
+    # and deliberately NO failure attribution in v1 (a cited policy on a
+    # failed turn is not evidence of fault; retirement only needs the
+    # zero-use signal).
+    for hint_id in scout_summary.get("used_hints") or []:
+        if not isinstance(hint_id, str) or not hint_id:
+            continue
+        if verdict == "pass":
+            attributions.append(
+                Attribution(
+                    "adaptive_entry",
+                    hint_id,
+                    delta_successes=1,
+                    delta_reinforcements=0,
+                    rationale="hint shaped plan; verdict=pass",
+                )
+            )
+        elif verdict == "retry" and failure_cause == "scout":
+            attributions.append(
+                Attribution(
+                    "adaptive_entry",
+                    hint_id,
+                    delta_failures=1,
+                    delta_reinforcements=0,
+                    rationale="hint shaped plan; verdict=retry, cause=scout",
+                )
+            )
+    for pol_id in payload.get("cited_policies") or []:
+        if not isinstance(pol_id, str) or not pol_id:
+            continue
+        attributions.append(
+            Attribution(
+                "adaptive_entry",
+                pol_id,
+                delta_successes=1 if verdict == "pass" else 0,
+                rationale=f"policy cited by reflect; verdict={verdict}",
+            )
+        )
+
     return attributions
 
 
@@ -238,6 +286,7 @@ def apply_attributions(attrs: Iterable[Attribution]) -> int:
                 delta_successes=a.delta_successes,
                 delta_failures=a.delta_failures,
                 payload_json=json.dumps({"last_rationale": a.rationale}),
+                delta_reinforcements=a.delta_reinforcements,
             )
             n += 1
         except Exception as e:

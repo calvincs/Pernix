@@ -114,6 +114,12 @@ class ScoutReport:
     recommended_model: str = ""
     model_rationale: str = ""
 
+    # Adaptive routing hints that shaped this plan, by entry id (the [id]
+    # prefixes in the [ADAPTIVE ROUTING HINTS] block). Feeds the
+    # adaptive_entry usage signal — the only per-entry evidence the layer
+    # has that a hint is worth its prompt space.
+    used_hints: list[str] = field(default_factory=list)
+
     # Session orientation
     session_state: str = ""  # Max ~200 tokens
     approach_guidance: str = ""  # Max ~500 tokens
