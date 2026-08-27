@@ -693,7 +693,7 @@ Golden-task canaries — see [internals/canary-and-adaptive.md](internals/canary
 ```
 GET /api/canary
 ```
-Returns `enabled`, the sweep `schedule`, and every canary definition (name, tags, flaky flag, gate names, timeout, `last_reviewed`) with per-task stats over the retention window (`runs`, `passed`, `last_run`).
+Returns `enabled`, the heartbeat `schedule` and `heartbeat_per_night`, and every canary definition (name, tags, `covers`, flaky/`parked` flags, probe fields `max_runs`/`expires`, gate names, timeout, `last_reviewed`) with per-task stats over the retention window (`runs`, `passed`, `last_run` including its `outcome`).
 
 ### List Runs
 ```
@@ -708,7 +708,25 @@ POST /api/canary/run
 ```json
 { "name": "fix-failing-test" }
 ```
-Queues one canary by name, or the whole suite with `"name": "*"`. Returns `{"queued": ...}`; `400` when `canary_enabled` is off, `404` for an unknown name.
+Queues one canary by name, or a **full sweep** (every canary, parked included) with `"name": "*"`. Returns `{"queued": ...}`; `400` when `canary_enabled` is off, `404` for an unknown name.
+
+### Create a Canary
+```
+POST /api/canary
+```
+```json
+{ "raw": "---\nname: my-canary\nprompt: ...\ngates: [...]\n---\nnotes" }
+```
+Raw `CANARY.md` text (or a structured spec: `name`, `prompt`, `gates`, optional `files`/`tags`/`timeout`). Validated by a parse round-trip; gate commands are checked against the auto-admission allowlist proof and the verdicts returned as `warnings` — advisory, never a blocker. `400` on invalid content or a duplicate name.
+
+### Read / Edit / Park / Review / Retire
+```
+GET    /api/canary/{name}            → full definition + raw_content
+PUT    /api/canary/{name}            {"raw": "..."} — replace, validated; the frontmatter name must match
+PATCH  /api/canary/{name}            {"parked": true|false}
+POST   /api/canary/{name}/reviewed   → bumps last_reviewed to today
+DELETE /api/canary/{name}            → moves to .retired/ (purged after canary_purge_after_days — reversible until then)
+```
 
 ---
 

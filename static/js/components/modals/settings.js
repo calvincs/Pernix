@@ -303,13 +303,36 @@ const SECTIONS = [
     },
     {
         title: 'Canary Suite',
-        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline on a nightly schedule. Measures whether the agent is getting better or worse — the Adaptive Layer\'s tripwire reads these results. Canary sessions are isolated: no memory writes, no FTS, no reflect-signal contamination.',
+        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline. Change-driven: canaries run when something they cover changes (an adaptive batch, a skill edit, a model swap, a deploy), plus a small nightly heartbeat that keeps history warm. The Adaptive Layer\'s tripwire reads the post-batch results per task. Canary sessions are isolated and tool-allowlisted: computation and reads only.',
         fields: [
             { key: 'canary_enabled', label: 'Canary Suite Enabled', type: 'bool', restart: RESTART_TOOLS },
-            { key: 'canary_schedule', label: 'Sweep Schedule (cron)', type: 'text' },
+            { key: 'canary_schedule', label: 'Heartbeat Schedule (cron)', type: 'text' },
+            {
+                key: 'canary_heartbeat_per_night',
+                label: 'Heartbeat Canaries per Night',
+                type: 'number', min: 1, max: 10,
+                hint: 'How many least-recently-run active canaries each scheduled heartbeat runs. Parked canaries sit out.',
+            },
+            {
+                key: 'canary_post_batch_max',
+                label: 'Post-batch Probe Size',
+                type: 'number', min: 1, max: 12,
+                hint: 'Cap on canaries per post-batch probe: the ones covering the batch\'s edit kinds first, sentinels riding along.',
+            },
             { key: 'canary_retention_days', label: 'Run Retention (days)', type: 'number', min: 1, max: 365 },
-            { key: 'canary_baseline_runs', label: 'Baseline Sweeps', type: 'number', min: 1, max: 20 },
-            { key: 'canary_regression_delta', label: 'Regression Delta', type: 'number', step: 0.05 },
+            {
+                key: 'canary_baseline_runs',
+                label: 'Green Precondition Window',
+                type: 'number', min: 1, max: 20,
+                hint: 'A canary may testify against a batch only when this many trailing runs before the apply were all green.',
+            },
+            { key: 'canary_regression_delta', label: 'Passive Drift Delta', type: 'number', step: 0.05 },
+            {
+                key: 'canary_park_after_passes',
+                label: 'Park After Consecutive Passes',
+                type: 'number', min: 3, max: 200,
+                hint: 'Long-green canaries are parked: off the heartbeat, still in the suite, auto-unparked by any red run.',
+            },
             {
                 key: 'canary_auto_admit',
                 label: 'Auto-admit New Canaries',
@@ -323,8 +346,9 @@ const SECTIONS = [
                 label: 'Auto-maintain Suite',
                 type: 'bool',
                 risk: 'autonomy',
-                hint: 'The nightly sweep promotes vetted canaries, tags flapping ones flaky, retires long-green '
-                    + 'ones to quarantine and eventually deletes them. A canary whose latest run failed is never auto-moved.',
+                hint: 'The idle sweep promotes vetted canaries, tags flapping ones flaky, parks long-green ones, '
+                    + 'syncs skill verify blocks, and retires exhausted probes. A canary whose latest run failed is '
+                    + 'never auto-moved — except that a red run un-parks.',
             },
         ],
     },

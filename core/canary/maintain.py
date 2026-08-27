@@ -211,7 +211,11 @@ def _retire_exhausted_probes(suite: list[CanaryDef], base: Path, stats: dict) ->
                     title=f"Canary probe retired: {c.name}",
                     body=(
                         f"{why}: {passed}/{len(runs)} runs passed"
-                        + (f", final outcome {last.get('outcome') or ('pass' if last.get('passed') else 'fail')}" if last else "")
+                        + (
+                            f", final outcome {last.get('outcome') or ('pass' if last.get('passed') else 'fail')}"
+                            if last
+                            else ""
+                        )
                         + f". The directory sits in .retired/ for {settings.canary_purge_after_days} days "
                         "if you want it back."
                     ),
@@ -299,7 +303,9 @@ def _scheduled_runs(name: str, window: int) -> list[dict]:
     is a slow structural question, and a post-change failure surfaces
     immediately through the tripwire instead.
     """
-    rows = [r for r in db.list_canary_runs(task=name, limit=_RUN_SCAN_LIMIT) if r.get("trigger") in ("scheduled", "full")]
+    rows = [
+        r for r in db.list_canary_runs(task=name, limit=_RUN_SCAN_LIMIT) if r.get("trigger") in ("scheduled", "full")
+    ]
     return rows[:window]
 
 

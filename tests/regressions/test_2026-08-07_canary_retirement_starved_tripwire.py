@@ -114,7 +114,9 @@ async def test_parked_canary_is_excluded_from_the_heartbeat(monkeypatch):
     from core.canary import runner as runner_mod
     from core.canary.parser import CanaryDef
 
-    parked = CanaryDef(name="parked-one", prompt="x", gates=[{"name": "g", "command": "true", "watch_paths": []}], parked=True)
+    parked = CanaryDef(
+        name="parked-one", prompt="x", gates=[{"name": "g", "command": "true", "watch_paths": []}], parked=True
+    )
     active = CanaryDef(name="active-one", prompt="x", gates=[{"name": "g", "command": "true", "watch_paths": []}])
 
     ran: list[str] = []

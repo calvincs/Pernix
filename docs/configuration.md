@@ -250,22 +250,23 @@ The long-running-autonomy substrate: deterministic gates Reflect cannot overrule
 
 ## Canary Suite
 
-Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated temp workspaces on a nightly schedule. Measures whether the agent is getting better or worse — the Adaptive Layer's tripwire reads these results. Zero rows, zero behavior change while off. Toggles live in Settings → Canary Suite; runs surface in the Explorer's Canary tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — an adaptive batch (a targeted post-batch probe), a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — plus a small nightly heartbeat that keeps every active canary's history warm. The Adaptive Layer's tripwire reads the post-batch results per task. Zero rows, zero behavior change while off. Toggles live in Settings → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Canary tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
 
 | Setting | Default | Description |
 |---|---|---|
-| `canary_enabled` | `false` | Master switch for the suite: the scheduled sweep, the `canary_run` / `canary_status` tools, and the manual-run API. |
+| `canary_enabled` | `false` | Master switch for the suite: sweeps, the `canary_run` / `canary_status` tools, and the API. |
 | `canaries_dir` | `data/canaries` | Directory scanned for `<name>/CANARY.md` task definitions. |
-| `canary_schedule` | `0 3 * * *` | Cron expression for the scheduled sweep (default: nightly at 03:00). |
-| `canary_max_concurrent` | `1` | Canary sessions run at once during a sweep. |
+| `canary_schedule` | `0 3 * * *` | Cron expression for the nightly heartbeat (default: 03:00). |
+| `canary_heartbeat_per_night` | `2` | How many least-recently-run active (non-parked) canaries each heartbeat runs. |
+| `canary_post_batch_max` | `4` | Cap on canaries per post-batch probe: the ones covering the batch's edit kinds first, `sentinel`-tagged ones riding along. |
 | `canary_retention_days` | `30` | Age after which Snooze prunes `canary_runs` rows and their sessions. |
-| `canary_baseline_runs` | `3` | Trailing scheduled sweeps a post-batch sweep's pass rate is compared against. |
-| `canary_regression_delta` | `0.15` | Pass-rate drop (vs. the baseline) that counts as a regression and trips the Adaptive tripwire. |
+| `canary_baseline_runs` | `5` | The green precondition: a canary may testify against a batch only when this many trailing runs before the apply all passed. |
+| `canary_regression_delta` | `0.15` | Drift threshold for the **passive** post-mortem signal only (the canary signal is per-task, not a rate delta). |
 | `canary_auto_admit` | `true` | Auto-admit machine-proposed canaries whose gate commands pass an allowlist proof plus the vetting runs; specs the machine can't prove safe still queue for human review. |
-| `canary_auto_maintain` | `true` | Maintenance sweep: promotes vetted canaries, tags flapping ones flaky, retires long-green ones to `.retired/` quarantine. A canary whose latest run failed is never auto-mutated — only a pass streak or a human moves it. |
+| `canary_auto_maintain` | `true` | Maintenance sweep: promotes vetted canaries, tags flapping ones flaky, parks long-green ones, syncs skill verify blocks, retires exhausted probes. A canary whose latest run failed is never auto-mutated — except that a red run un-parks. |
 | `canary_vetting_runs` | `3` | Consistent runs required to promote a canary out of vetting. |
-| `canary_retire_after_passes` | `25` | Consecutive passes before a canary is auto-retired. |
-| `canary_purge_after_days` | `30` | Quarantined (retired) canaries older than this are deleted. |
+| `canary_park_after_passes` | `25` | Consecutive passes before a canary is parked (off the heartbeat, still in the suite; any red run un-parks it). Replaces `canary_retire_after_passes`. |
+| `canary_purge_after_days` | `30` | Retired canaries (DELETE API, exhausted probes) sit in `.retired/` this long before deletion — the undo window. |
 | `canary_max_suite` | `24` | Auto-admission stops at this suite size (the human path stays open). |
 
 ---

@@ -58,9 +58,7 @@ async def list_canaries():
         "enabled": settings.canary_enabled,
         "schedule": settings.canary_schedule,
         "heartbeat_per_night": settings.canary_heartbeat_per_night,
-        "canaries": [
-            _def_payload(d, by_task.get(d.name, {"runs": 0, "passed": 0, "last_run": None})) for d in defs
-        ],
+        "canaries": [_def_payload(d, by_task.get(d.name, {"runs": 0, "passed": 0, "last_run": None})) for d in defs],
     }
 
 

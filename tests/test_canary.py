@@ -506,7 +506,15 @@ async def test_canary_session_runs_under_the_tool_allowlist(monkeypatch):
     result = await runner_mod.run_canary(c, trigger="manual")
     assert seen["allowlist"] == runner_mod.CANARY_TOOL_ALLOWLIST
     assert "bash" in seen["allowlist"] and "load_skill" in seen["allowlist"]
-    for denied in ("create_skill", "update_skill", "create_tool", "spawn_worker", "schedule_job", "notify_user", "remember"):
+    for denied in (
+        "create_skill",
+        "update_skill",
+        "create_tool",
+        "spawn_worker",
+        "schedule_job",
+        "notify_user",
+        "remember",
+    ):
         assert denied not in seen["allowlist"]
     assert mgr.get(result.session_id).tool_allowlist is None  # cleared with the run
 
@@ -695,9 +703,7 @@ async def test_must_run_sweep_defers_on_a_held_lock(monkeypatch):
         await sched._execute_canary_sweep_job({"trigger": "scheduled"})
         assert jobs == {}
         # must_run sweep: reschedules itself under its own job id.
-        await sched._execute_canary_sweep_job(
-            {"trigger": "full", "must_run": True, "job_id": "_canary_full_deploy"}
-        )
+        await sched._execute_canary_sweep_job({"trigger": "full", "must_run": True, "job_id": "_canary_full_deploy"})
         assert jobs["_canary_full_deploy"].kwargs["meta"]["lock_attempts"] == 1
 
 

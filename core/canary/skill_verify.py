@@ -166,7 +166,11 @@ def _sync_verify_canary(skill_name: str, md: Path, digest: str, canaries_base: P
             _retire(existing, canaries_base, f"verify block removed from skill '{skill_name}'", stats)
         return
 
-    unsafe = [f"{g.get('name')}: {reason}" for g in v["gates"] if (reason := is_gate_command_safe(str(g.get("command") or "")))]
+    unsafe = [
+        f"{g.get('name')}: {reason}"
+        for g in v["gates"]
+        if (reason := is_gate_command_safe(str(g.get("command") or "")))
+    ]
     if unsafe:
         stats["verify_unsafe"].append(skill_name)
         _notify_unsafe_once(skill_name, digest, "; ".join(unsafe))
@@ -176,7 +180,11 @@ def _sync_verify_canary(skill_name: str, md: Path, digest: str, canaries_base: P
     # Compare with the EXISTING review date first: last_reviewed only
     # restamps on a real content change, otherwise every first sweep of a
     # new day would rewrite the file just to move the date.
-    keep_date = existing.last_reviewed if (existing is not None and VERIFY_TAG in existing.tags and existing.last_reviewed) else today
+    keep_date = (
+        existing.last_reviewed
+        if (existing is not None and VERIFY_TAG in existing.tags and existing.last_reviewed)
+        else today
+    )
     if existing is not None and existing.path is not None:
         try:
             if existing.path.read_text(encoding="utf-8") == _render_verify_canary(skill_name, v, keep_date):
