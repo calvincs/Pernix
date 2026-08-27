@@ -80,6 +80,26 @@ def prune_post_mortems(retention_days: int | None = None) -> int:
     return deleted
 
 
+def prune_notifications(retention_days: int | None = None) -> int:
+    """Delete notification rows past the retention window (0 = keep forever).
+
+    The bell is a recent-events surface, not an archive: until v3.1 the
+    table had no pruner at all, and idle-loop producers refill it on a
+    fixed cadence while it only ever shrank by manual dismiss clicks.
+    """
+    days = int((retention_days if retention_days is not None else settings.notification_retention_days) or 0)
+    if days <= 0:
+        return 0
+    try:
+        deleted = db.prune_notifications(days)
+    except Exception as e:
+        logger.warning("Notification cleanup failed: %s", e)
+        return 0
+    if deleted:
+        logger.info("Notification cleanup: deleted %d rows older than %d days", deleted, days)
+    return deleted
+
+
 # ---------------------------------------------------------------------------
 # Canary runs
 # ---------------------------------------------------------------------------

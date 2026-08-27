@@ -170,6 +170,54 @@ def _post_mortem_signal(batch: dict, applied_at: str) -> tuple[bool, str] | None
     return (drift >= settings.canary_regression_delta, detail)
 
 
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _expire_stale_suspect(batch: dict, actions: list[dict]) -> bool:
+    """Auto-clear a passive-only suspect past adaptive_suspect_ttl_days.
+
+    Returns True when the batch was cleared (caller skips re-evaluation).
+    Canary-confirmed flags are exempt: their reason names the regression and
+    a human (or rollback) should settle them.
+    """
+    from datetime import datetime, timezone
+
+    ttl = int(settings.adaptive_suspect_ttl_days or 0)
+    if ttl <= 0:
+        return False
+    reason = str(batch.get("flagged_reason") or "")
+    if "canary regression" in reason:
+        return False
+    bid = batch["batch_id"]
+    key = f"adaptive_suspect_since:{bid}"
+    raw = db.get_snooze_state(key)
+    if not raw:
+        # Legacy suspect flagged before the marker existed — start its clock.
+        db.set_snooze_state(key, _now_iso())
+        return False
+    try:
+        since = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return False
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    if (datetime.now(timezone.utc) - since).days < ttl:
+        return False
+    from db.models import _now as _now_fn
+
+    db.adaptive_update_batch(
+        bid,
+        status="applied",
+        cleared_at=_now_fn(),
+        flagged_reason=reason + f" [auto-cleared: passive-signal flag aged past {ttl}d with no confirmation]",
+    )
+    actions.append({"batch_id": bid, "action": "suspect_expired", "detail": reason})
+    return True
+
+
 def evaluate_tripwire() -> list[dict]:
     """Sweep applied + suspect batches. Returns actions taken. Never raises."""
     actions: list[dict] = []
@@ -193,6 +241,19 @@ def evaluate_tripwire() -> list[dict]:
     for batch in batches:
         bid = batch["batch_id"]
         try:
+            # A suspect flagged by the PASSIVE signal alone can never
+            # self-clear: its comparison windows are frozen at the apply, so
+            # every sweep re-derives the same verdict and only a human
+            # dismiss ended it (4 batches sat suspect for 12 days on the
+            # live box). Passive-only flags now expire after
+            # adaptive_suspect_ttl_days — the notification already fired,
+            # the passive signal never auto-rolls-back, and a canary-
+            # confirmed regression (reason starts "canary regression:") is
+            # exempt. The marker is stamped at flag time; a legacy suspect
+            # with no marker gets one on first sight and expires from then.
+            if batch["status"] == "suspect" and _expire_stale_suspect(batch, actions):
+                continue
+
             applied_at = _applied_at(batch)
             canary = _canary_signal(batch, flaky, applied_at)
             pm = _post_mortem_signal(batch, applied_at)
@@ -203,6 +264,7 @@ def evaluate_tripwire() -> list[dict]:
 
             if regressed and batch["status"] == "applied":
                 db.adaptive_update_batch(bid, status="suspect", flagged_reason=details)
+                db.set_snooze_state(f"adaptive_suspect_since:{bid}", _now_iso())
                 actions.append({"batch_id": bid, "action": "flagged", "detail": details})
                 db.add_notification(
                     title="Adaptive tripwire: batch flagged suspect",

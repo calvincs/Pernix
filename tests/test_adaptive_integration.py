@@ -385,6 +385,49 @@ def test_tripwire_auto_rollback_when_enabled(monkeypatch):
     assert db.adaptive_get_batch(batch_id)["status"] == "rolled_back"
 
 
+def test_passive_only_suspect_expires_after_ttl(monkeypatch):
+    """A passive-signal flag's comparison windows are frozen at the apply, so
+    it can never self-clear — 4 batches sat suspect 12 days on the live box.
+    Passive-only flags now age out; canary-confirmed flags never do."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    monkeypatch.setattr("config.settings.adaptive_suspect_ttl_days", 7)
+    from datetime import datetime, timedelta, timezone
+
+    old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+
+    db.adaptive_create_batch("ab-passive", "dream", "[]", status="applied")
+    db.adaptive_update_batch("ab-passive", status="suspect", flagged_reason="post-mortem retry rate 25% vs 5%")
+    db.set_snooze_state("adaptive_suspect_since:ab-passive", old)
+
+    db.adaptive_create_batch("ab-canary-hit", "dream", "[]", status="applied")
+    db.adaptive_update_batch("ab-canary-hit", status="suspect", flagged_reason="canary regression: t1 (confirmed)")
+    db.set_snooze_state("adaptive_suspect_since:ab-canary-hit", old)
+
+    actions = evaluate_tripwire()
+    assert any(a["action"] == "suspect_expired" and a["batch_id"] == "ab-passive" for a in actions)
+    cleared = db.adaptive_get_batch("ab-passive")
+    assert cleared["status"] == "applied" and cleared["cleared_at"]
+    assert "auto-cleared" in cleared["flagged_reason"]
+    assert db.adaptive_get_batch("ab-canary-hit")["status"] == "suspect"  # exempt
+
+
+def test_legacy_suspect_without_marker_starts_its_clock_not_clears(monkeypatch):
+    """A pre-v3.1 suspect has no timestamp: first sight stamps one, and the
+    batch expires only after a full TTL from THEN — never instantly."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    monkeypatch.setattr("config.settings.adaptive_suspect_ttl_days", 7)
+    db.adaptive_create_batch("ab-legacy", "dream", "[]", status="applied")
+    db.adaptive_update_batch("ab-legacy", status="suspect", flagged_reason="post-mortem retry rate 50% vs 30%")
+
+    evaluate_tripwire()
+    assert db.adaptive_get_batch("ab-legacy")["status"] == "suspect"  # clock started, not cleared
+    assert db.get_snooze_state("adaptive_suspect_since:ab-legacy")
+
+
 def test_tripwire_unconfirmed_gate_fail_flags_but_never_rolls_back(monkeypatch):
     """One gate_fail with no confirm-rerun row = the rerun itself died.
     Suspicion is warranted; an automatic rollback is not."""

@@ -402,6 +402,21 @@ class Settings:
     adaptive_max_pending_proposals: int = 200  # review queue cap (0 = unbounded)
     adaptive_max_pending_per_producer: int = 60  # one producer's share of it (0 = unbounded)
     adaptive_proposal_ttl_days: int = 30  # pending proposals lapse after this (0 = never)
+    # Value-based retirement (v3.1): an entry that rendered into prompts for
+    # this many INSTRUMENTED days (counted from the usage epoch, stamped on
+    # the sweep's first run) without one recorded use — scout's used_hints,
+    # reflect's cited_policies — is retired. Journaled soft-deletes, one
+    # aggregate notification, one-click rollback. 0 disables. Candor-owned
+    # and human-authored entries are exempt.
+    adaptive_usage_retire_days: int = 45
+    # prompt_note has no producer-side retirement loop at all; this TTL is
+    # its backstop (0 = never). A still-useful note re-mints cheaply.
+    adaptive_prompt_note_ttl_days: int = 90
+    # A suspect flag raised by the PASSIVE post-mortem signal alone can never
+    # self-clear (its comparison windows are frozen at the apply). After this
+    # many days it auto-clears with an annotation; canary-confirmed flags are
+    # exempt. 0 = flags persist until human dismiss (the pre-v3.1 behavior).
+    adaptive_suspect_ttl_days: int = 7
     # The review queue is a VETO WINDOW, not an approval gate: a pending
     # proposal older than this many hours is approved by the system itself —
     # same apply path as a human approval, journaled, post-batch-swept and
@@ -634,6 +649,10 @@ class Settings:
         # Formula is min(scout_timeout × 3 + 30, this cap). Raise to be more conservative.
     )
     post_mortem_retention_days: int = 90  # Days to keep synthesized post-mortems before snooze sweeps them
+    # Notifications had NO retention at all — the table only ever shrank by
+    # manual dismiss clicks, and idle-loop producers refill it on a fixed
+    # cadence. 0 = keep forever (the old behavior).
+    notification_retention_days: int = 30
 
     # --- Notifications ---
     notify_webhook_url: str = ""  # POST here when ask_user fires (empty = disabled)

@@ -914,7 +914,22 @@ def add_notification(
     title: str = "",
     body: str = "",
     urgency: str = "normal",
+    dedup_key: str = "",
 ) -> str:
+    """Insert a notification row.
+
+    `dedup_key` suppresses repeats: the same key inserts at most once per
+    UTC day (tracked in snooze_state — no schema change), for idle-loop
+    producers that re-derive the same message on a fixed cadence. The FIRST
+    notification of a day is byte-identical to the pre-dedup behavior; only
+    the repeats are swallowed (returned id is "" then). Empty key = always
+    insert (the old behavior).
+    """
+    if dedup_key:
+        marker = f"notify_dedup:{datetime.now(timezone.utc).strftime('%Y-%m-%d')}:{dedup_key}"
+        if get_snooze_state(marker):
+            return ""
+        set_snooze_state(marker, "1")
     nid = _new_id()
     with connect_sessions() as conn:
         conn.execute(
@@ -925,15 +940,30 @@ def add_notification(
     return nid
 
 
-def get_notifications() -> list[dict]:
+def get_notifications(limit: int = 200) -> list[dict]:
+    """Newest first, bounded — the bell renders a list, not an archive."""
     with connect_sessions() as conn:
-        rows = conn.execute("SELECT * FROM notifications ORDER BY created_at DESC").fetchall()
+        rows = conn.execute(
+            "SELECT * FROM notifications ORDER BY created_at DESC LIMIT ?", (max(1, int(limit)),)
+        ).fetchall()
         return [dict(r) for r in rows]
 
 
 def delete_notification(notification_id: str) -> None:
     with connect_sessions() as conn:
         conn.execute("DELETE FROM notifications WHERE id = ?", (notification_id,))
+
+
+def prune_notifications(retention_days: int) -> int:
+    """Delete notifications older than the retention window. Returns count.
+
+    Until v3.1 nothing pruned this table — it only ever shrank by manual
+    dismiss clicks while idle-loop producers refilled it on a cadence.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, retention_days))).isoformat()
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM notifications WHERE created_at < ?", (cutoff,))
+        return cur.rowcount
 
 
 # ---------------------------------------------------------------------------
@@ -1666,6 +1696,15 @@ def adaptive_resolve_proposal(proposal_id: int, status: str) -> None:
         conn.execute(
             "UPDATE adaptive_proposals SET status = ?, resolved_at = ? WHERE id = ?",
             (status, _now(), int(proposal_id)),
+        )
+
+
+def adaptive_annotate_proposal(proposal_id: int, suffix: str) -> None:
+    """Append an audit note to a proposal's rationale (idempotent per text)."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE adaptive_proposals SET rationale = rationale || ? WHERE id = ? AND rationale NOT LIKE ?",
+            (suffix, int(proposal_id), f"%{suffix}"),
         )
 
 
