@@ -183,6 +183,14 @@ class Settings:
     round_cap_auto_continue: int = 1
     # (max_continuations removed in plan 3b — it was referenced nowhere in
     #  core logic; goal continuation_budget is the real, per-goal knob.)
+    # Forced follow-up (spec Feature 9): when a turn ends with prose that
+    # announces MORE work ("Next, I'll…") instead of doing it, inject one
+    # bounded in-turn nudge to keep the agent working rather than paying for
+    # a post-hoc reflect retry. The trigger is narrow (future-intent tail, no
+    # trailing question, courtesy closers excluded) so finished answers are
+    # never looped.
+    forced_followup_enabled: bool = True
+    forced_followup_max_per_turn: int = 1
 
     # --- Scout ---
     scout_enabled: bool = True

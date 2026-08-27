@@ -1364,13 +1364,14 @@ function _renderWorkerStrip() {
         const elapsed = Math.max(0, Math.round((Date.now() - w.startedAt) / 1000));
         const mins = Math.floor(elapsed / 60);
         const elapsedStr = mins > 0 ? `${mins}m${elapsed % 60}s` : `${elapsed}s`;
+        const kindTag = w.kind ? `[${w.kind}] ` : '';
         const chip = el('button', {
             class: `worker-chip${w.paused ? ' paused' : ''}`,
-            title: `${w.title} — click to open transcript`,
+            title: `${kindTag}${w.title} — click to open transcript`,
             onClick: () => selectSession(wid),
         }, [
             el('span', { class: 'worker-chip-dot' }),
-            text(` ${w.title.slice(0, 30)} · ${w.paused ? 'paused' : elapsedStr}`),
+            text(` ${kindTag}${w.title.slice(0, 30)} · ${w.paused ? 'paused' : elapsedStr}`),
         ]);
         // Pause/resume the worker without leaving the parent session — the
         // endpoints exist per-worker; this is their first UI affordance.
@@ -1426,6 +1427,7 @@ async function _seedWorkerStrip(sid) {
             const started = w.created_at ? Date.parse(w.created_at + 'Z') || now : now;
             _activeWorkers.set(w.id, {
                 title: w.title,
+                kind: w.kind || '',
                 startedAt: started,
                 paused: w.state === 'paused' || w.state === 'pause_requested',
             });
@@ -1861,8 +1863,28 @@ function handleEvent(event) {
 
     else if (type === 'worker.started') {
         const workerModel = event.model ? ` [${event.model}]` : '';
-        appendMessage('system', `Worker started: ${event.title || event.worker_id}${workerModel}`);
-        _activeWorkers.set(event.worker_id, { title: event.title || event.worker_id, startedAt: Date.now() });
+        const workerKind = event.kind ? ` (${event.kind})` : '';
+        appendMessage('system', `Worker started: ${event.title || event.worker_id}${workerKind}${workerModel}`);
+        _activeWorkers.set(event.worker_id, {
+            title: event.title || event.worker_id,
+            kind: event.kind || '',
+            startedAt: Date.now(),
+        });
+        _renderWorkerStrip();
+    }
+
+    else if (type === 'worker.resumed') {
+        // A terminated/reaped worker was revived (resume_worker) — treat it
+        // like a fresh start for the activity strip, with an honest note
+        // about what it is resuming from.
+        const prior = event.prior_termination ? ` (was: ${event.prior_termination})` : '';
+        const kindNote = event.kind ? ` (${event.kind})` : '';
+        appendMessage('system', `Worker resumed: ${event.title || event.worker_id}${kindNote}${prior}`);
+        _activeWorkers.set(event.worker_id, {
+            title: event.title || event.worker_id,
+            kind: event.kind || '',
+            startedAt: Date.now(),
+        });
         _renderWorkerStrip();
     }
 
@@ -1938,6 +1960,22 @@ function handleEvent(event) {
         } else if (!isNowIdle && !state.streaming) {
             state.streaming = true;
             _showStopButton();
+        }
+    }
+
+    else if (type === 'turn.forced_followup') {
+        // The harness detected an "I'll do X next…" tail with no tool calls
+        // and told the agent to keep working within the same turn.
+        appendMessage('system', `⟳ Forced follow-up ${event.attempt}/${event.max} — the agent announced more work but stopped; the harness told it to continue.`);
+    }
+
+    else if (type === 'tool.call.intercepted') {
+        // Gate-level corrections. Rejections already surface as error rows on
+        // tool.call; alias rewrites are worth a visible line so users learn
+        // the model's tool-name drift. Coercions/param-drops stay quiet here —
+        // they ride as a [note:] prefix on the tool result itself.
+        if (event.action === 'aliased') {
+            appendMessage('system', `Tool call rewritten: ${event.reason} → ${event.name}`);
         }
     }
 

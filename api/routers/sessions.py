@@ -127,6 +127,10 @@ async def list_workers(session_id: str):
                 "id": r["id"],
                 "title": r.get("title") or "worker",
                 "state": state,
+                "kind": r.get("worker_kind") or "",
+                "model": r.get("model_override") or "",
+                "termination_reason": (w.termination_reason if w is not None else None),
+                "in_memory": w is not None,
                 "created_at": r.get("created_at"),
                 "updated_at": r.get("updated_at"),
             }
@@ -488,19 +492,26 @@ async def http_pause_worker(session_id: str, worker_id: str):
 
 
 @router.post("/api/sessions/{session_id}/workers/{worker_id}/resume")
-async def http_resume_worker(session_id: str, worker_id: str):
-    """Resume a paused worker. Mirror of pause above."""
+async def http_resume_worker(session_id: str, worker_id: str, body: dict = {}):
+    """Resume a paused worker — or REVIVE a terminated/reaped one.
+
+    Parentage is checked against the DB row, not the in-memory worker_ids
+    list: after a server restart the parent's in-memory list is empty, and
+    revival (spec Feature 5) exists precisely for that case. Optional body
+    {"note": "..."} is injected into the continuation turn."""
+    import asyncio as _asyncio
+
     manager = get_manager()
-    parent = manager.get(session_id)
-    if not parent:
-        raise HTTPException(404, detail=f"Session {session_id} not found")
-    if worker_id not in parent.worker_ids:
+    if not manager.get(session_id):
+        raise HTTPException(404, detail=f"Session {session_id} not found in memory")
+    row = await _asyncio.to_thread(db.get_session, worker_id)
+    if not row:
+        raise HTTPException(404, detail=f"Worker {worker_id} not found")
+    if row.get("parent_session_id") != session_id:
         raise HTTPException(404, detail=f"Worker {worker_id} not a child of {session_id}")
-    if not manager.get(worker_id):
-        raise HTTPException(404, detail=f"Worker {worker_id} not in memory")
     from core.extensions.orchestration import resume_worker as _rw
 
-    msg = _rw(worker_id)
+    msg = _rw(worker_id, note=str((body or {}).get("note") or ""))
     return {"status": "resumed", "worker_id": worker_id, "detail": msg}
 
 

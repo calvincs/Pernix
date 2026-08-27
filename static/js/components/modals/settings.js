@@ -113,11 +113,13 @@ const SECTIONS = [
     },
     {
         title: 'Agent',
-        description: 'Limits on the agent loop. Max Tool Rounds is a backstop against a runaway loop, not a spend cap — goal token/time budgets and the stuck detector are the real guards, so a high value is fine. Scout sends a lightweight model (the Background role) ahead to discover relevant tools and context before the Primary model responds.',
+        description: 'Limits on the agent loop. Max Tool Rounds is a backstop against a runaway loop, not a spend cap — goal token/time budgets and the stuck detector are the real guards, so a high value is fine. Scout sends a lightweight model (the Background role) ahead to discover relevant tools and context before the Primary model responds. Forced follow-up: when a reply ends by announcing more work ("Next, I\'ll…") without doing it, the harness injects one bounded in-turn nudge to keep the agent working instead of ending the turn.',
         fields: [
             { key: 'max_tool_rounds', label: 'Max Tool Rounds', type: 'number' },
             { key: 'scout_enabled', label: 'Scout Enabled', type: 'bool' },
             { key: 'scout_timeout', label: 'Scout Timeout (s)', type: 'number' },
+            { key: 'forced_followup_enabled', label: 'Forced Follow-up Nudge', type: 'bool' },
+            { key: 'forced_followup_max_per_turn', label: 'Max Forced Follow-ups / Turn', type: 'number', min: 0, max: 5 },
         ],
     },
     {

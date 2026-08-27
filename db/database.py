@@ -989,6 +989,19 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
                WHERE passed = 0 AND IFNULL(tokens, 0) = 0 AND IFNULL(duration_s, 0) < 1.0""",
         ],
     ),
+    (
+        31,
+        "resumable workers: persist a worker's pinned model and typed kind "
+        "so rehydration after a reap/restart restores its identity",
+        [
+            # model_override / worker_kind were in-memory only, so a worker
+            # rehydrated from the DB (server restart, idle reap) silently
+            # lost its pinned model and its kind's tool allowlist. NULL =
+            # no override / untyped worker (every pre-v31 row).
+            "ALTER TABLE sessions ADD COLUMN model_override TEXT",
+            "ALTER TABLE sessions ADD COLUMN worker_kind TEXT",
+        ],
+    ),
 ]
 
 
