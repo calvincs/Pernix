@@ -183,7 +183,9 @@ _SETTING_BOUNDS = {
     "canary_retention_days": (1, 365),
     "canary_baseline_runs": (1, 20),
     "canary_regression_delta": (0.01, 1.0),
-    "canary_max_concurrent": (1, 4),
+    "canary_heartbeat_per_night": (1, 10),
+    "canary_post_batch_max": (1, 12),
+    "canary_park_after_passes": (3, 200),
     "adaptive_max_entries_per_kind": (1, 100),
     # Mirrors scripts/backup.py's KEEP_MIN/KEEP_MAX so the API rejects what the
     # backup run would have clamped anyway. 0 disables scheduled backups.

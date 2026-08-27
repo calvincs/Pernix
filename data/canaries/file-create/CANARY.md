@@ -10,7 +10,7 @@ gates:
     command: grep -qx 'Hello from Pernix canary.' hello.txt
     watch_paths: [hello.txt]
 timeout: 300
-tags: [file-write, instruction-following]
+tags: [file-write, instruction-following, sentinel]
 flaky: false
 last_reviewed: 2026-08-06
 ---

@@ -5,9 +5,12 @@ manager.prompt (the cron precedent) → wait for the turn to finish (including
 reflect retries) → score by re-running the canary's gates against the final
 workspace state → canary_runs row → cleanup (gates deleted, temp dir removed).
 
-Sweeps run canaries sequentially — canary_max_concurrent stays 1 until the
-model-concurrency story says otherwise; a sweep is a background measurement,
-not a throughput problem.
+Sweeps run canaries sequentially and one sweep runs at a time (the scheduler
+holds the lock) — a sweep is a background measurement, not a throughput
+problem. Selection is change-driven: the nightly `scheduled` trigger is a
+small least-recently-run heartbeat over the non-parked canaries, `full`
+(model swap, deploy, "Run all") runs everything, and `post_batch`/`manual`
+run the caller's explicit names.
 """
 
 from __future__ import annotations
@@ -281,30 +284,21 @@ async def run_canary(
     return result
 
 
-def _due_this_sweep(canary: CanaryDef, sweep_index: int) -> bool:
-    """Cadence filter for scheduled sweeps: run every Nth sweep.
+def _heartbeat_pick(defs: list[CanaryDef], k: int) -> list[CanaryDef]:
+    """The k least-recently-run active canaries — the nightly heartbeat.
 
-    Deterministic and stable per canary — the phase is derived from the
-    canary's own name, so demoted canaries spread across the rotation
-    instead of all landing on the same sweep.
+    Least-recently-run is self-healing under park/unpark/create/retire and
+    bounds every active canary's history staleness, which the per-task
+    tripwire's green precondition depends on. Never-run canaries sort first;
+    ties break by name for determinism.
     """
-    cadence = max(1, int(canary.cadence or 1))
-    if cadence == 1:
-        return True
-    phase = sum(canary.name.encode("utf-8")) % cadence
-    return sweep_index % cadence == phase
-
-
-def _next_sweep_index() -> int:
-    """Monotonic scheduled-sweep counter, durable across restarts."""
     from db import models as db
 
-    try:
-        current = int(db.get_snooze_state("canary_sweep_index") or "0")
-    except (TypeError, ValueError):
-        current = 0
-    db.set_snooze_state("canary_sweep_index", str(current + 1))
-    return current
+    def last_run_at(d: CanaryDef) -> str:
+        rows = db.list_canary_runs(task=d.name, limit=1)
+        return rows[0].get("created_at") or "" if rows else ""
+
+    return sorted(defs, key=lambda d: (last_run_at(d), d.name))[: max(1, k)]
 
 
 async def run_sweep(
@@ -312,12 +306,16 @@ async def run_sweep(
     batch_id: str | None = None,
     names: list[str] | None = None,
 ) -> list[CanaryRunResult]:
-    """Run the whole suite (or a named subset) sequentially.
+    """Run a selection of the suite sequentially.
 
-    Scheduled sweeps honour each canary's `cadence`; post_batch and manual
-    sweeps never do. The post-batch sweep is the tripwire's active probe and
-    must cover every canary that could regress, and a human asking for a run
-    means now.
+    Selection by trigger: `scheduled` is the nightly heartbeat — the
+    canary_heartbeat_per_night least-recently-run non-parked canaries, just
+    enough to keep every active canary's history warm. `full` runs
+    everything including parked canaries (model swaps, deploys, "Run all" —
+    the world changed, so every canary gets to speak). `post_batch` and
+    `manual` run the caller's explicit `names` (or everything, absent one) —
+    the post-batch probe's targeting happens at the scheduling layer, and a
+    human asking for a run means now.
     """
     if not settings.canary_enabled:
         logger.info("Canary sweep skipped: canary_enabled is off")
@@ -327,12 +325,10 @@ async def run_sweep(
         wanted = set(names)
         defs = [d for d in defs if d.name in wanted]
     elif trigger == "scheduled":
-        sweep_index = _next_sweep_index()
-        due = [d for d in defs if _due_this_sweep(d, sweep_index)]
-        deferred = len(defs) - len(due)
-        if deferred:
-            logger.info("Canary sweep #%d: %d canary(ies) deferred by cadence", sweep_index, deferred)
-        defs = due
+        active = [d for d in defs if not d.parked]
+        defs = _heartbeat_pick(active, settings.canary_heartbeat_per_night) if active else []
+        if defs:
+            logger.info("Canary heartbeat: %s", ", ".join(d.name for d in defs))
     if not defs:
         logger.info("Canary sweep: no canaries to run")
         return []

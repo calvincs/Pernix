@@ -10,7 +10,7 @@ gates:
     command: grep -qx '8' answer.txt
     watch_paths: [answer.txt]
 timeout: 300
-tags: [search, analysis]
+tags: [search, analysis, sentinel]
 flaky: false
 last_reviewed: 2026-08-06
 files:

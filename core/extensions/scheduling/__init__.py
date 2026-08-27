@@ -736,23 +736,50 @@ async def _init_scheduler_async():
 
 
 # ---------------------------------------------------------------------------
-# Canary triggers (adaptation plan 3.5): scheduled / post_batch / manual
+# Canary triggers: scheduled (heartbeat) / post_batch / manual / full
 # ---------------------------------------------------------------------------
 
-# One sweep at a time (canary_max_concurrent=1). A second trigger firing
-# mid-sweep skips rather than queues — canaries measure, they don't backlog.
+# One sweep at a time. A second trigger firing mid-sweep skips rather than
+# queues — canaries measure, they don't backlog. The exception is a sweep
+# whose meta says must_run (full sweeps after a model swap or deploy, and
+# coverage-triggered sweeps): those reschedule themselves instead of being
+# silently eaten by a heartbeat that happened to be in flight.
 _canary_sweep_lock = asyncio.Lock()
 
 # Post-batch retry cap: ~1 hour of 5-minute retries before giving up.
 _CANARY_BATCH_MAX_ATTEMPTS = 12
 _CANARY_BATCH_RETRY_S = 300
+# must_run lock-retry cap: ~20 minutes of 2-minute retries.
+_CANARY_LOCK_MAX_ATTEMPTS = 10
+_CANARY_LOCK_RETRY_S = 120
 
 
 async def _execute_canary_sweep_job(meta: dict):
-    """Scheduled/manual sweep executor. Never raises."""
+    """Sweep executor for every trigger. Never raises."""
     if not settings.canary_enabled:
         return
     if _canary_sweep_lock.locked():
+        if meta.get("must_run"):
+            attempts = int(meta.get("lock_attempts", 0)) + 1
+            scheduler = _get_scheduler()
+            if scheduler and attempts <= _CANARY_LOCK_MAX_ATTEMPTS:
+                from datetime import timedelta
+
+                from apscheduler.triggers.date import DateTrigger
+
+                scheduler.add_job(
+                    _execute_canary_sweep_job,
+                    trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=_CANARY_LOCK_RETRY_S)),
+                    id=meta.get("job_id") or "_canary_must_run_retry",
+                    replace_existing=True,
+                    kwargs={"meta": {**meta, "lock_attempts": attempts}},
+                )
+                logger.info(
+                    "Canary %s sweep waiting out the running sweep (attempt %d)",
+                    meta.get("trigger", "?"),
+                    attempts,
+                )
+                return
         logger.info("Canary sweep skipped: another sweep is running")
         return
     async with _canary_sweep_lock:
@@ -766,6 +793,39 @@ async def _execute_canary_sweep_job(meta: dict):
             )
         except Exception as e:
             logger.error("Canary sweep failed: %s", e)
+
+
+def _post_batch_targets(batch_id: str) -> list[str]:
+    """Which canaries a post-batch probe runs, resolved at EXECUTION time
+    (the suite may have changed during the up-to-an-hour idle deferral).
+
+    Canaries whose `covers:` matches the batch's edit kinds come first —
+    they are the ones actually testing what changed — then the
+    sentinel-tagged ones ride along, capped at canary_post_batch_max. A
+    missing or unreadable batch row falls back to sentinels; a suite with
+    neither coverage nor sentinels falls back to the active non-flaky
+    canaries so the tripwire is never left blind by omission.
+    """
+    import json as _json
+
+    from core.canary import scan_canaries
+    from db import models as db
+
+    kinds: set[str] = set()
+    try:
+        batch = db.adaptive_get_batch(batch_id)
+        for edit in _json.loads((batch or {}).get("payload_json") or "[]"):
+            if isinstance(edit, dict) and edit.get("kind"):
+                kinds.add(f"kind:{edit['kind']}")
+    except Exception as e:
+        logger.warning("Post-batch target resolution for %s fell back to sentinels: %s", batch_id, e)
+
+    defs = scan_canaries()
+    targets = [d.name for d in defs if kinds & set(d.covers)]
+    targets += [d.name for d in defs if "sentinel" in d.tags and d.name not in targets]
+    if not targets:
+        targets = [d.name for d in defs if not d.parked and not d.flaky]
+    return targets[: max(1, settings.canary_post_batch_max)]
 
 
 async def _execute_canary_batch_job(meta: dict):
@@ -803,7 +863,11 @@ async def _execute_canary_batch_job(meta: dict):
                 attempts,
             )
         return
-    await _execute_canary_sweep_job({**meta, "trigger": "post_batch"})
+    names = _post_batch_targets(str(meta.get("batch_id") or ""))
+    if not names:
+        logger.info("Post-batch canary sweep for %s: no canaries to run", meta.get("batch_id"))
+        return
+    await _execute_canary_sweep_job({**meta, "trigger": "post_batch", "names": names})
 
 
 def enqueue_post_batch_sweep(batch_id: str, delay_s: int = 60) -> bool:
@@ -844,8 +908,76 @@ def enqueue_manual_canary(name: str) -> bool:
     return True
 
 
+def enqueue_targeted_sweep(names: list[str], reason: str) -> bool:
+    """Fire a coverage-triggered set of canaries as ONE job.
+
+    One job, not one per name: enqueue_manual_canary calls landing at the
+    same instant would race the skip-not-queue sweep lock and all but the
+    first would be silently dropped. must_run so a heartbeat in flight
+    defers rather than eats the probe.
+    """
+    names = [n for n in names if n]
+    if not names or not settings.canary_enabled:
+        return False
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return False
+    from apscheduler.triggers.date import DateTrigger
+
+    job_id = f"_canary_targeted_{reason}"
+    scheduler.add_job(
+        _execute_canary_sweep_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc)),
+        id=job_id,
+        replace_existing=True,
+        kwargs={
+            "meta": {
+                "kind": "canary",
+                "transient": True,
+                "trigger": "manual",
+                "names": names,
+                "must_run": True,
+                "job_id": job_id,
+            }
+        },
+    )
+    return True
+
+
+def enqueue_full_sweep(reason: str, delay_s: int = 0) -> bool:
+    """A the-world-changed sweep (model swap, deploy, 'Run all'): every
+    canary including parked ones, must_run so nothing in flight eats it."""
+    if not settings.canary_enabled:
+        return False
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return False
+    from datetime import timedelta
+
+    from apscheduler.triggers.date import DateTrigger
+
+    job_id = f"_canary_full_{reason}"
+    scheduler.add_job(
+        _execute_canary_sweep_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=max(0, delay_s))),
+        id=job_id,
+        replace_existing=True,
+        kwargs={
+            "meta": {
+                "kind": "canary",
+                "transient": True,
+                "trigger": "full",
+                "must_run": True,
+                "job_id": job_id,
+                "reason": reason,
+            }
+        },
+    )
+    return True
+
+
 def ensure_canary_schedule() -> None:
-    """Install the nightly sweep job from settings (config is the truth —
+    """Install the nightly heartbeat job from settings (config is the truth —
     the job is transient, recreated each boot, never persisted to JSON)."""
     if not settings.canary_enabled:
         return
@@ -864,7 +996,7 @@ def ensure_canary_schedule() -> None:
             misfire_grace_time=3600,
             kwargs={"meta": {"kind": "canary", "transient": True, "trigger": "scheduled"}},
         )
-        logger.info("Canary sweep scheduled: %s", settings.canary_schedule)
+        logger.info("Canary heartbeat scheduled: %s", settings.canary_schedule)
     except Exception as e:
         logger.warning("Failed to schedule canary sweep: %s", e)
 

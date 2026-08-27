@@ -64,26 +64,16 @@ async def trigger_run(body: dict = {}):
     if not settings.canary_enabled:
         raise HTTPException(400, detail="canary_enabled is off")
     from core.canary import load_canary
-    from core.extensions.scheduling import _execute_canary_sweep_job, _get_scheduler, enqueue_manual_canary
+    from core.extensions.scheduling import enqueue_full_sweep, enqueue_manual_canary
 
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, detail="name is required ('*' runs the whole suite)")
     if name == "*":
-        scheduler = _get_scheduler()
-        if not scheduler:
+        # "Run all" means all: a full sweep includes parked canaries, and
+        # must_run means a heartbeat in flight defers it instead of eating it.
+        if not enqueue_full_sweep("run-all"):
             raise HTTPException(503, detail="scheduler unavailable")
-        from datetime import datetime, timezone
-
-        from apscheduler.triggers.date import DateTrigger
-
-        scheduler.add_job(
-            _execute_canary_sweep_job,
-            trigger=DateTrigger(run_date=datetime.now(timezone.utc)),
-            id="_canary_manual_sweep",
-            replace_existing=True,
-            kwargs={"meta": {"kind": "canary", "transient": True, "trigger": "manual"}},
-        )
         return {"queued": "*"}
     if load_canary(name) is None:
         raise HTTPException(404, detail=f"no canary named '{name}'")

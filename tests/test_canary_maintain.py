@@ -27,7 +27,7 @@ def _canaries_tmp(monkeypatch, tmp_path):
     monkeypatch.setattr("config.settings.canary_enabled", True)
     monkeypatch.setattr("config.settings.canary_auto_maintain", True)
     monkeypatch.setattr("config.settings.canary_vetting_runs", 3)
-    monkeypatch.setattr("config.settings.canary_retire_after_passes", 5)
+    monkeypatch.setattr("config.settings.canary_park_after_passes", 5)
 
 
 def _mk(name: str = "pin", vetting: bool = True) -> None:
@@ -95,37 +95,43 @@ def test_flap_detection_tags_established_canary():
     assert load_canary("pin", base=_base()).flaky is True
 
 
-def test_long_green_demotes_cadence_and_stays_in_the_suite():
-    """A long-green canary is the tripwire's baseline, not dead weight: it
-    must stay scannable and keep producing scheduled runs, just fewer."""
+def test_long_green_parks_and_stays_in_the_suite():
+    """A long-green canary is parked — off the heartbeat, never removed: the
+    per-task tripwire's green precondition is built on exactly this history."""
     _mk(vetting=False)
     for _ in range(5):
         _run("pin", True)
     stats = run_maintenance()
-    assert stats["demoted"] == [{"name": "pin", "cadence": 2}]
+    assert stats["parked"] == ["pin"]
     c = load_canary("pin", base=_base())
-    assert c is not None and c.cadence == 2
+    assert c is not None and c.parked is True
     assert not (retired_dir(_base()) / "pin").exists()
 
-    # Still green after more runs: cadence backs off further, still present.
+    # Still green on a later sweep: parked stays parked, no re-park churn.
     for _ in range(5):
         _run("pin", True)
     stats = run_maintenance()
-    assert stats["demoted"] == [{"name": "pin", "cadence": 4}]
-    assert load_canary("pin", base=_base()).cadence == 4
+    assert stats["parked"] == []
+    assert load_canary("pin", base=_base()).parked is True
 
 
-def test_demotion_capped_so_a_canary_never_leaves_the_baseline():
-    from core.canary.parser import MAX_CADENCE
-
+def test_red_run_unparks_a_parked_canary():
+    """Parking is a claim that green stays green; a red run revokes it. This
+    is the one mutation allowed while the latest run is a failure, because
+    it amplifies the alarm instead of silencing it."""
     _mk(vetting=False)
-    md = _base() / "pin" / "CANARY.md"
-    md.write_text(md.read_text().replace("flaky: false", f"flaky: false\ncadence: {MAX_CADENCE}", 1))
     for _ in range(5):
         _run("pin", True)
+    run_maintenance()
+    assert load_canary("pin", base=_base()).parked is True
+
+    _run("pin", False)  # newest run is red
     stats = run_maintenance()
-    assert stats["demoted"] == []  # already at the ceiling — no further backoff
-    assert load_canary("pin", base=_base()).cadence == MAX_CADENCE
+    assert stats["unparked"] == ["pin"]
+    c = load_canary("pin", base=_base())
+    assert c.parked is False
+    # And the Goodhart lock held for everything else: still not flaky, etc.
+    assert c.flaky is False
 
 
 def test_purge_after_retention_window(monkeypatch):
