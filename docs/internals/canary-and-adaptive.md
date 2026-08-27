@@ -223,7 +223,76 @@ A governed store of machine-editable **policy** — distinct from memory
 | `routing_hint` | Tool/skill/model selection guidance | Scout only (`[ADAPTIVE ROUTING HINTS]` + `search_adaptive`) | **low → auto-apply** |
 | `prompt_note` | Supplemental directive ≤400 chars | The agent's compiler block | **low → auto-apply** |
 | `policy` | Behavioral rule with control-flow weight | The agent's compiler block | **high → proposal-gated** |
-| `worker_spec` | Reusable worker template: instructions, model, gate set | `spawn_worker(spec=...)` via the `[WORKER SPECS]` catalog | **high → proposal-gated** |
+
+(`worker_spec` was carved in v3.1: fully-built consumption, zero live rows
+ever, and no reachable producer — its high-risk gating meant a human would
+have had to approve YAML that refine would first have had to spontaneously
+emit.)
+
+### The actionability floor (v3.1)
+
+The consumers of this store are prompts, and prompts act on instructions —
+but the live audit found the policy slots full of narrative complaints
+("Despite high-confidence verifications, the agent repeatedly fails
+to..."), auto-approved unread through the veto window. Three layers now
+stop that at the mouth:
+
+- **The mechanical lint** (`core/adaptive/lint.py`), applied inside
+  `queue_producer_edits` — under all four machine producers. Narrative
+  shapes are refused; negative tool claims pass only with the fix clause
+  (Candor's "prefer an alternative or verify; see why_reliability(...)"
+  template is the model citizen); policy/routing_hint content must contain
+  an actionable directive. Human authorship uses the direct create path
+  and is deliberately unlinted — the human is the authority the lint
+  substitutes for.
+- **Dream's actionability gate** (`core/dream/promote.py`): both promotion
+  channels (`lesson_ineffective→policy`, `tool_pattern→routing_hint`) pass
+  through one bounded judge call that rewrites the validated finding into
+  an imperative rule or rules honestly that none exists —
+  `reported:not-actionable` is terminal, and the finding still reaches the
+  dream report. A tool_pattern restating a live Candor hint is a terminal
+  duplicate.
+- **Refine's contract** gained the Do-NOT-capture rules, a worked bad→good
+  example, and a confidence field (floor and 2-edit cap enforced
+  mechanically in the parser). Telos hints dropped the "Supported
+  hypothesis (...)" framing and must pass the lint or stand as claims only.
+
+### The usefulness signal (v3.1)
+
+The layer could always detect harm (the tripwire); it could never detect
+benefit — so retirement ran on 90-day clocks and the store converged on
+what was *recent*, not what *worked*. Now both consumption paths report
+usage: rendered entries carry their ids, scout echoes the hints that
+shaped its plan (`used_hints`, counted once at the fresh-report seam),
+reflect sees an id-carrying `ACTIVE ADAPTIVE POLICIES` section in its
+evidence and may cite up to five in `cited_policies`. Both flow through
+post-mortems into synthesis and land as `adaptive_entry` rows in
+`scout_signals`. Counters surface in the Adaptive tab (zero-use
+highlighted) and drive:
+
+- **Value-based retirement** — `retire_unused_entries` (Activity 15):
+  entries with zero recorded uses over `adaptive_usage_retire_days` of
+  *instrumented* life are retired (journaled soft-deletes, one aggregate
+  daily notification, one-click rollback). The usage epoch is stamped on
+  the sweep's first run so pre-instrumentation entries get a full observed
+  window before they can be judged. `prompt_note` — previously the kind
+  with no retirement loop at all — also gets a TTL backstop.
+- **Capped, ranked rendering** — the scout hints block ranks by live usage
+  and caps at 12 lines/1.6k chars with a truncation marker (which finally
+  makes `search_adaptive`'s trigger real); the agent block caps at 12
+  policies/12k chars with deterministic source-priority selection
+  (user > refine > candor > telos > dream) — stable bytes between idle
+  applies, prompt-cache safe.
+
+### Authorship (v3.1)
+
+`SOURCES` always declared `user` and `agent`; no path ever minted either.
+Now: **you** author directly (`POST /api/adaptive/entries`, the Adaptive
+tab's *New entry* form — immediately active, journaled, unlinted), and
+**the agent** authors through the `adaptive_note` tool
+(`adaptive_agent_notes_enabled`): prompt_note/routing_hint only, the lint
+applies, 2 mints/day, normal batch pipeline + tripwire — an agent never
+writes `policy` about itself.
 
 Risk is computed at apply time, and two escalations gate otherwise-low-risk
 edits: any **delete** of another producer's entry, and any **global-scope**
@@ -443,7 +512,12 @@ running, so a batch could be judged on turns that had nothing to do with it.
 
 Either signal flags the batch **`suspect`** — surfaced in the Adaptive tab,
 cleared by human dismiss (`POST /api/adaptive/batches/{id}/dismiss`, the
-*Dismiss flag* button) or a subsequent clean sweep. **Dismissal is durable**:
+*Dismiss flag* button), a subsequent clean sweep, or — for flags raised by
+the passive signal alone — an automatic expiry after
+`adaptive_suspect_ttl_days` (7): the passive comparison windows are frozen
+at the apply, so such a flag can never self-clear, and four batches sat
+suspect for 12 days on the live box waiting for clicks nobody owed them.
+Canary-confirmed flags never expire. **Dismissal is durable**:
 it stamps `cleared_at`, and the sweep skips any batch that has one, so the
 same evidence can never re-raise a flag you already looked at. Only a
 **confirmed** primary (canary) verdict can promote to automatic rollback,

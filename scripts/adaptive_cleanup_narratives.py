@@ -90,7 +90,9 @@ def main() -> int:
         print(
             json.dumps(
                 {
-                    "remove": [{"id": e["id"], "kind": e["kind"], "source": e["source"], "why": e["why"]} for e in remove],
+                    "remove": [
+                        {"id": e["id"], "kind": e["kind"], "source": e["source"], "why": e["why"]} for e in remove
+                    ],
                     "keep": [e["id"] for e in keep],
                 },
                 indent=2,

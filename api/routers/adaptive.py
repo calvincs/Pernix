@@ -20,9 +20,7 @@ async def list_entries(kind: str = "", status: str = "active", limit: int = 200)
     # Per-entry usage counters (the v3.1 usefulness signal) ride along so
     # the panel can show which entries actually earn their prompt space.
     try:
-        signals = await _asyncio.to_thread(
-            db.get_signals_by_subjects, [("adaptive_entry", r["id"]) for r in rows]
-        )
+        signals = await _asyncio.to_thread(db.get_signals_by_subjects, [("adaptive_entry", r["id"]) for r in rows])
         by_id = {s["subject"]: s for s in signals}
         for r in rows:
             s = by_id.get(r["id"])

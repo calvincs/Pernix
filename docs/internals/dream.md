@@ -101,9 +101,17 @@ cycle-generated hypotheses — no special write powers.
   pending row self-approves after `adaptive_auto_approve_after_hours`
   (default 24 h) unless you veto it first; every application is journaled
   and rollback-able. Only *validated* hypotheses promote at all — dream is
-  the most speculative producer in the stack. With the adaptive layer off,
-  the dream's entire observable output remains the journal, the report,
-  and sidecar rows.
+  the most speculative producer in the stack — and since v3.1 the two
+  adaptive channels (`lesson_ineffective→policy`, `tool_pattern→routing_hint`)
+  additionally pass an **actionability gate**: one bounded judge call
+  rewrites the finding into an imperative rule, or rules honestly that none
+  exists (`reported:not-actionable`, terminal — the finding still renders
+  in the dream report). The gate exists because this channel shipped raw
+  hypothesis statements ("Despite ... the agent repeatedly fails ...") into
+  the agent's every-turn prompt; the mechanical adaptive lint backstops it.
+  A tool_pattern restating a live Candor hint is a terminal duplicate.
+  With the adaptive layer off, the dream's entire observable output remains
+  the journal, the report, and sidecar rows.
 - **No permanent shelf space.** Promoted entries are retired again when
   their evidence stops holding — the originating hypothesis is gone or
   unpromoted, the cited Candor facts recovered above the degradation line,

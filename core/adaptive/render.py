@@ -90,7 +90,9 @@ def build_adaptive_block(session_id: str = "") -> str:
     for p in policies:
         parts.append(f"\n### Policy [{p['id']}]: {p['title']}\n{p['content']}")
     if dropped:
-        parts.append(f"\n({dropped} lower-priority entr{'y' if dropped == 1 else 'ies'} not rendered — see the Adaptive tab)")
+        parts.append(
+            f"\n({dropped} lower-priority entr{'y' if dropped == 1 else 'ies'} not rendered — see the Adaptive tab)"
+        )
     return "\n".join(parts)
 
 

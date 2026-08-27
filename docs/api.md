@@ -735,7 +735,14 @@ DELETE /api/canary/{name}            → moves to .retired/ (purged after canary
 The governed policy store — see [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md). Read endpoints work regardless of `adaptive_enabled`.
 
 ```
-GET  /api/adaptive/entries?kind=&status=active&limit=200   Entries by kind/status (+ enabled/auto_apply flags)
+GET  /api/adaptive/entries?kind=&status=active&limit=200   Entries by kind/status (+ enabled/auto_apply flags).
+                                                           Each row carries `usage` — the per-entry
+                                                           usefulness counters (uses/successes/failures from
+                                                           scout and reflect citations), null when never used
+POST /api/adaptive/entries                                 Direct authorship: {kind, title, content, scope?}.
+                                                           Immediately active, journaled, deliberately
+                                                           unlinted — the human is the authority the content
+                                                           lint substitutes for. 400 on validation/cap/dup
 DEL  /api/adaptive/entries/{entry_id}                      Release valve: soft-delete one entry as actor
                                                            "human" (status -> deleted, version bumped,
                                                            journaled so it rolls back). 404 if unknown or
@@ -779,7 +786,6 @@ Surfaces for the teleological layer — see [internals/telos.md](internals/telos
 GET  /api/telos                          Layer status summary
 GET  /api/telos/questions                Open questions
 GET  /api/telos/hypotheses               SOUP hypotheses
-GET  /api/telos/goals                    The goal DAG
 GET  /api/telos/claims                   Committed claims
 GET  /api/telos/trace                    Append-only trace ledger
 POST /api/telos/run                      Run the telos machinery on demand

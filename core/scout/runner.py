@@ -1079,7 +1079,7 @@ def build_session_brief(session_id: str, context_budget: int | None = None) -> S
 def _build_lessons_section(message: str) -> str:
     """Format relevant lessons (entry_type='lesson') for scout injection.
 
-    Lessons are operational workarounds extracted by snooze_reflect from past
+    Lessons are operational workarounds extracted by the refine pass from past
     failed sessions. We surface up to 5 high-relevance matches; if none match
     the current request, the section is omitted entirely (no empty header).
     """
@@ -1617,7 +1617,7 @@ async def _run_scout_llm(
 
     def _gather_lessons() -> str | None:
         # Relevant past lessons (entry_type='lesson') — workarounds extracted
-        # by snooze_reflect from prior failed sessions, via hybrid search.
+        # by the refine pass from prior failed sessions, via hybrid search.
         try:
             lessons_section = _build_lessons_section(message)
             if lessons_section:

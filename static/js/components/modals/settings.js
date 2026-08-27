@@ -271,6 +271,12 @@ const SECTIONS = [
             { key: 'reflect_deferred_normal', label: 'Defer Grading (Interactive)', type: 'bool' },
             { key: 'reflect_defer_idle_s', label: 'Defer Delay (seconds)', type: 'number' },
             { key: 'post_mortem_retention_days', label: 'Post-mortem retention (days)', type: 'number' },
+            {
+                key: 'notification_retention_days',
+                label: 'Notification retention (days)',
+                type: 'number', min: 0, max: 365,
+                hint: 'The bell is a recent-events surface, not an archive. 0 = keep forever (pre-v3.1 behavior).',
+            },
         ],
     },
     {
@@ -362,6 +368,32 @@ const SECTIONS = [
             { key: 'adaptive_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number' },
             { key: 'adaptive_max_entries_per_kind', label: 'Max Entries / Kind', type: 'number' },
             { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (h)', type: 'number' },
+            {
+                key: 'adaptive_usage_retire_days',
+                label: 'Retire Unused After (days)',
+                type: 'number', min: 0, max: 365,
+                hint: 'Entries with zero recorded uses (scout/reflect citations) over this many instrumented days are retired — journaled, rollbackable. 0 disables.',
+            },
+            {
+                key: 'adaptive_prompt_note_ttl_days',
+                label: 'Prompt-note TTL (days)',
+                type: 'number', min: 0, max: 365,
+                hint: 'Prompt notes have no producer-side retirement; this TTL is their backstop. 0 = keep forever.',
+            },
+            {
+                key: 'adaptive_suspect_ttl_days',
+                label: 'Passive Suspect-flag TTL (days)',
+                type: 'number', min: 0, max: 90,
+                hint: 'A suspect flag from the passive post-mortem signal alone can never self-clear; it auto-clears after this many days. Canary-confirmed flags are exempt. 0 = flags wait for your dismiss.',
+            },
+            {
+                key: 'adaptive_agent_notes_enabled',
+                label: 'Agent Self-notes (adaptive_note tool)',
+                type: 'bool',
+                risk: 'autonomy',
+                restart: RESTART_TOOLS,
+                hint: 'Lets the live agent mint prompt notes and routing hints the moment it learns something — content lint applies, 2/day, normal pipeline + tripwire, never policy.',
+            },
         ],
     },
     {
