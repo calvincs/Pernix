@@ -49,10 +49,27 @@ class CanaryRunResult:
     run_id: int | None = None
     flaky: bool = False
 
+    @property
+    def outcome(self) -> str:
+        """pass | gate_fail | timeout | error | noop — the honest failure
+        taxonomy. Only gate_fail means "the agent ran and the work was wrong";
+        the others are wall-clock or harness trouble and must never feed the
+        per-task tripwire."""
+        if self.passed:
+            return "pass"
+        if self.error.startswith("timeout"):
+            return "timeout"
+        if self.error:
+            return "error"
+        if self.tokens == 0 and self.duration_s < 1.0:
+            return "noop"
+        return "gate_fail"
+
     def to_dict(self) -> dict:
         return {
             "task": self.task,
             "passed": self.passed,
+            "outcome": self.outcome,
             "trigger": self.trigger,
             "session_id": self.session_id,
             "gates": self.gate_results,
@@ -247,6 +264,8 @@ async def run_canary(
             tokens=result.tokens,
             duration_s=result.duration_s,
             batch_id=batch_id,
+            outcome=result.outcome,
+            error=result.error[:500],
         )
     except Exception as e:
         logger.error("Failed to record canary run '%s': %s", canary.name, e)
@@ -254,7 +273,7 @@ async def run_canary(
     logger.info(
         "Canary '%s' %s (%.0fs, %d retries, trigger=%s)",
         canary.name,
-        "PASSED" if result.passed else "FAILED",
+        "PASSED" if result.passed else f"FAILED[{result.outcome}]",
         result.duration_s,
         result.retries,
         trigger,

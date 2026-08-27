@@ -202,6 +202,19 @@ def _real_fail(name: str) -> None:
     )
 
 
+def test_noop_detection_prefers_the_outcome_column():
+    """v30 rows say what they are; the tokens/duration heuristic is only for
+    legacy rows whose outcome is NULL."""
+    from core.canary.maintain import _is_noop_run
+
+    assert _is_noop_run({"passed": 0, "outcome": "noop", "tokens": 54000, "duration_s": 120.0}) is True
+    # An explicit non-noop outcome wins even when the heuristic would fire.
+    assert _is_noop_run({"passed": 0, "outcome": "gate_fail", "tokens": 0, "duration_s": 0.1}) is False
+    # Legacy NULL outcome falls back to the heuristic.
+    assert _is_noop_run({"passed": 0, "outcome": None, "tokens": 0, "duration_s": 0.1}) is True
+    assert _is_noop_run({"passed": 0, "outcome": None, "tokens": 9000, "duration_s": 45.0}) is False
+
+
 def test_health_flags_chronically_failing_canary():
     _mk("solo", vetting=False)
     for _ in range(3):

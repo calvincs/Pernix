@@ -1237,15 +1237,19 @@ def add_canary_run(
     tokens: int = 0,
     duration_s: float = 0.0,
     batch_id: str | None = None,
+    outcome: str = "",
+    error: str = "",
 ) -> int:
     """Record a completed canary run. batch_id links post-batch sweeps to the
-    Phase 4 adaptive batch that triggered them (the tripwire joins on it)."""
+    Phase 4 adaptive batch that triggered them (the tripwire joins on it).
+    outcome separates timeout/error/noop from honest gate failures; rows
+    written before v30 keep it NULL."""
     with connect_sessions() as conn:
         cur = conn.execute(
             """INSERT INTO canary_runs
                (task, trigger, batch_id, session_id, gate_results_json,
-                passed, retries, tokens, duration_s, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                passed, retries, tokens, duration_s, outcome, error, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 task,
                 trigger,
@@ -1256,6 +1260,8 @@ def add_canary_run(
                 int(retries),
                 int(tokens),
                 float(duration_s),
+                outcome or None,
+                error or None,
                 _now(),
             ),
         )

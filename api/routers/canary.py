@@ -28,6 +28,7 @@ async def list_canaries():
             s["last_run"] = {
                 "created_at": r.get("created_at"),
                 "passed": bool(r.get("passed")),
+                "outcome": r.get("outcome"),
                 "trigger": r.get("trigger"),
                 "duration_s": r.get("duration_s"),
             }
