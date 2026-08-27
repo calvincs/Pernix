@@ -1,7 +1,7 @@
-// Pernix — Telos tab (Explorer): the teleological layer's state — root
-// question, goal DAG, question/hypothesis pipeline, claims, alarms, and
-// exploration temperature. Read-heavy by design: the only controls are the
-// manual slow-loop trigger and alarm acknowledgement.
+// Pernix — Telos tab (Explorer): the question loop's state — root question,
+// question/hypothesis pipeline, claims, alarms, and exploration
+// temperature. Read-heavy by design: the only controls are the manual
+// slow-loop trigger and alarm acknowledgement.
 
 import { el, text, clear } from '../../render.js';
 import { get, post } from '../../api.js';
@@ -83,7 +83,7 @@ export async function renderTelosTab(container) {
     const alarms = overview.alarms_open || [];
     container.appendChild(sectionTitle(`Open alarms (${alarms.length})`));
     if (!alarms.length) {
-        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No open alarms — no binding, divergence, or acedia signatures holding.')]));
+        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No open alarms — no acedia signature holding (exploration entropy is above floor).')]));
     } else {
         alarms.forEach(a => {
             const row = el('div', { class: 'adaptive-entry' }, [
