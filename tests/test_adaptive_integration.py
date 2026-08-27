@@ -58,7 +58,15 @@ def test_queue_producer_edits_stamps_session_evidence():
     from core.adaptive.contract import queue_producer_edits
 
     result = queue_producer_edits(
-        [{"action": "create", "kind": "routing_hint", "title": "no refs", "content": "x", "evidence": []}],
+        [
+            {
+                "action": "create",
+                "kind": "routing_hint",
+                "title": "no refs",
+                "content": "prefer browse_web when pages are js-heavy",
+                "evidence": [],
+            }
+        ],
         "refine",
         session_id="sess-1234",
     )
@@ -87,9 +95,25 @@ def test_producer_prompt_suffix_gated_on_flag(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_dream_promotion_mapping():
+async def _gate_identity(row):
+    """Actionability-gate stand-in for tests that exercise the promotion
+    plumbing, not the gate itself (the gate has its own tests in
+    test_dream.py). Emits lint-passing imperative content."""
+    return {
+        "actionable": True,
+        "title": str(row.get("statement") or "")[:60],
+        "content": f"When relevant: {str(row.get('statement') or '')[:200]}",
+    }
+
+
+def _bypass_gate(monkeypatch):
+    monkeypatch.setattr("core.dream.promote._actionability_gate", _gate_identity)
+
+
+async def test_dream_promotion_mapping(monkeypatch):
     from core.dream.promote import promote_validated
 
+    _bypass_gate(monkeypatch)
     h_tool = db.add_dream_hypothesis("tool_pattern", "http_get fails on js-heavy sites; use browse_web", "[]")
     h_lesson = db.add_dream_hypothesis("lesson_ineffective", "lesson X never changes outcomes", "[]")
     h_stale = db.add_dream_hypothesis("memory_stale", "entry about API v1 is outdated", "[]")
@@ -780,12 +804,13 @@ def test_one_producer_cannot_own_the_whole_review_queue():
     )
 
 
-async def test_paraphrased_tool_findings_promote_once():
+async def test_paraphrased_tool_findings_promote_once(monkeypatch):
     """Eleven of the sixty-four live proposals were one fetch_ok finding
     restated. Lexical dedup cannot see a paraphrase; the Candor evidence key
     is the claim's semantic identity, and promotion must use it."""
     from core.dream.promote import promote_validated
 
+    _bypass_gate(monkeypatch)
     ev = json.dumps([{"type": "candor", "pred": "fetch_ok", "args": ["*"], "quote": "p=0.49"}])
     first = db.add_dream_hypothesis("tool_pattern", "fetch_ok succeeds only about half the time overall", ev)
     second = db.add_dream_hypothesis("tool_pattern", "Fetching is unreliable, working roughly 50% of the time", ev)

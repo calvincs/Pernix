@@ -450,6 +450,129 @@ async def test_validate_tool_pattern_any_recovered_ref_refutes(store, dream_on, 
     assert "degradation gone" in note and "fetch_ok(*)" in note
 
 
+# ---------------------------------------------------------------------------
+# Promotion actionability gate (v3.1)
+# ---------------------------------------------------------------------------
+
+
+def _adaptive_on(monkeypatch):
+    monkeypatch.setattr(config.settings, "adaptive_enabled", True)
+
+
+async def test_promotion_gate_not_actionable_is_terminal(dream_on, monkeypatch):
+    """A validated finding the gate cannot turn into a rule leaves the queue
+    terminally and mints nothing — the report is its delivery surface."""
+    from core.dream.promote import promote_validated
+
+    _adaptive_on(monkeypatch)
+    hid = db.add_dream_hypothesis("lesson_ineffective", "Lessons about X never change outcomes.", "[]")
+    db.update_dream_hypothesis(hid, status="validated")
+    fake = FakeLLMClient(responses=[_resp('{"actionable": false, "note": "pure observation"}')])
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
+
+    assert await promote_validated(limit=10) == 0  # terminal outcomes are not yield
+    row = db.list_dream_hypotheses()[0]
+    assert row["status"] == "promoted" and row["promoted_ref"] == "reported:not-actionable"
+    assert db.adaptive_list_proposals(status="pending") == []
+
+
+async def test_promotion_gate_rewrite_mints_the_imperative_form(dream_on, monkeypatch):
+    """An actionable finding mints the GATE'S rewrite, not the raw statement."""
+    from core.dream.promote import promote_validated
+
+    _adaptive_on(monkeypatch)
+    hid = db.add_dream_hypothesis("lesson_ineffective", "The agent claims files exist without checking.", "[]")
+    db.update_dream_hypothesis(hid, status="validated")
+    rewrite = "Before asserting a file exists: read it on disk and confirm the content."
+    fake = FakeLLMClient(
+        responses=[_resp(json.dumps({"actionable": True, "title": "verify files on disk", "content": rewrite}))]
+    )
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
+
+    assert await promote_validated(limit=10) == 1
+    props = db.adaptive_list_proposals(status="pending")
+    assert len(props) == 1
+    payload = json.loads(props[0]["payload_json"])
+    assert payload[0]["content"] == rewrite and payload[0]["title"] == "verify files on disk"
+
+
+async def test_promotion_gate_rewrite_failing_lint_is_terminal(dream_on, monkeypatch):
+    """The mechanical lint backstops the gate: a 'rewrite' that still reads
+    as narrative is refused terminally, not retried forever."""
+    from core.dream.promote import promote_validated
+
+    _adaptive_on(monkeypatch)
+    hid = db.add_dream_hypothesis("lesson_ineffective", "Something about lessons.", "[]")
+    db.update_dream_hypothesis(hid, status="validated")
+    fake = FakeLLMClient(
+        responses=[
+            _resp(
+                json.dumps(
+                    {
+                        "actionable": True,
+                        "title": "still narrative",
+                        "content": "Despite the lessons, the agent repeatedly fails to comply.",
+                    }
+                )
+            )
+        ]
+    )
+    monkeypatch.setattr("core.llm.client.get_llm_client", lambda: fake)
+
+    assert await promote_validated(limit=10) == 0
+    row = db.list_dream_hypotheses()[0]
+    assert row["promoted_ref"] == "reported:not-actionable"
+    assert db.adaptive_list_proposals(status="pending") == []
+
+
+async def test_promotion_gate_unavailable_leaves_the_row_for_retry(dream_on, monkeypatch):
+    """A transient LLM outage must not mark a finding terminal."""
+    from core.dream import promote as promote_mod
+
+    _adaptive_on(monkeypatch)
+    hid = db.add_dream_hypothesis("lesson_ineffective", "A finding.", "[]")
+    db.update_dream_hypothesis(hid, status="validated")
+
+    async def _gate_down(row):
+        return None
+
+    monkeypatch.setattr(promote_mod, "_actionability_gate", _gate_down)
+    assert await promote_mod.promote_validated(limit=10) == 0
+    assert db.list_dream_hypotheses()[0]["status"] == "validated"  # still queued
+
+
+async def test_promotion_skips_restating_a_live_candor_hint(dream_on, monkeypatch):
+    """A tool_pattern about a tool Candor already flags is a restatement of
+    the live hint the scout already sees — terminal duplicate, no gate call."""
+    from core.dream.promote import promote_validated
+
+    _adaptive_on(monkeypatch)
+    from datetime import datetime as _dt
+
+    now = _dt.now(timezone.utc).isoformat()
+    db.adaptive_put_entry(
+        {
+            "id": "tool-fetch_ok-degraded",
+            "kind": "routing_hint",
+            "scope": "global",
+            "title": "tool fetch_ok degraded",
+            "content": "prefer an alternative or verify its output",
+            "risk": "low",
+            "version": 1,
+            "status": "active",
+            "source": "candor",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    ev = json.dumps([{"type": "candor", "pred": "tool_ok", "args": ["fetch_ok"], "quote": "p=0.4"}])
+    hid = db.add_dream_hypothesis("tool_pattern", "fetch_ok has become unreliable overall.", ev)
+    db.update_dream_hypothesis(hid, status="validated")
+
+    assert await promote_validated(limit=10) == 0
+    assert db.list_dream_hypotheses()[0]["promoted_ref"] == "reported:duplicate-evidence"
+
+
 async def test_replay_budget_zero_skips_lesson_hypotheses(store, dream_on, monkeypatch):
     monkeypatch.setattr(config.settings, "dream_validation_replays_per_day", 0)
     assert not replay_budget_left()
