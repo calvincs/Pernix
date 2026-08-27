@@ -50,11 +50,13 @@ def build_adaptive_block(session_id: str = "") -> str:
     if not notes and not policies:
         return ""
 
+    # Entries carry their ids so reflect can cite which policies shaped a
+    # turn (cited_policies → the adaptive_entry usage signal).
     parts = [_BLOCK_HEADER]
     for n in notes:
-        parts.append(f"- {n['title']}: {n['content']}")
+        parts.append(f"- [{n['id']}] {n['title']}: {n['content']}")
     for p in policies:
-        parts.append(f"\n### Policy: {p['title']}\n{p['content']}")
+        parts.append(f"\n### Policy [{p['id']}]: {p['title']}\n{p['content']}")
     return "\n".join(parts)
 
 
@@ -69,9 +71,11 @@ def build_routing_hints_block() -> str:
         return ""
     if not hints:
         return ""
+    # Hints carry their ids so scout can echo which ones shaped the plan
+    # (used_hints → the adaptive_entry usage signal).
     lines = ["[ADAPTIVE ROUTING HINTS] (learned tool/skill selection guidance; advisory, not binding):"]
     for h in hints:
-        lines.append(f"- {h['title']}: {h['content']}")
+        lines.append(f"- [{h['id']}] {h['title']}: {h['content']}")
     return "\n".join(lines)
 
 

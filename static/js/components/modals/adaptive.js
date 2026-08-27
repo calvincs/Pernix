@@ -109,9 +109,16 @@ export async function renderAdaptiveTab(container) {
                 if (!confirm(`Delete adaptive entry "${e.title}"? It is journaled and can be rolled back.`)) return;
                 await del(`/api/adaptive/entries/${encodeURIComponent(e.id)}`);
             }, refresh);
+            // Usage badge: the per-entry usefulness signal. Zero-use is the
+            // highlighted state — those are the retirement sweep's targets.
+            const u = e.usage;
+            const usageBadge = u
+                ? badge(`used ${u.uses}${u.successes ? ` · ✓${u.successes}` : ''}${u.failures ? ` · ✗${u.failures}` : ''}`, 'ok')
+                : badge('unused', 'off');
             container.appendChild(el('div', { class: 'adaptive-card entry' }, [
                 el('div', { class: 'adaptive-card-head' }, [
                     badge(`v${e.version}`), badge(e.risk, e.risk === 'high' ? 'warn' : ''), badge(e.source),
+                    usageBadge,
                     text(` ${e.title}`),
                 ]),
                 el('div', { class: 'adaptive-entry-content' }, [text(e.content)]),

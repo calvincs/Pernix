@@ -243,3 +243,53 @@ def test_bypass_fallback_stays_quiet():
     report = _build_fallback_report("thanks", SessionBrief(session_id="test"), reason="bypass")
     assert report.from_fallback is True
     assert "[SCOUT STATUS]" not in report.to_system_prompt_section()
+
+
+def test_extract_report_parses_used_hints():
+    from core.scout.runner import _extract_report
+
+    report = _extract_report(
+        {
+            "recommended_tools": ["bash"],
+            "approach_guidance": "do the thing",
+            "used_hints": ["[yt-dlp-403-captions-fallback]", "plain-id", 42, ""],
+        }
+    )
+    # Brackets tolerated, non-strings dropped at count time (str() here), empties dropped.
+    assert "[yt-dlp-403-captions-fallback]" in report.used_hints or "yt-dlp-403-captions-fallback" in report.used_hints
+    assert "" not in report.used_hints
+
+
+def test_count_hint_usage_sanitizes_and_counts_once(monkeypatch):
+    """Citations are checked against LIVE hint ids and counted at the fresh-
+    report seam — a fabricated id never lands a row, a real one lands one."""
+    from datetime import datetime, timezone
+
+    from core.scout.report import ScoutReport
+    from core.scout.runner import _count_hint_usage
+    from db import models as db
+
+    monkeypatch.setattr("config.settings.adaptive_enabled", True)
+    now = datetime.now(timezone.utc).isoformat()
+    db.adaptive_put_entry(
+        {
+            "id": "real-hint",
+            "kind": "routing_hint",
+            "scope": "global",
+            "title": "real",
+            "content": "prefer x",
+            "risk": "low",
+            "version": 1,
+            "status": "active",
+            "source": "refine",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    db.delete_signal("adaptive_entry", "real-hint")
+    report = ScoutReport(used_hints=["[real-hint]", "made-up-hint", "real-hint"])
+    _count_hint_usage(report)
+    assert report.used_hints == ["real-hint"]  # sanitized + deduped
+    row = db.get_signal("adaptive_entry", "real-hint")
+    assert row is not None and row["reinforcements"] == 1
+    assert db.get_signal("adaptive_entry", "made-up-hint") is None
