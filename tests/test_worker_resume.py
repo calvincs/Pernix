@@ -152,6 +152,28 @@ def test_revive_respects_worker_cap(mgr, loop, prompt_calls, monkeypatch):
     assert not prompt_calls
 
 
+def test_revive_auto_resume_parent_registers_watch(mgr, loop, prompt_calls):
+    parent_id, wid = _make_worker(mgr, terminal="cancelled")
+    parent = mgr.get(parent_id)
+    out = _driver(loop, orch.resume_worker, wid, "", True)  # auto_resume_parent=True
+    assert "revived" in out
+    assert wid in parent._watched_worker_ids
+    # Persisted, so a restart mid-revival keeps the watch.
+    row = db.get_session(parent_id)
+    assert wid in (row.get("watched_worker_ids") or "")
+
+
+def test_revive_extends_parent_budget(mgr, loop, prompt_calls, monkeypatch):
+    parent_id, wid = _make_worker(mgr, terminal="error")
+    calls: list[tuple] = []
+    monkeypatch.setattr("core.llm.client.extend_session_budget", lambda sid, secs: calls.append((sid, secs)))
+    monkeypatch.setattr("config.settings.llm_session_timeout", 1800)
+    out = _driver(loop, orch.resume_worker, wid)
+    assert "revived" in out
+    assert calls and calls[0][0] == parent_id
+    assert calls[0][1] == 2 * 1800.0
+
+
 def test_revive_clears_stale_model_override(mgr, loop, prompt_calls, monkeypatch):
     _parent, wid = _make_worker(mgr, terminal="error")
     w = mgr.get(wid)

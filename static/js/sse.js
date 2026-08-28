@@ -73,7 +73,7 @@ const EVENT_TYPES = [
     // Turn boundary (safety-net for button reset)
     'turn.complete',
     // Forced follow-up (harness kept an idling agent working in-turn)
-    'turn.forced_followup',
+    'turn.forced_followup', 'turn.forced_followup_outcome',
 ];
 
 window.addEventListener('pernix:offline', () => {

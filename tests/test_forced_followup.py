@@ -71,3 +71,28 @@ def test_nudge_prefers_active_goal(monkeypatch):
     nudge = _build_followup_nudge(sid, "Now I'll get started.", 1, 2)
     assert "ship the release notes" in nudge
     assert "[forced follow-up 1/2]" in nudge
+
+
+# ---------------------------------------------------------------------------
+# Outcome ledger
+# ---------------------------------------------------------------------------
+
+
+def test_outcome_ledger_accumulates():
+    from core.agent import _record_followup_outcome
+    from sessions.state import AgentSession
+
+    sid = db.create_session(title="T")
+    session = AgentSession(session_id=sid)
+
+    _record_followup_outcome(session, sid, acted=True)
+    _record_followup_outcome(session, sid, acted=True)
+    _record_followup_outcome(session, sid, acted=False)
+
+    row = db.get_signal("forced_followup", "global")
+    assert row is not None
+    assert row["successes"] == 2
+    assert row["failures"] == 1
+    # The outcome event reached the session stream.
+    outcomes = [e for e in session.events if e.get("type") == "turn.forced_followup_outcome"]
+    assert [e["outcome"] for e in outcomes] == ["acted", "acted", "re_idled"]

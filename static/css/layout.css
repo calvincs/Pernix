@@ -2768,6 +2768,11 @@ mark.ts-mark.current {
 }
 .worker-chip-ctl:hover { color: var(--text-bright); border-color: var(--border); }
 .worker-chip.paused { opacity: 0.6; }
+/* Recently-finished workers: dimmed chip + gray dot, revivable via the ↻
+   control next to it (resume_worker). */
+.worker-chip.dead { opacity: 0.5; }
+.worker-chip.dead:hover { opacity: 0.8; }
+.worker-chip-dot.dead { background: var(--text-dim); animation: none; }
 
 /* ---------------------------------------------------------------------------
    RLM run viewer — read-only trace rendering in the chat area

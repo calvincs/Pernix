@@ -226,6 +226,15 @@ async def lifespan(app: FastAPI):
             ).stdout.strip()
         except Exception:
             pass
+        if not _sha:
+            # No .git in the image (the deployment norm — code is baked via
+            # COPY and .dockerignore drops the repo). Version alone missed
+            # every same-version rebuild, so the box's "full sweep on deploy"
+            # trigger never fired between releases. Fall back to a content
+            # hash over the shipped code: it changes exactly when the code
+            # does — hand-patched containers included — and is deterministic
+            # across restarts of the same image.
+            _sha = _compute_code_hash()
         _stamp = f"{APP_VERSION}+{_sha}" if _sha else APP_VERSION
         _seen = _db.get_snooze_state("app_version_seen")
         if _seen != _stamp:
@@ -580,6 +589,32 @@ def _compute_build_id() -> str:
 
 
 BUILD_ID = _compute_build_id()
+
+
+def _compute_code_hash() -> str:
+    """Content hash of the shipped code — the deploy-stamp fallback when the
+    image carries no .git. Contents only (no sizes/mtimes), sorted paths, so
+    the value is deterministic for a given code state and changes exactly
+    when the code does."""
+    import hashlib
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parent.parent
+    h = hashlib.sha256()
+    try:
+        trees = ["api", "core", "sessions", "db", "static"]
+        files: list[_Path] = [root / "config.py", root / "run.py", root / "maintenance.py"]
+        for tree in trees:
+            files.extend((root / tree).rglob("*.py"))
+        files.extend((root / "static").rglob("*.js"))
+        files.extend((root / "static").rglob("*.css"))
+        files.extend((root / "static").rglob("*.html"))
+        for p in sorted(f for f in files if f.is_file() and "__pycache__" not in f.parts):
+            h.update(str(p.relative_to(root)).encode())
+            h.update(p.read_bytes())
+    except OSError:
+        return ""
+    return h.hexdigest()[:12]
 
 
 @app.get("/sw.js")

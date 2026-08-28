@@ -1338,15 +1338,33 @@ function _renderStreamIncremental(contentEl) {
 // Worker activity strip — live view of the fleet during a fan-out, instead
 // of an opaque "awaiting workers" wait. Click a worker to open its session.
 // ---------------------------------------------------------------------------
-const _activeWorkers = new Map();  // worker_id → { title, startedAt }
+const _activeWorkers = new Map();  // worker_id → { title, kind, startedAt }
+// worker_id → { title, kind, reason, endedAt } — recently-finished workers,
+// kept so a dead worker has a UI home (and a Resume button) instead of
+// vanishing from the strip the moment it stops. Capped, recency-bounded.
+const _recentDeadWorkers = new Map();
+const _DEAD_WORKER_CAP = 4;
+const _DEAD_WORKER_MAX_AGE_MS = 60 * 60 * 1000;  // showing week-old corpses is noise
 // run_id → { uiSid, label, iterations, maxIterations, subcalls, startedAt }
 const _activeRlmRuns = new Map();
 let _workerTicker = null;
 
+function _addDeadWorker(wid, entry) {
+    _recentDeadWorkers.delete(wid);  // re-insert = move to newest position
+    _recentDeadWorkers.set(wid, entry);
+    while (_recentDeadWorkers.size > _DEAD_WORKER_CAP) {
+        _recentDeadWorkers.delete(_recentDeadWorkers.keys().next().value);
+    }
+}
+
 function _renderWorkerStrip() {
     const strip = document.getElementById('worker-strip');
     if (!strip) return;
-    if (_activeWorkers.size === 0 && _activeRlmRuns.size === 0) {
+    // Age out stale dead chips before deciding visibility.
+    for (const [wid, d] of _recentDeadWorkers) {
+        if (Date.now() - d.endedAt > _DEAD_WORKER_MAX_AGE_MS) _recentDeadWorkers.delete(wid);
+    }
+    if (_activeWorkers.size === 0 && _activeRlmRuns.size === 0 && _recentDeadWorkers.size === 0) {
         strip.hidden = true;
         strip.innerHTML = '';
         if (_workerTicker) { clearInterval(_workerTicker); _workerTicker = null; }
@@ -1357,6 +1375,7 @@ function _renderWorkerStrip() {
     const labelParts = [];
     if (_activeWorkers.size) labelParts.push(`${_activeWorkers.size} worker${_activeWorkers.size === 1 ? '' : 's'}`);
     if (_activeRlmRuns.size) labelParts.push(`${_activeRlmRuns.size} RLM`);
+    if (_recentDeadWorkers.size) labelParts.push(`${_recentDeadWorkers.size} finished`);
     strip.appendChild(el('span', { class: 'worker-strip-label' }, [
         text(labelParts.join(' · ')),
     ]));
@@ -1393,6 +1412,37 @@ function _renderWorkerStrip() {
         });
         strip.appendChild(el('span', { class: 'worker-chip-wrap' }, [chip, ctlBtn]));
     }
+    // Dead-worker chips: dimmed, with the termination reason and a revive
+    // button. Reviving fires worker.resumed, which flips the chip back to
+    // the active map.
+    for (const [wid, d] of _recentDeadWorkers) {
+        const kindTag = d.kind ? `[${d.kind}] ` : '';
+        const chip = el('button', {
+            class: 'worker-chip dead',
+            title: `${kindTag}${d.title} — ended: ${d.reason}. Click to open transcript.`,
+            onClick: () => selectSession(wid),
+        }, [
+            el('span', { class: 'worker-chip-dot dead' }),
+            text(` ${kindTag}${d.title.slice(0, 24)} · ${d.reason}`),
+        ]);
+        const reviveBtn = el('button', {
+            class: 'worker-chip-ctl',
+            title: 'Resume this worker from where it stopped',
+        }, [text('↻')]);
+        reviveBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            reviveBtn.disabled = true;
+            try {
+                await post(`/api/sessions/${state.sid}/workers/${wid}/resume`, {});
+                _recentDeadWorkers.delete(wid);
+            } catch (err) {
+                appendMessage('system', `Worker resume failed: ${err.message}`);
+                reviveBtn.disabled = false;
+            }
+            _renderWorkerStrip();
+        });
+        strip.appendChild(el('span', { class: 'worker-chip-wrap' }, [chip, reviveBtn]));
+    }
     // RLM run chips — live iteration/sub-call counters; click opens the
     // run's read-only trace view (its sidebar pseudo-session).
     for (const [rid, r] of _activeRlmRuns) {
@@ -1415,6 +1465,7 @@ function _renderWorkerStrip() {
 
 async function _seedWorkerStrip(sid) {
     _activeWorkers.clear();
+    _recentDeadWorkers.clear();
     _activeRlmRuns.clear();
     try {
         const data = await get(`/api/sessions/${sid}/workers`);
@@ -1423,7 +1474,20 @@ async function _seedWorkerStrip(sid) {
             // Defensive: only real workers belong in the worker-chip path
             // (RLM view sessions get their own pink chips from /api/rlm/runs).
             if (w.session_type && w.session_type !== 'worker') continue;
-            if (w.state === 'idle_ready' || w.state === 'idle') continue;  // finished
+            if (w.state === 'idle_ready' || w.state === 'idle') {
+                // Recently-finished workers get a dead chip with a Resume
+                // button; anything older stays out of the strip.
+                const ended = w.updated_at ? (Date.parse(w.updated_at + 'Z') || 0) : 0;
+                if (ended && (now - ended) <= _DEAD_WORKER_MAX_AGE_MS) {
+                    _addDeadWorker(w.id, {
+                        title: w.title,
+                        kind: w.kind || '',
+                        reason: w.termination_reason || 'done',
+                        endedAt: ended,
+                    });
+                }
+                continue;
+            }
             const started = w.created_at ? Date.parse(w.created_at + 'Z') || now : now;
             _activeWorkers.set(w.id, {
                 title: w.title,
@@ -1865,6 +1929,7 @@ function handleEvent(event) {
         const workerModel = event.model ? ` [${event.model}]` : '';
         const workerKind = event.kind ? ` (${event.kind})` : '';
         appendMessage('system', `Worker started: ${event.title || event.worker_id}${workerKind}${workerModel}`);
+        _recentDeadWorkers.delete(event.worker_id);
         _activeWorkers.set(event.worker_id, {
             title: event.title || event.worker_id,
             kind: event.kind || '',
@@ -1880,6 +1945,7 @@ function handleEvent(event) {
         const prior = event.prior_termination ? ` (was: ${event.prior_termination})` : '';
         const kindNote = event.kind ? ` (${event.kind})` : '';
         appendMessage('system', `Worker resumed: ${event.title || event.worker_id}${kindNote}${prior}`);
+        _recentDeadWorkers.delete(event.worker_id);
         _activeWorkers.set(event.worker_id, {
             title: event.title || event.worker_id,
             kind: event.kind || '',
@@ -1892,7 +1958,14 @@ function handleEvent(event) {
         const reason = event.termination_reason ? ` (${event.termination_reason})` : '';
         const err = event.error ? ` error: ${event.error}` : '';
         appendMessage('system', `Worker done: ${event.worker_id}${reason}${err}`);
+        const prev = _activeWorkers.get(event.worker_id);
         _activeWorkers.delete(event.worker_id);
+        _addDeadWorker(event.worker_id, {
+            title: (prev && prev.title) || event.worker_id.slice(0, 8),
+            kind: (prev && prev.kind) || '',
+            reason: event.termination_reason || (event.error ? 'error' : 'done'),
+            endedAt: Date.now(),
+        });
         _renderWorkerStrip();
     }
 

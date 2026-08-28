@@ -1125,7 +1125,12 @@ def _resume_paused(session, worker_id: str, _context: dict | None = None) -> str
     return call_on_loop(_resume_on_loop, loop=(_context or {}).get("_loop"))
 
 
-def resume_worker(worker_id: str, note: str = "", _context: dict | None = None) -> str:
+def resume_worker(
+    worker_id: str,
+    note: str = "",
+    auto_resume_parent: bool = False,
+    _context: dict | None = None,
+) -> str:
     """Resume a worker wherever it stopped (spec Feature 5).
 
     Three cases, one mental model — "bring the worker back to life":
@@ -1235,6 +1240,12 @@ def resume_worker(worker_id: str, note: str = "", _context: dict | None = None) 
         # Re-attach to the parent so check_workers/await_workers see it.
         if parent is not None and worker_id not in parent.worker_ids:
             parent.worker_ids.append(worker_id)
+        # Watch-set parity with spawn_worker(auto_resume_parent=True): the
+        # revived worker's completion wakes the parent via the normal
+        # _on_watched_worker_done path.
+        if parent is not None and auto_resume_parent:
+            parent._watched_worker_ids.add(worker_id)
+            manager._persist_watched(parent)
 
         # Clear the previous run's summary file — get_worker_result prefers
         # it, so a stale INCOMPLETE/CANCELLED stamp (or an outdated real
@@ -1264,6 +1275,19 @@ def resume_worker(worker_id: str, note: str = "", _context: dict | None = None) 
     if outcome.startswith(("Error:", "Worker ")):
         return outcome
     prior, _sep, model_note = outcome.partition("|")
+
+    # Budget parity with spawn_worker: a parent that revives a worker and then
+    # awaits it needs its LLM wall-clock extended past the child's runtime,
+    # or the synthesis turn dies on its first acquire.
+    if parent is not None:
+        try:
+            from core.llm.client import extend_session_budget as _extend
+
+            base = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else 0.0
+            if base > 0:
+                _extend(parent_id, min(2 * base, 24 * 3600.0))
+        except Exception as _ext_err:
+            logger.debug("resume_worker: failed to extend parent budget: %s", _ext_err)
 
     resume_msg = (
         f"[resumed by resume_worker] Your previous run ended: {prior}.{model_note}\n"
@@ -1564,6 +1588,13 @@ def register(reg) -> None:
                 "note": {
                     "type": "string",
                     "description": "Optional guidance injected into the continuation turn",
+                },
+                "auto_resume_parent": {
+                    "type": "boolean",
+                    "description": (
+                        "Add the revived worker to the parent watch-set so the parent "
+                        "auto-resumes when it finishes (default false; same contract as spawn_worker)"
+                    ),
                 },
             },
             "required": ["worker_id"],

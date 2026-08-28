@@ -17,6 +17,10 @@ router = APIRouter(tags=["jobs"])
 
 HEARTBEAT_INTERVAL = 30
 
+# Strong refs for fire-and-forget test runs — asyncio holds only a weak
+# reference to running tasks, so a bare create_task can be GC'd mid-flight.
+_bg_tasks: set = set()
+
 
 @router.get("/api/jobs")
 async def list_jobs():
@@ -97,6 +101,73 @@ async def resume_job_endpoint(name: str):
     if result.startswith("Error"):
         raise HTTPException(400, detail=result)
     return {"status": "resumed", "name": name}
+
+
+@router.post("/api/jobs/{name}/validate")
+async def validate_job_endpoint(name: str):
+    """Re-validate a stored job's spec. Persists the result on the job."""
+    from core.extensions.scheduling import _read_jobs_json, _update_job_field, validate_job_spec
+
+    job = next((j for j in _read_jobs_json() if j["name"] == name), None)
+    if job is None:
+        raise HTTPException(404, detail=f"Job '{name}' not found")
+    v = validate_job_spec(
+        job.get("cron_expr", ""),
+        job.get("prompt", ""),
+        model=job.get("model", ""),
+        allowed_tools=job.get("allowed_tools"),
+    )
+    _update_job_field(name, "validation", v)
+    return {"name": name, "validation": v}
+
+
+@router.post("/api/jobs/{name}/test")
+async def test_job_endpoint(name: str):
+    """Start an isolated dry-run of the job (spec Feature 7).
+
+    Returns immediately — a test can take minutes. The outcome arrives as a
+    `job.test_done` event on /api/jobs/events plus a bell notification, and
+    is stamped on the job as `last_test`."""
+    from core.extensions.scheduling import _read_jobs_json, run_job_test
+
+    if not any(j["name"] == name for j in _read_jobs_json()):
+        raise HTTPException(404, detail=f"Job '{name}' not found")
+
+    async def _run_and_notify():
+        from sessions.manager import get_manager
+
+        try:
+            result = await run_job_test(name)
+        except Exception as e:
+            logger.error("Job test '%s' crashed: %s", name, e)
+            return
+        try:
+            title = f"Job test {'passed' if result.get('ok') else 'FAILED'}: {name}"
+            body = (result.get("error") or result.get("answer_preview") or "completed cleanly")[:200]
+            nid = await asyncio.to_thread(
+                db.add_notification,
+                session_id=result.get("session_id") or "",
+                title=title,
+                body=body,
+                urgency="normal" if result.get("ok") else "high",
+            )
+            get_manager().broadcast(
+                {
+                    "type": "dialog.notification",
+                    "notification_id": nid,
+                    "title": title,
+                    "body": body,
+                    "urgency": "normal" if result.get("ok") else "high",
+                    "source_session_id": result.get("session_id") or "",
+                }
+            )
+        except Exception as e:
+            logger.debug("Job test notification failed: %s", e)
+
+    task = asyncio.create_task(_run_and_notify())
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return {"status": "test_started", "name": name}
 
 
 @router.get("/api/jobs/runs")

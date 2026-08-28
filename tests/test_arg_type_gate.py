@@ -117,6 +117,43 @@ def test_none_value_passes_through():
     assert args["limit"] is None
 
 
+def test_enum_membership_enforced():
+    tool = _tool({"mode": {"type": "string", "enum": ["fast", "slow"]}})
+    err, _n, _a = _run(tool, {"mode": "fast"})
+    assert err is None
+    err, _n, _a = _run(tool, {"mode": "medium"})
+    assert err is not None
+    assert "fast" in err and "slow" in err
+
+
+def test_enum_checked_after_coercion():
+    # "5" coerces to 5, which IS an enum member — must pass.
+    tool = _tool({"level": {"type": "integer", "enum": [1, 5, 9]}})
+    err, _n, args = _run(tool, {"level": "5"})
+    assert err is None
+    assert args["level"] == 5
+
+
+def test_array_item_types_validated():
+    tool = _tool({"ids": {"type": "array", "items": {"type": "integer"}}})
+    err, _n, args = _run(tool, {"ids": [1, 2, 3]})
+    assert err is None
+    err, notes, args = _run(tool, {"ids": [1, "2", 3]})
+    assert err is None
+    assert args["ids"] == [1, 2, 3]
+    assert any("items" in n for n in notes)
+    err, _n, _a = _run(tool, {"ids": [1, "two"]})
+    assert err is not None
+    assert "element 1" in err
+
+
+def test_array_without_item_schema_passes():
+    tool = _tool({"stuff": {"type": "array"}})
+    err, notes, args = _run(tool, {"stuff": [1, "mixed", {"a": 1}]})
+    assert err is None
+    assert not notes
+
+
 def test_coerce_helper_edges():
     assert _coerce_json_type("  7 ", "integer") == (True, 7)
     assert _coerce_json_type("-3", "integer") == (True, -3)

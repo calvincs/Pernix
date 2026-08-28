@@ -229,6 +229,21 @@ function _buildJobRow(job, models) {
 
     function renderView() {
         clear(wrapper);
+        // Validation + last-test badges (spec Feature 7). A job saved before
+        // the feature has no validation record — shown as "unvalidated".
+        const v = job.validation;
+        const validBadge = !v
+            ? el('span', { style: { color: 'var(--text-faint)' }, title: 'Saved before spec validation existed — edit or validate to check it' }, [text('unvalidated')])
+            : v.ok
+                ? el('span', { style: { color: 'var(--ok, #4a8)' }, title: (v.warnings || []).join('\n') || 'spec valid' }, [text((v.warnings || []).length ? 'valid ⚠' : 'valid')])
+                : el('span', { style: { color: 'var(--danger, #c66)' }, title: (v.errors || []).join('\n') }, [text('invalid')]);
+        const lt = job.last_test;
+        const testBadge = lt
+            ? el('span', {
+                style: { color: lt.ok ? 'var(--ok, #4a8)' : 'var(--danger, #c66)' },
+                title: lt.error || `tested ${lt.at || ''} (${lt.duration_s || 0}s)`,
+            }, [text(lt.ok ? 'test ✓' : 'test ✗')])
+            : null;
         const item = el('div', { class: 'jobs-item' }, [
             statusBadge(job.status),
             el('div', { class: 'jobs-item-main' }, [
@@ -239,6 +254,8 @@ function _buildJobRow(job, models) {
                     job.model ? el('span', {}, [text(`model: ${job.model}`)]) : null,
                     el('span', {}, [text(`runs: ${job.run_count}`)]),
                     job.last_run_at ? el('span', {}, [text(`last: ${relativeTime(job.last_run_at)}`)]) : null,
+                    validBadge,
+                    testBadge,
                 ]),
                 el('div', { class: 'jobs-item-meta', style: { marginTop: '2px' } }, [
                     el('span', { style: { color: 'var(--text-faint)' } },
@@ -246,6 +263,21 @@ function _buildJobRow(job, models) {
                 ]),
             ]),
             el('div', { class: 'jobs-item-actions' }, [
+                el('button', {
+                    class: 'jobs-btn',
+                    title: 'Dry-run this job once in an isolated workspace — result arrives as a notification',
+                    onClick: async (e) => {
+                        e.target.disabled = true;
+                        e.target.textContent = 'testing…';
+                        try {
+                            await post(`/api/jobs/${encodeURIComponent(job.name)}/test`);
+                        } catch (err) {
+                            e.target.disabled = false;
+                            e.target.textContent = 'test';
+                            alert(`Test failed to start: ${err.message}`);
+                        }
+                    },
+                }, [text('test')]),
                 el('button', {
                     class: 'jobs-btn',
                     onClick: () => renderEdit(),

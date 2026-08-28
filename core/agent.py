@@ -573,6 +573,37 @@ def _build_followup_nudge(session_id: str, content: str, attempt: int, cap: int)
     )
 
 
+def _record_followup_outcome(session: AgentSession, session_id: str, acted: bool) -> None:
+    """One aggregate ledger row: did the nudge produce tool calls?
+
+    scout_signals (signal_type="forced_followup", subject="global") —
+    successes = the agent acted, failures = it re-idled anyway. A week of
+    live traffic answers "is this feature earning its keep" with one query,
+    and a rising failure share is the adaptive layer's cue to narrow the
+    trigger. Runs in a thread (DB write); never blocks the turn.
+    """
+    try:
+        db.upsert_signal(
+            "forced_followup",
+            "global",
+            delta_successes=1 if acted else 0,
+            delta_failures=0 if acted else 1,
+        )
+    except Exception as e:
+        logger.debug("forced_followup outcome record failed: %s", e)
+    session.emit_event(
+        {
+            "type": "turn.forced_followup_outcome",
+            "outcome": "acted" if acted else "re_idled",
+        }
+    )
+    logger.info(
+        "Session %s: forced follow-up outcome=%s",
+        session_id,
+        "acted" if acted else "re_idled",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tool-call admission
 # ---------------------------------------------------------------------------
@@ -632,7 +663,8 @@ def _validate_arg_types(tool_def, parsed_args: dict, notes) -> str | None:
 
     coerced: list[str] = []
     for key, value in list(parsed_args.items()):
-        expected = props.get(key, {}).get("type")
+        spec = props.get(key, {})
+        expected = spec.get("type")
         # Union types ({"type": ["string","null"]}) and typeless properties:
         # accept as-is — precision there isn't worth false rejections.
         if not isinstance(expected, str) or expected not in _JSON_TYPE_CHECKS:
@@ -643,13 +675,51 @@ def _validate_arg_types(tool_def, parsed_args: dict, notes) -> str | None:
         if isinstance(value, bool) and expected not in ("boolean", "string"):
             ok, new_value = False, value
         elif isinstance(value, accepted):
-            continue
+            ok, new_value = True, value
         else:
             ok, new_value = _coerce_json_type(value, expected)
+            if ok:
+                coerced.append(f"{key} ({type(value).__name__}→{expected})")
         if not ok:
             return f"parameter '{key}' expects {expected}, got {type(value).__name__} ({str(value)[:80]!r})"
         parsed_args[key] = new_value
-        coerced.append(f"{key} ({type(value).__name__}→{expected})")
+
+        # Enum membership — a wrong enum string used to reach the tool and
+        # burn a round on its "invalid value" error. Checked after coercion
+        # so a numeric-string enum member still matches.
+        enum_vals = spec.get("enum")
+        if isinstance(enum_vals, list) and enum_vals and new_value not in enum_vals:
+            allowed = ", ".join(repr(v) for v in enum_vals[:12])
+            return f"parameter '{key}' must be one of [{allowed}], got {str(new_value)[:80]!r}"
+
+        # Array item types — one wrong-typed element ([\"5\"] for integers)
+        # otherwise TypeErrors inside the tool. Scalar item schemas only;
+        # nested objects/arrays stay the tool's own concern.
+        if expected == "array":
+            item_type = (spec.get("items") or {}).get("type")
+            if isinstance(item_type, str) and item_type in _JSON_TYPE_CHECKS:
+                item_accepted = _JSON_TYPE_CHECKS[item_type]
+                new_items: list = []
+                items_coerced = False
+                for i, item in enumerate(new_value):
+                    if isinstance(item, bool) and item_type not in ("boolean", "string"):
+                        item_ok = False
+                    elif isinstance(item, item_accepted):
+                        new_items.append(item)
+                        continue
+                    else:
+                        item_ok, item = _coerce_json_type(item, item_type)
+                        items_coerced = items_coerced or item_ok
+                        if item_ok:
+                            new_items.append(item)
+                            continue
+                    return (
+                        f"parameter '{key}' expects an array of {item_type}; "
+                        f"element {i} is {type(new_value[i]).__name__} ({str(new_value[i])[:60]!r})"
+                    )
+                if items_coerced:
+                    parsed_args[key] = new_items
+                    coerced.append(f"{key}[] (items→{item_type})")
     if coerced:
         notes(f"[note: coerced parameter type(s): {', '.join(coerced)}]")
     return None
@@ -1172,8 +1242,10 @@ async def run_agent(
 
     # Forced follow-ups used this turn (spec Feature 9). Bounded by
     # settings.forced_followup_max_per_turn so a genuinely finished task is
-    # never looped.
+    # never looped. _followup_pending tracks a fired nudge whose outcome
+    # (acted / re-idled) hasn't been recorded yet.
     _forced_followups = 0
+    _followup_pending = False
 
     # Last compiled prompt size (F13, field case 17683100ecf8): the only
     # token number the window actually constrains. One round stale by
@@ -1403,6 +1475,12 @@ async def run_agent(
 
         # --- Response analysis ---
         if not collected_tool_calls:
+            # A pending nudge answered with another tool-less reply = the
+            # agent re-idled. Record before deciding whether to nudge again.
+            if _followup_pending:
+                _followup_pending = False
+                await asyncio.to_thread(_record_followup_outcome, session, session_id, False)
+
             # Forced follow-up (spec Feature 9): the model narrated future work
             # ("Next, I'll…") and then went quiet. Ending the turn here means
             # paying for a full reflect retry to recover; one in-turn nudge is
@@ -1437,6 +1515,7 @@ async def run_agent(
                     _followup_cap,
                     tool_round,
                 )
+                _followup_pending = True
                 session.touch()
                 collected_content = ""
                 tool_round += 1
@@ -1467,6 +1546,11 @@ async def run_agent(
 
         # --- Tool execution ---
         did_tool_calls = True
+
+        # A pending nudge answered with tool calls = the nudge worked.
+        if _followup_pending:
+            _followup_pending = False
+            await asyncio.to_thread(_record_followup_outcome, session, session_id, True)
 
         # NOTE: We save the assistant message AFTER validation below,
         # so only validated tool_calls end up in the DB (prevents orphans).

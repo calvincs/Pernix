@@ -1072,19 +1072,249 @@ def enqueue_manual_telos(force_weekly: bool = False) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Job spec validation + isolated test-run (spec Feature 7)
+# ---------------------------------------------------------------------------
+
+# A test-run is a smoke check, not a production run — bounded well under the
+# cron dispatch ceiling so a broken prompt fails fast.
+_JOB_TEST_TIMEOUT_S = 300
+_JOB_TEST_CANCEL_GRACE_S = 30
+
+
+def validate_job_spec(
+    cron_expr: str,
+    prompt: str,
+    model: str = "",
+    allowed_tools: list | None = None,
+) -> dict:
+    """Structured validation of a job spec. Errors block; warnings don't.
+
+    Errors are the locally-provable breaks (unparseable cron, empty prompt,
+    a tool name the registry has never heard of). Model resolution is a
+    warning only — the model registry can be stale or remote, and blocking a
+    save on it would reject legitimate OpenRouter ids.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    from apscheduler.triggers.cron import CronTrigger
+
+    try:
+        CronTrigger.from_crontab(cron_expr)
+    except (ValueError, KeyError) as e:
+        errors.append(f"cron_expr: invalid ({e})")
+    if len((prompt or "").strip()) < 10:
+        errors.append("prompt: too short to be a real job charter (<10 chars)")
+    if allowed_tools:
+        try:
+            from core.tools.registry import get_registry
+
+            treg = get_registry()
+            for t in allowed_tools:
+                t = str(t)
+                if not treg.exists(t):
+                    errors.append(f"allowed_tools: unknown tool '{t}'")
+                elif treg.is_disabled(t):
+                    warnings.append(f"allowed_tools: tool '{t}' is currently disabled")
+        except Exception as e:
+            warnings.append(f"allowed_tools: registry unavailable — not validated ({e})")
+    if model:
+        try:
+            from core.llm.client import get_llm_client
+
+            mreg = get_llm_client().router.registry
+            if not mreg.get_model_info(mreg.resolve_model_id(model)):
+                warnings.append(f"model: '{model}' not found in the model registry (may still resolve at dispatch)")
+        except Exception:
+            warnings.append("model: registry unavailable — not validated")
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def run_job_test(name: str) -> dict:
+    """Dry-run one job's prompt in an isolated temp workspace.
+
+    Mirrors the canary runner's mechanics (temp workspace override, real
+    manager.prompt, wait on the task handle, cancel + grace on timeout) but
+    runs under the job's OWN model and allow-list for fidelity. Never records
+    a cron_runs row and never consumes the schedule. The transcript session
+    (titled "Job test: <name>") is kept for inspection.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from core.canary.runner import _wait_for_turn_end
+    from core.events import get_event_bus
+    from sessions import state_v2 as sv2
+    from sessions.manager import get_manager
+
+    saved = _read_jobs_json()
+    job = next((j for j in saved if j["name"] == name), None)
+    if job is None:
+        return {"ok": False, "job": name, "error": f"job '{name}' not found"}
+
+    validation = validate_job_spec(
+        job.get("cron_expr", ""), job.get("prompt", ""), job.get("model", ""), job.get("allowed_tools")
+    )
+    bus = get_event_bus()
+    bus.emit({"type": "job.test_started", "job_name": name})
+
+    manager = get_manager()
+    start = time.monotonic()
+    tmp = Path(tempfile.mkdtemp(prefix=f"jobtest-{name[:24]}-"))
+    result: dict = {"ok": False, "job": name, "validation": validation}
+    sid = ""
+    turn_started = False
+    turn_ended = False
+    try:
+        sid = manager.create_session(title=f"Job test: {name}", session_type="cron")
+        result["session_id"] = sid
+        session = manager.get(sid)
+        session.workspace_override = str(tmp)
+        if job.get("model"):
+            session.model_override = job["model"]
+        if job.get("allowed_tools"):
+            session.tool_allowlist = frozenset(str(t) for t in job["allowed_tools"] if t)
+
+        await manager.prompt(sid, job.get("prompt", ""))
+        turn_started = True
+        turn_ended = await _wait_for_turn_end(session, time.monotonic() + _JOB_TEST_TIMEOUT_S)
+        if not turn_ended:
+            session.cancel_requested = True
+            turn_ended = await _wait_for_turn_end(session, time.monotonic() + _JOB_TEST_CANCEL_GRACE_S)
+            result["error"] = f"timeout after {_JOB_TEST_TIMEOUT_S}s"
+
+        result["termination_reason"] = session.termination_reason
+        if session.error:
+            result["error"] = session.error
+        if sv2._current_state(session) is sv2.SessionStateV2.AWAITING_USER:
+            # An unattended fire would hang here forever — that IS the finding.
+            result["error"] = "job asked a user question — an unattended run would wedge in AWAITING_USER"
+
+        def _read_outcome() -> tuple[str, int]:
+            preview = ""
+            for m in reversed(db.get_messages(sid, last=50)):
+                if m.get("role") == "assistant" and m.get("content"):
+                    preview = m["content"][:400]
+                    break
+            tokens = int((db.get_session_usage(sid) or {}).get("total", 0))
+            return preview, tokens
+
+        try:
+            _preview, _tokens = await asyncio.to_thread(_read_outcome)
+            if _preview:
+                result["answer_preview"] = _preview
+            result["tokens"] = _tokens
+        except Exception:
+            pass
+        result["ok"] = bool(turn_ended) and not result.get("error")
+    except Exception as e:
+        logger.exception("Job test '%s' failed", name)
+        result["error"] = result.get("error") or str(e)
+    finally:
+        result["duration_s"] = round(time.monotonic() - start, 1)
+        try:
+            s = manager.get(sid) if sid else None
+            if s is not None:
+                s.workspace_override = None
+                s.model_override = None
+                s.tool_allowlist = None
+        except Exception:
+            pass
+        # Same reclamation rule as the canary runner: never delete the temp
+        # workspace under a still-running agent — leak and log instead.
+        if turn_ended or not turn_started:
+            shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            logger.warning("Job test '%s' never ended its turn — leaving %s in place", name, tmp)
+
+    # Stamp the outcome onto the live job's meta (round-tripped by _save_jobs)
+    # so the panel can show "last test: pass/fail" without a separate store.
+    try:
+        scheduler = _get_scheduler()
+        live = scheduler.get_job(name) if scheduler else None
+        if live is not None:
+            live.kwargs.get("meta", {})["last_test"] = {
+                "ok": result["ok"],
+                "at": datetime.now(timezone.utc).isoformat(),
+                "error": (result.get("error") or "")[:300],
+                "duration_s": result["duration_s"],
+            }
+            _save_jobs()
+    except Exception as e:
+        logger.debug("Persisting job test outcome failed: %s", e)
+
+    bus.emit(
+        {
+            "type": "job.test_done",
+            "job_name": name,
+            "ok": result["ok"],
+            "error": result.get("error") or "",
+            "duration_s": result["duration_s"],
+            "session_id": result.get("session_id") or "",
+        }
+    )
+    logger.info(
+        "Job test '%s' %s (%.0fs)%s",
+        name,
+        "PASSED" if result["ok"] else "FAILED",
+        result["duration_s"],
+        f" — {result.get('error')}" if result.get("error") else "",
+    )
+    return result
+
+
+def test_job(name: str, _context: dict | None = None) -> str:
+    """Tool wrapper: run a job's prompt once in an isolated workspace."""
+    import asyncio
+
+    ctx = _context or {}
+    loop = ctx.get("_loop")
+    if not loop:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return "Error: no event loop available for test_job"
+    try:
+        result = asyncio.run_coroutine_threadsafe(run_job_test(name), loop).result(
+            timeout=_JOB_TEST_TIMEOUT_S + _JOB_TEST_CANCEL_GRACE_S + 60
+        )
+    except Exception as e:
+        return f"Error: job test did not complete: {e}"
+    lines = [f"Job test '{name}': {'PASS' if result.get('ok') else 'FAIL'} ({result.get('duration_s', 0)}s)"]
+    if result.get("error"):
+        lines.append(f"Error: {result['error']}")
+    v = result.get("validation") or {}
+    for e in v.get("errors", []):
+        lines.append(f"spec error: {e}")
+    for w in v.get("warnings", []):
+        lines.append(f"spec warning: {w}")
+    if result.get("termination_reason"):
+        lines.append(f"termination: {result['termination_reason']}")
+    if result.get("answer_preview"):
+        lines.append(f"answer preview: {result['answer_preview'][:300]}")
+    if result.get("session_id"):
+        lines.append(f"transcript session: {result['session_id']}")
+    lines.append("(dry run — no cron_runs row recorded, schedule untouched, temp workspace)")
+    return "\n".join(lines)
+
+
 def schedule_job(
     name: str, cron_expr: str, prompt: str, session_id: str = "", model: str = "", _context: dict | None = None
 ) -> str:
     """Schedule a recurring job with cron expression."""
     import asyncio
 
-    from apscheduler.triggers.cron import CronTrigger
-
-    # Validate cron expression early for a clear error message
-    try:
-        CronTrigger.from_crontab(cron_expr)
-    except (ValueError, KeyError) as e:
-        return f"Error: Invalid cron expression '{cron_expr}': {e}"
+    # Full spec validation up front (spec Feature 7): a job that can't fire
+    # correctly should fail at save time, not weeks later on schedule.
+    v = validate_job_spec(cron_expr, prompt, model=model)
+    if not v["ok"]:
+        return "Error: job spec invalid — " + "; ".join(v["errors"])
 
     ctx = _context or {}
     loop = ctx.get("_loop")
@@ -1094,9 +1324,14 @@ def schedule_job(
             future = asyncio.run_coroutine_threadsafe(_init_scheduler_async(), loop)
             future.result(timeout=10)
 
-        _add_job_internal(name, cron_expr, prompt, session_id=session_id or None, model=model)
+        _add_job_internal(
+            name, cron_expr, prompt, session_id=session_id or None, model=model, extra_meta={"validation": v}
+        )
         _save_jobs()
-        return f"Job '{name}' scheduled: {cron_expr}"
+        msg = f"Job '{name}' scheduled: {cron_expr}"
+        if v["warnings"]:
+            msg += " (warnings: " + "; ".join(v["warnings"]) + ")"
+        return msg
     except Exception as e:
         return f"Error scheduling job: {e}"
 
@@ -1124,6 +1359,21 @@ def update_scheduled_job(
     new_prompt = prompt if prompt is not None else current.get("prompt", "")
     new_model = model if model is not None else current.get("model", "")
     was_paused = current.get("paused", False)
+
+    # Re-validate the merged spec (spec Feature 7). Block ONLY on errors the
+    # edit itself introduces (a changed cron/prompt) — a job whose
+    # pre-existing prompt or allow-list wouldn't pass today's rules must stay
+    # editable, or the fix for an invalid job would be refused by its own
+    # invalidity. The full result still lands on the job for the UI badge.
+    v = validate_job_spec(new_cron, new_prompt, model=new_model, allowed_tools=current.get("allowed_tools"))
+    blocking: list[str] = []
+    if cron_expr is not None:
+        blocking += [e for e in v["errors"] if e.startswith("cron_expr")]
+    if prompt is not None:
+        blocking += [e for e in v["errors"] if e.startswith("prompt")]
+    if blocking:
+        return "Error: job spec invalid — " + "; ".join(blocking)
+    current["validation"] = v
 
     try:
         # Re-add with updated parameters (replace_existing=True in _add_job_internal).
@@ -1278,6 +1528,12 @@ def get_all_jobs_with_status() -> list[dict]:
                 "next_run": next_runs.get(name),
                 "run_count": stats.get("run_count", 0),
                 "last_run_at": stats.get("last_run_at"),
+                # Spec-validation + last dry-run outcomes (spec Feature 7).
+                # None for pre-feature jobs — the UI renders those as
+                # "unvalidated", which is the honest state.
+                "validation": job.get("validation"),
+                "last_test": job.get("last_test"),
+                "allowed_tools": job.get("allowed_tools"),
             }
         )
     return result
@@ -1413,6 +1669,28 @@ def register(reg) -> None:
         tags=tags + ["pause", "resume", "stop", "start", "unpause"],
         timeout=15,
         parallel_safe=False,
+        **common,
+    )
+    reg.register(
+        name="test_job",
+        func=test_job,
+        description=(
+            "Dry-run a scheduled job's prompt ONCE in an isolated temp workspace, under the "
+            "job's own model and tool allow-list. Reports pass/fail, spec validation, and an "
+            "answer preview — without recording a run or touching the schedule. Use after "
+            "schedule_job/update_scheduled_job to prove the job actually works before it fires."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "Job name to test"}},
+            "required": ["name"],
+        },
+        tags=tags + ["test", "dry-run", "validate", "verify", "smoke"],
+        timeout=_JOB_TEST_TIMEOUT_S + _JOB_TEST_CANCEL_GRACE_S + 90,
+        parallel_safe=False,
+        long_poll=True,
+        safety_level="safe",
+        denied_session_types={"worker", "canary"},
         **common,
     )
     reg.register(
