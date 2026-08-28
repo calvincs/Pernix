@@ -646,6 +646,15 @@ class Settings:
     reflect_max_retries: int = 2  # Max retry attempts before giving up
     reflect_max_retries_worker: int = 2  # Separate cap for worker sessions — bounds fan-out cost (2 retries allowed)
     reflect_min_messages: int = 3  # Min messages to trigger (skip trivial exchanges)
+    # Materiality floor for non-pass verdicts (2026-08-27 audit): the prompt
+    # defines confidence <0.5 as "evidence is ambiguous" and the materiality
+    # bar grades ambiguity as pass — yet low-confidence retry/escalate
+    # verdicts kept landing (a 0.45-confidence escalate over evidence the
+    # verifier itself couldn't see). A non-pass verdict the model grades
+    # below this floor is downgraded to pass-with-lessons mechanically.
+    # Coerced verdicts (malformed grades) are exempt and stay conservative.
+    # 0 disables.
+    reflect_nonpass_confidence_floor: float = 0.5
     reflect_full_transcript: bool = (
         False  # DEPRECATED: reflect now always sees the per-attempt transcript; kept as a no-op for backwards compat
     )

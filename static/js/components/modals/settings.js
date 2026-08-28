@@ -284,6 +284,12 @@ const SECTIONS = [
             { key: 'reflect_min_messages', label: 'Min Messages to Trigger', type: 'number' },
             { key: 'reflect_deferred_normal', label: 'Defer Grading (Interactive)', type: 'bool' },
             { key: 'reflect_defer_idle_s', label: 'Defer Delay (seconds)', type: 'number' },
+            {
+                key: 'reflect_nonpass_confidence_floor',
+                label: 'Non-pass Confidence Floor (0–1)',
+                type: 'number', min: 0, max: 1, step: 0.05,
+                hint: 'A retry/escalate verdict the grader itself rates below this confidence is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous", and ambiguity should not burn a retry or fire an escalation. Malformed grades stay conservative. 0 disables.',
+            },
             { key: 'post_mortem_retention_days', label: 'Post-mortem retention (days)', type: 'number' },
             {
                 key: 'notification_retention_days',

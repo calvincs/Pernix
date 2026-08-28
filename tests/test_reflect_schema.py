@@ -201,3 +201,68 @@ def test_cited_policies_parsed_capped_and_sanitized():
     assert len(r.cited_policies) == 5
     # Absent → empty default (the honest common case).
     assert _result_from_data({"verdict": "pass"}, "m", 0).cited_policies == []
+
+
+# ---------------------------------------------------------------------------
+# Materiality floor for non-pass verdicts (2026-08-27 verdict audit)
+# ---------------------------------------------------------------------------
+
+
+def test_low_confidence_nonpass_downgrades_to_pass():
+    r = _result_from_data(
+        {"verdict": "escalate", "reasoning": "cannot see the evidence", "failure_cause": "env", "confidence": 0.45},
+        "m",
+        0,
+    )
+    assert r.verdict == "pass"
+    assert r.failure_cause == "none"
+    assert "downgraded from escalate" in r.reasoning
+    r2 = _result_from_data({"verdict": "retry", "failure_cause": "agent", "confidence": 0.3}, "m", 0)
+    assert r2.verdict == "pass"
+
+
+def test_confident_nonpass_survives_floor():
+    r = _result_from_data({"verdict": "retry", "failure_cause": "agent", "confidence": 0.6}, "m", 0)
+    assert r.verdict == "retry"
+    assert r.failure_cause == "agent"
+
+
+def test_floor_never_flips_coerced_verdicts():
+    """A malformed grade carries no meaningful confidence — flipping it to
+    pass would undo the deliberate conservative coercion."""
+    r = _result_from_data({"reasoning": "no verdict field"}, "m", 0)  # missing verdict
+    assert r.verdict == "retry"
+    r2 = _result_from_data({"verdict": "fail", "failure_cause": "agent", "confidence": 0.2}, "m", 0)  # invalid verdict
+    assert r2.verdict == "retry"
+
+
+def test_floor_disabled_by_config(monkeypatch):
+    monkeypatch.setattr("config.settings.reflect_nonpass_confidence_floor", 0)
+    r = _result_from_data({"verdict": "retry", "failure_cause": "agent", "confidence": 0.1}, "m", 0)
+    assert r.verdict == "retry"
+
+
+def test_effective_workspace_falls_back_without_live_session():
+    from core.reflect import _effective_workspace
+
+    root, overridden = _effective_workspace("no-such-session")
+    assert overridden is False
+    assert root  # shared workspace path
+
+
+def test_effective_workspace_honors_override(monkeypatch):
+    from types import SimpleNamespace
+
+    from core.reflect import _effective_workspace
+
+    live = SimpleNamespace(workspace_override="/tmp/sandbox-x")
+    monkeypatch.setattr("sessions.manager.get_manager", lambda: SimpleNamespace(get=lambda _s: live))
+    root, overridden = _effective_workspace("s1")
+    assert (root, overridden) == ("/tmp/sandbox-x", True)
+
+
+def test_floor_ignores_absent_confidence():
+    """A non-pass grade that omits confidence entirely is incomplete output,
+    not a self-assessed ambiguity — it stays conservative."""
+    r = _result_from_data({"verdict": "retry", "failure_cause": "agent"}, "m", 0)
+    assert r.verdict == "retry"

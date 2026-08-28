@@ -33,7 +33,7 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
 - reasoning: 1-2 sentences explaining your verdict
 - failure_cause: One of "none" | "scout" | "agent" | "skill" | "task" | "env". Use "none" if verdict is pass. Otherwise attribute the failure: "scout" (plan was wrong/incomplete), "agent" (plan was fine but execution was poor), "skill" (a recommended skill was broken/outdated), "task" (user request was ambiguous or impossible), "env" (network, permissions, rate limit, missing external resource).
 - confidence: float 0.0-1.0 — how confident you are in this verdict and failure_cause. Use <0.5 when evidence is ambiguous.
-- deliverables: Array of {description, status: "met"|"partial"|"unmet"|"unknown", evidence_ref: string}. If scout provided a deliverables_plan, grade each item. If not, synthesize from the user's ask. evidence_ref should be a file path, task id, worker summary path, or a short quote pointing to what proves the status.
+- deliverables: Array of {description, status: "met"|"partial"|"unmet"|"unknown", evidence_ref: string}. If scout provided a deliverables_plan, grade each item. If not, synthesize from the user's ask. evidence_ref should be a file path, task id, worker summary path, or a short quote pointing to what proves the status. Grading a plan item "unmet" does NOT by itself justify a non-pass verdict: a plan item the USER's own request does not require is the planner's elaboration (see the plan-literalism rules below) — an inline answer that satisfies the user's actual ask passes even when a plan-invented artifact was never produced.
 - diagnostic: If retry — root cause analysis. Name the specific failure pattern. Empty string if pass.
 - what_worked: If retry — tools/approaches that produced useful results (carry forward). Empty string if pass.
 - what_failed: If retry — tools/approaches that failed or wasted time (avoid). Empty string if pass.
@@ -72,6 +72,9 @@ Output a JSON object — emit fields in THIS order so the verdict is committed b
 
 RULES:
 - MATERIALITY BAR FOR NON-PASS VERDICTS: A retry is warranted only when a concrete user-facing deliverable is missing, incomplete, or factually false — or when a success claim (file written, job scheduled, memory saved, command executed) is unsupported by verifiable evidence. Plan-literalism (deviating from the scout plan when the outcome was delivered), tone/length mismatches, and defensible judgment calls are PASS — record them in the lessons fields and in `experience`, never as a retry. A non-pass verdict MUST name a concrete, checkable failure_cause; if you cannot name one, the verdict is "pass".
+- COMPLETED WORK IS NEVER RETRIED FOR PROCESS VIOLATIONS: when everything the user's request requires is verifiably done, violations of efficiency or procedure rules — call/budget caps exceeded, forbidden re-reads, redundant tool calls, a stray formatting artifact in otherwise-correct output — are a PASS with the violation recorded in what_failed and experience. A retry re-executes finished work, and the retry attempt has nothing left to do (field case: an attempt-2 with zero tool calls was then failed for "not verifying" prior work its charter forbade it from re-reading — an unwinnable trap the first verdict created).
+- ESCALATE GRADES THE TURN, NOT THE SITUATION: escalate means THIS turn's deliverable cannot exist without user input. If the turn's work is complete, the verdict is pass even when a question for the user remains (a stalled loop, a pending decision, a follow-up worth raising) — note the question in experience.note; the agent has its own channels for surfacing questions. Field case: a cron run the verdict itself described as "delivered cleanly" was escalated to flag a stale thread — a failure statistic for a turn that never failed.
+- YOUR OWN BLINDNESS IS NOT THE AGENT'S FAILURE: when you cannot verify a claim because the evidence is invisible TO YOU — a tool result body elided from the evidence blob, image bytes you cannot render, output truncation, a session that ran in a sandboxed or temporary workspace — grade what you CAN see and lower confidence below 0.5 with a note in reasoning. Never issue retry or escalate whose only nameable failure is that the verifier could not see the evidence.
 - Be strict: if the user asked for a file/deliverable and none was created, that's a retry.
 - Be strict: if the USER named a specific tool or approach and the agent used something else, that's a retry. This covers the user's own instruction only — scout's plan is the agent's planning artifact, not a contract with the user, so departing from SCOUT DELIVERABLES PLAN / PLANNED APPROACH while still delivering the outcome is a pass.
 - Be fair: if the agent produced a reasonable answer even without creating files, that can be a pass.
@@ -527,6 +530,23 @@ def _format_grounding(g: dict) -> str:
     return "\n".join(lines)
 
 
+def _effective_workspace(session_id: str) -> tuple[str, bool]:
+    """(workspace_root, is_override) for a session. workspace_override is an
+    in-memory AgentSession field (job test-runs, canary sandboxes) — never a
+    DB column — so it must come from the live session object; a missing or
+    ended session falls back to the shared workspace."""
+    try:
+        from sessions.manager import get_manager
+
+        live = get_manager().get(session_id)
+        override = getattr(live, "workspace_override", None) if live else None
+        if override:
+            return str(override), True
+    except Exception:
+        pass
+    return settings.workspace_dir, False
+
+
 def _messages_since_attempt_start(messages: list[dict], turn_user_msg_id: int | None = None) -> list[dict]:
     """Slice messages to the current attempt's transcript.
 
@@ -655,8 +675,14 @@ def _build_compact_evidence(
             "Verdict = pass iff the agent took the action implied by the user's answer."
         )
 
-    # Workspace files (top 20 by mtime)
-    workspace = Path(settings.workspace_dir)
+    # Workspace files (top 20 by mtime) — from the session's EFFECTIVE
+    # workspace. A workspace_override session (job test-runs, canaries)
+    # works in its own sandbox; listing the shared workspace here made
+    # reflect grade against files the agent could never see (2026-08-27
+    # audit: a job test-run was escalated for "ignoring" the shared
+    # workspace's ~20 files while it correctly organized its temp mount).
+    ws_root, ws_overridden = _effective_workspace(session_id)
+    workspace = Path(ws_root)
     ws_files = []
     if workspace.exists():
         candidates = [
@@ -667,7 +693,12 @@ def _build_compact_evidence(
         candidates.sort(key=lambda f: f.stat().st_mtime, reverse=True)
         ws_files = [str(f.relative_to(workspace)) for f in candidates[:20]]
 
-    parts.append("WORKSPACE FILES:\n" + ("\n".join(f"- {f}" for f in ws_files) if ws_files else "(none)"))
+    ws_label = (
+        "WORKSPACE FILES (session-scoped sandbox — the shared workspace is out of scope for this session):"
+        if ws_overridden
+        else "WORKSPACE FILES:"
+    )
+    parts.append(ws_label + "\n" + ("\n".join(f"- {f}" for f in ws_files) if ws_files else "(none)"))
 
     # Termination history — lets reflect detect ceiling-loops (same hard wall
     # hit on multiple consecutive turns). When present, the prompt's CEILING
@@ -963,9 +994,11 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
     # data to "pass" makes a broken grader look like a confident approval
     # (ARC-3 sweep: contentless confidence-0.0 passes on substantial turns).
     _verdict = data.get("verdict")
+    _verdict_coerced = False
     if not _verdict:
         logger.warning("Reflect grade missing verdict field — coercing to retry")
         _verdict = "retry"
+        _verdict_coerced = True
         data.setdefault("reasoning", "(malformed grade: no verdict field — coerced to retry)")
     result = ReflectResult(
         verdict=_verdict,
@@ -994,6 +1027,7 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
             (result.reasoning or "")[:120],
         )
         result.verdict = "retry"
+        _verdict_coerced = True
 
     # Structured attribution (optional — reflect prompt will be updated to emit
     # these in Phase 2. For now, accept them if present and default otherwise).
@@ -1025,11 +1059,43 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
             result.reasoning or ""
         ) + " [verdict coerced to pass: non-pass verdict carried failure_cause=none]"
 
+    conf_explicit = False
     try:
         conf = float(data.get("confidence", 0.0))
+        conf_explicit = "confidence" in data
     except (TypeError, ValueError):
         conf = 0.0
     result.confidence = max(0.0, min(1.0, conf))
+
+    # Materiality floor (2026-08-27 verdict audit): the prompt defines
+    # confidence <0.5 as ambiguous evidence and the materiality bar grades
+    # ambiguity as pass, yet low-confidence retry/escalate verdicts kept
+    # landing (a 0.45 escalate whose only failure was evidence the verifier
+    # couldn't see). Enforce mechanically — but only on an EXPLICIT numeric
+    # confidence the model itself emitted. Coerced verdicts and grades that
+    # omit confidence carry no meaningful self-assessment, and flipping
+    # them to pass would undo the deliberate conservative coercions above.
+    floor = float(getattr(settings, "reflect_nonpass_confidence_floor", 0.5) or 0)
+    if (
+        conf_explicit
+        and not _verdict_coerced
+        and floor > 0
+        and result.verdict in ("retry", "escalate")
+        and result.confidence < floor
+    ):
+        logger.info(
+            "Reflect %s at confidence %.2f (< %.2f floor) — downgrading to pass-with-lessons (%s)",
+            result.verdict,
+            result.confidence,
+            floor,
+            (result.reasoning or "")[:120],
+        )
+        result.reasoning = (result.reasoning or "") + (
+            f" [downgraded from {result.verdict}: confidence {result.confidence:.2f} is below the "
+            f"{floor:.2f} materiality floor — ambiguous evidence grades pass; findings kept as lessons]"
+        )
+        result.verdict = "pass"
+        result.failure_cause = "none"
 
     raw_deliv = data.get("deliverables") or []
     if isinstance(raw_deliv, list):
