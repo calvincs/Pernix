@@ -1283,11 +1283,22 @@ def _write_post_mortem(
                 _msg = db.get_message(int(turn_user_msg_id))
                 _t0 = str((_msg or {}).get("created_at") or "")
                 if _t0:
-                    _usage = db.session_token_usage_since(session_id, _t0)
+                    # End anchor = the turn's last message, NOT now: deferred
+                    # reflect grades minutes after the turn ends, and a
+                    # now-anchored window would add the deferred delay to
+                    # wall_ms and swallow any next turn's tokens.
+                    _t1 = db.session_last_message_at(session_id, int(turn_user_msg_id)) or ""
+                    _usage = db.session_token_usage_since(session_id, _t0, until_iso=_t1)
                     _started = datetime.fromisoformat(_t0)
                     if _started.tzinfo is None:
                         _started = _started.replace(tzinfo=timezone.utc)
-                    _wall_ms = int((datetime.now(timezone.utc) - _started).total_seconds() * 1000)
+                    if _t1:
+                        _ended = datetime.fromisoformat(_t1)
+                        if _ended.tzinfo is None:
+                            _ended = _ended.replace(tzinfo=timezone.utc)
+                    else:
+                        _ended = datetime.now(timezone.utc)
+                    _wall_ms = int((_ended - _started).total_seconds() * 1000)
                     payload["turn_metrics"] = {
                         "tokens": int(_usage.get("total") or 0),
                         "llm_calls": int(_usage.get("calls") or 0),

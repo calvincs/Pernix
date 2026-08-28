@@ -862,24 +862,56 @@ def get_session_usage(session_id: str) -> dict:
         return dict(row) if row else {}
 
 
-def session_token_usage_since(session_id: str, since_iso: str) -> dict:
-    """Token totals for one session since a timestamp — the turn window.
+def session_token_usage_since(session_id: str, since_iso: str, until_iso: str = "") -> dict:
+    """Token totals for one session inside a time window — the turn window.
 
     Reflect stamps this into the post-mortem as turn_metrics: the turn's
-    user message created_at is the anchor, so retries are included (they
-    are part of what the turn cost). token_usage.created_at is a SQLite
-    CURRENT_TIMESTAMP ("YYYY-MM-DD HH:MM:SS", UTC); message stamps are ISO
-    with offset — normalize the anchor to the same shape for comparison.
+    user message created_at is the start anchor (retries included — they
+    are part of what the turn cost) and the turn's LAST message is the end
+    anchor. The end bound matters for deferred reflect, which grades
+    minutes after the turn: without it the window would swallow the
+    deferred delay and any next turn already running.
+    token_usage.created_at is a SQLite CURRENT_TIMESTAMP ("YYYY-MM-DD
+    HH:MM:SS", UTC); message stamps are ISO with offset — normalize the
+    anchors to the same shape for comparison.
     """
     anchor = str(since_iso).replace("T", " ")[:19]
+    clauses = "session_id = ? AND created_at >= ?"
+    params: list = [session_id, anchor]
+    if until_iso:
+        clauses += " AND created_at <= ?"
+        params.append(str(until_iso).replace("T", " ")[:19])
     with connect_sessions() as conn:
         row = conn.execute(
-            """SELECT COALESCE(SUM(total_tokens), 0) as total,
+            f"""SELECT COALESCE(SUM(total_tokens), 0) as total,
                       COUNT(*) as calls
-               FROM token_usage WHERE session_id = ? AND created_at >= ?""",
-            (session_id, anchor),
+               FROM token_usage WHERE {clauses}""",
+            params,
         ).fetchone()
         return dict(row) if row else {}
+
+
+def session_last_message_at(session_id: str, after_id: int) -> str | None:
+    """created_at of the last message of the TURN opened by message
+    `after_id` — the turn-end anchor for turn_metrics.
+
+    "The turn" ends before the next user-role message: a deferred reflect
+    grade runs minutes later, by which time the next turn may already have
+    rows, and the newest-message shortcut would swallow them.
+    """
+    with connect_sessions() as conn:
+        nxt = conn.execute(
+            "SELECT MIN(id) FROM messages WHERE session_id = ? AND id > ? AND role = 'user'",
+            (session_id, int(after_id)),
+        ).fetchone()
+        next_user_id = nxt[0] if nxt else None
+        q = "SELECT created_at FROM messages WHERE session_id = ? AND id > ?"
+        params: list = [session_id, int(after_id)]
+        if next_user_id is not None:
+            q += " AND id < ?"
+            params.append(int(next_user_id))
+        row = conn.execute(q + " ORDER BY id DESC LIMIT 1", params).fetchone()
+    return str(row[0]) if row and row[0] else None
 
 
 def token_usage_by_model_since(since_iso: str) -> list[dict]:
