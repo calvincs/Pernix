@@ -164,6 +164,7 @@ REPORT FIELD GUIDANCE:
 - approach_guidance: Step-by-step plan for approaching this task. Number each step, name tools/skills, flag risks, incorporate lessons from memory/past sessions. Max 500 tokens. **MEMORY-FIRST ORDERING**: If the baseline MEMORY SEARCH RESULTS or cross-session findings substantively cover the user's request, step 1 of approach_guidance MUST synthesize from those findings before any external research. Treat search_web/browse_web as supplementation for verification or gap-filling, not the default first move. Only when memory baseline is empty or clearly insufficient should external search lead the plan.
 - deliverables_plan: Array of concrete work items the agent is expected to produce (0-6). Each item has a "description" (the artifact or outcome, e.g. "Write summary.md with key findings") and an optional "execution_hint" (inline | task | worker). Leave empty for pure Q&A. Reflect will check each item at turn end, so be specific and measurable.
 - execution_mode: Overall approach — "inline" (default, single-agent work) or "tasks" (multi-step sequential via task system).
+- task_type: Classify what KIND of task this is: "research" (finding/verifying information, web or corpus), "coding" (writing or modifying code/config), "data_analysis" (computing over data or files), "writing" (producing documents, summaries, distillations), "ops" (operating this system or external services: settings, deploys, admin actions), "conversational" (questions answered from context/memory, discussion). Pick the dominant kind when mixed. This is a statistics label only — it never changes how the task runs.
 - used_hints: Array of [id] values from the ADAPTIVE ROUTING HINTS block whose guidance actually shaped this plan. Empty array when none did (the honest default) — do not echo every hint.
 
 RULES:
@@ -263,6 +264,11 @@ def _scout_system_prompt() -> str:
 # ---------------------------------------------------------------------------
 # Scout tool schemas (OpenAI function-calling format)
 # ---------------------------------------------------------------------------
+
+# The task-type taxonomy (outcome-stats axis). One tuple, referenced by the
+# schema enum and both parse paths, so the clamp can never drift from what
+# scout was offered.
+TASK_TYPES = ("research", "coding", "data_analysis", "writing", "ops", "conversational")
 
 _SCOUT_TOOLS = [
     {
@@ -451,6 +457,11 @@ _SCOUT_TOOLS = [
                         "type": "string",
                         "enum": ["inline", "tasks"],
                         "description": "Overall execution approach. Default 'inline' for simple tasks.",
+                    },
+                    "task_type": {
+                        "type": "string",
+                        "enum": list(TASK_TYPES),
+                        "description": "What KIND of task this is (classification for outcome statistics; never changes execution).",
                     },
                     "used_hints": {
                         "type": "array",
@@ -660,6 +671,11 @@ def _extract_report(args: dict) -> ScoutReport:
         # Clamp unknown / deprecated values (e.g. legacy "workers") to inline.
         mode = "inline"
 
+    task_type = str(args.get("task_type", "")).strip().lower()
+    if task_type not in TASK_TYPES:
+        # Unknown/absent → "" (reflect falls back to the legacy stamp).
+        task_type = ""
+
     # identity/rules/instructions are deliberately NOT read from args: the
     # compiler injects those files whole, and honoring a model-echoed copy
     # here would let a stale or re-worded variant shadow the real ones.
@@ -678,6 +694,7 @@ def _extract_report(args: dict) -> ScoutReport:
         approach_guidance=str(args.get("approach_guidance", "")),
         deliverables_plan=deliverables,
         execution_mode=mode,
+        task_type=task_type,
         used_hints=(
             [str(h)[:64] for h in args.get("used_hints", []) if h][:24]
             if isinstance(args.get("used_hints"), list)
@@ -1971,6 +1988,10 @@ def _parse_scout_response(text: str) -> ScoutReport:
         report.from_fallback = True
         return report
 
+    raw_task_type = str(data.get("task_type", "")).strip().lower()
+    if raw_task_type not in TASK_TYPES:
+        raw_task_type = ""
+
     # identity/rules/instructions ignored — see _extract_report for rationale.
     return ScoutReport(
         memory_context=str(data.get("memory_context", "")),
@@ -1985,6 +2006,7 @@ def _parse_scout_response(text: str) -> ScoutReport:
         model_rationale=str(data.get("model_rationale", "")),
         session_state=str(data.get("session_state", "")),
         approach_guidance=str(data.get("approach_guidance", "")),
+        task_type=raw_task_type,
     )
 
 

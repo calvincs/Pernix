@@ -574,6 +574,15 @@ class SnoozeRunner:
             _announce(bus, "adaptive_apply", "Applying pending adaptive edits and evaluating the tripwire")
             await self._adaptive_step()
 
+        # Activity 17: fallback-burn watch — pure store read + at most one
+        # notification/day. Encodes the 2026-08-19 silent-reroute incident
+        # signature (primary provider wedged → every call billed to the
+        # fallback tier) as a standing check. Watch-only: never touches
+        # routing. Gated inside check_fallback_burn (share=0 or no
+        # fallback_model configured → no-op).
+        if not self._is_cancelled():
+            await self._fallback_burn_check()
+
     # ------------------------------------------------------------------
     # Activity 1: Catch-up distillation
     # ------------------------------------------------------------------
@@ -1479,11 +1488,12 @@ Output valid JSON only. No markdown fences. /no_think"""
                 await asyncio.to_thread(
                     db.add_notification,
                     "",
-                    "Adaptive: unused entries retired",
+                    "Adaptive: value sweep retired entries",
                     (
-                        "These rendered into prompts for the whole retire window without one "
-                        "recorded use (scout/reflect citations). Each deletion is journaled — "
-                        "roll any back from the Adaptive tab.\n"
+                        "Retired by the value sweep — unused for the whole retire window, "
+                        "past a prompt_note TTL, or failure-dominated in attributed "
+                        "outcomes (the per-entry reason is listed). Each deletion is "
+                        "journaled — roll any back from the Adaptive tab.\n"
                         + "\n".join(lines)
                         + (f"\n(+{len(swept['retired']) - 12} more)" if len(swept["retired"]) > 12 else "")
                     ),
@@ -1501,6 +1511,39 @@ Output valid JSON only. No markdown fences. /no_think"""
                 logger.info("Adaptive tripwire: %s %s (%s)", a["action"], a["batch_id"], a.get("detail", ""))
         except Exception as e:
             logger.warning("Adaptive tripwire failed: %s", e)
+
+    # ------------------------------------------------------------------
+    # Activity 17: fallback-burn watch
+    # ------------------------------------------------------------------
+
+    async def _fallback_burn_check(self) -> None:
+        """Notify (high urgency, daily dedup) when the fallback model is
+        carrying a threshold share of the trailing 24h's tokens. Never raises."""
+        try:
+            from core.llm.burnwatch import check_fallback_burn
+            from db import models as db
+
+            finding = await asyncio.to_thread(check_fallback_burn)
+            if not finding:
+                return
+            self._bump("fallback_burn_alerts")
+            await asyncio.to_thread(
+                db.add_notification,
+                "",
+                "Fallback model is carrying the load",
+                (
+                    f"{finding['model']} served {finding['share']:.0%} of all tokens in the last "
+                    f"{finding['window_hours']}h ({finding['tokens']:,} of {finding['total_tokens']:,} "
+                    f"tokens over {finding['calls']} calls). If this model is the paid tier, the "
+                    "primary provider is likely wedged and every turn is billing there — check the "
+                    "provider key/endpoint (the 2026-08-19 signature: container-local env keys die "
+                    "on rebuild; the durable copy belongs in the compose-level .env)."
+                ),
+                "high",
+                "fallback_burn",
+            )
+        except Exception as e:
+            logger.warning("Fallback-burn watch failed: %s", e)
 
     # ------------------------------------------------------------------
     # Activities 14/16: Dream + TELOS steps

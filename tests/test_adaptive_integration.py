@@ -984,3 +984,22 @@ def test_zero_window_restores_the_human_gate(monkeypatch):
 
     assert auto_approve_stale_proposals()["approved"] == []
     assert db.adaptive_get_proposal(pid)["status"] == "pending"
+
+
+def test_routing_hints_ranked_by_outcome_share():
+    """When the cap bites, hints with the best smoothed success share render
+    first — a much-cited failing hint no longer crowds out a reliable one."""
+    from core.adaptive.render import build_routing_hints_block
+
+    filler = "x" * 900  # two hints alone exceed the 1600-char cap -> ranking runs
+    _apply_hint(title="loser", content=f"bad guidance {filler}")
+    _apply_hint(title="winner", content=f"good guidance {filler}")
+    hints = {h["title"]: h["id"] for h in db.adaptive_list_entries(kind="routing_hint")}
+    # loser: cited constantly, fails constantly. winner: cited less, succeeds.
+    db.upsert_signal("adaptive_entry", hints["loser"], delta_failures=6, delta_reinforcements=9)
+    db.upsert_signal("adaptive_entry", hints["winner"], delta_successes=3, delta_reinforcements=3)
+    block = build_routing_hints_block()
+    assert "winner" in block
+    # With the cap at 1600 chars only the top-ranked hint fits — the failing
+    # one is cut despite triple the reinforcements.
+    assert "loser" not in block

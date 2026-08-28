@@ -15,6 +15,8 @@ def _adaptive_on(monkeypatch):
     monkeypatch.setattr("config.settings.adaptive_enabled", True)
     monkeypatch.setattr("config.settings.adaptive_usage_retire_days", 45)
     monkeypatch.setattr("config.settings.adaptive_prompt_note_ttl_days", 90)
+    monkeypatch.setattr("config.settings.adaptive_harmful_retire_min_uses", 5)
+    monkeypatch.setattr("config.settings.adaptive_harmful_retire_max_success", 0.3)
 
 
 def _entry(entry_id: str, kind: str = "routing_hint", source: str = "refine", age_days: int = 60) -> None:
@@ -100,8 +102,70 @@ def test_prompt_note_ttl_retires_even_a_used_note():
 def test_zero_settings_disable_the_sweep(monkeypatch):
     monkeypatch.setattr("config.settings.adaptive_usage_retire_days", 0)
     monkeypatch.setattr("config.settings.adaptive_prompt_note_ttl_days", 0)
+    monkeypatch.setattr("config.settings.adaptive_harmful_retire_min_uses", 0)
     _entry("kept-by-config", age_days=300)
     _backdate_epoch(300)
+    assert retire_unused_entries()["retired"] == []
+
+
+# ---------------------------------------------------------------------------
+# Failure-dominated retirement (the frontier-retention lesson): the sweep
+# reads the OUTCOME half of the adaptive_entry signal, not just usage.
+# ---------------------------------------------------------------------------
+
+
+def _outcomes(entry_id: str, wins: int, losses: int) -> None:
+    db.upsert_signal("adaptive_entry", entry_id, delta_successes=wins, delta_failures=losses)
+
+
+def test_failure_dominated_entry_retires_despite_heavy_use():
+    """The exact case usage-only retention got wrong: an entry cited every
+    turn whose turns keep failing lived forever BECAUSE it was cited."""
+    _entry("plausible-but-wrong", age_days=20)
+    _backdate_epoch(50)
+    _outcomes("plausible-but-wrong", wins=1, losses=5)
+    out = retire_unused_entries()
+    assert out["retired"] == ["plausible-but-wrong"]
+    assert "failure-dominated" in out["reasons"]["plausible-but-wrong"]
+    assert "1/6" in out["reasons"]["plausible-but-wrong"]
+
+
+def test_below_min_uses_is_not_judged():
+    _entry("thin-evidence", age_days=20)
+    _backdate_epoch(50)
+    _outcomes("thin-evidence", wins=0, losses=3)  # 3 < min_uses=5
+    assert retire_unused_entries()["retired"] == []
+
+
+def test_success_dominated_entry_survives():
+    _entry("earning-outcomes", age_days=60)
+    _backdate_epoch(50)
+    _outcomes("earning-outcomes", wins=5, losses=1)
+    assert retire_unused_entries()["retired"] == []
+
+
+def test_harmful_branch_respects_exempt_sources():
+    _entry("candor-owned", source="candor", age_days=60)
+    _backdate_epoch(50)
+    _outcomes("candor-owned", wins=0, losses=8)
+    assert retire_unused_entries()["retired"] == []
+
+
+def test_harmful_branch_needs_no_age_or_epoch_grace():
+    """Outcomes ARE the observed window — a young entry with enough failed
+    outcomes goes even though the unused-sweep grace would protect it."""
+    _entry("young-and-harmful", age_days=2)
+    # Fresh epoch (stamped by the first call inside the sweep itself).
+    _outcomes("young-and-harmful", wins=0, losses=6)
+    out = retire_unused_entries()
+    assert out["retired"] == ["young-and-harmful"]
+
+
+def test_harmful_zero_min_uses_disables_branch(monkeypatch):
+    monkeypatch.setattr("config.settings.adaptive_harmful_retire_min_uses", 0)
+    _entry("spared-by-config", age_days=20)
+    _backdate_epoch(50)
+    _outcomes("spared-by-config", wins=0, losses=10)
     assert retire_unused_entries()["retired"] == []
 
 

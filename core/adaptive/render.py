@@ -108,17 +108,29 @@ def build_routing_hints_block() -> str:
     if not hints:
         return ""
     # The scout block lives in a per-turn user message — no prefix cache to
-    # protect — so it CAN rank by live usage: most-used first (the counters
-    # scout itself feeds via used_hints), recency and id as tie-breaks.
+    # protect — so it CAN rank by live outcomes: best observed success share
+    # first (the outcome half of the adaptive_entry signal synthesis writes),
+    # then most-used, then recency and id. Laplace smoothing (s+1)/(n+2)
+    # keeps unattributed entries at a neutral 0.5 instead of burying them,
+    # and stops a single lucky success from outranking a long record.
     if len(hints) > _HINTS_MAX_LINES or sum(len(h["content"]) for h in hints) > _HINTS_CHAR_CAP:
         try:
             sig = {s["subject"]: s for s in db.get_signals_by_subjects([("adaptive_entry", h["id"]) for h in hints])}
         except Exception:
             sig = {}
-        # Stacked stable sorts → (reinforcements desc, recency desc, id asc).
+
+        def _smoothed_success(h: dict) -> float:
+            s = sig.get(h["id"]) or {}
+            wins = int(s.get("successes") or 0)
+            losses = int(s.get("failures") or 0)
+            return (wins + 1.0) / (wins + losses + 2.0)
+
+        # Stacked stable sorts → (smoothed success desc, reinforcements desc,
+        # recency desc, id asc).
         hints = sorted(hints, key=lambda h: h["id"])
         hints = sorted(hints, key=lambda h: str((sig.get(h["id"]) or {}).get("last_reinforced_at") or ""), reverse=True)
         hints = sorted(hints, key=lambda h: int((sig.get(h["id"]) or {}).get("reinforcements") or 0), reverse=True)
+        hints = sorted(hints, key=_smoothed_success, reverse=True)
 
     # Hints carry their ids so scout can echo which ones shaped the plan
     # (used_hints → the adaptive_entry usage signal).

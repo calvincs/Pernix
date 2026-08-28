@@ -14,6 +14,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from config import settings
 from db import models as db
@@ -1191,6 +1192,7 @@ def _write_post_mortem(
     extra_payload: dict | None = None,
     reflect_mode: str = "sync",
     tool_summary_attempts: list | None = None,
+    turn_user_msg_id: int | None = None,
 ) -> None:
     """Persist a post-mortem artifact for this reflect invocation (Phase 2c).
 
@@ -1264,7 +1266,35 @@ def _write_post_mortem(
             except Exception:
                 pass
         if scout_report is not None and "task_category" not in payload:
-            payload["task_category"] = getattr(scout_report, "execution_mode", "") or ""
+            # Scout's task_type is the real classification axis; the old
+            # execution_mode stamp survives only as the fallback for reports
+            # that predate the field (cache, fallback, older deploys) so
+            # rows never lose their category outright.
+            payload["task_category"] = (
+                getattr(scout_report, "task_type", "") or getattr(scout_report, "execution_mode", "") or ""
+            )
+        # Decoupled turn metrics (tokens + wall clock, retries included):
+        # anchored on the turn's user message so synthesis can accumulate
+        # per-(model, category) averages. Observability only — no consumer
+        # routes or budgets on it. Guarded: a metrics failure must never
+        # cost the post-mortem row.
+        if turn_user_msg_id and "turn_metrics" not in payload:
+            try:
+                _msg = db.get_message(int(turn_user_msg_id))
+                _t0 = str((_msg or {}).get("created_at") or "")
+                if _t0:
+                    _usage = db.session_token_usage_since(session_id, _t0)
+                    _started = datetime.fromisoformat(_t0)
+                    if _started.tzinfo is None:
+                        _started = _started.replace(tzinfo=timezone.utc)
+                    _wall_ms = int((datetime.now(timezone.utc) - _started).total_seconds() * 1000)
+                    payload["turn_metrics"] = {
+                        "tokens": int(_usage.get("total") or 0),
+                        "llm_calls": int(_usage.get("calls") or 0),
+                        "wall_ms": max(_wall_ms, 0),
+                    }
+            except Exception as me:
+                logger.debug("turn_metrics stamp failed for %s: %s", session_id, me)
         scout_viability = None
         execution_mode = None
         if scout_report is not None:
@@ -1274,6 +1304,7 @@ def _write_post_mortem(
                 "viability": scout_viability,
                 "viability_notes": list(getattr(scout_report, "viability_notes", []) or []),
                 "execution_mode": execution_mode,
+                "task_type": getattr(scout_report, "task_type", "") or "",
                 "recommended_tools": list(scout_report.recommended_tools or []),
                 "recommended_skills": list(scout_report.recommended_skills or []),
                 "deliverables_plan": [
@@ -1403,6 +1434,7 @@ async def reflect_on_session(
             tool_summary,
             reflect_mode=reflect_mode,
             tool_summary_attempts=tool_summary_attempts,
+            turn_user_msg_id=turn_user_msg_id,
         )
         return r
 
@@ -1646,6 +1678,7 @@ async def reflect_on_session(
                 extra_payload=extra_payload,
                 reflect_mode=reflect_mode,
                 tool_summary_attempts=tool_summary_attempts,
+                turn_user_msg_id=turn_user_msg_id,
             )
             await _save_user_observations(session_id, result)
             return result
@@ -1693,6 +1726,7 @@ async def reflect_on_session(
             extra_payload={"parse_error": True, "raw_response_excerpt": (raw or "")[:500]},
             reflect_mode=reflect_mode,
             tool_summary_attempts=tool_summary_attempts,
+            turn_user_msg_id=turn_user_msg_id,
         )
         return r
 
@@ -1707,5 +1741,6 @@ async def reflect_on_session(
             tool_summary,
             reflect_mode=reflect_mode,
             tool_summary_attempts=tool_summary_attempts,
+            turn_user_msg_id=turn_user_msg_id,
         )
         return r

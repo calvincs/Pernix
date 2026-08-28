@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from db import models as db
@@ -42,6 +43,12 @@ class Attribution:
     # Short, free-form note describing *why* this attribution was made.
     # Stored in signal payload for UI / debugging.
     rationale: str = ""
+    # Optional per-observation resource metrics ({"tokens": int, "wall_ms":
+    # int}), currently only on model_route attributions. apply_attributions
+    # folds them into running accumulators in the signal's payload_json —
+    # upsert_signal REPLACES payload_json wholesale, so accumulation is a
+    # read-merge-write there, not an SQL delta.
+    metrics: dict | None = None
 
 
 # Threshold for calling a tool's performance in a single session "bad":
@@ -162,6 +169,15 @@ def attribute(pm_row: dict) -> list[Attribution]:
     agent_model = str(payload.get("agent_model") or "").strip()
     if agent_model:
         category = str(payload.get("task_category") or "").strip() or "general"
+        # Decoupled resource channels (reward stays the primary signal;
+        # tokens/wall-clock ride along as observability-only accumulators).
+        turn_metrics = payload.get("turn_metrics") or {}
+        metrics = None
+        if isinstance(turn_metrics, dict) and int(turn_metrics.get("tokens") or 0) > 0:
+            metrics = {
+                "tokens": int(turn_metrics.get("tokens") or 0),
+                "wall_ms": int(turn_metrics.get("wall_ms") or 0),
+            }
         if verdict == "pass":
             attributions.append(
                 Attribution(
@@ -169,6 +185,7 @@ def attribute(pm_row: dict) -> list[Attribution]:
                     f"{agent_model}|{category}",
                     delta_successes=1,
                     rationale="session verdict=pass",
+                    metrics=metrics,
                 )
             )
         elif verdict in ("retry", "escalate"):
@@ -178,6 +195,7 @@ def attribute(pm_row: dict) -> list[Attribution]:
                     f"{agent_model}|{category}",
                     delta_failures=1,
                     rationale=f"verdict={verdict}, cause={failure_cause}",
+                    metrics=metrics,
                 )
             )
 
@@ -235,6 +253,10 @@ _ROUTE_MIN_OBSERVATIONS = 5
 _ROUTE_HEALTHY_RATE = 0.7
 _ROUTE_MAX_LINES = 8
 _ROUTE_CHAR_CAP = 1200
+# Rows whose counters stopped moving are history, not intel — and the
+# task_category re-keying (execution_mode → scout task_type) left legacy
+# "inline"/"tasks" subjects behind that would otherwise render forever.
+_ROUTE_STALE_DAYS = 45
 
 _ROUTE_HEADER = (
     "[MODEL ROUTING INTEL] Observed reflect-verdict rates by (model, task "
@@ -251,10 +273,15 @@ def build_model_routing_brief() -> str | None:
     except Exception as e:
         logger.warning("Model routing brief read failed: %s", e)
         return None
+    stale_floor = ""
+    if _ROUTE_STALE_DAYS > 0:
+        stale_floor = (datetime.now(timezone.utc) - timedelta(days=_ROUTE_STALE_DAYS)).isoformat()
     lines: list[str] = []
     for r in rows:
         if len(lines) >= _ROUTE_MAX_LINES:
             break
+        if stale_floor and str(r.get("last_reinforced_at") or "") < stale_floor:
+            continue
         wins = int(r.get("successes") or 0)
         losses = int(r.get("failures") or 0)
         n = wins + losses
@@ -265,7 +292,19 @@ def build_model_routing_brief() -> str | None:
             continue
         subject = str(r.get("subject") or "")
         model, _, category = subject.partition("|")
-        lines.append(f"- {model} on {category or 'general'}: {rate:.0%} pass over {n} turns")
+        line = f"- {model} on {category or 'general'}: {rate:.0%} pass over {n} turns"
+        # Decoupled resource channels, when accumulated: average tokens and
+        # wall-clock per turn. Context for the reader — never a routing rule.
+        try:
+            mp = _parse_payload(r.get("payload_json"))
+            m_count = int(mp.get("m_count") or 0)
+            if m_count > 0:
+                avg_tok = int(mp.get("m_tokens_total") or 0) // m_count
+                avg_s = (int(mp.get("m_wall_ms_total") or 0) / m_count) / 1000.0
+                line += f" (avg ~{avg_tok / 1000:.0f}k tok, ~{avg_s:.0f}s/turn)"
+        except Exception:
+            pass
+        lines.append(line)
     if not lines:
         return None
     return "\n".join([_ROUTE_HEADER, *lines])[:_ROUTE_CHAR_CAP]
@@ -276,16 +315,46 @@ def apply_attributions(attrs: Iterable[Attribution]) -> int:
 
     Each attribution becomes one `upsert_signal` call. Safe to call with
     an empty iterable.
+
+    Attributions carrying metrics accumulate them into the signal's
+    payload_json (m_tokens_total / m_wall_ms_total / m_count) via
+    read-merge-write: upsert_signal replaces payload_json wholesale, and
+    synthesis is the payload's only writer for these signal types, running
+    serially inside snooze — so the read-merge-write is race-free in
+    practice and a lost update would cost one observation, not corrupt.
     """
     n = 0
     for a in attrs:
         try:
+            payload: dict = {"last_rationale": a.rationale}
+            # Accumulators must survive metric-less observations too (an old
+            # payload without turn_metrics would otherwise wipe the totals),
+            # so any signal type that ever carries metrics reads-and-carries.
+            if a.metrics or a.signal_type == "model_route":
+                try:
+                    existing = db.get_signal(a.signal_type, a.subject) or {}
+                    prior = json.loads(existing.get("payload_json") or "{}")
+                    if not isinstance(prior, dict):
+                        prior = {}
+                except Exception:
+                    prior = {}
+                m_tokens = int(prior.get("m_tokens_total") or 0)
+                m_wall = int(prior.get("m_wall_ms_total") or 0)
+                m_count = int(prior.get("m_count") or 0)
+                if a.metrics:
+                    m_tokens += int(a.metrics.get("tokens") or 0)
+                    m_wall += int(a.metrics.get("wall_ms") or 0)
+                    m_count += 1
+                if m_count:
+                    payload["m_tokens_total"] = m_tokens
+                    payload["m_wall_ms_total"] = m_wall
+                    payload["m_count"] = m_count
             db.upsert_signal(
                 a.signal_type,
                 a.subject,
                 delta_successes=a.delta_successes,
                 delta_failures=a.delta_failures,
-                payload_json=json.dumps({"last_rationale": a.rationale}),
+                payload_json=json.dumps(payload),
                 delta_reinforcements=a.delta_reinforcements,
             )
             n += 1

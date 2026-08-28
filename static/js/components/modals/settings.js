@@ -91,6 +91,18 @@ const SECTIONS = [
             { key: 'openai_base_url', label: 'OpenAI URL (or any OpenAI-compatible server)', type: 'text' },
             { key: 'openai_max_concurrent', label: 'OpenAI Max Concurrent', type: 'number', min: 1, restart: RESTART_ROUTER },
             { key: 'llm_session_timeout', label: 'Session LLM Timeout (s)', type: 'number', min: 0, restart: RESTART_ROUTER },
+            {
+                key: 'fallback_burn_alert_share',
+                label: 'Fallback-burn Alert Share (0–1)',
+                type: 'number', min: 0, max: 1, step: 0.05,
+                hint: 'When the Backup model serves at least this share of the trailing 24h\'s tokens, a high-urgency notification fires (once/day) — the signature of a wedged primary provider silently billing everything to the paid tier. Watch-only; 0 disables.',
+            },
+            {
+                key: 'fallback_burn_min_tokens',
+                label: 'Fallback-burn Volume Floor (tokens)',
+                type: 'number', min: 0,
+                hint: 'The alert stays quiet unless the 24h window carried at least this many total tokens — a quiet day that happened to fail over is noise, not the incident.',
+            },
             { key: 'openrouter_api_key', label: 'OpenRouter API Key', type: 'apikey', envKey: 'OPENROUTER_API_KEY' },
             { key: 'openai_api_key', label: 'OpenAI API Key', type: 'apikey', envKey: 'OPENAI_API_KEY' },
         ],
@@ -381,6 +393,18 @@ const SECTIONS = [
                 label: 'Prompt-note TTL (days)',
                 type: 'number', min: 0, max: 365,
                 hint: 'Prompt notes have no producer-side retirement; this TTL is their backstop. 0 = keep forever.',
+            },
+            {
+                key: 'adaptive_harmful_retire_min_uses',
+                label: 'Failure-dominated Retire — Min Outcomes',
+                type: 'number', min: 0, max: 100,
+                hint: 'An entry with at least this many attributed outcomes (successes + failures from synthesis) whose success share falls below the threshold retires even though it is used. 0 disables.',
+            },
+            {
+                key: 'adaptive_harmful_retire_max_success',
+                label: 'Failure-dominated Retire — Success Floor (0–1)',
+                type: 'number', min: 0, max: 1, step: 0.05,
+                hint: 'Success share below this = failure-dominated. Journaled soft-delete, one-click rollback, candor/user sources exempt.',
             },
             {
                 key: 'adaptive_suspect_ttl_days',

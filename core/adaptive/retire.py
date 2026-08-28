@@ -18,6 +18,12 @@ recorded use (the `adaptive_entry` signal from scout's used_hints and
 reflect's cited_policies) are retired. Retirement is a journaled
 soft-delete — one click in the Adaptive tab restores any of them.
 
+The sweep also reads the OUTCOME half of the same signal (successes/
+failures attributed by synthesis): an entry with enough attributed
+outcomes whose success share is failure-dominated retires even though it
+is used. Usage alone kept a harmful hint alive forever — being cited
+every turn was exactly what kept it in the prompt.
+
 A producer deleting its OWN entry is same-producer, so it stays low-risk:
 the cross-producer escalation in `compute_risk` is what guards against one
 subsystem silently unpublishing another's work.
@@ -119,7 +125,8 @@ def _epoch_age_days() -> float | None:
 
 def retire_unused_entries() -> dict:
     """Retire entries whose observed lifetime produced zero recorded uses,
-    and prompt_notes past their TTL. Returns {"retired": [...], "reasons": {}}.
+    failure-dominated entries, and prompt_notes past their TTL. Returns
+    {"retired": [...], "reasons": {}}.
 
     Every deletion goes through engine.delete_entry — journaled with a full
     snapshot, individually rollbackable. The caller aggregates the
@@ -130,7 +137,9 @@ def retire_unused_entries() -> dict:
     out: dict = {"retired": [], "reasons": {}}
     window = int(settings.adaptive_usage_retire_days or 0)
     note_ttl = int(settings.adaptive_prompt_note_ttl_days or 0)
-    if window <= 0 and note_ttl <= 0:
+    harm_min_uses = int(settings.adaptive_harmful_retire_min_uses or 0)
+    harm_max_success = float(settings.adaptive_harmful_retire_max_success or 0.0)
+    if window <= 0 and note_ttl <= 0 and harm_min_uses <= 0:
         return out
     epoch_age = _epoch_age_days()
     if epoch_age is None:
@@ -150,8 +159,16 @@ def retire_unused_entries() -> dict:
             continue
         sig = usage.get(r["id"])
         used = bool(sig and int(sig.get("reinforcements") or 0) > 0)
+        wins = int((sig or {}).get("successes") or 0)
+        losses = int((sig or {}).get("failures") or 0)
+        outcomes = wins + losses
         reason = ""
-        if window > 0 and not used and age >= window and epoch_age >= window:
+        # Failure-dominated check first: it applies precisely to USED
+        # entries, and its reason names the evidence. No epoch/age gate —
+        # the outcomes themselves are the observed window.
+        if harm_min_uses > 0 and outcomes >= harm_min_uses and (wins / outcomes) < harm_max_success:
+            reason = f"failure-dominated: {wins}/{outcomes} attributed outcomes succeeded"
+        elif window > 0 and not used and age >= window and epoch_age >= window:
             reason = f"no recorded use in {int(age)} days of instrumented life"
         elif note_ttl > 0 and r.get("kind") == "prompt_note" and age >= note_ttl:
             # prompt_note is the kind with no producer-side retirement loop
