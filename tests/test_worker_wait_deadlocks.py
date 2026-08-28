@@ -803,3 +803,17 @@ async def test_post_hooks_run_when_finalizing(mgr, monkeypatch):
     await mgr._run_post_hooks(session)
 
     assert hooks_called == [sid], "Post-hooks must run exactly once when the session is FINALIZING"
+
+
+def test_resume_message_carries_the_reuse_prefix():
+    """The Gap-1 scout-reuse check keys on this exact prefix — if the resume
+    message head ever drifts from _WORKER_RESUME_PREFIX, worker resumes
+    silently go back to paying a full scout per resume."""
+    from sessions.manager import _WORKER_RESUME_PREFIX, get_manager
+    from sessions.state import AgentSession
+
+    mgr = get_manager()
+    parent = AgentSession(session_id="prefix-test-parent")
+    parent.worker_ids = []
+    msg = mgr._build_resume_message(parent)
+    assert msg.startswith(_WORKER_RESUME_PREFIX)

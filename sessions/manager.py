@@ -189,6 +189,13 @@ def _map_termination_to_v2_reason(tr: str | None) -> tuple[str, sv2.TerminationR
     return mapping.get(key, ("loop-complete", sv2.TerminationReason.COMPLETE))
 
 
+# The fixed head of every synthetic worker-resume message. Single source:
+# _build_resume_message writes it, and _run_agent_safe's scout-reuse check
+# reads it to recognize a Gap-1 resume (parent already idle when the workers
+# finished, so the resume enters as an ordinary "prompt-arrived" turn).
+_WORKER_RESUME_PREFIX = "[Watched workers have completed"
+
+
 class SessionManager:
     """Manages in-memory session state and routes prompts to the agent loop."""
 
@@ -1225,10 +1232,15 @@ class SessionManager:
                 # scouts at 17-25s each, and every sampled plan just restated
                 # the action the resume message already mandates (call
                 # get_worker_result for the listed workers). Gap-1 resumes
-                # (parent already idle, resume queued as a pending message)
-                # still scout fresh — they enter from IDLE_READY as
-                # "prompt-arrived" and last_scout_report may be turns stale.
-                reuse_scout=start_reason in ("answer-received", "workers-complete"),
+                # (parent already idle when workers finished, resume queued
+                # as a pending message) enter as "prompt-arrived", so they
+                # are recognized by the fixed prefix _build_resume_message
+                # stamps. Reuse falls back to a fresh scout whenever
+                # last_scout_report is None (restart-lost).
+                reuse_scout=(
+                    start_reason in ("answer-received", "workers-complete")
+                    or (isinstance(message, str) and message.startswith(_WORKER_RESUME_PREFIX))
+                ),
             )
 
         except asyncio.CancelledError:
@@ -2029,7 +2041,7 @@ class SessionManager:
         cancellation) so the LLM is forced to acknowledge non-pass outcomes
         instead of having to discover them by reading get_worker_result()."""
         lines = [
-            f"[Watched workers have completed — {len(parent.worker_ids)} total]",
+            f"{_WORKER_RESUME_PREFIX} — {len(parent.worker_ids)} total]",
         ]
         problem_workers: list[str] = []
         for wid in parent.worker_ids:
