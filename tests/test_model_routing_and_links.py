@@ -274,3 +274,31 @@ def test_brief_skips_stale_rows():
         )
     brief = build_model_routing_brief()
     assert brief is None or "old-model" not in brief
+
+
+def test_turn_metrics_window_is_bounded_by_turn_end():
+    """Deferred reflect grades minutes after the turn — wall_ms must anchor
+    on the turn's last message, and a next turn's tokens must not leak in."""
+    from core.reflect import ReflectResult, _write_post_mortem
+
+    sid = db.create_session(title="tm-bounded")
+    u1 = db.add_message(sid, "user", "turn one")
+    db.add_token_usage(session_id=sid, model="m1", total_tokens=1000)
+    a1 = db.add_message(sid, "assistant", "done")
+    u2 = db.add_message(sid, "user", "turn two already running")
+    db.add_token_usage(session_id=sid, model="m1", total_tokens=7777)  # next turn's spend
+    with db.connect_sessions() as conn:
+        conn.execute("UPDATE messages SET created_at='2026-01-01T10:00:00+00:00' WHERE id=?", (u1,))
+        conn.execute("UPDATE messages SET created_at='2026-01-01T10:01:00+00:00' WHERE id=?", (a1,))
+        conn.execute("UPDATE messages SET created_at='2026-01-01T10:05:00+00:00' WHERE id=?", (u2,))
+        conn.execute(
+            "UPDATE token_usage SET created_at='2026-01-01 10:00:30' WHERE session_id=? AND total_tokens=1000", (sid,)
+        )
+        conn.execute(
+            "UPDATE token_usage SET created_at='2026-01-01 10:05:30' WHERE session_id=? AND total_tokens=7777", (sid,)
+        )
+    _write_post_mortem(sid, 1, ReflectResult(verdict="pass", reasoning="ok"), None, {}, turn_user_msg_id=u1)
+    payload = json.loads(db.list_post_mortems(session_id=sid)[0]["payload_json"])
+    tm = payload["turn_metrics"]
+    assert tm["tokens"] == 1000  # the 7777 next-turn row is outside the window
+    assert tm["wall_ms"] == 60_000  # turn end anchor, not grade time
