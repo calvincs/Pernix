@@ -163,6 +163,9 @@ class ScoutReport:
     scout_model: str = ""
     scout_latency_ms: int = 0
     scout_tokens: TokenUsage = field(default_factory=TokenUsage)
+    # LLM rounds the scout loop actually spent (1 = submitted immediately;
+    # >1 = searched first or needed a revision). Observability only.
+    scout_rounds: int = 0
     from_cache: bool = False
     from_fallback: bool = False
     # Why the deterministic fallback was used: "bypass" (cheap turn, scout

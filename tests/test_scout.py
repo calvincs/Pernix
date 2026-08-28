@@ -293,3 +293,40 @@ def test_count_hint_usage_sanitizes_and_counts_once(monkeypatch):
     row = db.get_signal("adaptive_entry", "real-hint")
     assert row is not None and row["reinforcements"] == 1
     assert db.get_signal("adaptive_entry", "made-up-hint") is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-28 scout audit fixes
+# ---------------------------------------------------------------------------
+
+
+def test_used_hints_is_required_in_schema():
+    """The echo went 0-for-215 organic turns while optional; required (with []
+    allowed) makes emission the norm and density measurable."""
+    from core.scout.runner import _SCOUT_TOOLS
+
+    schema = [t for t in _SCOUT_TOOLS if t["function"]["name"] == "submit_report"][0]
+    assert "used_hints" in schema["function"]["parameters"]["required"]
+
+
+def test_extract_report_defaults_missing_used_hints_to_empty():
+    from core.scout.runner import _extract_report
+
+    r = _extract_report({"recommended_tools": [], "approach_guidance": "x" * 40})
+    assert r.used_hints == []
+
+
+def test_scout_report_carries_rounds_field():
+    from core.scout.report import ScoutReport
+
+    assert ScoutReport().scout_rounds == 0
+    assert ScoutReport(scout_rounds=3).scout_rounds == 3
+
+
+def test_cache_is_gone():
+    """0 hits in 506 live runs — the report cache was removed outright. This
+    pins that no resurrected cache path can hand a retry its failed plan."""
+    import core.scout.runner as runner
+
+    for name in ("_cache", "_get_cached", "_put_cache", "_cache_key", "CACHE_TTL"):
+        assert not hasattr(runner, name), name
