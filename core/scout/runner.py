@@ -8,7 +8,6 @@ submits a structured ScoutReport via the submit_report tool.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import re
@@ -128,7 +127,7 @@ When [OPERATIONAL INTEL] is present (calibrated reliability from logged outcome 
 - The percentages are calibrated from real observation counts. Weigh them by evidence: a wide credible interval or few obs is weak evidence; many obs is strong. An [unstable] or [under_specified] tag means the rate is context-dependent — flag that uncertainty in your plan rather than trusting the point estimate.
 - When reliability is central to the task, add predict_reliability / why_reliability / reliability_questions to recommended_tools so the main agent can query live calibrated numbers and their evidence chains.
 
-When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations, and echo the [id] of each hint that actually shaped your plan in the report's used_hints array. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
+When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations, and echo the [id] of EVERY hint that influenced the plan — even partially (a tool it steered you toward, a step it added, a pitfall it made you avoid) — in the report's used_hints array. The usage signal you echo is the only evidence the system has that a hint earns its place; a used-but-unechoed hint gets retired as dead weight. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
 
 When [MODEL ROUTING INTEL] is present (observed verdict rates by model and task category): it is an exception report — a model absent from it has no known problem. Steer recommended_model away from listed (model, category) pairs when a viable alternative exists; never report a model's absence as a concern.
 
@@ -165,7 +164,7 @@ REPORT FIELD GUIDANCE:
 - deliverables_plan: Array of concrete work items the agent is expected to produce (0-6). Each item has a "description" (the artifact or outcome, e.g. "Write summary.md with key findings") and an optional "execution_hint" (inline | task | worker). Leave empty for pure Q&A. Reflect will check each item at turn end, so be specific and measurable.
 - execution_mode: Overall approach — "inline" (default, single-agent work) or "tasks" (multi-step sequential via task system).
 - task_type: Classify what KIND of task this is: "research" (finding/verifying information, web or corpus), "coding" (writing or modifying code/config), "data_analysis" (computing over data or files), "writing" (producing documents, summaries, distillations), "ops" (operating this system or external services: settings, deploys, admin actions), "conversational" (questions answered from context/memory, discussion). Pick the dominant kind when mixed. This is a statistics label only — it never changes how the task runs.
-- used_hints: Array of [id] values from the ADAPTIVE ROUTING HINTS block whose guidance actually shaped this plan. Empty array when none did (the honest default) — do not echo every hint.
+- used_hints: ALWAYS EMIT THIS FIELD. Array of [id] values from the ADAPTIVE ROUTING HINTS block whose guidance influenced this plan, even partially — a tool choice it steered, a step it added, a pitfall it made you avoid. Echo every hint you actually drew on (the retention sweep deletes hints that never record use, so omitting a used hint kills it); emit [] when no hint applied or no hints block was present. Do not echo hints that had no influence.
 
 RULES:
 - Be terse. Every token costs the main agent context space.
@@ -466,10 +465,10 @@ _SCOUT_TOOLS = [
                     "used_hints": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Ids from [ADAPTIVE ROUTING HINTS] that shaped this plan; empty if none did.",
+                        "description": "Ids from [ADAPTIVE ROUTING HINTS] that influenced this plan, even partially; [] if none applied.",
                     },
                 },
-                "required": ["recommended_tools", "approach_guidance"],
+                "required": ["recommended_tools", "approach_guidance", "used_hints"],
             },
         },
     },
@@ -928,13 +927,6 @@ CORE_MINIMUM = frozenset(
     }
 )
 
-# Cache
-import threading as _threading
-
-_cache: dict[str, tuple[ScoutReport, float]] = {}
-_cache_lock = _threading.Lock()
-CACHE_TTL = 300  # 5 minutes
-
 # Known model IDs (populated during scout LLM run for validation)
 _known_model_ids: set[str] = set()
 
@@ -1183,42 +1175,18 @@ def should_bypass_scout(message: str, turn_count: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _cache_key(message: str, brief: SessionBrief) -> str:
-    # Deliberately coarse. The old key included turn_count, the exact
-    # recently-used-tools list, and utilization at 0.1 granularity — all of
-    # which change between consecutive turns, so the cache could only hit
-    # when the same message was re-sent in the same turn state (essentially
-    # never; the cache was dead weight). Within the 5-minute TTL a report
-    # for the same message in the same session/phase at a similar context
-    # fill is still valid guidance.
-    util_bucket = int(brief.context_utilization * 4)  # 25% buckets
-    raw = f"{message}:{brief.session_id}:{brief.phase}:{util_bucket}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
-
-
-def _get_cached(message: str, brief: SessionBrief) -> ScoutReport | None:
-    key = _cache_key(message, brief)
-    with _cache_lock:
-        entry = _cache.get(key)
-        if entry and time.time() < entry[1]:
-            report = entry[0]
-            report.from_cache = True
-            return report
-    return None
-
-
-MAX_CACHE_SIZE = 500
-
-
 def _count_hint_usage(report: ScoutReport) -> None:
     """Record which adaptive routing hints shaped a FRESH scout plan.
 
-    Called from _put_cache — the one seam every fresh report passes and no
-    cache read does, so a single LLM claim is counted exactly once (cache
-    reuse hands the same report object back for CACHE_TTL). Citations are
-    sanitized against the live hint ids: the model can only credit hints
-    that exist, and over-echo can at worst delay a retirement, never cause
-    one. Never raises — counting is telemetry, not control flow.
+    Called at the fresh-report acceptance seams in run_scout (primary and
+    fallback-model success paths) — every report passing there came from a
+    live LLM run, so a single claim is counted exactly once. (This used to
+    live inside the report cache's write path; the cache recorded 0 hits in
+    506 live runs over 8 days — exact-string key, 5-minute TTL — and was
+    removed in the 2026-08-28 scout audit. The counting seam survives it.)
+    Citations are sanitized against the live hint ids: the model can only
+    credit hints that exist, and over-echo can at worst delay a retirement,
+    never cause one. Never raises — counting is telemetry, not control flow.
     """
     if not report.used_hints or not settings.adaptive_enabled:
         return
@@ -1230,24 +1198,6 @@ def _count_hint_usage(report: ScoutReport) -> None:
             db.upsert_signal("adaptive_entry", hid)
     except Exception as e:
         logger.debug("adaptive hint-usage count failed: %s", e)
-
-
-def _put_cache(message: str, brief: SessionBrief, report: ScoutReport) -> None:
-    _count_hint_usage(report)
-    with _cache_lock:
-        now = time.time()
-        # Evict expired entries when cache is getting large
-        if len(_cache) > MAX_CACHE_SIZE // 2:
-            expired = [k for k, (_, ttl) in _cache.items() if now >= ttl]
-            for k in expired:
-                del _cache[k]
-        # Hard cap: evict oldest entries if still over limit
-        if len(_cache) >= MAX_CACHE_SIZE:
-            oldest = sorted(_cache.items(), key=lambda x: x[1][1])
-            for k, _ in oldest[: len(_cache) - MAX_CACHE_SIZE + 1]:
-                del _cache[k]
-        key = _cache_key(message, brief)
-        _cache[key] = (report, now + CACHE_TTL)
 
 
 # ---------------------------------------------------------------------------
@@ -1262,35 +1212,25 @@ async def run_scout(
     emit: Callable[[dict], None] | None = None,
     is_retry: bool = False,
 ) -> ScoutReport:
-    """Run the scout agent. Returns ScoutReport (from cache, LLM, or fallback).
+    """Run the scout agent. Returns ScoutReport (from LLM or fallback).
 
     The scout:
     1. Reads SOUL.md, RULES.md, SESSIONS.md (if they exist)
     2. Iteratively searches memory, tools, skills via tool calls
     3. Submits a curated ScoutReport via submit_report tool
 
-    is_retry: this turn repeats one that failed verification. Cache reads are
-    skipped — the key is coarse (message + session + phase + utilization
-    bucket) with a 5-minute TTL, so a reflect retry of the same user message
-    would otherwise be handed back the very plan that just failed. Writes are
-    unaffected: the fresh plan is still worth caching.
+    is_retry: this turn repeats one that failed verification. Currently
+    informational only — the report cache that once made it load-bearing
+    (skipping cache reads so a retry never got back the plan that just
+    failed) was removed in the 2026-08-28 scout audit after recording 0
+    hits in 506 live runs. Kept so callers still declare the semantics.
     """
     brief = session_brief or build_session_brief(session_id)
 
     # Check bypass
     if should_bypass_scout(message, brief.turn_count):
-        cached = None if is_retry else _get_cached(message, brief)
-        if cached:
-            logger.debug("Scout bypassed, using cached report for session %s", session_id)
-            return cached
         logger.debug("Scout bypassed, using fallback for session %s", session_id)
         return _build_fallback_report(message, brief, reason="bypass")
-
-    # Check cache
-    cached = None if is_retry else _get_cached(message, brief)
-    if cached:
-        logger.debug("Scout cache hit for session %s", session_id)
-        return cached
 
     # Run scout LLM with retry for transient errors (model loading, 500s, etc.)
     max_attempts = 3
@@ -1358,8 +1298,8 @@ async def run_scout(
             # A fallback report is a degraded artifact, not a scout result:
             # keep it as the floor but let the dedicated fallback model try
             # for a real plan first. Breaking out (rather than returning) also
-            # keeps it out of the cache, so the next turn re-scouts instead of
-            # inheriting a scout-less plan for the full CACHE_TTL.
+            # skips hint-usage counting — a deterministic fallback's hints
+            # are not an LLM's claim about what shaped the plan.
             if report.from_fallback:
                 logger.warning(
                     "Scout produced only a fallback report for session %s after %d attempt(s)",
@@ -1369,7 +1309,7 @@ async def run_scout(
                 degraded_report = report
                 break
 
-            _put_cache(message, brief, report)
+            _count_hint_usage(report)
             if attempt > 1:
                 logger.info("Scout succeeded on attempt %d for session %s", attempt, session_id)
             logger.info(
@@ -1441,7 +1381,7 @@ async def run_scout(
                 logger.warning("Scout fallback model produced no usable plan for session %s", session_id)
                 degraded_report = report
             else:
-                _put_cache(message, brief, report)
+                _count_hint_usage(report)
                 logger.info(
                     "Scout fallback model succeeded for session %s in %dms", session_id, report.scout_latency_ms
                 )
@@ -1744,8 +1684,10 @@ async def _run_scout_llm(
     # When scout submits a report that fails _self_check_report, we inject
     # a revision request and let scout submit once more. Hard-capped at 1.
     revisions_used = 0
+    rounds_used = 0  # LLM rounds actually spent (observability — scout.done)
 
     for round_num in range(SCOUT_MAX_ROUNDS):
+        rounds_used = round_num + 1
         is_last_round = round_num == SCOUT_MAX_ROUNDS - 1
         # On the last round, drop the search tools so scout can't keep digging —
         # but keep submit_report. Removing every tool made the final round
@@ -1933,6 +1875,7 @@ async def _run_scout_llm(
 
     report.scout_model = model
     report.scout_tokens = total_usage
+    report.scout_rounds = rounds_used
     return report
 
 

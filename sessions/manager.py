@@ -1219,9 +1219,16 @@ class SessionManager:
                 session,
                 message,
                 pre_saved=_pre_saved,
-                # Answer-resumed turns continue the same task — reuse the
-                # suspended turn's scout report instead of re-scouting.
-                reuse_scout=start_reason == "answer-received",
+                # Answer-resumed and worker-resumed turns continue the same
+                # task — reuse the suspended turn's scout report instead of
+                # re-scouting. The 2026-08-28 scout audit measured resume
+                # scouts at 17-25s each, and every sampled plan just restated
+                # the action the resume message already mandates (call
+                # get_worker_result for the listed workers). Gap-1 resumes
+                # (parent already idle, resume queued as a pending message)
+                # still scout fresh — they enter from IDLE_READY as
+                # "prompt-arrived" and last_scout_report may be turns stale.
+                reuse_scout=start_reason in ("answer-received", "workers-complete"),
             )
 
         except asyncio.CancelledError:
@@ -1837,6 +1844,17 @@ class SessionManager:
             "from_fallback": scout_report.from_fallback,
             "latency_ms": scout_report.scout_latency_ms,
             "scout_model": scout_report.scout_model,
+            # Observability fields (2026-08-28 scout audit): these existed on
+            # the report but never reached the event, so the UI and every
+            # audit had to reconstruct them from post-mortems — and echo
+            # density (used_hints) was unmeasurable per-turn at all.
+            "used_hints": list(scout_report.used_hints or []),
+            "task_type": getattr(scout_report, "task_type", ""),
+            "execution_mode": scout_report.execution_mode,
+            "viability": scout_report.viability,
+            "scout_rounds": getattr(scout_report, "scout_rounds", 0),
+            "scout_prompt_tokens": scout_report.scout_tokens.prompt_tokens,
+            "scout_completion_tokens": scout_report.scout_tokens.completion_tokens,
         }
         session.emit_event(scout_event)
         db.add_message(session.session_id, "scout", json.dumps(scout_event))
