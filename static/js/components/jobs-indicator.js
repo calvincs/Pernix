@@ -88,6 +88,7 @@ function _connectSSE() {
         _eventSource = new EventSource('/api/jobs/events');
 
         for (const type of ['job.started', 'job.completed', 'job.error',
+                            'job.test_started', 'job.test_done',
                             'snooze.start', 'snooze.done', 'snooze.activity']) {
             _eventSource.addEventListener(type, (e) => {
                 try {

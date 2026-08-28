@@ -63,6 +63,8 @@ Both behaviors live in `_is_unattended_session()` in `core/tools/executor.py`.
 | `POST /api/jobs` | Create a new job (same args as `schedule_job`) |
 | `POST /api/jobs/{name}/pause` | Pause an enabled job (won't fire until resumed) |
 | `POST /api/jobs/{name}/resume` | Resume a paused job |
+| `POST /api/jobs/{name}/validate` | Re-check the job's spec (cron, prompt, tools, model) |
+| `POST /api/jobs/{name}/test` | Dry-run the job once in an isolated workspace (result → notification) |
 | `DELETE /api/jobs/{name}` | Delete the job |
 
 Or via tools the agent can use:
@@ -70,9 +72,28 @@ Or via tools the agent can use:
 - `list_scheduled_jobs`
 - `update_scheduled_job` (change schedule or instructions)
 - `set_job_state` (pause/resume)
+- `test_job` (isolated dry-run — prove the job works before it fires)
 - `remove_scheduled_job`
 
-The UI's jobs panel shows the list with next-run times and status.
+The UI's jobs panel shows the list with next-run times, status, a spec badge
+(`valid` / `invalid` / `unvalidated`), the last test outcome, and a **test**
+button per job.
+
+### Validation and test-runs
+
+Creating or editing a job validates the spec first: an unparseable cron
+expression, a trivial prompt, or an unknown tool in `allowed_tools` is
+rejected at save time with the reasons spelled out — not discovered weeks
+later when the job silently fails on schedule. A model that isn't in the
+local registry is a warning, not a blocker (remote ids can still resolve at
+dispatch).
+
+`test_job` (or the panel's **test** button) then proves the job actually
+runs: the prompt fires once in a throwaway temp workspace under the job's own
+model and tool allow-list, bounded at 5 minutes. Nothing is recorded in the
+run history and the schedule is untouched. The transcript survives as a
+session titled `Job test: <name>`, and a job that calls `ask_user` is flagged
+— an unattended fire would hang on that question forever.
 
 ---
 
