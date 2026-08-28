@@ -160,3 +160,117 @@ def test_consolidation_prompt_preserves_links():
     from core.memory.consolidate import _LLM_MERGE_PROMPT
 
     assert "[[file-name]]" in _LLM_MERGE_PROMPT and "verbatim" in _LLM_MERGE_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Task-type taxonomy (the outcome-stats axis) + decoupled resource channels
+# ---------------------------------------------------------------------------
+
+
+def test_task_category_stamps_from_scout_task_type():
+    from core.reflect import ReflectResult, _write_post_mortem
+    from core.scout.report import ScoutReport
+
+    sid = db.create_session(title="tt")
+    report = ScoutReport(task_type="research", execution_mode="inline")
+    _write_post_mortem(sid, 1, ReflectResult(verdict="pass", reasoning="ok"), report, {})
+    payload = json.loads(db.list_post_mortems(session_id=sid)[0]["payload_json"])
+    assert payload["task_category"] == "research"
+    assert payload["scout_summary"]["task_type"] == "research"
+
+
+def test_task_category_falls_back_to_execution_mode():
+    """Reports predating the field (cache/fallback/older deploys) keep the
+    legacy stamp so rows never lose their category outright."""
+    from core.reflect import ReflectResult, _write_post_mortem
+    from core.scout.report import ScoutReport
+
+    sid = db.create_session(title="tt2")
+    report = ScoutReport(execution_mode="tasks")  # no task_type
+    _write_post_mortem(sid, 1, ReflectResult(verdict="pass", reasoning="ok"), report, {})
+    payload = json.loads(db.list_post_mortems(session_id=sid)[0]["payload_json"])
+    assert payload["task_category"] == "tasks"
+
+
+def test_extract_report_clamps_task_type():
+    from core.scout.runner import _extract_report
+
+    base = {"recommended_tools": [], "approach_guidance": "x" * 40}
+    assert _extract_report({**base, "task_type": "coding"}).task_type == "coding"
+    assert _extract_report({**base, "task_type": "Research"}).task_type == "research"
+    assert _extract_report({**base, "task_type": "galactic"}).task_type == ""
+    assert _extract_report(base).task_type == ""
+
+
+def test_turn_metrics_stamp_from_token_usage():
+    from core.reflect import ReflectResult, _write_post_mortem
+
+    sid = db.create_session(title="tm")
+    msg_id = db.add_message(sid, "user", "do the thing")
+    db.add_token_usage(session_id=sid, model="m1", prompt_tokens=1000, completion_tokens=200, total_tokens=1200)
+    db.add_token_usage(session_id=sid, model="m1", prompt_tokens=2000, completion_tokens=300, total_tokens=2300)
+    _write_post_mortem(sid, 1, ReflectResult(verdict="pass", reasoning="ok"), None, {}, turn_user_msg_id=msg_id)
+    payload = json.loads(db.list_post_mortems(session_id=sid)[0]["payload_json"])
+    tm = payload.get("turn_metrics")
+    assert tm is not None
+    assert tm["tokens"] == 3500 and tm["llm_calls"] == 2
+    assert tm["wall_ms"] >= 0
+
+
+def test_attribute_model_route_carries_metrics():
+    from core.synthesis import attribute
+
+    attrs = attribute(_pm_row(verdict="pass", turn_metrics={"tokens": 42000, "wall_ms": 65000}))
+    route = [a for a in attrs if a.signal_type == "model_route"][0]
+    assert route.metrics == {"tokens": 42000, "wall_ms": 65000}
+    # Absent/zero metrics -> None (no accumulator churn from empty stamps).
+    attrs = attribute(_pm_row(verdict="pass"))
+    assert [a for a in attrs if a.signal_type == "model_route"][0].metrics is None
+
+
+def test_apply_attributions_accumulates_and_preserves_metrics():
+    from core.synthesis import Attribution, apply_attributions
+
+    subj = "metered-model|research"
+    a = Attribution("model_route", subj, delta_failures=1, rationale="r", metrics={"tokens": 10000, "wall_ms": 30000})
+    b = Attribution("model_route", subj, delta_failures=1, rationale="r", metrics={"tokens": 20000, "wall_ms": 60000})
+    apply_attributions([a, b])
+    payload = json.loads(db.get_signal("model_route", subj)["payload_json"])
+    assert payload["m_tokens_total"] == 30000
+    assert payload["m_wall_ms_total"] == 90000
+    assert payload["m_count"] == 2
+    # A metric-less observation must NOT wipe the accumulators.
+    apply_attributions([Attribution("model_route", subj, delta_failures=1, rationale="old row")])
+    payload = json.loads(db.get_signal("model_route", subj)["payload_json"])
+    assert payload["m_count"] == 2 and payload["m_tokens_total"] == 30000
+
+
+def test_brief_renders_resource_channels():
+    from core.synthesis import Attribution, apply_attributions, build_model_routing_brief
+
+    subj = "slow-model|research"
+    apply_attributions(
+        [
+            Attribution(
+                "model_route", subj, delta_failures=1, rationale="r", metrics={"tokens": 40000, "wall_ms": 90000}
+            )
+            for _ in range(6)
+        ]
+    )
+    brief = build_model_routing_brief()
+    assert brief is not None
+    assert "slow-model on research: 0% pass over 6 turns" in brief
+    assert "avg ~40k tok" in brief and "~90s/turn" in brief
+
+
+def test_brief_skips_stale_rows():
+    from core.synthesis import build_model_routing_brief
+
+    _seed_route("old-model|inline", 0, 8)  # would render if fresh
+    with db.connect_sessions() as conn:
+        conn.execute(
+            "UPDATE scout_signals SET last_reinforced_at = '2020-01-01T00:00:00+00:00' "
+            "WHERE signal_type='model_route' AND subject='old-model|inline'"
+        )
+    brief = build_model_routing_brief()
+    assert brief is None or "old-model" not in brief

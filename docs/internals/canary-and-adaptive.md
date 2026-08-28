@@ -277,12 +277,23 @@ highlighted) and drive:
   the sweep's first run so pre-instrumentation entries get a full observed
   window before they can be judged. `prompt_note` — previously the kind
   with no retirement loop at all — also gets a TTL backstop.
-- **Capped, ranked rendering** — the scout hints block ranks by live usage
-  and caps at 12 lines/1.6k chars with a truncation marker (which finally
-  makes `search_adaptive`'s trigger real); the agent block caps at 12
-  policies/12k chars with deterministic source-priority selection
-  (user > refine > candor > telos > dream) — stable bytes between idle
-  applies, prompt-cache safe.
+- **Failure-dominated retirement** — the same sweep also reads the OUTCOME
+  half of the signal (successes/failures attributed by synthesis): an
+  entry with ≥ `adaptive_harmful_retire_min_uses` attributed outcomes
+  whose success share sits below `adaptive_harmful_retire_max_success`
+  retires *even though it is used*. Usage-only retention had the perverse
+  edge: a harmful hint cited every turn was immortal precisely because it
+  was cited, while an uncited good one died at the window. No age/epoch
+  gate — the outcomes themselves are the observed window. Exempt sources
+  (candor, user) and the journaled-delete/rollback path are shared with
+  the unused sweep.
+- **Capped, ranked rendering** — the scout hints block ranks by observed
+  outcome share (Laplace-smoothed `(s+1)/(n+2)`, so unattributed entries
+  sit at a neutral 0.5), then usage, and caps at 12 lines/1.6k chars with
+  a truncation marker (which finally makes `search_adaptive`'s trigger
+  real); the agent block caps at 12 policies/12k chars with deterministic
+  source-priority selection (user > refine > candor > telos > dream) —
+  stable bytes between idle applies, prompt-cache safe.
 
 ### Authorship (v3.1)
 

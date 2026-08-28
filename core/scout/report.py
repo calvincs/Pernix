@@ -143,6 +143,15 @@ class ScoutReport:
     # from this directive). Deferred until properly implemented.
     execution_mode: str = "inline"
 
+    # Task-type classification (the outcome-stats axis): research | coding |
+    # data_analysis | writing | ops | conversational, or "" when scout didn't
+    # classify. Purely an ANALYSIS label — nothing routes, switches models,
+    # or changes execution on it. Reflect stamps it into the post-mortem as
+    # task_category, so model_route counters and the [MODEL ROUTING INTEL]
+    # brief aggregate per real task type instead of per execution_mode
+    # (whose two live values made every category read "inline").
+    task_type: str = ""
+
     # Viability flag set by scout self-validation (Phase 2a).
     # "verified": passed the validator on first or second submit.
     # "unverified": submitted with outstanding issues — agent proceeds with caution.

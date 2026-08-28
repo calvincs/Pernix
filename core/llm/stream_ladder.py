@@ -46,6 +46,27 @@ logger = logging.getLogger("pernix.agent")
 
 STREAM_BACKOFFS = (5, 10, 15)
 
+
+def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    """USD estimate from settings.model_prices, or None for unpriced models.
+
+    model_prices: {model_id: {"in": USD per 1M prompt tok, "out": USD per 1M
+    completion tok}}. Exact model-id match only — a partial match silently
+    pricing the wrong model is worse than a NULL. Display/telemetry only.
+    """
+    try:
+        prices = settings.model_prices.get(model)
+        if not isinstance(prices, dict):
+            return None
+        rate_in = float(prices.get("in") or 0.0)
+        rate_out = float(prices.get("out") or 0.0)
+        if rate_in <= 0 and rate_out <= 0:
+            return None
+        return (int(prompt_tokens) * rate_in + int(completion_tokens) * rate_out) / 1_000_000.0
+    except Exception:
+        return None
+
+
 # Substrings that mark an error as worth retrying against the same model:
 # gateway/5xx codes and transport-level failures. Anything else (auth, bad
 # request, model-not-found) is a config problem that retrying only delays.
@@ -228,6 +249,11 @@ async def stream_with_failover(
                         total_tokens=event.usage.total_tokens,
                         cache_read_tokens=event.usage.cache_read_tokens,
                         cache_write_tokens=event.usage.cache_write_tokens,
+                        cost_estimate=estimate_cost(
+                            current_model,
+                            event.usage.prompt_tokens,
+                            event.usage.completion_tokens,
+                        ),
                         source="provider",
                         provider=client.resolve_provider(current_model),
                         goal_id=goal_id,

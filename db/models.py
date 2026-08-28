@@ -862,6 +862,46 @@ def get_session_usage(session_id: str) -> dict:
         return dict(row) if row else {}
 
 
+def session_token_usage_since(session_id: str, since_iso: str) -> dict:
+    """Token totals for one session since a timestamp — the turn window.
+
+    Reflect stamps this into the post-mortem as turn_metrics: the turn's
+    user message created_at is the anchor, so retries are included (they
+    are part of what the turn cost). token_usage.created_at is a SQLite
+    CURRENT_TIMESTAMP ("YYYY-MM-DD HH:MM:SS", UTC); message stamps are ISO
+    with offset — normalize the anchor to the same shape for comparison.
+    """
+    anchor = str(since_iso).replace("T", " ")[:19]
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT COALESCE(SUM(total_tokens), 0) as total,
+                      COUNT(*) as calls
+               FROM token_usage WHERE session_id = ? AND created_at >= ?""",
+            (session_id, anchor),
+        ).fetchone()
+        return dict(row) if row else {}
+
+
+def token_usage_by_model_since(since_iso: str) -> list[dict]:
+    """Per-model token totals across ALL sessions since a timestamp.
+
+    Feeds the fallback-burn watch (core/llm/burnwatch.py): the fallback
+    model's share of a window's tokens is the signature of a wedged
+    primary provider silently rerouting every call to the paid tier.
+    """
+    anchor = str(since_iso).replace("T", " ")[:19]
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT model, provider,
+                      COALESCE(SUM(total_tokens), 0) as total,
+                      COUNT(*) as calls
+               FROM token_usage WHERE created_at >= ?
+               GROUP BY model, provider ORDER BY total DESC""",
+            (anchor,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Questions
 # ---------------------------------------------------------------------------

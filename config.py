@@ -99,6 +99,22 @@ class Settings:
     # doomed request and — worse — replaces the original error with the
     # quota 403, masking what actually went wrong (0 disables the breaker).
     provider_quota_cooldown_s: int = 600
+    # Fallback-burn watch: fallback_model is the paid/backup tier, and a
+    # silently wedged primary provider once rerouted every turn there for
+    # days before anyone noticed (the 2026-08-19 aibox key-loss incident).
+    # Snooze checks the trailing 24h of token_usage: when the fallback
+    # model's token share reaches fallback_burn_alert_share AND at least
+    # fallback_burn_min_tokens were spent in the window, a high-urgency
+    # notification fires (deduped daily). Watch-only — routing never
+    # changes. share=0 disables the watch.
+    fallback_burn_alert_share: float = 0.25
+    fallback_burn_min_tokens: int = 50000
+    # Optional per-model pricing for token_usage.cost_estimate: model id →
+    # {"in": USD per 1M prompt tokens, "out": USD per 1M completion tokens}.
+    # Unpriced models keep cost_estimate NULL (the pre-existing behavior);
+    # local models simply stay unlisted. Display/telemetry only — nothing
+    # routes on cost.
+    model_prices: dict = field(default_factory=dict)
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_max_concurrent: int = 4  # Max concurrent OpenRouter requests
     openrouter_models: list = field(default_factory=list)
@@ -420,6 +436,15 @@ class Settings:
     # prompt_note has no producer-side retirement loop at all; this TTL is
     # its backstop (0 = never). A still-useful note re-mints cheaply.
     adaptive_prompt_note_ttl_days: int = 90
+    # Failure-dominated retirement: an entry whose attributed OUTCOMES are
+    # mostly failures retires even though it is used — before this, usage
+    # alone kept a provably harmful hint alive forever while an uncited good
+    # one died at the retire window. Needs at least min_uses attributed
+    # outcomes (successes+failures, written by synthesis) before the share
+    # is trusted; retires when the success share is below max_success.
+    # min_uses=0 disables the branch.
+    adaptive_harmful_retire_min_uses: int = 5
+    adaptive_harmful_retire_max_success: float = 0.3
     # A suspect flag raised by the PASSIVE post-mortem signal alone can never
     # self-clear (its comparison windows are frozen at the apply). After this
     # many days it auto-clears with an annotation; canary-confirmed flags are
