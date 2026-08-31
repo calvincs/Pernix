@@ -8,7 +8,9 @@ with no reflect verdict at all. (It replaced a narrower reflect-gated sibling,
 the same sessions for the same artifacts.)
 
 Triggered as the tail-end activity of snooze (Activity 13). Watermarks via
-``snooze_state['refined:{sid}']`` so each session is processed at most once.
+``snooze_state['refined:{sid}']`` (max message id seen) so each session is
+processed at most once per growth spurt — a session that gains messages
+after its last pass re-arms and is refined again over the fuller story.
 
 Hard rule: never auto-applies skill edits. All SKILL.md changes flow through
 the existing proposals UI for human approve/deny.
