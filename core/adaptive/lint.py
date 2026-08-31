@@ -60,6 +60,13 @@ _IMPERATIVE_RE = re.compile(
 # read as guidance. prompt_note is included: it lands in the agent prefix.
 _LINTED_KINDS = frozenset({"policy", "routing_hint", "prompt_note"})
 
+# Bump when the patterns above change. The retro sweep (retire.py) keys its
+# watermark on this, so a lint that learns a new narrative shape re-examines
+# the standing population instead of only future mints — the entries the
+# 2026-08-31 audit found were all minted BEFORE the lint existed and sat
+# untouched in the rendered policy slots for four days.
+LINT_VERSION = 1
+
 
 def lint_edit(edit: dict) -> str | None:
     """Reason the edit's content fails the actionability floor, or None.

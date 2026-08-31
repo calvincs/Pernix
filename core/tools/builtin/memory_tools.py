@@ -53,7 +53,8 @@ def _duplicate_verdict(store_result: str) -> str:
     f, e, preview = m.group("file"), m.group("epoch"), m.group("preview")
     return (
         f'NOT SAVED — duplicate of {f}@{e}: "{preview}". If your version is newer or more '
-        f"accurate, supersede it with update_memory(file='{f}', epoch={e}, content=...)"
+        f"accurate, repeat this remember() call with supersede='{f}@{e}' (one call), or "
+        f"update_memory(file='{f}', epoch={e}, content=...)"
     )
 
 
@@ -81,6 +82,107 @@ def _verify_write(store, verdict: str, file_name: str, epoch: int, sent_content:
         stored = entry.content.strip()[:_PREVIEW_CHARS].replace("\n", " ")
         return f'{head} VERIFY=MISMATCH — stored content differs from what you sent (stored: "{stored}")'
     return f"{head} VERIFY=OK"
+
+
+# ---------------------------------------------------------------------------
+# Federated read-side (agent-ergonomics plan P2: reads federate, writes
+# govern). Knowledge lives in 6+ stores, each with its own governed write
+# path; nothing requires six READ surfaces. deep_recall appends bounded,
+# provenance-tagged hits from the other stores so "which store do I ask?"
+# stops being the agent's problem. Every source is best-effort: a store
+# that is off or broken contributes nothing, never an error.
+# ---------------------------------------------------------------------------
+
+_FED_PER_SOURCE = 3
+_FED_SNIPPET_CHARS = 160
+
+
+def _federated_sections(query: str) -> str:
+    q = " ".join(query.split()).lower()
+    if not q:
+        return ""
+    words = [w for w in q.split() if len(w) > 2][:6]
+    if not words:
+        return ""
+    sections: list[str] = []
+
+    # Adaptive store — the rules currently shaping behavior.
+    try:
+        from db.models import connect_sessions
+
+        like = " OR ".join("(lower(title) LIKE ? OR lower(content) LIKE ?)" for _ in words)
+        params: list[str] = []
+        for w in words:
+            params += [f"%{w}%", f"%{w}%"]
+        with connect_sessions() as conn:
+            rows = conn.execute(
+                f"SELECT id, kind, source, title, content FROM adaptive_entries "
+                f"WHERE status = 'active' AND ({like}) LIMIT {_FED_PER_SOURCE}",
+                params,
+            ).fetchall()
+        for r in rows:
+            body = " ".join(str(r["content"]).split())[:_FED_SNIPPET_CHARS]
+            sections.append(f"[adaptive/{r['kind']} · {r['source']}] {r['title']}: {body}")
+    except Exception:
+        pass
+
+    # Telos claims — validated beliefs with epistemic-class caps.
+    try:
+        from config import settings as _s
+
+        if _s.telos_enabled:
+            from core.telos.store import TelosStore
+
+            store = TelosStore.open()
+            hits = 0
+            for c in store.list("claim"):
+                text = str(c.get("text") or c.get("statement") or c.get("content") or "")
+                if any(w in text.lower() for w in words):
+                    conf = c.get("confidence")
+                    tag = f" (conf {float(conf):.2f})" if conf is not None else ""
+                    sections.append(f"[telos claim{tag}] {' '.join(text.split())[:_FED_SNIPPET_CHARS]}")
+                    hits += 1
+                    if hits >= 2:
+                        break
+    except Exception:
+        pass
+
+    # Skills — procedural knowledge that may already cover the topic.
+    try:
+        from core.skills.registry import get_skill_registry
+
+        hits = 0
+        for s in get_skill_registry().all_skills():
+            hay = f"{s.name} {s.description} {' '.join(s.tags or [])}".lower()
+            if any(w in hay for w in words):
+                sections.append(f"[skill] {s.name}: {' '.join(s.description.split())[:_FED_SNIPPET_CHARS]}")
+                hits += 1
+                if hits >= _FED_PER_SOURCE:
+                    break
+    except Exception:
+        pass
+
+    # Session transcripts — raw history the curated store may not carry.
+    try:
+        from db.models import connect_sessions
+
+        fts_q = '"' + q.replace('"', " ") + '"'
+        with connect_sessions() as conn:
+            rows = conn.execute(
+                "SELECT session_id, snippet(messages_fts, 2, '', '', '…', 14) sn "
+                f"FROM messages_fts WHERE messages_fts MATCH ? LIMIT {_FED_PER_SOURCE}",
+                (fts_q,),
+            ).fetchall()
+        for r in rows:
+            sections.append(f"[session {str(r['session_id'])[:12]}] …{' '.join(str(r['sn']).split())}…")
+    except Exception:
+        pass
+
+    if not sections:
+        return ""
+    return "\n\nRELATED IN OTHER STORES (provenance-tagged; read-only federation):\n" + "\n".join(
+        f"- {s}" for s in sections
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -257,13 +359,26 @@ async def _deep_recall_async(query: str, context: str) -> str:
     return "Search completed but no synthesis produced."
 
 
-def remember(content: str, file: str = "", tags: str = "", weight: str = "", _context: dict | None = None) -> str:
-    """Save content to persistent memory. Returns a SAVED / NOT SAVED verdict."""
+def remember(
+    content: str, file: str = "", tags: str = "", weight: str = "", supersede: str = "", _context: dict | None = None
+) -> str:
+    """Save content to persistent memory. Returns a SAVED / NOT SAVED verdict.
+
+    supersede='file@epoch' replaces that entry instead of appending — the
+    single-call repair for a duplicate refusal (the refusal names this exact
+    target), so correcting a stale fact costs one call, not a
+    recall/update_memory round-trip (agent-ergonomics plan §4.5)."""
     from core.memory.store import get_memory_store
 
     store = get_memory_store()
     if store is None:
         return "NOT SAVED — Memory system unavailable"
+
+    if supersede:
+        target_file, sep, raw_epoch = supersede.partition("@")
+        if not sep or not target_file or not raw_epoch.strip().isdigit():
+            return f"NOT SAVED — supersede must be 'file@epoch' (got {supersede!r})"
+        return update_memory(target_file.strip(), int(raw_epoch.strip()), content, _context=_context)
 
     # Auto-infer weight if not specified
     if not weight:
@@ -448,13 +563,14 @@ def deep_recall(
         ctx = _context or {}
         loop = ctx.get("_loop") or asyncio.get_running_loop()
         future = asyncio.run_coroutine_threadsafe(_deep_recall_async(query, context), loop)
-        return future.result(timeout=60)
+        return future.result(timeout=60) + _federated_sections(query)
     except Exception as e:
         logger.warning("deep_recall LLM agent failed, falling back to basic recall: %s", e)
         try:
             results = store.search(query, limit=8)
             if not results:
-                return "No results found in memory."
+                fed = _federated_sections(query)
+                return ("No results found in memory." + fed) if fed else "No results found in memory."
 
             sid = (_context or {}).get("session_id", "")
             footer = ""
@@ -479,7 +595,7 @@ def deep_recall(
                         len(content) // 3,
                     )
                 lines.append(format_result_line(r))
-            body = "\n\n".join(lines)
+            body = "\n\n".join(lines) + _federated_sections(query)
             if footer:
                 return f"{body}\n\n{footer}"
             return body
@@ -583,8 +699,9 @@ def register(reg) -> None:
             "or NOT SAVED — only 'SAVED file=<f> epoch=<n> VERIFY=OK' means the entry is on "
             "disk (VERIFY is a read-back of the stored text; MISMATCH means it landed but "
             "differs from what you sent). 'NOT SAVED — duplicate of <f>@<e>' means nothing was "
-            "written: if your version is newer or more accurate, call update_memory(file, "
-            "epoch, content) on that entry, otherwise the correction is lost."
+            "written: if your version is newer or more accurate, repeat the call with "
+            "supersede='<f>@<e>' (one-call repair), or call update_memory(file, epoch, "
+            "content) — otherwise the correction is lost."
         ),
         parameters={
             "type": "object",
@@ -599,6 +716,13 @@ def register(reg) -> None:
                     "type": "string",
                     "enum": ["normal", "high"],
                     "description": "Importance level. Auto-inferred from content if omitted (CRITICAL/NEVER/ALWAYS → high).",
+                },
+                "supersede": {
+                    "type": "string",
+                    "description": (
+                        "'file@epoch' of an existing entry to REPLACE with this content — the "
+                        "one-call repair when a save was refused as a duplicate of that entry."
+                    ),
                 },
             },
             "required": ["content"],
@@ -685,10 +809,11 @@ def register(reg) -> None:
         name="deep_recall",
         func=deep_recall,
         description=(
-            "LLM-backed memory search with synthesis. Searches memory using multiple "
-            "strategies (FTS5 + ripgrep fallback), reformulates queries on weak/empty results, "
-            "and returns a clean attributed answer. Raw search noise stays inside the sub-agent. "
-            "Use when: recall() returns empty/weak results, the query is complex, "
+            "LLM-backed memory search with synthesis, FEDERATED across every knowledge "
+            "store: long-term memory (FTS5 + ripgrep, query reformulation, attributed "
+            "answer) plus provenance-tagged hits from adaptive entries, telos claims, "
+            "skills, and session transcripts — one query instead of guessing which store "
+            "to ask. Use when: recall() returns empty/weak results, the query is complex, "
             "or cross-file synthesis is needed. Pass context= to focus the search. "
             "include_seen=true bypasses the per-session dedup ledger (only affects "
             "the fallback path — the LLM path returns synthesis, not raw entries)."
@@ -756,10 +881,13 @@ def register(reg) -> None:
         name="forget",
         func=forget,
         description=(
-            "Permanently delete a memory entry. "
+            "Permanently delete a memory entry. LAST RESORT — its calibrated reliability is "
+            "poor (single-digit percent on the live ledger), almost always from a stale epoch: "
+            "the epoch MUST come from a recall() run THIS turn, never from memory or an "
+            "earlier session. Prefer update_memory to correct a wrong fact (same freshness "
+            "rule, but a failed update loses nothing). "
             "First call recall() to find the entry — the output shows [file epoch=N score=X.X]. "
             "Then call forget with that file and epoch. Cannot be undone. "
-            "Prefer update_memory to correct wrong facts rather than deleting them entirely. "
             "The result always begins DELETED or NOT DELETED; only 'DELETED file=<f> "
             "epoch=<n> VERIFY=OK' means the entry is gone from disk."
         ),

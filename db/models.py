@@ -793,6 +793,159 @@ def recent_termination_reasons(session_id: str, limit: int = 3) -> list[str]:
         return [r["termination_reason"] for r in rows]
 
 
+def ledger_anchor(session_id: str, before_msg_id: int) -> str | None:
+    """Timestamp of the last message before this turn's user message — the
+    'since when' for the turn-boundary ledger. None on a session's first
+    turn (the caller falls back to the session's created_at)."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT created_at FROM messages WHERE session_id = ? AND id < ? ORDER BY id DESC LIMIT 1",
+            (session_id, before_msg_id),
+        ).fetchone()
+        return row["created_at"] if row else None
+
+
+def ledger_snapshot(session_id: str, anchor_iso: str) -> dict:
+    """Everything that changed around this session since `anchor_iso` — the
+    read side of the turn-boundary ledger (agent-ergonomics plan, Tier 1).
+
+    Every group is bounded and best-effort: a group whose table or column is
+    missing (older DB, feature off) contributes an empty list rather than
+    sinking the snapshot. All data already exists in these tables; this is
+    composition, not new plumbing.
+    """
+    out: dict = {
+        "finished_workers": [],
+        "finished_jobs": [],
+        "finished_rlm": [],
+        "inflight": {},
+        "last_verdict": None,
+        "open_questions": [],
+        "agent_proposals": [],
+        "adaptive_changes": [],
+        "canary_fails": [],
+        "boot": {},
+    }
+    with connect_sessions() as conn:
+        try:
+            out["finished_workers"] = [
+                dict(r)
+                for r in conn.execute(
+                    """SELECT id, title, updated_at FROM sessions
+                       WHERE parent_session_id = ? AND session_type = 'worker'
+                         AND state_v2 = 'idle_ready' AND updated_at > ?
+                       ORDER BY updated_at DESC LIMIT 4""",
+                    (session_id, anchor_iso),
+                ).fetchall()
+            ]
+        except Exception:
+            pass
+        try:
+            out["finished_jobs"] = [
+                dict(r)
+                for r in conn.execute(
+                    """SELECT id, name, command, state, exit_code FROM jobs
+                       WHERE session_id = ? AND finished_at > ?
+                       ORDER BY finished_at DESC LIMIT 3""",
+                    (session_id, anchor_iso),
+                ).fetchall()
+            ]
+        except Exception:
+            pass
+        try:
+            out["finished_rlm"] = [
+                dict(r)
+                for r in conn.execute(
+                    """SELECT run_id, status FROM rlm_runs
+                       WHERE session_id = ? AND finished_at > ?
+                       ORDER BY finished_at DESC LIMIT 2""",
+                    (session_id, anchor_iso),
+                ).fetchall()
+            ]
+        except Exception:
+            pass
+        try:
+            busy = "('scouting', 'processing', 'compacting', 'awaiting_workers')"
+            out["inflight"] = {
+                "workers": conn.execute(
+                    f"SELECT COUNT(*) c FROM sessions WHERE session_type = 'worker' AND state_v2 IN {busy}"
+                ).fetchone()["c"],
+                "jobs": conn.execute("SELECT COUNT(*) c FROM jobs WHERE state = 'running'").fetchone()["c"],
+                "rlm": conn.execute("SELECT COUNT(*) c FROM rlm_runs WHERE status = 'running'").fetchone()["c"],
+                "cron": conn.execute(
+                    f"SELECT COUNT(*) c FROM sessions WHERE session_type = 'cron' AND state_v2 IN {busy}"
+                ).fetchone()["c"],
+            }
+        except Exception:
+            pass
+        try:
+            row = conn.execute(
+                """SELECT verdict, failure_cause, payload_json, created_at FROM post_mortems
+                   WHERE session_id = ? AND created_at > ?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (session_id, anchor_iso),
+            ).fetchone()
+            out["last_verdict"] = dict(row) if row else None
+        except Exception:
+            pass
+        try:
+            out["open_questions"] = [
+                dict(r)
+                for r in conn.execute(
+                    """SELECT question, created_at FROM questions
+                       WHERE session_id = ? AND answered_at IS NULL
+                       ORDER BY created_at DESC LIMIT 2""",
+                    (session_id,),
+                ).fetchall()
+            ]
+        except Exception:
+            pass
+        try:
+            out["agent_proposals"] = [
+                dict(r)
+                for r in conn.execute(
+                    """SELECT id, created_at FROM adaptive_proposals
+                       WHERE status = 'pending' AND producer = 'agent'
+                       ORDER BY created_at DESC LIMIT 2""",
+                ).fetchall()
+            ]
+        except Exception:
+            pass
+        try:
+            out["adaptive_changes"] = [
+                dict(r)
+                for r in conn.execute(
+                    """SELECT entry_id, action, actor FROM adaptive_events
+                       WHERE created_at > ? AND action IN ('create', 'update', 'delete')
+                       ORDER BY id DESC LIMIT 6""",
+                    (anchor_iso,),
+                ).fetchall()
+            ]
+        except Exception:
+            pass
+        try:
+            out["canary_fails"] = [
+                dict(r)
+                for r in conn.execute(
+                    """SELECT task, created_at FROM canary_runs
+                       WHERE created_at > ? AND outcome = 'gate_fail'
+                       ORDER BY created_at DESC LIMIT 3""",
+                    (anchor_iso,),
+                ).fetchall()
+            ]
+        except Exception:
+            pass
+    try:
+        out["boot"] = {
+            "at": get_snooze_state("app_last_boot_at") or "",
+            "was_deploy": get_snooze_state("app_last_boot_was_deploy") == "1",
+            "stamp": get_snooze_state("app_version_seen") or "",
+        }
+    except Exception:
+        pass
+    return out
+
+
 def get_message_context(session_id: str, message_id: int, window: int = 2) -> list[dict]:
     """Get a message and its surrounding context (window messages before/after)."""
     with connect_sessions() as conn:
@@ -1903,20 +2056,26 @@ def delete_old_dream_hypotheses(cutoff_iso: str, statuses: tuple[str, ...]) -> i
         return cur.rowcount
 
 
-def prune_cron_sessions(max_age_days: int = 7) -> int:
-    """Delete old auto-created cron sessions and their messages."""
+def list_cron_sessions_before(max_age_days: int = 7) -> list[dict]:
+    """Cron sessions the pruner would delete — the single criteria
+    definition, shared with retention's distill-before-delete digest."""
     from datetime import datetime, timedelta, timezone
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
     with connect_sessions() as conn:
         rows = conn.execute(
-            "SELECT id FROM sessions WHERE title LIKE 'Cron: %' AND updated_at < ?",
+            "SELECT id, title, updated_at FROM sessions WHERE title LIKE 'Cron: %' AND updated_at < ?",
             (cutoff,),
         ).fetchall()
-        ids = [r["id"] for r in rows]
-    for sid in ids:
-        delete_session(sid)
-    return len(ids)
+        return [dict(r) for r in rows]
+
+
+def prune_cron_sessions(max_age_days: int = 7) -> int:
+    """Delete old auto-created cron sessions and their messages."""
+    rows = list_cron_sessions_before(max_age_days)
+    for r in rows:
+        delete_session(r["id"])
+    return len(rows)
 
 
 # ---------------------------------------------------------------------------

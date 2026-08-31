@@ -45,6 +45,41 @@ def _priority(entry: dict) -> tuple:
     return (_SOURCE_RANK.get(entry.get("source"), 5), entry["id"])
 
 
+# (entry_id → (version, evidence ref)) — the audit chain lives in
+# adaptive_events, and querying it on every compile would put N queries on
+# the hot path. Version-keyed, so the cached string is deterministic for a
+# given store state and the rendered bytes stay stable between applies (I8).
+_EVIDENCE_CACHE: dict[str, tuple[int, str]] = {}
+_EVIDENCE_CACHE_MAX = 512
+
+
+def _evidence_ref(entry: dict) -> str:
+    """First evidence ref recorded on the entry's creating event, truncated.
+
+    Rendered beside the producer so the agent can see not just WHO minted a
+    rule it is following but from WHAT — the 2026-08-31 first-person audit's
+    §5.1: 'I currently can't tell which producer minted the rule I'm
+    following.' Empty when the journal has none (e.g. legacy rows).
+    """
+    eid, version = entry["id"], int(entry.get("version") or 0)
+    cached = _EVIDENCE_CACHE.get(eid)
+    if cached and cached[0] == version:
+        return cached[1]
+    ref = ""
+    try:
+        from core.adaptive.retire import creating_evidence
+
+        refs = creating_evidence(eid)
+        if refs:
+            ref = refs[0][:60]
+    except Exception:
+        ref = ""
+    if len(_EVIDENCE_CACHE) >= _EVIDENCE_CACHE_MAX:
+        _EVIDENCE_CACHE.clear()
+    _EVIDENCE_CACHE[eid] = (version, ref)
+    return ref
+
+
 def build_adaptive_block(session_id: str = "") -> str:
     """prompt_note one-liners + policy entries for the compiler prefix.
 
@@ -86,9 +121,11 @@ def build_adaptive_block(session_id: str = "") -> str:
     # turn (cited_policies → the adaptive_entry usage signal).
     parts = [_BLOCK_HEADER]
     for n in notes:
-        parts.append(f"- [{n['id']}] {n['title']}: {n['content']}")
+        parts.append(f"- [{n['id']}] ({n.get('source', '?')}) {n['title']}: {n['content']}")
     for p in policies:
-        parts.append(f"\n### Policy [{p['id']}]: {p['title']}\n{p['content']}")
+        ev = _evidence_ref(p)
+        provenance = f"{p.get('source', '?')}" + (f" · evidence: {ev}" if ev else "")
+        parts.append(f"\n### Policy [{p['id']}] ({provenance}): {p['title']}\n{p['content']}")
     if dropped:
         parts.append(
             f"\n({dropped} lower-priority entr{'y' if dropped == 1 else 'ies'} not rendered — see the Adaptive tab)"
@@ -138,7 +175,7 @@ def build_routing_hints_block() -> str:
     total = 0
     shown = 0
     for h in hints:
-        line = f"- [{h['id']}] {h['title']}: {h['content']}"
+        line = f"- [{h['id']}] ({h.get('source', '?')}) {h['title']}: {h['content']}"
         if shown >= _HINTS_MAX_LINES or total + len(line) > _HINTS_CHAR_CAP:
             break
         lines.append(line)
