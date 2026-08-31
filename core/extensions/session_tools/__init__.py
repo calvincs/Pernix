@@ -153,10 +153,10 @@ def agent_state(_context: dict | None = None) -> str:
                 "SELECT COUNT(*) c, SUM(CASE WHEN producer = 'agent' THEN 1 ELSE 0 END) mine "
                 "FROM adaptive_proposals WHERE status = 'pending'"
             ).fetchone()
-            suspect = conn.execute(
-                "SELECT COUNT(*) c FROM adaptive_batches "
-                "WHERE flagged_reason IS NOT NULL AND flagged_reason != '' AND cleared_at IS NULL"
-            ).fetchone()["c"]
+            # status is the authoritative field — flagged_reason survives a
+            # clear/expiry, and counting it over-reported 5 where 1 batch was
+            # actually suspect (found by the agent live-validating this tool).
+            suspect = conn.execute("SELECT COUNT(*) c FROM adaptive_batches WHERE status = 'suspect'").fetchone()["c"]
             if kinds or (pending and pending["c"]):
                 kind_str = ", ".join(f"{k['c']} {k['kind']}" for k in kinds) or "none"
                 lines.append(

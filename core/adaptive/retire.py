@@ -159,7 +159,7 @@ def retire_lint_failures() -> dict:
             if not reason:
                 continue
             try:
-                delete_entry(r["id"], actor="lint_sweep")
+                delete_entry(r["id"], actor="lint_sweep", reason=reason)
                 out["retired"].append(r["id"])
                 out["reasons"][r["id"]] = reason
             except AdaptiveError as e:
@@ -228,7 +228,7 @@ def retire_unused_entries() -> dict:
         if not reason:
             continue
         try:
-            delete_entry(r["id"], actor="usage_sweep")
+            delete_entry(r["id"], actor="usage_sweep", reason=reason)
             out["retired"].append(r["id"])
             out["reasons"][r["id"]] = reason
         except AdaptiveError as e:

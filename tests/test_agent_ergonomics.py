@@ -63,6 +63,12 @@ def test_lint_sweep_retires_narrative_machine_entries(_adaptive_on):
     assert rows["narrative-dream"]["status"] == "deleted"  # journaled soft-delete
     assert rows["good-refine"]["status"] == "active"
     assert db.get_snooze_state(_LINT_SWEEP_KEY)  # watermark stamped
+    # The journal names the real actor + reason — not "human delete" (the
+    # provenance bug the agent found live-validating the first sweep).
+    ev = [e for e in db.adaptive_list_events(entry_id="narrative-dream") if e["action"] == "delete"][0]
+    assert "lint_sweep delete" in (ev.get("evidence_json") or "")
+    assert "human delete" not in (ev.get("evidence_json") or "")
+    assert "narrative" in (ev.get("evidence_json") or "")
 
 
 def test_lint_v2_catches_the_live_survivor_shapes():
