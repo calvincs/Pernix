@@ -472,10 +472,11 @@ def test_get_unrefined_sessions_excludes_watermarked():
 
     # Before watermark: should appear.
     rows = db.get_unrefined_sessions(min_idle_minutes=10, limit=10)
-    assert any(r["id"] == sid for r in rows)
+    hit = [r for r in rows if r["id"] == sid]
+    assert hit
 
-    # After watermark: should disappear.
-    db.set_snooze_state(f"refined:{sid}", "2024-01-01T00:00:00+00:00")
+    # After watermark (max message id — the value snooze stamps): gone.
+    db.set_snooze_state(f"refined:{sid}", str(hit[0]["refine_max_message_id"]))
     rows_after = db.get_unrefined_sessions(min_idle_minutes=10, limit=10)
     assert not any(r["id"] == sid for r in rows_after)
 

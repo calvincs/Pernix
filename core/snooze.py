@@ -526,10 +526,28 @@ class SnoozeRunner:
 
         # Activity 13: Refine pass — the single session-improvement rung.
         # Runs independent of did_llm: refine has its own budget, bounded to
-        # one session per cycle, watermarked refined:{sid}.
+        # one session per cycle, watermarked refined:{sid} (max message id —
+        # a session that grows past its watermark re-arms).
         if not self._is_cancelled() and self._llm_ready():
             _announce(bus, "refine", "Crystallizing skill/memory updates from an idle session")
             await self._refine_one_session()
+
+        # Activity 13b: Skill proposal veto-window auto-apply (no LLM).
+        # Pending SKILL.md proposals older than the veto window are
+        # machine-validated and applied with a timestamped backup — the
+        # skill-file counterpart of adaptive's auto_approve_stale_proposals.
+        if not self._is_cancelled() and settings.skill_proposal_auto_apply_after_hours > 0:
+            _announce(bus, "skill_auto_apply", "Applying skill proposals past the veto window")
+            await self._auto_apply_skill_proposals()
+
+        # Activity 13c: Skill content-change sweep (no LLM). When a skill's
+        # SKILL.md/scripts change (proposal apply, agent edit, human edit),
+        # memory entries that mention the skill are cited into memory_stale
+        # dream hypotheses so stale claims ("the script can't do X") get
+        # re-judged against the new reality instead of lingering.
+        if not self._is_cancelled():
+            _announce(bus, "skill_change_sweep", "Checking skills for content changes")
+            await self._sweep_skill_content_changes()
 
         # Activity 14: Dream step — idle-time introspection (core/dream).
         # Runs independent of did_llm like refine: one bounded unit per cycle
@@ -837,8 +855,11 @@ Output valid JSON only. No markdown fences. /no_think"""
         Selects via :func:`db.get_unrefined_sessions` (10-min idle floor,
         watermark ``refined:{sid}``). Stamps the watermark unconditionally
         after the call so a session that produced nothing actionable, or
-        one whose LLM call failed, is never retried — matches the
-        mark-on-failure pattern used by ``_catchup_distill``.
+        one whose LLM call failed, is never retried at its current size —
+        matches the mark-on-failure pattern used by ``_catchup_distill``.
+        The stamp is the max message id captured AT SELECTION TIME, so a
+        session that grows (resumes, gets its ask_user answered, ends with
+        a workaround) re-arms and gets another pass over the full story.
 
         Returns True if the LLM was invoked (so stats reflect cycle work),
         False otherwise. Snooze does not gate any subsequent activity on
@@ -855,6 +876,9 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         session = sessions[0]
         sid = session["id"]
+        # Stamp what was visible when we chose the session — messages that
+        # arrive mid-refine stay above the watermark and re-arm it.
+        watermark = str(int(session.get("refine_max_message_id") or 0))
 
         if self._is_cancelled():
             return False
@@ -874,12 +898,236 @@ Output valid JSON only. No markdown fences. /no_think"""
                 "insufficient_exchange",
                 "no_model_configured",
             )
-            db.set_snooze_state(f"refined:{sid}", datetime.now(timezone.utc).isoformat())
+            db.set_snooze_state(f"refined:{sid}", watermark)
             return bool(llm_used)
         except Exception as e:
             logger.warning("Snooze: refine pass failed for %s: %s", sid, e)
-            db.set_snooze_state(f"refined:{sid}", datetime.now(timezone.utc).isoformat())
+            db.set_snooze_state(f"refined:{sid}", watermark)
             return False
+
+    # ------------------------------------------------------------------
+    # Activity 13b: Skill proposal veto-window auto-apply
+    # ------------------------------------------------------------------
+
+    async def _auto_apply_skill_proposals(self) -> None:
+        """Apply pending skill proposals whose veto window has elapsed.
+
+        Thin wrapper over core.skills.proposals.auto_apply_ripe_proposals
+        (machine validation, backups, day cap, idle guard all live there).
+        Announces applied changes as a notification so a veto-after-the-fact
+        is one file restore away.
+        """
+        from db import models as db
+
+        try:
+            from core.skills.proposals import auto_apply_ripe_proposals
+
+            out = await asyncio.to_thread(auto_apply_ripe_proposals)
+        except Exception as e:
+            logger.warning("Snooze: skill proposal auto-apply failed: %s", e)
+            return
+
+        applied = out.get("applied") or []
+        if not applied:
+            return
+        self._bump("skill_proposals_auto_applied", len(applied))
+        lines = out.get("summaries") or [str(p) for p in applied]
+        try:
+            db.add_notification(
+                title="Skill proposals auto-applied",
+                body=(
+                    f"{len(applied)} skill proposal(s) past the "
+                    f"{settings.skill_proposal_auto_apply_after_hours}h veto window "
+                    "were validated and applied to SKILL.md.\n"
+                    + "\n".join(f"• {line}" for line in lines)
+                    + "\nBackups in data/skill_backups/<skill>/ — restore one to roll "
+                    "back; reject a pending proposal in the Skills tab to veto it "
+                    "inside the window."
+                ),
+                urgency="normal",
+            )
+        except Exception as e:
+            logger.debug("Snooze: skill auto-apply notification failed: %s", e)
+
+    # ------------------------------------------------------------------
+    # Activity 13c: Skill content-change sweep → memory re-validation
+    # ------------------------------------------------------------------
+
+    def _hash_skill_content(self, skill) -> str:
+        """Digest of a skill's SKILL.md + scripts/ tree (paths + bytes)."""
+        import hashlib
+
+        h = hashlib.sha256()
+        md = skill.path / "SKILL.md"
+        if md.exists():
+            h.update(b"SKILL.md\x00")
+            h.update(md.read_bytes())
+        scripts = skill.path / "scripts"
+        if scripts.is_dir():
+            for f in sorted(scripts.rglob("*")):
+                if f.is_file():
+                    h.update(str(f.relative_to(skill.path)).encode() + b"\x00")
+                    h.update(f.read_bytes())
+        return h.hexdigest()
+
+    async def _sweep_skill_content_changes(self) -> None:
+        """Detect skill content changes and queue memory re-validation.
+
+        Hash-watermarked via ``snooze_state['skill_content_hash:{name}']``
+        (same pattern as the requirements sweep). First sight of a skill
+        stores the baseline silently. On change: memory entries that mention
+        the skill are cited into ``memory_stale`` dream hypotheses, so the
+        dream validator re-judges claims like "the script can't do X"
+        against the skill's new reality — whoever made the edit (a veto-
+        window apply, an in-session agent edit, a human on disk). One
+        changed skill per cycle keeps the sweep bounded.
+        """
+        import json as _json
+
+        from core.skills.registry import get_skill_registry
+        from db import models as db
+
+        try:
+            registry = get_skill_registry()
+            skills = registry.enabled_skills()
+        except Exception as e:
+            logger.debug("Snooze: skill-change sweep registry unavailable: %s", e)
+            return
+
+        changed_skill = None
+        old_digest = new_digest = ""
+        for skill in skills:
+            if self._is_cancelled():
+                return
+            try:
+                digest = self._hash_skill_content(skill)
+            except OSError as e:
+                logger.debug("Snooze: could not hash skill '%s': %s", skill.name, e)
+                continue
+            key = f"skill_content_hash:{skill.name}"
+            prior = db.get_snooze_state(key)
+            if prior is None:
+                # Baseline: never treat first sight as a change, or a fresh
+                # deploy would flood dream with hypotheses for every skill.
+                db.set_snooze_state(key, digest)
+                continue
+            if prior != digest and changed_skill is None:
+                changed_skill, old_digest, new_digest = skill, prior, digest
+                db.set_snooze_state(key, digest)
+                # Keep scanning so unseen skills still get baselines this
+                # cycle; other CHANGED skills keep their old hash and are
+                # picked up one per subsequent cycle.
+
+        if changed_skill is None:
+            return
+
+        self._bump("skill_changes_detected", 1)
+        logger.info(
+            "Snooze: skill '%s' content changed (%s → %s)",
+            changed_skill.name,
+            old_digest[:8],
+            new_digest[:8],
+        )
+
+        if not settings.dream_enabled:
+            return
+        try:
+            if db.count_dream_hypotheses(status="pending") >= settings.dream_max_pending:
+                logger.info("Snooze: dream backlog full — skipping stale-memory enqueue")
+                return
+        except Exception:
+            pass
+
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if not store:
+            return
+
+        # Entries already cited by a pending memory_stale hypothesis don't
+        # need a second one.
+        covered: set[tuple] = set()
+        try:
+            for row in db.list_dream_hypotheses(kind="memory_stale", status="pending", limit=300):
+                for ref in _json.loads(row.get("evidence_json") or "[]"):
+                    if isinstance(ref, dict) and ref.get("type") == "memory":
+                        covered.add((ref.get("file"), ref.get("epoch")))
+        except Exception:
+            pass
+
+        # FTS phrase search on the skill's name tokens ("youtube-whisper" →
+        # "youtube whisper" matches the hyphenated name and the script stem).
+        tokens = [t for t in re.split(r"[^A-Za-z0-9]+", changed_skill.name) if t]
+        if not tokens:
+            return
+        phrase = '"' + " ".join(tokens) + '"'
+        try:
+            conn = store._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT file_name, epoch FROM memory_fts WHERE memory_fts MATCH ? LIMIT 12",
+                    (phrase,),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug("Snooze: stale-memory FTS failed for '%s': %s", changed_skill.name, e)
+            return
+
+        from core.dream.observe import content_hash
+
+        today = datetime.now(timezone.utc).date().isoformat()
+        change_ref = {
+            "type": "skill_change",
+            "quote": (
+                f"Skill '{changed_skill.name}' content (SKILL.md/scripts) changed on "
+                f"{today} (digest {old_digest[:8]} → {new_digest[:8]}). Claims recorded "
+                "against the old version may no longer hold."
+            ),
+        }
+        queued = 0
+        for row in rows:
+            if queued >= 6:
+                break
+            file_name = row["file_name"]
+            try:
+                # FTS stores epoch as text; get_entry and the validator's
+                # resolve_memory_ref match on the integer.
+                epoch = int(row["epoch"])
+            except (TypeError, ValueError):
+                continue
+            if (file_name, epoch) in covered:
+                continue
+            entry = store.get_entry(file_name, epoch)
+            if entry is None or not (entry.content or "").strip():
+                continue
+            mem_ref = {
+                "type": "memory",
+                "file": file_name,
+                "epoch": epoch,
+                "hash": content_hash(entry.content),
+                "quote": entry.content[:400],
+            }
+            db.add_dream_hypothesis(
+                kind="memory_stale",
+                statement=(
+                    f"Memory entry {file_name}@{epoch} may be stale: skill "
+                    f"'{changed_skill.name}' was updated on {today}, and the entry makes "
+                    "claims about that skill's behavior, flags, or limits."
+                ),
+                evidence_json=_json.dumps([mem_ref, change_ref]),
+                origin="skill_change_sweep",
+                confidence=0.6,
+            )
+            queued += 1
+
+        if queued:
+            self._bump("skill_stale_hypotheses", queued)
+            logger.info(
+                "Snooze: queued %d memory re-validation hypothesis(es) for changed skill '%s'",
+                queued,
+                changed_skill.name,
+            )
 
     # ------------------------------------------------------------------
     # Activity 2c: Skill requirements install (adaptation plan 1d)

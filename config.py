@@ -471,6 +471,16 @@ class Settings:
     adaptive_auto_approve_after_hours: int = 24
     adaptive_max_auto_approvals_per_day: int = 40
 
+    # --- Skill self-healing (refine skill proposals, veto-window apply) ---
+    # Same veto-window contract as adaptive_auto_approve_after_hours, for
+    # SKILL.md improvement proposals: a pending proposal older than the
+    # window is machine-validated (skill exists + enabled, change bounded,
+    # frontmatter preserved) and applied with a timestamped backup under
+    # data/skill_backups/. A human can reject anything in the Skills tab
+    # inside the window; 0 disables auto-apply (manual Apply only).
+    skill_proposal_auto_apply_after_hours: int = 24
+    skill_proposal_max_auto_applies_per_day: int = 5
+
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
     # namespace survives tool rounds, turns, and compaction (I1), and — via

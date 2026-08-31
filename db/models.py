@@ -2047,21 +2047,45 @@ def get_unrefined_sessions(min_idle_minutes: int = 10, limit: int = 1) -> list[d
     Broader gate than the removed Activity-2b selector: no reflect verdict
     required. Refine looks at the whole transcript, so a smooth-running
     session (no reflect) or a 'pass with no deviation' session still
-    qualifies. Watermark lives in ``snooze_state`` under
-    ``refined:{session_id}``.
+    qualifies.
+
+    The watermark in ``snooze_state`` under ``refined:{session_id}`` stores
+    the MAX message id refine saw (as text). A session becomes eligible
+    again once it grows past that id — refine used to get exactly one shot
+    per session, which it routinely spent while the session sat parked on an
+    unanswered ask_user, hours before the interesting resolution existed
+    (session 83dc931a8596 is the type specimen). Migration v32 converted the
+    legacy ISO-timestamp watermarks to "processed up to now" so the fleet
+    didn't re-refine its entire history on deploy.
+
+    ``awaiting_user`` / ``awaiting_workers`` are deliberately NOT idle here,
+    unlike SQL_SESSION_IS_IDLE: those are mid-task pauses, and grading half
+    a story wastes refine's one call per cycle. The re-arm makes the wait
+    safe — the session qualifies once it finishes and grows.
+
+    Each returned row carries ``refine_max_message_id`` — the value the
+    caller must stamp into the watermark after processing, so messages that
+    arrive mid-refine aren't silently skipped.
     """
     from datetime import timedelta
 
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=min_idle_minutes)).isoformat()
     with connect_sessions() as conn:
         rows = conn.execute(
-            f"""SELECT s.* FROM sessions s
-               WHERE {SQL_SESSION_IS_IDLE}
+            """SELECT s.*,
+                      (SELECT COALESCE(MAX(m.id), 0) FROM messages m
+                       WHERE m.session_id = s.id) AS refine_max_message_id
+               FROM sessions s
+               WHERE (s.state_v2 IS NULL OR s.state_v2 IN
+                      ('idle_ready', 'cancelling', 'finalizing'))
                  AND s.updated_at < ?
                  AND s.session_type NOT IN ('worker', 'canary')
                  AND NOT EXISTS (
                      SELECT 1 FROM snooze_state ss
                      WHERE ss.key = 'refined:' || s.id
+                       AND CAST(ss.value AS INTEGER) >=
+                           (SELECT COALESCE(MAX(m.id), 0) FROM messages m
+                            WHERE m.session_id = s.id)
                  )
                  AND EXISTS (
                      SELECT 1 FROM messages m
@@ -2712,8 +2736,14 @@ def get_skill_proposal(proposal_id: str) -> dict | None:
 
 
 def resolve_skill_proposal(proposal_id: str, status: str) -> bool:
-    """Mark a proposal as approved, rejected, applied, or archived. Returns True if row existed."""
-    if status not in ("approved", "rejected", "applied", "archived"):
+    """Mark a proposal as approved, rejected, applied, auto_applied, or
+    archived. Returns True if row existed.
+
+    'applied' = a human clicked Apply; 'auto_applied' = the veto-window
+    sweep applied it (core/skills/proposals.py:auto_apply_ripe_proposals).
+    Distinct statuses so the daily auto-apply cap can count its own work.
+    """
+    if status not in ("approved", "rejected", "applied", "auto_applied", "archived"):
         raise ValueError(f"Invalid proposal status: {status!r}")
     with connect_sessions() as conn:
         cur = conn.execute(
@@ -2721,6 +2751,21 @@ def resolve_skill_proposal(proposal_id: str, status: str) -> bool:
             (status, _now(), proposal_id),
         )
         return cur.rowcount > 0
+
+
+def count_auto_applied_skill_proposals_since(cutoff_iso: str) -> int:
+    """How many proposals the veto-window sweep applied since `cutoff_iso`.
+
+    Backs the ``skill_proposal_max_auto_applies_per_day`` budget — same
+    counting pattern as adaptive_count_auto_approved_since.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) FROM skill_improvement_proposals
+               WHERE status = 'auto_applied' AND resolved_at >= ?""",
+            (cutoff_iso,),
+        ).fetchone()
+        return int(row[0]) if row else 0
 
 
 def archive_proposals_for_run(run_id: str) -> int:
