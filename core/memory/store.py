@@ -379,11 +379,22 @@ class MemoryStore:
     def _resolve_file_name(self, suggested: str | None, content: str) -> str:
         """Map a suggested file name to an existing file when possible.
 
-        Resolution cascade:
-        1. Exact normalized-name match against existing files
-        2. Token-Jaccard >= 0.6 against existing files
-        3. FTS5 content-based file match (dominant file in top-5 results)
-        4. Keyword-based auto-route fallback
+        Resolution cascade for an explicit suggestion:
+        1. Exact normalized-name match — against ALL known files, empty and
+           archived ones included (a file that exists with zero entries must
+           be able to receive its first entry by name, and an explicit write
+           to an archived file flows to add_entry's revive path). The old
+           entry_count>0 filter made an explicitly named empty file
+           invisible here, and the content-dominance step then hijacked the
+           write — the curiosity drive's pernix.findings ledger sat at 0
+           entries while 4 runs' findings were silently diverted to a
+           look-alike file.
+        2. Token-Jaccard >= 0.6 against files that hold entries.
+        3. Honor the suggestion. Content-based routing decides only when NO
+           file was named (_auto_route) — a valid explicit target is a
+           contract, not a hint, and content dominance is self-reinforcing:
+           every mis-route makes the wrong file more dominant for exactly
+           this content (the gravity-well effect _auto_route guards against).
         """
         if not suggested:
             return self._auto_route(content)
@@ -394,13 +405,15 @@ class MemoryStore:
         except ValueError:
             return self._auto_route(content)
 
-        # Build map of existing files (normalized → actual name)
+        # Build map of known files (normalized → actual name), tracking
+        # which ones actually hold entries.
         conn = self._connect()
         try:
-            rows = conn.execute("SELECT name FROM memory_files WHERE entry_count > 0").fetchall()
+            rows = conn.execute("SELECT name, entry_count FROM memory_files").fetchall()
         finally:
             conn.close()
         existing = {r["name"]: self._normalize_name(r["name"]) for r in rows}
+        populated = {r["name"] for r in rows if (r["entry_count"] or 0) > 0}
 
         if not existing:
             return suggested
@@ -408,15 +421,16 @@ class MemoryStore:
         suggested_norm = self._normalize_name(suggested)
         suggested_tokens = self._name_tokens(suggested)
 
-        # 1. Exact normalized match
+        # 1. Exact normalized match (empty and archived files included —
+        # add_entry revives an archived file on explicit append)
         for actual, norm in existing.items():
             if norm == suggested_norm:
                 return actual
 
-        # 2. Token Jaccard >= 0.6
+        # 2. Token Jaccard >= 0.6 against populated files only
         best_jaccard = 0.0
         best_match = None
-        for actual, _ in existing.items():
+        for actual in populated:
             actual_tokens = self._name_tokens(actual)
             if not suggested_tokens or not actual_tokens:
                 continue
@@ -427,25 +441,7 @@ class MemoryStore:
         if best_jaccard >= 0.6 and best_match:
             return best_match
 
-        # 3. FTS5 content-based match
-        try:
-            conn = self._connect()
-            try:
-                results = search_bm25(conn, content[:200], limit=5)
-            finally:
-                conn.close()
-            if results:
-                file_counts: dict[str, int] = {}
-                for r in results:
-                    fn = r.entry.file_name
-                    file_counts[fn] = file_counts.get(fn, 0) + 1
-                dominant = max(file_counts, key=file_counts.get)
-                if file_counts[dominant] >= 3:
-                    return dominant
-        except Exception:
-            pass
-
-        # 4. Fallback — use suggested name (or auto-route if it looks generic)
+        # 3. Honor the explicit suggestion — creates the file if needed.
         return suggested
 
     def _auto_route(self, content: str) -> str:
