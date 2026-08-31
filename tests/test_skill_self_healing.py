@@ -602,3 +602,73 @@ async def test_skill_change_sweep_dream_disabled_still_tracks_hash(tmp_path, mon
     second = db.get_snooze_state("skill_content_hash:quiet-skill")
     assert first != second, "hash must advance even when dream is off (no flood later)"
     assert db.count_dream_hypotheses(kind="memory_stale") == 0
+
+
+async def test_skill_change_sweep_own_cap_not_global_backlog(tmp_path, monkeypatch):
+    """A flooded GLOBAL dream backlog must not starve skill-change
+    re-validation; only the sweep's own pending rows count against its cap."""
+    from core.memory.store import MemoryStore
+    from db import models as db
+
+    skill = _make_skill_dir(tmp_path, "capped-skill")
+    _patch_registry(monkeypatch, FakeSkillRegistry({"capped-skill": skill}))
+    monkeypatch.setattr("config.settings.dream_enabled", True)
+
+    store = MemoryStore(memory_dir=str(tmp_path / "memories"))
+    store.add_entry(content="capped-skill only works on GPU.", entry_type="lesson", tags="capped-skill", source="test")
+    monkeypatch.setattr("core.memory.store.get_memory_store", lambda: store)
+
+    # Flood the general queue with foreign-origin pending hypotheses.
+    for i in range(40):
+        db.add_dream_hypothesis(
+            kind="memory_stale",
+            statement=f"unrelated backlog row {i}",
+            evidence_json="[]",
+            origin="dream_cycle",
+        )
+
+    runner = _sweep_runner()
+    await runner._sweep_skill_content_changes()  # baseline
+    (skill.path / "SKILL.md").write_text(
+        "---\nname: capped-skill\n---\n\n## Usage\nNow works on CPU too.\n", encoding="utf-8"
+    )
+    await runner._sweep_skill_content_changes()
+
+    mine = [
+        r
+        for r in db.list_dream_hypotheses(kind="memory_stale", status="pending", limit=100)
+        if r.get("origin") == "skill_change_sweep"
+    ]
+    assert len(mine) == 1, "own-origin cap must not be blocked by the foreign backlog"
+
+
+async def test_skill_change_sweep_respects_own_cap(tmp_path, monkeypatch):
+    from core.memory.store import MemoryStore
+    from core.snooze import SKILL_SWEEP_MAX_PENDING
+    from db import models as db
+
+    skill = _make_skill_dir(tmp_path, "saturated-skill")
+    _patch_registry(monkeypatch, FakeSkillRegistry({"saturated-skill": skill}))
+    monkeypatch.setattr("config.settings.dream_enabled", True)
+
+    store = MemoryStore(memory_dir=str(tmp_path / "memories"))
+    store.add_entry(
+        content="saturated-skill has a broken flag.", entry_type="lesson", tags="saturated-skill", source="test"
+    )
+    monkeypatch.setattr("core.memory.store.get_memory_store", lambda: store)
+
+    for i in range(SKILL_SWEEP_MAX_PENDING):
+        db.add_dream_hypothesis(
+            kind="memory_stale",
+            statement=f"own backlog row {i}",
+            evidence_json="[]",
+            origin="skill_change_sweep",
+        )
+
+    runner = _sweep_runner()
+    await runner._sweep_skill_content_changes()  # baseline
+    (skill.path / "SKILL.md").write_text("---\nname: saturated-skill\n---\n\n## Usage\nchanged.\n", encoding="utf-8")
+    await runner._sweep_skill_content_changes()
+
+    total = db.count_dream_hypotheses(kind="memory_stale", status="pending")
+    assert total == SKILL_SWEEP_MAX_PENDING, "sweep at its own cap must not enqueue more"
