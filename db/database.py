@@ -1002,6 +1002,26 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE sessions ADD COLUMN worker_kind TEXT",
         ],
     ),
+    (
+        32,
+        "re-armable refine watermarks: convert refined:{sid} snooze_state "
+        "values from ISO timestamps to the session's max message id",
+        [
+            # Old semantics: 'refined once, never again' (value = when).
+            # New semantics: 'refined up to message N' — a session that
+            # grows past N becomes eligible again, so refine can revisit a
+            # session whose interesting half (the workaround) happened
+            # after its first pass. Converting to the CURRENT max id means
+            # 'processed up to now' for every legacy row: nothing already
+            # graded re-runs on deploy, only future growth re-arms.
+            """UPDATE snooze_state
+               SET value = CAST(COALESCE(
+                       (SELECT MAX(m.id) FROM messages m
+                        WHERE m.session_id = substr(snooze_state.key, 9)),
+                       0) AS TEXT)
+               WHERE key LIKE 'refined:%'""",
+        ],
+    ),
 ]
 
 
