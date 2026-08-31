@@ -44,6 +44,11 @@ from core.pools import run_background
 
 logger = logging.getLogger("pernix.snooze")
 
+# Activity 13c bound: max pending memory_stale hypotheses the skill-change
+# sweep may hold open at once (its own origin only — deliberately NOT the
+# global dream_max_pending, see _sweep_skill_content_changes).
+SKILL_SWEEP_MAX_PENDING = 30
+
 
 # Session types snooze looks straight through (plan §5, pass-3 F3): they
 # neither cancel a running cycle, nor block the idle gate, nor refresh the
@@ -1031,12 +1036,6 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         if not settings.dream_enabled:
             return
-        try:
-            if db.count_dream_hypotheses(status="pending") >= settings.dream_max_pending:
-                logger.info("Snooze: dream backlog full — skipping stale-memory enqueue")
-                return
-        except Exception:
-            pass
 
         from core.memory.store import get_memory_store
 
@@ -1045,15 +1044,32 @@ Output valid JSON only. No markdown fences. /no_think"""
             return
 
         # Entries already cited by a pending memory_stale hypothesis don't
-        # need a second one.
+        # need a second one. The backpressure gate counts only THIS sweep's
+        # own pending rows (origin=skill_change_sweep), not the global dream
+        # backlog: a flooded general queue must not starve the targeted
+        # re-validation of a skill that verifiably just changed — the live
+        # box sat at 310 pending (over dream_max_pending) the day this
+        # shipped, which would have parked every skill-change hypothesis
+        # indefinitely. Six rows per change against a bounded own-cap is
+        # noise to the validator either way.
         covered: set[tuple] = set()
+        own_pending = 0
         try:
             for row in db.list_dream_hypotheses(kind="memory_stale", status="pending", limit=300):
+                if row.get("origin") == "skill_change_sweep":
+                    own_pending += 1
                 for ref in _json.loads(row.get("evidence_json") or "[]"):
                     if isinstance(ref, dict) and ref.get("type") == "memory":
                         covered.add((ref.get("file"), ref.get("epoch")))
         except Exception:
             pass
+        if own_pending >= SKILL_SWEEP_MAX_PENDING:
+            logger.info(
+                "Snooze: %d skill-change hypotheses already pending (cap %d) — skipping enqueue",
+                own_pending,
+                SKILL_SWEEP_MAX_PENDING,
+            )
+            return
 
         # FTS phrase search on the skill's name tokens ("youtube-whisper" →
         # "youtube whisper" matches the hyphenated name and the script stem).
