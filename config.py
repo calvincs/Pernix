@@ -186,6 +186,13 @@ class Settings:
     # (core/context/compiler.py). Past it, the oldest attachments are dropped
     # back to text markers. 32MB fits audio (a 19MB WAV → ~25MB base64).
     max_inline_attach_bytes: int = 32 * 1024 * 1024
+    # Turn-boundary ledger (agent-ergonomics plan, Tier 1): a delta block in
+    # the volatile tail telling the agent what changed since its previous
+    # turn — finished workers/jobs/RLM runs, its last reflect verdict,
+    # adaptive changes, canary regressions, platform restarts. Composition
+    # over existing tables; renders nothing when nothing changed. Off = the
+    # tail is byte-identical to the pre-ledger shape.
+    turn_ledger_enabled: bool = True
 
     # --- Agent Loop ---
     # Raised 10 -> 50 (audit P2): ten rounds was a weak-local-model-era value

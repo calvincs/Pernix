@@ -83,6 +83,7 @@ Context is **auto-managed by default** (`context_auto`): the harness reads each 
 | `compaction_keep_tokens` | `51000` | How many tokens to preserve verbatim after compaction. Recent messages and tool results are kept. |
 | `context_critical_threshold` | `0.85` | Show a visual warning in the UI when context fills to this fraction. |
 | `max_inline_attach_bytes` | `33554432` (32 MB) | Ceiling on the total base64 attachment bytes inlined into a single compile. Past it, the oldest attachments fall back to text markers. 32 MB fits audio (a 19 MB WAV expands to ~25 MB base64). |
+| `turn_ledger_enabled` | `true` | The `[SINCE YOUR LAST TURN]` block in the volatile tail: a delta of what changed since the agent's previous turn — finished workers/jobs/RLM runs, its last reflect verdict + lesson, adaptive changes, canary regressions, platform restarts/updates. Normal and cron sessions only (canaries excluded by isolation, workers stay lean). Renders nothing when nothing changed; `false` makes the tail byte-identical to the pre-ledger shape. |
 
 ### View pruning
 

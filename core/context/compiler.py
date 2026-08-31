@@ -468,6 +468,9 @@ def _build_server_context() -> str:
             "",
             "SELF-INSPECTION — questions about Pernix's own state (notifications, adaptive",
             "proposals and batches, cron runs, dream, telos, canaries, other sessions):",
+            "- START at SYSTEM-MAP.md in the workspace: the machine-generated map of the DB",
+            "  schema, data layout, API routes, and context blocks. Read it BEFORE guessing a",
+            "  table name, path, or endpoint — it is regenerated every boot and cannot drift.",
             f"- The store is the SQLite file {db_path} (python3 sqlite3 from bash or repl) and this API.",
             f"- GET {base_url}/openapi.json lists every route with its query params and their DEFAULTS.",
             "  Read it before guessing an endpoint. A list route that defaults to one status hides the",
@@ -805,7 +808,15 @@ def _build_telos_drive_block() -> str:
                     f"- ({q.id}, surprise {float(q.get('surprise') or 0):.2f}) {str(q.get('text') or '')[:180]}"
                 )
         if alarms:
-            lines.append(f"Open telos alarms: {len(alarms)} (see telos_status)")
+            # Alarm TEXT, not just a count — the count alone sent the agent
+            # off to spend a telos_status call on exactly the turns where the
+            # user was asking about system state (first-person audit §2.4).
+            previews = []
+            for a in alarms[:2]:
+                label = str(a.get("text") or a.get("reason") or a.get("kind") or a.get("id") or "alarm")
+                previews.append(label[:80])
+            suffix = f" — {'; '.join(previews)}" if previews else ""
+            lines.append(f"Open telos alarms: {len(alarms)}{suffix} (see telos_status)")
         block = "\n".join(lines)
         _telos_drive_cache = (now, settings.telos_dir, block)
         return block
@@ -845,8 +856,147 @@ def _build_watched_workers_block(session_id: str) -> str:
         return ""
 
 
+# Turn-boundary ledger cache: content is fixed for the life of a turn (keyed
+# on the turn's user-message id), so the up-to-ten queries behind it run once
+# per turn, not once per round — and the tail bytes stay stable within the
+# turn.
+_ledger_cache: dict[tuple[str, int], str] = {}
+_LEDGER_CACHE_MAX = 128
+# Ledger renders only for these session types. Canary sessions are excluded
+# by isolation (platform state leaking into a synthetic measurement turn
+# would contaminate it); workers stay lean (I5); dream/rlm views take no
+# turns.
+_LEDGER_SESSION_TYPES = ("normal", "cron")
+
+
+def _build_turn_ledger(session_id: str, turn_user_msg_id: int | None) -> str:
+    """[SINCE YOUR LAST TURN] — the delta the agent otherwise reconstructs
+    with tool calls (agent-ergonomics plan, Tier 1).
+
+    Every line answers "what happened while I wasn't looking": work that
+    finished, the verdict on the previous turn (deferred reflect lands ~300s
+    AFTER the turn — without this line the agent learns its grade one turn
+    late or never), self-modifications applied, canary regressions, platform
+    restarts. Delta-based: a quiet system renders nothing, and the block is
+    the empty string when disabled — the tail is then byte-identical to the
+    pre-ledger shape.
+    """
+    if not settings.turn_ledger_enabled or not session_id or not turn_user_msg_id:
+        return ""
+    key = (session_id, int(turn_user_msg_id))
+    cached = _ledger_cache.get(key)
+    if cached is not None:
+        return cached
+
+    block = ""
+    try:
+        sess = db.get_session(session_id) or {}
+        if (sess.get("session_type") or "normal") in _LEDGER_SESSION_TYPES:
+            anchor = db.ledger_anchor(session_id, int(turn_user_msg_id)) or sess.get("created_at") or ""
+            if anchor:
+                snap = db.ledger_snapshot(session_id, anchor)
+                block = _format_turn_ledger(snap, anchor, sess)
+    except Exception as e:
+        logger.debug("Turn ledger build failed (omitted): %s", e)
+        block = ""
+    if len(_ledger_cache) >= _LEDGER_CACHE_MAX:
+        _ledger_cache.clear()
+    _ledger_cache[key] = block
+    return block
+
+
+def _format_turn_ledger(snap: dict, anchor: str, sess: dict) -> str:
+    import json as _json
+
+    lines: list[str] = []
+
+    # Finished delegated work — each item names the collect call, so the
+    # discovery is a read instead of a check_workers/job_status round.
+    watched: set[str] = set()
+    try:
+        raw = sess.get("watched_worker_ids") or "[]"
+        watched = set(_json.loads(raw) if isinstance(raw, str) else list(raw))
+    except Exception:
+        pass
+    for w in snap.get("finished_workers", []):
+        if w["id"] in watched:
+            continue  # the watched-workers block already shows it, with state
+        lines.append(
+            f"- Finished: worker {w['id']} \"{(w.get('title') or '?')[:60]}\" — get_worker_result('{w['id']}')"
+        )
+    for j in snap.get("finished_jobs", []):
+        label = (j.get("name") or j.get("command") or "")[:50]
+        exit_code = j.get("exit_code")
+        lines.append(
+            f"- Finished: job {j['id']} ({label}) {j.get('state', '?')}"
+            f"{f' exit {exit_code}' if exit_code is not None else ''} — job_tail('{j['id']}')"
+        )
+    for r in snap.get("finished_rlm", []):
+        lines.append(f"- Finished: RLM run {r['run_id']} ({r.get('status', '?')})")
+
+    # The previous turn's grade — labeled as the grader's opinion, because
+    # reflect's non-pass rate has a measured over-strict component and the
+    # ledger must not teach the agent its grader's biases as its own.
+    lv = snap.get("last_verdict")
+    if lv and lv.get("verdict") and lv["verdict"] != "pass":
+        lesson = ""
+        try:
+            payload = _json.loads(lv.get("payload_json") or "{}")
+            lesson = str(payload.get("what_failed") or payload.get("diagnostic") or payload.get("reasoning") or "")
+        except Exception:
+            pass
+        lesson = " ".join(lesson.split())[:150]
+        lines.append(
+            f"- Reflect graded your previous turn: {lv['verdict']} (cause={lv.get('failure_cause', '?')})"
+            + (f' — "{lesson}"' if lesson else "")
+            + " [grader's opinion, not ground truth]"
+        )
+
+    for q in snap.get("open_questions", []):
+        lines.append(
+            f"- Unanswered question you asked earlier: \"{' '.join(str(q.get('question', '')).split())[:100]}\""
+        )
+    for p in snap.get("agent_proposals", []):
+        lines.append(f"- Your adaptive proposal #{p['id']} is still pending review")
+
+    changes = snap.get("adaptive_changes", [])
+    if changes:
+        parts = [f"{c['entry_id']} {c['action']} ({c.get('actor') or '?'})" for c in changes[:4]]
+        more = f" (+{len(changes) - 4} more)" if len(changes) > 4 else ""
+        lines.append(f"- Adaptive changes since your last turn: {', '.join(parts)}{more}")
+
+    fails = snap.get("canary_fails", [])
+    if fails:
+        names = sorted({str(f.get("task") or "?") for f in fails})
+        lines.append(f"- Canary regression(s) since your last turn: {', '.join(names)[:120]}")
+
+    boot = snap.get("boot") or {}
+    if boot.get("at") and boot["at"] > anchor:
+        if boot.get("was_deploy"):
+            lines.append(
+                f"- Platform UPDATED since your last turn (build {boot.get('stamp', '?')}) — "
+                "tool contracts may have changed; re-read a tool's schema before assuming its old shape"
+            )
+        else:
+            lines.append(f"- Platform restarted since your last turn (build {boot.get('stamp', '?')})")
+
+    inflight = snap.get("inflight") or {}
+    busy = {k: v for k, v in inflight.items() if v}
+    if busy:
+        lines.append("- In flight platform-wide: " + " · ".join(f"{v} {k}" for k, v in busy.items()))
+
+    if not lines:
+        return ""
+    header = f"[SINCE YOUR LAST TURN] (changes since {anchor[5:16]} UTC; ambient — verify before acting on it)"
+    return "\n".join([header] + lines[:25])
+
+
 def _build_volatile_tail(
-    resource_status: str, goal_burn: str = "", telos_block: str = "", workers_block: str = ""
+    resource_status: str,
+    goal_burn: str = "",
+    telos_block: str = "",
+    workers_block: str = "",
+    ledger_block: str = "",
 ) -> str:
     """Per-call state that goes in a trailing system message, NOT the head.
 
@@ -872,6 +1022,8 @@ def _build_volatile_tail(
         lines.append(telos_block)
     if workers_block:
         lines.append(workers_block)
+    if ledger_block:
+        lines.append(ledger_block)
     return "\n".join(lines)
 
 
@@ -1047,6 +1199,7 @@ def compile_context(
         goal_burn=_build_goal_burn(session_id) if goal_block else "",
         telos_block=_build_telos_drive_block(),
         workers_block=_build_watched_workers_block(session_id),
+        ledger_block=_build_turn_ledger(session_id, turn_user_msg_id),
     )
     # Head is stable across the rounds of a turn — cached count. The tail is
     # tiny and changes per call, so it's counted raw.

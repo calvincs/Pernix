@@ -123,6 +123,56 @@ def _epoch_age_days() -> float | None:
     return (datetime.now(timezone.utc) - stamp).total_seconds() / 86400.0
 
 
+# The retro-lint sweep's watermark: runs once per LINT_VERSION, so the
+# standing population is re-examined exactly when the lint itself changes.
+# Live-box evidence (2026-08-31 agent-ergonomics audit): six dream-minted
+# policies that were narrative meta-observations — "The lesson M7 … was
+# violated", "The protocol … remains ineffective" — sat in the rendered
+# policy slots because the v3.1 lint only ever gated NEW mints.
+_LINT_SWEEP_KEY = "adaptive_lint_sweep_ver"
+
+
+def retire_lint_failures() -> dict:
+    """Retire active machine-authored entries that fail the current content
+    lint. Returns {"retired": [...], "reasons": {}}. Runs once per
+    LINT_VERSION (watermarked in snooze_state); a no-op on every later call
+    until the lint changes.
+
+    Human-authored entries are exempt for the same reason they are unlinted
+    at mint time: the human is the authority the lint substitutes for.
+    Deletions go through engine.delete_entry — journaled, individually
+    rollbackable. The caller aggregates the notification.
+    """
+    from core.adaptive.lint import _LINTED_KINDS, LINT_VERSION, lint_edit
+
+    out: dict = {"retired": [], "reasons": {}}
+    if db.get_snooze_state(_LINT_SWEEP_KEY) == str(LINT_VERSION):
+        return out
+
+    from core.adaptive.engine import AdaptiveError, delete_entry
+
+    for kind in sorted(_LINTED_KINDS):
+        for r in db.adaptive_list_entries(kind=kind):
+            if r.get("status") != "active" or r.get("source") == "user":
+                continue
+            reason = lint_edit({"action": "update", "kind": kind, "content": r.get("content")})
+            if not reason:
+                continue
+            try:
+                delete_entry(r["id"], actor="lint_sweep")
+                out["retired"].append(r["id"])
+                out["reasons"][r["id"]] = reason
+            except AdaptiveError as e:
+                logger.info("lint sweep skipped %s: %s", r["id"], e)
+    # Stamp only after a complete pass, so a crash mid-sweep retries the
+    # remaining entries next cycle (retiring twice is impossible — the first
+    # pass already flipped their status off 'active').
+    db.set_snooze_state(_LINT_SWEEP_KEY, str(LINT_VERSION))
+    if out["retired"]:
+        logger.info("Adaptive lint sweep retired %d entr(y/ies): %s", len(out["retired"]), ", ".join(out["retired"]))
+    return out
+
+
 def retire_unused_entries() -> dict:
     """Retire entries whose observed lifetime produced zero recorded uses,
     failure-dominated entries, and prompt_notes past their TTL. Returns

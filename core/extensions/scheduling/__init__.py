@@ -613,6 +613,25 @@ def _ensure_dispatch_session(session_id: str | None, title: str = "") -> str:
     return get_manager().create_session(title=title, session_type="cron")
 
 
+# A charter that grants a write tool must grant its repair tool: remember()
+# refuses near-duplicates with "supersede via update_memory(...)", and a run
+# allowed to remember but not to update_memory has the repair path named in
+# an error it cannot act on — the fact is then silently lost until another
+# session relearns it (agent-ergonomics plan §4.5; live memory notes
+# pernix.agent_engineering @1787710676 / @1787695237 record exactly this).
+_TOOL_REPAIR_PAIRS: dict[str, tuple[str, ...]] = {
+    "remember": ("update_memory", "recall"),
+}
+
+
+def _pair_repair_tools(allow: frozenset[str]) -> frozenset[str]:
+    extra: set[str] = set()
+    for tool, repairs in _TOOL_REPAIR_PAIRS.items():
+        if tool in allow:
+            extra.update(repairs)
+    return allow | frozenset(extra)
+
+
 async def _dispatch_prompt(
     session_id: str | None,
     prompt: str,
@@ -640,7 +659,7 @@ async def _dispatch_prompt(
     if session and model:
         session.model_override = model
     if session and allowed_tools:
-        session.tool_allowlist = frozenset(str(t) for t in allowed_tools if t)
+        session.tool_allowlist = _pair_repair_tools(frozenset(str(t) for t in allowed_tools if t))
 
     try:
         await asyncio.wait_for(

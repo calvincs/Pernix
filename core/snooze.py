@@ -1767,6 +1767,39 @@ Output valid JSON only. No markdown fences. /no_think"""
         except Exception as e:
             logger.warning("Adaptive usage sweep failed: %s", e)
 
+        if self._is_cancelled():
+            return
+        # The retro-lint sweep: re-examine the standing population whenever
+        # the content lint changes (watermarked on LINT_VERSION — a no-op on
+        # every cycle in between). The v3.1 lint only gated new mints, so
+        # narrative entries minted before it sat in the rendered slots
+        # indefinitely.
+        try:
+            from core.adaptive.retire import retire_lint_failures
+            from db import models as db
+
+            linted = await asyncio.to_thread(retire_lint_failures)
+            if linted["retired"]:
+                self._bump("adaptive_lint_retired", len(linted["retired"]))
+                lines = [f"• {eid} — {linted['reasons'].get(eid, '')}" for eid in linted["retired"][:12]]
+                await asyncio.to_thread(
+                    db.add_notification,
+                    "",
+                    "Adaptive: lint sweep retired entries",
+                    (
+                        "Retired by the retro content-lint sweep — machine-authored "
+                        "entries whose content fails the current actionability floor "
+                        "(narrative findings, bare negative claims). Each deletion is "
+                        "journaled — roll any back from the Adaptive tab.\n"
+                        + "\n".join(lines)
+                        + (f"\n(+{len(linted['retired']) - 12} more)" if len(linted["retired"]) > 12 else "")
+                    ),
+                    "normal",
+                    "adaptive_lint_sweep",
+                )
+        except Exception as e:
+            logger.warning("Adaptive lint sweep failed: %s", e)
+
         try:
             from core.adaptive.tripwire import evaluate_tripwire
 

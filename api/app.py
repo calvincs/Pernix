@@ -237,6 +237,17 @@ async def lifespan(app: FastAPI):
             _sha = _compute_code_hash()
         _stamp = f"{APP_VERSION}+{_sha}" if _sha else APP_VERSION
         _seen = _db.get_snooze_state("app_version_seen")
+        # Boot markers for the turn-boundary ledger: a session whose last
+        # turn predates this boot gets one line saying the platform
+        # restarted — or was UPDATED, when the stamp changed. Exhibit A of
+        # the agent-ergonomics plan: the agent asked for a feature that had
+        # deployed 12 days earlier, because no channel carried "the platform
+        # changed" to the platform's operator.
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        _db.set_snooze_state("app_last_boot_at", _dt.now(_tz.utc).isoformat())
+        _db.set_snooze_state("app_last_boot_was_deploy", "1" if (_seen and _seen != _stamp) else "0")
         if _seen != _stamp:
             _db.set_snooze_state("app_version_seen", _stamp)
             # First boot ever (no stamp) is a fresh install, not a deploy.
@@ -245,6 +256,16 @@ async def lifespan(app: FastAPI):
                 enqueue_full_sweep("deploy", delay_s=300)
     except Exception as e:
         logger.warning("Deploy detection failed (continuing): %s", e)
+
+    # 4c. SYSTEM-MAP: the agent's machine-generated map of its own machinery
+    # (schema, routes, blocks, stores). Regenerated every boot so it can't
+    # drift; referenced from [SERVER CONTEXT]. Never allowed to fail the boot.
+    try:
+        from core.context.system_map import write_system_map
+
+        await asyncio.to_thread(write_system_map, app)
+    except Exception as e:
+        logger.warning("SYSTEM-MAP generation failed (continuing): %s", e)
 
     # 5. Maintenance heartbeat
     from maintenance import get_maintenance

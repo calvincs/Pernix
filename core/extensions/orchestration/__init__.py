@@ -515,10 +515,34 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
         return kind_gate_warning(_kind_name, body) or ""
 
     # Check worker termination state (cancelled, errored, round-capped).
+    # The in-memory object is the fresh source; after a restart or reap the
+    # durable state log answers instead — a round-capped worker must not
+    # read as clean just because the process cycled (field case
+    # c11530758fbc: an INCOMPLETE worker diagnosed three reflections late).
     from sessions.manager import get_manager as _get_mgr
 
     _worker_obj = _get_mgr().get(worker_id)
     term_reason = _worker_obj.termination_reason if _worker_obj else None
+    if term_reason is None and _worker_obj is None:
+        try:
+            _recent = db.recent_termination_reasons(worker_id, 1)
+            term_reason = _recent[0] if _recent else None
+        except Exception:
+            term_reason = None
+
+    def _ceiling_note() -> str:
+        """Cap warning that survives a 'pass' verdict. A worker that hit its
+        round ceiling ended mid-work by definition — reflect grading the
+        partial output as fine does not un-truncate it, and the parent is
+        the one who pays for believing it was complete."""
+        if term_reason not in ("round_ceiling", "budget_exhausted"):
+            return ""
+        return (
+            f"# NOTE: worker ended by {term_reason} (hard cap, not completion) — "
+            f"its final message should state what is unfinished; treat missing "
+            f"deliverables as NOT DONE, and use get_worker_transcript({worker_id[:12]!r}) "
+            f"or retry_worker to close the gap.\n\n"
+        )
 
     def _gate_header() -> str:
         """Build a header that reflects the worker's trust state. Empty when
@@ -579,19 +603,19 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
         # don't double up — just return as-is (the stamp already encodes state).
         if body.startswith(_SENTINELS):
             return _cap(body)
-        return _gate_header() + _kind_warn(body) + _cap(body)
+        return _gate_header() + _ceiling_note() + _kind_warn(body) + _cap(body)
 
     # Backward compat: shared summary.md from pre-fix workers
     legacy_path = workspace / "summary.md"
     if legacy_path.exists():
         _legacy_body = legacy_path.read_text()
-        return _gate_header() + _kind_warn(_legacy_body) + _cap(_legacy_body)
+        return _gate_header() + _ceiling_note() + _kind_warn(_legacy_body) + _cap(_legacy_body)
 
     # Fallback: last assistant message, always wrapped in a quality header.
     messages = db.get_messages(worker_id)
     for m in reversed(messages):
         if m["role"] == "assistant" and m.get("content"):
-            return _gate_header() + _kind_warn(m["content"]) + _cap(m["content"])
+            return _gate_header() + _ceiling_note() + _kind_warn(m["content"]) + _cap(m["content"])
 
     # No output at all
     if _worker_obj and _worker_obj.error:
