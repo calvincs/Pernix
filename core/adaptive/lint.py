@@ -23,8 +23,13 @@ from __future__ import annotations
 import re
 
 # Narrative-complaint shapes: observations about behavior, not instructions
-# for it. These are the exact patterns the audit found saturating the
-# policy slots.
+# for it. The first two are the exact patterns the 2026-08-27 audit found
+# saturating the policy slots; the rest were added after the first live
+# retro sweep (2026-08-31) caught only one of six standing narrative
+# policies — the survivors said "are ineffective", "was violated",
+# "persistent failures", and cited evidence-pack labels ("The lesson M3
+# instructs…", "the newer memory M10") that resolve to nothing at render
+# time.
 _NARRATIVE_RES = (
     re.compile(r"^(despite|even though|although)\b", re.IGNORECASE),
     re.compile(
@@ -32,6 +37,13 @@ _NARRATIVE_RES = (
         r"|does not seem to|was not effective|remains? ineffective)\b",
         re.IGNORECASE,
     ),
+    re.compile(r"\b(is|are|may be|might be|proved?|proven)\s+ineffective\b", re.IGNORECASE),
+    re.compile(r"\bpersistent failures?\b", re.IGNORECASE),
+    re.compile(r"\b(was|were)\s+violated\b", re.IGNORECASE),
+    # Evidence-pack labels (lesson M3, post-mortem P1, memory M10) are
+    # meaningful inside the dream's evidence pack and dangling everywhere
+    # else — a policy citing one is a finding, not a rule.
+    re.compile(r"\b(?:lesson|lessons|memory|post-mortem)s?\s+[MP]\d+\b", re.IGNORECASE),
 )
 
 # Negative tool claims are allowed ONLY with a fix clause — Candor's own
@@ -65,7 +77,8 @@ _LINTED_KINDS = frozenset({"policy", "routing_hint", "prompt_note"})
 # the standing population instead of only future mints — the entries the
 # 2026-08-31 audit found were all minted BEFORE the lint existed and sat
 # untouched in the rendered policy slots for four days.
-LINT_VERSION = 1
+# v2: the post-first-sweep pattern broadening described above.
+LINT_VERSION = 2
 
 
 def lint_edit(edit: dict) -> str | None:
