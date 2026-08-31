@@ -838,7 +838,7 @@ def create_entry(
     return {"entry_id": entry_id, "status": "active", "version": 1, "event_id": event_id}
 
 
-def delete_entry(entry_id: str, actor: str = "human") -> dict:
+def delete_entry(entry_id: str, actor: str = "human", reason: str = "") -> dict:
     """Soft-delete one entry outside the batch machinery.
 
     The valve for a wedged per-kind cap: producers can only ever add under
@@ -846,6 +846,12 @@ def delete_entry(entry_id: str, actor: str = "human") -> dict:
     Same status flip the engine's own delete action uses (version bumped,
     before_json journaled), so rollback restores it byte-for-byte and the
     entry drops out of the prompt blocks and the cap count immediately.
+
+    The journaled evidence names the ACTUAL actor — the text used to
+    hardcode "human delete … via /api/adaptive/entries" for every caller,
+    so the sweeps' deletions read as Calvin's clicks in the audit trail
+    (found by the agent live-validating the 2026-08-31 lint sweep: a
+    provenance bug inside the provenance feature).
     """
     existing = db.adaptive_get_entry(entry_id)
     if existing is None or existing.get("status") != "active":
@@ -856,12 +862,17 @@ def delete_entry(entry_id: str, actor: str = "human") -> dict:
     new_row["version"] = int(existing["version"]) + 1
     new_row["updated_at"] = _now_iso()
     db.adaptive_put_entry(new_row)
+    evidence = f"{actor} delete of {entry_id}"
+    if actor == "human":
+        evidence += " via /api/adaptive/entries"
+    if reason:
+        evidence += f" — {reason}"
     event_id = db.adaptive_add_event(
         entry_id=entry_id,
         action="delete",
         before_json=_snapshot(existing),
         after_json=_snapshot(new_row),
-        evidence_json=json.dumps([f"human delete of {entry_id} via /api/adaptive/entries"]),
+        evidence_json=json.dumps([evidence]),
         actor=actor,
     )
 
