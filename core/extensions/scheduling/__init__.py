@@ -172,16 +172,22 @@ def _read_jobs_json() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _count_missed_fires(cron_expr: str, last_fired_iso: str, now: datetime, cap: int = 1000) -> int:
+def _count_missed_fires(trigger, last_fired_iso: str, now: datetime, cap: int = 1000) -> int:
     """Count scheduled fires strictly after last_fired and at/before now.
 
-    Pure computation over the cron expression — used at startup to decide
-    whether downtime swallowed any ticks. Capped so a years-stale
-    last_fired_at on a every-minute job can't spin."""
-    from apscheduler.triggers.cron import CronTrigger
+    `trigger` must be the job's LIVE trigger object (``job.trigger``), so the
+    missed-run grid can never disagree with the grid that actually fires.
+    This function used to rebuild a trigger from the cron expression with a
+    hardcoded UTC timezone while the real jobs run on the container's local
+    zone (from_crontab with no tz → America/Chicago) — five hours of every
+    day the two grids disagreed, and any restart in that gap minted a
+    phantom "missed run" catch-up for a slot that had already fired
+    (2026-08-31: the 17:00 UTC curiosity-drive slot completed at 17:03, a
+    18:30 UTC deploy restart saw the UTC grid's nonexistent 18:00 slot and
+    dispatched a spurious coalesced run).
 
+    Capped so a years-stale last_fired_at on an every-minute job can't spin."""
     try:
-        trigger = CronTrigger.from_crontab(cron_expr, timezone="UTC")
         prev = datetime.fromisoformat(last_fired_iso)
     except (ValueError, TypeError):
         return 0
@@ -189,7 +195,10 @@ def _count_missed_fires(cron_expr: str, last_fired_iso: str, now: datetime, cap:
         prev = prev.replace(tzinfo=timezone.utc)
     missed = 0
     while missed < cap:
-        nxt = trigger.get_next_fire_time(prev, prev)
+        try:
+            nxt = trigger.get_next_fire_time(prev, prev)
+        except Exception:
+            return 0
         if nxt is None or nxt > now:
             break
         missed += 1
@@ -233,7 +242,7 @@ def _schedule_coalesced_catchup(job_entries: list[dict]) -> None:
             meta["last_fired_at"] = now.isoformat()
             advanced = True
             continue
-        missed = _count_missed_fires(expr, last, now)
+        missed = _count_missed_fires(job.trigger, last, now)
         if missed < 1:
             continue
         meta["last_fired_at"] = now.isoformat()
