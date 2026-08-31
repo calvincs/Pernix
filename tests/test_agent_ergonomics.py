@@ -65,6 +65,36 @@ def test_lint_sweep_retires_narrative_machine_entries(_adaptive_on):
     assert db.get_snooze_state(_LINT_SWEEP_KEY)  # watermark stamped
 
 
+def test_lint_v2_catches_the_live_survivor_shapes():
+    """The five narrative policies the first live sweep missed (2026-08-31),
+    quoted from the box's store — each must fail the broadened lint."""
+    from core.adaptive.lint import lint_edit
+
+    survivors = [
+        "Multiple memory entries prescribe 'informing the user' of the limitation, yet "
+        "post-mortems record persistent failures to adhere to it.",
+        "Stored lessons regarding fallback to Gemini when Qwen-VL stalls are ineffective "
+        "because the system lacks evidence of actually switching models.",
+        "The lesson M3 instructs respecting a max active worker limit of 2, but P1 and the "
+        "newer memory M10 indicate the system successfully operated above it.",
+        "The lesson M7 instructing the agent to strictly use provided JSON manifests "
+        "was violated in the recorded run.",
+        "The stored lessons on manual workflow recovery (M1, M9, M11) may be ineffective "
+        "if the bug that they address has been resolved.",
+    ]
+    for content in survivors:
+        assert lint_edit({"action": "create", "kind": "policy", "content": content}), content
+    # Legitimate instructions still pass — including candor's model citizen.
+    good = [
+        "Verify the cwd with ls before any file move.",
+        "Calibrated reliability for forget is 7% over 26 observations — prefer an "
+        "alternative or verify its output; see why_reliability('tool_ok', 'forget').",
+        "When a task defines an explicit deliverable list, emit every named deliverable " "before finishing.",
+    ]
+    for content in good:
+        assert lint_edit({"action": "create", "kind": "policy", "content": content}) is None, content
+
+
 def test_lint_sweep_exempts_user_entries_and_is_idempotent(_adaptive_on):
     from core.adaptive.lint import LINT_VERSION
     from core.adaptive.retire import _LINT_SWEEP_KEY, retire_lint_failures
