@@ -357,5 +357,6 @@ If you want to read the code:
 | Memory store | `core/memory/store.py` |
 | Snooze | `core/snooze.py` (memory sweeps in `core/memory/sweeps.py`, retention in `core/retention.py`) |
 | RLM engine | `core/extensions/rlm/` |
+| MCP client (external tool servers) | `core/extensions/mcp/` |
 
 The codebase is intentionally small and readable. Pick a thread and pull on it.

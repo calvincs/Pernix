@@ -40,6 +40,7 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Workspace** — sandboxed file area the agent can read, write, and organize
 - **Worker orchestration** — spawn parallel sub-agents running on different models for complex multi-part work
 - **Skills system** — installable capability packs that teach the agent domain-specific procedures
+- **MCP client** ([docs](docs/mcp.md)) — plug in any Model Context Protocol server, local (stdio) or remote (Streamable HTTP); its tools register as first-class Pernix tools with scout curation, the safety gate, and health metrics, managed from the Explorer → MCP tab with paste-compatible Claude Code / Cursor configs
 - **Cron scheduling** — run agents on a schedule for recurring tasks
 - **Reflect & retry** — a quality gate verifies each response and automatically retries if the agent missed the intent
 - **Session kernel** — an optional persistent per-session Python REPL (`repl` tool) whose variables survive turns, compaction, and restarts; huge tool results auto-bind as variables instead of flooding context

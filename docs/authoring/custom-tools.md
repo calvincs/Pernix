@@ -13,6 +13,7 @@ For markdown-only capability extension, write a [skill](writing-skills.md) inste
 | Scenario | Use |
 |---|---|
 | Multi-step procedure the agent should follow, no new code needed | **Skill** |
+| The capability already exists as an MCP server (or you'd rather build one out-of-process, in any language) | **[MCP server](../mcp.md)** |
 | Need to call a Python library not exposed via existing tools | **Tool** |
 | Need to maintain state between calls within a session | **Tool** |
 | Need fine control over input/output schema | **Tool** |
