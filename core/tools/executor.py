@@ -206,10 +206,14 @@ def _batch_timeout(indices: list[int], tool_calls: list[dict], registry: ToolReg
 
     Every _execute_single already enforces its own per-call timeout and
     degrades to a per-tool error result, so this outer bound exists only to
-    catch a gather that wedges outside those waits. Size it to the slowest
-    tool actually in the batch so it can never fire first — if it does, the
-    TimeoutError escapes execute_tool_round and destroys the whole round,
-    including the results of calls that already completed.
+    catch a gather that wedges outside those waits. It must never fire
+    first — if it does, the TimeoutError escapes execute_tool_round and
+    destroys the whole round, including the results of calls that already
+    completed. A call's worst case is the queue-wait ceiling (the per-call
+    clock only starts once a pool thread picks it up) plus the slowest
+    tool's timeout, so the backstop covers both; sizing it to the tool
+    timeout alone meant a batch that queued ~280s behind a saturated pool
+    and then ran normally tripped the backstop at 305s.
     """
     slowest = 0
     for i in indices:
@@ -217,7 +221,7 @@ def _batch_timeout(indices: list[int], tool_calls: list[dict], registry: ToolReg
         if tool is None:
             continue
         slowest = max(slowest, _resolve_timeout(tool, tool_calls[i].get("arguments", {})))
-    return max(settings.tool_timeout, slowest) + _DISPATCH_TIMEOUT_GRACE_S
+    return _QUEUE_WAIT_CEILING_S + max(settings.tool_timeout, slowest) + _DISPATCH_TIMEOUT_GRACE_S
 
 
 def _is_unattended_session(sid: str) -> bool:
@@ -733,7 +737,11 @@ async def _bind_large_results(tool_calls: list[dict], results: list[ToolExecutio
                 k.bind_variable(v, c)
                 return v, p
 
-            var, payload_path = await asyncio.to_thread(_spill_and_bind)
+            # On the tool pool, not asyncio's default executor: a bind can
+            # block on a cold venv build or a shared space kernel's
+            # round-trip lock for minutes, and the default pool is what the
+            # API routes and every other to_thread in the process share.
+            var, payload_path = await asyncio.get_running_loop().run_in_executor(_get_tool_executor(), _spill_and_bind)
         except Exception as e:
             logger.warning("Result binding failed for %s: %s", tc.get("name"), e)
             continue
