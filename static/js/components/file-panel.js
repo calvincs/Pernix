@@ -2260,6 +2260,10 @@ function _renderToolsFiltered() {
 let _mcpData = null;
 let _mcpShowAdd = false;
 let _mcpBusy = false;
+let _mcpDraft = '';          // form text survives re-renders (status refreshes)
+let _mcpEditTarget = null;   // server name when the form is editing, null = adding
+let _mcpFormJustOpened = false;
+let _mcpRefreshTimer = null;
 
 async function loadMcp() {
     try {
@@ -2288,9 +2292,25 @@ function renderMcp() {
     const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('↻')]);
     refreshBtn.addEventListener('click', loadMcp);
     const addBtn = el('button', { class: 'fp-icon-btn', title: 'Add server' }, [text('+')]);
-    addBtn.addEventListener('click', () => { _mcpShowAdd = !_mcpShowAdd; renderMcp(); });
+    addBtn.addEventListener('click', () => {
+        if (_mcpShowAdd && _mcpEditTarget === null) {
+            _mcpShowAdd = false;                    // toggle a plain add form closed
+        } else {
+            _mcpShowAdd = true;                     // (re)open as a fresh add
+            if (_mcpEditTarget !== null) _mcpDraft = '';
+            _mcpEditTarget = null;
+            _mcpFormJustOpened = true;
+        }
+        renderMcp();
+    });
 
     const servers = _mcpData?.servers || [];
+    // A connecting server settles within seconds — refresh once on its own
+    // instead of making the user hammer the refresh button.
+    if (_mcpRefreshTimer) { clearTimeout(_mcpRefreshTimer); _mcpRefreshTimer = null; }
+    if (servers.some(s => s.status === 'connecting') && _state.tab === 'mcp') {
+        _mcpRefreshTimer = setTimeout(() => { _mcpRefreshTimer = null; loadMcp(); }, 3000);
+    }
     const connected = servers.filter(s => s.status === 'ready').length;
     container.appendChild(el('div', { class: 'fp-section-header' }, [
         el('div', {}, [
@@ -2358,6 +2378,18 @@ function _buildMcpServerItem(s) {
         await loadMcp();
     });
 
+    const editBtn = el('button', { class: 'fp-icon-btn', title: 'Edit server config' }, [text('✎')]);
+    editBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const cfg = _mcpData?.configs?.[s.name];
+        if (!cfg) return;
+        _mcpEditTarget = s.name;
+        _mcpDraft = JSON.stringify({ mcpServers: { [s.name]: cfg } }, null, 2);
+        _mcpShowAdd = true;
+        _mcpFormJustOpened = true;
+        renderMcp();
+    });
+
     const reloadBtn = el('button', { class: 'fp-icon-btn', title: 'Reconnect + re-discover tools' }, [text('↻')]);
     reloadBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
@@ -2386,7 +2418,7 @@ function _buildMcpServerItem(s) {
             el('span', { class: 'fp-skill-version' }, [text(s.transport)]),
             el('span', { class: 'fp-skill-version' }, [text(`safety: ${s.safety}`)]),
         ]),
-        el('div', { class: 'fp-skill-actions' }, [reloadBtn, delBtn, toggle]),
+        el('div', { class: 'fp-skill-actions' }, [editBtn, reloadBtn, delBtn, toggle]),
     ]));
 
     const statusBits = [meta.label];
@@ -2397,7 +2429,7 @@ function _buildMcpServerItem(s) {
         text(`${statusBits.join(' · ')}${s.target ? ` — ${s.target}` : ''}`),
     ]));
     if (s.error && (s.status === 'degraded' || s.status === 'stopped')) {
-        item.appendChild(el('div', { class: 'fp-perf-line fp-perf-warn' }, [text(s.error)]));
+        item.appendChild(el('div', { class: 'fp-mcp-error' }, [text(s.error)]));
     }
     if (s.tools && s.tools.length) {
         const tagsEl = el('div', { class: 'fp-skill-tags' });
@@ -2422,53 +2454,96 @@ function _normalizeMcpPaste(raw) {
 }
 
 function _buildMcpAddForm() {
+    const editing = _mcpEditTarget !== null;
     const ta = el('textarea', {
         class: 'fp-mcp-add-input',
-        rows: '8',
+        rows: String(Math.min(16, Math.max(8, _mcpDraft.split('\n').length + 1))),
         placeholder: '{\n  "mcpServers": {\n    "github": {\n      "url": "https://api.githubcopilot.com/mcp/",\n      "headers": { "Authorization": "Bearer ${GITHUB_MCP_TOKEN}" }\n    }\n  }\n}',
+        spellcheck: 'false',
     });
+    ta.value = _mcpDraft;
+    ta.addEventListener('input', () => { _mcpDraft = ta.value; });
+
     const result = el('div', { class: 'fp-mcp-add-result' });
     const setResult = (msg, isErr) => {
         result.textContent = msg;
         result.classList.toggle('err', !!isErr);
     };
 
-    const testBtn = el('button', { class: 'fp-mcp-add-btn' }, [text('Test')]);
+    const buttons = [];
+    const setBusy = (busy, activeBtn, busyLabel) => {
+        for (const b of buttons) b.disabled = busy;
+        if (activeBtn) activeBtn.textContent = busy ? busyLabel : activeBtn.dataset.label;
+    };
+
+    const testBtn = el('button', { class: 'fp-mcp-add-btn', 'data-label': 'Test' }, [text('Test')]);
     testBtn.addEventListener('click', async () => {
         let body;
         try { body = _normalizeMcpPaste(ta.value); } catch (e) { setResult(e.message, true); return; }
-        setResult('Testing…');
+        setBusy(true, testBtn, 'Testing…');
+        setResult('Connecting to the server without saving…');
         try {
             const res = await post('/api/mcp/test', body);
             setResult(res.ok
                 ? `OK — ${res.server_info || 'server'} exposes ${res.tools.length} tool(s): ${res.tools.slice(0, 10).join(', ')}${res.tools.length > 10 ? '…' : ''}`
                 : `Failed: ${res.error}`, !res.ok);
         } catch (e) { setResult(`Test failed: ${e.message || e}`, true); }
+        setBusy(false, testBtn);
     });
 
-    const saveBtn = el('button', { class: 'fp-mcp-add-btn primary' }, [text('Save & Connect')]);
+    const saveBtn = el('button', {
+        class: 'fp-mcp-add-btn primary',
+        'data-label': editing ? 'Save changes' : 'Save & Connect',
+    }, [text(editing ? 'Save changes' : 'Save & Connect')]);
     saveBtn.addEventListener('click', async () => {
         let body;
         try { body = _normalizeMcpPaste(ta.value); } catch (e) { setResult(e.message, true); return; }
-        setResult('Connecting…');
+        if (editing && !(_mcpEditTarget in (body.mcpServers || {}))) {
+            setResult(`This form is editing '${_mcpEditTarget}' but the config names ${Object.keys(body.mcpServers).join(', ')} — renaming creates a new server; remove the old one after.`, true);
+        }
+        setBusy(true, saveBtn, 'Connecting…');
         try {
             const res = await post('/api/mcp/servers', body);
             const lines = Object.entries(res.results || {}).map(([name, r]) =>
                 `${name}: ${r.ok ? r.status : (r.error || r.status)}`);
             const allOk = Object.values(res.results || {}).every(r => r.ok);
             setResult(lines.join(' · ') || 'saved', !allOk);
-            if (allOk) { _mcpShowAdd = false; await loadMcp(); }
+            if (allOk) {
+                _mcpShowAdd = false; _mcpDraft = ''; _mcpEditTarget = null;
+                await loadMcp();
+                return;
+            }
         } catch (e) { setResult(`Save failed: ${e.message || e}`, true); }
+        // On failure the form stays open with the message — no re-render,
+        // which would wipe both the result line and the user's edits' focus.
+        setBusy(false, saveBtn);
     });
 
-    const cancelBtn = el('button', { class: 'fp-mcp-add-btn' }, [text('Cancel')]);
-    cancelBtn.addEventListener('click', () => { _mcpShowAdd = false; renderMcp(); });
+    const cancelBtn = el('button', { class: 'fp-mcp-add-btn', 'data-label': 'Cancel' }, [text('Cancel')]);
+    cancelBtn.addEventListener('click', () => {
+        _mcpShowAdd = false; _mcpDraft = ''; _mcpEditTarget = null;
+        renderMcp();
+    });
+    buttons.push(testBtn, saveBtn, cancelBtn);
 
-    return el('div', { class: 'fp-mcp-add' }, [
+    const form = el('div', { class: 'fp-mcp-add' }, [
+        el('div', { class: 'fp-mcp-add-title' }, [
+            text(editing ? `Edit server: ${_mcpEditTarget}` : 'Add MCP server'),
+        ]),
+        el('div', { class: 'fp-mcp-add-hint' }, [
+            text(editing
+                ? 'Adjust the entry and Save — the server reconnects with the new config. Secrets stay in .env as "${VAR}".'
+                : 'Paste a standard mcpServers config (Claude Code / Cursor format works verbatim). Secrets go in .env, referenced as "${VAR}".'),
+        ]),
         ta,
         el('div', { class: 'fp-mcp-add-actions' }, [testBtn, saveBtn, cancelBtn]),
         result,
     ]);
+    if (_mcpFormJustOpened) {
+        _mcpFormJustOpened = false;
+        requestAnimationFrame(() => { ta.focus(); form.scrollIntoView({ block: 'nearest' }); });
+    }
+    return form;
 }
 
 // ---------------------------------------------------------------------------

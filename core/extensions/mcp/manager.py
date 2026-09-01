@@ -56,6 +56,21 @@ class MCPUnavailable(RuntimeError):
     """The server can't take this call right now (disabled, degraded, closed)."""
 
 
+def describe_error(e: BaseException) -> str:
+    """Human-readable root cause for UI/status surfaces.
+
+    anyio task groups (which every SDK transport uses) surface failures as
+    'unhandled errors in a TaskGroup (1 sub-exception)' — unwrap to the real
+    leaf (connection refused, DNS failure, 401) before showing a person.
+    """
+    depth = 0
+    while isinstance(e, BaseExceptionGroup) and e.exceptions and depth < 5:
+        e = e.exceptions[0]
+        depth += 1
+    msg = str(e).strip()
+    return msg if msg else type(e).__name__
+
+
 def _notify(title: str, body: str, urgency: str = "normal") -> None:
     """One-shot operator notification (web extension precedent). Best-effort."""
     try:
@@ -172,7 +187,8 @@ class MCPConnection:
             # error) — the held connection is suspect, drop and reconnect.
             self._note_call_failure(transport=True)
             raise MCPUnavailable(
-                f"MCP server '{self.cfg.name}' connection failed mid-call ({e}); reconnecting in the background"
+                f"MCP server '{self.cfg.name}' connection failed mid-call "
+                f"({describe_error(e)}); reconnecting in the background"
             ) from e
         finally:
             self._inflight -= 1
@@ -392,7 +408,7 @@ class MCPConnection:
             logger.debug("MCP message handler error (%s): %s", self.cfg.name, e)
 
     def _record_incident(self, e: Exception) -> None:
-        self.error = str(e) or type(e).__name__
+        self.error = describe_error(e)
         self._fail_cycles += 1
         self.status = "degraded"
         self._resolve_waiters(MCPUnavailable(f"MCP server '{self.cfg.name}' failed to connect: {self.error}"))

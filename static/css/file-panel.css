@@ -1298,3 +1298,29 @@ body.fp-resizing #main { pointer-events: none; }
     white-space: pre-wrap;
 }
 .fp-mcp-add-result.err { color: var(--error); }
+.fp-mcp-add-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text);
+}
+.fp-mcp-add-hint {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    line-height: 1.4;
+}
+.fp-mcp-add-input:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+}
+.fp-mcp-add-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+.fp-mcp-error {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--error);
+    margin-top: var(--sp-1);
+    line-height: 1.4;
+    word-break: break-word;
+}

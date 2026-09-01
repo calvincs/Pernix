@@ -205,7 +205,7 @@ async def test_mcp_server(body: dict):
     if len(parsed) != 1:
         raise HTTPException(status_code=400, detail="Test one server at a time")
     _require_manager()  # needs mcp_enabled (stdio gate already checked in parsing)
-    from core.extensions.mcp.manager import probe_server
+    from core.extensions.mcp.manager import describe_error, probe_server
 
     cfg = next(iter(parsed.values()))
     try:
@@ -213,4 +213,4 @@ async def test_mcp_server(body: dict):
     except asyncio.TimeoutError:
         return {"ok": False, "error": f"connect timed out after {settings.mcp_connect_timeout + 10}s"}
     except Exception as e:
-        return {"ok": False, "error": str(e) or type(e).__name__}
+        return {"ok": False, "error": describe_error(e)}
