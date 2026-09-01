@@ -2102,7 +2102,13 @@ class SessionManager:
             return
         parent = self.get(parent_id)
         if parent is None:
-            return
+            # Reaped from memory while the worker flew on (idle parent, tab
+            # closed). The row still exists, so revive it the same way boot
+            # reconcile does — otherwise the finished result landed nowhere.
+            row = await asyncio.to_thread(db.get_session, parent_id)
+            if row is None:
+                return
+            parent = self.get_or_create(parent_id)
         watched: set = getattr(parent, "_watched_worker_ids", set())
         if worker_session.session_id not in watched:
             # Unwatched worker (spawned without auto_resume_parent). If the
