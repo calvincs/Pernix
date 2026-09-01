@@ -130,8 +130,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         localStorage.setItem('pernix:sidebar-hidden', sidebar.classList.contains('collapsed') ? '1' : '0');
     });
 
+    // Space/session mutations from the sidebar need a re-FETCH, not just a repaint
+    window.addEventListener('pernix:sessions-changed', () => loadSessions());
+
     // Restore the normal session list when the sidebar search box clears
-    window.addEventListener('pernix:sidebar-refresh', () => renderSidebar(state.sessions, state.sid));
+    window.addEventListener('pernix:sidebar-refresh', () => renderSidebar(state.sessions, state.sid, state.spaces));
 
     // Pinned-scroll tracking + jump-to-bottom affordance
     const _msgScroll = _messagesScroll();
@@ -215,7 +218,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Re-render sidebar when type filter toggles
     document.addEventListener('sidebar:filter-changed', () => {
-        renderSidebar(state.sessions, state.sid);
+        renderSidebar(state.sessions, state.sid, state.spaces);
     });
 
     // Poll — guarded by isOnline() inside the functions / api layer.
@@ -280,6 +283,7 @@ async function loadSessions() {
     try {
         const data = await get('/api/sessions?limit=500');
         state.sessions = data.items || [];
+        state.spaces = data.spaces || [];
         for (const s of state.sessions) {
             const busy = _BUSY_STATES.has(s.state_v2);
             if (_prevBusy.get(s.id) && !busy && s.id !== state.sid) {
@@ -290,7 +294,7 @@ async function loadSessions() {
                 : (_recentlyFinished.has(s.id) && s.id !== state.sid) ? 'done'
                 : null;
         }
-        renderSidebar(state.sessions, state.sid);
+        renderSidebar(state.sessions, state.sid, state.spaces);
     } catch (e) {
         if (!e.offline) console.warn('Failed to load sessions:', e);
     }
@@ -335,7 +339,7 @@ async function selectSession(sid) {
     _toolGroupCount = 0;
     if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
     closeRlmViewer();
-    renderSidebar(state.sessions, state.sid);
+    renderSidebar(state.sessions, state.sid, state.spaces);
 
     // RLM run views have no transcript — the chat area renders the live
     // trace viewer instead, and the composer stays off (the server enforces
@@ -1872,7 +1876,7 @@ function handleEvent(event) {
         if (s && event.title) {
             s.title = event.title;
             if (event.subtitle) s.subtitle = event.subtitle;
-            renderSidebar(state.sessions, state.sid);
+            renderSidebar(state.sessions, state.sid, state.spaces);
         }
     }
 
@@ -3519,8 +3523,18 @@ function openSessionPalette() {
         items = matches;
         selected = 0;
         matches.forEach((s, i) => {
+            const titleKids = [];
+            const sp = s.space_id ? (state.spaces || []).find(x => x.id === s.space_id) : null;
+            if (sp) {
+                titleKids.push(el('span', {
+                    class: 'space-chip',
+                    style: `--space-color: ${sp.color}`,
+                    title: `Space: ${sp.label}`,
+                }));
+            }
+            titleKids.push(text(s.title || 'New session'));
             const row = el('div', { class: `palette-item${i === 0 ? ' selected' : ''}` }, [
-                el('span', { class: 'palette-title' }, [text(s.title || 'New session')]),
+                el('span', { class: 'palette-title' }, titleKids),
                 el('span', { class: 'palette-meta' }, [text(_paletteTime(s.updated_at))]),
             ]);
             row.addEventListener('click', () => { closeSessionPalette(); selectSession(s.id); });

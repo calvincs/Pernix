@@ -533,20 +533,31 @@ def _read_directive_file(path: Path) -> str:
     return content
 
 
-def _build_agent_directives_block() -> str:
-    """[IDENTITY] + [RULES] + [INSTRUCTIONS] from data/agent/, whole and verbatim."""
+def _build_agent_directives_block(session_id: str = "") -> str:
+    """[IDENTITY] + [RULES] + [INSTRUCTIONS] from data/agent/, whole and verbatim.
+
+    A session in a space resolves each file through core.spaces.directive_path
+    — the space's override when one exists, else the shared default, per file
+    (v33). The mtime cache is path-keyed, so default and override coexist in
+    it; the exists() check inside directive_path runs fresh each compile, so
+    saving or reverting an override takes effect on the next tool round.
+    """
+    from core.spaces import directive_path
+
     parts = []
 
     for fname, label in (("SOUL.md", "IDENTITY"), ("RULES.md", "RULES")):
-        path = Path("data/agent") / fname
+        path = directive_path(fname, session_id)
         if path.exists():
             content = _read_directive_file(path)
             if content:
                 parts.append(f"[{label}]\n{content}")
 
-    # First of SESSIONS.md / INSTRUCTIONS.md wins (mirrors the old scout order).
+    # First wins: space SESSIONS.md override, else default SESSIONS.md, else
+    # default INSTRUCTIONS.md (mirrors the old scout order). directive_path
+    # handles the space-vs-default half; the loop keeps the legacy fallback.
     for fname in ("SESSIONS.md", "INSTRUCTIONS.md"):
-        path = Path("data/agent") / fname
+        path = directive_path(fname, session_id) if fname == "SESSIONS.md" else Path("data/agent") / fname
         if path.exists():
             content = _read_directive_file(path)
             if content:
@@ -603,6 +614,35 @@ def _build_available_skills_block(max_skills: int = 24, desc_chars: int = 180) -
             desc = desc[: desc_chars - 1].rstrip() + "…"
         lines.append(f"- {s.name} — {desc}")
     return "\n".join(lines)
+
+
+def _build_space_block(session_id: str) -> str:
+    """[SPACE] — membership + workspace-home orientation for space sessions.
+
+    States the soft-home semantics explicitly: without this the model reads
+    the bash [cwd: …spaces/<slug>] prefix as a sandbox and stops referencing
+    files elsewhere in the workspace. Empty string for non-space sessions.
+    """
+    try:
+        from core.spaces import get_session_space, space_memory_prefix
+
+        space = get_session_space(session_id)
+        if not space:
+            return ""
+        return (
+            f"[SPACE]\n"
+            f"This session belongs to the space \"{space['label']}\" (slug: {space['slug']}).\n"
+            f"- Your working folder is spaces/{space['slug']}/ inside the shared workspace: "
+            f"bash runs there, and relative paths resolve there first. Keep this space's "
+            f"files in it.\n"
+            f"- It is NOT a sandbox: the rest of the workspace stays readable and writable "
+            f"(existing files resolve wherever they live).\n"
+            f"- Route memories for this space's work to {space_memory_prefix(space)}* files; "
+            f"they are surfaced first in this space's searches."
+        )
+    except Exception as e:
+        logger.debug("space block unavailable for %s: %s", session_id[:12], e)
+        return ""
 
 
 def _build_adaptive_block(session_id: str) -> str:
@@ -1144,11 +1184,19 @@ def compile_context(
     # Server URL — lets the agent open or examine workspace artifacts in a browser.
     system_parts.append(_build_server_context())
 
+    # Space workspace home (v33): per-session-constant, so it belongs in the
+    # fixed prefix — same cache argument as the directives below. Empty for
+    # non-space sessions (byte-identical output to pre-v33).
+    space_block = _build_space_block(session_id)
+    if space_block:
+        system_parts.append(space_block)
+
     # Agent directives (SOUL/RULES/SESSIONS) — deterministic, byte-stable, and
     # delivered whole. Lives in the fixed prefix, not the scout section, so the
     # prompt-prefix cache covers it and every turn (including scout-fallback
-    # and worker turns) gets identical directives.
-    directives_block = _build_agent_directives_block()
+    # and worker turns) gets identical directives. Space sessions resolve
+    # per-file overrides (v33) — still stable within the session.
+    directives_block = _build_agent_directives_block(session_id)
     if directives_block:
         system_parts.append(directives_block)
 

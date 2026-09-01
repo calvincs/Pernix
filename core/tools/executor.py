@@ -264,6 +264,7 @@ async def _execute_single(
     sid = (context or {}).get("session_id", "")
     session_type = ""
     workspace_override: str | None = None
+    workspace_home: str | None = None
     if sid:
         from sessions.manager import get_manager
         from sessions.state import turn_state
@@ -271,6 +272,7 @@ async def _execute_single(
         s = get_manager().get(sid)
         session_type = (s.session_type or "") if s else ""
         workspace_override = getattr(s, "workspace_override", None) if s else None
+        workspace_home = getattr(s, "workspace_home", None) if s else None
     # Retry effector (audit P1f): reflect can mechanically disable tools for
     # the current retry attempt; the schema filter removes them, this guard
     # catches a model that calls one anyway.
@@ -404,6 +406,8 @@ async def _execute_single(
         ctx["_call_id"] = call_id
         if workspace_override:
             ctx["workspace_override"] = workspace_override
+        if workspace_home:
+            ctx["workspace_home"] = workspace_home
 
         # Never asyncio.to_thread here: that is the default executor the API
         # depends on. See the pool comments at the top of this module.
@@ -691,8 +695,18 @@ async def _bind_large_results(tool_calls: list[dict], results: list[ToolExecutio
             # payloads dir — neither may run on the event loop.
             def _spill_and_bind(sid=session_id, c=content):
                 from core.kernel import get_kernel_registry
+                from core.spaces import kernel_key_for_session
 
-                k = get_kernel_registry().get_or_create(sid)
+                _s = None
+                try:
+                    from sessions.manager import get_manager
+
+                    _s = get_manager().get(sid)
+                except Exception:
+                    pass
+                k = get_kernel_registry().get_or_create(
+                    kernel_key_for_session(sid), cwd=getattr(_s, "workspace_home", None)
+                )
                 v = f"tool_result_{k.next_bind_ordinal()}"
                 p = k.payloads_dir / f"{v}.txt"
                 k.payloads_dir.mkdir(parents=True, exist_ok=True)

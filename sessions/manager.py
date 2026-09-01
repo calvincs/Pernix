@@ -196,6 +196,26 @@ def _map_termination_to_v2_reason(tr: str | None) -> tuple[str, sv2.TerminationR
 _WORKER_RESUME_PREFIX = "[Watched workers have completed"
 
 
+def _apply_space_fields(session: AgentSession, space_id: str | None) -> None:
+    """Set space_id + workspace_home on a session object (create AND
+    rehydrate must both run this, or a restart strips space behavior).
+    A vanished space (row deleted while the session survived a detach
+    race) degrades to no-space rather than failing the hydrate."""
+    if not space_id:
+        return
+    session.space_id = space_id
+    try:
+        from core import spaces as _spaces
+
+        space = _spaces.get_space(space_id)
+        if space is not None:
+            home = _spaces.space_workspace_home(space)
+            home.mkdir(parents=True, exist_ok=True)
+            session.workspace_home = str(home)
+    except Exception as e:
+        logger.warning("workspace_home setup failed for space %s: %s", space_id, e)
+
+
 class SessionManager:
     """Manages in-memory session state and routes prompts to the agent loop."""
 
@@ -304,6 +324,7 @@ class SessionManager:
             session_type=db_session.get("session_type", "normal"),
             parent_session_id=db_session.get("parent_session_id"),
         )
+        _apply_space_fields(session, db_session.get("space_id"))
 
         # Restore the persisted state (migration v16+). A row written before
         # v16, or one carrying a value this build no longer knows, hydrates at
@@ -602,6 +623,7 @@ class SessionManager:
         system_prompt: str = "",
         session_type: str = "normal",
         parent_session_id: str | None = None,
+        space_id: str | None = None,
     ) -> str:
         """Create a new session in both DB and memory."""
         sid = db.create_session(
@@ -609,12 +631,14 @@ class SessionManager:
             system_prompt=system_prompt,
             session_type=session_type,
             parent_session_id=parent_session_id,
+            space_id=space_id,
         )
         session = AgentSession(
             session_id=sid,
             session_type=session_type,
             parent_session_id=parent_session_id,
         )
+        _apply_space_fields(session, space_id)
         self._sessions[sid] = session
         logger.info("Created session %s (type=%s)", sid, session_type)
         from core.snooze import SNOOZE_TRANSPARENT_TYPES, get_snooze

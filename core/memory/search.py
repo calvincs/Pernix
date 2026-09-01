@@ -147,7 +147,13 @@ def rg_memory_text(pattern: str, memory_dir: str, max_matches: int = 10) -> str:
     return "\n".join(output_lines)
 
 
-def search_bm25(conn, query: str, limit: int = 5, after_epoch: int | None = None) -> list[SearchResult]:
+def search_bm25(
+    conn,
+    query: str,
+    limit: int = 5,
+    after_epoch: int | None = None,
+    file_prefix: str | None = None,
+) -> list[SearchResult]:
     """BM25 keyword search via FTS5. Scores are length-normalized.
 
     Query tokens are OR'd, so the raw bm25() sum grows with query length:
@@ -174,6 +180,13 @@ def search_bm25(conn, query: str, limit: int = 5, after_epoch: int | None = None
     if after_epoch:
         sql += " AND CAST(epoch AS INTEGER) > ?"
         params.append(after_epoch)
+
+    if file_prefix:
+        # Space-scoped supplemental query (v33): restrict to one file-name
+        # prefix. LIKE with an escaped literal — prefixes come from slugs
+        # ([a-z0-9_-]) plus dots, so no wildcard chars, but escape anyway.
+        sql += " AND file_name LIKE ? ESCAPE '\\'"
+        params.append(file_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
 
     sql += " ORDER BY score LIMIT ?"
     params.append(limit * 2)  # over-fetch for dedup headroom
@@ -344,14 +357,24 @@ def _rrf_fuse(lexical: list[SearchResult], semantic: list[SearchResult], limit: 
     return [SearchResult(entry=s["entry"], score=s["score"], source=s["source"]) for s in ordered]
 
 
-def search_hybrid(conn, query: str, limit: int = 5, after_epoch: int | None = None) -> list[SearchResult]:
+def search_hybrid(
+    conn,
+    query: str,
+    limit: int = 5,
+    after_epoch: int | None = None,
+    file_prefix: str | None = None,
+) -> list[SearchResult]:
     """Multi-signal search: BM25 ∪ vector (RRF-fused when embeddings are
     enabled), recent entries pad remaining slots. Deduped by (file, epoch).
     Scores stay on the BM25 scale throughout — see _rrf_fuse.
+
+    file_prefix restricts the lexical channel to one file-name prefix
+    (space-scoped supplemental queries, v33); the vector and recent
+    channels are post-filtered to match.
     """
     # Signal 1: BM25 keyword search — dedupe keeping highest score
     seen: dict[tuple, SearchResult] = {}
-    for r in search_bm25(conn, query, limit=limit, after_epoch=after_epoch):
+    for r in search_bm25(conn, query, limit=limit, after_epoch=after_epoch, file_prefix=file_prefix):
         key = (r.entry.file_name, r.entry.epoch)
         if key not in seen or r.score > seen[key].score:
             seen[key] = r
@@ -366,6 +389,8 @@ def search_hybrid(conn, query: str, limit: int = 5, after_epoch: int | None = No
         query_vec = _emb.embed_query_sync(query)
         if query_vec:
             vector_ranked = search_vector(conn, query_vec, limit=limit)
+            if file_prefix:
+                vector_ranked = [r for r in vector_ranked if r.entry.file_name.startswith(file_prefix)]
             if vector_ranked:
                 final = _rrf_fuse(bm25_ranked, vector_ranked, limit)
 
@@ -377,6 +402,8 @@ def search_hybrid(conn, query: str, limit: int = 5, after_epoch: int | None = No
         for r in search_recent(conn, limit=min(limit, 3)):
             if len(final) >= limit:
                 break
+            if file_prefix and not r.entry.file_name.startswith(file_prefix):
+                continue
             key = (r.entry.file_name, r.entry.epoch)
             if key not in included:
                 included.add(key)

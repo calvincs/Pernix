@@ -254,7 +254,7 @@ _DEEP_RECALL_TOOLS = [
 ]
 
 
-def _execute_deep_recall_tool(name: str, args: dict, memory_dir: str) -> str:
+def _execute_deep_recall_tool(name: str, args: dict, memory_dir: str, space_slug: str | None = None) -> str:
     if name == "search_memory":
         query = args.get("query", "")
         top = min(args.get("top", 8), 15)
@@ -264,7 +264,7 @@ def _execute_deep_recall_tool(name: str, args: dict, memory_dir: str) -> str:
             store = get_memory_store()
             if not store:
                 return "Memory unavailable."
-            results = store.search(query, limit=top)
+            results = store.search(query, limit=top, space_slug=space_slug)
             if not results:
                 return "No results found."
             from core.memory.search import format_result_line
@@ -298,7 +298,7 @@ def _execute_deep_recall_tool(name: str, args: dict, memory_dir: str) -> str:
     return f"Unknown tool: {name}"
 
 
-async def _deep_recall_async(query: str, context: str) -> str:
+async def _deep_recall_async(query: str, context: str, space_slug: str | None = None) -> str:
     from config import settings
     from core.llm.client import get_llm_client
 
@@ -353,7 +353,7 @@ async def _deep_recall_async(query: str, context: str) -> str:
                 args = json.loads(tc.arguments) if tc.arguments else {}
             except json.JSONDecodeError:
                 args = {}
-            result = _execute_deep_recall_tool(tc.name, args, memory_dir)
+            result = _execute_deep_recall_tool(tc.name, args, memory_dir, space_slug=space_slug)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
 
     return "Search completed but no synthesis produced."
@@ -389,12 +389,15 @@ def remember(
             weight = "normal"
 
     try:
+        from core.spaces import space_slug_for_session
+
         result = store.add_entry(
             content=content,
             file_name=file or None,
             tags=tags,
             weight=weight,
             source="user",
+            space_slug=space_slug_for_session((_context or {}).get("session_id", "")),
         )
     except Exception as e:
         logger.error("Remember failed: %s", e)
@@ -495,8 +498,14 @@ def recall(
         return "Error: Memory system unavailable"
 
     try:
+        from core.spaces import space_slug_for_session
+
         fetch = top * 2 if file else top
-        results = store.search(query, limit=fetch)
+        results = store.search(
+            query,
+            limit=fetch,
+            space_slug=space_slug_for_session((_context or {}).get("session_id", "")),
+        )
         if file:
             results = [r for r in results if r.entry.file_name.lower() == file.lower()][:top]
         if not results:
@@ -560,14 +569,20 @@ def deep_recall(
         return "Error: Memory system unavailable"
 
     try:
+        from core.spaces import space_slug_for_session
+
+        _slug = space_slug_for_session((_context or {}).get("session_id", ""))
+    except Exception:
+        _slug = None
+    try:
         ctx = _context or {}
         loop = ctx.get("_loop") or asyncio.get_running_loop()
-        future = asyncio.run_coroutine_threadsafe(_deep_recall_async(query, context), loop)
+        future = asyncio.run_coroutine_threadsafe(_deep_recall_async(query, context, space_slug=_slug), loop)
         return future.result(timeout=60) + _federated_sections(query)
     except Exception as e:
         logger.warning("deep_recall LLM agent failed, falling back to basic recall: %s", e)
         try:
-            results = store.search(query, limit=8)
+            results = store.search(query, limit=8, space_slug=_slug)
             if not results:
                 fed = _federated_sections(query)
                 return ("No results found in memory." + fed) if fed else "No results found in memory."

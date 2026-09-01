@@ -200,6 +200,15 @@ class AgentSession:
     # executor context -> paths.WORKSPACE_OVERRIDE.
     workspace_override: str | None = None
 
+    # Space membership (v33). Mirrors sessions.space_id; set at create and
+    # rehydrate by the manager. workspace_home is the space's folder inside
+    # the shared workspace (absolute path) — a soft default for relative
+    # paths and bash cwd, NOT a sandbox: read/write roots stay global, and
+    # workspace_override (a real sandbox) always wins over it. Plumbed via
+    # executor context -> paths.WORKSPACE_HOME.
+    space_id: str | None = None
+    workspace_home: str | None = None
+
     # Live goal id for token_usage stamping (plan 3b). Resolved at turn
     # start from session_goals when goals_enabled; workers inherit the
     # parent's at spawn so a goal's budget sees fan-out spend.

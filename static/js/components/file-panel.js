@@ -1214,6 +1214,13 @@ function renderMemoryFiles(listEl) {
             el('div', { class: 'fp-memory-name' }, [text(f.name)]),
             el('div', { class: 'fp-memory-desc' }, [text(f.description || '')]),
             el('div', { class: 'fp-memory-meta' }, [
+                // Space badge (v33): pernix.space.<slug>.* files carry their
+                // space's label + color from /api/memory/files.
+                f.space ? el('span', {
+                    class: 'space-chip-labeled',
+                    style: `--space-color: ${f.space_color || '#888'}`,
+                    title: `Space memory bucket (${f.space})`,
+                }, [text(f.space_label || f.space)]) : null,
                 el('span', {}, [text(`${f.entry_count || 0} entries`)]),
                 f.keywords ? el('span', {}, [text(f.keywords)]) : text(''),
             ]),

@@ -557,6 +557,7 @@ from api.routers import (
     rlm,
     sessions,
     skills,
+    spaces,
     telos,
     tools,
     voice,
@@ -567,6 +568,7 @@ app.include_router(health.router)
 app.include_router(adaptive.router)
 app.include_router(canary.router)
 app.include_router(sessions.router)
+app.include_router(spaces.router)
 app.include_router(chat.router)
 app.include_router(tools.router)
 app.include_router(models.router)

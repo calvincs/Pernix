@@ -17,11 +17,15 @@ async def create_session(body: dict = {}):
     session_type = body.get("session_type", "normal")
     if session_type not in ("normal", "worker", "cron"):
         session_type = "normal"
+    space_id = body.get("space_id") or None
+    if space_id and not db.get_space(space_id):
+        raise HTTPException(404, detail=f"Space {space_id} not found")
     sid = manager.create_session(
         title=body.get("title", "New session"),
         system_prompt=body.get("system_prompt", ""),
         session_type=session_type,
         parent_session_id=body.get("parent_session_id"),
+        space_id=space_id,
     )
     return {"session_id": sid}
 
@@ -34,7 +38,8 @@ async def list_sessions(limit: int = 50, offset: int = 0):
 
     rows = await _asyncio.to_thread(db.list_sessions_enriched, limit, offset)
     sessions = [annotate_read_only(s) for s in rows]
-    return {"items": sessions, "count": len(sessions)}
+    spaces = await _asyncio.to_thread(db.list_spaces)
+    return {"items": sessions, "count": len(sessions), "spaces": spaces}
 
 
 @router.get("/api/sessions/search")
@@ -56,6 +61,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                 "session_id": sid,
                 "title": h["session_title"],
                 "session_type": h["session_type"],
+                "space_id": h.get("session_space_id"),
                 "updated_at": h["session_updated_at"],
                 "snippet": h["content"],
                 "matches": 1,
@@ -404,6 +410,21 @@ async def patch_session(session_id: str, body: dict = {}):
         await _asyncio.to_thread(db.set_session_meta, session_id, pinned=pinned)
         result["pinned"] = pinned
 
+    if "space_id" in body:
+        # Move to space (validated id) or remove from space (null/"").
+        space_id = body["space_id"] or None
+        if space_id and not await _asyncio.to_thread(db.get_space, space_id):
+            raise HTTPException(404, detail=f"Space {space_id} not found")
+        await _asyncio.to_thread(db.set_session_meta, session_id, space_id=space_id)
+        live = get_manager().get(session_id)
+        if live is not None:
+            from sessions.manager import _apply_space_fields
+
+            live.space_id = None
+            live.workspace_home = None
+            _apply_space_fields(live, space_id)
+        result["space_id"] = space_id
+
     if "model_override" in body:
         override = body["model_override"]
         if override is not None and not isinstance(override, str):
@@ -528,8 +549,10 @@ async def purge_sessions(body: dict = {}):
     import asyncio as _asyncio
 
     sessions = await _asyncio.to_thread(db.list_sessions, 1000)
-    # Sort by updated_at, keep at least keep_min
-    candidates = [s for s in sessions if (s.get("updated_at") or "") < cutoff]
+    # Sort by updated_at, keep at least keep_min. Space sessions are
+    # long-lived by contract (v33) — the bulk sweep never touches them;
+    # they go only via explicit delete or their space's cascade delete.
+    candidates = [s for s in sessions if (s.get("updated_at") or "") < cutoff and not s.get("space_id")]
     to_delete = candidates[keep_min:] if len(candidates) > keep_min else []
 
     manager = get_manager()

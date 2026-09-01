@@ -1022,6 +1022,27 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
                WHERE key LIKE 'refined:%'""",
         ],
     ),
+    (
+        33,
+        "spaces: named/colored long-lived session groups",
+        [
+            # slug is immutable after creation — the memory-file prefix
+            # (pernix.space.<slug>.*), the directives dir (data/agent/spaces/
+            # <slug>/) and the workspace home (data/workspace/spaces/<slug>/)
+            # all key off it, so a label rename must never move files.
+            """CREATE TABLE IF NOT EXISTS spaces (
+                id TEXT PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
+                label TEXT NOT NULL,
+                color TEXT NOT NULL DEFAULT '#7c9cff',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+            "ALTER TABLE sessions ADD COLUMN space_id TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_space ON sessions(space_id) WHERE space_id IS NOT NULL",
+        ],
+    ),
 ]
 
 

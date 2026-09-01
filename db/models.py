@@ -35,6 +35,7 @@ def create_session(
     system_prompt: str = "",
     session_type: str = "normal",
     parent_session_id: str | None = None,
+    space_id: str | None = None,
 ) -> str:
     """Create a new session. Returns session ID."""
     sid = _new_id()
@@ -42,9 +43,9 @@ def create_session(
     with connect_sessions() as conn:
         conn.execute(
             """INSERT INTO sessions (id, title, system_prompt, session_type,
-               parent_session_id, state, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, 'idle', ?, ?)""",
-            (sid, title, system_prompt, session_type, parent_session_id, now, now),
+               parent_session_id, space_id, state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'idle', ?, ?)""",
+            (sid, title, system_prompt, session_type, parent_session_id, space_id, now, now),
         )
     return sid
 
@@ -64,44 +65,57 @@ def list_sessions(limit: int = 50, offset: int = 0) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+_ENRICHED_SELECT = """SELECT
+    s.*,
+    COALESCE(mc.message_count, 0) AS message_count,
+    COALESCE(tu.total_tokens, 0) AS total_tokens,
+    COALESCE(tu.total_cost, 0) AS total_cost,
+    fm.first_message
+FROM sessions s
+LEFT JOIN (
+    SELECT session_id, COUNT(*) AS message_count
+    FROM messages
+    WHERE role IN ('user', 'assistant')
+    GROUP BY session_id
+) mc ON mc.session_id = s.id
+LEFT JOIN (
+    SELECT session_id, SUM(total_tokens) AS total_tokens,
+           SUM(COALESCE(cost_estimate, 0)) AS total_cost
+    FROM token_usage
+    GROUP BY session_id
+) tu ON tu.session_id = s.id
+LEFT JOIN (
+    SELECT session_id, substr(content, 1, 200) AS first_message
+    FROM (
+        SELECT session_id, content,
+               ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS rn
+        FROM messages
+        WHERE role = 'user'
+    )
+    WHERE rn = 1
+) fm ON fm.session_id = s.id
+"""
+
+
 def list_sessions_enriched(limit: int = 50, offset: int = 0) -> list[dict]:
-    """List sessions with message_count, total_tokens, and first_message."""
+    """List sessions with message_count, total_tokens, and first_message.
+
+    Space sessions are long-lived by contract: any that fall outside the
+    recency window are unioned back in, so the sidebar's space groups never
+    lose members to the LIMIT no matter how stale they get.
+    """
     with connect_sessions() as conn:
         rows = conn.execute(
-            """SELECT
-                s.*,
-                COALESCE(mc.message_count, 0) AS message_count,
-                COALESCE(tu.total_tokens, 0) AS total_tokens,
-                COALESCE(tu.total_cost, 0) AS total_cost,
-                fm.first_message
-            FROM sessions s
-            LEFT JOIN (
-                SELECT session_id, COUNT(*) AS message_count
-                FROM messages
-                WHERE role IN ('user', 'assistant')
-                GROUP BY session_id
-            ) mc ON mc.session_id = s.id
-            LEFT JOIN (
-                SELECT session_id, SUM(total_tokens) AS total_tokens,
-                       SUM(COALESCE(cost_estimate, 0)) AS total_cost
-                FROM token_usage
-                GROUP BY session_id
-            ) tu ON tu.session_id = s.id
-            LEFT JOIN (
-                SELECT session_id, substr(content, 1, 200) AS first_message
-                FROM (
-                    SELECT session_id, content,
-                           ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS rn
-                    FROM messages
-                    WHERE role = 'user'
-                )
-                WHERE rn = 1
-            ) fm ON fm.session_id = s.id
-            ORDER BY s.updated_at DESC
-            LIMIT ? OFFSET ?""",
+            _ENRICHED_SELECT + "ORDER BY s.updated_at DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+        seen = {r["id"] for r in result}
+        extra = conn.execute(
+            _ENRICHED_SELECT + "WHERE s.space_id IS NOT NULL ORDER BY s.updated_at DESC",
+        ).fetchall()
+        result.extend(dict(r) for r in extra if r["id"] not in seen)
+        return result
 
 
 def update_session(session_id: str, **kwargs) -> None:
@@ -136,14 +150,27 @@ def touch_session(session_id: str) -> None:
         conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (_now(), session_id))
 
 
-def set_session_meta(session_id: str, *, title: str | None = None, pinned: bool | None = None) -> None:
+_UNSET = object()
+
+
+def set_session_meta(
+    session_id: str,
+    *,
+    title: str | None = None,
+    pinned: bool | None = None,
+    space_id: object = _UNSET,
+) -> None:
     """Set user-facing session metadata WITHOUT bumping updated_at —
-    renaming or pinning a session must not change its recency ordering."""
+    renaming, pinning, or moving a session between spaces must not change
+    its recency ordering. space_id accepts None (remove from space); omit
+    the argument to leave membership untouched."""
     updates: dict = {}
     if title is not None:
         updates["title"] = title
     if pinned is not None:
         updates["pinned"] = 1 if pinned else 0
+    if space_id is not _UNSET:
+        updates["space_id"] = space_id
     if not updates:
         return
     cols = ", ".join(f"{k} = ?" for k in updates)
@@ -166,6 +193,104 @@ def set_watched_workers(session_id: str, worker_ids: list[str]) -> None:
     import json as _json
 
     update_session(session_id, watched_worker_ids=_json.dumps(list(worker_ids)))
+
+
+# ---------------------------------------------------------------------------
+# Spaces — named/colored long-lived session groups (migration v33)
+# ---------------------------------------------------------------------------
+
+
+def create_space(label: str, color: str, slug: str) -> dict:
+    """Create a space. Slug uniqueness is enforced by the UNIQUE constraint;
+    callers validate the slug format (core.spaces.SLUG_RE) before calling."""
+    space_id = _new_id()
+    now = _now()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO spaces (id, slug, label, color, sort_order, created_at, updated_at)
+               VALUES (?, ?, ?, ?,
+                       COALESCE((SELECT MAX(sort_order) + 1 FROM spaces), 0), ?, ?)""",
+            (space_id, slug, label, color, now, now),
+        )
+        row = conn.execute("SELECT * FROM spaces WHERE id = ?", (space_id,)).fetchone()
+        return dict(row)
+
+
+def get_space(space_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM spaces WHERE id = ?", (space_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_space_by_slug(slug: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM spaces WHERE slug = ?", (slug,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_spaces() -> list[dict]:
+    """All spaces with a live session count, in user sort order."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT sp.*, COALESCE(sc.session_count, 0) AS session_count
+               FROM spaces sp
+               LEFT JOIN (
+                   SELECT space_id, COUNT(*) AS session_count
+                   FROM sessions WHERE space_id IS NOT NULL GROUP BY space_id
+               ) sc ON sc.space_id = sp.id
+               ORDER BY sp.sort_order, sp.created_at""",
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_space(space_id: str, **kwargs) -> None:
+    """Update space fields. Slug is deliberately NOT updatable — memory
+    prefixes, directive dirs and workspace homes key off it."""
+    allowed = {"label", "color", "sort_order"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+    if not updates:
+        return
+    updates["updated_at"] = _now()
+    cols = ", ".join(f"{k} = ?" for k in updates)
+    vals = list(updates.values()) + [space_id]
+    with connect_sessions() as conn:
+        conn.execute(f"UPDATE spaces SET {cols} WHERE id = ?", vals)
+
+
+def delete_space(space_id: str) -> None:
+    """Delete the space row only — session detach/cascade is orchestrated
+    by the API layer, which owns kernel/memory/workspace cleanup too."""
+    with connect_sessions() as conn:
+        conn.execute("DELETE FROM spaces WHERE id = ?", (space_id,))
+
+
+def list_space_session_ids(space_id: str) -> list[str]:
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT id FROM sessions WHERE space_id = ? ORDER BY created_at",
+            (space_id,),
+        ).fetchall()
+        return [r["id"] for r in rows]
+
+
+def detach_space_sessions(space_id: str) -> int:
+    """Return sessions of a deleted space to the ungrouped list."""
+    with connect_sessions() as conn:
+        cur = conn.execute("UPDATE sessions SET space_id = NULL WHERE space_id = ?", (space_id,))
+        return cur.rowcount
+
+
+def any_space_session_mid_turn(space_id: str) -> bool:
+    """True when ANY session of the space is processing a turn — the shared
+    space kernel must not be evicted or reaped while a member is mid-turn.
+    Mirrors the single-session check (state_v2 == 'processing') in
+    KernelRegistry._session_mid_turn."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sessions WHERE space_id = ? AND state_v2 = 'processing' LIMIT 1",
+            (space_id,),
+        ).fetchone()
+        return row is not None
 
 
 # SQL predicate for "this session is not actively being worked on", for the
@@ -704,6 +829,7 @@ def search_messages_fts(
         sql = """
             SELECT f.rowid as msg_id, f.session_id, f.role, f.content,
                    s.title as session_title, s.session_type,
+                   s.space_id as session_space_id,
                    s.created_at as session_created_at,
                    s.updated_at as session_updated_at,
                    bm25(messages_fts, 1.0) as score
@@ -733,6 +859,7 @@ def search_messages_fts(
                     "session_id": r["session_id"],
                     "session_title": r["session_title"] or "untitled",
                     "session_type": r["session_type"] or "normal",
+                    "session_space_id": r["session_space_id"],
                     "session_created_at": (r["session_created_at"] or "")[:16],
                     "session_updated_at": (r["session_updated_at"] or "")[:16],
                     "role": r["role"],
@@ -2063,8 +2190,11 @@ def list_cron_sessions_before(max_age_days: int = 7) -> list[dict]:
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
     with connect_sessions() as conn:
+        # pinned exclusion: a user who pins a cron session is saying "keep
+        # this run" — the title-based sweep must not eat it (pre-v33 gap).
         rows = conn.execute(
-            "SELECT id, title, updated_at FROM sessions WHERE title LIKE 'Cron: %' AND updated_at < ?",
+            "SELECT id, title, updated_at FROM sessions "
+            "WHERE title LIKE 'Cron: %' AND updated_at < ? AND COALESCE(pinned, 0) = 0",
             (cutoff,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -2678,10 +2808,20 @@ def fail_orphaned_rlm_runs() -> int:
         return cur.rowcount
 
 
-def list_rlm_runs(session_id: str | None = None, limit: int = 20) -> list[dict]:
-    """Return RLM runs, newest first. Optionally filter by owning session."""
+def list_rlm_runs(session_id: str | None = None, limit: int = 20, space_id: str | None = None) -> list[dict]:
+    """Return RLM runs, newest first. Optionally filter by owning session,
+    or by SPACE (v33) — a join through sessions, so every run launched from
+    any member session of the space is listed. space_id wins over session_id."""
     with connect_sessions() as conn:
-        if session_id:
+        if space_id:
+            rows = conn.execute(
+                """SELECT r.* FROM rlm_runs r
+                   JOIN sessions s ON s.id = r.session_id
+                   WHERE s.space_id = ?
+                   ORDER BY r.created_at DESC LIMIT ?""",
+                (space_id, limit),
+            ).fetchall()
+        elif session_id:
             rows = conn.execute(
                 """SELECT * FROM rlm_runs WHERE session_id = ?
                    ORDER BY created_at DESC LIMIT ?""",

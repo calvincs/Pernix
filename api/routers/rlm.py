@@ -24,10 +24,11 @@ _ANSWER_INLINE_LIMIT = 200_000
 
 
 @router.get("/api/rlm/runs")
-async def list_rlm_runs(session_id: str = "", limit: int = 20):
-    """List RLM runs, newest first. Optionally filter by owning session."""
+async def list_rlm_runs(session_id: str = "", limit: int = 20, space_id: str = ""):
+    """List RLM runs, newest first. Filter by owning session, or by space
+    (v33) — every member session's runs; space_id wins over session_id."""
     limit = max(1, min(int(limit), 100))
-    runs = db.list_rlm_runs(session_id=session_id or None, limit=limit)
+    runs = db.list_rlm_runs(session_id=session_id or None, limit=limit, space_id=space_id or None)
     return {"runs": runs, "rlm_enabled": settings.rlm_enabled}
 
 

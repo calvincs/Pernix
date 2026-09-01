@@ -1,7 +1,8 @@
 // Pernix — Sidebar component: session list with grouping, dots, tooltips, legend
 import { el, text, clear } from '../render.js';
 import { isMobile } from '../mobile.js';
-import { get, patch } from '../api.js';
+import { get, post, patch } from '../api.js';
+import { openSpaceModal, openSpaceDeleteDialog } from './modals/spaces.js';
 
 // ---------------------------------------------------------------------------
 // Session type definitions
@@ -28,6 +29,7 @@ let _onSelect = null;
 let _onDelete = null;
 let _tooltipTimer = null;
 let _lastJson = '';
+let _spaces = [];  // last /api/sessions payload's spaces list
 
 // Live activity text per session (cleared on idle)
 const _activity = new Map(); // sessionId → string
@@ -93,11 +95,21 @@ async function _runSearch(q) {
             return;
         }
         for (const r of results) {
+            const sp = r.space_id ? spaceById(r.space_id) : null;
+            const titleKids = [];
+            if (sp) {
+                titleKids.push(el('span', {
+                    class: 'space-chip',
+                    style: `--space-color: ${sp.color}`,
+                    title: `Space: ${sp.label}`,
+                }));
+            }
+            titleKids.push(text(r.title || 'untitled'));
             list.appendChild(el('div', {
                 class: 'session-item search-hit',
                 onClick: () => { if (_onSelect) _onSelect(r.session_id); },
             }, [
-                el('div', { class: 'session-title' }, [text(r.title || 'untitled')]),
+                el('div', { class: 'session-title' }, titleKids),
                 el('div', { class: 'search-snippet' }, [text(r.snippet || '')]),
                 el('div', { class: 'search-meta' }, [
                     text(`${r.matches} match${r.matches === 1 ? '' : 'es'}${r.updated_at ? ' · ' + r.updated_at : ''}`),
@@ -135,9 +147,12 @@ export function updateSessionActivity(sessionId, activityText) {
     }
 }
 
-export function renderSessionList(sessions, activeSid) {
+export function renderSessionList(sessions, activeSid, spaces = []) {
     if (_searchActive) return;  // search results own the list until cleared
-    const json = JSON.stringify(sessions) + '|' + activeSid;
+    _spaces = spaces || [];
+    // The guard must see spaces too: a label/color edit with an unchanged
+    // session list would otherwise never repaint.
+    const json = JSON.stringify(sessions) + '|' + JSON.stringify(spaces) + '|' + activeSid;
     if (json === _lastJson) return;
     _lastJson = json;
 
@@ -145,15 +160,10 @@ export function renderSessionList(sessions, activeSid) {
     const scrollTop = list.scrollTop;
     clear(list);
 
-    if (!sessions || sessions.length === 0) {
-        list.scrollTop = scrollTop;
-        _updateLegendCounts({});
-        return;
-    }
-
     const sidebarState = _loadState();
     const hidden = sidebarState.hiddenTypes || {};
 
+    sessions = sessions || [];
     // Separate top-level from child sessions (workers, RLM runs), apply type filter
     const allTopLevel = sessions.filter(s => !CHILD_TYPES.has(s.session_type));
     const allChildren = sessions.filter(s => CHILD_TYPES.has(s.session_type));
@@ -174,12 +184,37 @@ export function renderSessionList(sessions, activeSid) {
         childrenByParent[pid].push(c);
     }
 
+    // Space groups render ABOVE the time buckets. Space sessions leave the
+    // buckets entirely — they live in their space, never "roll off" into a
+    // collapsed Older group. An empty space still renders (its + button is
+    // how the first session gets in).
+    const bySpace = {};
+    for (const s of topLevel) {
+        if (s.space_id) {
+            (bySpace[s.space_id] = bySpace[s.space_id] || []).push(s);
+        }
+    }
+    list.appendChild(el('div', { class: 'spaces-header' }, [
+        el('span', { class: 'spaces-header-label' }, [text('Spaces')]),
+        el('button', {
+            class: 'space-btn spaces-new-btn',
+            title: 'New space',
+            onClick: (e) => { e.stopPropagation(); openSpaceModal(null); },
+        }, [text('+')]),
+    ]));
+    for (const space of _spaces) {
+        _renderSpaceGroup(space, bySpace[space.id] || [], list, activeSid, childrenByParent, sidebarState);
+    }
+    // Sessions pointing at a deleted/unknown space fall back to the buckets.
+    const knownSpaceIds = new Set(_spaces.map(sp => sp.id));
+    const ungrouped = topLevel.filter(s => !s.space_id || !knownSpaceIds.has(s.space_id));
+
     // Bucket by time group — pinned sessions get their own group on top.
     const GROUP_ORDER = ['Pinned', 'Today', 'Yesterday', 'This Week', 'This Month', 'Older'];
     const DEFAULT_COLLAPSED = { Pinned: false, Today: false, Yesterday: false, 'This Week': true, 'This Month': true, Older: true };
     const buckets = {};
     for (const g of GROUP_ORDER) buckets[g] = [];
-    for (const s of topLevel) buckets[s.pinned ? 'Pinned' : _timeGroup(s.updated_at)].push(s);
+    for (const s of ungrouped) buckets[s.pinned ? 'Pinned' : _timeGroup(s.updated_at)].push(s);
     // Within each group: real conversations first, auto-created cron
     // sessions after — a busy schedule otherwise crowds chats out of view.
     for (const g of GROUP_ORDER) {
@@ -240,6 +275,86 @@ export function renderSessionList(sessions, activeSid) {
     }
 
     list.scrollTop = scrollTop;
+}
+
+// ---------------------------------------------------------------------------
+// Space groups (v33) — one collapsible group per space, above the buckets
+// ---------------------------------------------------------------------------
+
+function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, sidebarState) {
+    // Pinned first, then recency (the never-roll-off union can append stale
+    // sessions out of order — sort locally instead of trusting API order).
+    group.sort((a, b) =>
+        (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) ||
+        String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+
+    const collapseKey = 'space:' + space.id;
+    const hasActive = group.some(s => s.id === activeSid ||
+        (childrenByParent[s.id] || []).some(w => w.id === activeSid ||
+            (childrenByParent[w.id] || []).some(g => g.id === activeSid)));
+    const savedCollapsed = sidebarState.collapsed?.[collapseKey];
+    const collapsed = savedCollapsed !== undefined ? savedCollapsed : (hasActive ? false : false);
+
+    const header = el('div', {
+        class: 'session-group-header space-group-header' + (collapsed ? ' collapsed' : ''),
+        style: `--space-color: ${space.color}`,
+    }, [
+        el('span', { class: 'sg-arrow' }, [text('▼')]),
+        el('span', { class: 'space-dot' }),
+        el('span', { class: 'space-label' }, [text(space.label)]),
+        el('span', { class: 'sg-count' }, [text(String(group.length))]),
+        el('button', {
+            class: 'space-btn space-add-btn',
+            title: `New session in ${space.label}`,
+            onClick: async (e) => {
+                e.stopPropagation();
+                try {
+                    const r = await post('/api/sessions', { title: 'New session', space_id: space.id });
+                    _lastJson = '';
+                    window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
+                    if (_onSelect && r.session_id) _onSelect(r.session_id);
+                } catch { /* stay put on failure */ }
+            },
+        }, [text('+')]),
+        el('button', {
+            class: 'space-btn space-gear-btn',
+            title: `Space settings — ${space.label}`,
+            onClick: (e) => {
+                e.stopPropagation();
+                openSpaceModal(space);
+            },
+        }, [text('⚙')]),
+        el('button', {
+            class: 'space-btn space-del-btn',
+            title: `Delete space ${space.label}`,
+            onClick: (e) => {
+                e.stopPropagation();
+                openSpaceDeleteDialog(space);
+            },
+        }, [text('×')]),
+    ]);
+
+    const body = el('div', { class: 'session-group-body' + (collapsed ? ' collapsed' : '') });
+
+    header.addEventListener('click', () => {
+        const isCollapsed = header.classList.toggle('collapsed');
+        body.classList.toggle('collapsed', isCollapsed);
+        _saveCollapsed(collapseKey, isCollapsed);
+    });
+
+    if (!group.length) {
+        body.appendChild(el('div', { class: 'space-empty' }, [text('No sessions yet — use + to start one')]));
+    }
+    for (const s of group) {
+        _renderSessionWithWorkers(s, body, activeSid, childrenByParent, sidebarState);
+    }
+
+    list.appendChild(header);
+    list.appendChild(body);
+}
+
+export function spaceById(id) {
+    return _spaces.find(sp => sp.id === id) || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +469,20 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
                 _startRename(session);
             },
         }, [text('✎')]));
+
+        // Move to space — dropdown of spaces (+ "No space"). Only rendered
+        // when at least one space exists; membership changes never bump
+        // recency (set_session_meta contract).
+        if (_spaces.length) {
+            meta.push(el('button', {
+                class: 'session-space-move',
+                title: session.space_id ? 'Move to another space' : 'Move to space',
+                onClick: (e) => {
+                    e.stopPropagation();
+                    _openMoveMenu(session, e.currentTarget);
+                },
+            }, [text('▣')]));
+        }
     }
 
     // Delete button \u2014 two-tap confirm: the \u00d7 is always visible on touch
@@ -483,6 +612,52 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
             }
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Move-to-space dropdown — one floating menu at a time; click-away closes.
+// ---------------------------------------------------------------------------
+
+function _openMoveMenu(session, anchor) {
+    document.querySelector('.space-move-menu')?.remove();
+    const menu = el('div', { class: 'space-move-menu' });
+    const choose = async (spaceId) => {
+        menu.remove();
+        if ((spaceId || null) === (session.space_id || null)) return;
+        try {
+            await patch(`/api/sessions/${session.id}`, { space_id: spaceId });
+            _lastJson = '';
+            window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
+        } catch { /* leave membership as-is on failure */ }
+    };
+    for (const sp of _spaces) {
+        menu.appendChild(el('div', {
+            class: 'space-move-item' + (session.space_id === sp.id ? ' current' : ''),
+            onClick: (e) => { e.stopPropagation(); choose(sp.id); },
+        }, [
+            el('span', { class: 'space-dot', style: `--space-color: ${sp.color}` }),
+            text(sp.label),
+        ]));
+    }
+    if (session.space_id) {
+        menu.appendChild(el('div', {
+            class: 'space-move-item',
+            onClick: (e) => { e.stopPropagation(); choose(null); },
+        }, [text('Remove from space')]));
+    }
+    const r = anchor.getBoundingClientRect();
+    menu.style.top = `${r.bottom + 4}px`;
+    menu.style.left = `${Math.max(8, r.right - 180)}px`;
+    document.body.appendChild(menu);
+    setTimeout(() => {
+        const away = (ev) => {
+            if (!menu.contains(ev.target)) {
+                menu.remove();
+                document.removeEventListener('click', away);
+            }
+        };
+        document.addEventListener('click', away);
+    }, 0);
 }
 
 // ---------------------------------------------------------------------------

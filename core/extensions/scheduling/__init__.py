@@ -109,6 +109,31 @@ def _load_jobs():
         logger.warning("Failed to load cron jobs: %s", e)
 
 
+def jobs_for_space(space_id: str) -> list[str]:
+    """Names of jobs bound to a space (space_id rides in extra_meta)."""
+    scheduler = _get_scheduler()
+    if not scheduler or not space_id:
+        return []
+    return [j.id for j in scheduler.get_jobs() if j.kwargs.get("meta", {}).get("space_id") == space_id]
+
+
+def unbind_space_jobs(space_id: str) -> int:
+    """Drop the space binding from every bound job (detach-delete path).
+    The jobs keep running; their future firings just land un-spaced."""
+    scheduler = _get_scheduler()
+    if not scheduler or not space_id:
+        return 0
+    changed = 0
+    for job in scheduler.get_jobs():
+        meta = job.kwargs.get("meta", {})
+        if meta.get("space_id") == space_id:
+            meta.pop("space_id", None)
+            changed += 1
+    if changed:
+        _save_jobs()
+    return changed
+
+
 def _save_jobs():
     """Persist all jobs to JSON."""
     scheduler = _get_scheduler()
@@ -597,7 +622,7 @@ def _notify_job_failure(manager, bus, job_name: str, session_id: str | None, err
     bus.emit({**notification, "session_id": session_id or ""})
 
 
-def _ensure_dispatch_session(session_id: str | None, title: str = "") -> str:
+def _ensure_dispatch_session(session_id: str | None, title: str = "", space_id: str | None = None) -> str:
     """Resolve or create the session a scheduled dispatch will run in.
 
     session_type="cron" is what _is_unattended_session() keys off — without
@@ -605,12 +630,17 @@ def _ensure_dispatch_session(session_id: str | None, title: str = "") -> str:
     into the void, and wedge in AWAITING_USER forever. Jobs reusing an
     explicit session_id keep that session's type: a user-attended session
     shouldn't lose its gate just because a job also runs in it.
+
+    space_id (v33): a space-bound job's fresh run session is created INSIDE
+    the space, so the run inherits the space's directives, memory routing,
+    workspace home and shared kernel. Still titled "Cron: …" — the 7-day
+    machine-run sweep applies in spaces too, by decision.
     """
     from sessions.manager import get_manager
 
     if session_id:
         return session_id
-    return get_manager().create_session(title=title, session_type="cron")
+    return get_manager().create_session(title=title, session_type="cron", space_id=space_id)
 
 
 # A charter that grants a write tool must grant its repair tool: remember()
@@ -734,7 +764,7 @@ async def _execute_cron_job(meta: dict):
         db.update_cron_run(run_id, "running")
         # Bind the session id BEFORE dispatch: a timeout/error must still
         # reference the session that holds the partial transcript.
-        session_id = _ensure_dispatch_session(session_id, title=f"Cron: {name}")
+        session_id = _ensure_dispatch_session(session_id, title=f"Cron: {name}", space_id=meta.get("space_id"))
         await _dispatch_prompt(session_id, prompt, model=model, allowed_tools=meta.get("allowed_tools"))
 
         duration_ms = int((time.time() - start_time) * 1000)
@@ -1333,9 +1363,22 @@ def test_job(name: str, _context: dict | None = None) -> str:
 
 
 def schedule_job(
-    name: str, cron_expr: str, prompt: str, session_id: str = "", model: str = "", _context: dict | None = None
+    name: str,
+    cron_expr: str,
+    prompt: str,
+    session_id: str = "",
+    model: str = "",
+    space_id: str = "",
+    _context: dict | None = None,
 ) -> str:
-    """Schedule a recurring job with cron expression."""
+    """Schedule a recurring job with cron expression.
+
+    space_id binds the job to a space — every firing runs in a fresh cron
+    session created inside that space. When the CALLER is a space session
+    and no space_id is given, the job inherits the caller's space (work
+    scheduled from inside a space stays in the space); pass space_id="none"
+    to schedule an unbound job from a space session.
+    """
     import asyncio
 
     # Full spec validation up front (spec Feature 7): a job that can't fire
@@ -1347,14 +1390,33 @@ def schedule_job(
     ctx = _context or {}
     loop = ctx.get("_loop")
 
+    # Resolve the space binding: explicit id > caller's space > none.
+    resolved_space: str | None = None
+    if space_id and space_id.lower() != "none":
+        from db import models as _db
+
+        if not _db.get_space(space_id):
+            return f"Error: space '{space_id}' not found"
+        resolved_space = space_id
+    elif not space_id:
+        try:
+            from core.spaces import get_session_space
+
+            caller_space = get_session_space(ctx.get("session_id", ""))
+            resolved_space = caller_space["id"] if caller_space else None
+        except Exception:
+            resolved_space = None
+
+    extra_meta: dict = {"validation": v}
+    if resolved_space:
+        extra_meta["space_id"] = resolved_space
+
     try:
         if loop and not _scheduler:
             future = asyncio.run_coroutine_threadsafe(_init_scheduler_async(), loop)
             future.result(timeout=10)
 
-        _add_job_internal(
-            name, cron_expr, prompt, session_id=session_id or None, model=model, extra_meta={"validation": v}
-        )
+        _add_job_internal(name, cron_expr, prompt, session_id=session_id or None, model=model, extra_meta=extra_meta)
         _save_jobs()
         msg = f"Job '{name}' scheduled: {cron_expr}"
         if v["warnings"]:
@@ -1369,9 +1431,13 @@ def update_scheduled_job(
     cron_expr: str | None = None,
     prompt: str | None = None,
     model: str | None = None,
+    space_id: str | None = None,
     _context: dict | None = None,
 ) -> str:
-    """Update an existing scheduled job. Only provided fields are changed."""
+    """Update an existing scheduled job. Only provided fields are changed.
+
+    space_id: None = unchanged; ""/"none" = unbind; an id = rebind
+    (validated). Rides extra_meta like every non-structural field."""
     scheduler = _get_scheduler()
     if not scheduler:
         return "Scheduler not available"
@@ -1381,6 +1447,16 @@ def update_scheduled_job(
     current = next((j for j in saved if j["name"] == name), None)
     if not current:
         return f"Error: Job '{name}' not found"
+
+    if space_id is not None:
+        if not space_id or space_id.lower() == "none":
+            current.pop("space_id", None)
+        else:
+            from db import models as _db
+
+            if not _db.get_space(space_id):
+                return f"Error: space '{space_id}' not found"
+            current["space_id"] = space_id
 
     # Merge changes
     new_cron = cron_expr if cron_expr is not None else current.get("cron_expr", "")
@@ -1562,6 +1638,7 @@ def get_all_jobs_with_status() -> list[dict]:
                 "validation": job.get("validation"),
                 "last_test": job.get("last_test"),
                 "allowed_tools": job.get("allowed_tools"),
+                "space_id": job.get("space_id"),
             }
         )
     return result
@@ -1649,6 +1726,11 @@ def register(reg) -> None:
                 "prompt": {"type": "string", "description": "Message to send when job fires"},
                 "session_id": {"type": "string", "description": "Session to target (empty = create new each time)"},
                 "model": {"type": "string", "description": "Model override for this job (empty = default model)"},
+                "space_id": {
+                    "type": "string",
+                    "description": "Bind the job to a space: each firing runs in a fresh session inside it. "
+                    "Empty = inherit the calling session's space (if any); 'none' = explicitly unbound",
+                },
             },
             "required": ["name", "cron_expr", "prompt"],
         },

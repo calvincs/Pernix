@@ -187,6 +187,7 @@ class MemoryStore:
         source: str = "",
         skip_dedup: bool = False,
         origin: str = "",
+        space_slug: str | None = None,
     ) -> str:
         """Append an entry to a memory file and index it.
 
@@ -197,6 +198,10 @@ class MemoryStore:
         by construction similar to entries they are about to supersede
         (consolidation fuse) — the gate would block the write against the
         very entry being replaced.
+
+        space_slug (v33): the writing session's space. Scopes AUTO-routing
+        to the space's pernix.space.<slug>.* files; an explicit file_name
+        stays a verbatim contract, global names included.
         """
         if not content.strip():
             return "Error: Empty content"
@@ -220,7 +225,7 @@ class MemoryStore:
         epoch = epoch or int(time.time())
 
         # Resolve file name: map to existing file or create new one
-        file_name = self._resolve_file_name(file_name, content)
+        file_name = self._resolve_file_name(file_name, content, space_slug=space_slug)
 
         file_name = self._validate_name(file_name)
 
@@ -304,6 +309,7 @@ class MemoryStore:
         epoch: int | None = None,
         source: str = "",
         origin: str = "",
+        space_slug: str | None = None,
     ) -> str:
         """add_entry, except a blocked duplicate that is a *correction* rewrites it.
 
@@ -369,6 +375,7 @@ class MemoryStore:
             source=source,
             skip_dedup=True,
             origin=origin,
+            space_slug=space_slug,
         )
 
     # Canonical implementations live in core.memory.routing (shared with
@@ -376,7 +383,7 @@ class MemoryStore:
     _normalize_name = staticmethod(normalize_file_name)
     _name_tokens = staticmethod(name_tokens)
 
-    def _resolve_file_name(self, suggested: str | None, content: str) -> str:
+    def _resolve_file_name(self, suggested: str | None, content: str, space_slug: str | None = None) -> str:
         """Map a suggested file name to an existing file when possible.
 
         Resolution cascade for an explicit suggestion:
@@ -397,13 +404,13 @@ class MemoryStore:
            this content (the gravity-well effect _auto_route guards against).
         """
         if not suggested:
-            return self._auto_route(content)
+            return self._auto_route(content, space_slug=space_slug)
 
         # Clean the suggested name through validation-safe form
         try:
             suggested = self._validate_name(suggested)
         except ValueError:
-            return self._auto_route(content)
+            return self._auto_route(content, space_slug=space_slug)
 
         # Build map of known files (normalized → actual name), tracking
         # which ones actually hold entries.
@@ -427,10 +434,19 @@ class MemoryStore:
             if norm == suggested_norm:
                 return actual
 
-        # 2. Token Jaccard >= 0.6 against populated files only
+        # 2. Token Jaccard >= 0.6 against populated files only. Space-bucket
+        # guard (v33): "pernix.space.alpha.research" is 0.6-similar to
+        # "pernix.space.beta.research" — without the bucket check an explicit
+        # write to one space silently lands in another (or a space name maps
+        # onto a global file and vice versa).
+        from core.memory.routing import space_bucket as _space_bucket
+
+        suggested_bucket = _space_bucket(suggested)
         best_jaccard = 0.0
         best_match = None
         for actual in populated:
+            if _space_bucket(actual) != suggested_bucket:
+                continue
             actual_tokens = self._name_tokens(actual)
             if not suggested_tokens or not actual_tokens:
                 continue
@@ -444,23 +460,38 @@ class MemoryStore:
         # 3. Honor the explicit suggestion — creates the file if needed.
         return suggested
 
-    def _auto_route(self, content: str) -> str:
+    def _auto_route(self, content: str, space_slug: str | None = None) -> str:
         """Find best existing file for content, or suggest new one.
 
         Always evaluates ALL signals (FTS5, namespace keywords, file metadata)
         and combines them. No early returns — prevents gravity-well effect
         where one large file attracts all new entries.
+
+        space_slug (v33): route inside the space's bucket. Namespace hits map
+        to pernix.space.<slug>.<topic>, candidate files are restricted to the
+        space prefix, and the fallback is the space's own notes file — an
+        auto-routed write from a space session never lands in a global file
+        (or another space's).
         """
+        space_prefix = f"pernix.space.{space_slug}." if space_slug else None
         content_lower = content.lower()
         # Candidates: {file_name: score}
         candidates: dict[str, float] = {}
+
+        def _scoped(name: str) -> str:
+            """Map a canonical bucket into the space (pernix.research ->
+            pernix.space.<slug>.research); non-space routing is identity."""
+            if not space_prefix:
+                return name
+            return space_prefix + name.rsplit(".", 1)[-1]
 
         # Signal 1: Namespace keyword matching (always runs, cheap)
         for ns, keywords in NAMESPACE_KEYWORDS.items():
             score = sum(1 for kw in keywords if kw in content_lower)
             if score > 0:
                 # Boost namespace matches — these are curated topical buckets
-                candidates[ns] = candidates.get(ns, 0) + score * 2.0
+                ns_target = _scoped(ns)
+                candidates[ns_target] = candidates.get(ns_target, 0) + score * 2.0
 
         # Signal 2: Existing file metadata keyword overlap
         conn = self._connect()
@@ -468,6 +499,8 @@ class MemoryStore:
             rows = conn.execute("SELECT name, keywords FROM memory_files WHERE entry_count > 0").fetchall()
             file_count = len(rows)
             for row in rows:
+                if space_prefix and not row["name"].startswith(space_prefix):
+                    continue
                 file_kws = set(row["keywords"].lower().split(","))
                 content_words = set(content_lower.split())
                 overlap = len(file_kws & content_words)
@@ -484,7 +517,7 @@ class MemoryStore:
             try:
                 conn = self._connect()
                 try:
-                    results = search_bm25(conn, content[:200], limit=10)
+                    results = search_bm25(conn, content[:200], limit=10, file_prefix=space_prefix)
                 finally:
                     conn.close()
                 if results:
@@ -501,7 +534,7 @@ class MemoryStore:
 
         if candidates:
             return max(candidates, key=candidates.get)
-        return "pernix.notes"
+        return space_prefix + "notes" if space_prefix else "pernix.notes"
 
     def _ensure_file(self, file_name: str, content: str = "") -> None:
         """Create memory file if it doesn't exist."""
@@ -845,6 +878,30 @@ class MemoryStore:
 
         logger.info("Archived memory file: %s", name)
 
+    def delete_file(self, name: str) -> bool:
+        """Hard-delete a memory file: markdown, FTS rows, registry row, hit
+        counters and vectors. Unlike archive_file this is irreversible —
+        used by space cascade-delete, where the user explicitly opted in.
+        Returns True when a markdown file was actually removed."""
+        name = self._validate_name(name)
+        md_path = self._dir / f"{name}.md"
+        with self._lock:
+            existed = md_path.exists()
+            if existed:
+                md_path.unlink()
+            conn = self._connect()
+            try:
+                conn.execute("DELETE FROM memory_fts WHERE file_name = ?", (name,))
+                conn.execute("DELETE FROM memory_files WHERE name = ?", (name,))
+                conn.execute("DELETE FROM memory_hits WHERE file_name = ?", (name,))
+                conn.execute("DELETE FROM vectors WHERE file_name = ?", (name,))
+                conn.commit()
+            finally:
+                conn.close()
+        if existed:
+            logger.info("Deleted memory file: %s", name)
+        return existed
+
     def move_entries(
         self,
         source_file: str,
@@ -982,11 +1039,20 @@ class MemoryStore:
         after_epoch: int | None = None,
         _track_hits: bool = True,
         expand_wikilinks: bool = False,
+        space_slug: str | None = None,
     ) -> list[SearchResult]:
         """Search memory entries.
 
         expand_wikilinks: one-hop [[file-name]]/[[file@epoch]] expansion
         (H4, plan §12.5) — linked entries append with source="link".
+
+        space_slug (v33): prioritize the space's pernix.space.<slug>.* files.
+        Implemented as a second, prefix-restricted query merged in front of
+        the global results — scores are NEVER mutated (the documented scale
+        contract, search.py: > 3.0 strong · 1.0–3.0 weak · < 1.0 noise,
+        must keep holding), so a space hit is promoted by ORDER only. One
+        guard: a space hit under the 1.0 noise floor sinks below every real
+        global hit instead of displacing one.
         """
         conn = self._connect()
         try:
@@ -996,6 +1062,10 @@ class MemoryStore:
                 results = search_recent(conn, limit=limit)
             else:
                 results = search_hybrid(conn, query, limit=limit, after_epoch=after_epoch)
+
+            if space_slug and mode != "recent":
+                results = self._merge_space_first(conn, query, results, mode, limit, after_epoch, space_slug)
+
             if expand_wikilinks and results:
                 from core.memory.search import expand_links
 
@@ -1006,6 +1076,40 @@ class MemoryStore:
         if _track_hits and results:
             self._record_hits(results)
         return results
+
+    @staticmethod
+    def _merge_space_first(conn, query, global_results, mode, limit, after_epoch, space_slug):
+        """Order-only space prioritization for search() — see its docstring."""
+        from core.memory.routing import SPACE_PREFIX_FMT
+
+        prefix = SPACE_PREFIX_FMT.format(slug=space_slug)
+        if mode == "bm25":
+            space_results = search_bm25(conn, query, limit=limit, after_epoch=after_epoch, file_prefix=prefix)
+        else:
+            space_results = search_hybrid(conn, query, limit=limit, after_epoch=after_epoch, file_prefix=prefix)
+
+        space_results.sort(key=lambda r: r.score, reverse=True)
+        # Noise-floor guard: space hits at documented-noise scores (< 1.0)
+        # sink below real global hits — but only when real globals EXIST.
+        # When everything scored as noise (tiny corpus, short query), space
+        # hits still lead: there is nothing better to protect.
+        has_real_global = any(r.score >= 1.0 for r in global_results)
+        if has_real_global:
+            leading = [r for r in space_results if r.score >= 1.0]
+            space_noise = [r for r in space_results if r.score < 1.0]
+        else:
+            leading, space_noise = space_results, []
+
+        merged: list = []
+        seen: set[tuple] = set()
+        for r in leading + list(global_results) + space_noise:
+            key = (r.entry.file_name, r.entry.epoch)
+            if key not in seen:
+                seen.add(key)
+                merged.append(r)
+            if len(merged) >= limit:
+                break
+        return merged
 
     def _record_hits(self, results: list[SearchResult]) -> None:
         """Record usage hits for search results. Non-blocking, never raises."""
@@ -1027,7 +1131,9 @@ class MemoryStore:
         except Exception as e:
             logger.debug("Failed to record memory hits: %s", e)
 
-    def search_lessons(self, query: str, limit: int = 10, _track_hits: bool = True) -> list[SearchResult]:
+    def search_lessons(
+        self, query: str, limit: int = 10, _track_hits: bool = True, space_slug: str | None = None
+    ) -> list[SearchResult]:
         """Search lesson-type memory entries with age-based decay.
 
         Lessons are operational workarounds extracted by the refine pass from
@@ -1041,7 +1147,7 @@ class MemoryStore:
         beyond). Lessons that survive after decay still show up — they're
         just outranked by anything fresher and roughly comparable.
         """
-        results = self.search(query, mode="hybrid", limit=limit * 4, _track_hits=False)
+        results = self.search(query, mode="hybrid", limit=limit * 4, _track_hits=False, space_slug=space_slug)
         lessons = [r for r in results if r.entry.entry_type == "lesson"]
         if not lessons:
             return []

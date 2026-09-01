@@ -26,6 +26,25 @@ from __future__ import annotations
 import re
 
 # ---------------------------------------------------------------------------
+# Space buckets (v33): pernix.space.<slug>.* files belong to one space
+# ---------------------------------------------------------------------------
+
+_SPACE_FILE_RE = re.compile(r"^pernix\.space\.([a-z0-9][a-z0-9_-]*)\.")
+SPACE_PREFIX_FMT = "pernix.space.{slug}."
+
+
+def space_bucket(file_name: str) -> str | None:
+    """The space slug a memory file belongs to, or None for global files.
+
+    Consolidation, reroute and merge sweeps use this as a hard boundary:
+    entries never move between buckets (space↔space or space↔global), no
+    matter how name- or content-similar the files look.
+    """
+    m = _SPACE_FILE_RE.match(file_name or "")
+    return m.group(1) if m else None
+
+
+# ---------------------------------------------------------------------------
 # Name canonicalization (used by store routing and consolidation clustering)
 # ---------------------------------------------------------------------------
 

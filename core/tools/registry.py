@@ -567,6 +567,7 @@ class ToolRegistry:
         from core.tools import paths as _paths
 
         _ws_token = _paths.WORKSPACE_OVERRIDE.set((context or {}).get("workspace_override"))
+        _wh_token = _paths.WORKSPACE_HOME.set((context or {}).get("workspace_home"))
         try:
             result = tool.function(**arguments)
             # Tools can return (str, dict) to include structured metadata
@@ -593,6 +594,7 @@ class ToolRegistry:
             # across calls, so a leaked override would bleed into the next
             # session's tool call on that thread.
             _paths.WORKSPACE_OVERRIDE.reset(_ws_token)
+            _paths.WORKSPACE_HOME.reset(_wh_token)
 
     # --- Health report ---
 

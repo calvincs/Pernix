@@ -190,6 +190,24 @@ async def distill_session(
     file_list_str = _build_file_catalog(store)
     prompt = DISTILL_PROMPT.format(existing_files=file_list_str)
 
+    # Space routing (v33): a space session's knowledge belongs in the
+    # space's own bucket unless it is genuinely deployment-wide. The slug
+    # also scopes add_or_supersede_entry's auto-routing below.
+    space_slug = None
+    try:
+        from core.spaces import space_slug_for_session
+
+        space_slug = space_slug_for_session(session_id)
+    except Exception:
+        space_slug = None
+    if space_slug:
+        prompt += (
+            f"\n\nSPACE ROUTING: this session belongs to the space '{space_slug}'. Route "
+            f"session-scoped facts to pernix.space.{space_slug}.<topic> files (e.g. "
+            f"pernix.space.{space_slug}.research). Use the canonical global files above "
+            f"only for facts that matter deployment-wide (user profile, system config)."
+        )
+
     # Entries the agent wrote itself this session are authoritative: the
     # distiller must not restate, extend or re-list them (told here, and
     # enforced by _restates below — the prompt alone did not stop a second
@@ -274,6 +292,7 @@ async def distill_session(
                 weight=entry.get("weight", "normal"),
                 source="distill",
                 origin=origin,
+                space_slug=space_slug,
             )
         )
         if result.startswith("Superseded"):

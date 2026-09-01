@@ -16,6 +16,14 @@ from config import settings
 # and only the tool.
 WORKSPACE_OVERRIDE: ContextVar[str | None] = ContextVar("workspace_override", default=None)
 
+# Per-call space workspace home (v33), plumbed the same way. A SOFT default,
+# not a sandbox: it becomes the first root (so bare relative paths resolve
+# into the space folder) and bash's cwd/HOME, while the global workspace,
+# /tmp and the other roots all remain — cross-visibility between spaces and
+# ordinary sessions is a feature. WORKSPACE_OVERRIDE (a real sandbox) always
+# wins: when an override is active the home is ignored entirely.
+WORKSPACE_HOME: ContextVar[str | None] = ContextVar("workspace_home", default=None)
+
 # Files whose names are reserved for agent instructions / secrets.
 # Only protected when located *directly* at the root of an allowed tree,
 # not deep in the hierarchy where a user might legitimately keep a skill
@@ -54,6 +62,16 @@ def workspace() -> Path:
     if override:
         return Path(override).resolve()
     return Path(settings.workspace_dir).resolve()
+
+
+def workspace_home() -> Path:
+    """The effective working folder for the current tool call: the space
+    home when one is active (and no sandbox override is), else workspace().
+    Used for bash cwd/HOME and kernel spawn cwd — never for containment."""
+    home = WORKSPACE_HOME.get()
+    if home and WORKSPACE_OVERRIDE.get() is None:
+        return Path(home).resolve()
+    return workspace()
 
 
 # Harness-data subtrees that live under DATA_DIR, never under the workspace.
@@ -181,9 +199,7 @@ def allowed_read_roots() -> list[Path]:
     Order matters: workspace first, so a bare relative name still resolves
     against the workspace rather than being captured by a later root.
     """
-    roots = [workspace()]
-    if WORKSPACE_OVERRIDE.get() is None:
-        roots.append(Path("/tmp").resolve())
+    roots = _base_roots()
     skills = Path(settings.skills_dir).resolve()
     if skills not in roots:
         roots.append(skills)
@@ -210,7 +226,20 @@ def allowed_write_roots() -> list[Path]:
     tasks) the override stays the ONLY root: isolation is the whole point
     there, and pytest/canary sandboxes themselves live under /tmp.
     """
-    roots = [workspace()]
+    return _base_roots()
+
+
+def _base_roots() -> list[Path]:
+    """Workspace-ish roots shared by read and write: the space home first
+    (when active — so bare relative paths resolve there), then the global
+    workspace, then /tmp except under a sandbox override."""
+    roots: list[Path] = []
+    home = WORKSPACE_HOME.get()
+    if home and WORKSPACE_OVERRIDE.get() is None:
+        roots.append(Path(home).resolve())
+    ws = workspace()
+    if ws not in roots:
+        roots.append(ws)
     if WORKSPACE_OVERRIDE.get() is None:
         roots.append(Path("/tmp").resolve())
     return roots
@@ -251,11 +280,26 @@ def _resolve_within(path: str, roots: list[Path], create_roots: bool = False) ->
             check_protected(resolved, roots)
             return resolved
 
+    # Relative path: join against roots in order. When a space workspace-home
+    # is active it sits at roots[0], and we prefer a candidate that already
+    # EXISTS — a bare name like "SYSTEM-MAP.md" must still find the global
+    # workspace copy instead of resolving to a phantom path in the home.
+    # Applies to writes too, deliberately: edits land on the file where it
+    # lives; only genuinely new files default into the home. Without a home
+    # the historical rule stands unchanged: first root wins outright.
+    prefer_existing = WORKSPACE_HOME.get() is not None and WORKSPACE_OVERRIDE.get() is None
+    first_valid: Path | None = None
     for root in roots:
         candidate = (root / path).resolve()
         if candidate.is_relative_to(root):
-            check_protected(candidate, roots)
-            return candidate
+            if not prefer_existing or candidate.exists():
+                check_protected(candidate, roots)
+                return candidate
+            if first_valid is None:
+                first_valid = candidate
+    if first_valid is not None:
+        check_protected(first_valid, roots)
+        return first_valid
 
     raise ValueError(f"Path not within allowed directories: {path}")
 

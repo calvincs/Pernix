@@ -498,12 +498,15 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
             mode = args.get("mode", "hybrid")
             limit = min(args.get("limit", 10), 20)
             file_filter = args.get("file", "")
+            from core.spaces import space_slug_for_session
+
             results = store.search(
                 query,
                 mode=mode,
                 limit=limit * 2 if file_filter else limit,
                 _track_hits=False,
                 expand_wikilinks=True,  # H4: [[refs]] pull linked entries
+                space_slug=space_slug_for_session(brief.session_id),
             )
             if file_filter:
                 results = [r for r in results if r.entry.file_name.lower() == file_filter.lower()][:limit]
@@ -1084,7 +1087,7 @@ def build_session_brief(session_id: str, context_budget: int | None = None) -> S
 
 
 # ---------------------------------------------------------------------------
-def _build_lessons_section(message: str) -> str:
+def _build_lessons_section(message: str, space_slug: str | None = None) -> str:
     """Format relevant lessons (entry_type='lesson') for scout injection.
 
     Lessons are operational workarounds extracted by the refine pass from past
@@ -1099,7 +1102,7 @@ def _build_lessons_section(message: str) -> str:
         store = get_memory_store()
         if not store:
             return ""
-        lessons = store.search_lessons(message, limit=5, _track_hits=False)
+        lessons = store.search_lessons(message, limit=5, _track_hits=False, space_slug=space_slug)
     except Exception as e:
         logger.debug("Scout lessons lookup failed: %s", e)
         return ""
@@ -1442,22 +1445,25 @@ async def _run_scout_llm(
         f"SESSION CONTEXT:\n{brief.to_prompt_text()}",
     ]
 
-    # Read instruction files
+    # Read instruction files — through the same space-aware resolution the
+    # compiler uses (v33), so a space session's scout plans against the same
+    # overridden directives its main turn will run under.
+    from core.spaces import directive_path
+
     _step("reading", "Loading identity & rules")
-    for filename, label in [
-        ("data/agent/SOUL.md", "SOUL.md contents"),
-        ("data/agent/RULES.md", "RULES.md contents"),
+    for fname, label in [
+        ("SOUL.md", "SOUL.md contents"),
+        ("RULES.md", "RULES.md contents"),
     ]:
-        path = Path(filename)
+        path = directive_path(fname, brief.session_id)
         if path.exists():
             content = path.read_text()[:12000]
             user_content_parts.append(f"\n{label}:\n{content}")
 
-    # Check data/agent/ for SESSIONS.md / INSTRUCTIONS.md
+    # SESSIONS slot: space override, else default SESSIONS.md, else INSTRUCTIONS.md
     _step("reading", "Checking project instructions")
-    agent_dir = Path("data/agent")
     for fname in ["SESSIONS.md", "INSTRUCTIONS.md"]:
-        agent_path = agent_dir / fname
+        agent_path = directive_path(fname, brief.session_id) if fname == "SESSIONS.md" else Path("data/agent") / fname
         if agent_path.exists():
             content = agent_path.read_text()[:12000]
             user_content_parts.append(f"\nProject instructions ({fname}):\n{content}")
@@ -1472,6 +1478,13 @@ async def _run_scout_llm(
     # concurrently on threads (emit_event is thread-safe) and append results
     # in a fixed order to keep the prompt deterministic.
     _mem_cap = int(getattr(settings, "scout_preload_memory_char_limit", 300) or 300)
+    # Space scoping (v33): resolved once, shared by the memory gatherers.
+    try:
+        from core.spaces import space_slug_for_session as _slug_for
+
+        _space_slug = _slug_for(brief.session_id)
+    except Exception:
+        _space_slug = None
 
     def _gather_memory_baseline() -> str | None:
         _step("memory", "Searching memory")
@@ -1481,7 +1494,7 @@ async def _run_scout_llm(
             store = get_memory_store()
             if not store:
                 return None
-            results = store.search(message, limit=10, _track_hits=False)
+            results = store.search(message, limit=10, _track_hits=False, space_slug=_space_slug)
             if results:
                 _step("memory", f"Found {len(results)} relevant memories")
                 mem_lines = ["", "MEMORY SEARCH RESULTS (use search_memory tool for deeper/different queries):"]
@@ -1509,7 +1522,7 @@ async def _run_scout_llm(
         try:
             from core.scout.search import gather_deep_memory
 
-            deep_mem = gather_deep_memory(message, char_cap=_mem_cap)
+            deep_mem = gather_deep_memory(message, char_cap=_mem_cap, space_slug=_space_slug)
             if deep_mem:
                 _step("memory", "Deep search found additional results")
                 return f"\nDEEP MEMORY SEARCH:\n{deep_mem}"
@@ -1575,7 +1588,7 @@ async def _run_scout_llm(
         # Relevant past lessons (entry_type='lesson') — workarounds extracted
         # by the refine pass from prior failed sessions, via hybrid search.
         try:
-            lessons_section = _build_lessons_section(message)
+            lessons_section = _build_lessons_section(message, space_slug=_space_slug)
             if lessons_section:
                 _step("lessons", "Injecting relevant past lessons")
                 return lessons_section
