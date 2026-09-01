@@ -211,6 +211,13 @@ _SETTING_BOUNDS = {
     # only the archive's own horizon deletes, so long values are cheap.
     "telos_soup_retention_days": (0, 3650),
     "telos_soup_archive_retention_days": (0, 3650),
+    "mcp_call_timeout": (5, 3600),
+    "mcp_connect_timeout": (5, 300),
+    "mcp_idle_seconds": (0, 86_400),  # 0 = never suspend
+    "mcp_max_servers": (1, 50),
+    "mcp_max_tools_per_server": (1, 200),
+    "mcp_max_description_chars": (200, 8000),
+    "mcp_refresh_interval_s": (0, 86_400),  # 0 = manual reload only
 }
 
 
@@ -314,6 +321,34 @@ async def update_settings(body: dict):
             await client.refresh_registry()
         except Exception:
             pass  # Non-critical — next startup will pick it up
+
+    # mcp_enabled is hot both ways: on → start the manager (connects the
+    # configured servers, registers tools); off → stop it (stdio children
+    # die), leaving registered schemas in place so calls fail with a clear
+    # disabled error rather than a vanished tool.
+    if "mcp_enabled" in updated:
+        try:
+            from core.extensions.mcp.manager import get_mcp_manager, get_mcp_manager_if_started
+
+            if settings.mcp_enabled:
+                if get_mcp_manager_if_started() is None:
+                    await get_mcp_manager().start()
+            else:
+                mgr = get_mcp_manager_if_started()
+                if mgr is not None:
+                    await mgr.shutdown()
+        except Exception:
+            pass  # Non-critical — restart will always recover
+
+    # Validate mcp_default_safety like the other enums (a typo would stamp
+    # every future MCP tool with a bogus level).
+    if "mcp_default_safety" in updated and settings.mcp_default_safety not in (
+        "safe",
+        "caution",
+        "dangerous",
+    ):
+        settings.mcp_default_safety = "caution"
+        settings.save()
 
     # A different llm_model is a different agent: re-baseline the whole
     # canary suite (parked included). Same hook as POST /api/models/switch.

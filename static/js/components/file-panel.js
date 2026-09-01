@@ -386,6 +386,7 @@ function buildPanelDOM() {
     const skillContent = el('div', { class: 'fp-tab-content', 'data-tab': 'skills', id: 'fp-skills' });
     const jobsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'jobs', id: 'fp-jobs' });
     const toolsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'tools', id: 'fp-tools' });
+    const mcpContent = el('div', { class: 'fp-tab-content', 'data-tab': 'mcp', id: 'fp-mcp' });
     const adaptiveContent = el('div', { class: 'fp-tab-content', 'data-tab': 'adaptive', id: 'fp-adaptive' });
     const canaryContent = el('div', { class: 'fp-tab-content', 'data-tab': 'canary', id: 'fp-canary' });
     const telosContent = el('div', { class: 'fp-tab-content', 'data-tab': 'telos', id: 'fp-telos' });
@@ -397,6 +398,7 @@ function buildPanelDOM() {
     _panel.appendChild(memContent);
     _panel.appendChild(skillContent);
     _panel.appendChild(toolsContent);
+    _panel.appendChild(mcpContent);
     _panel.appendChild(jobsContent);
     _panel.appendChild(adaptiveContent);
     _panel.appendChild(canaryContent);
@@ -415,6 +417,7 @@ function renderTabs() {
         { key: 'memory', label: 'Memory' },
         { key: 'skills', label: 'Skills' },
         { key: 'tools', label: 'Tools' },
+        { key: 'mcp', label: 'MCP' },
         { key: 'jobs', label: 'Jobs' },
         { key: 'adaptive', label: 'Adaptive' },
         { key: 'canary', label: 'Canary' },
@@ -439,7 +442,7 @@ function renderTabs() {
     });
 
     // Show/hide tab content
-    ['workspace', 'memory', 'skills', 'tools', 'jobs', 'adaptive', 'canary', 'telos'].forEach(key => {
+    ['workspace', 'memory', 'skills', 'tools', 'mcp', 'jobs', 'adaptive', 'canary', 'telos'].forEach(key => {
         const container = document.getElementById(`fp-${key}`);
         if (container) container.classList.toggle('active', key === _state.tab);
     });
@@ -450,6 +453,7 @@ async function loadTabData() {
     else if (_state.tab === 'memory') await loadMemory();
     else if (_state.tab === 'skills') await loadSkills();
     else if (_state.tab === 'tools') await loadTools();
+    else if (_state.tab === 'mcp') await loadMcp();
     else if (_state.tab === 'jobs') await loadJobs();
     else if (_state.tab === 'adaptive') await renderAdaptiveTab(document.getElementById('fp-adaptive'));
     else if (_state.tab === 'canary') await renderCanaryTab(document.getElementById('fp-canary'));
@@ -2250,6 +2254,224 @@ function _renderToolsFiltered() {
 }
 
 // ---------------------------------------------------------------------------
+// MCP tab — external tool servers (Model Context Protocol)
+// ---------------------------------------------------------------------------
+
+let _mcpData = null;
+let _mcpShowAdd = false;
+let _mcpBusy = false;
+
+async function loadMcp() {
+    try {
+        _mcpData = await get('/api/mcp/servers');
+    } catch {
+        _mcpData = null;
+    }
+    renderMcp();
+}
+
+const _MCP_STATUS_META = {
+    ready:      { cls: 'ok',   label: 'connected' },
+    connecting: { cls: 'wait', label: 'connecting…' },
+    idle:       { cls: 'wait', label: 'idle (suspended)' },
+    degraded:   { cls: 'err',  label: 'unreachable' },
+    disabled:   { cls: 'off',  label: 'disabled' },
+    stopped:    { cls: 'off',  label: 'stopped' },
+    offline:    { cls: 'off',  label: 'offline (MCP disabled)' },
+};
+
+function renderMcp() {
+    const container = document.getElementById('fp-mcp');
+    if (!container) return;
+    clear(container);
+
+    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('↻')]);
+    refreshBtn.addEventListener('click', loadMcp);
+    const addBtn = el('button', { class: 'fp-icon-btn', title: 'Add server' }, [text('+')]);
+    addBtn.addEventListener('click', () => { _mcpShowAdd = !_mcpShowAdd; renderMcp(); });
+
+    const servers = _mcpData?.servers || [];
+    const connected = servers.filter(s => s.status === 'ready').length;
+    container.appendChild(el('div', { class: 'fp-section-header' }, [
+        el('div', {}, [
+            el('span', { class: 'fp-section-label' }, [text('MCP Servers')]),
+            el('div', { class: 'fp-section-sub' }, [text(
+                _mcpData ? `${servers.length} configured · ${connected} connected` : 'unavailable',
+            )]),
+        ]),
+        el('div', { class: 'fp-section-actions' }, [addBtn, refreshBtn]),
+    ]));
+    container.appendChild(_buildTabDesc(
+        'External tool servers speaking the Model Context Protocol.',
+        'Each connected server\'s tools register as mcp_<server>_<tool> and show up in the Tools ' +
+        'tab with the normal enable/safety controls. Paste a standard mcpServers config from ' +
+        'Claude Code, Cursor, or VS Code — it works verbatim. Secrets belong in .env, referenced ' +
+        'as "${VAR}", never pasted into the config.',
+    ));
+
+    if (_mcpData && _mcpData.mcp_enabled === false) {
+        const banner = el('div', { class: 'fp-danger-mode-banner' }, [
+            el('div', { class: 'fp-danger-banner-inner' }, [
+                el('span', { class: 'fp-danger-banner-icon' }, [text('◌')]),
+                el('span', { class: 'fp-danger-banner-text' }, [
+                    text('MCP is disabled — servers will not connect. Click to open Settings.'),
+                ]),
+            ]),
+        ]);
+        banner.addEventListener('click', () => openSettings());
+        container.appendChild(banner);
+    }
+
+    if (_mcpShowAdd) container.appendChild(_buildMcpAddForm());
+
+    if (!_mcpData) {
+        container.appendChild(el('div', { class: 'fp-empty' }, [text('Could not load MCP status')]));
+        return;
+    }
+    if (servers.length === 0) {
+        container.appendChild(el('div', { class: 'fp-empty' }, [
+            text('No MCP servers configured. Click + to add one, or ask the agent to run mcp_add_server.'),
+        ]));
+        return;
+    }
+
+    const listEl = el('div', { class: 'fp-skills-list' });
+    for (const s of servers) listEl.appendChild(_buildMcpServerItem(s));
+    container.appendChild(listEl);
+}
+
+function _buildMcpServerItem(s) {
+    const meta = _MCP_STATUS_META[s.status] || { cls: 'off', label: s.status };
+    const item = el('div', { class: `fp-skill-item${s.enabled ? '' : ' disabled'}` });
+
+    const toggle = el('button', {
+        class: `fp-skill-toggle${s.enabled ? ' on' : ''}`,
+        title: s.enabled ? 'Disable server (unregisters its tools)' : 'Enable server',
+    }, [text(s.enabled ? 'on' : 'off')]);
+    toggle.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (_mcpBusy) return;
+        _mcpBusy = true;
+        try { await post(`/api/mcp/servers/${encodeURIComponent(s.name)}/toggle`, { enabled: !s.enabled }); }
+        catch (err) { console.error('MCP toggle failed:', err); }
+        _mcpBusy = false;
+        await loadMcp();
+    });
+
+    const reloadBtn = el('button', { class: 'fp-icon-btn', title: 'Reconnect + re-discover tools' }, [text('↻')]);
+    reloadBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (_mcpBusy) return;
+        _mcpBusy = true;
+        reloadBtn.textContent = '…';
+        try { await post(`/api/mcp/servers/${encodeURIComponent(s.name)}/reload`, {}); }
+        catch (err) { console.error('MCP reload failed:', err); }
+        _mcpBusy = false;
+        await loadMcp();
+    });
+
+    const delBtn = el('button', { class: 'fp-icon-btn', title: 'Remove server' }, [text('×')]);
+    delBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Remove MCP server '${s.name}' and unregister its tools?`)) return;
+        try { await del(`/api/mcp/servers/${encodeURIComponent(s.name)}`); }
+        catch (err) { console.error('MCP remove failed:', err); }
+        await loadMcp();
+    });
+
+    item.appendChild(el('div', { class: 'fp-skill-header' }, [
+        el('div', { class: 'fp-skill-name' }, [
+            el('span', { class: `fp-mcp-dot ${meta.cls}`, title: meta.label }),
+            text(s.name),
+            el('span', { class: 'fp-skill-version' }, [text(s.transport)]),
+            el('span', { class: 'fp-skill-version' }, [text(`safety: ${s.safety}`)]),
+        ]),
+        el('div', { class: 'fp-skill-actions' }, [reloadBtn, delBtn, toggle]),
+    ]));
+
+    const statusBits = [meta.label];
+    if (s.server_info) statusBits.push(s.server_info);
+    if (s.tool_count) statusBits.push(`${s.tool_count} tools`);
+    if (s.last_used) statusBits.push(`used ${timeAgo(s.last_used)}`);
+    item.appendChild(el('div', { class: 'fp-skill-desc' }, [
+        text(`${statusBits.join(' · ')}${s.target ? ` — ${s.target}` : ''}`),
+    ]));
+    if (s.error && (s.status === 'degraded' || s.status === 'stopped')) {
+        item.appendChild(el('div', { class: 'fp-perf-line fp-perf-warn' }, [text(s.error)]));
+    }
+    if (s.tools && s.tools.length) {
+        const tagsEl = el('div', { class: 'fp-skill-tags' });
+        for (const t of s.tools.slice(0, 8)) tagsEl.appendChild(el('span', { class: 'fp-skill-tag' }, [text(t)]));
+        if (s.tools.length > 8) tagsEl.appendChild(el('span', { class: 'fp-skill-tag' }, [text(`+${s.tools.length - 8} more`)]));
+        item.appendChild(tagsEl);
+    }
+    return item;
+}
+
+function _normalizeMcpPaste(raw) {
+    // Accept a full {"mcpServers": {...}} blob or a bare {name: entry} map.
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && parsed.mcpServers) return { mcpServers: parsed.mcpServers };
+    if (parsed && typeof parsed === 'object') {
+        const values = Object.values(parsed);
+        if (values.length && values.every(v => v && typeof v === 'object' && (v.command || v.url))) {
+            return { mcpServers: parsed };
+        }
+    }
+    throw new Error('Expected {"mcpServers": {...}} or {"<name>": {"command"|"url": ...}}');
+}
+
+function _buildMcpAddForm() {
+    const ta = el('textarea', {
+        class: 'fp-mcp-add-input',
+        rows: '8',
+        placeholder: '{\n  "mcpServers": {\n    "github": {\n      "url": "https://api.githubcopilot.com/mcp/",\n      "headers": { "Authorization": "Bearer ${GITHUB_MCP_TOKEN}" }\n    }\n  }\n}',
+    });
+    const result = el('div', { class: 'fp-mcp-add-result' });
+    const setResult = (msg, isErr) => {
+        result.textContent = msg;
+        result.classList.toggle('err', !!isErr);
+    };
+
+    const testBtn = el('button', { class: 'fp-mcp-add-btn' }, [text('Test')]);
+    testBtn.addEventListener('click', async () => {
+        let body;
+        try { body = _normalizeMcpPaste(ta.value); } catch (e) { setResult(e.message, true); return; }
+        setResult('Testing…');
+        try {
+            const res = await post('/api/mcp/test', body);
+            setResult(res.ok
+                ? `OK — ${res.server_info || 'server'} exposes ${res.tools.length} tool(s): ${res.tools.slice(0, 10).join(', ')}${res.tools.length > 10 ? '…' : ''}`
+                : `Failed: ${res.error}`, !res.ok);
+        } catch (e) { setResult(`Test failed: ${e.message || e}`, true); }
+    });
+
+    const saveBtn = el('button', { class: 'fp-mcp-add-btn primary' }, [text('Save & Connect')]);
+    saveBtn.addEventListener('click', async () => {
+        let body;
+        try { body = _normalizeMcpPaste(ta.value); } catch (e) { setResult(e.message, true); return; }
+        setResult('Connecting…');
+        try {
+            const res = await post('/api/mcp/servers', body);
+            const lines = Object.entries(res.results || {}).map(([name, r]) =>
+                `${name}: ${r.ok ? r.status : (r.error || r.status)}`);
+            const allOk = Object.values(res.results || {}).every(r => r.ok);
+            setResult(lines.join(' · ') || 'saved', !allOk);
+            if (allOk) { _mcpShowAdd = false; await loadMcp(); }
+        } catch (e) { setResult(`Save failed: ${e.message || e}`, true); }
+    });
+
+    const cancelBtn = el('button', { class: 'fp-mcp-add-btn' }, [text('Cancel')]);
+    cancelBtn.addEventListener('click', () => { _mcpShowAdd = false; renderMcp(); });
+
+    return el('div', { class: 'fp-mcp-add' }, [
+        ta,
+        el('div', { class: 'fp-mcp-add-actions' }, [testBtn, saveBtn, cancelBtn]),
+        result,
+    ]);
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -2258,6 +2480,7 @@ function renderCurrentTab() {
     else if (_state.tab === 'memory') renderMemory();
     else if (_state.tab === 'skills') renderSkills();
     else if (_state.tab === 'tools') renderTools();
+    else if (_state.tab === 'mcp') renderMcp();
     else if (_state.tab === 'jobs') renderJobs();
 }
 

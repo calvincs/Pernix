@@ -212,6 +212,20 @@ class MaintenanceRunner:
                 self._stats["sessions_reaped"] += reaped
                 logger.info("Reaped %d idle sessions", reaped)
 
+            # MCP upkeep: suspend idle stdio servers (child reaped, tools
+            # kept, next call respawns) and schedule periodic tools/list
+            # refreshes for servers that never send listChanged. Both are
+            # cheap sync calls that only flip events / spawn tasks.
+            try:
+                from core.extensions.mcp.manager import get_mcp_manager_if_started
+
+                _mcp = get_mcp_manager_if_started()
+                if _mcp is not None:
+                    _mcp.reap_idle()
+                    _mcp.refresh_due()
+            except Exception as e:
+                logger.warning("MCP maintenance failed: %s", e)
+
             # Partial message cleanup
             cleaned = db.cleanup_old_partials(max_age_hours=1)
             if cleaned:

@@ -263,6 +263,23 @@ const SECTIONS = [
         ],
     },
     {
+        title: 'MCP Servers',
+        description: 'Model Context Protocol: plug external tool servers into the agent. Servers are configured in the Explorer → MCP tab (or data/mcp_servers.json, standard mcpServers format); each connected server\'s tools register as mcp_<server>_<tool> and go through the normal safety gate, scout curation, and health metrics. Enabling/disabling applies immediately — no restart. Turning it off kills local server processes but keeps the tool names visible; their calls return a clear "disabled" error.',
+        fields: [
+            { key: 'mcp_enabled', label: 'MCP Enabled', type: 'bool' },
+            { key: 'mcp_stdio_enabled', label: 'Allow stdio (local subprocess) Servers', type: 'bool', risk: 'security',
+              hint: 'A stdio server is arbitrary local code. Off = remote (url) servers only.' },
+            { key: 'mcp_default_safety', label: 'Default Tool Safety', type: 'select', options: ['safe', 'caution', 'dangerous'],
+              hint: 'Stamped on MCP tools unless the server config overrides it. Server-sent destructive hints always escalate to dangerous.' },
+            { key: 'mcp_call_timeout', label: 'Call Timeout (s)', type: 'number', min: 5 },
+            { key: 'mcp_connect_timeout', label: 'Connect Timeout (s)', type: 'number', min: 5 },
+            { key: 'mcp_idle_seconds', label: 'Suspend Idle stdio Servers After (s, 0 = never)', type: 'number', min: 0 },
+            { key: 'mcp_max_servers', label: 'Max Servers', type: 'number', min: 1 },
+            { key: 'mcp_max_tools_per_server', label: 'Max Tools per Server', type: 'number', min: 1 },
+            { key: 'mcp_refresh_interval_s', label: 'Tool Re-check Interval (s, 0 = manual only)', type: 'number', min: 0 },
+        ],
+    },
+    {
         title: 'Dream (Introspection)',
         description: 'Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems, generates typed hypotheses about itself (contradictions, stale lessons, tool patterns), validates them against recorded outcomes, and writes a periodic dream report to workspace/dreams/. Hypotheses influence nothing until validated; replays/day bounds the counterfactual scout-replay spend (0 disables replay). All settings apply immediately.',
         fields: [

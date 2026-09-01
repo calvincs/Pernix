@@ -1909,6 +1909,19 @@ def _resolve_tool_surface(session: AgentSession, session_id: str, registry) -> t
         # A scheduled job's allow-list still applies — this path must not be
         # the one that hands a constrained cron run the full tool surface.
         names = set(t.name for t in registry.enabled_tools())
+        # MCP tools are scout-curated by design (source="mcp" is not in the
+        # builtin force-add): without a scout report they would ALL land in
+        # the schema here, and a couple of connected servers can dwarf the
+        # native surface. Keep only the ones this session has already used
+        # successfully — proven need, deterministic set.
+        _mcp_names = {t.name for t in registry.enabled_tools() if t.source == "mcp"}
+        if _mcp_names:
+            _used: set[str] = set()
+            try:
+                _used = {n for n in _prior_turn_tool_names(session_id) if n in _mcp_names}
+            except Exception as _e:
+                logger.debug("MCP fallback allowlist lookup failed for %s: %s", session_id, _e)
+            names -= _mcp_names - _used
         _allow = getattr(session, "tool_allowlist", None)
         if _allow:
             names &= set(_allow)

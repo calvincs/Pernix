@@ -30,6 +30,7 @@ BUNDLED_EXTENSIONS = [
     "core.extensions.candor",
     "core.extensions.rlm",
     "core.extensions.telos",
+    "core.extensions.mcp",
 ]
 
 
