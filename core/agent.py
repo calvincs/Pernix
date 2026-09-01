@@ -1193,7 +1193,8 @@ async def run_agent(
 
     # Tool surface for this turn: scout's picks, widened and then narrowed by
     # rules the scout does not get to overrule.
-    scout_text, active_tools = _resolve_tool_surface(session, session_id, registry)
+    _prior_names = await asyncio.to_thread(_prior_turn_tool_names, session_id)
+    scout_text, active_tools = _resolve_tool_surface(session, session_id, registry, prior_tool_names=_prior_names)
 
     # Effective model: per-session override (for workers) or global default.
     # Resolved per-round inside the loop so an in-turn switch_model call
@@ -1953,7 +1954,9 @@ async def _announce_model_switch(
     )
 
 
-def _resolve_tool_surface(session: AgentSession, session_id: str, registry) -> tuple[str, list[str]]:
+def _resolve_tool_surface(
+    session: AgentSession, session_id: str, registry, *, prior_tool_names: set[str] | None = None
+) -> tuple[str, list[str]]:
     """Decide which tools this turn may call, and the scout text to prepend.
 
     Scout proposes; five rules dispose, in order: builtins are always present,
@@ -1962,6 +1965,10 @@ def _resolve_tool_surface(session: AgentSession, session_id: str, registry) -> t
     allowed_tools (when set) intersects the result, and reflect's retry
     exclusions are subtracted last so they beat all four.
     """
+    # The prior-turn lookup is a transcript read; run_agent prefetches it
+    # off-loop and hands it in so turn start does not block the event loop.
+    if prior_tool_names is None:
+        prior_tool_names = _prior_turn_tool_names(session_id)
     scout_report = session.last_scout_report
     if not scout_report:
         # No scout report available. Nothing to substitute: SOUL/RULES/SESSIONS
@@ -1980,7 +1987,7 @@ def _resolve_tool_surface(session: AgentSession, session_id: str, registry) -> t
         if _mcp_names:
             _used: set[str] = set()
             try:
-                _used = {n for n in _prior_turn_tool_names(session_id) if n in _mcp_names}
+                _used = {n for n in prior_tool_names if n in _mcp_names}
             except Exception as _e:
                 logger.debug("MCP fallback allowlist lookup failed for %s: %s", session_id, _e)
             names -= _mcp_names - _used
@@ -2000,7 +2007,7 @@ def _resolve_tool_surface(session: AgentSession, session_id: str, registry) -> t
     # install_package after a successful pip install), forcing the agent to
     # re-discover tools it has already proven it needs.
     try:
-        for tname in _prior_turn_tool_names(session_id):
+        for tname in prior_tool_names:
             # Skip disabled — a tool the user toggled off between turns must
             # NOT be re-promoted by the monotonic allowlist; otherwise
             # disabling a previously-used tool has no effect on the next turn.
