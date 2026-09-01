@@ -105,6 +105,44 @@ servers only — the supply-chain valve), `mcp_default_safety`,
 - `POST /api/mcp/servers/{name}/reload`
 - `POST /api/mcp/test` — dry-run connect, nothing saved
 
+## Private servers next to a Docker deployment
+
+When Pernix runs as a Docker container, you can host MCP services on the
+same machine that only Pernix can reach — never the LAN. Two validated
+patterns:
+
+**1. Sibling container on the compose network (recommended).** Run the MCP
+service as its own container attached to Pernix's compose network
+(`<project>_default`, e.g. `pernix_default`) and publish **no ports**:
+
+```bash
+docker run -d --name my-mcp --network pernix_default --restart unless-stopped \
+  my-mcp-image   # serves Streamable HTTP on some port, e.g. 9400
+```
+
+Then register it by container-name DNS: `{"url": "http://my-mcp:9400/mcp"}`.
+No published port means nothing on the LAN can reach it; Docker's network
+DNS makes the name stable across restarts and IP churn.
+
+**2. Host process bound to the docker gateway IP.** For a service that must
+run on the host itself (systemd unit, GPU process), bind it to the compose
+network's gateway address only (find it with
+`docker network inspect pernix_default` — e.g. `172.20.0.1`), not
+`0.0.0.0`. Register as `{"url": "http://172.20.0.1:<port>/mcp"}`. The
+gateway IP is host-local, so the LAN cannot route to it; the container
+reaches it as its default gateway.
+
+**Host-header gotcha (both patterns):** MCP SDK servers ship DNS-rebinding
+protection that rejects requests whose `Host` header isn't allowlisted —
+and Pernix's requests arrive with `Host: my-mcp:9400` (or
+`172.20.0.1:<port>`), not `localhost`. Configure the service to allow the
+exact host:port you registered (Python SDK:
+`TransportSecuritySettings(allowed_hosts=["my-mcp:9400"])`), or the connect
+fails during initialize.
+
+Scope honestly: these patterns hide services from the network, not from the
+machine — anyone with root/docker on the host can always reach them.
+
 ## Not (yet) supported
 
 Interactive input requests from servers (MRTR/elicitation) return a clear
