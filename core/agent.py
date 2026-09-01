@@ -1039,18 +1039,36 @@ class _CompactionController:
         self._session_id = session_id
         self.attempts = 0
         self._tokens_before_last: int | None = None
+        self._awaiting_measure = False
+        self._stalled = False
 
     @property
     def exhausted(self) -> bool:
         return self.attempts >= self.ATTEMPT_LIMIT
 
-    def stalled(self, token_count: int) -> bool:
+    @property
+    def stalled(self) -> bool:
         """True when the last compaction failed to shrink the context.
 
         Retrying the compactor after it moved nothing is wishful; the caller
         bails to compaction_failed rather than burning the remaining attempts.
+
+        Judged by `observe()` on the first compile *after* a compaction, not
+        at the next trigger. Comparing the next trigger's size to the last
+        pre-compaction size looked like the same test but never passed: both
+        triggers sit at fixed thresholds, so the second is always at or above
+        the first, and every long turn got exactly one compaction before
+        dying with compaction_failed at attempt 1 of 3.
         """
-        return self._tokens_before_last is not None and token_count >= self._tokens_before_last * 0.95
+        return self._stalled
+
+    def observe(self, token_count: int) -> None:
+        """Record a compile's size; the first one after a compaction is the
+        measurement of whether that compaction did anything."""
+        if not self._awaiting_measure or self._tokens_before_last is None:
+            return
+        self._awaiting_measure = False
+        self._stalled = token_count >= self._tokens_before_last * 0.95
 
     async def run(
         self,
@@ -1073,6 +1091,8 @@ class _CompactionController:
             logger.error("%s transition failed: %s", transition_reason, _e)
 
         self._tokens_before_last = payload.token_count
+        self._awaiting_measure = True
+        self._stalled = False
         # history_budget is what the compiler actually reserved for history
         # after the fixed prefix and the output reservation. Without it the
         # compactor falls back to a fraction-of-budget heuristic and keeps a
@@ -1328,11 +1348,12 @@ async def run_agent(
         )
 
         _last_context_tokens = payload.token_count
+        compaction.observe(payload.token_count)
 
         # Context health check
         utilization = payload.token_count / max(effective_budget, 1)
         if utilization > settings.context_critical_threshold:
-            if not compaction.exhausted and not compaction.stalled(payload.token_count):
+            if not compaction.exhausted and not compaction.stalled:
                 logger.warning(
                     "Context critical (%.0f%%), attempting compaction-retry %d/%d",
                     utilization * 100,
