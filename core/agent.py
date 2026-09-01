@@ -1738,7 +1738,12 @@ async def run_agent(
     # classify it now so downstream hooks can tell "round ceiling" from "complete".
     if session.termination_reason is None:
         session.termination_reason = "round_ceiling"
-    if did_tool_calls:
+    if did_tool_calls and session.termination_reason != "compaction_failed":
+        # A turn that broke on compaction_failed already emitted its error;
+        # streaming a final answer against a context that is still over the
+        # critical threshold either overflows again or raises
+        # ContextBudgetError on the recompile, which overwrote the honest
+        # termination reason with a generic agent-error.
         _last_usage = await _stream_final_answer(
             session=session,
             session_id=session_id,
