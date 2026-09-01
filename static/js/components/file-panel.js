@@ -2048,6 +2048,8 @@ function renderTools() {
         el('option', { value: 'safety',   ...(_toolsSortBy === 'safety'   ? { selected: '' } : {}) }, [text('Safety')]),
         el('option', { value: 'category', ...(_toolsSortBy === 'category' ? { selected: '' } : {}) }, [text('Category')]),
         el('option', { value: 'status',   ...(_toolsSortBy === 'status'   ? { selected: '' } : {}) }, [text('Status')]),
+        el('option', { value: 'uses',     ...(_toolsSortBy === 'uses'     ? { selected: '' } : {}) }, [text('Uses')]),
+        el('option', { value: 'failures', ...(_toolsSortBy === 'failures' ? { selected: '' } : {}) }, [text('Failures')]),
     ]);
     sortSelect.addEventListener('change', () => {
         _toolsSortBy = sortSelect.value;
@@ -2146,6 +2148,13 @@ function _renderToolsFiltered() {
         if (_toolsSortBy === 'status') {
             if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
             return a.name.localeCompare(b.name);
+        }
+        if (_toolsSortBy === 'uses' || _toolsSortBy === 'failures') {
+            // Descending — the most-used / most-failing tools are the ones
+            // worth looking at; never-observed tools sink to the bottom.
+            const key = _toolsSortBy === 'uses' ? 'uses' : 'failures';
+            const d = (b.performance?.[key] || 0) - (a.performance?.[key] || 0);
+            return d !== 0 ? d : a.name.localeCompare(b.name);
         }
         return a.name.localeCompare(b.name);
     });
