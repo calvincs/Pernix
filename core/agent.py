@@ -1047,6 +1047,15 @@ class _CompactionController:
         return self.attempts >= self.ATTEMPT_LIMIT
 
     @property
+    def can_help_with_overflow(self) -> bool:
+        """Whether a provider overflow should come back to the loop for a
+        compact-and-retry, or stay in the ladder as a fatal stream error
+        (where the fallback model's larger window is the last rescue).
+        Once the compactor is spent or provably a no-op, re-sending the same
+        oversized request can only fail the same way."""
+        return not (self.exhausted or self._stalled)
+
+    @property
     def stalled(self) -> bool:
         """True when the last compaction failed to shrink the context.
 
@@ -1428,7 +1437,7 @@ async def run_agent(
             tried_fallback=_tried_fallback,
             # Only worth surfacing while we can still act on it; once the
             # budget is spent an overflow is just another fatal stream error.
-            surface_context_overflow=not compaction.exhausted,
+            surface_context_overflow=compaction.can_help_with_overflow,
         )
         _tried_fallback = outcome.tried_fallback
         _stream_current_model = outcome.model
@@ -1443,13 +1452,27 @@ async def run_agent(
         if outcome.context_overflow is not None:
             # The provider rejected the request as too long. Compact and
             # restart this tool round against a re-compiled context.
+            #
+            # restore_state_on_failure: a compactor that declined (summary
+            # rejected by the compression gate) must hand the session back to
+            # PROCESSING. Leaving it parked in COMPACTING meant a turn that
+            # went on to succeed on the fallback model was still finalized
+            # as COMPACTION_FAILED — workers got "# INCOMPLETE" and reflect
+            # saw a false ceiling. The next compile measures the attempt
+            # (stalled), and once the controller cannot help the ladder
+            # keeps the overflow as a fatal stream error instead.
             logger.warning(
                 "API context overflow in session %s, attempting compaction-retry %d/%d",
                 session_id,
                 compaction.attempts + 1,
                 compaction.ATTEMPT_LIMIT,
             )
-            await compaction.run(payload, transition_reason="compact-overflow", event_reason="api_overflow")
+            await compaction.run(
+                payload,
+                transition_reason="compact-overflow",
+                event_reason="api_overflow",
+                restore_state_on_failure=True,
+            )
             continue  # restart tool_round loop with compacted context
 
         if outcome.error:
