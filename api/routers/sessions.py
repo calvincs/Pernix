@@ -285,23 +285,11 @@ async def cancel_session(session_id: str):
 
 
 def _kill_session_process(session):
-    """Kill every tracked subprocess for this session.
+    """Kill every tracked subprocess for this session (shared with the
+    manager's cancel path; escalates TERM -> KILL)."""
+    from sessions.manager import kill_session_processes
 
-    Cancel is session-wide, so it sweeps all registrations rather than a single
-    slot — concurrent bash calls each register their own, and cancelling the
-    session must not leave the others running.
-    """
-    import os
-    import signal
-
-    for proc in session.all_processes():
-        if proc is None or proc.poll() is not None:
-            continue
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (OSError, ProcessLookupError):
-            pass
-    session._active_processes.clear()
+    kill_session_processes(session)
 
 
 @router.post("/api/sessions/{session_id}/clear")

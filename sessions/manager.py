@@ -216,6 +216,41 @@ def _apply_space_fields(session: AgentSession, space_id: str | None) -> None:
         logger.warning("workspace_home setup failed for space %s: %s", space_id, e)
 
 
+def kill_session_processes(session, *, kill_after: float = 3.0) -> int:
+    """SIGTERM every tracked subprocess group for this session, SIGKILL the
+    survivors after `kill_after` seconds. Returns how many were signalled.
+
+    Cancel is session-wide: concurrent bash calls each register their own
+    process, and cancelling the session must not leave the others running.
+    The escalation matters for children that ignore TERM (or sit in D
+    state) — without it the tool thread stayed blocked until the tool's own
+    timeout while the "cancelled" session looked idle.
+    """
+    import os
+    import signal
+    import threading
+
+    procs = [p for p in session.all_processes() if p is not None and p.poll() is None]
+    for proc in procs:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+    session._active_processes.clear()
+    if procs and kill_after > 0:
+
+        def _escalate():
+            for proc in procs:
+                if proc.poll() is None:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        pass
+
+        threading.Timer(kill_after, _escalate, ()).start()
+    return len(procs)
+
+
 class SessionManager:
     """Manages in-memory session state and routes prompts to the agent loop."""
 
@@ -778,6 +813,29 @@ class SessionManager:
         except Exception as e:
             logger.warning("Kernel shutdown scheduling failed for %s: %s", session_id[:12], e)
 
+    def cancel_session(self, session: AgentSession, *, cascade: bool = True) -> bool:
+        """Stop a session's turn now: cooperative flag, queued prompts, child
+        processes, and the asyncio task. Loop-affine (Task.cancel).
+
+        Every cancel path used to do a different subset of this. The worker
+        cascade and the cancel_worker tool only cancelled the task, so the
+        worker's executor swallowed the CancelledError, the bash child ran
+        on, and the loop's cancel_requested checkpoints never fired.
+        Returns True when a running task was cancelled.
+        """
+        session.cancel_requested = True
+        session.pending_messages.clear()
+        kill_session_processes(session)
+        if cascade:
+            for wid in list(getattr(session, "worker_ids", []) or []):
+                w = self.get(wid)
+                if w is not None and w is not session:
+                    self.cancel_session(w, cascade=False)
+        if session.task and not session.task.done():
+            session.task.cancel()
+            return True
+        return False
+
     def delete_session(self, session_id: str) -> None:
         """Delete session from both memory and DB (cascades workers)."""
         # Cancel any running task
@@ -1302,8 +1360,8 @@ class SessionManager:
                 )
                 for wid in watched:
                     w = self._sessions.get(wid)
-                    if w and w.task and not w.task.done():
-                        w.task.cancel()
+                    if w is not None:
+                        self.cancel_session(w, cascade=False)
                 session._watched_worker_ids.clear()
                 self._persist_watched(session)
             logger.info("Session %s agent task cancelled", session.session_id)
@@ -2000,6 +2058,8 @@ class SessionManager:
         """Called when a worker completes its turn. If the parent is watching
         this worker, removes it from the watch-set and resumes the parent when
         the set empties."""
+        from sessions import state_v2 as sv2
+
         parent_id = worker_session.parent_session_id
         if not parent_id:
             return
@@ -2019,6 +2079,14 @@ class SessionManager:
             # the old semantics.
             from sessions import state_v2 as sv2
 
+            if worker_session.termination_reason == "cancelled":
+                # A cancelled worker has nothing to synthesize. This is also
+                # the tail of the parent's own cancel: the cascade fires,
+                # the parent finalizes to IDLE_READY (resetting the
+                # cancel_requested flag _resume_from_workers guards on), and
+                # only THEN do the workers unwind and land here — resuming
+                # would start a fresh turn re-planning what the user stopped.
+                return
             if not watched and sv2._current_state(parent) is sv2.SessionStateV2.IDLE_READY:
                 logger.info(
                     "Unwatched worker %s finished with parent %s idle — Gap-1 resume",
@@ -2033,8 +2101,6 @@ class SessionManager:
             # Purge any stale IDs for workers that already completed but were
             # added to the watch-set after they fired (race condition). Without
             # this, a non-empty set of stale IDs permanently blocks resume.
-            from sessions import state_v2 as sv2
-
             stale = set()
             for wid in list(watched):
                 w = self.get(wid)
@@ -2054,6 +2120,13 @@ class SessionManager:
                 self._persist_watched(parent)
             if watched:
                 return  # other workers still outstanding
+        if (
+            worker_session.termination_reason == "cancelled"
+            and sv2._current_state(parent) is not sv2.SessionStateV2.AWAITING_WORKERS
+        ):
+            # The set drained on a cancel and the parent is not parked
+            # waiting for it: nothing to resume (see the unwatched branch).
+            return
         # Hand off to resume — extends LLM budget and starts/queues the
         # synthesis turn.
         await self._resume_from_workers(parent)
