@@ -188,6 +188,12 @@ class MCPConnection:
         """Reap an idle stdio child; tools stay registered, next call resumes."""
         if self.status == "ready" and self.cfg.transport == "stdio" and self._inflight == 0 and not self._closing:
             self._suspend_requested = True
+            # A refresh mid-flight would land on the dropping connection and
+            # log a spurious connection-closed warning (observed live
+            # 2026-09-01: idle reap + refresh sweep share the tick when both
+            # intervals are 900s).
+            if self._refresh_task is not None and not self._refresh_task.done():
+                self._refresh_task.cancel()
             self._drop_evt.set()
 
     def schedule_refresh(self) -> None:
@@ -366,7 +372,12 @@ class MCPConnection:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning("MCP server '%s' tool refresh failed: %s", self.cfg.name, e)
+            # A refresh racing a suspend/close loses its connection by
+            # design — that's noise, not a fault worth a warning.
+            if self._suspend_requested or self._closing or self.status != "ready":
+                logger.debug("MCP server '%s' tool refresh dropped (suspend/close): %s", self.cfg.name, e)
+            else:
+                logger.warning("MCP server '%s' tool refresh failed: %s", self.cfg.name, e)
 
     async def _on_message(self, message) -> None:
         """SDK message handler: watch for tools/list_changed, ignore the rest."""
@@ -521,8 +532,19 @@ class MCPManager:
         if settings.mcp_refresh_interval_s <= 0:
             return
         now = time.time()
+        idle_cut = settings.mcp_idle_seconds
         for conn in self.connections.values():
-            if conn.status == "ready" and now - conn.last_refresh > settings.mcp_refresh_interval_s:
+            if conn.status != "ready" or conn._suspend_requested:
+                continue
+            # Skip a stdio server already inside the idle-suspend horizon:
+            # with the default intervals (both 900s) the same tick would
+            # otherwise schedule a refresh AND suspend the connection under
+            # it. It re-lists on resume anyway.
+            if idle_cut > 0 and conn.cfg.transport == "stdio":
+                anchor = max(conn.last_used, conn.connected_at)
+                if anchor and now - anchor > idle_cut - 90:
+                    continue
+            if now - conn.last_refresh > settings.mcp_refresh_interval_s:
                 conn.schedule_refresh()
 
     def status_snapshot(self) -> list[dict]:
