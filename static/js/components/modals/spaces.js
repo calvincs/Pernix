@@ -145,13 +145,25 @@ export function openSpaceModal(space) {
         ]),
     ]);
 
-    const overlay = el('div', {
-        class: 'modal-overlay space-modal-overlay',
-        onClick: (e) => { if (e.target === overlay) close(); },
-    }, [card]);
+    const overlay = el('div', { class: 'modal-overlay space-modal-overlay' }, [card]);
+    _armBackdropClose(overlay, close);
     document.body.appendChild(overlay);
     document.addEventListener('keydown', onEsc);
     labelInput.focus();
+}
+
+// Backdrop close that only fires when the press STARTED on the backdrop.
+// A naive click handler also fires after a resize-handle drag or a
+// text-selection drag that ends off the card: the browser dispatches the
+// synthesized click on the common ancestor of mousedown/mouseup — the
+// overlay — and the modal closes mid-resize.
+function _armBackdropClose(overlay, close) {
+    let downOnBackdrop = false;
+    overlay.addEventListener('mousedown', (e) => { downOnBackdrop = e.target === overlay; });
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay && downOnBackdrop) close();
+        downOnBackdrop = false;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -320,10 +332,8 @@ export function openSpaceDeleteDialog(space) {
         ]),
     ]);
 
-    const overlay = el('div', {
-        class: 'modal-overlay space-delete-overlay',
-        onClick: (e) => { if (e.target === overlay) close(); },
-    }, [card]);
+    const overlay = el('div', { class: 'modal-overlay space-delete-overlay' }, [card]);
+    _armBackdropClose(overlay, close);
     document.body.appendChild(overlay);
     document.addEventListener('keydown', onEsc);
 }
