@@ -259,8 +259,13 @@ async def stream_with_failover(
                         goal_id=goal_id,
                     )
 
-                elif event.type == StreamEventType.ERROR and event.error:
-                    err = event.error
+                elif event.type == StreamEventType.ERROR:
+                    # An ERROR event is an error even when the adapter could
+                    # not describe it. Testing `event.error` for truth used to
+                    # drop the empty-string case (str(httpx.ReadTimeout()) is
+                    # ''), and the adapter's finally-DONE then ended the turn
+                    # as a clean, empty completion.
+                    err = event.error or "provider stream ended with an error and no detail"
                     break
 
                 elif event.type == StreamEventType.DONE:

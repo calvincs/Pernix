@@ -12,6 +12,7 @@ from typing import AsyncGenerator
 import httpx
 
 from config import settings
+from core.llm.providers._shared import describe_exception
 from core.llm.types import (
     ChatResponse,
     HealthStatus,
@@ -379,7 +380,7 @@ class OllamaProvider:
         except Exception as e:
             logger.error("Ollama stream error: %s", e)
             try:
-                yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
+                yield StreamEvent(type=StreamEventType.ERROR, error=describe_exception(e))
             except GeneratorExit:
                 # GeneratorExit arrived while we were yielding the ERROR event
                 # (caller broke out of their async-for after receiving it).
