@@ -256,6 +256,11 @@ class SessionManager:
 
     def __init__(self):
         self._sessions: dict[str, AgentSession] = {}
+        # Set by lifespan shutdown before agent tasks are cancelled: the
+        # cascade fires _on_watched_worker_done -> _resume_from_workers ->
+        # _process_pending, which used to start a fresh turn against a
+        # closing LLM client and leave a phantom SCOUTING row for boot.
+        self.shutting_down = False
         self._agent_runner: Callable | None = None  # set by agent module on init
         self._global_subscribers: list[asyncio.Queue] = []  # global notification listeners
         # Strong refs for detached recovery tasks — see _spawn_detached.
@@ -2251,6 +2256,8 @@ class SessionManager:
         via _on_watched_worker_done — without this guard, the parent would
         re-enter SCOUTING and start a NEW turn (commonly spawning fresh workers
         to redo the cancelled work), defeating the user's cancel intent."""
+        if self.shutting_down:
+            return
         if parent.cancel_requested:
             logger.info(
                 "Resume-from-workers skipped for %s — cancel_requested is set",
@@ -2358,6 +2365,8 @@ class SessionManager:
         or AWAITING_WORKERS never returns to IDLE_READY, so the message that
         resumes it has to be dispatched from that state.
         """
+        if self.shutting_down:
+            return
         async with session.lock:
             if not session.pending_messages:
                 return
