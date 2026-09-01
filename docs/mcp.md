@@ -16,7 +16,9 @@ Three equivalent ways:
 
 1. **Explorer → MCP tab** — click `+`, paste a standard `mcpServers` config
    (the same JSON Claude Code, Claude Desktop, Cursor, and VS Code use),
-   hit **Test**, then **Save & Connect**.
+   hit **Test**, then **Save & Connect**. Existing entries are edited in
+   place via each row's ✎ button (the form opens prefilled; saving
+   reconnects with the new config).
 2. **Ask the agent** — "add the GitHub MCP server". The agent calls
    `mcp_add_server`, which is a dangerous-gated tool: you confirm before
    anything is installed or spawned.

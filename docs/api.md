@@ -794,6 +794,33 @@ POST /api/telos/alarms/{alarm_id}/ack    Acknowledge an alarm (silences the noti
 
 ---
 
+## MCP Servers
+
+External tool servers speaking the Model Context Protocol. Config CRUD works
+even while `mcp_enabled=false` (it edits `data/mcp_servers.json` directly);
+live operations (connect, reload, test) need the running manager and return
+`409` without it. Full guide: [mcp.md](mcp.md).
+
+```
+GET    /api/mcp/servers                  Configured servers merged with live status
+                                         (state, tools, last error, server_info)
+POST   /api/mcp/servers                  Add/update one server ({"name", "config"}) or
+                                         import a pasted {"mcpServers": {...}} blob;
+                                         connects immediately and reports per-server results
+DELETE /api/mcp/servers/{name}           Disconnect, unregister its tools, delete config
+POST   /api/mcp/servers/{name}/toggle    {"enabled": bool} — off unregisters tools, on reconnects
+POST   /api/mcp/servers/{name}/reload    Full reconnect + tool re-discovery (re-reads config from disk)
+POST   /api/mcp/test                     Dry-run connect (one server): nothing saved or
+                                         registered; returns server_info + tool names, or the error
+```
+
+Entries use the ecosystem-standard `mcpServers` shape (Claude Code / Cursor /
+VS Code configs paste verbatim); `${VAR}` placeholders in `headers`/`env`
+expand from `.env` at connect time, and values that look like literal secrets
+are rejected with a 400.
+
+---
+
 ## Voice
 
 Speech-to-text for the chat mic button — engines and their privacy labels are configured in Settings → Voice Input.

@@ -263,6 +263,18 @@ What remains true, and is the reason to run Pernix in a container: **an approved
 
 ---
 
+## MCP Servers: Third-Party Tool Providers
+
+MCP servers are third-party software the agent calls as tools ([mcp.md](mcp.md)). The threat model and its controls:
+
+- **Supply chain (stdio).** A stdio server entry is a command Pernix executes — arbitrary local code. `mcp_add_server` is `dangerous` (always confirmed), the Explorer add path is an explicit human action, and `mcp_stdio_enabled=false` turns stdio off entirely (remote-only mode). Pin versions in stdio commands (`npx -y pkg@1.2.3`): an unpinned `npx -y` runs whatever was published most recently.
+- **Prompt injection via tool metadata.** Server-supplied names, descriptions, and schemas end up in the model's prompt. Descriptions are length-capped (`mcp_max_description_chars`) and provenance-prefixed `[MCP:<server>]` so the model always sees where a tool came from. Treat a server you add as able to talk to your agent.
+- **Overbroad access.** Default safety is `caution`, a server-sent `destructiveHint` escalates to `dangerous` (never the reverse), per-server `tool_allowlist` narrows what registers, individual tools can be disabled in the Tools tab, and canary sessions are denied MCP tools outright.
+- **Credentials.** Secrets live only in `.env` and are referenced as `${VAR}` in `mcp_servers.json`; literal-looking tokens in config are rejected. Pernix never forwards its own auth token or provider keys to an MCP server.
+- **Network scope.** MCP URLs are operator-configured and not subject to the fetch tools' SSRF blocklist — that is deliberate (private, docker-network-local servers are a supported pattern), and it means adding a server URL is trusted input. Only a confirmed `mcp_add_server` call or an authenticated REST/UI action can add one.
+
+---
+
 ## Deterministic Gates
 
 `add_gate` registers a shell command that runs automatically before Reflect at **every turn end**, for the life of the session. That persistence — one approval buying repeated unattended execution the user never sees again — is what separates it from a one-shot `bash` call, and it is why `add_gate` is `dangerous`.

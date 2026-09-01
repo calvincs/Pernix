@@ -30,6 +30,7 @@ Authoring new capabilities — no Pernix code changes required.
 
 - [authoring/writing-skills.md](authoring/writing-skills.md) — the SKILL.md schema and how to write your own
 - [authoring/custom-tools.md](authoring/custom-tools.md) — author Python tools via the toolmaker extension
+- [mcp.md](mcp.md) — plug in external MCP tool servers (Model Context Protocol), local or remote, no code required
 
 ## I'm operating / deploying Pernix
 

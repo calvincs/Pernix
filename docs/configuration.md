@@ -335,6 +335,30 @@ Detached long-compute processes via the `job_start` / `job_status` / `job_tail` 
 
 ---
 
+## MCP Servers
+
+Connect external tool servers speaking the Model Context Protocol; each
+server's tools register as `mcp_<server>_<tool>` and flow through scout
+curation, the dangerous-tool gate, and per-tool health metrics like native
+tools. Servers themselves are configured per-item in the Explorer → MCP tab
+(or `data/mcp_servers.json`); these settings are the global knobs. Toggles in
+Settings → MCP Servers. Full guide: [mcp.md](mcp.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `mcp_enabled` | `true` | Master switch, hot both ways. Inert until a server is configured — configuring one is the opt-in. Off kills local server processes but keeps tool names registered; their calls return a clear disabled error. |
+| `mcp_stdio_enabled` | `true` | Allow stdio (local subprocess) servers. `false` = remote-only mode — a stdio server is arbitrary local code running inside the Pernix process's container, so turn this off when all your servers are remote. |
+| `mcp_default_safety` | `caution` | Safety level stamped on MCP tools without a per-server override. Server-sent `destructiveHint` annotations escalate a tool to `dangerous`; annotations can never lower a level. |
+| `mcp_call_timeout` | `60` | Per-call ceiling (seconds); a server entry's own `timeout` overrides it. |
+| `mcp_connect_timeout` | `30` | Budget for transport open + initialize + tools/list on connect. |
+| `mcp_idle_seconds` | `900` | Idle stdio servers are suspended (child reaped, tools kept, next call respawns). `0` = never. HTTP connections are never reaped. |
+| `mcp_max_servers` | `10` | Configured-server cap — a sanity valve, not a quota. |
+| `mcp_max_tools_per_server` | `50` | Excess tools are skipped with a warning; use a per-server `tool_allowlist` to pick which. |
+| `mcp_max_description_chars` | `1024` | Server-supplied tool descriptions are untrusted text headed for the system prompt; capped before registration. |
+| `mcp_refresh_interval_s` | `900` | Periodic tools/list re-check for servers that never send listChanged. `0` = manual reload only. |
+
+---
+
 ## Memory
 
 | Setting | Default | Description |
