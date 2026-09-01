@@ -1514,6 +1514,12 @@ class SessionManager:
                     await self._on_watched_worker_done(session)
                 except Exception as _e:
                     logger.error("Cancel-path watcher notify failed: %s", _e)
+            # A prompt that landed between the cancel endpoint clearing the
+            # queue and the task unwinding is a new request, not part of
+            # the cancelled turn; without this it sat in an IDLE_READY
+            # session's queue until the user's next send.
+            if session.pending_messages:
+                await self._process_pending(session)
             return
 
         # Normal path: if the agent loop returned cleanly we're still in
@@ -1731,8 +1737,14 @@ class SessionManager:
         # any user message that arrived during post-hooks but was lost from
         # the in-memory queue (e.g., server restarted between the
         # FINALIZING→IDLE_READY write and _process_pending running).
+        # Everything below runs after IDLE_READY; an exception here escaped
+        # _run_agent_safe's finally and left queued prompts undrained until
+        # the next send. Each step is best-effort so _process_pending runs.
         if not session.pending_messages:
-            await self._sweep_db_pending(session, exclude_msg_id=_completed_turn_msg_id)
+            try:
+                await self._sweep_db_pending(session, exclude_msg_id=_completed_turn_msg_id)
+            except Exception as _e:
+                logger.error("Post-turn DB pending sweep failed for %s: %s", session.session_id, _e)
 
         # Worker-specific: notify the parent session that this worker
         # turn has fully settled. Frontend listens for `worker.done`
@@ -1758,7 +1770,10 @@ class SessionManager:
                 },
             )
             # Gap 1+2: wake parent if it's watching this worker.
-            await self._on_watched_worker_done(session)
+            try:
+                await self._on_watched_worker_done(session)
+            except Exception as _e:
+                logger.error("Post-turn watcher notify failed for %s: %s", session.session_id, _e)
 
         # Process pending messages.
         await self._process_pending(session)
