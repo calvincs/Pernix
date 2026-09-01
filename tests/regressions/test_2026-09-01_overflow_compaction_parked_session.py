@@ -33,7 +33,7 @@ def _payload(tokens: int):
 
 
 async def test_declined_overflow_compaction_returns_to_processing(processing_session, monkeypatch):
-    async def _declines(session_id, messages, history_budget=None):
+    async def _declines(session_id, messages, **kwargs):
         return False
 
     monkeypatch.setattr("core.agent.compact_with_llm", _declines)
@@ -50,7 +50,7 @@ async def test_declined_overflow_compaction_returns_to_processing(processing_ses
 
 
 async def test_overflow_stops_surfacing_once_the_compactor_cannot_help(processing_session, monkeypatch):
-    async def _noop(session_id, messages, history_budget=None):
+    async def _noop(session_id, messages, **kwargs):
         return True
 
     monkeypatch.setattr("core.agent.compact_with_llm", _noop)

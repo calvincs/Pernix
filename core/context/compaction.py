@@ -261,11 +261,34 @@ def _active_turn_root_index(convo: list[dict]) -> int:
     return -1
 
 
+def _clamp_boundary_to_live_turn(convo: list[dict], boundary_idx: int, turn_user_msg_id: int | None) -> int:
+    """Never let the boundary advance past the live turn's root.
+
+    When the agent loop knows its turn root (`turn_user_msg_id`), that row
+    is authoritative. The positional guess in `_active_turn_root_index`
+    stays as the fallback for callers that do not know it (the manual
+    /compact endpoint), but on its own it picked an *injected* mid-turn
+    user message as the root — `/api/chat/inject` puts one between two
+    tool rounds — and folded the real ask and its earlier rounds into the
+    summary, so the agent resumed with no verbatim request.
+    """
+    root_idx = -1
+    if turn_user_msg_id is not None:
+        for i, m in enumerate(convo):
+            if m.get("id") == turn_user_msg_id and m.get("role") == "user":
+                root_idx = i
+                break
+    if root_idx < 0:
+        root_idx = _active_turn_root_index(convo)
+    return root_idx if 0 <= root_idx < boundary_idx else boundary_idx
+
+
 async def compact_with_llm(
     session_id: str,
     messages: list[dict],
     existing_summary: str | None = None,
     history_budget: int | None = None,
+    turn_user_msg_id: int | None = None,
 ) -> bool:
     """Run LLM summarization and append compaction marker. Never deletes messages.
 
@@ -318,15 +341,15 @@ async def compact_with_llm(
         total += tokens
 
     # Hard floor: whatever the token arithmetic says, the live turn stays.
-    root_idx = _active_turn_root_index(convo)
-    if root_idx >= 0 and boundary_idx > root_idx:
+    clamped = _clamp_boundary_to_live_turn(convo, boundary_idx, turn_user_msg_id)
+    if clamped != boundary_idx:
         logger.info(
             "Compaction boundary clamped from %d to %d to preserve the active turn (session %s)",
             boundary_idx,
-            root_idx,
+            clamped,
             session_id,
         )
-        boundary_idx = root_idx
+        boundary_idx = clamped
 
     to_summarize = convo[:boundary_idx]
     if len(to_summarize) < 4:
