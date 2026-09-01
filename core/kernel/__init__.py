@@ -46,10 +46,18 @@ class KernelError(Exception):
 
 
 class SessionKernel:
-    """One persistent plain-scaffold child REPL for one session."""
+    """One persistent plain-scaffold child REPL for one registry key.
 
-    def __init__(self, session_id: str):
+    The key is usually a session id; space sessions share one kernel under
+    the key "space-<space_id>" (v33) — same class, same lifecycle, just a
+    key that more than one session resolves to. `cwd` pins the child's
+    working directory (the space's workspace home); None keeps the
+    historical behavior of resolving paths.workspace() at spawn time.
+    """
+
+    def __init__(self, session_id: str, cwd: str | None = None):
         self.session_id = session_id
+        self.cwd = cwd
         self.state_dir = (KERNEL_STATE_ROOT / session_id).resolve()
         self._repl: ChildREPL | None = None
         self._lock = threading.RLock()
@@ -143,7 +151,10 @@ class SessionKernel:
                 self.state_dir,
                 python_exe=self._interpreter(),
                 scaffold="plain",
-                cwd=workspace(),  # honors the session's 1g override at spawn
+                # Pinned cwd (space home) beats the spawn-time ContextVar —
+                # the spill-bind path can spawn a kernel OUTSIDE a tool-call
+                # window, where workspace() knows nothing about the space.
+                cwd=Path(self.cwd).resolve() if self.cwd else workspace(),
             )
             repl.start()
             self._repl = repl
@@ -192,6 +203,10 @@ class SessionKernel:
         except ChildBusy as e:
             # Another driver (snapshot/bind) held the round-trip lock past its
             # wait budget. The child is alive and working — report, never reap.
+            # For a shared space kernel the "other driver" is usually a
+            # sibling session's cell — say so, or the agent reads it as a hang.
+            if self.session_id.startswith("space-"):
+                raise KernelError(f"shared space kernel busy (another session in this space is executing): {e}") from e
             raise KernelError(f"kernel busy: {e}") from e
         except Exception as e:
             # RLMChildDied / RLMTimeout after failed interrupt / connection
@@ -335,20 +350,27 @@ class KernelRegistry:
     # state) rather than risk kernels that can never be collected.
     @staticmethod
     def _session_mid_turn(session_id: str) -> bool:
+        """Mid-turn check by registry key. A shared space kernel
+        ("space-<id>") is mid-turn while ANY member session of that space is
+        processing — evicting it under one member's feet because a different
+        member was the last to touch it is exactly the reap-during-turn bug
+        the single-session check exists to prevent."""
         try:
             from db import models as db
 
+            if session_id.startswith("space-"):
+                return db.any_space_session_mid_turn(session_id[len("space-") :])
             row = db.get_session(session_id)
             return bool(row and row.get("state_v2") == "processing")
         except Exception:
             logger.debug("kernel: mid-turn check failed for %s", session_id[:12], exc_info=True)
             return False
 
-    def get_or_create(self, session_id: str) -> SessionKernel:
+    def get_or_create(self, session_id: str, cwd: str | None = None) -> SessionKernel:
         with self._lock:
             kernel = self._kernels.get(session_id)
             if kernel is None:
-                kernel = SessionKernel(session_id)
+                kernel = SessionKernel(session_id, cwd=cwd)
                 self._kernels[session_id] = kernel
             evict = self._pick_lru_beyond_cap(exclude=session_id)
         # Evict outside the registry lock — a shutdown snapshot is seconds

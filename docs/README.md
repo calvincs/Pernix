@@ -17,6 +17,7 @@ This index is organized by what you're trying to do.
 How Pernix behaves day-to-day. Read the ones that match what you're trying to do.
 
 - [guides/sessions-and-chat.md](guides/sessions-and-chat.md) — sessions, the turn lifecycle, pausing/resuming
+- [guides/spaces.md](guides/spaces.md) — long-lived session groups with shared directives, memory, workspace, and kernel
 - [guides/workspace-and-files.md](guides/workspace-and-files.md) — where outputs land, file safety, retrieval
 - [guides/memory-and-recall.md](guides/memory-and-recall.md) — what Pernix remembers across sessions and how to manage it
 - [guides/using-skills.md](guides/using-skills.md) — installing and invoking skills

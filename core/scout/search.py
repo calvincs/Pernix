@@ -221,7 +221,7 @@ def gather_cross_session_data(message: str, current_session_id: str) -> str:
     return "\n".join(lines)
 
 
-def gather_deep_memory(message: str, char_cap: int = 400) -> str:
+def gather_deep_memory(message: str, char_cap: int = 400, space_slug: str | None = None) -> str:
     """Multi-query memory search for broader recall.
 
     Decomposes the message into keywords and runs parallel BM25 searches
@@ -238,13 +238,13 @@ def gather_deep_memory(message: str, char_cap: int = 400) -> str:
         return ""
 
     # Main search with broad limit
-    all_results = store.search(message, limit=12, _track_hits=False)
+    all_results = store.search(message, limit=12, _track_hits=False, space_slug=space_slug)
 
     # Keyword decomposition sub-queries
     keywords = _extract_keywords(message, max_keywords=5)
     for kw in keywords[:3]:
         try:
-            sub = store.search(kw, mode="bm25", limit=5, _track_hits=False)
+            sub = store.search(kw, mode="bm25", limit=5, _track_hits=False, space_slug=space_slug)
             all_results.extend(sub)
         except Exception:
             continue

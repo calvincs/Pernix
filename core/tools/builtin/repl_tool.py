@@ -36,7 +36,14 @@ def repl(code: str, timeout: int | None = None, _context: dict | None = None) ->
     if not session_id:
         return "Error: repl requires a session context."
 
-    kernel = get_kernel_registry().get_or_create(session_id)
+    # Space sessions share one kernel keyed by their space (v33): live
+    # variables carry across every session in the space. cwd pins the
+    # child to the space's workspace home.
+    from core.spaces import kernel_key_for_session
+
+    kernel = get_kernel_registry().get_or_create(
+        kernel_key_for_session(session_id), cwd=(_context or {}).get("workspace_home")
+    )
 
     # Soft cancel: a user cancel SIGINTs the cell (aborting it, preserving
     # the namespace) rather than killing the kernel.

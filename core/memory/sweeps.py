@@ -395,7 +395,11 @@ def classify_entry(entry, src_file: str, file_keywords: dict[str, set[str]]) -> 
     tag/keyword affinity scoring (medium — the current file scores zero while
     some other file scores at least 1.0).
     """
-    if entry.entry_type == "profile" and src_file != "user.profile":
+    from core.memory.routing import space_bucket
+
+    src_bucket = space_bucket(src_file)
+
+    if entry.entry_type == "profile" and src_file != "user.profile" and src_bucket is None:
         return {
             "entry": entry,
             "src_file": src_file,
@@ -407,8 +411,13 @@ def classify_entry(entry, src_file: str, file_keywords: dict[str, set[str]]) -> 
     tag_str = " ".join(entry.tags).lower()
     content_lower = entry.content.lower()
 
+    # Space-bucket boundary (v33): reroute targets stay inside the entry's
+    # own bucket — a space entry never moves to a global file or another
+    # space, and global entries never get pulled into a space.
     scores: dict[str, float] = {}
     for fname, fkws in file_keywords.items():
+        if space_bucket(fname) != src_bucket:
+            continue
         tag_hits = sum(2.0 for kw in fkws if kw in tag_str)
         content_hits = sum(0.5 for kw in fkws if kw in content_lower)
         scores[fname] = tag_hits + content_hits

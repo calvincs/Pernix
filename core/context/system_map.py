@@ -54,8 +54,10 @@ data/memories/*.md        long-term memory (markdown = source of truth; _index.d
 data/workspace/           your working directory (served at {base}/workspace/...)
 data/workspace/.jobs/     background-job logs + exit sidecars
 data/workspace/rlm/       RLM run residue (trace.jsonl, payloads.jsonl, draft.txt)
+data/workspace/spaces/    per-space home folders (space sessions work here; runs' rlm/ nests inside)
 data/skills/              skills (SKILL.md + scripts/ + references/)
 data/agent/               SOUL.md / RULES.md / SESSIONS.md (user-owned — never machine-written)
+data/agent/spaces/<slug>/ per-space directive overrides (same three files; present file wins)
 data/adaptive/ADAPTIVE.md read-only mirror of the adaptive store (never read back)
 data/canaries/            canary suite (CANARY.md per task)
 data/telos/               telos layer (questions/soup/claims/ledgers, markdown+YAML)
@@ -71,7 +73,20 @@ data/cron_jobs.json       scheduled jobs"""
 CONTEXT_BLOCKS = (
     ("[SERVER CONTEXT]", "compiler", "reference", "static", "base URL, self-inspection pointers, this map"),
     ("[MODEL CAPABILITY]", "compiler", "reference", "per-session", "vision/audio support of the current model"),
-    ("SOUL/RULES/SESSIONS", "user-authored files", "binding", "on file edit", "identity + operating rules"),
+    (
+        "SOUL/RULES/SESSIONS",
+        "user-authored files",
+        "binding",
+        "on file edit",
+        "identity + operating rules; a space session gets the space's per-file overrides",
+    ),
+    (
+        "[SPACE]",
+        "spaces store",
+        "reference",
+        "per session",
+        "space membership, workspace home (soft, not a sandbox), memory prefix",
+    ),
     (
         "Adaptive notes/policies",
         "adaptive store (machine)",

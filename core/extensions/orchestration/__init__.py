@@ -157,11 +157,16 @@ def spawn_worker(
                 return f"Error: Max active workers ({settings.max_concurrent_workers}) reached. Wait for running workers to complete."
 
         # Create session inside the lock to atomically reserve the slot.
+        # Workers inherit the parent's space (v33): space_id is persisted so
+        # rehydration keeps membership, and create_session derives the
+        # workspace_home — the worker writes in the space folder, compiles
+        # space directives, routes memory to the space, shares its kernel.
         worker_id = manager.create_session(
             title=worker_title,
             system_prompt="",
             session_type="worker",
             parent_session_id=parent_id,
+            space_id=getattr(parent, "space_id", None) if parent else None,
         )
 
     summary_file = f".worker_{worker_id[:12]}_summary.md"

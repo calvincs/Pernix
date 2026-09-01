@@ -275,7 +275,7 @@ def test_repl_clamps_a_runaway_timeout(monkeypatch):
 
     monkeypatch.setattr(
         "core.kernel.get_kernel_registry",
-        lambda: type("R", (), {"get_or_create": lambda self, sid: _FakeKernel()})(),
+        lambda: type("R", (), {"get_or_create": lambda self, sid, cwd=None: _FakeKernel()})(),
     )
     repl_tool.repl("1", timeout=999999, _context={"session_id": "s"})
     assert seen["timeout"] == repl_tool._MAX_TIMEOUT_S

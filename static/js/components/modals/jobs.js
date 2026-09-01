@@ -197,12 +197,14 @@ export async function buildScheduledTab() {
     const container = el('div', { class: 'jobs-tab-content' });
 
     try {
-        const [data, modelsData] = await Promise.all([
+        const [data, modelsData, spacesData] = await Promise.all([
             get('/api/jobs'),
             get('/api/models').catch(() => ({ models: [], current: '' })),
+            get('/api/spaces').catch(() => ({ items: [] })),
         ]);
         const jobs = data.items || [];
         const models = modelsData;
+        const spaces = spacesData.items || [];
 
         container.appendChild(el('div', {
             style: 'font-size:var(--text-xs); color:var(--text-faint); margin-bottom:var(--sp-2); padding:0 var(--sp-3);',
@@ -212,11 +214,11 @@ export async function buildScheduledTab() {
             container.appendChild(el('div', { class: 'jobs-empty' }, [text('No scheduled jobs')]));
         } else {
             for (const job of jobs) {
-                container.appendChild(_buildJobRow(job, models));
+                container.appendChild(_buildJobRow(job, models, spaces));
             }
         }
 
-        container.appendChild(_buildAddSection(models));
+        container.appendChild(_buildAddSection(models, spaces));
     } catch (e) {
         container.appendChild(el('div', { class: 'jobs-empty' }, [text(`Error: ${e.message}`)]));
     }
@@ -224,7 +226,7 @@ export async function buildScheduledTab() {
     return container;
 }
 
-function _buildJobRow(job, models) {
+function _buildJobRow(job, models, spaces = []) {
     const wrapper = el('div');
 
     function renderView() {
@@ -249,6 +251,16 @@ function _buildJobRow(job, models) {
             el('div', { class: 'jobs-item-main' }, [
                 el('div', { class: 'jobs-item-name' }, [text(job.name)]),
                 el('div', { class: 'jobs-item-meta' }, [
+                    (() => {
+                        // Space binding chip (v33): the run lands in this space.
+                        if (!job.space_id) return null;
+                        const sp = spaces.find(s => s.id === job.space_id);
+                        return el('span', {
+                            class: 'space-chip-labeled',
+                            style: `--space-color: ${sp ? sp.color : '#888'}`,
+                            title: sp ? `Runs in space "${sp.label}"` : 'Bound to a deleted space',
+                        }, [text(sp ? sp.label : 'space?')]);
+                    })(),
                     el('span', {}, [text(`${job.cron_expr} (UTC)`)]),
                     job.next_run ? el('span', {}, [text(`next: ${relativeTime(job.next_run)}`)]) : null,
                     job.model ? el('span', {}, [text(`model: ${job.model}`)]) : null,
@@ -462,7 +474,7 @@ function _cronHint(expr) {
     return '';
 }
 
-function _buildAddSection(models) {
+function _buildAddSection(models, spaces = []) {
     const wrapper = el('div');
     let editorInstance = null;
 
@@ -517,6 +529,14 @@ function _buildAddSection(models) {
             modelSelect.appendChild(el('option', { value: m.id }, [text(label)]));
         }
 
+        // Space binding (v33): each firing runs in a fresh session inside
+        // the chosen space. Only rendered when spaces exist.
+        const spaceSelect = el('select', { title: 'Run this job inside a space' });
+        spaceSelect.appendChild(el('option', { value: '' }, [text('No space')]));
+        for (const sp of spaces) {
+            spaceSelect.appendChild(el('option', { value: sp.id }, [text(`Space: ${sp.label}`)]));
+        }
+
         const form = el('div', { class: 'jobs-add-form' }, [
             el('div', { style: { fontSize: 'var(--text-sm)', color: 'var(--text-dim)', marginBottom: '4px' } },
                 [text('Add Job — cron schedule is UTC')]),
@@ -525,6 +545,7 @@ function _buildAddSection(models) {
             editorHost,
             el('div', { class: 'jobs-add-row' }, [
                 modelSelect,
+                spaces.length ? spaceSelect : null,
                 el('button', {
                     class: 'btn btn-primary',
                     style: { padding: '4px 12px', fontSize: 'var(--text-sm)' },
@@ -541,6 +562,7 @@ function _buildAddSection(models) {
                             await post('/api/jobs', {
                                 name, cron_expr, prompt,
                                 model: modelSelect.value,
+                                space_id: spaceSelect.value || null,
                             });
                             statusMsg.textContent = `Job "${name}" created`;
                             statusMsg.style.color = 'var(--success)';

@@ -48,7 +48,9 @@ async def create_job(body: dict):
 
     from core.extensions.scheduling import schedule_job
 
-    result = schedule_job(name, cron_expr, prompt, model=model)
+    # API creation is explicit: no calling session to inherit a space from,
+    # so an absent/empty space_id means unbound ("none"), never "inherit".
+    result = schedule_job(name, cron_expr, prompt, model=model, space_id=body.get("space_id") or "none")
     if result.startswith("Error"):
         raise HTTPException(400, detail=result)
     return {"status": "created", "name": name, "message": result}
@@ -75,6 +77,7 @@ async def update_job(name: str, body: dict):
         cron_expr=body.get("cron_expr"),
         prompt=body.get("prompt"),
         model=body.get("model"),
+        space_id=body["space_id"] if "space_id" in body else None,
     )
     if result.startswith("Error"):
         raise HTTPException(400, detail=result)

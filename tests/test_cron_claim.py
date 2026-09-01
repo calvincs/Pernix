@@ -283,7 +283,7 @@ async def test_execute_cron_job_claims_before_prompt(monkeypatch):
     observed = {}
 
     class _Mgr:
-        def create_session(self, title="", session_type="normal"):
+        def create_session(self, title="", session_type="normal", space_id=None):
             return "sess-claim"
 
         def get(self, sid):
@@ -316,7 +316,7 @@ async def test_execute_cron_job_claims_before_prompt(monkeypatch):
 
 async def test_execute_cron_job_error_path(monkeypatch):
     class _Mgr:
-        def create_session(self, title="", session_type="normal"):
+        def create_session(self, title="", session_type="normal", space_id=None):
             return "sess-err"
 
         def get(self, sid):
