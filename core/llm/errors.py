@@ -31,8 +31,25 @@ FALLBACK_REASONS = frozenset(
     }
 )
 
-# Keywords in error bodies that indicate context/token overflow
-_CONTEXT_OVERFLOW_KEYWORDS = ("token", "context", "length", "too long", "maximum", "exceed")
+# Phrases in a 400 body that mean the PROMPT exceeded the model's window —
+# the one 400 the caller can fix by compacting. Deliberately overflow-
+# specific: the old single-word list ("token", "length", "maximum",
+# "exceed") also matched "max_tokens is too large" and "image exceeds 20MB",
+# and each false positive cost a pointless compaction pass.
+_CONTEXT_OVERFLOW_PHRASES = (
+    "context length",  # OpenAI / vLLM / OpenRouter: "maximum context length is N tokens"
+    "maximum context",
+    "context window",
+    "context size",  # llama.cpp: "the request exceeds the available context size"
+    "prompt is too long",  # Anthropic: "prompt is too long: N tokens > M maximum"
+    "input is too long",
+    "too many tokens",
+    "context_length_exceeded",
+)
+
+# Machine-readable error codes that mean the same thing (OpenAI sets
+# error.code="context_length_exceeded"; some gateways say window instead).
+_CONTEXT_OVERFLOW_CODES = ("context_length_exceeded", "context_window_exceeded")
 
 
 class FailoverError(Exception):
@@ -50,12 +67,24 @@ class FailoverError(Exception):
         super().__init__(message)
 
 
-def classify_http_error(status_code: int, body: str = "") -> FailoverReason:
+def is_context_overflow_code(code: object) -> bool:
+    """True when a provider's machine-readable error code names an overflow."""
+    if not code:
+        return False
+    lowered = str(code).lower()
+    return any(marker in lowered for marker in _CONTEXT_OVERFLOW_CODES)
+
+
+def classify_http_error(status_code: int, body: str = "", code: object = None) -> FailoverReason:
     """Classify an HTTP error into a FailoverReason.
 
     Uses status code first, then inspects body text for 400-class errors
-    to distinguish context overflow from generic format errors.
+    to distinguish context overflow from generic format errors. `code` is
+    the provider's machine-readable error code when the response carried
+    one (OpenAI: "context_length_exceeded") — it outranks the body text.
     """
+    if is_context_overflow_code(code):
+        return FailoverReason.CONTEXT_OVERFLOW
     if status_code in {429, 402}:
         return FailoverReason.RATE_LIMIT
     if status_code in {401, 403}:
@@ -68,7 +97,7 @@ def classify_http_error(status_code: int, body: str = "") -> FailoverReason:
         return FailoverReason.TIMEOUT
     if status_code == 400:
         lower = body.lower()
-        if any(kw in lower for kw in _CONTEXT_OVERFLOW_KEYWORDS):
+        if any(phrase in lower for phrase in _CONTEXT_OVERFLOW_PHRASES):
             return FailoverReason.CONTEXT_OVERFLOW
         return FailoverReason.FORMAT_ERROR
     return FailoverReason.UNKNOWN
