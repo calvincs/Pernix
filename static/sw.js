@@ -52,6 +52,7 @@ const SHELL_ASSETS = [
     '/static/js/components/modals/timeline.js',
     '/static/js/components/modals/jobs.js',
     '/static/js/components/modals/question.js',
+    '/static/js/components/modals/spaces.js',
     '/static/js/components/modals/adaptive.js',
     '/static/js/components/modals/canary.js',
     '/static/js/components/modals/telos.js',

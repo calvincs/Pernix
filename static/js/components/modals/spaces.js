@@ -1,5 +1,10 @@
 // Pernix — Spaces modal: create/edit (label, color, directive overrides)
 // and the delete dialog with its cascade checkbox (v33).
+//
+// Styling contract: buttons are `btn btn-*` (the bare variant classes carry
+// only color — .btn carries shape), footer status is `.save-status`, and the
+// directive tabs reuse the shared .tab-bar/.tab-btn look. The edit card is
+// user-resizable (CSS resize: both); Monaco's automaticLayout tracks it.
 import { el, text, clear } from '../../render.js';
 import { get, post, del, patch, apiJson } from '../../api.js';
 import { createCodeEditor } from '../file-panel.js';
@@ -11,6 +16,7 @@ const DIRECTIVE_HINT = {
     RULES: 'Binding rules for this space. Overrides data/agent/RULES.md.',
     SESSIONS: 'Deployment/config notes for this space. Overrides data/agent/SESSIONS.md.',
 };
+const MAX_DIRECTIVE_BYTES = 64000;  // mirrors the API cap
 
 function _notifyChanged() {
     window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
@@ -55,23 +61,33 @@ export function openSpaceModal(space) {
     paintSwatches();
 
     const body = el('div', { class: 'modal-body space-modal-body' }, [
-        el('label', { class: 'space-field-label' }, [text('Name')]),
-        labelInput,
-        el('label', { class: 'space-field-label' }, [text('Color')]),
-        colorRow,
+        el('div', { class: 'space-form-grid' }, [
+            el('div', { class: 'space-form-name' }, [
+                el('label', { class: 'space-field-label' }, [text('Name')]),
+                labelInput,
+            ]),
+            el('div', { class: 'space-form-color' }, [
+                el('label', { class: 'space-field-label' }, [text('Color')]),
+                colorRow,
+            ]),
+        ]),
     ]);
     if (isEdit) {
         body.appendChild(el('div', { class: 'space-slug-note' }, [
             text(`slug: ${space.slug} · memory: pernix.space.${space.slug}.* · workspace: spaces/${space.slug}/`),
         ]));
-        body.appendChild(_buildDirectivesSection(space, dirState, disposers));
+        body.appendChild(_buildDirectivesSection(space, dirState, disposers, () => save()));
     } else {
         body.appendChild(el('div', { class: 'space-slug-note' }, [
             text('Directive overrides (SOUL / RULES / SESSIONS) can be edited here after the space is created.'),
         ]));
     }
 
-    const status = el('span', { class: 'space-modal-status' });
+    const status = el('span', { class: 'save-status status-muted' });
+    const setStatus = (msg, kind = 'muted') => {
+        status.textContent = msg;
+        status.className = `save-status status-${kind}`;
+    };
 
     const close = () => {
         for (const d of disposers) { try { d(); } catch { /* disposed */ } }
@@ -82,8 +98,8 @@ export function openSpaceModal(space) {
 
     const save = async () => {
         const label = labelInput.value.trim();
-        if (!label) { status.textContent = 'Name is required'; return; }
-        status.textContent = 'Saving…';
+        if (!label) { setStatus('Name is required', 'error'); return; }
+        setStatus('Saving…');
         try {
             if (isEdit) {
                 await patch(`/api/spaces/${space.id}`, { label, color });
@@ -95,22 +111,28 @@ export function openSpaceModal(space) {
                         const content = st.editor.getValue();
                         if (content.trim()) {
                             await apiJson('PUT', `/api/spaces/${space.id}/directives/${name}`, { content });
+                            st.dirty = false;
+                            st.hadOverride = true;
                         }
                     } else if (st.revert && st.hadOverride) {
                         await del(`/api/spaces/${space.id}/directives/${name}`);
+                        st.hadOverride = false;
+                        st.revert = false;
                     }
                 }
+                setStatus('Saved', 'muted');
+                _notifyChanged();
             } else {
                 await post('/api/spaces', { label, color });
+                _notifyChanged();
+                close();
             }
-            _notifyChanged();
-            close();
         } catch (e) {
-            status.textContent = `Save failed: ${e.message || e}`;
+            setStatus(`Save failed: ${e.message || e}`, 'error');
         }
     };
 
-    const card = el('div', { class: 'modal-card space-modal-card' }, [
+    const card = el('div', { class: 'modal-card space-modal-card' + (isEdit ? '' : ' compact') }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text(isEdit ? `Space — ${space.label}` : 'New space')]),
             el('button', { class: 'modal-close', onClick: close }, [text('×')]),
@@ -118,8 +140,8 @@ export function openSpaceModal(space) {
         body,
         el('div', { class: 'modal-footer' }, [
             status,
-            el('button', { class: 'btn-secondary', onClick: close }, [text('Cancel')]),
-            el('button', { class: 'btn-primary', onClick: save }, [text(isEdit ? 'Save' : 'Create space')]),
+            el('button', { class: 'btn btn-secondary', onClick: close }, [text(isEdit ? 'Close' : 'Cancel')]),
+            el('button', { class: 'btn btn-primary', onClick: save }, [text(isEdit ? 'Save' : 'Create space')]),
         ]),
     ]);
 
@@ -133,18 +155,18 @@ export function openSpaceModal(space) {
 }
 
 // ---------------------------------------------------------------------------
-// Directive override editor — three tabs; default is read-only until
-// "Customize" copies it into an editable buffer; "Revert" removes the
-// override (applied on Save).
+// Directive override editor — shared .tab-bar tabs; the default is read-only
+// until "Customize" copies it into an editable Monaco buffer that fills the
+// (resizable) card. Ctrl+S in the editor saves the modal.
 // ---------------------------------------------------------------------------
 
-function _buildDirectivesSection(space, dirState, disposers) {
+function _buildDirectivesSection(space, dirState, disposers, onSave) {
     const section = el('div', { class: 'space-directives' });
     section.appendChild(el('label', { class: 'space-field-label' }, [
-        text('Directives (space overrides — undefined files fall back to the defaults)'),
+        text('Directives — space overrides; undefined files fall back to the defaults'),
     ]));
 
-    const tabBar = el('div', { class: 'space-dir-tabs' });
+    const tabBar = el('div', { class: 'tab-bar space-dir-tabbar' });
     const pane = el('div', { class: 'space-dir-pane' }, [text('Loading…')]);
     section.appendChild(tabBar);
     section.appendChild(pane);
@@ -158,9 +180,13 @@ function _buildDirectivesSection(space, dirState, disposers) {
             const st = dirState[name];
             const overridden = st ? (st.mode === 'edit' && !st.revert) : !!files?.[name]?.override;
             tabBar.appendChild(el('button', {
-                class: 'space-dir-tab' + (name === active ? ' active' : '') + (overridden ? ' overridden' : ''),
+                class: 'tab-btn' + (name === active ? ' active' : ''),
+                title: overridden ? `${name}.md — space override active` : `${name}.md — using the default`,
                 onClick: () => { active = name; renderTabs(); renderPane(); },
-            }, [text(name + (overridden ? ' •' : ''))]));
+            }, [
+                text(name),
+                overridden ? el('span', { class: 'space-dir-ovr-dot' }) : null,
+            ]));
         }
     };
 
@@ -179,46 +205,58 @@ function _buildDirectivesSection(space, dirState, disposers) {
                 revert: false,
             };
         }
-        pane.appendChild(el('div', { class: 'space-dir-hint' }, [text(DIRECTIVE_HINT[name])]));
 
         if (st.mode === 'default') {
-            const label = st.revert && st.hadOverride
+            const modeLabel = st.revert && st.hadOverride
                 ? 'Override will be removed on Save — showing the default:'
                 : 'Using the default (read-only):';
-            pane.appendChild(el('div', { class: 'space-dir-mode' }, [text(label)]));
+            pane.appendChild(el('div', { class: 'space-dir-toolbar' }, [
+                el('span', { class: 'space-dir-mode' }, [text(modeLabel)]),
+                el('button', {
+                    class: 'btn btn-primary space-dir-action',
+                    onClick: () => { st.mode = 'edit'; st.revert = false; renderTabs(); renderPane(); },
+                }, [text('Customize for this space')]),
+            ]));
             pane.appendChild(el('pre', { class: 'space-dir-default' }, [
                 text(info.default || '(default file is empty or missing)'),
             ]));
-            pane.appendChild(el('button', {
-                class: 'btn-secondary space-dir-customize',
-                onClick: () => {
-                    st.mode = 'edit';
-                    st.revert = false;
-                    renderTabs();
-                    renderPane();
-                },
-            }, [text('Customize for this space')]));
+            pane.appendChild(el('div', { class: 'space-dir-hint' }, [text(DIRECTIVE_HINT[name])]));
         } else {
-            pane.appendChild(el('div', { class: 'space-dir-mode' }, [
-                text(st.hadOverride ? 'Space override (editable):' : 'New override — seeded from the default:'),
+            const sizeInfo = el('span', { class: 'space-dir-size' });
+            const updateSize = (v) => {
+                const bytes = new TextEncoder().encode(v).length;
+                sizeInfo.textContent = `${(bytes / 1024).toFixed(1)} KB / ${MAX_DIRECTIVE_BYTES / 1000} KB`;
+                sizeInfo.classList.toggle('over', bytes > MAX_DIRECTIVE_BYTES);
+            };
+            pane.appendChild(el('div', { class: 'space-dir-toolbar' }, [
+                el('span', { class: 'space-dir-mode' }, [
+                    text(st.hadOverride ? 'Space override (editable)' : 'New override — seeded from the default'),
+                ]),
+                sizeInfo,
+                el('button', {
+                    class: 'btn btn-secondary space-dir-action',
+                    title: 'Discard this override and go back to the default file',
+                    onClick: () => {
+                        st.mode = 'default';
+                        st.revert = true;
+                        st.editor = null;
+                        renderTabs();
+                        renderPane();
+                    },
+                }, [text('Revert to default')]),
             ]));
             const host = el('div', { class: 'space-dir-editor' });
             pane.appendChild(host);
             const seed = st.editor ? st.editor.getValue() : (info.override != null ? info.override : info.default);
-            createCodeEditor(host, seed, 'markdown', () => { st.dirty = true; }).then(inst => {
+            updateSize(seed);
+            createCodeEditor(host, seed, 'markdown', (v) => { st.dirty = true; updateSize(v); }).then(inst => {
                 st.editor = inst;
+                inst.addSaveCommand(() => onSave());
                 disposers.push(() => inst.dispose && inst.dispose());
             });
-            pane.appendChild(el('button', {
-                class: 'btn-secondary space-dir-revert',
-                onClick: () => {
-                    st.mode = 'default';
-                    st.revert = true;
-                    st.editor = null;
-                    renderTabs();
-                    renderPane();
-                },
-            }, [text('Revert to default')]));
+            pane.appendChild(el('div', { class: 'space-dir-hint' }, [
+                text(DIRECTIVE_HINT[name] + ' Ctrl+S saves. Applies on the next agent turn.'),
+            ]));
         }
     };
 
@@ -242,7 +280,7 @@ function _buildDirectivesSection(space, dirState, disposers) {
 export function openSpaceDeleteDialog(space) {
     document.querySelector('.space-delete-overlay')?.remove();
     const cascadeBox = el('input', { type: 'checkbox', id: 'space-cascade-box' });
-    const status = el('span', { class: 'space-modal-status' });
+    const status = el('span', { class: 'save-status status-muted' });
 
     const close = () => { overlay.remove(); document.removeEventListener('keydown', onEsc); };
     const onEsc = (e) => { if (e.key === 'Escape') close(); };
@@ -254,6 +292,7 @@ export function openSpaceDeleteDialog(space) {
             _notifyChanged();
             close();
         } catch (e) {
+            status.className = 'save-status status-error';
             status.textContent = `Delete failed: ${e.message || e}`;
         }
     };
@@ -276,8 +315,8 @@ export function openSpaceDeleteDialog(space) {
         ]),
         el('div', { class: 'modal-footer' }, [
             status,
-            el('button', { class: 'btn-secondary', onClick: close }, [text('Cancel')]),
-            el('button', { class: 'btn-danger', onClick: doDelete }, [text('Delete space')]),
+            el('button', { class: 'btn btn-secondary', onClick: close }, [text('Cancel')]),
+            el('button', { class: 'btn btn-danger', onClick: doDelete }, [text('Delete space')]),
         ]),
     ]);
 
