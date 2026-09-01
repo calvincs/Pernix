@@ -1114,7 +1114,7 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
         # (just logged); [1:] is genuinely prior.
         termination_history: list[str] = []
         try:
-            termination_history = db.recent_termination_reasons(session_id, limit=3)
+            termination_history = await asyncio.to_thread(db.recent_termination_reasons, session_id, limit=3)
         except Exception as e:
             logger.debug("Failed to fetch termination history for %s: %s", session_id, e)
 
