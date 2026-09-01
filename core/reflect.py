@@ -1503,7 +1503,8 @@ async def reflect_on_session(
     )
     if not user_request or not evidence:
         r = ReflectResult(verdict="pass", reasoning="No user request found to verify")
-        _write_post_mortem(
+        await asyncio.to_thread(
+            _write_post_mortem,
             session_id,
             attempt,
             r,
@@ -1746,7 +1747,8 @@ async def reflect_on_session(
             extra_payload = extra_payload or {}
             if gate_results:
                 extra_payload["gates"] = [g.to_payload() for g in gate_results]
-            _write_post_mortem(
+            await asyncio.to_thread(
+                _write_post_mortem,
                 session_id,
                 attempt,
                 result,
@@ -1794,7 +1796,8 @@ async def reflect_on_session(
                     "reflect_model": model,
                 }
             )
-        _write_post_mortem(
+        await asyncio.to_thread(
+            _write_post_mortem,
             session_id,
             attempt,
             r,
@@ -1810,7 +1813,8 @@ async def reflect_on_session(
     except Exception as e:
         logger.warning("Reflect failed for session %s: %s", session_id, e)
         r = ReflectResult(verdict="pass", reasoning=f"Reflect error: {e}")
-        _write_post_mortem(
+        await asyncio.to_thread(
+            _write_post_mortem,
             session_id,
             attempt,
             r,
