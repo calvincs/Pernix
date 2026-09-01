@@ -837,40 +837,62 @@ class SessionManager:
         return False
 
     def delete_session(self, session_id: str) -> None:
-        """Delete session from both memory and DB (cascades workers)."""
-        # Cancel any running task
+        """Delete session from both memory and DB (cascades workers).
+
+        Synchronous form: both phases run inline on the caller's thread.
+        Prefer `delete_session_async` from the event loop — phase 2 is a
+        DB cascade plus filesystem work that must not run on the loop, and
+        phase 1 touches loop-affine state that must not run off it.
+        """
+        ids = self._delete_session_phase1(session_id)
+        self._delete_session_phase2(ids)
+
+    async def delete_session_async(self, session_id: str) -> None:
+        """Loop-side delete: stop the turn and drop the in-memory session
+        now, then do the DB/filesystem cleanup on a worker thread."""
+        ids = self._delete_session_phase1(session_id)
+        await asyncio.to_thread(self._delete_session_phase2, ids)
+
+    def _delete_session_phase1(self, session_id: str) -> list[str]:
+        """Loop-affine half: cancel the turn (flag, processes, task), pop the
+        session and its in-memory workers. Returns the ids to purge, workers
+        first. Deleting used to cancel only the task, so a bash child kept
+        running against the deleted workspace until its own timeout."""
+        ids: list[str] = []
         session = self._sessions.get(session_id)
         if session:
-            if session.task and not session.task.done():
-                session.task.cancel()
-            # Clean up workers first
+            self.cancel_session(session, cascade=False)
             for wid in list(session.worker_ids):
-                self.delete_session(wid)
+                ids.extend(self._delete_session_phase1(wid))
+        self._sessions.pop(session_id, None)
+        ids.append(session_id)
+        return ids
 
-        # Clean up per-worker summary file if this session was a worker
+    def _delete_session_phase2(self, ids: list[str]) -> None:
+        """Blocking half: summary file, scheduler budget, RLM artifacts,
+        kernel state, DB row — for each id in order."""
         from pathlib import Path as _P
 
-        worker_summary = _P(settings.workspace_dir) / f".worker_{session_id[:12]}_summary.md"
-        worker_summary.unlink(missing_ok=True)
-
-        self._sessions.pop(session_id, None)
-        # Same scheduler cleanup remove() does. Without it the per-provider
-        # wall-clock budget maps keep an entry for a session that no longer
-        # exists, for the life of the process.
         from core.llm.client import get_llm_client as _get_client
 
-        _get_client().purge_session(session_id)
-        self._purge_rlm_artifacts(session_id)
-        # Session deletion purges kernel state entirely — no snapshot; there
-        # is no session left to revive into (plan 2b).
-        try:
-            from core.kernel import get_kernel_registry
+        for session_id in ids:
+            worker_summary = _P(settings.workspace_dir) / f".worker_{session_id[:12]}_summary.md"
+            worker_summary.unlink(missing_ok=True)
+            # Same scheduler cleanup remove() does. Without it the per-provider
+            # wall-clock budget maps keep an entry for a session that no longer
+            # exists, for the life of the process.
+            _get_client().purge_session(session_id)
+            self._purge_rlm_artifacts(session_id)
+            # Session deletion purges kernel state entirely — no snapshot; there
+            # is no session left to revive into (plan 2b).
+            try:
+                from core.kernel import get_kernel_registry
 
-            get_kernel_registry().shutdown_session_detached(session_id, snapshot=False, purge_state=True)
-        except Exception as e:
-            logger.warning("Kernel purge scheduling failed for %s: %s", session_id[:12], e)
-        db.delete_session(session_id)
-        logger.info("Deleted session %s", session_id)
+                get_kernel_registry().shutdown_session_detached(session_id, snapshot=False, purge_state=True)
+            except Exception as e:
+                logger.warning("Kernel purge scheduling failed for %s: %s", session_id[:12], e)
+            db.delete_session(session_id)
+            logger.info("Deleted session %s", session_id)
 
     def _purge_rlm_artifacts(self, session_id: str) -> None:
         """Deleting an RLM view session (or a parent holding some) also removes
