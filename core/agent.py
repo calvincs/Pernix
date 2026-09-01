@@ -1041,6 +1041,9 @@ class _CompactionController:
         self._tokens_before_last: int | None = None
         self._awaiting_measure = False
         self._stalled = False
+        # The live turn's root user row, set by run_agent once known, so the
+        # compactor clamps to the real ask rather than guessing it.
+        self.turn_user_msg_id: int | None = None
 
     @property
     def exhausted(self) -> bool:
@@ -1110,6 +1113,7 @@ class _CompactionController:
             self._session_id,
             payload.messages,
             history_budget=payload.history_budget,
+            turn_user_msg_id=self.turn_user_msg_id,
         )
         self.attempts += 1
         self._session.touch()  # keep the reaper honest — COMPACTING can take seconds
@@ -1241,6 +1245,7 @@ async def run_agent(
     )
     did_tool_calls = False
     compaction = _CompactionController(session, session_id)
+    compaction.turn_user_msg_id = _turn_user_msg_id
     _tried_fallback = False  # sticky per-turn: once we fail over, stay on fallback for all remaining rounds
     _last_usage = None  # local tracker — avoids reading shared client.last_usage across sessions
     # Counter for "stuck + told to call ask_user but did not" consecutive rounds.

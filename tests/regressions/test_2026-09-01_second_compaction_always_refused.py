@@ -18,7 +18,7 @@ from sessions.state import AgentSession
 
 @pytest.fixture
 def controller(monkeypatch):
-    async def _compact(session_id, messages, history_budget=None):
+    async def _compact(session_id, messages, **kwargs):
         return True
 
     monkeypatch.setattr("core.agent.compact_with_llm", _compact)
