@@ -1242,3 +1242,59 @@ body.fp-resizing #main { pointer-events: none; }
     padding: 8px; border-radius: var(--radius); overflow-x: auto;
     font-size: 0.9em; margin: 4px 0;
 }
+
+/* --- MCP tab --- */
+.fp-mcp-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    flex-shrink: 0;
+    background: var(--text-faint);
+}
+.fp-mcp-dot.ok { background: var(--success); }
+.fp-mcp-dot.err { background: var(--error); }
+.fp-mcp-dot.wait { background: var(--accent-dim); }
+.fp-mcp-dot.off { background: var(--border); }
+.fp-mcp-add {
+    margin: var(--sp-2) var(--sp-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.fp-mcp-add-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    padding: var(--sp-2);
+    resize: vertical;
+}
+.fp-mcp-add-actions {
+    display: flex;
+    gap: var(--sp-2);
+}
+.fp-mcp-add-btn {
+    background: var(--border);
+    border: none;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    padding: 3px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: var(--transition);
+}
+.fp-mcp-add-btn:hover { background: var(--accent); color: var(--bg); }
+.fp-mcp-add-btn.primary { background: var(--accent-dim); color: var(--bg); }
+.fp-mcp-add-result {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    font-family: var(--mono);
+    white-space: pre-wrap;
+}
+.fp-mcp-add-result.err { color: var(--error); }

@@ -532,6 +532,41 @@ class Settings:
     # expired, archived, promoted) — pending and validated rows are work.
     dream_hypothesis_retention_days: int = 90
 
+    # --- MCP (Model Context Protocol client) ---
+    # Connects to external MCP servers (stdio subprocess or Streamable HTTP)
+    # and registers their tools in the ToolRegistry as mcp_<server>_<tool>
+    # with source="mcp" — scout curation, the dangerous-tool gate, per-tool
+    # health metrics and post-mortems all apply unchanged. Enabled by
+    # default but fully inert until a server is configured in
+    # data/mcp_servers.json (industry convention: configuring a server IS
+    # the opt-in). A hot toggle-off shuts the manager down (stdio children
+    # die) but keeps the schemas registered — calls return a clear disabled
+    # error, never a run. Design: docs/dev/mcp-integration-plan.md.
+    mcp_enabled: bool = True
+    # Allow stdio (local subprocess) servers. False = remote-only mode; a
+    # stdio entry refuses to connect. The supply-chain valve — a stdio
+    # server is arbitrary local code.
+    mcp_stdio_enabled: bool = True
+    # Safety level stamped on MCP tools with no per-server override.
+    # Server-sent annotations may only TIGHTEN this (destructive_hint →
+    # dangerous), never loosen it — annotations are server-controlled and
+    # therefore untrusted.
+    mcp_default_safety: str = "caution"
+    mcp_call_timeout: int = 60  # per-call ceiling (s); per-server override in mcp_servers.json
+    mcp_connect_timeout: int = 30  # transport open + initialize + tools/list budget (s)
+    # Idle stdio servers are suspended (child reaped, tools kept registered,
+    # respawned on the next call) after this many seconds. 0 disables.
+    # HTTP connections are cheap and never reaped.
+    mcp_idle_seconds: int = 900
+    mcp_max_servers: int = 10  # configured-server cap (sanity valve, not a quota)
+    mcp_max_tools_per_server: int = 50  # excess tools are skipped with a warning
+    # Server-supplied tool descriptions are untrusted text headed for the
+    # system prompt: cap them (chars) before registration.
+    mcp_max_description_chars: int = 1024
+    # Periodic tools/list re-check for servers that don't send listChanged
+    # notifications. 0 disables the sweep (manual mcp_reload_server only).
+    mcp_refresh_interval_s: int = 900
+
     # --- Dream (idle-time introspection add-on, off by default) ---
     # Hypothesis generation over memory/Candor/post-mortems, validated against
     # recorded outcomes, promoted only through gates — docs/dev/dream-plan.md.

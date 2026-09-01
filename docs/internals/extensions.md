@@ -209,6 +209,7 @@ The teleological layer's agent surface (off by default): read the drive state, m
 | candor | off | `candor_enabled` (tool registration restart-gated) |
 | rlm — `rlm_process` | off | `rlm_enabled` (tool registration restart-gated) |
 | telos | off | `telos_enabled` (tool registration restart-gated) |
+| mcp — `mcp_list_servers`, `mcp_add_server`, `mcp_remove_server`, `mcp_reload_server` | on (inert with no servers configured) | `mcp_enabled` (hot both ways; management-tool registration restart-gated) |
 
 The total number of registered tools varies by configuration. With a minimal install (no Tavily key, no Chromium binary), the web extension contributes only `http_get`; with a fully-loaded install, it adds `search_web` and `browse_web`.
 
@@ -219,6 +220,7 @@ The total number of registered tools varies by configuration. With a minimal ins
 If the existing extensions don't cover what you need, two options:
 
 1. **Custom tool** via `toolmaker` — for one-off tools, no Pernix code change. See [../authoring/custom-tools.md](../authoring/custom-tools.md).
-2. **New extension module** — for a coherent group of related tools. Drop a directory under `core/extensions/yourmodule/` with an `__init__.py` exposing `register()`. Pernix discovers it on next start.
+2. **New extension module** — for a coherent group of related tools. Drop a directory under `core/extensions/yourmodule/` with an `__init__.py` exposing `register()`, **and add its module path to `BUNDLED_EXTENSIONS` in `core/extensions/__init__.py`** — the list is literal; there is no directory scan. It loads on the next start.
+3. **MCP server** — if the capability already exists as a Model Context Protocol server (or you'd rather build one out-of-process, in any language), configure it in the Explorer → MCP tab or `data/mcp_servers.json` instead of writing an extension. See [../mcp.md](../mcp.md).
 
 The second path is appropriate for serious capability extensions you'd want to maintain or share. Use the existing extensions as patterns — `core/extensions/scheduling/` is a clean example of "tools + persistent state on disk + REST endpoints," and `core/extensions/rlm/` is the reference for a gated, off-by-default add-on with a DB table, workspace run dirs, and snooze retention.

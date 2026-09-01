@@ -81,6 +81,17 @@ async def lifespan(app: FastAPI):
     skill_count = skill_reg.scan(skills_dir)
     logger.info("Skills loaded: %d skills scanned from %s", skill_count, skills_dir)
 
+    # 2.7 MCP manager — connects the servers in data/mcp_servers.json in the
+    # background and registers their tools as each comes ready. start()
+    # only spawns supervisor tasks; a slow or dead server never blocks boot.
+    if settings.mcp_enabled:
+        try:
+            from core.extensions.mcp.manager import get_mcp_manager
+
+            await get_mcp_manager().start()
+        except Exception as e:
+            logger.warning("MCP manager start failed (continuing): %s", e)
+
     # 2.8 Orphan rlm_runs sweep — same reasoning: the RLM engine is synchronous
     # and its child self-reaps with the server, so a 'running' row across a
     # restart is dead. Retention later purges the dir + row.
@@ -357,6 +368,16 @@ async def lifespan(app: FastAPI):
     except Exception:
         _kill_driver()
     try:
+        # Kills stdio MCP children and closes HTTP transports. Bounded: a
+        # wedged server must not hold the whole shutdown hostage.
+        from core.extensions.mcp.manager import get_mcp_manager_if_started
+
+        _mcp = get_mcp_manager_if_started()
+        if _mcp is not None:
+            await asyncio.wait_for(_mcp.shutdown(), timeout=8)
+    except Exception:
+        pass
+    try:
         from core.llm.client import get_llm_client
 
         await get_llm_client().close()
@@ -528,6 +549,7 @@ from api.routers import (
     context,
     health,
     jobs,
+    mcp,
     memory,
     models,
     push,
@@ -558,6 +580,7 @@ app.include_router(push.router)
 app.include_router(rlm.router)
 app.include_router(telos.router)
 app.include_router(voice.router)
+app.include_router(mcp.router)
 
 
 @app.get("/")
