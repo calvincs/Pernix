@@ -153,6 +153,20 @@ def _resolve_timeout(tool, arguments: dict | None) -> int:
     return min(max(requested, base), ceiling) + _DISPATCH_TIMEOUT_GRACE_S
 
 
+def _session_cancel_requested(context: dict | None) -> bool:
+    """Whether the session that owns this dispatch has asked to stop."""
+    sid = (context or {}).get("session_id", "")
+    if not sid:
+        return False
+    try:
+        from sessions.manager import get_manager
+
+        session = get_manager().get(sid)
+    except Exception:
+        return False
+    return bool(session is not None and getattr(session, "cancel_requested", False))
+
+
 def _kill_tool_subprocess(context: dict | None, call_id: str) -> None:
     """Kill the subprocesses spawned by ONE dispatch call after its timeout.
 
@@ -510,12 +524,13 @@ async def _execute_single(
     except asyncio.CancelledError:
         latency = int((time.monotonic() - start) * 1000)
         registry.metrics[name].record_failure("cancelled", latency)
-        return ToolExecutionResult(
-            tool_name=name,
-            content=f"Error: Tool '{name}' was cancelled",
-            was_error=True,
-            latency_ms=latency,
-        )
+        # Returning an error result here swallowed the cancel: Task.cancel()
+        # was consumed by the awaited future, _must_cancel never set, and the
+        # sequential loop dispatched the NEXT tool while the user's bash
+        # child kept running to its own timeout. Kill the child and let the
+        # cancel unwind the round; the agent loop stubs the tool rows.
+        _kill_tool_subprocess(context, call_id)
+        raise
     except Exception as e:
         latency = int((time.monotonic() - start) * 1000)
         registry.metrics[name].record_failure(str(e), latency)
@@ -614,8 +629,12 @@ async def execute_tool_round(
             else:
                 results[i] = result
 
-    # Run sequential tools in order
+    # Run sequential tools in order. A cancel that landed between two
+    # calls (flag set, no CancelledError in flight) must stop the round
+    # here, not after the next tool has already had its side effects.
     for i in sequential_idx:
+        if _session_cancel_requested(context):
+            raise asyncio.CancelledError()
         results[i] = await _execute_single(
             tool_calls[i]["name"],
             tool_calls[i].get("arguments", {}),
