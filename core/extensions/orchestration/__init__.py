@@ -1084,10 +1084,17 @@ def cancel_worker(worker_id: str, _context: dict | None = None) -> str:
     session = manager.get(worker_id)
     if not session:
         return f"Worker {worker_id} not found in memory"
-    if session.task and not session.task.done():
-        session.task.cancel()
-        return f"Worker {worker_id[:8]} cancelled"
-    return f"Worker {worker_id[:8]} is not running"
+
+    # This tool runs on a worker thread; Task.cancel() and the process
+    # sweep are loop-affine, so marshal like pause_worker does.
+    def _cancel_on_loop() -> str:
+        if manager.cancel_session(session):
+            return f"Worker {worker_id[:8]} cancelled"
+        return f"Worker {worker_id[:8]} is not running"
+
+    from core.events import call_on_loop
+
+    return call_on_loop(_cancel_on_loop, loop=(_context or {}).get("_loop"))
 
 
 def pause_worker(worker_id: str, _context: dict | None = None) -> str:
