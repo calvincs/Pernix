@@ -1852,7 +1852,10 @@ async def _run_scout_llm(
             else:
                 # Execute read-only tool
                 _step("tool", f"{tc.name}")
-                result = _exec_scout_tool(tc.name, args, brief)
+                # Off-loop: search_memory runs an embedding HTTP call plus a
+                # full vector load; inline it froze every session's SSE for
+                # the embed timeout on each scout tool round.
+                result = await asyncio.to_thread(_exec_scout_tool, tc.name, args, brief)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
                 logger.debug("Scout tool %s returned %d chars", tc.name, len(result))
 
