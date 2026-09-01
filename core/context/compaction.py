@@ -129,7 +129,57 @@ def exclude_orphans(messages: list[dict]) -> list[dict]:
             if tcid and tcid not in valid_ids:
                 continue  # Orphan — exclude
         result.append(msg)
-    return result
+    return repair_unanswered_tool_calls(result)
+
+
+ABORTED_CALL_STUB = "Error: tool call aborted before it returned — no result was recorded."
+
+
+def _tool_call_ids(msg: dict) -> list[str]:
+    tcs = msg.get("tool_calls")
+    if isinstance(tcs, str):
+        try:
+            tcs = json.loads(tcs)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(tcs, list):
+        return []
+    return [tc.get("id", "") for tc in tcs if isinstance(tc, dict) and tc.get("id")]
+
+
+def repair_unanswered_tool_calls(messages: list[dict]) -> list[dict]:
+    """Give every assistant tool_call a tool row, stubbing the ones that never got one.
+
+    The reverse orphan of `exclude_orphans`: the assistant row with
+    `tool_calls` is persisted *before* the round executes, so a round that
+    dies mid-flight (cancel during a parallel batch, the executor backstop,
+    a DB error while recording results) leaves it with no answers.
+    OpenAI-format providers reject that transcript — "assistant message
+    with tool_calls must be followed by tool messages" — on every later
+    turn until compaction happens to fold the row; with an Ollama fallback
+    configured the turn silently ran there instead. The stub is inserted
+    after any results the round did record, so ordering stays intact.
+    """
+    out: list[dict] = []
+    i, n = 0, len(messages)
+    while i < n:
+        msg = messages[i]
+        out.append(msg)
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            i += 1
+            continue
+        ids = _tool_call_ids(msg)
+        answered: set[str] = set()
+        j = i + 1
+        while j < n and messages[j].get("role") == "tool":
+            out.append(messages[j])
+            answered.add(messages[j].get("tool_call_id", ""))
+            j += 1
+        for tcid in ids:
+            if tcid not in answered:
+                out.append({"role": "tool", "tool_call_id": tcid, "content": ABORTED_CALL_STUB})
+        i = j
+    return out
 
 
 # ---------------------------------------------------------------------------

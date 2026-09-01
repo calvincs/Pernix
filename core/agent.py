@@ -1653,7 +1653,15 @@ async def run_agent(
 
         # Execute the surviving calls, then persist, emit and account for
         # every result in one pass.
-        results = await _execute_round(parsed_calls, session=session, session_id=session_id, registry=registry)
+        try:
+            results = await _execute_round(parsed_calls, session=session, session_id=session_id, registry=registry)
+        except BaseException as exc:
+            # The assistant row above is already on disk. Answer its calls
+            # before unwinding so the transcript never carries a tool_use
+            # with no result (the compiler also repairs the view, but the
+            # persisted row is what every later compile starts from).
+            await _stub_unanswered_calls(parsed_calls, save_turn_msg=_save_turn_msg, exc=exc)
+            raise
         await _record_round_results(
             parsed_calls,
             results,
@@ -2086,6 +2094,32 @@ def record_tool_outcome(turn, result) -> None:
         a_entry["refusals"] += 1
     elif result.was_error:
         a_entry["failures"] += 1
+
+
+async def _stub_unanswered_calls(parsed_calls: list[dict], *, save_turn_msg, exc: BaseException) -> None:
+    """Persist an error tool row for every call in a round that died before
+    `_record_round_results` ran, so the already-saved assistant `tool_calls`
+    row is never left unanswered."""
+    if isinstance(exc, asyncio.CancelledError):
+        why = "Error: tool call cancelled before it returned."
+    elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        why = "Error: tool round timed out before this call returned."
+    else:
+        why = f"Error: tool round aborted before this call returned ({type(exc).__name__})."
+    for item in parsed_calls:
+        tcid = item["tc"].get("id", "")
+        if not tcid:
+            continue
+        try:
+            await save_turn_msg(
+                "tool",
+                why,
+                tool_call_id=tcid,
+                latency_ms=0,
+                metadata=json.dumps({"was_error": True, "aborted": True}),
+            )
+        except Exception as e:  # never mask the original unwind
+            logger.warning("Could not stub aborted tool call %s: %s", tcid, e)
 
 
 async def _record_round_results(
