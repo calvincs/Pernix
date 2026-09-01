@@ -1390,19 +1390,25 @@ def add_cron_run(
         return cur.lastrowid
 
 
-def update_cron_run(run_id: int, status: str, error: str | None = None) -> None:
+def update_cron_run(run_id: int, status: str, error: str | None = None, session_id: str | None = None) -> None:
+    """Advance a cron run's status. session_id, when given, back-fills the
+    row — fresh-session jobs claim the run BEFORE the dispatch session
+    exists, and without the back-fill the History tab's session link stayed
+    NULL forever for every such run."""
     with connect_sessions() as conn:
+        sid_sql = ", session_id = ?" if session_id else ""
+        sid_arg = [session_id] if session_id else []
         if status in ("claimed", "running"):
             # Non-terminal transition — completed_at stays empty until the
             # run actually finishes.
             conn.execute(
-                "UPDATE cron_runs SET status = ?, error = ? WHERE id = ?",
-                (status, error, run_id),
+                f"UPDATE cron_runs SET status = ?, error = ?{sid_sql} WHERE id = ?",
+                (status, error, *sid_arg, run_id),
             )
         else:
             conn.execute(
-                "UPDATE cron_runs SET status = ?, error = ?, completed_at = ? WHERE id = ?",
-                (status, error, _now(), run_id),
+                f"UPDATE cron_runs SET status = ?, error = ?, completed_at = ?{sid_sql} WHERE id = ?",
+                (status, error, _now(), *sid_arg, run_id),
             )
 
 

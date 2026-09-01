@@ -312,6 +312,9 @@ async def test_execute_cron_job_claims_before_prompt(monkeypatch):
     assert observed["last_fired_meta"] == observed["fire_time_at_prompt"]
     final = db.list_cron_runs("claim-job")[0]
     assert final["status"] == "completed"
+    # Fresh-session jobs claim the run before the session exists — the
+    # resolved id must be back-filled or the History link stays NULL forever.
+    assert final["session_id"] == "sess-claim"
 
 
 async def test_execute_cron_job_error_path(monkeypatch):

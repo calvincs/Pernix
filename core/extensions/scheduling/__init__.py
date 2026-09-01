@@ -763,8 +763,11 @@ async def _execute_cron_job(meta: dict):
     try:
         db.update_cron_run(run_id, "running")
         # Bind the session id BEFORE dispatch: a timeout/error must still
-        # reference the session that holds the partial transcript.
+        # reference the session that holds the partial transcript. The
+        # back-fill matters for fresh-session jobs — the claim row above was
+        # written before this session existed.
         session_id = _ensure_dispatch_session(session_id, title=f"Cron: {name}", space_id=meta.get("space_id"))
+        db.update_cron_run(run_id, "running", session_id=session_id)
         await _dispatch_prompt(session_id, prompt, model=model, allowed_tools=meta.get("allowed_tools"))
 
         duration_ms = int((time.time() - start_time) * 1000)
@@ -780,7 +783,9 @@ async def _execute_cron_job(meta: dict):
         )
     except Exception as e:
         logger.error("Cron job '%s' failed: %s", name, e)
-        db.update_cron_run(run_id, "error", str(e))
+        # session_id is whatever resolution reached before the failure —
+        # back-fill it when we have one so the error row links its transcript.
+        db.update_cron_run(run_id, "error", str(e), session_id=session_id)
         bus.emit({"type": "job.error", "job_name": name, "session_id": session_id, "error": str(e)})
         # Notify user about the failure via push/webhook
         _notify_job_failure(manager, bus, name, session_id, str(e))
