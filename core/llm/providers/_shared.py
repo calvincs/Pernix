@@ -47,6 +47,20 @@ def http_status_failover(provider: str, status: int, body: str) -> FailoverError
     return FailoverError(classify_http_error(status, body), f"{provider} {status}: {body[:500]}")
 
 
+def describe_exception(exc: BaseException) -> str:
+    """Error text that is never empty and always names the exception class.
+
+    `str(httpx.ReadTimeout())` is `''` (httpx 0.28), and so are several other
+    transport errors. An adapter that yields `StreamEvent(ERROR, error=str(e))`
+    then hands the ladder an error it tests as falsy and drops — the stream
+    ends as a clean, empty completion with no retry, no fallback, and no
+    error surfaced. The class name is also what `_RETRYABLE_MARKERS` keys on.
+    """
+    text = str(exc).strip()
+    name = type(exc).__name__
+    return f"{name}: {text}" if text and text != name else name
+
+
 def stream_failover(provider: str, exc: Exception) -> FailoverError:
     """Classify an httpx failure raised while opening/reading a stream."""
     if isinstance(exc, httpx.HTTPStatusError):

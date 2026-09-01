@@ -12,7 +12,7 @@ import httpx
 
 from config import settings
 from core.llm.errors import FailoverError, FailoverReason, classify_http_error
-from core.llm.providers._shared import http_status_failover, parse_usage, stream_failover
+from core.llm.providers._shared import describe_exception, http_status_failover, parse_usage, stream_failover
 from core.llm.types import (
     ChatResponse,
     HealthStatus,
@@ -317,10 +317,10 @@ class OpenRouterProvider:
             if not emitted_output:
                 failing_over = True
                 raise stream_failover("OpenRouter", e) from e
-            yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
+            yield StreamEvent(type=StreamEventType.ERROR, error=describe_exception(e))
         except Exception as e:
             logger.error("OpenRouter stream error: %s", e)
-            yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
+            yield StreamEvent(type=StreamEventType.ERROR, error=describe_exception(e))
         finally:
             # A failover in flight discards this stream entirely — emitting a
             # DONE here would hand the router a clean end-of-stream and the
