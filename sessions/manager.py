@@ -1764,7 +1764,7 @@ class SessionManager:
         # Grab the last assistant message as the best-available content.
         last_text = ""
         try:
-            messages = db.get_messages(session.session_id, last=100)
+            messages = await asyncio.to_thread(db.get_messages, session.session_id, last=100)
             for m in reversed(messages):
                 if m["role"] == "assistant" and m.get("content"):
                     last_text = m["content"]
@@ -1783,7 +1783,7 @@ class SessionManager:
         reflect_verdict: str | None = None
         reflect_reason: str = ""
         try:
-            msgs = db.get_messages(session.session_id, last=100)
+            msgs = await asyncio.to_thread(db.get_messages, session.session_id, last=100)
             for _m in reversed(msgs):
                 if _m.get("role") == "reflect":
                     import json as _json
@@ -2263,7 +2263,10 @@ class SessionManager:
         deferred_task: asyncio.Task | None = None
         async with parent.lock:
             current_v2 = sv2._current_state(parent)
-            resume_msg = self._build_resume_message(parent)
+            # Off-loop: one 100-row transcript read per worker, under the
+            # parent lock — an orchestrator with 20 workers stalled every
+            # SSE stream for the duration when this ran inline.
+            resume_msg = await asyncio.to_thread(self._build_resume_message, parent)
             # A fast worker can finish while the parent's suspended turn is
             # still settling its post-hooks. Starting the synthesis turn now
             # would run two turns against one transcript, so queue it and
