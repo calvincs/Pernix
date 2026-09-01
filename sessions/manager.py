@@ -2809,7 +2809,14 @@ class SessionManager:
             if v2 is sv2.SessionStateV2.PAUSED:
                 # Never reap for inactivity while intentionally paused.
                 # Safety net: > 24h OR parent session deleted (orphan).
-                parent_gone = session.parent_session_id is not None and session.parent_session_id not in self._sessions
+                # "Gone" means deleted, not merely reaped from memory: an
+                # idle parent with its tab closed is evicted after max_idle,
+                # and that used to read as deleted and kill a worker the
+                # user had deliberately paused.
+                parent_gone = session.parent_session_id is not None and (
+                    session.parent_session_id not in self._sessions
+                    and db.get_session(session.parent_session_id) is None
+                )
                 if idle >= 86400 or parent_gone:
                     logger.warning(
                         "Force-cancelling orphan/stale PAUSED session %s " "(idle=%ds, parent_gone=%s)",
