@@ -1,8 +1,7 @@
-"""Pernix — Tool discovery: discover_tools, get_tool_schema."""
+"""Pernix — Tool discovery: discover_tools."""
 
 from __future__ import annotations
 
-import json
 import logging
 
 logger = logging.getLogger("pernix.tools.discovery")
@@ -16,8 +15,9 @@ def discover_tools(
 ) -> str:
     """Search for available tools by natural language description.
 
-    Returns tool summaries (name + description + tags), not full schemas.
-    Use get_tool_schema(name) to get full parameter details for a specific tool.
+    Returns tool summaries (name + description + tags). Discovered tools are
+    added to the session's active set, so their full schemas arrive on the
+    next round automatically.
     """
     from core.tools.registry import get_registry
 
@@ -36,26 +36,6 @@ def discover_tools(
         if tags_str:
             lines.append(f"  tags: {tags_str}")
     return "\n".join(lines)
-
-
-def get_tool_schema(name: str, _context: dict | None = None) -> str:
-    """Get the full JSON Schema for a tool's parameters.
-
-    Use this after discover_tools to get exact parameter definitions
-    before calling a discovered tool.
-    """
-    from core.tools.registry import get_registry
-
-    registry = get_registry()
-
-    tool = registry.get(name)
-    if not tool:
-        return f"Error: Tool '{name}' not found. Use discover_tools to search."
-    if registry.is_disabled(name):
-        return f"Error: Tool '{name}' is disabled. " "Enable it in Explorer > Tools before use."
-
-    schema = tool.to_openai_schema()
-    return json.dumps(schema, indent=2)
 
 
 def register(reg) -> None:
@@ -84,22 +64,5 @@ def register(reg) -> None:
         category="core",
         tags=["discover", "find", "search", "tools", "capabilities", "available"],
         timeout=15,
-        parallel_safe=True,
-    )
-
-    reg.register(
-        name="get_tool_schema",
-        func=get_tool_schema,
-        description="Get the full parameter schema for a specific tool. Use after discover_tools to see exact parameters before calling.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Exact tool name"},
-            },
-            "required": ["name"],
-        },
-        category="core",
-        tags=["schema", "parameters", "tool", "details", "usage"],
-        timeout=5,
         parallel_safe=True,
     )

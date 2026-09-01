@@ -920,7 +920,6 @@ CORE_MINIMUM = frozenset(
         "ask_user",
         "notify_user",
         "discover_tools",
-        "get_tool_schema",
         "discover_skills",
         "load_skill",
         "read_skill_resource",

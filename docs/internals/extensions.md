@@ -106,7 +106,7 @@ Always enabled. Skill authoring without leaving the chat.
 | `add_skill_reference` | safe | Drop a doc into `references/` |
 | `remove_skill_script` / `remove_skill_reference` | safe | Delete a script / reference |
 
-`delete_skill` lives in builtin tools (`core/tools/builtin/skill_tools.py`) and is **dangerous**.
+Deleting a skill is a human action: use the Explorer → Skills panel or `DELETE /api/skills/{name}` (the agent-side `delete_skill` tool was removed 2026-09 — never used, and the UI path already covered it).
 
 See [../authoring/writing-skills.md](../authoring/writing-skills.md).
 

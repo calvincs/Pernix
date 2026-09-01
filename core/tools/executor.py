@@ -333,9 +333,9 @@ async def _execute_single(
                             # Single-use approvals must actually cover this
                             # call: every significant string argument has to
                             # appear in the scope the user was shown. Without
-                            # this, approving "delete skill foo" unlocks
-                            # delete_skill(name="bar") — the gate would match
-                            # on tool name alone.
+                            # this, approving "remove server foo" unlocks
+                            # mcp_remove_server(name="bar") — the gate would
+                            # match on tool name alone.
                             _scope_text = " ".join(str(entry.get("scope", "")).lower().split())
                             _uncovered = [
                                 k

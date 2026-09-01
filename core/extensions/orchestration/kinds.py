@@ -41,12 +41,10 @@ _COMMON_TOOLS = frozenset(
         "glob",
         "grep",
         "discover_tools",
-        "get_tool_schema",
         "recall",
         "deep_recall",
         "notify_parent",
         "discover_skills",
-        "list_skills",
         "load_skill",
         "read_skill_resource",
     }

@@ -258,8 +258,7 @@ Use those offset and limit values EXACTLY. Do NOT invent your own pagination
 (no limit=1 to "probe", no random offsets). Do not assume partial output is complete.
 
 Core tools: file_read, file_write, file_edit, glob, grep, bash, remember, recall,
-ask_user, discover_tools, get_tool_schema, discover_skills, load_skill,
-read_skill_resource.
+ask_user, discover_tools, discover_skills, load_skill, read_skill_resource.
 
 ASKING THE USER A QUESTION: When you need a decision before continuing —
 confirmation before a destructive or large action, a yes/no, an A/B choice,

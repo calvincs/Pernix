@@ -60,12 +60,10 @@ CANARY_TOOL_ALLOWLIST = frozenset(
         "view_image",
         "recall",
         "deep_recall",
-        "list_skills",
         "discover_skills",
         "load_skill",
         "read_skill_resource",
         "discover_tools",
-        "get_tool_schema",
         "list_gates",
     }
 )

@@ -179,7 +179,6 @@ Tools classified as `dangerous` require explicit per-invocation user confirmatio
 | Tool | Why |
 |---|---|
 | `search_web`, `browse_web` | Outbound traffic and untrusted page content entering the context |
-| `delete_skill` | Destroys authored artifacts |
 | `create_tool`, `update_tool` | Writes model-authored Python into the server's own source tree and imports it **into the server process** — see [Toolmaker](#toolmaker-model-authored-code-in-the-server-process) below |
 | `create_skill`, `add_skill_script` | Authors instructions the agent will later load and follow, and scripts `load_skill` then tells it to run under `bash` |
 | `add_gate` | Registers shell that re-runs unattended at every turn end for the life of the session |
@@ -190,7 +189,7 @@ You can promote or demote any tool via `POST /api/tools/set-safety` or the Explo
 
 **The gate surfaces intent. It is not a containment boundary.**
 
-`bash` and `repl` stay at the `caution` level, which does not prompt. That is a deliberate choice, not an oversight: they are the product's core utility, and prompting on every call would make the agent unusable for ordinary work. The consequence has to be stated plainly — **every dangerous-gated action has an ungated equivalent through `bash`.** `delete_skill` prompts; `bash("rm -r data/skills/foo")` does not. `create_tool` prompts; `bash` writing the same file and waiting for a restart does not.
+`bash` and `repl` stay at the `caution` level, which does not prompt. That is a deliberate choice, not an oversight: they are the product's core utility, and prompting on every call would make the agent unusable for ordinary work. The consequence has to be stated plainly — **every dangerous-gated action has an ungated equivalent through `bash`.** `create_skill` prompts; `bash` writing the same SKILL.md does not. `create_tool` prompts; `bash` writing the same file and waiting for a restart does not.
 
 So the gate's real job is to make a consequential action *visible and deliberate* at the moment the agent takes it — it stops a careless tool call, not a determined one. **The VM or container Pernix runs in is the actual boundary.** This is the same posture [internals/rlm.md](internals/rlm.md) states for the RLM child sandbox, and the same one the shell denylist below is labeled with.
 

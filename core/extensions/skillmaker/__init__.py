@@ -208,36 +208,6 @@ def update_skill(
     return f"Skill '{name}' updated."
 
 
-def list_skills(_context: dict | None = None) -> str:
-    """List all enabled installed skills with their metadata.
-
-    Disabled skills are hidden from the agent (they appear in the Explorer UI
-    only). The agent should not be told about skills it cannot use.
-    """
-    from core.skills.registry import get_skill_registry
-
-    reg = get_skill_registry()
-    skills = reg.enabled_skills()
-
-    if not skills:
-        return "No skills installed. Use create_skill to create one."
-
-    lines = []
-    for s in sorted(skills, key=lambda x: x.name):
-        tags_str = ", ".join(s.tags[:5]) if s.tags else "none"
-        resources = reg.list_resources(s.name)
-        extras = []
-        if "scripts" in resources:
-            extras.append(f"{len(resources['scripts'])} scripts")
-        if "references" in resources:
-            extras.append(f"{len(resources['references'])} refs")
-        extra_str = f" [{', '.join(extras)}]" if extras else ""
-        lines.append(f"- **{s.name}** (v{s.version}): {s.description}")
-        lines.append(f"  tags: {tags_str}{extra_str}")
-
-    return "\n".join(lines)
-
-
 def add_skill_script(
     name: str,
     script_name: str,
@@ -543,17 +513,6 @@ def register(reg) -> None:
         timeout=30,
         parallel_safe=False,
         safety_level="safe",
-        **common,
-    )
-
-    reg.register(
-        name="list_skills",
-        func=list_skills,
-        description="List all installed skills with their metadata, tags, and resources.",
-        parameters={"type": "object", "properties": {}},
-        tags=tags_base + ["list", "show", "available"],
-        timeout=15,
-        parallel_safe=True,
         **common,
     )
 
