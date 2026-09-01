@@ -280,8 +280,8 @@ def _make_approved_session(monkeypatch, tool_name, scope, persistent=False):
 
 async def test_dangerous_approval_scope_mismatch_blocks(monkeypatch):
     """A single-use approval whose scope doesn't mention the call's argument
-    values must not unlock the call (approve 'delete skill foo' must not
-    allow delete_skill(name='bar'))."""
+    values must not unlock the call (approving a scope naming 'foo' must not
+    allow the same tool called with name='bar')."""
 
     def dangerous_fn(name=""):
         return f"deleted {name}"

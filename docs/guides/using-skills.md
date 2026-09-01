@@ -75,7 +75,7 @@ git clone https://example.com/some-skill-repo.git some-skill-name/
 
 The next turn picks it up. There's no install command — discovery is just a directory scan.
 
-To uninstall: delete the directory, or use the agent's `delete_skill` tool (it's a dangerous tool, so it'll ask you to confirm first).
+To uninstall: delete the directory, or use the trash action in Explorer → Skills (`DELETE /api/skills/{name}`).
 
 ---
 

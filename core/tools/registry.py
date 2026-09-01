@@ -585,11 +585,7 @@ class ToolRegistry:
             expected = [
                 p.name for p in sig.parameters.values() if p.name != "_context" and p.default is inspect.Parameter.empty
             ]
-            return (
-                f"Error calling '{name}': {e}. "
-                f"Required parameters: {expected}. "
-                f"Use get_tool_schema('{name}') to see the full parameter spec."
-            )
+            return f"Error calling '{name}': {e}. Required parameters: {expected}."
         except Exception as e:
             return f"Error: {e}"
         finally:

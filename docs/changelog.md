@@ -88,7 +88,7 @@ The DB schema lands at **v29** (from v19); all ten migrations run automatically 
 
 **Restart recovery for stuck sessions.** Sessions stuck in `PROCESSING` or `AWAITING_WORKERS` from a prior crash are reconciled to `IDLE_READY` immediately at startup, instead of waiting for the 5-minute reaper tick. (migration v16, commit `cf849fa`)
 
-**`delete_skill` and `delete_workflow` tools.** Both are dangerous (require `ask_user` + `approve_dangerous_tool`); cron sessions auto-bypass the gate. (commit `9085876`) *(`delete_workflow` removed 2026-08.)*
+**`delete_skill` and `delete_workflow` tools.** Both are dangerous (require `ask_user` + `approve_dangerous_tool`); cron sessions auto-bypass the gate. (commit `9085876`) *(`delete_workflow` removed 2026-08; `delete_skill` removed 2026-09 — zero uses in 10 weeks, UI delete covers it.)*
 
 **Workspace upload limit raised from 10 MB to 250 MB.** Per file. Useful for media-cast skills and bulk file analysis. (commit `9b883b3`)
 
