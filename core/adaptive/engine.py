@@ -926,6 +926,19 @@ def rollback(batch_id: str | None = None, event_id: int | None = None, actor: st
         _reverse_event(ev, actor)
         reversed_ids = [ev["id"]]
     else:
+        # Status guard: a batch is rollback-able exactly once. Its journal
+        # snapshots describe the world at apply time, and re-playing them
+        # over a batch that was already reversed clobbers whatever landed
+        # since — a later batch's create of the same id would be hard-
+        # deleted, a later update overwritten with the stale before_json.
+        # The API exposes this path with no other check.
+        batch = db.adaptive_get_batch(batch_id)
+        if batch is None:
+            raise AdaptiveError(f"unknown batch {batch_id}")
+        if batch.get("status") not in ("applied", "suspect"):
+            raise AdaptiveError(
+                f"batch {batch_id} is {batch.get('status')}, not applied/suspect — nothing to roll back"
+            )
         events = [e for e in db.adaptive_events_for_batch(batch_id) if e.get("action") != "rollback"]
         if not events:
             raise AdaptiveError(f"no events for batch {batch_id}")
