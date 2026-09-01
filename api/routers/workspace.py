@@ -178,7 +178,21 @@ async def serve_workspace_file(path: str):
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(404, detail="File not found")
     media_type = _CONTENT_TYPES.get(file_path.suffix.lower())
-    return FileResponse(file_path, media_type=media_type)
+    # Workspace files are agent- and upload-authored, i.e. untrusted. Served
+    # bare, an .html/.svg document would execute on the app origin with the
+    # auth token one `localStorage` read away. `sandbox` (no allow-* flags)
+    # gives the document an opaque origin and disables scripts, so it still
+    # previews but cannot reach the token, cookies, or the API. `nosniff`
+    # stops a browser from promoting a .txt to HTML on content sniffing.
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        headers={
+            "Content-Security-Policy": "sandbox",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
 
 
 @router.put("/workspace/{path:path}")

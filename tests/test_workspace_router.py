@@ -141,3 +141,23 @@ async def test_workspace_delete_not_found(tmp_path, monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.delete("/workspace/nonexistent.txt")
     assert resp.status_code == 404
+
+
+async def test_workspace_serve_file_is_sandboxed(tmp_path, monkeypatch):
+    """Served workspace files must not run as the app origin.
+
+    An agent-saved page (or an uploaded one) that renders inline on the app
+    origin can read the auth token out of localStorage. `sandbox` gives it an
+    opaque origin with scripts disabled; `nosniff` keeps a .txt a .txt.
+    """
+    monkeypatch.setattr("config.settings.workspace_dir", str(tmp_path))
+    (tmp_path / "report.html").write_text("<script>localStorage.getItem('pernix_auth_token')</script>")
+    (tmp_path / "notes.txt").write_text("plain")
+    app = _make_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for name in ("report.html", "notes.txt"):
+            resp = await client.get(f"/workspace/{name}")
+            assert resp.status_code == 200
+            assert resp.headers["content-security-policy"] == "sandbox"
+            assert resp.headers["x-content-type-options"] == "nosniff"
+            assert resp.headers["referrer-policy"] == "no-referrer"
