@@ -1694,6 +1694,19 @@
     text-overflow: ellipsis;
 }
 
+/* Recovery notices ("reconnected — transcript refreshed"). Its own span so
+   updateStatus('') cannot wipe it, and its own colour so it reads as an
+   explanation rather than as live turn status. */
+#status-bar .notice {
+    font-size: var(--text-xxs);
+    color: var(--accent-dim);
+    max-width: 240px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#status-bar .notice:empty { display: none; }
+
 .status-divider {
     width: 1px;
     align-self: stretch;

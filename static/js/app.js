@@ -2599,12 +2599,17 @@ function _isRlmView() {
 // should know happened but must not have to dismiss.
 let _noticeTimer = null;
 function _showNotice(msg, ms = 6000) {
-    updateStatus(msg);
+    // Its own span. A notice explains something that already happened and has
+    // to stay readable for a few seconds; it used to share #status-info with
+    // the live turn status, so the very next updateStatus('') — which fires on
+    // stream.done, on every idle state change — wiped it mid-sentence.
+    const noticeEl = document.getElementById('status-notice');
+    if (!noticeEl) { updateStatus(msg); return; }
+    noticeEl.textContent = msg;
     if (_noticeTimer) clearTimeout(_noticeTimer);
     _noticeTimer = setTimeout(() => {
         _noticeTimer = null;
-        const infoEl = document.getElementById('status-info');
-        if (infoEl && infoEl.textContent === msg) infoEl.textContent = '';
+        if (noticeEl.textContent === msg) noticeEl.textContent = '';
     }, ms);
 }
 
@@ -2767,8 +2772,6 @@ function _showStopButton() {
     btn.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
         <rect x="6" y="6" width="12" height="12" rx="2"/>
     </svg>`;
-    const statusBar = document.getElementById('status-bar');
-    if (statusBar) statusBar.classList.add('processing');
 }
 
 function _showSendButton() {
@@ -2784,8 +2787,6 @@ function _showSendButton() {
         <line x1="22" y1="2" x2="11" y2="13"></line>
         <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
     </svg>`;
-    const statusBar = document.getElementById('status-bar');
-    if (statusBar) statusBar.classList.remove('processing');
 }
 
 async function _cancelSession() {

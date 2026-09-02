@@ -253,6 +253,34 @@
     z-index: 45;
     pointer-events: none;
 }
+/* Recovery notices ride in the same floating strip as the status line. When
+   both are up the notice stacks above it rather than covering it. */
+#status-bar .notice:empty {
+    display: none;
+}
+#status-bar .notice:not(:empty) {
+    display: block;
+    position: fixed;
+    left: var(--sp-3);
+    right: var(--sp-3);
+    bottom: calc(76px + var(--safe-bottom));
+    max-width: none;
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+    padding: var(--sp-1) var(--sp-2);
+    font-size: var(--text-xxs);
+    color: var(--accent-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    z-index: 45;
+    pointer-events: none;
+}
+#status-bar .info:not(:empty) ~ .notice:not(:empty) {
+    bottom: calc(108px + var(--safe-bottom));
+}
+
 #status-bar .ctx {
     display: none;
 }
