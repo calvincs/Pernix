@@ -7,6 +7,7 @@ import { get, post, del, getAuthToken } from '../api.js';
 import { isMobile } from '../mobile.js';
 import { notify } from '../feedback.js';
 import { openSettings } from './modals/settings.js';
+import { confirmDanger } from './modals/confirm.js';
 
 function _authHdr() { const t = getAuthToken(); return t ? { 'Authorization': `Bearer ${t}` } : {}; }
 import {
@@ -1454,8 +1455,18 @@ async function saveFile(container, { force = false } = {}) {
 // ---------------------------------------------------------------------------
 
 async function deleteEntry(path, type = 'file') {
-    const label = type === 'dir' ? `folder "${path}" and all its contents` : path;
-    if (!confirm(`Delete ${label} \u2014 this cannot be undone.`)) return;
+    const name = path.split('/').pop() || path;
+    const go = await confirmDanger({
+        title: type === 'dir' ? `Delete the folder "${name}"?` : `Delete "${name}"?`,
+        body: type === 'dir'
+            ? [`Everything inside ${path} is deleted with it.`,
+               'Workspace files have no trash — this cannot be undone.']
+            : [`${path} is removed from the workspace.`,
+               'Workspace files have no trash — this cannot be undone.'],
+        verb: 'Delete',
+        cancelLabel: 'Keep',
+    });
+    if (!go) return;
     try {
         await del(`/workspace/${path.split('/').map(encodeURIComponent).join('/')}`);
         if (_state.currentFile?.path === path ||
@@ -2344,9 +2355,18 @@ function renderSkillViewer(container) {
         const applyBtn = el('button', { class: 'fp-btn primary', type: 'button' }, [text('apply')]);
         applyBtn.title = 'Insert the suggested change into this skill\'s SKILL.md under the referenced section. Re-run the skill to validate the fix.';
         applyBtn.addEventListener('click', async () => {
-            if (!confirm(`Apply this proposal to ${proposal.skill_name}'s SKILL.md?\n\nSection: ${proposal.section || '(new section)'}\n\nNothing re-runs automatically — invoke the skill again to validate the fix.`)) {
-                return;
-            }
+            const go = await confirmDanger({
+                title: `Apply this change to ${proposal.skill_name}?`,
+                body: [
+                    `The suggested text is inserted into ${proposal.skill_name}/SKILL.md under `
+                    + `${proposal.section ? `"${proposal.section}"` : 'a new section'}.`,
+                    'Nothing re-runs automatically — invoke the skill again to see whether it helped. '
+                    + 'The file stays editable here afterwards.',
+                ],
+                verb: 'Apply change',
+                cancelLabel: 'Not now',
+            });
+            if (!go) return;
             try {
                 const res = await post(`/api/skills/proposals/${proposal.id}/apply`, {});
                 _pendingProposals = _pendingProposals.filter(p => p.id !== proposal.id);
@@ -2586,7 +2606,17 @@ async function toggleSkill(name, enabled) {
 }
 
 async function deleteSkill(name) {
-    if (!confirm(`Delete the skill "${name}" and all of its files \u2014 this cannot be undone.`)) return;
+    const go = await confirmDanger({
+        title: `Delete the skill "${name}"?`,
+        body: [
+            `Its whole directory under data/skills/ goes — SKILL.md, scripts, references, assets.`,
+            'The agent stops being able to invoke it. This cannot be undone; disabling it instead '
+            + 'takes it out of consideration and keeps the files.',
+        ],
+        verb: 'Delete skill',
+        cancelLabel: 'Keep it',
+    });
+    if (!go) return;
     try {
         await del(`/api/skills/${encodeURIComponent(name)}`);
         if (_state.currentFile?.path === name) {
@@ -3233,7 +3263,21 @@ function _buildMcpServerItem(s) {
     }, [icon('x')]);
     delBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (!confirm(`Remove the MCP server "${s.name}" and unregister its tools \u2014 this cannot be undone.`)) return;
+        const tools = s.tool_count || 0;
+        const go = await confirmDanger({
+            title: `Remove the server "${s.name}"?`,
+            body: [
+                tools
+                    ? `Its ${tools} tool${tools === 1 ? '' : 's'} are unregistered immediately; the agent `
+                      + 'can no longer call them.'
+                    : 'Its entry is deleted and any tools it registered are unregistered.',
+                'The config is removed from data/mcp_servers.json — you would have to paste it again. '
+                + 'Disabling the server instead keeps the config and just stops it.',
+            ],
+            verb: 'Remove server',
+            cancelLabel: 'Keep it',
+        });
+        if (!go) return;
         try { await del(`/api/mcp/servers/${encodeURIComponent(s.name)}`); }
         catch (err) { notify('error', `Could not remove ${s.name}: ${err.message || err}`); }
         await loadMcp();
