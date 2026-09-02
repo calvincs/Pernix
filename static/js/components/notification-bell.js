@@ -199,7 +199,10 @@ function _renderItems() {
 
     if (_items.length === 0) {
         container.appendChild(
-            el('div', { class: 'bell-empty' }, [text('No notifications')])
+            el('div', { class: 'bell-empty' }, [text(
+                'Nothing waiting. Questions from the agent and finished background '
+                + 'turns land here — leave this panel closed and the bell will count them.'
+            )])
         );
         return;
     }
