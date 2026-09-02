@@ -18,6 +18,7 @@ import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 logger = logging.getLogger("pernix.ext.mcp")
 
@@ -174,6 +175,19 @@ def parse_server_entry(name: str, raw: dict) -> MCPServerConfig:
                     "Put the secret in .env (e.g. MY_TOKEN=...) and reference it "
                     'here as "${MY_TOKEN}" — mcp_servers.json is plaintext on disk.'
                 )
+    # The url was exempt from the scan above, but hosted MCP endpoints
+    # commonly carry the credential in the query string
+    # (https://host/sse?api_key=sk-...) or in userinfo. Those were accepted,
+    # written to disk in plaintext, and echoed back by GET /api/mcp/servers.
+    if cfg.url and "${" not in cfg.url:
+        parsed = urlparse(cfg.url)
+        for part in (parsed.query, parsed.username or "", parsed.password or ""):
+            if part and _SECRET_LITERAL_RE.search(part):
+                raise ValueError(
+                    f"Server '{name}': the url carries what looks like a literal secret. "
+                    'Put it in .env and reference it as "${MY_TOKEN}" — mcp_servers.json '
+                    "is plaintext on disk and the url is returned by the API."
+                )
     return cfg
 
 
@@ -229,19 +243,50 @@ def load_server_configs(path: Path | None = None) -> dict[str, MCPServerConfig]:
         logger.warning("%s: expected an object of servers", path)
         return {}
     out: dict[str, MCPServerConfig] = {}
+    skipped: dict[str, object] = {}
     for name, raw in servers.items():
         try:
             out[name] = parse_server_entry(str(name), raw)
         except ValueError as e:
             logger.warning("Skipping MCP server entry: %s", e)
+            skipped[str(name)] = raw
+    # Remembered so save_server_configs can put them back. The saved file is
+    # written from the manager's live connections, which are only the entries
+    # that PARSED — so one hand-edited typo used to be deleted outright by
+    # the next add/remove/toggle from the UI, with no notice.
+    _remember_skipped(path, skipped)
     return out
+
+
+# name -> raw entry, per settings file, for entries that failed validation.
+_SKIPPED_ENTRIES: dict[str, dict[str, object]] = {}
+
+
+def _remember_skipped(path: Path, skipped: dict[str, object]) -> None:
+    key = str(path)
+    if skipped:
+        _SKIPPED_ENTRIES[key] = skipped
+    else:
+        _SKIPPED_ENTRIES.pop(key, None)
+
+
+def skipped_server_entries(path: Path | None = None) -> dict[str, object]:
+    """Raw entries the last load of this file could not parse."""
+    return dict(_SKIPPED_ENTRIES.get(str(path or MCP_SERVERS_PATH), {}))
 
 
 def save_server_configs(configs: dict[str, MCPServerConfig], path: Path | None = None) -> None:
     """Atomic write (tempfile + os.replace), settings.json style."""
     path = path or MCP_SERVERS_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"mcpServers": {name: cfg.to_dict() for name, cfg in sorted(configs.items())}}
+    entries: dict[str, object] = {name: cfg.to_dict() for name, cfg in configs.items()}
+    # Carry forward anything the last load rejected, so a rewrite triggered
+    # from the UI cannot silently delete a server the user is mid-way
+    # through fixing by hand. A name that has since been re-added properly
+    # wins over its skipped version.
+    for name, raw in skipped_server_entries(path).items():
+        entries.setdefault(name, raw)
+    data = {"mcpServers": {name: entries[name] for name in sorted(entries)}}
     tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(tmp_fd, "w") as f:
