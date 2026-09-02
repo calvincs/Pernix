@@ -161,7 +161,7 @@ The structural reason is that a workflow is a step graph you have to declare *be
 | `POST /api/workflows/proposals/{id}/reject` | `POST /api/skills/proposals/{id}/reject` |
 | `POST /api/workflows/proposals/{id}/apply` | `POST /api/skills/proposals/{id}/apply` |
 
-The Explorer's Skills tab already points at the new paths; only external callers need updating.
+The Explorer's Capabilities → Skills tab already points at the new paths; only external callers need updating.
 
 ### 2026-08-07 — Scheduled backups; one-active-goal index (migration v26)
 
@@ -195,7 +195,7 @@ If you plan to enable the self-improvement pair, follow the burn-in order: **`ca
 
 ### 2026-07 — RLM (recursive processing) add-on, off by default
 
-Nothing to do on upgrade: migration v18 adds the `rlm_runs` table automatically (v17, from the same period, adds session pinning). If you want the feature, enabling `rlm_enabled` in Settings → General requires a **restart** — the `rlm_process` tool registers at startup only. RLM has no model settings of its own: the root runs on your Primary model and sub-calls on Background. Runs leave residue in `data/workspace/rlm/<run_id>/`; snooze purges it after `rlm_run_retention_days` (default 30), and it's safe to delete by hand.
+Nothing to do on upgrade: migration v18 adds the `rlm_runs` table automatically (v17, from the same period, adds session pinning). If you want the feature, enabling `rlm_enabled` in Settings → Tools & safety → Large-input runs (RLM) requires a **restart** — the `rlm_process` tool registers at startup only. RLM has no model settings of its own: the root runs on your Primary model and sub-calls on Background. Runs leave residue in `data/workspace/rlm/<run_id>/`; snooze purges it after `rlm_run_retention_days` (default 30), and it's safe to delete by hand.
 
 ### 2026-05-05 — `data/agent/AGENTS.md` renamed to `SESSIONS.md`
 

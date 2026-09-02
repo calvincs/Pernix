@@ -8,8 +8,9 @@ validated — and validated conclusions reach live behavior only through the
 [Adaptive Layer](canary-and-adaptive.md)'s governed promotion path (itself
 off by default).
 
-Off by default. Enable in Settings → Dream (Introspection); all settings apply
-hot. Runs as the final activity of the [Snooze ladder](reflect-and-snooze.md),
+Off by default. Enable in Settings → Autonomy & idle work → Dream
+(Introspection); all settings apply hot. Runs as the final activity of the
+[Snooze ladder](reflect-and-snooze.md),
 so it only ever spends idle time.
 
 ## The idea
@@ -81,8 +82,8 @@ intra-file contradictions. With `dream_rlm_probe` enabled (requires
 **staged copies** of the whole memory corpus, hunting cross-file
 contradictions — at most once per `dream_rlm_probe_interval_days`, with caps
 sized from your observed completed RLM runs. The probe runs as a tracked
-background task outside the snooze cycle, shows up in the Jobs tab
-(Active while running, History when done) like any other run, and its
+background task outside the snooze cycle, shows up in the Automation → Jobs
+tab (Active while running, History when done) like any other run, and its
 candidates go through the same dedup and filters as
 cycle-generated hypotheses — no special write powers.
 

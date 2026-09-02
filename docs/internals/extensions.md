@@ -106,7 +106,7 @@ Always enabled. Skill authoring without leaving the chat.
 | `add_skill_reference` | safe | Drop a doc into `references/` |
 | `remove_skill_script` / `remove_skill_reference` | safe | Delete a script / reference |
 
-Deleting a skill is a human action: use the Explorer → Skills panel or `DELETE /api/skills/{name}` (the agent-side `delete_skill` tool was removed 2026-09 — never used, and the UI path already covered it).
+Deleting a skill is a human action: use the Explorer → Capabilities → Skills panel or `DELETE /api/skills/{name}` (the agent-side `delete_skill` tool was removed 2026-09 — never used, and the UI path already covered it).
 
 See [../authoring/writing-skills.md](../authoring/writing-skills.md).
 
@@ -221,6 +221,6 @@ If the existing extensions don't cover what you need, two options:
 
 1. **Custom tool** via `toolmaker` — for one-off tools, no Pernix code change. See [../authoring/custom-tools.md](../authoring/custom-tools.md).
 2. **New extension module** — for a coherent group of related tools. Drop a directory under `core/extensions/yourmodule/` with an `__init__.py` exposing `register()`, **and add its module path to `BUNDLED_EXTENSIONS` in `core/extensions/__init__.py`** — the list is literal; there is no directory scan. It loads on the next start.
-3. **MCP server** — if the capability already exists as a Model Context Protocol server (or you'd rather build one out-of-process, in any language), configure it in the Explorer → MCP tab or `data/mcp_servers.json` instead of writing an extension. See [../mcp.md](../mcp.md).
+3. **MCP server** — if the capability already exists as a Model Context Protocol server (or you'd rather build one out-of-process, in any language), configure it in the Explorer → Capabilities → Servers (MCP) tab or `data/mcp_servers.json` instead of writing an extension. See [../mcp.md](../mcp.md).
 
 The second path is appropriate for serious capability extensions you'd want to maintain or share. Use the existing extensions as patterns — `core/extensions/scheduling/` is a clean example of "tools + persistent state on disk + REST endpoints," and `core/extensions/rlm/` is the reference for a gated, off-by-default add-on with a DB table, workspace run dirs, and snooze retention.

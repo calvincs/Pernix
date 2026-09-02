@@ -59,7 +59,7 @@ Claims commit through `TelosStore.commit_claim` with hard confidence caps by epi
 
 - **Agent tools** (`core/extensions/telos/`): `telos_status`, `telos_ask`. Deliberately absent: trace writes, root re-expression, alarm clearing.
 - **API** (`api/routers/telos.py`): `GET /api/telos` (overview), `/questions`, `/hypotheses`, `/claims`, `/trace` (read-only ledger window), `POST /api/telos/run` (manual slow-loop pass), `POST /api/telos/alarms/{id}/ack`.
-- **UI**: the **Telos** tab in the Explorer panel; settings section "Telos".
+- **UI**: the Explorer's **Self-tuning → Goals (Telos)** tab; settings section "Goals (Telos)" under Autonomy & idle work.
 
 ## Actuation ports
 

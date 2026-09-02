@@ -158,7 +158,7 @@ AI-powered web search with summaries alongside results. Requires an account at [
 
 ```bash
 # tavily-python is already in requirements.txt — just add the key:
-# Add TAVILY_API_KEY=tvly-... to .env, or set it in Settings → Web → Tavily API Key
+# Add TAVILY_API_KEY=tvly-... to .env, or set it in Settings → Tools & safety → Web → Tavily API Key
 ```
 
 ### QR Code — LAN Access URL
@@ -204,7 +204,7 @@ Use `--rebuild` when you want a completely fresh start or are troubleshooting st
 
 Starts the server with the dangerous-tool approval gate disabled. Every tool call executes immediately — no `ask_user` confirmation, no `approve_dangerous_tool()` step required.
 
-**This flag is the only way to enable this mode.** It cannot be toggled via Settings, the API, or any environment variable while the server is running. This prevents a rogue process or prompt injection from silently elevating its own privileges mid-session. The mode is visible in **Settings → Security** (read-only status badge) and in a red banner at the top of the **Explorer → Tools** panel.
+**This flag is the only way to enable this mode.** It cannot be toggled via Settings, the API, or any environment variable while the server is running. This prevents a rogue process or prompt injection from silently elevating its own privileges mid-session. The mode is visible in **Settings → Tools & safety → Security** (read-only status badge) and in a red banner at the top of the **Explorer → Capabilities → Tools** panel.
 
 **The flag survives server restarts** — if `POST /api/admin/restart` is used, the new process inherits `--dangerous` from the original `sys.argv`.
 

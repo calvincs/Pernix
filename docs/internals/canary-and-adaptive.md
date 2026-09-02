@@ -85,7 +85,8 @@ harness broke), or `noop` (zero tokens, sub-second — the agent never
 executed). Only `gate_fail` is evidence about the agent; the rest are
 suite-health trouble, and the tripwire ignores them. Results land in the
 `canary_runs` table (gate results, outcome, error, pass/fail, retries,
-tokens, duration) and in the Explorer's **Canary** tab.
+tokens, duration) and in the Explorer's **Self-tuning → Self-checks (Canary)**
+tab.
 
 ### Isolation guarantees
 
@@ -122,7 +123,7 @@ re-testing tasks nothing had touched, at a 99% pass rate.
 |---|---|
 | `scheduled` | The nightly **heartbeat** (`canary_schedule`, default `0 3 * * *`): the `canary_heartbeat_per_night` (2) least-recently-run non-parked canaries. Keeps every active canary's history warm enough that a post-change failure is provably the change's fault. |
 | `post_batch` | Enqueued after every adaptive apply (auto **or** approved proposal), tagged with the batch id — the tripwire's active probe. **Targeted**: canaries whose `covers` matches the batch's edit kinds first, `sentinel`-tagged ones riding along, capped at `canary_post_batch_max` (4), resolved at execution time. A non-flaky `gate_fail` is immediately **confirm-rerun once** in the same sweep — two rows is what the tripwire calls confirmed. Enqueued for the next idle window, never dispatched inline. |
-| `manual` | The `canary_run(name)` tool, `POST /api/canary/run`, the Canary tab's run buttons, or a coverage-triggered targeted sweep (e.g. a skill edit). `canary_status` reads recent results. |
+| `manual` | The `canary_run(name)` tool, `POST /api/canary/run`, the Self-checks tab's run buttons, or a coverage-triggered targeted sweep (e.g. a skill edit). `canary_status` reads recent results. |
 | `full` | The-world-changed sweeps: a model swap (both switch paths), a deploy (the boot version stamp), or the tab's "Run all". Runs **everything including parked canaries** and carries `must_run`, so a sweep already in flight defers it instead of eating it (the lock is otherwise skip-not-queue). |
 
 One sweep runs at a time; Snooze prunes runs past
@@ -134,8 +135,9 @@ Start with a small hand-written seed covering your daily-driver categories.
 From there the suite grows the way a regression-test suite does — from real
 failures: while `canary_enabled` is on, the refine pass may **propose** a new
 canary distilled from a genuinely failed turn (name, prompt, gates,
-fixtures, rationale). Proposals wait in the Adaptive tab for a human.
-Approving materializes the `CANARY.md` (validated by a parse round-trip) and
+fixtures, rationale). Proposals wait in the Learning (Adaptive) tab for a
+human. Approving materializes the `CANARY.md` (validated by a parse round-trip)
+and
 queues a manual vetting run so you see it pass before it counts.
 
 **Auto-admission.** `canary_auto_admit` defaults to **true**, so a proposal
@@ -164,7 +166,7 @@ when its trailing runs were green, so removing the stable canaries would
 disarm exactly the signal they feed. (This replaced cadence demotion, which
 replaced retirement — same invariant, third mechanism.)
 
-**Full lifecycle control** lives in the Canary tab and the API: create
+**Full lifecycle control** lives in the Self-checks tab and the API: create
 (raw CANARY.md or structured spec — gate commands are checked against the
 auto-admission allowlist proof and the verdicts returned as *warnings*,
 never blockers), edit (`PUT`, validated round-trip), park/unpark
@@ -267,7 +269,7 @@ shaped its plan (`used_hints`, counted once at the fresh-report seam),
 reflect sees an id-carrying `ACTIVE ADAPTIVE POLICIES` section in its
 evidence and may cite up to five in `cited_policies`. Both flow through
 post-mortems into synthesis and land as `adaptive_entry` rows in
-`scout_signals`. Counters surface in the Adaptive tab (zero-use
+`scout_signals`. Counters surface in the Learning tab (zero-use
 highlighted) and drive:
 
 - **Value-based retirement** — `retire_unused_entries` (Activity 15):
@@ -413,7 +415,7 @@ is a payload action, not one of the three entry actions.
   rows; it has no file-write capability. `SOUL.md`/`RULES.md` and the base
   prompt stay machine-untouchable.
 - **Release valve** — `DELETE /api/adaptive/entries/{id}` (the *Delete*
-  button on each entry in the Adaptive tab) soft-deletes one entry as actor
+  button on each entry in the Learning tab) soft-deletes one entry as actor
   `human`: status flips to `deleted`, the version increments, and a `delete`
   event with full before/after snapshots is journaled, so it rolls back like
   any other change. This exists because producers can only ever *fill* the
@@ -433,8 +435,9 @@ you to accept a `policy` change to get a `routing_hint`.
 ### Proposals, rollback, and the tripwire
 
 High-risk edits become **apply-on-approve proposals**
-(`/api/adaptive/proposals`, Explorer → Adaptive tab): approving executes the
-batch through the same apply engine as auto-applies — and mints the same
+(`/api/adaptive/proposals`, Explorer → Self-tuning → Learning): approving
+executes the batch through the same apply engine as auto-applies — and mints
+the same
 batch id and post-batch canary sweep, so batch-tagged measurement data
 accumulates even with auto-apply off.
 
@@ -486,7 +489,7 @@ promotions still go through the queue.
 **Rollback is exact.** Every apply is an append-only event with full
 before/after snapshots; `rollback(batch_id | event_id)` walks the events in
 reverse and restores each entry byte-for-byte (or deletes what the batch
-created). Rollback is itself an event. One click in the Adaptive tab, or
+created). Rollback is itself an event. One click in the Learning tab, or
 `POST /api/adaptive/rollback`.
 
 **The tripwire** watches every batch with two signals, both anchored on when
@@ -521,7 +524,7 @@ newest-first feed instead would compare the newest turns *overall* — a moving
 target that drifts further from the batch the longer the system keeps
 running, so a batch could be judged on turns that had nothing to do with it.
 
-Either signal flags the batch **`suspect`** — surfaced in the Adaptive tab,
+Either signal flags the batch **`suspect`** — surfaced in the Learning tab,
 cleared by human dismiss (`POST /api/adaptive/batches/{id}/dismiss`, the
 *Dismiss flag* button), a subsequent clean sweep, or — for flags raised by
 the passive signal alone — an automatic expiry after
