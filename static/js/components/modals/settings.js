@@ -1,6 +1,7 @@
 // Pernix — Settings modal with tabs
 
 import { el, text, clear, setSanitizedSvg } from '../../render.js';
+import { icon } from '../../icons.js';
 import { del, get, post, setAuthToken } from '../../api.js';
 import { getPermission, requestPermission } from '../../notifications.js';
 import { getTheme, setTheme } from '../../theme.js';
@@ -538,17 +539,18 @@ function buildSectionDesc(description) {
 }
 
 function buildHelpIcon(tip) {
-    const icon = el('span', { class: 'section-help', tabindex: '0' }, [text('?')]);
+    // `mark`, not `icon`: the module now imports icon() from icons.js.
+    const mark = el('span', { class: 'section-help', tabindex: '0' }, [text('?')]);
     const tooltip = el('span', { class: 'section-help-tip' }, [text(tip)]);
-    const wrapper = el('span', { class: 'section-help-wrap' }, [icon, tooltip]);
+    const wrapper = el('span', { class: 'section-help-wrap' }, [mark, tooltip]);
 
     const position = () => {
-        const r = icon.getBoundingClientRect();
+        const r = mark.getBoundingClientRect();
         tooltip.style.left = `${r.left + r.width / 2 - 140}px`;
         tooltip.style.top = `${r.bottom + 6}px`;
     };
-    icon.addEventListener('mouseenter', position);
-    icon.addEventListener('focus', position);
+    mark.addEventListener('mouseenter', position);
+    mark.addEventListener('focus', position);
 
     return wrapper;
 }
@@ -933,8 +935,164 @@ function _buildLabelCell(field) {
     return el('div', { class: 'setting-label-cell' }, children);
 }
 
+// ---------------------------------------------------------------------------
+// Field schema (S4)
+//
+// Ranges used to be typed in beside each label, and they drifted from the ones
+// update_settings() enforces — snooze_max_cycle_seconds claimed a floor of 60
+// against the server's 30, scout_timeout and compaction_threshold claimed none
+// at all. Out-of-range values are dropped silently, so the modal could show a
+// number the server had refused and call it saved.
+//
+// GET /api/settings/schema now supplies type/default/min/max/step/unit; this
+// file keeps the labels, hints and risk badges (UI prose, not configuration).
+// Everything below reads the merged record, so there is exactly one range.
+// ---------------------------------------------------------------------------
+
+let _schema = {};                     // key -> server record
+const _invalidKeys = new Map();       // key -> why it cannot be saved
+
+function _schemaFor(key) {
+    return Object.prototype.hasOwnProperty.call(_schema, key) ? _schema[key] : null;
+}
+
+/** The bound to enforce: the server's when it has one, else the field's own. */
+function _boundsFor(field) {
+    const rec = _schemaFor(field.key);
+    const lo = rec && rec.min !== null && rec.min !== undefined ? rec.min : field.min;
+    const hi = rec && rec.max !== null && rec.max !== undefined ? rec.max : field.max;
+    return { min: lo, max: hi };
+}
+
+function _defaultText(rec) {
+    const d = rec.default;
+    if (rec.type === 'bool') return `default: ${d ? 'on' : 'off'}`;
+    if (Array.isArray(d)) return `default: ${d.length ? d.join(', ') : 'empty'}`;
+    if (d === '' || d === null || d === undefined) return 'default: empty';
+    // A default URL or model id can be longer than the label it sits under —
+    // the point of this line is the number, not a second copy of the value.
+    const shown = String(d);
+    return `default: ${shown.length > 44 ? shown.slice(0, 43) + '…' : shown}`;
+}
+
+function _rangeText(field) {
+    const { min, max } = _boundsFor(field);
+    if (min === undefined || min === null || max === undefined || max === null) return '';
+    const rec = _schemaFor(field.key);
+    const unit = rec && rec.unit ? ` ${rec.unit}` : '';
+    return `range ${min}–${max}${unit}`;
+}
+
+/** What the control currently holds, in the field's own type. */
+function _controlValue(field, input) {
+    if (field.type === 'bool') return input.checked;
+    if (field.type === 'number') return input.value === '' ? null : Number(input.value);
+    return input.value;
+}
+
+function _isAtDefault(field, rec, input) {
+    const cur = _controlValue(field, input);
+    if (cur === null) return true;  // an empty number box means "leave it alone"
+    if (field.type === 'bool') return !!rec.default === !!cur;
+    if (field.type === 'number') return Number(rec.default) === cur;
+    return String(rec.default ?? '') === String(cur ?? '');
+}
+
+// Save is disabled while any control holds a value the server would drop —
+// the alternative is a save that silently keeps the old number.
+function _updateSaveDisabled() {
+    const btn = document.getElementById('settings-save-btn');
+    if (!btn) return;
+    const bad = [..._invalidKeys.keys()];
+    btn.disabled = bad.length > 0;
+    btn.title = bad.length
+        ? `Out of range: ${bad.map(_labelFor).join(', ')}`
+        : '';
+}
+
+function _setInvalid(key, message) {
+    if (message) _invalidKeys.set(key, message);
+    else _invalidKeys.delete(key);
+    const row = document.getElementById(`row-${key}`);
+    if (row) row.classList.toggle('setting-invalid', !!message);
+    const errEl = document.getElementById(`err-${key}`);
+    if (errEl) {
+        errEl.textContent = message || '';
+        errEl.hidden = !message;
+    }
+    _updateSaveDisabled();
+}
+
+function _validateNumber(field, input) {
+    if (field.type !== 'number') return;
+    const raw = input.value.trim();
+    if (raw === '') { _setInvalid(field.key, ''); return; }
+    const v = Number(raw);
+    const { min, max } = _boundsFor(field);
+    let msg = '';
+    if (!Number.isFinite(v)) msg = 'Must be a number.';
+    else if (min !== undefined && min !== null && v < min) msg = `Must be at least ${min}.`;
+    else if (max !== undefined && max !== null && v > max) msg = `Must be at most ${max}.`;
+    _setInvalid(field.key, msg);
+}
+
+// The meta line under a control: what the default is, what range the server
+// takes, a reset that only appears once you have moved off the default, and
+// the inline reason a value cannot be saved.
+function _buildFieldMeta(field, input) {
+    const rec = _schemaFor(field.key);
+    if (!rec) return null;
+    const locked = LOCKED_KEYS.has(field.key);
+
+    const parts = [_defaultText(rec)];
+    const range = _rangeText(field);
+    if (range) parts.push(range);
+    const factsEl = el('span', {
+        class: 'setting-facts',
+        title: `${field.label} — default ${String(rec.default)}${range ? `, ${range}` : ''}`,
+    }, [text(parts.join(' · '))]);
+
+    const resetBtn = el('button', {
+        type: 'button',
+        class: 'btn btn--ghost btn--xs setting-reset',
+        title: `Reset ${field.label} to its default`,
+        'aria-label': `Reset ${field.label} to its default`,
+    }, [icon('refresh', { size: 12 }), text('Reset')]);
+    resetBtn.hidden = true;
+
+    const errEl = el('span', { class: 'setting-error', id: `err-${field.key}`, role: 'alert' });
+    errEl.hidden = true;
+
+    const sync = () => {
+        resetBtn.hidden = locked || _isAtDefault(field, rec, input);
+    };
+
+    resetBtn.addEventListener('click', () => {
+        if (field.type === 'bool') input.checked = !!rec.default;
+        else input.value = rec.default === null || rec.default === undefined ? '' : String(rec.default);
+        _validateNumber(field, input);
+        sync();
+        announce(`${field.label} reset to its default`);
+    });
+
+    input.addEventListener('input', () => { _validateNumber(field, input); sync(); });
+    input.addEventListener('change', () => { _validateNumber(field, input); sync(); });
+    // A value already out of range when the modal opens (hand-edited
+    // settings.json, a bound tightened since) must block Save straight away.
+    // Nothing is in the document yet, so paint this first verdict by hand;
+    // _refreshValidationUI() replays it onto the row once the modal is live.
+    _validateNumber(field, input);
+    const initial = _invalidKeys.get(field.key) || '';
+    errEl.textContent = initial;
+    errEl.hidden = !initial;
+    sync();
+
+    return el('div', { class: 'setting-meta' }, [factsEl, resetBtn, errEl]);
+}
+
 function buildField(field, value) {
-    const { key, label, type, step, options, allowEmpty, min, max } = field;
+    const { key, label, type, step, options, allowEmpty } = field;
+    const { min, max } = _boundsFor(field);
     const locked = LOCKED_KEYS.has(key);
 
     let input;
@@ -974,13 +1132,14 @@ function buildField(field, value) {
             })
         );
     } else if (type === 'number') {
+        const rec = _schemaFor(key);
         input = el('input', {
             type: 'number',
             id: `setting-${key}`,
             value: String(value ?? ''),
-            step: String(step || (Number.isInteger(value) ? 1 : 0.01)),
-            ...(min === undefined ? {} : { min: String(min) }),
-            ...(max === undefined ? {} : { max: String(max) }),
+            step: String(step || (rec && rec.step) || (Number.isInteger(value) ? 1 : 0.01)),
+            ...(min == null ? {} : { min: String(min) }),
+            ...(max == null ? {} : { max: String(max) }),
         });
     } else {
         input = el('input', { type: 'text', id: `setting-${key}`, value: String(value ?? '') });
@@ -1005,7 +1164,26 @@ function buildField(field, value) {
     if (locked) {
         row.append(el('span', { class: 'setting-locked-note', id: `locked-${key}` }, [text(LOCKED_NOTE)]));
     }
+
+    // What the default is, what range the server takes, and the reset. Skipped
+    // for the write-only kinds: the server redacts their value, so there is
+    // nothing to compare a default against. (S4)
+    if (type !== 'apikey' && type !== 'certpath' && type !== 'writeonly') {
+        const meta = _buildFieldMeta(field, input);
+        if (meta) row.append(meta);
+    }
     return row;
+}
+
+// Rows and the Save button are built before the modal is in the document, so
+// the first validation pass has nowhere to paint. Replay it once it does.
+function _refreshValidationUI() {
+    for (const [key, message] of _invalidKeys) {
+        document.getElementById(`row-${key}`)?.classList.add('setting-invalid');
+        const errEl = document.getElementById(`err-${key}`);
+        if (errEl) { errEl.textContent = message; errEl.hidden = false; }
+    }
+    _updateSaveDisabled();
 }
 
 function _rebuildModelSelects() {
@@ -1043,6 +1221,9 @@ function _revertField(key) {
             input.value = '';
             input.placeholder = _writeOnlyPlaceholder(key);
         } else input.value = prev === undefined || prev === null ? '' : String(prev);
+        // Re-run the range check and the reset button's visibility against the
+        // value the server actually holds. (S4)
+        input.dispatchEvent(new Event('input', { bubbles: true }));
         return;
     }
     // List-valued editors keep their state outside the DOM.
@@ -2365,17 +2546,22 @@ export async function openSettings(opts = {}) {
 
     let settings;
     try {
-        const [s, m, ev, om] = await Promise.all([
+        // One schema fetch per open. A failure is survivable: every control
+        // still renders, just without its default line or range check.
+        const [s, m, ev, om, sc] = await Promise.all([
             get('/api/settings'),
             get('/api/models'),
             get('/api/env-vars').catch(() => ({ vars: [] })),
             get('/api/models/ollama').catch(() => ({ models: [] })),
+            get('/api/settings/schema').catch(() => ({ fields: {} })),
         ]);
         settings = s;
         _availableModels = (m.models || []).sort((a, b) => a.id.localeCompare(b.id));
         _envVarNames = ev.vars || [];
         _ollamaModels = om.models || [];
         _ollamaError = om.error || '';
+        _schema = sc.fields || {};
+        _invalidKeys.clear();
     } catch (e) {
         _openLoadFailure(e.message || String(e), opts);
         return;
@@ -2554,6 +2740,7 @@ export async function openSettings(opts = {}) {
     // Wire network section visibility toggles (must be after DOM append)
     _wireNetworkSection();
     _wireVoiceSection();
+    _refreshValidationUI();
 
     // Validate models after modal is visible
     const listEl = document.getElementById('or-model-list');
@@ -2590,6 +2777,8 @@ export function closeSettings() {
     _corsOrigins = [];
     _restartRequired = false;
     _searchQuery = '';
+    _schema = {};
+    _invalidKeys.clear();
     clearTimeout(_statusTimer);
 }
 

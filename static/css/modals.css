@@ -367,6 +367,42 @@
     background: var(--accent-glow);
 }
 .setting-row.setting-locked { opacity: 0.85; }
+
+/* The line under a control: what the default is, what range the server takes,
+   the reset, and the reason a value cannot be saved. Full width so it never
+   competes with the control for the row. (S4) */
+.setting-meta {
+    flex-basis: 100%;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    font-size: var(--text-xxs);
+    line-height: 1.4;
+}
+.setting-facts {
+    color: var(--text-faint);
+    font-family: var(--mono);
+}
+.setting-reset {
+    gap: 4px;
+    padding: 0 var(--sp-1);
+    color: var(--text-dim);
+}
+.setting-reset:hover { color: var(--text-bright); }
+.setting-error {
+    color: var(--error);
+    font-weight: 500;
+}
+/* An out-of-range value is dropped by the server without a word, so it has to
+   look wrong here before Save is ever pressed. */
+.setting-row.setting-invalid input[type="number"] {
+    border-color: var(--error);
+}
+.setting-row.setting-invalid input[type="number"]:focus {
+    border-color: var(--error);
+}
+
 .setting-locked-note {
     flex-basis: 100%;
     font-size: var(--text-xs);
