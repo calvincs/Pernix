@@ -555,7 +555,10 @@ function renderWorkspace() {
         loadWorkspace({ path: _wsCurrentPath });
     });
 
-    const uploadBtn = el('button', { class: 'fp-icon-btn', title: 'Upload file' }, [text('\u2191')]);
+    const uploadBtn = el('button', {
+        class: 'fp-icon-btn',
+        title: _wsCurrentPath ? `Upload into ${_wsCurrentPath}/` : 'Upload into the workspace root',
+    }, [text('\u2191')]);
     uploadBtn.addEventListener('click', triggerUpload);
 
     const fileCount = _wsEntries.filter(e => e.type === 'file').length;
@@ -576,7 +579,7 @@ function renderWorkspace() {
     ]));
     container.appendChild(_buildTabDesc(
         'Your agent\'s working directory — browse, upload, and edit files.',
-        'Files live at data/workspace/ and are accessible to agent tools. Navigate directories with the tree, view file contents inline, or open the editor to modify them directly. Uploads land at the workspace root.',
+        'Files live at data/workspace/ and are accessible to agent tools. Navigate directories with the tree, view file contents inline, or open the editor to modify them directly. Uploads land in the folder you are currently looking at.',
     ));
 
     // Search bar
@@ -1286,6 +1289,10 @@ function triggerUpload() {
             try {
                 const formData = new FormData();
                 formData.append('file', file);
+                // Uploads always landed at the workspace root, wherever you
+                // were standing — so a file dropped into a folder simply was
+                // not there afterwards. (S12)
+                if (_wsCurrentPath) formData.append('path', _wsCurrentPath);
                 const resp = await fetch('/api/upload', {
                     method: 'POST', body: formData, headers: _authHdr(),
                 });
