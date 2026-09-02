@@ -26,9 +26,9 @@ The whole sequence emits SSE events the UI streams in real time. You can also su
 
 In the UI:
 
-- **New session** in the sidebar starts a fresh thread. Each session has its own memory recall scope and its own workers.
+- **+ new** in the sidebar header starts a fresh thread. Each session has its own memory recall scope and its own workers.
 - **Switch** by clicking another session in the sidebar — your prior session keeps its state in the background.
-- **Clear** the current session's messages by typing `/clear` in the composer; the session itself remains in the DB. **Delete** a session with the `×` on its sidebar row — it arms on the first click and deletes on the second. There is no session menu.
+- **Clear** the current session's messages by typing `/clear` in the composer; it asks first, and the session itself remains in the DB. **Delete** a session with the `×` on its sidebar row, or on touch from the row's `⋯` sheet. Either way a dialog names the session and how many messages go with it, and the delete then sits behind a five-second **Undo** in the toast before it reaches the server.
 
 Programmatically:
 
@@ -62,7 +62,7 @@ Click a legend entry to hide or show that type — useful when scheduled runs st
 Finding things:
 
 - The sidebar **search box** is full-text over all message content — it finds any past conversation, not just titles.
-- **Ctrl+K** opens a jump-to-session palette. It is a plain substring match (not fuzzy) over each session's title and first message, so type a run of characters that actually appears.
+- **Ctrl+K** opens the command palette. It lists every session, and above them the things you would otherwise go hunting for a button for: a new session (in a space or not), **Open Explorer →** any tab, **Settings**, **Clear conversation**, **Toggle theme**. Matching is a plain substring (not fuzzy) over a session's title and first message, or a command's name and aliases, so type a run of characters that actually appears; with an empty box it is still a plain session switcher.
 - **Ctrl+F** searches within the current transcript.
 - **↑** in an empty composer recalls your message history.
 
@@ -133,7 +133,7 @@ You can give a single session a different primary model than your global setting
 - Running a research session on Claude Sonnet but a quick-script session on Qwen 3.
 - Comparing two models on the same prompt — open two sessions with different `model_override`.
 
-The override lives in `session.model_override` (not in global Settings). Set it by clicking the **model badge** in the status bar, or via `PATCH /api/sessions/{id}` with `{"model_override": "..."}`.
+The override lives in `session.model_override` (not in global Settings). Set it by clicking the model name in the status bar — it opens a menu of every model your providers offer, grouped by provider, as a bottom sheet titled *Model for this session* below 900px. Or via `PATCH /api/sessions/{id}` with `{"model_override": "..."}`.
 
 The other two model roles (Background and Backup) follow the global setting; only Primary is overridable per session.
 
