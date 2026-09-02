@@ -19,6 +19,10 @@ SUFFIXED = "sessions.db.20260201-030405"
 STAMPED = "sessions-20260301-030405.db"
 STAMPED_COLLISION = "sessions-20260301-030405_001.db"
 
+# The same ISO instant in its compact spelling — the oldest scheme on the box,
+# and the one the "iso" pattern used to miss because it insisted on dashes.
+COMPACT_ISO = "sessions.20251202T030405Z.db"
+
 # Things that live in the same directory and are not snapshots.
 NON_SNAPSHOTS = (
     "settings-20260102.json",
@@ -68,11 +72,45 @@ def test_list_snapshots_ignores_everything_else(backups):
 
 def test_scheme_labels():
     assert backup.snapshot_scheme(ISO) == "iso"
+    assert backup.snapshot_scheme(COMPACT_ISO) == "iso"
     assert backup.snapshot_scheme(SUFFIXED) == "suffixed"
     assert backup.snapshot_scheme(STAMPED) == "stamped"
     assert backup.snapshot_scheme(STAMPED_COLLISION) == "stamped"
     for name in NON_SNAPSHOTS:
         assert backup.snapshot_scheme(name) is None, name
+
+
+def test_the_names_on_the_box():
+    """The literal filenames beside the production database, verbatim.
+
+    The compact ISO form is the box's oldest scheme and five files wore it;
+    until the pattern accepted a stamp without dashes they were invisible to
+    rotation forever, which is exactly the bug the scheme table exists to stop.
+    The three non-snapshots are the near misses that share a prefix: a settings
+    dump, a hand-made ``.bak`` of the database, and a memory corpus directory.
+    """
+    assert backup.snapshot_scheme("sessions.20260825T183703Z.db") == "iso"
+    assert backup.snapshot_scheme("sessions-20260826-024434.db") == "stamped"
+    assert backup.snapshot_scheme("sessions.db.20260824-103602") == "suffixed"
+    assert backup.snapshot_scheme("settings-20260902-130414.json") is None
+    assert backup.snapshot_scheme("sessions.db.bak-20260831-132226") is None
+    assert backup.snapshot_scheme("memories-20260902-160055") is None
+
+
+def test_compact_iso_snapshots_rotate_like_any_other(backups):
+    """A scheme that is recognised but never rotated would be no better."""
+    path = backups / COMPACT_ISO
+    path.write_bytes(b"x" * 50)
+    os.utime(path, (time.time() - 20_000, time.time() - 20_000))  # older than all four
+
+    found = backup.list_snapshots(backups)
+    assert [s["path"].name for s in found][-1] == COMPACT_ISO, "oldest, so last"
+    assert found[-1]["scheme"] == "iso"
+
+    result = backup.rotate(4)
+    assert result["removed"] == [COMPACT_ISO]
+    assert result["bytes_freed"] == 50
+    assert not path.exists()
 
 
 def test_rotate_keeps_newest_across_schemes(backups):
