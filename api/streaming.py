@@ -13,6 +13,7 @@ import time
 
 from starlette.responses import StreamingResponse
 
+from core.events import queue_was_dropped
 from sessions.state import AgentSession
 
 logger = logging.getLogger("pernix.api.streaming")
@@ -108,6 +109,8 @@ async def event_stream(session: AgentSession, last_event_id: int = 0):
             except asyncio.TimeoutError:
                 if shutdown.is_set():
                     return
+                if queue_was_dropped(queue):
+                    return
                 yield ": heartbeat\n\n"
                 continue
 
@@ -119,6 +122,12 @@ async def event_stream(session: AgentSession, last_event_id: int = 0):
 
             seq = event.get("_seq")
             yield sse_event(event_type, _clean_event(event), event_id=seq)
+
+            # Detached for being too slow: end the response so EventSource
+            # reconnects and replays from Last-Event-ID, instead of holding
+            # a live-looking connection that will never carry another event.
+            if queue_was_dropped(queue):
+                return
 
     except (asyncio.CancelledError, GeneratorExit):
         pass
