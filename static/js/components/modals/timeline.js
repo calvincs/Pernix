@@ -24,6 +24,7 @@ import { get } from '../../api.js';
 import { state } from '../../store.js';
 import { openOverlay } from '../../a11y.js';
 import { hex } from '../../theme.js';
+import { bindStripScroll } from '../file-panel.js';
 
 // Vendored rather than CDN-loaded: the page ships a `script-src 'self'` CSP
 // (see index.html) and has to work offline on a LAN. Mermaid 10's ESM build
@@ -48,6 +49,7 @@ let _data = { stateLog: [], messages: [], liveTools: [], hasOlder: false };
 let _pendingToolRows = [];
 let _filter = { mode: 'all', q: '' };
 let _scroller = null;   // .modal-body — the actual scroll container
+let _revealTab = () => {};   // set by bindStripScroll when the strip is built
 let _bodyEl = null;     // #timeline-modal-body — rebuilt by _renderTimeline
 let _filterInput = null;
 let _filterBtns = [];
@@ -85,6 +87,7 @@ export async function openTimeline() {
         btn.addEventListener('click', () => _switchTab(btn.getAttribute('data-tab')));
     });
     const tabBar = el('div', { class: 'tab-bar' }, _tabBtns);
+    _revealTab = bindStripScroll(tabBar, _tabBtns[0]);
 
     const copyBtn = el('button', {
         class: 'tl-copy-btn',
@@ -153,6 +156,7 @@ export function isTimelineOpen() {
 
 function _switchTab(target) {
     _tabBtns.forEach(b => b.classList.toggle('active', b.getAttribute('data-tab') === target));
+    _revealTab(_tabBtns.find(b => b.getAttribute('data-tab') === target));
     _panes.forEach(p => p.classList.toggle('active', p.getAttribute('data-tab') === target));
     if (target === 'graph') {
         const pane = _panes.find(p => p.getAttribute('data-tab') === 'graph');

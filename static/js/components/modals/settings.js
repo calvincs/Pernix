@@ -9,6 +9,7 @@ import { runVoiceTest } from '../../voice.js';
 import { announce, openOverlay } from '../../a11y.js';
 import { notify } from '../../feedback.js';
 import { confirmDanger } from './confirm.js';
+import { bindStripScroll } from '../file-panel.js';
 
 let _overlay = null;
 let _closeOverlay = null;  // teardown from a11y.js openOverlay()
@@ -2577,6 +2578,10 @@ function buildTabs(settings) {
     });
 
     const tabBar = el('div', { class: 'tab-bar settings-tab-bar' }, tabs);
+    // Six tabs never fit a phone. The strip has always scrolled; now it says
+    // so, and the tab you pick is brought into view rather than left half
+    // off the edge you tapped it at. (P8)
+    const revealTab = bindStripScroll(tabBar, tabs[0]);
 
     tabs.forEach((tab, i) => {
         tab.addEventListener('click', () => {
@@ -2584,6 +2589,7 @@ function buildTabs(settings) {
             contents.forEach(c => c.classList.remove('active'));
             tab.classList.add('active');
             contents[i].classList.add('active');
+            revealTab(tab);
             // The body is one shared scroller. Without this, switching tabs
             // lands you partway down (or past the end of) the new one.
             const body = _overlay?.querySelector('.modal-body');
