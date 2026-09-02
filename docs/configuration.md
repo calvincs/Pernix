@@ -8,7 +8,7 @@ Some settings (marked **requires restart**) only take effect when the server is 
 
 ## How Settings Work
 
-**Via the UI:** Open the gear icon in the sidebar → Settings. Changes save immediately.
+**Via the UI:** Open the gear icon in the sidebar → Settings. Edits are held in the form until you press **Save** — closing the modal, pressing Escape or clicking the backdrop discards them (it asks first). After saving, controls marked with a **restart** badge report which of them need a server restart to take effect.
 
 **Via the API:**
 ```bash

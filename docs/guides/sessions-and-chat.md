@@ -28,7 +28,7 @@ In the UI:
 
 - **New session** in the sidebar starts a fresh thread. Each session has its own memory recall scope and its own workers.
 - **Switch** by clicking another session in the sidebar — your prior session keeps its state in the background.
-- **Clear / delete** a session from the session menu. Cleared sessions remain in the DB; deleted ones are removed.
+- **Clear** the current session's messages by typing `/clear` in the composer; the session itself remains in the DB. **Delete** a session with the `×` on its sidebar row — it arms on the first click and deletes on the second. There is no session menu.
 
 Programmatically:
 
@@ -61,7 +61,7 @@ Click a legend entry to hide or show that type — useful when cron runs start t
 Finding things:
 
 - The sidebar **search box** is full-text over all message content — it finds any past conversation, not just titles.
-- **Ctrl+K** opens a fuzzy-find palette to jump to any session by name.
+- **Ctrl+K** opens a jump-to-session palette. It is a plain substring match (not fuzzy) over each session's title and first message, so type a run of characters that actually appears.
 - **Ctrl+F** searches within the current transcript.
 - **↑** in an empty composer recalls your message history.
 
@@ -132,7 +132,7 @@ You can give a single session a different primary model than your global setting
 - Running a research session on Claude Sonnet but a quick-script session on Qwen 3.
 - Comparing two models on the same prompt — open two sessions with different `model_override`.
 
-The override lives in `session.model_override` (not in global Settings). Set it by clicking the **model badge** in the status bar, via the UI session menu, or via `PATCH /api/sessions/{id}` with `{"model_override": "..."}`.
+The override lives in `session.model_override` (not in global Settings). Set it by clicking the **model badge** in the status bar, or via `PATCH /api/sessions/{id}` with `{"model_override": "..."}`.
 
 The other two model roles (Background and Backup) follow the global setting; only Primary is overridable per session.
 

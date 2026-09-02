@@ -58,7 +58,7 @@ If you ever see the agent claiming it edited a protected file, that's a bug — 
 
 Three paths:
 
-- **In the UI:** the file panel shows the workspace tree. Click a file to open it; right-click to download or delete.
+- **In the UI:** the Explorer's Workspace tab shows the tree. Click a file to open it; the viewer's toolbar carries **edit**, **open** (in a browser tab) and **download**. Delete is the `×` that appears on a row on hover (swipe left on touch). The toolbar at the top of the tab refreshes the listing and uploads into the folder you are currently looking at. There is no right-click menu.
 - **Direct filesystem:** `data/workspace/` is just a regular directory — open files in your editor of choice.
 - **REST API:**
 
