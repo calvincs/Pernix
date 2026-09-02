@@ -89,6 +89,50 @@ GET /api/sessions/{session_id}/state-log
 ```
 Returns the append-only state machine transition history for the session. Every state change is recorded with a timestamp, the triggering event, and optional metadata. Accepts `since_id`, `before_id`, `limit` (1–5000), and `tail`.
 
+### Get Turns
+
+```
+GET /api/sessions/{session_id}/turns?before_turn=<turn_id>&limit=20
+```
+
+One record per turn, newest first, holding everything the agent produced inside it. This is the read model behind the State timeline: the same join the modal used to do in the browser after downloading the whole state log *and* the whole transcript — every tool result included — just to draw a header saying "13 tools, 4 errors". Nothing new is captured; every field is read back from `session_state_log`, `messages` and `token_usage`.
+
+`limit` is clamped to 1–100. `before_turn` pages backward (turns older than that turn id); `has_more` says whether an older page exists. 404 on an unknown session; a known session with nothing logged yet returns an empty page.
+
+```json
+{ "session_id": "8af5b75db1b1", "count": 10, "has_more": true, "turns": [ {
+    "turn_id": 17, "parent_turn_id": null, "retry_index": 0, "running": false,
+    "started_at": "…", "ended_at": "…|null", "elapsed_ms": 115684,
+    "termination_reason": "complete|null",
+    "reflect_count": 0, "eval_count": 0, "compaction_count": 0,
+    "phases":  [ {"state","started_at","ended_at|null","elapsed_ms","reason_in","reason_out|null"} ],
+    "tool_calls": [ {"message_id","call_id","name","args_summary","latency_ms","was_error","started_at"} ],
+    "scout":  {"approach","tools","tool_rationale","memory","model","scout_model",
+               "latency_ms","from_cache","from_fallback","reused_prior", …} | null,
+    "reflect": [ {"attempt","verdict","reasoning","diagnostic","what_worked"} ],
+    "eval":    [ {"attempt","gates":[{"name","command","passed","exit_code","output_tail"}]} ],
+    "compactions": [ {"summary","compacted_up_to","original_count","at"} ],
+    "notices": [ {"text","at"} ],
+    "tokens": {"prompt","completion","total","calls","cost_estimate","models"},
+    "model": "…|null",
+    "invariant_violations": []
+} ] }
+```
+
+**A turn** runs from the transition that opened it — `prompt-arrived`, or `answer-received` / `workers-complete` after a question or a worker wait, which also set `parent_turn_id` — to the transition that parks the machine again. `running` is true only for the session's newest turn while it has no closing transition; an older turn without one was abandoned by a crash and says so in `invariant_violations` (`"turn-never-closed"`) rather than ticking forever.
+
+**Phases** are the states the turn passed through, in order, with the wall-clock time spent in each. Retries repeat them (`scouting → processing → finalizing → scouting → …`) and a compaction round trip shows as its own `compacting` phase. They sum exactly to `elapsed_ms`, which the old client-side header did not: it added up every log row's `elapsed_ms` including the opening row's, which measures how long the session sat *idle before the prompt* — on one real turn that was 71 minutes of idle reported as turn time.
+
+**`was_error`** is the executor's own verdict, stamped on the tool row (`metadata.was_error`): the call raised, timed out, returned nothing, or returned an `Error:`. For rows written before that stamp existed it falls back to the transcript's old heuristic. It is deliberately narrower than that heuristic, which also flagged any result merely *containing* a traceback — 336 rows on the owner's box, nearly all successful `bash` calls whose script printed one.
+
+**`tokens.cost_estimate`** is null, not `0`, when no usage row priced itself — an unpriced local model has no cost, which is not the same as a free one. **`model`** is the model most assistant rows in the turn recorded; null for turns saved before assistant rows carried it.
+
+**Messages are joined by time window**, not by `metadata.parent_user_msg_id`: that stamp names the turn root a row was written under, but `current_turn_user_msg_id` survives turns that never refresh it — on session `e058985e52df` one user message is stamped as the parent of four different turns — so keying on it collapses their work together. In the gap between two turns the discriminator is role: a `user` row there is the prompt that opened the next turn, everything else is the previous turn's post-hook tail.
+
+Malformed JSON in a message never fails the request. A scout, reflect or eval body that will not parse comes back as `{"raw": "<head of the content>"}`; a compaction summary that is prose rather than the usual fenced JSON block comes back as that text.
+
+`/state-log` and the message endpoints are unchanged — this is an additional view over the same rows.
+
 ### Search Sessions
 ```
 GET /api/sessions/search?q=<query>&limit=20

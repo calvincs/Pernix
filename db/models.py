@@ -3,8 +3,10 @@ import json
 """Pernix — Database query helpers organized by table."""
 
 import logging
+import re
 import sqlite3
 import uuid
+from bisect import bisect_right
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 
@@ -814,6 +816,556 @@ def prune_state_log(
             "DELETE FROM session_state_log WHERE session_id NOT IN (SELECT id FROM sessions)"
         ).rowcount
         return total
+
+
+# ---------------------------------------------------------------------------
+# Turn records (the State timeline's read model)
+# ---------------------------------------------------------------------------
+# One record per turn, holding everything the agent produced inside it. The
+# evidence is already persisted across three tables — session_state_log has
+# the phases, messages has the scout/tool/reflect/eval/compaction/notice
+# rows, token_usage has the cost — and the timeline modal used to fetch two
+# of them whole and join them in the browser. This is that join, done once,
+# server-side, over a bounded window. Nothing new is captured.
+#
+# The join is four bounded queries per page and no per-turn round trips:
+# the turn-id page (a GROUP BY over one session's log), the full log rows
+# for that contiguous span of turn ids, the messages inside the span's time
+# window, and the token_usage rows in the same window.
+
+# States the machine parks in between turns. A turn whose last transition
+# lands in one of these is finished; anything else means it has no closing
+# row (still running, or abandoned by a crash).
+_TURN_IDLE_STATES = frozenset({"idle_ready", "awaiting_user", "awaiting_workers"})
+
+# Roles whose body is structured and must be read whole. Everything else
+# (tool results, assistant answers) is read as a 200-char head — only the
+# error heuristic looks at it, and a single tool result can be 100s of KB.
+_TURN_JSON_ROLES = ("scout", "reflect", "eval", "compaction", "notice")
+_TURN_JSON_ROLES_SQL = "(" + ", ".join(f"'{r}'" for r in _TURN_JSON_ROLES) + ")"
+
+_ARGS_SUMMARY_CAP = 160
+_RAW_HEAD_CAP = 400
+# A compaction summary that is prose rather than the usual fenced JSON is the
+# whole record of what the turn carried forward; 400 characters would cut it
+# off mid-sentence.
+_SUMMARY_RAW_CAP = 4000
+_CONTENT_HEAD_CAP = 200
+_TOOL_CALLS_CAP = 65536
+# How far before the oldest turn on the page to look for its opening prompt
+# when there is no older turn to bound the search with.
+_ROOT_LOOKBACK_MS = 60_000
+# A turn's tail (post-hook rows) is written just after its closing
+# transition; give the window that much slack when the next turn's start is
+# unknown.
+_TURN_TAIL_MS = 5_000
+
+_TOOL_CALL_HEAD_RE = re.compile(r'"id"\s*:\s*"([^"]+)"\s*,\s*"name"\s*:\s*"([^"]+)"')
+
+
+def _turn_ms_to_iso(ms: int | None) -> str | None:
+    """Wall-clock milliseconds → the ISO stamp the API speaks."""
+    if ms is None:
+        return None
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat()
+
+
+def _turn_iso_bound(ms: int) -> str:
+    """A messages.created_at comparison bound.
+
+    Written with an explicit 6-digit microsecond field rather than
+    isoformat(), which drops the fraction entirely at a whole second — and
+    "…:12+00:00" sorts BEFORE "…:12.468215+00:00", so a whole-second upper
+    bound would silently exclude every row inside that second."""
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+
+
+def _turn_usage_bound(ms: int) -> str:
+    """A token_usage.created_at bound — SQLite's CURRENT_TIMESTAMP shape
+    (naive UTC, second resolution), not the ISO stamp messages carry."""
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _turn_stamp_to_ms(stamp) -> int | None:
+    """Parse either created_at shape into wall-clock milliseconds.
+
+    messages.created_at is an offset-aware ISO string; token_usage.created_at
+    is SQLite's naive-UTC CURRENT_TIMESTAMP. Anything unparseable returns
+    None and the row is skipped rather than raising."""
+    if not stamp:
+        return None
+    text = str(stamp).strip().replace(" ", "T", 1)
+    try:
+        dt = datetime.fromisoformat(text)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def _turn_json_body(raw: str | None) -> tuple[dict | None, str | None]:
+    """Parse a structured message body. Returns (parsed, raw_head) with
+    exactly one side filled in — a malformed body becomes a `raw` string on
+    the record instead of a 500.
+
+    Compaction summaries arrive as a ```json fence followed by a prose recap
+    of the same thing, so the fenced region has to be cut out at its closing
+    line: taking everything after the opening fence leaves the prose attached
+    and json.loads reports "Extra data" on all but the rare summary that
+    happens to end at the fence."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        close = text.find("\n```")
+        if close != -1:
+            text = text[:close]
+        elif text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+        text = text.strip()
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return None, (raw or "")[:_RAW_HEAD_CAP]
+    if not isinstance(parsed, dict):
+        return None, (raw or "")[:_RAW_HEAD_CAP]
+    return parsed, None
+
+
+def _turn_args_summary(arguments) -> str:
+    """A one-line "key: value, key: value" digest of a tool call's arguments,
+    capped. Falls back to the raw argument string when it is not JSON (or
+    was truncated out of parseability by the column read)."""
+    if arguments in (None, ""):
+        return ""
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (ValueError, TypeError):
+            return arguments[:_ARGS_SUMMARY_CAP]
+    if not isinstance(arguments, dict):
+        try:
+            return json.dumps(arguments, default=str)[:_ARGS_SUMMARY_CAP]
+        except (TypeError, ValueError):
+            return str(arguments)[:_ARGS_SUMMARY_CAP]
+    parts: list[str] = []
+    used = 0
+    for key, value in arguments.items():
+        if isinstance(value, str):
+            shown = value
+        else:
+            try:
+                shown = json.dumps(value, default=str)
+            except (TypeError, ValueError):
+                shown = str(value)
+        shown = shown[:_ARGS_SUMMARY_CAP].replace("\n", " ").replace("\r", " ")
+        parts.append(f"{key}: {shown}")
+        used += len(parts[-1]) + 2
+        if used >= _ARGS_SUMMARY_CAP:
+            break
+    return ", ".join(parts)[:_ARGS_SUMMARY_CAP]
+
+
+def _turn_looks_like_error(content: str | None) -> bool:
+    """The pre-metadata error heuristic the timeline modal has always used.
+    Only consulted for tool rows written before `metadata.was_error` existed
+    — the stamp wins whenever it is there."""
+    head = (content or "")[:120].lower()
+    return head.startswith("error:") or "traceback" in head
+
+
+def _turn_tool_call_index(rows: list[dict]) -> dict:
+    """tool_call_id → {name, arguments, issued_at} from the assistant rows
+    that issued them (core/agent.py stores [{id, name, arguments}]).
+
+    The column read is capped, so a call carrying a large file body can come
+    back as truncated JSON; the regex recovers at least the id and name from
+    the head of each object rather than losing the row's identity."""
+    index: dict = {}
+    for row in rows:
+        if row["role"] != "assistant" or not row["tool_calls"]:
+            continue
+        raw = row["tool_calls"]
+        try:
+            calls = json.loads(raw)
+        except (ValueError, TypeError):
+            calls = [{"id": cid, "name": name} for cid, name in _TOOL_CALL_HEAD_RE.findall(raw)]
+        if not isinstance(calls, list):
+            continue
+        for call in calls:
+            if not isinstance(call, dict) or not call.get("id"):
+                continue
+            index[call["id"]] = {
+                "name": call.get("name") or "tool",
+                "arguments": call.get("arguments"),
+                "issued_at": row["_ms"],
+            }
+    return index
+
+
+def _turn_assign(
+    msgs: list[dict], starts: list[int], his: list[int], next_start_ms: int | None, win_lo_ms: int
+) -> None:
+    """Stamp each message with the index of the turn it belongs to (`_turn`),
+    or None when it belongs to a turn outside this page.
+
+    A message belongs to the turn whose [start, end] contains it (end = now
+    for the running turn). Between two turns the discriminator is role — a
+    `user` row in the gap is the prompt that opened the NEXT turn (it is
+    written a millisecond or two before the transition it triggers), and
+    everything else is the previous turn's post-hook tail: a deferred grade,
+    a notice, a late tool row.
+
+    The window is the whole rule, deliberately. `metadata.parent_user_msg_id`
+    looks like a better key — it names the user message a row was produced
+    under — but it is not one: `current_turn_user_msg_id` survives turns that
+    never refresh it, so on a real session (e058985e52df) one user message id
+    is stamped as the parent of four separate turns. Keying on it collapses
+    those four turns' work into whichever one claims the id first. It stays
+    useful for what it was added for — sorting an injected row inside its
+    turn — but not for saying which turn a row belongs to.
+
+    Also called for token_usage rows, which have no role at all; those can
+    never be a turn's opening prompt, and `.get` is what says so."""
+    last = len(starts) - 1
+    for msg in msgs:
+        ts = msg["_ms"]
+        if ts is None:
+            msg["_turn"] = None
+            continue
+        idx = bisect_right(starts, ts) - 1
+        if idx < 0:
+            # Ahead of the page's oldest turn: only its own prompt counts.
+            msg["_turn"] = 0 if (msg.get("role") == "user" and ts >= win_lo_ms) else None
+            continue
+        if ts <= his[idx]:
+            msg["_turn"] = idx
+            continue
+        if idx < last:
+            msg["_turn"] = idx + 1 if msg.get("role") == "user" else idx
+            continue
+        if next_start_ms is None:
+            msg["_turn"] = idx  # tail of the session's newest turn
+        elif msg.get("role") == "user":
+            msg["_turn"] = None  # the next turn's prompt, not ours
+        else:
+            msg["_turn"] = idx if ts < next_start_ms else None
+
+
+def _turn_phases(rows: list[dict], closed: bool, end_ms: int) -> list[dict]:
+    """The states the turn passed through, in order, with the wall-clock time
+    spent in each.
+
+    A log row records a transition, so state N's span runs from the row that
+    entered it to the row that left it. Durations come from the timestamp
+    delta rather than the row's own `elapsed_ms`, which is measured off a
+    monotonic clock that resets when the process restarts; the delta keeps
+    the phases summing exactly to the turn's elapsed. The turn's opening row
+    is excluded — its `elapsed_ms` is time spent idle before the prompt."""
+    phases: list[dict] = []
+    for i in range(len(rows) - 1):
+        head, nxt = rows[i], rows[i + 1]
+        phases.append(
+            {
+                "state": head["to_state"],
+                "started_at": _turn_ms_to_iso(head["timestamp_ms"]),
+                "ended_at": _turn_ms_to_iso(nxt["timestamp_ms"]),
+                "elapsed_ms": max(0, nxt["timestamp_ms"] - head["timestamp_ms"]),
+                "reason_in": head["reason"],
+                "reason_out": nxt["reason"],
+            }
+        )
+    if not closed and rows:
+        tail = rows[-1]
+        phases.append(
+            {
+                "state": tail["to_state"],
+                "started_at": _turn_ms_to_iso(tail["timestamp_ms"]),
+                "ended_at": None,
+                "elapsed_ms": max(0, end_ms - tail["timestamp_ms"]),
+                "reason_in": tail["reason"],
+                "reason_out": None,
+            }
+        )
+    return phases
+
+
+def _turn_tokens(usage: list[dict]) -> dict:
+    """Token totals for one turn. `cost_estimate` stays null when no row
+    priced itself — an unpriced local model must not report a cost of 0."""
+    priced = [u["cost_estimate"] for u in usage if u["cost_estimate"] is not None]
+    return {
+        "prompt": sum(int(u["prompt_tokens"] or 0) for u in usage),
+        "completion": sum(int(u["completion_tokens"] or 0) for u in usage),
+        "total": sum(int(u["total_tokens"] or 0) for u in usage),
+        "calls": len(usage),
+        "cost_estimate": sum(priced) if priced else None,
+        "models": sorted({u["model"] for u in usage if u["model"]}),
+    }
+
+
+def _turn_record(page_turn: dict, rows: list[dict], msgs: list[dict], usage: list[dict], now_ms: int) -> dict:
+    """Fold one turn's state-log rows, messages and usage rows into a record."""
+    first, last = rows[0], rows[-1]
+    closed = last["to_state"] in _TURN_IDLE_STATES
+    running = page_turn["_running"]
+    end_ms = now_ms if running else last["timestamp_ms"]
+
+    violations = [r["reason"] for r in rows if str(r["reason"] or "").startswith("invariant-violation")]
+    if not closed and not running:
+        # No closing transition and no longer the live turn: the process died
+        # mid-turn. Record it rather than letting the turn read as finished.
+        violations.append("turn-never-closed")
+
+    termination = None
+    for row in rows:
+        if row["termination_reason"]:
+            termination = row["termination_reason"]
+
+    tool_index = _turn_tool_call_index(msgs)
+    tool_calls: list[dict] = []
+    scouts: list[dict] = []
+    reflects: list[dict] = []
+    evals: list[dict] = []
+    compactions: list[dict] = []
+    notices: list[dict] = []
+    model_votes: dict[str, int] = {}
+
+    for msg in msgs:
+        role = msg["role"]
+        if role == "assistant":
+            model = (msg["_meta"] or {}).get("model")
+            if isinstance(model, str) and model:
+                model_votes[model] = model_votes.get(model, 0) + 1
+        elif role == "tool":
+            meta = msg["_meta"] or {}
+            call = tool_index.get(msg["tool_call_id"]) or {}
+            latency = msg["latency_ms"]
+            if latency is None:
+                latency = meta.get("latency_ms")
+            if "was_error" in meta:
+                was_error = bool(meta["was_error"])
+            else:
+                was_error = _turn_looks_like_error(msg["content"])
+            started = call.get("issued_at")
+            if started is None:
+                started = msg["_ms"] - int(latency or 0) if msg["_ms"] is not None else None
+            tool_calls.append(
+                {
+                    "message_id": msg["id"],
+                    "call_id": msg["tool_call_id"],
+                    "name": call.get("name") or "tool",
+                    "args_summary": _turn_args_summary(call.get("arguments")),
+                    "latency_ms": int(latency) if latency is not None else None,
+                    "was_error": was_error,
+                    "started_at": _turn_ms_to_iso(started),
+                }
+            )
+        elif role == "scout":
+            body, raw = _turn_json_body(msg["content"])
+            scouts.append({"raw": raw} if body is None else body)
+        elif role == "reflect":
+            body, raw = _turn_json_body(msg["content"])
+            entry = {"attempt": len(reflects) + 1}
+            if body is None:
+                entry["raw"] = raw
+            else:
+                for key in ("verdict", "reasoning", "diagnostic", "what_worked"):
+                    entry[key] = body.get(key)
+            reflects.append(entry)
+        elif role == "eval":
+            body, raw = _turn_json_body(msg["content"])
+            if body is None:
+                evals.append({"attempt": len(evals) + 1, "gates": [], "raw": raw})
+                continue
+            gates = body.get("gates")
+            evals.append(
+                {
+                    "attempt": body.get("attempt", len(evals) + 1),
+                    "gates": [
+                        {
+                            "name": g.get("name"),
+                            "command": g.get("command"),
+                            "passed": bool(g.get("passed")),
+                            "exit_code": g.get("exit_code"),
+                            "output_tail": g.get("output_tail") or "",
+                        }
+                        for g in (gates if isinstance(gates, list) else [])
+                        if isinstance(g, dict)
+                    ],
+                }
+            )
+        elif role == "compaction":
+            body, raw = _turn_json_body(msg["content"])
+            meta = msg["_meta"] or {}
+            compactions.append(
+                {
+                    "summary": body if body is not None else (msg["content"] or "")[:_SUMMARY_RAW_CAP],
+                    "compacted_up_to": meta.get("compacted_up_to"),
+                    "original_count": meta.get("original_count"),
+                    "at": _turn_ms_to_iso(msg["_ms"]),
+                }
+            )
+        elif role == "notice":
+            notices.append({"text": msg["content"] or "", "at": _turn_ms_to_iso(msg["_ms"])})
+
+    return {
+        "turn_id": first["turn_id"],
+        "parent_turn_id": first["parent_turn_id"],
+        "retry_index": max(int(r["retry_index"] or 0) for r in rows),
+        "running": running,
+        "started_at": _turn_ms_to_iso(first["timestamp_ms"]),
+        "ended_at": None if running else _turn_ms_to_iso(last["timestamp_ms"]),
+        "elapsed_ms": max(0, end_ms - first["timestamp_ms"]),
+        "termination_reason": termination,
+        "reflect_count": max(int(r["reflect_count"] or 0) for r in rows),
+        "eval_count": max(int(r["eval_count"] or 0) for r in rows),
+        "compaction_count": max(int(r["compaction_count"] or 0) for r in rows),
+        "phases": _turn_phases(rows, closed, end_ms),
+        "tool_calls": tool_calls,
+        # Retries re-scout; the report kept is the one the turn opened with,
+        # which is the plan reflect[0] graded. The extra scouting phases stay
+        # visible in `phases`.
+        "scout": scouts[0] if scouts else None,
+        "reflect": reflects,
+        "eval": evals,
+        "compactions": compactions,
+        "notices": notices,
+        "tokens": _turn_tokens(usage),
+        "model": max(model_votes, key=lambda m: (model_votes[m], m)) if model_votes else None,
+        "invariant_violations": violations,
+    }
+
+
+def get_turns(session_id: str, before_turn: int = 0, limit: int = 20) -> dict:
+    """One record per turn for the State timeline, newest turn first.
+
+    `before_turn` pages backward (turns older than that turn id); `limit` is
+    clamped to 1..100. `has_more` says whether an older page exists. A
+    session with no transitions logged returns an empty page rather than an
+    error — the 404 for an unknown session belongs to the route."""
+    limit = max(1, min(20 if limit is None else int(limit), 100))
+    before_turn = max(0, 0 if before_turn is None else int(before_turn))
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    with connect_sessions() as conn:
+        newest_row = conn.execute(
+            "SELECT COALESCE(MAX(turn_id), 0) AS t FROM session_state_log WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        newest_turn = int(newest_row["t"]) if newest_row else 0
+
+        # One row per turn: the page itself, plus the turn the caller paged
+        # back from (its start bounds our newest turn's tail) and one turn
+        # behind the page (its end bounds our oldest turn's prompt search).
+        bounds = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT turn_id,
+                          MIN(timestamp_ms) AS start_ms,
+                          MAX(timestamp_ms) AS end_ms
+                   FROM session_state_log
+                   WHERE session_id = ? AND (? = 0 OR turn_id <= ?)
+                   GROUP BY turn_id
+                   ORDER BY turn_id DESC
+                   LIMIT ?""",
+                (session_id, before_turn, before_turn, limit + 2),
+            )
+        ]
+        above = bounds.pop(0) if (before_turn and bounds and bounds[0]["turn_id"] == before_turn) else None
+        page_desc = bounds[:limit]
+        has_more = len(bounds) > limit
+        below = bounds[limit] if has_more else None
+        if not page_desc:
+            return {"session_id": session_id, "count": 0, "has_more": False, "turns": []}
+
+        page = list(reversed(page_desc))
+        log_rows = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT * FROM session_state_log
+                   WHERE session_id = ? AND turn_id >= ? AND turn_id <= ?
+                   ORDER BY id""",
+                (session_id, page[0]["turn_id"], page[-1]["turn_id"]),
+            )
+        ]
+
+        # Only the session's newest turn can still be running, and only when
+        # the caller is not paging behind it.
+        for entry in page:
+            entry["_running"] = False
+        newest_entry = page[-1]
+        newest_is_live = above is None and newest_entry["turn_id"] >= newest_turn
+        newest_rows = [r for r in log_rows if r["turn_id"] == newest_entry["turn_id"]]
+        if newest_is_live and newest_rows and newest_rows[-1]["to_state"] not in _TURN_IDLE_STATES:
+            newest_entry["_running"] = True
+
+        starts = [t["start_ms"] for t in page]
+        his = [now_ms if t["_running"] else t["end_ms"] for t in page]
+        if above is not None:
+            next_start_ms: int | None = above["start_ms"]
+        elif newest_is_live:
+            next_start_ms = None
+        else:
+            next_start_ms = newest_entry["end_ms"] + _TURN_TAIL_MS
+        win_lo_ms = below["end_ms"] if below else starts[0] - _ROOT_LOOKBACK_MS
+        win_hi_ms = next_start_ms if next_start_ms is not None else now_ms
+
+        msgs = [
+            dict(r)
+            for r in conn.execute(
+                f"""SELECT id, role, tool_call_id, latency_ms, metadata, created_at,
+                           substr(tool_calls, 1, {_TOOL_CALLS_CAP}) AS tool_calls,
+                           CASE WHEN role IN {_TURN_JSON_ROLES_SQL}
+                                THEN content
+                                ELSE substr(content, 1, {_CONTENT_HEAD_CAP}) END AS content
+                    FROM messages
+                    WHERE session_id = ? AND created_at >= ? AND created_at <= ?
+                    ORDER BY id""",
+                (session_id, _turn_iso_bound(win_lo_ms), _turn_iso_bound(win_hi_ms + 1000)),
+            )
+        ]
+        usage_rows = [
+            dict(r)
+            for r in conn.execute(
+                """SELECT model, prompt_tokens, completion_tokens, total_tokens,
+                          cost_estimate, created_at
+                   FROM token_usage
+                   WHERE session_id = ? AND created_at >= ? AND created_at <= ?""",
+                (session_id, _turn_usage_bound(win_lo_ms), _turn_usage_bound(win_hi_ms + 1000)),
+            )
+        ]
+
+    for msg in msgs:
+        msg["_ms"] = _turn_stamp_to_ms(msg["created_at"])
+        msg["_meta"], _ = _turn_json_body(msg["metadata"])
+    _turn_assign(msgs, starts, his, next_start_ms, win_lo_ms)
+
+    for row in usage_rows:
+        row["_ms"] = _turn_stamp_to_ms(row["created_at"])
+    _turn_assign(usage_rows, starts, his, next_start_ms, win_lo_ms)
+
+    by_turn: dict[int, list[dict]] = {t["turn_id"]: [] for t in page}
+    for row in log_rows:
+        if row["turn_id"] in by_turn:
+            by_turn[row["turn_id"]].append(row)
+    msgs_by_turn: dict[int, list[dict]] = {t["turn_id"]: [] for t in page}
+    for msg in msgs:
+        if msg["_turn"] is not None:
+            msgs_by_turn[page[msg["_turn"]]["turn_id"]].append(msg)
+    usage_by_turn: dict[int, list[dict]] = {t["turn_id"]: [] for t in page}
+    for row in usage_rows:
+        if row["_turn"] is not None:
+            usage_by_turn[page[row["_turn"]]["turn_id"]].append(row)
+
+    turns = [
+        _turn_record(
+            entry, by_turn[entry["turn_id"]], msgs_by_turn[entry["turn_id"]], usage_by_turn[entry["turn_id"]], now_ms
+        )
+        for entry in reversed(page)
+        if by_turn[entry["turn_id"]]
+    ]
+    return {"session_id": session_id, "count": len(turns), "has_more": has_more, "turns": turns}
 
 
 # ---------------------------------------------------------------------------
