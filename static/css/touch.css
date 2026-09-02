@@ -1,54 +1,37 @@
-/* Pernix — Mobile / touch styles
+/* Pernix — Touch styles (input modality)
    ----------------------------------------------------------------------
-   THE WHOLE FILE IS GATED BY THE media ATTRIBUTE ON ITS <link> IN
-   index.html — the touch rules below carry no @media wrapper of their own.
+   GATE: the media ATTRIBUTE on this file's <link> in index.html —
 
-   The gate has to be something JavaScript can override. iPadOS defaults to
-   desktop-class browsing in both Safari and Chrome (Chrome on iOS is a
-   WebKit wrapper — Apple requires it), and in that mode the browser reports
-   `hover: hover`, `pointer: fine`, a Macintosh user-agent and a layout width
-   over 768px. A media query therefore cannot see an iPad at all, and every
-   rule in this file silently stopped applying there: 13px inputs that make
-   iOS zoom in on focus, hover-only controls that are invisible but still
-   tappable, and no drawer.
+       media="(max-width: 768px), (hover: none) and (pointer: coarse)"
 
-   touch-boot.js runs in <head>, detects iPadOS by the one signal desktop
-   mode does not fake — a touchscreen on a "Mac" — and flips this link's
-   media to `all`. Still loaded last, so these rules win on the cascade.
+   The rules below carry NO @media wrapper of their own, and none must ever
+   be added around them. The gate has to be something JavaScript can
+   override: iPadOS defaults to desktop-class browsing in both Safari and
+   Chrome (Chrome on iOS is a WebKit wrapper — Apple requires it), and in
+   that mode the browser reports `hover: hover`, `pointer: fine`, a
+   Macintosh user-agent and a layout width over 768px. A media query
+   therefore cannot see an iPad at all, and every rule in this file
+   silently stopped applying there: 13px inputs that make iOS zoom in on
+   focus, hover-only controls that are invisible but still tappable, no
+   safe-area insets. touch-boot.js runs in <head>, detects iPadOS by the
+   one signal desktop mode does not fake — a touchscreen on a "Mac" — and
+   flips THIS link's media to `all`.
 
-   Rules that narrow further (small phones, landscape phones) keep their own
-   @media blocks: those AND with the link gate, which is what they mean.   */
+   WHAT BELONGS HERE: input modality, and nothing else. Target sizes, 16px
+   inputs (below that iOS zooms the page on focus and never zooms back),
+   hover-revealed controls made visible, safe-area insets, momentum
+   scrolling, the status bar moved to the top of the screen, the font-scale
+   bump. A rule that is about fitting a NARROW WIDTH belongs in
+   compact.css, which is gated on `(max-width: 899px)` and needs no JS.
+   The tablet tier — wide and touch — gets this file and not that one, so
+   anything filed wrongly here shows up as a phone layout on a 1180px iPad.
 
-/* ======================================================================
-   Safe area insets (notch phones)
-   ====================================================================== */
-:root {
-    --safe-top: env(safe-area-inset-top, 0px);
-    --safe-bottom: env(safe-area-inset-bottom, 0px);
-    --safe-left: env(safe-area-inset-left, 0px);
-    --safe-right: env(safe-area-inset-right, 0px);
-}
+   Rules that narrow further (small phones, landscape phones) keep their
+   own @media blocks: those AND with the link gate, which is what they
+   mean. The --safe-* tokens live in tokens.css; env() is 0 on a desktop,
+   so defining them there is harmless and lets compact.css use them too.
 
-/* ======================================================================
-   Moved here from layout.css and file-panel.css
-   ----------------------------------------------------------------------
-   These sat behind their own copy of the old `(max-width: 768px), (hover:
-   none) and (pointer: coarse)` media query, so they were dark on an iPad
-   for the same reason everything else was. They live here now because this
-   file is the only one whose gate JavaScript can reach.
-
-   Kept at the TOP of the touch rules on purpose: layout.css and
-   file-panel.css load before mobile.css, so this is where they sat in the
-   cascade, and #sidebar/#input-wrapper/.fp-tab-desc-toggle are all
-   re-declared further down. Moving them lower would let `display: none`
-   beat the drawer.
-   ====================================================================== */
-
-/* from layout.css */
-#sidebar { display: none; }
-#sidebar-toggle { display: none; }
-:root { --chat-max-w: 100%; }
-#input-wrapper { padding: var(--sp-2) var(--sp-3) var(--sp-3); }
+   Loaded LAST of the two so it wins ties, exactly as mobile.css did.    */
 
 /* from file-panel.css — larger touch target for the tab desc toggle */
 .fp-tab-desc-toggle {
@@ -62,7 +45,6 @@
 .fp-tab-desc-full {
     font-size: 11px;
 }
-
 
 /* ======================================================================
    Touch accessibility — controls the desktop only reveals on :hover
@@ -147,7 +129,6 @@
     --text-md:  0.9375rem;   /* 15px, up from 14px */
     --text-lg:  1rem;        /* 16px, up from 15px */
     --text-xl:  1.0625rem;   /* 17px, up from 16px */
-    --chat-max-w: 100% !important;
 }
 
 /* ------------------------------------------------------------------
@@ -372,49 +353,6 @@
     flex-shrink: 0;
 }
 
-/* ------------------------------------------------------------------
-   Sidebar — slide-in drawer (overrides layout.css 768px display:none)
-   ------------------------------------------------------------------ */
-#sidebar {
-    display: flex !important;
-    position: fixed;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: 280px !important;
-    z-index: 500;
-    transform: translateX(-100%);
-    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: none;
-    padding-top: var(--safe-top);
-    /* The drawer spans the full height, so its last row (the legend)
-       lands under the home indicator without this. */
-    padding-bottom: var(--safe-bottom);
-    padding-left: var(--safe-left);
-}
-#sidebar.collapsed {
-    width: 280px !important;
-    border-right-color: var(--border);
-    transform: translateX(-100%);
-}
-#sidebar.mobile-open {
-    transform: translateX(0);
-    box-shadow: 4px 0 24px var(--shadow-color);
-}
-
-/* Scrim behind drawer */
-.mobile-scrim {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: var(--scrim);
-    z-index: 499;
-    touch-action: none;
-}
-.mobile-scrim.visible {
-    display: block;
-}
-
 /* Session items — touch-friendly sizing */
 .session-item {
     padding: var(--sp-2) var(--sp-3);
@@ -463,32 +401,6 @@
     row-gap: var(--sp-1);
 }
 
-/* ------------------------------------------------------------------
-   File panel — full-screen overlay
-   ------------------------------------------------------------------ */
-#file-panel.open {
-    position: fixed !important;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    width: 100% !important;
-    z-index: 400;
-}
-.fp-resize-handle {
-    display: none;
-}
-.fp-header {
-    padding-top: calc(var(--sp-3) + var(--safe-top));
-}
-/* Full-screen overlay: its last row would otherwise sit under the home
-   indicator, and its edges under the landscape notch. Insets go on the
-   container so every tab's content inherits them exactly once. */
-#file-panel.open {
-    padding-bottom: var(--safe-bottom);
-    padding-left: var(--safe-left);
-    padding-right: var(--safe-right);
-}
 .fp-tab-btn {
     min-height: 44px;
     padding: 12px var(--sp-3);
@@ -575,17 +487,6 @@
     padding: var(--sp-3);
 }
 
-/* ------------------------------------------------------------------
-   Messages area
-   ------------------------------------------------------------------ */
-#messages {
-    padding: var(--sp-3) 0;
-    min-height: 0;
-}
-.messages-inner {
-    padding-left: max(var(--sp-3), var(--safe-left));
-    padding-right: max(var(--sp-3), var(--safe-right));
-}
 .message {
     margin-bottom: var(--sp-2);
 }
@@ -680,53 +581,6 @@
     height: 20px;
 }
 
-/* ------------------------------------------------------------------
-   Modals — bottom-sheet pattern
-   ------------------------------------------------------------------ */
-.modal-overlay {
-    align-items: flex-end;
-    /* Landscape notch — insets go on the overlay so the sheet keeps
-       width:100% of the remaining space instead of overflowing it. */
-    padding-left: var(--safe-left);
-    padding-right: var(--safe-right);
-}
-.modal-card {
-    width: 100%;
-    max-width: 100%;
-    max-height: 92vh;
-    max-height: 92dvh;
-    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-    animation: slideUpMobile 0.25s ease;
-    /* Sheets sit flush against the bottom edge. A footer supplies its
-       own inset (below); footer-less sheets (timeline, signals) would
-       otherwise run their last row under the home indicator. */
-    padding-bottom: var(--safe-bottom);
-}
-/* A footer already pads for the home indicator — don't inset twice. */
-.modal-card:has(.modal-footer) {
-    padding-bottom: 0;
-}
-/* Grab handle indicator for bottom sheets */
-.modal-card::before {
-    content: '';
-    display: block;
-    width: 32px;
-    height: 4px;
-    background: var(--border);
-    border-radius: 2px;
-    margin: var(--sp-2) auto 0;
-    flex-shrink: 0;
-}
-.modal-card.expanded {
-    max-width: 100%;
-    width: 100%;
-    max-height: 100vh;
-    max-height: 100dvh;
-    border-radius: 0;
-}
-.modal-card.expanded::before {
-    display: none;
-}
 .modal-body {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
@@ -740,40 +594,7 @@
     justify-content: center;
     font-size: 22px;
 }
-.modal-footer {
-    padding-bottom: max(var(--sp-3), var(--safe-bottom));
-}
 
-/* Scout Signals — bottom-sheet sizing + compact table */
-#signals-modal {
-    max-width: 100%;
-    width: 100%;
-    max-height: 92dvh;
-}
-#signals-modal table {
-    font-size: var(--text-xs);
-}
-#signals-modal th,
-#signals-modal td {
-    padding: 0.35rem 0.4rem;
-}
-
-/* Settings rows — stack vertically */
-.setting-row {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--sp-2);
-}
-.setting-row label {
-    min-width: auto;
-}
-/* The label column is the full row width once stacked, so nothing gets
-   squeezed into a two-character column. */
-.setting-label-cell {
-    min-width: 0;
-    max-width: 100%;
-    width: 100%;
-}
 .setting-row input[type="text"],
 .setting-row input[type="number"],
 .setting-row input[type="password"],
@@ -818,46 +639,10 @@
     font-size: var(--text-xs);
 }
 
-/* Settings search — the primary way to find anything on a phone, so it
-   gets a full-width field and never triggers the iOS zoom. */
-/* Horizontal notch insets live on .modal-overlay (above), so the sheet's
-   own chrome only needs its normal padding here. */
-.settings-search {
-    padding: var(--sp-2) var(--sp-5);
-    flex-wrap: wrap;
-}
 .settings-search-input {
     font-size: 16px;
     min-height: 44px;
     padding: var(--sp-2) var(--sp-3);
-}
-.settings-search-count {
-    white-space: normal;
-}
-
-/* Save/Cancel stay reachable; a long status message (rejected values,
-   restart notices) wraps above them instead of shoving them off-screen. */
-.modal-footer {
-    flex-wrap: wrap;
-}
-.save-status {
-    flex-basis: 100%;
-    margin-right: 0;
-    margin-bottom: var(--sp-1);
-}
-
-/* Section help tooltip — flow-relative instead of fixed */
-.section-help-tip {
-    position: absolute !important;
-    left: 0 !important;
-    top: 100% !important;
-    right: auto !important;
-    bottom: auto !important;
-    width: min(280px, calc(100vw - 48px));
-    margin-top: 4px;
-}
-.section-help-wrap {
-    position: relative;
 }
 
 /* Modal buttons — touch-friendly */
@@ -866,18 +651,7 @@
     padding: var(--sp-3) var(--sp-5);
     font-size: var(--text-md);
 }
-/* Five tabs wrapped onto two rows at 390px, costing ~45px of a sheet that
-   is already short. Keep them on one line and let the strip scroll if a
-   narrower phone still can't fit them. */
-.tab-bar {
-    padding: 0;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    scrollbar-width: none;
-}
-.tab-bar::-webkit-scrollbar {
-    display: none;
-}
+
 .tab-btn {
     flex: 1 0 auto;
     min-height: 44px;
@@ -920,11 +694,6 @@
     font-size: var(--text-lg);
 }
 
-@keyframes slideUpMobile {
-    from { opacity: 0; transform: translateY(30%); }
-    to   { opacity: 1; transform: translateY(0); }
-}
-
 /* ------------------------------------------------------------------
    Palette (Ctrl+K) and model menu — reclaim vertical space on phones
    ------------------------------------------------------------------ */
@@ -965,35 +734,10 @@
     min-height: 44px;
     font-size: 16px;
 }
-.jobs-add-row {
-    flex-direction: column;
-}
-.jobs-history-header {
-    flex-wrap: wrap;
-}
+
 .jobs-history-header select {
     min-height: 44px;
     font-size: 16px;
-}
-
-/* ------------------------------------------------------------------
-   Empty state
-   ------------------------------------------------------------------ */
-.empty-state {
-    padding: var(--sp-6);
-}
-.empty-state-figure {
-    width: 240px;
-    height: 240px;
-}
-.empty-state-title {
-    font-size: 44px;
-}
-.empty-state-kicker {
-    font-size: 11px;
-}
-.empty-state-kicker em {
-    font-size: 13px;
 }
 
 /* ------------------------------------------------------------------
@@ -1109,7 +853,6 @@
     }
 }
 
-
 /* ------------------------------------------------------------------
    Toasts — above the composer, clear of the home indicator
    ------------------------------------------------------------------ */
@@ -1123,18 +866,6 @@
     max-width: 100%;
 }
 
-
-/* ------------------------------------------------------------------
-   Spaces modal — the desktop card is a fixed, user-resizable box
-   (min-width 560px, height min(82vh, 950px)); on a 360px phone that
-   overflowed the sheet sideways and could not be scrolled back.
-   ------------------------------------------------------------------ */
-.space-modal-card {
-    min-width: 0;
-    width: 100%;
-    height: auto;
-    resize: none;
-}
 /* Hover-revealed on desktop — there is no hover here, so the rename/delete
    controls on a space were simply unreachable. */
 .space-group-header .space-btn,

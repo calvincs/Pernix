@@ -1737,7 +1737,7 @@ function _buildQRButton() {
             // Build overlay
             const overlay = el('div', { class: 'modal-overlay' });
             // The padding lives on an inner .modal-body, not inline on the
-            // card: an inline `padding` beats mobile.css's bottom-sheet
+            // card: an inline `padding` beats compact.css's bottom-sheet
             // safe-area inset, so the last row of these dialogs sat under the
             // home indicator on a phone. (V12)
             const card = el('div', {

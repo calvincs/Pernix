@@ -1,0 +1,307 @@
+/* Pernix — Compact layout (narrow viewports)
+   ----------------------------------------------------------------------
+   GATE: the media attribute on this file's <link> in index.html —
+
+       media="(max-width: 899px)"
+
+   Width only. No JavaScript is involved: unlike touch.css there is nothing
+   here an iPad in desktop mode could hide from a media query, because the
+   question this file answers — "is the viewport narrower than 900px?" — is
+   one the browser always answers honestly.
+
+   WHAT BELONGS HERE: fitting a narrow width. The sidebar as a modal drawer
+   with a scrim, the full-screen Explorer, bottom-sheet modals, the chat
+   column at 100%, stacked settings rows, wrapped toolbars. A rule that is
+   about INPUT MODALITY — a 44px target, a 16px input, a hover-revealed
+   control, a safe-area inset — belongs in touch.css instead. 900px is the
+   tablet line (D1): every iPad in landscape docks the sidebar and keeps
+   the desktop shapes; every iPad in portrait and every phone stays here.
+
+   Loaded BEFORE touch.css so touch wins ties, exactly as mobile.css did.
+   The --safe-* tokens are defined in tokens.css.                        */
+
+/* ======================================================================
+   Moved here from layout.css
+   ----------------------------------------------------------------------
+   These sat behind layout.css's own copy of the old `(max-width: 768px),
+   (hover: none) and (pointer: coarse)` query. Kept at the TOP: layout.css
+   loads before this file, so this is where they sat in the cascade, and
+   #sidebar and #input-wrapper are both re-declared further down. Moving
+   them lower would let `display: none` beat the drawer.
+
+   layout.css's `#sidebar-toggle { display: none }` is deliberately NOT
+   carried over. It was safe only because touch.css puts the hamburger
+   back with `display: flex !important`; in a narrow window with a MOUSE
+   touch.css does not load, and hiding it would leave the drawer with no
+   handle at all. layout.css already floats it over #main there.
+   ====================================================================== */
+/* from layout.css */
+#sidebar { display: none; }
+
+:root { --chat-max-w: 100%; }
+#input-wrapper { padding: var(--sp-2) var(--sp-3) var(--sp-3); }
+
+/* The chat column spans the viewport; there is no room for a measure. */
+:root {
+    --chat-max-w: 100% !important;
+}
+
+/* ------------------------------------------------------------------
+   Sidebar — slide-in drawer (overrides layout.css 768px display:none)
+   ------------------------------------------------------------------ */
+#sidebar {
+    display: flex !important;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 280px !important;
+    z-index: 500;
+    transform: translateX(-100%);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: none;
+    padding-top: var(--safe-top);
+    /* The drawer spans the full height, so its last row (the legend)
+       lands under the home indicator without this. */
+    padding-bottom: var(--safe-bottom);
+    padding-left: var(--safe-left);
+}
+#sidebar.collapsed {
+    width: 280px !important;
+    border-right-color: var(--border);
+    transform: translateX(-100%);
+}
+#sidebar.mobile-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px var(--shadow-color);
+}
+
+/* Scrim behind drawer */
+.mobile-scrim {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: var(--scrim);
+    z-index: 499;
+    touch-action: none;
+}
+.mobile-scrim.visible {
+    display: block;
+}
+
+/* ------------------------------------------------------------------
+   File panel — full-screen overlay
+   ------------------------------------------------------------------ */
+#file-panel.open {
+    position: fixed !important;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100% !important;
+    z-index: 400;
+}
+.fp-resize-handle {
+    display: none;
+}
+.fp-header {
+    padding-top: calc(var(--sp-3) + var(--safe-top));
+}
+/* Full-screen overlay: its last row would otherwise sit under the home
+   indicator, and its edges under the landscape notch. Insets go on the
+   container so every tab's content inherits them exactly once. */
+#file-panel.open {
+    padding-bottom: var(--safe-bottom);
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
+}
+
+/* ------------------------------------------------------------------
+   Messages area
+   ------------------------------------------------------------------ */
+#messages {
+    padding: var(--sp-3) 0;
+    min-height: 0;
+}
+.messages-inner {
+    padding-left: max(var(--sp-3), var(--safe-left));
+    padding-right: max(var(--sp-3), var(--safe-right));
+}
+
+/* ------------------------------------------------------------------
+   Modals — bottom-sheet pattern
+   ------------------------------------------------------------------ */
+.modal-overlay {
+    align-items: flex-end;
+    /* Landscape notch — insets go on the overlay so the sheet keeps
+       width:100% of the remaining space instead of overflowing it. */
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
+}
+.modal-card {
+    width: 100%;
+    max-width: 100%;
+    max-height: 92vh;
+    max-height: 92dvh;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    animation: slideUpMobile 0.25s ease;
+    /* Sheets sit flush against the bottom edge. A footer supplies its
+       own inset (below); footer-less sheets (timeline, signals) would
+       otherwise run their last row under the home indicator. */
+    padding-bottom: var(--safe-bottom);
+}
+/* A footer already pads for the home indicator — don't inset twice. */
+.modal-card:has(.modal-footer) {
+    padding-bottom: 0;
+}
+/* Grab handle indicator for bottom sheets */
+.modal-card::before {
+    content: '';
+    display: block;
+    width: 32px;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin: var(--sp-2) auto 0;
+    flex-shrink: 0;
+}
+.modal-card.expanded {
+    max-width: 100%;
+    width: 100%;
+    max-height: 100vh;
+    max-height: 100dvh;
+    border-radius: 0;
+}
+.modal-card.expanded::before {
+    display: none;
+}
+
+.modal-footer {
+    padding-bottom: max(var(--sp-3), var(--safe-bottom));
+}
+
+/* Scout Signals — bottom-sheet sizing + compact table */
+#signals-modal {
+    max-width: 100%;
+    width: 100%;
+    max-height: 92dvh;
+}
+#signals-modal table {
+    font-size: var(--text-xs);
+}
+#signals-modal th,
+#signals-modal td {
+    padding: 0.35rem 0.4rem;
+}
+
+/* Settings rows — stack vertically */
+.setting-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--sp-2);
+}
+.setting-row label {
+    min-width: auto;
+}
+/* The label column is the full row width once stacked, so nothing gets
+   squeezed into a two-character column. */
+.setting-label-cell {
+    min-width: 0;
+    max-width: 100%;
+    width: 100%;
+}
+
+/* Settings search — the primary way to find anything on a phone, so it
+   gets a full-width field and never triggers the iOS zoom. */
+/* Horizontal notch insets live on .modal-overlay (above), so the sheet's
+   own chrome only needs its normal padding here. */
+.settings-search {
+    padding: var(--sp-2) var(--sp-5);
+    flex-wrap: wrap;
+}
+
+.settings-search-count {
+    white-space: normal;
+}
+
+/* Save/Cancel stay reachable; a long status message (rejected values,
+   restart notices) wraps above them instead of shoving them off-screen. */
+.modal-footer {
+    flex-wrap: wrap;
+}
+.save-status {
+    flex-basis: 100%;
+    margin-right: 0;
+    margin-bottom: var(--sp-1);
+}
+
+/* Section help tooltip — flow-relative instead of fixed */
+.section-help-tip {
+    position: absolute !important;
+    left: 0 !important;
+    top: 100% !important;
+    right: auto !important;
+    bottom: auto !important;
+    width: min(280px, calc(100vw - 48px));
+    margin-top: 4px;
+}
+.section-help-wrap {
+    position: relative;
+}
+
+/* Five tabs wrapped onto two rows at 390px, costing ~45px of a sheet that
+   is already short. Keep them on one line and let the strip scroll if a
+   narrower phone still can't fit them. */
+.tab-bar {
+    padding: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.tab-bar::-webkit-scrollbar {
+    display: none;
+}
+
+@keyframes slideUpMobile {
+    from { opacity: 0; transform: translateY(30%); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.jobs-add-row {
+    flex-direction: column;
+}
+.jobs-history-header {
+    flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------------
+   Empty state
+   ------------------------------------------------------------------ */
+.empty-state {
+    padding: var(--sp-6);
+}
+.empty-state-figure {
+    width: 240px;
+    height: 240px;
+}
+.empty-state-title {
+    font-size: 44px;
+}
+.empty-state-kicker {
+    font-size: 11px;
+}
+.empty-state-kicker em {
+    font-size: 13px;
+}
+
+/* ------------------------------------------------------------------
+   Spaces modal — the desktop card is a fixed, user-resizable box
+   (min-width 560px, height min(82vh, 950px)); on a 360px phone that
+   overflowed the sheet sideways and could not be scrolled back.
+   ------------------------------------------------------------------ */
+.space-modal-card {
+    min-width: 0;
+    width: 100%;
+    height: auto;
+    resize: none;
+}

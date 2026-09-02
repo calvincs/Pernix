@@ -6,7 +6,7 @@
 // Everything else either wrote into a status span in a panel that may be
 // closed, or said nothing at all.
 //
-// Styling lives in layout.css (.toast-region / .toast) and mobile.css, and
+// Styling lives in layout.css (.toast-region / .toast) and touch.css, and
 // uses tokens only — no literals here.
 
 import { el, text } from './render.js';

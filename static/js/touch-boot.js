@@ -30,10 +30,13 @@
 //                               (animation power tier) and notification-bell.js
 //                               (iOS Home Screen instructions). Set once at
 //                               boot; nothing clears it.
-//   2. mobile.css's link      — flipped to media="all". That stylesheet keeps
+//   2. touch.css's link       — flipped to media="all". That stylesheet keeps
 //                               its gate on the <link> rather than in an
 //                               internal @media precisely so this line can
-//                               reach it.
+//                               reach it. Its sibling compact.css is NOT
+//                               touched: that one is keyed on viewport width,
+//                               which desktop mode reports honestly, and an
+//                               iPad in landscape is meant to miss it.
 //
 // A classic script in its own file, not an inline one: index.html ships a
 // `script-src 'self'` CSP with no 'unsafe-inline' escape hatch.
@@ -48,6 +51,6 @@
 
     document.documentElement.setAttribute('data-touch-ui', '');
 
-    var link = document.querySelector('link[href*="/css/mobile.css"]');
+    var link = document.querySelector('link[href*="/css/touch.css"]');
     if (link) link.media = 'all';
 })();

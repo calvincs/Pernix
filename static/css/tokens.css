@@ -171,7 +171,8 @@
     /* Set per-element at runtime (sidebar.js / file-panel.js / jobs.js write
        --space-color and --ticker-duration as inline styles); the defaults
        here are what an element without one falls back to. --safe-* is
-       re-declared identically in mobile.css, which is where it matters. */
+       --safe-* is defined here rather than in touch.css/compact.css so
+       both tiers can use it; env() resolves to 0 on a desktop. */
     --space-color: var(--accent);
     /* The sigil canvas blends into the page rather than sitting on it. Screen
        is lighten-only: perfect over black, and on paper it drives every pixel
@@ -316,7 +317,7 @@
    that sets display, whatever its specificity — origin beats specificity. So
    every author `display` on a control that toggles via the hidden attribute
    silently defeated it: #pause-btn (index.html) rendered in the idle header
-   on a phone because mobile.css gives .status-btn `display: flex`, and the
+   on a phone because touch.css gives .status-btn `display: flex`, and the
    same trap was waiting for #voice-btn and #worker-strip, each of which had
    grown its own `#id[hidden] { display: none }` patch. One rule instead, so
    `el.hidden = true` means hidden everywhere. */

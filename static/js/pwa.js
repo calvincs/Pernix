@@ -40,7 +40,7 @@ if ('serviceWorker' in navigator) {
         }
         // Visible: never yank the page mid-interaction — offer a tap.
         if (document.getElementById('sw-update-banner')) return;
-        // Styling lives in layout.css / mobile.css (#sw-update-banner) so it
+        // Styling lives in layout.css / touch.css (#sw-update-banner) so it
         // uses the real tokens and can be anchored above the composer on a
         // phone, where a centred pill sat on top of the send button.
         var banner = document.createElement('div');

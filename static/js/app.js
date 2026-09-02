@@ -4017,7 +4017,7 @@ function appendMessage(role, content, meta = {}) {
         const latency = row.latency_ms ?? meta.latencyMs ?? 0;
         _setMessageChip(msgEl, model, latency);
         // On a phone the chip is one more line of clutter on every single
-        // answer, so mobile.css folds it away and the meta row is the handle
+        // answer, so touch.css folds it away and the meta row is the handle
         // that brings it back.
         roleLabel.classList.add('role-label--toggle');
         roleLabel.addEventListener('click', () => msgEl.classList.toggle('show-meta'));

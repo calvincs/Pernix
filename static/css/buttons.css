@@ -51,7 +51,7 @@
     align-items: center;
     justify-content: center;
     gap: var(--sp-2);
-    /* The pointer-target floor. mobile.css raises the ones that matter to
+    /* The pointer-target floor. touch.css raises the ones that matter to
        44px for touch; this is the desktop minimum, and it is why an
        icon-only button is never a 14px glyph with nothing around it. */
     min-height: 24px;
