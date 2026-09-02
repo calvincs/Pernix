@@ -2125,7 +2125,6 @@ class SessionManager:
             # documented Gap-1 idle-resume instead. A parent that is mid-turn,
             # awaiting the user, or deliberately watching OTHER workers keeps
             # the old semantics.
-            from sessions import state_v2 as sv2
 
             if worker_session.termination_reason == "cancelled":
                 # A cancelled worker has nothing to synthesize. This is also

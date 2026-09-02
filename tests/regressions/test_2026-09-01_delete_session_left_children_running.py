@@ -17,6 +17,7 @@ def mgr(monkeypatch):
     monkeypatch.setattr("sessions.manager._manager", fresh)
     return fresh
 
+
 async def test_delete_session_async_stops_the_turn_then_purges_off_loop(mgr):
     sid = mgr.create_session(title="doomed")
     session = mgr.get(sid)

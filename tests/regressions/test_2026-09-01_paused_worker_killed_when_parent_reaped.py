@@ -16,6 +16,7 @@ def mgr(monkeypatch):
     monkeypatch.setattr("sessions.manager._manager", fresh)
     return fresh
 
+
 async def test_paused_worker_survives_a_parent_that_was_only_reaped(mgr):
     parent_id = mgr.create_session(title="P")
     worker_id = mgr.create_session(title="W", session_type="worker", parent_session_id=parent_id)

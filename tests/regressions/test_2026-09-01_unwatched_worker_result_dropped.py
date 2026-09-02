@@ -16,6 +16,7 @@ def mgr(monkeypatch):
     monkeypatch.setattr("sessions.manager._manager", fresh)
     return fresh
 
+
 async def test_unwatched_worker_result_revives_a_reaped_parent(mgr, monkeypatch):
     parent_id = mgr.create_session(title="P")
     worker_id = mgr.create_session(title="W", session_type="worker", parent_session_id=parent_id)
