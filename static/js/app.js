@@ -1480,6 +1480,7 @@ function _addQueueRemoveButton(msgEl, messageId) {
     const btn = el('button', {
         class: 'queued-remove',
         title: 'Remove from queue (not yet seen by the agent)',
+        'aria-label': 'Remove this queued message',
     }, [text('×')]);
     btn.addEventListener('click', async (e) => {
         e.stopPropagation();
@@ -1674,6 +1675,7 @@ function renderFileChips() {
             el('button', {
                 class: 'file-chip-remove',
                 title: 'Remove',
+                'aria-label': `Remove attachment ${pf.name}`,
                 onClick: () => removePendingFile(i),
             }, [text('\u00d7')]),
         ]);
@@ -1845,6 +1847,9 @@ function _renderWorkerStrip() {
         const ctlBtn = el('button', {
             class: 'worker-chip-ctl',
             title: w.paused ? 'Resume this worker' : 'Pause this worker after its current step',
+            'aria-label': w.paused
+                ? `Resume worker ${w.title}`
+                : `Pause worker ${w.title} after its current step`,
         }, [text(w.paused ? '▶' : '❚❚')]);
         ctlBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -1876,6 +1881,7 @@ function _renderWorkerStrip() {
         const reviveBtn = el('button', {
             class: 'worker-chip-ctl',
             title: 'Resume this worker from where it stopped',
+            'aria-label': `Resume worker ${d.title} from where it stopped`,
         }, [text('↻')]);
         reviveBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -2450,11 +2456,14 @@ function handleEvent(event) {
         // A raw uuid told the reader nothing about which of five parallel
         // workers had just finished. The strip and the session list both know
         // its title.
-        appendMessage('system', `Worker done: ${_workerLabel(event.worker_id, event.title)}${reason}${err}`);
+        // Resolve the name BEFORE the strip forgets it — _workerLabel reads
+        // _activeWorkers, and the delete below is what empties it.
+        const doneLabel = _workerLabel(event.worker_id, event.title);
+        appendMessage('system', `Worker done: ${doneLabel}${reason}${err}`);
         const prev = _activeWorkers.get(event.worker_id);
         _activeWorkers.delete(event.worker_id);
         _addDeadWorker(event.worker_id, {
-            title: _workerLabel(event.worker_id, event.title),
+            title: doneLabel,
             kind: (prev && prev.kind) || '',
             reason: event.termination_reason || (event.error ? 'error' : 'done'),
             endedAt: Date.now(),
@@ -3172,7 +3181,9 @@ function _parseMsgTs(createdAt) {
 /** Hover action toolbar: copy on every message, edit-&-resend on user messages. */
 function _attachMessageActions(msgEl, role) {
     const actions = el('div', { class: 'msg-actions' });
-    const copyBtn = el('button', { class: 'msg-action-btn', title: 'Copy message' }, [text('⧉')]);
+    const copyBtn = el('button', {
+        class: 'msg-action-btn', title: 'Copy message', 'aria-label': 'Copy message',
+    }, [text('⧉')]);
     copyBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const raw = msgEl._rawContent ?? msgEl.querySelector('.content')?.innerText ?? '';
@@ -3188,7 +3199,9 @@ function _attachMessageActions(msgEl, role) {
         // "Edit & resend" promised something this button does not do: it
         // neither edits the stored message nor resends anything, it only
         // puts the text back in the composer for you to change and send.
-        const editBtn = el('button', { class: 'msg-action-btn', title: 'Copy to composer' }, [text('✎')]);
+        const editBtn = el('button', {
+            class: 'msg-action-btn', title: 'Copy to composer', 'aria-label': 'Copy to composer',
+        }, [text('✎')]);
         editBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             const textarea = document.getElementById('msg-input');
@@ -3651,7 +3664,10 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
     const fileMatch = (fullResult || preview || '').match(/Written \d+ chars to (.+)/);
     if (fileMatch) {
         const [, filePath] = fileMatch;
-        const viewBtn = el('button', { class: 'file-view-btn' }, [text('view')]);
+        const viewBtn = el('button', {
+            class: 'file-view-btn',
+            'aria-label': `Open ${filePath.trim()} in the Explorer`,
+        }, [text('view')]);
         viewBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             openWorkspaceFile(filePath.trim());
@@ -4234,10 +4250,16 @@ function openTranscriptSearch() {
         placeholder: 'Search transcript…',
         'aria-label': 'Search transcript',
     });
-    const counter = el('span', { class: 'ts-counter' });
-    const prevBtn = el('button', { class: 'ts-nav', title: 'Previous match (Shift+Enter)' }, [text('↑')]);
-    const nextBtn = el('button', { class: 'ts-nav', title: 'Next match (Enter)' }, [text('↓')]);
-    const closeBtn = el('button', { class: 'ts-close', title: 'Close (Esc)' }, [text('×')]);
+    const counter = el('span', { class: 'ts-counter', role: 'status', 'aria-live': 'polite' });
+    const prevBtn = el('button', {
+        class: 'ts-nav', title: 'Previous match (Shift+Enter)', 'aria-label': 'Previous match',
+    }, [text('↑')]);
+    const nextBtn = el('button', {
+        class: 'ts-nav', title: 'Next match (Enter)', 'aria-label': 'Next match',
+    }, [text('↓')]);
+    const closeBtn = el('button', {
+        class: 'ts-close', title: 'Close (Esc)', 'aria-label': 'Close transcript search',
+    }, [text('×')]);
 
     input.addEventListener('input', () => {
         clearTimeout(_searchDebounce);
