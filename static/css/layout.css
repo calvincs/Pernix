@@ -1157,6 +1157,11 @@
     transition: color 0.15s;
 }
 .tool-group-header:hover { color: var(--accent-dim); }
+.tool-group-header:focus-visible,
+.tool-item-header:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: -2px;
+}
 /* A round that failed says so on the one line that stays visible when the
    group is collapsed. (The group with a failure is never auto-collapsed —
    see closeToolGroup — but the user can still fold it by hand.) */
@@ -1655,9 +1660,23 @@
     width: 100%;
 }
 
+/* #status-model and #state-badge are <button>s (they open a menu and a
+   dialog); strip the UA chrome so they still read as status-bar text. */
 #status-bar .model {
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    cursor: pointer;
     color: var(--accent-dim);
     font-weight: 500;
+}
+#status-bar .model:focus-visible,
+#state-badge:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: 2px;
 }
 #status-bar .model.has-override {
     color: var(--text-faint);
@@ -1813,7 +1832,11 @@
 .state-badge.awaiting_workers   { background: var(--state-awaiting_workers-bg); color: var(--state-awaiting_workers-fg); border-color: color-mix(in srgb, var(--state-awaiting_workers-fg) 40%, var(--state-awaiting_workers-bg)); }
 
 /* State badge is clickable — opens the timeline modal. */
-#state-badge { cursor: pointer; }
+#state-badge {
+    cursor: pointer;
+    font-family: inherit;
+    line-height: inherit;
+}
 #state-badge:hover { filter: brightness(1.15); }
 
 /* Timeline modal — opened via #state-badge click (see modals/timeline.js).

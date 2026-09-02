@@ -1984,9 +1984,11 @@ function _renderModelBadge() {
         pin.title = `Session override (default: ${state.model})`;
         mEl.appendChild(pin);
         mEl.title = `This session runs on ${_sessionModelOverride} (default: ${state.model}). Click to change.`;
+        mEl.setAttribute('aria-label', `Model: ${_sessionModelOverride} (session override). Change model.`);
     } else {
         mEl.appendChild(text(state.model || '...'));
         mEl.title = 'Model for this session — click to override';
+        mEl.setAttribute('aria-label', `Model: ${state.model || 'not set'}. Change model.`);
     }
 }
 
@@ -1996,6 +1998,7 @@ function _closeModelMenu() {
         _modelMenuEl = null;
         document.removeEventListener('click', _closeModelMenu);
     }
+    document.getElementById('status-model')?.setAttribute('aria-expanded', 'false');
 }
 
 async function _openModelMenu() {
@@ -2008,6 +2011,7 @@ async function _openModelMenu() {
     ]);
     _modelMenuEl = menu;
     document.body.appendChild(menu);
+    document.getElementById('status-model')?.setAttribute('aria-expanded', 'true');
 
     // Position above the status bar, anchored to the badge.
     const badge = document.getElementById('status-model');
@@ -3536,6 +3540,37 @@ function _updateToolGroupHeader(group) {
     group.classList.toggle('has-error', _toolGroupErrors > 0);
 }
 
+/**
+ * Make a non-button element behave like a disclosure control: focusable,
+ * operable with Enter and Space, and announcing whether it is open. The tool
+ * group and tool item headers were plain divs with a click listener, so a
+ * keyboard user could not open a single tool result in the transcript.
+ *
+ * @param {HTMLElement} headerEl
+ * @param {boolean} expanded  its state right now
+ * @param {function} toggle   flips the state and returns the new one
+ */
+function _makeDisclosure(headerEl, expanded, toggle) {
+    headerEl.setAttribute('role', 'button');
+    headerEl.setAttribute('tabindex', '0');
+    headerEl.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    const fire = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        _syncDisclosure(headerEl, toggle());
+    };
+    headerEl.addEventListener('click', fire);
+    headerEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') fire(e);
+    });
+}
+
+/** Keep aria-expanded honest when the state is changed by code rather than by
+ *  the user — an auto-collapse, or a search hit forcing a group open. */
+function _syncDisclosure(headerEl, expanded) {
+    if (headerEl) headerEl.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+}
+
 function ensureToolGroup() {
     if (_toolGroup) return _toolGroup;
     const inner = _messagesInner();
@@ -3551,9 +3586,11 @@ function ensureToolGroup() {
         el('span', { class: 'tg-toggle' }, [text('\u25BC')]),
         el('span', { class: 'tg-label' }, [text('0 tool calls')]),
     ]);
-    header.addEventListener('click', () => {
+    _makeDisclosure(header, true, () => {
         const group = header.closest('.tool-group');
-        if (group) group.classList.toggle('collapsed');
+        if (!group) return true;
+        group.classList.toggle('collapsed');
+        return !group.classList.contains('collapsed');
     });
     _toolGroup = el('div', { class: 'tool-group' }, [
         header,
@@ -3570,6 +3607,7 @@ function closeToolGroup() {
     // it is exactly how a red row goes unread.
     if (_toolGroupCount > 2 && _toolGroupErrors === 0) {
         _toolGroup.classList.add('collapsed');
+        _syncDisclosure(_toolGroup.querySelector('.tool-group-header'), false);
     }
     _clearRunningTools();
     _toolGroup = null;
@@ -3686,10 +3724,12 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
         class: `tool-item${wasError ? ' error' : ''}${isBrowse ? ' browse' : ''}`
     }, [headerEl, bodyEl]);
 
-    // Click header to toggle item expansion; reveal toggle button if content overflows
-    headerEl.addEventListener('click', () => {
+    // Header toggles item expansion; the show-more button appears after the
+    // first open if the content actually overflows.
+    _makeDisclosure(headerEl, false, () => {
         itemEl.classList.toggle('expanded');
-        if (itemEl.classList.contains('expanded') && !toggleRevealed) {
+        const nowExpanded = itemEl.classList.contains('expanded');
+        if (nowExpanded && !toggleRevealed) {
             requestAnimationFrame(() => {
                 if (isTruncated || contentEl.scrollHeight > contentEl.clientHeight + 2) {
                     contentEl.classList.add('overflows');
@@ -3698,6 +3738,7 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
                 }
             });
         }
+        return nowExpanded;
     });
 
     // Replace the live placeholder in place when there is one, so a finished
@@ -4168,9 +4209,15 @@ function _gotoSearchMatch(idx) {
     mark.classList.add('current');
     // Expand a collapsed tool group / body so the hit is actually visible.
     const group = mark.closest('.tool-group.collapsed');
-    if (group) group.classList.remove('collapsed');
+    if (group) {
+        group.classList.remove('collapsed');
+        _syncDisclosure(group.querySelector('.tool-group-header'), true);
+    }
     const toolItem = mark.closest('.tool-item');
-    if (toolItem && !toolItem.classList.contains('expanded')) toolItem.classList.add('expanded');
+    if (toolItem && !toolItem.classList.contains('expanded')) {
+        toolItem.classList.add('expanded');
+        _syncDisclosure(toolItem.querySelector('.tool-item-header'), true);
+    }
     mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
     const counter = _searchBarEl?.querySelector('.ts-counter');
     if (counter) counter.textContent = `${_searchCurrent + 1}/${_searchMarks.length}`;
@@ -4419,6 +4466,8 @@ function _applyStateBadge(to, reason) {
     el.className = 'state-badge ' + to;
     el.textContent = _STATE_LABELS[to] || to;
     el.title = reason ? `state: ${to} (${reason})` : `state: ${to}`;
+    el.setAttribute('aria-label',
+        `Session state: ${_STATE_LABELS[to] || to}${reason ? ` (${reason})` : ''}. Open the timeline.`);
     _updatePauseButton(to);
 }
 

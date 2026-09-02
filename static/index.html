@@ -123,9 +123,15 @@
             <div id="worker-strip" hidden></div>
             <div id="status-bar">
                 <span id="sse-health" class="sse-health disconnected" title="SSE: disconnected"></span>
-                <span class="model" id="status-model">...</span>
+                <!-- Both of these open something on click. As spans they were
+                     invisible to the keyboard and announced as plain text, so
+                     the model switcher and the state timeline were mouse-only. -->
+                <button type="button" class="model" id="status-model"
+                        aria-haspopup="menu" aria-expanded="false">...</button>
                 <span class="ctx" id="status-ctx"></span>
-                <span id="state-badge" class="state-badge idle_ready" title="Session state — click for timeline">idle</span>
+                <button type="button" id="state-badge" class="state-badge idle_ready"
+                        aria-haspopup="dialog"
+                        title="Session state — click for timeline">idle</button>
                 <button id="pause-btn" class="status-btn" title="Pause after the current step" aria-label="Pause after the current step" hidden>&#10074;&#10074;</button>
                 <span id="browser-status"></span>
                 <span id="tool-status"></span>
