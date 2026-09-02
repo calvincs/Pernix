@@ -166,6 +166,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    // The wordmark is the one thing on the page that looks like a home link
+    // and href="#" made it a no-op that also scrolled the page to the top.
+    document.querySelector('.brand')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        goHome();
+    });
+
+    // Escape closes the Explorer when nothing else owns the key. Overlays get
+    // theirs from openOverlay (which is scoped to the top of its own stack);
+    // this is the one pane that is not an overlay and had no way out but the
+    // button that opened it.
+    document.addEventListener('keydown', _handleGlobalEscape);
+
+    _setupPaneHistory();
+
     // Space/session mutations from the sidebar need a re-FETCH, not just a repaint
     window.addEventListener('pernix:sessions-changed', () => loadSessions());
 
@@ -294,6 +309,101 @@ function _modalOverlayOpen() {
         return true;
     }
     return false;
+}
+
+/** Escape, when nothing nearer owns it. */
+function _handleGlobalEscape(e) {
+    if (e.key !== 'Escape' || e.defaultPrevented) return;
+    if (_modalOverlayOpen() || _searchBarEl) return;
+    const panel = document.getElementById('file-panel');
+    if (panel && panel.classList.contains('open')) {
+        e.preventDefault();
+        toggleFilePanel();
+    }
+}
+
+/** Back to the hero screen with no session selected — the state the app boots
+ *  into, and the only thing the wordmark could sensibly mean. */
+function goHome() {
+    if (isMobile()) closeSidebar();
+    _flushDraft();
+    state.sid = null;
+    _lastSeq = 0;           // seqs are per-session (see deleteSession)
+    _selectSeq++;           // cancel any select still in flight
+    disconnectSSE();
+    closeRlmViewer();
+    _activeWorkers.clear();
+    _recentDeadWorkers.clear();
+    _activeRlmRuns.clear();
+    _renderWorkerStrip();
+    state.streaming = false;
+    _setComposerReadOnly(false);
+    _showSendButton();
+    updateStatus('');
+    _clearToolStatus();
+    _resetContextReadout();
+    _applyStateBadge('idle_ready', '');
+    showEmptyState();
+    _restoreDraft();
+    renderSidebar(state.sessions, state.sid, state.spaces);
+}
+
+// ---------------------------------------------------------------------------
+// Back-button support for the two panes that cover the screen on a phone.
+// Their open/close lives in mobile.js (the drawer) and file-panel.js (the
+// Explorer); this watches the class each of them sets rather than reaching
+// into either module. Without it, Back on Android left the app entirely while
+// a full-screen drawer was covering the transcript.
+// ---------------------------------------------------------------------------
+let _paneHistoryDepth = 0;
+
+function _panesOpen() {
+    const sidebar = document.getElementById('sidebar');
+    const panel = document.getElementById('file-panel');
+    return !!((sidebar && sidebar.classList.contains('mobile-open'))
+        || (panel && panel.classList.contains('open')));
+}
+
+function _closePanes() {
+    const panel = document.getElementById('file-panel');
+    if (panel && panel.classList.contains('open')) toggleFilePanel();
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar && sidebar.classList.contains('mobile-open')) closeSidebar();
+}
+
+function _setupPaneHistory() {
+    if (typeof MutationObserver !== 'function') return;
+    let wasOpen = _panesOpen();
+
+    const sync = () => {
+        const now = _panesOpen();
+        if (now === wasOpen) return;
+        wasOpen = now;
+        if (now) {
+            _paneHistoryDepth++;
+            history.pushState({ pernixPane: _paneHistoryDepth }, '');
+        } else if (_paneHistoryDepth > 0) {
+            // Closed by a tap, not by Back. Spend our entry now, or the user's
+            // next Back press would be swallowed doing nothing.
+            _paneHistoryDepth--;
+            history.back();
+        }
+    };
+
+    const observer = new MutationObserver(sync);
+    for (const id of ['sidebar', 'file-panel']) {
+        const node = document.getElementById(id);
+        if (node) observer.observe(node, { attributes: true, attributeFilter: ['class'] });
+    }
+
+    window.addEventListener('popstate', () => {
+        if (!_panesOpen()) return;
+        // Set the tracking state BEFORE closing, so the observer sees no
+        // change and does not push a second history.back() on top of this one.
+        wasOpen = false;
+        if (_paneHistoryDepth > 0) _paneHistoryDepth--;
+        _closePanes();
+    });
 }
 
 function _showOfflineOverlay() {
