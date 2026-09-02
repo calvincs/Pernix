@@ -133,14 +133,24 @@
 
 /* ------------------------------------------------------------------
    Viewport — prevent page-level scrolling. Only #messages scrolls.
+
+   --vvh and --vv-top come from mobile.js, which reads window.visualViewport.
+   dvh alone is not enough on iOS: Safari ignores
+   `interactive-widget=resizes-content` and does NOT shrink dvh when the
+   on-screen keyboard comes up, so a 100dvh shell keeps its full height and
+   the composer you are typing into sits underneath the keyboard. The visual
+   viewport is the one measurement that knows about the keyboard, and its
+   offsetTop is what keeps a fixed shell aligned with it after a pinch-zoom
+   scroll. Both fall back to the old values, so a browser without
+   visualViewport behaves exactly as before. (C5)
    ------------------------------------------------------------------ */
 #app {
     position: fixed;
-    top: 0;
+    top: var(--vv-top, 0px);
     left: 0;
     right: 0;
-    height: 100vh;       /* fallback */
-    height: 100dvh;      /* visible viewport, excludes browser toolbar */
+    height: 100vh;                 /* fallback */
+    height: var(--vvh, 100dvh);    /* the visible viewport, keyboard included */
     overflow: hidden;
     overscroll-behavior: none;
 }
