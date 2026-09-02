@@ -1297,6 +1297,10 @@ let _toolGroupCount = 0;
 let _parseTimer = null;
 let _activityTimer = null;
 let _lastSeq = 0;  // track last processed event seq for dedup on SSE reconnect
+// Set while _softReload re-renders the transcript: stream tokens are buffered
+// rather than written into a container that is about to be replaced.
+let _reloading = false;
+let _bufferedDuringReload = '';
 let _reconcileTimer = null;
 let _toolStatusTimer = null;
 
@@ -1703,6 +1707,12 @@ function handleEvent(event) {
     const type = event.type || '';
 
     if (type === 'stream.token' && event.content) {
+        // Mid-reload: the container is being re-rendered under us. Keep the
+        // text and let _softReload place it in the single bubble it creates.
+        if (_reloading) {
+            _bufferedDuringReload += event.content;
+            return;
+        }
         closeToolGroup();
         // Recover streaming state if page was refreshed mid-stream
         if (!_streamingEl) {
@@ -2418,14 +2428,26 @@ function _showNotice(msg, ms = 6000) {
 
 async function _softReload() {
     if (!state.sid || _isRlmView()) return;
+    if (_reloading) return;  // a second gap during the fetch is the same reload
     console.info('SSE: soft reload triggered (gap detected or reconciliation)');
     // loadMessages() clears and re-renders the DOM, which detaches any live
     // _streamingEl reference. Reset it unconditionally so the next stream.token
     // event creates a fresh element rather than updating a ghost node.
+    //
+    // _reloading holds the token handler off the DOM until the re-render
+    // lands. Without it, tokens arriving during the fetch built a bubble in
+    // the just-emptied container, the history was appended UNDER it, and the
+    // status branch below then made a second empty bubble — so the answer's
+    // tail ended up split across two bubbles with the history wedged between.
+    _reloading = true;
     _streamingEl = null;
     _collected = '';
     state.streaming = false;
-    await loadMessages(state.sid);
+    try {
+        await loadMessages(state.sid);
+    } finally {
+        _reloading = false;
+    }
     // Re-fetch server state to re-wire streaming controls and badge.
     try {
         const status = await get(`/api/sessions/${state.sid}/status`);
@@ -2436,13 +2458,21 @@ async function _softReload() {
         if (status.status === 'processing' || status.status === 'scouting') {
             state.streaming = true;
             _showStopButton();
+            // Carry whatever arrived while the transcript was being fetched
+            // into the one bubble, instead of discarding it and opening a
+            // second empty one.
             _streamingEl = appendMessage('assistant', '');
-            _collected = '';
+            _collected = _bufferedDuringReload;
+            if (_collected) {
+                const contentEl = _streamingEl.querySelector('.content');
+                if (contentEl) _renderStreamIncremental(contentEl);
+            }
         } else {
             _showSendButton();
             updateStatus('');
         }
     } catch {}
+    _bufferedDuringReload = '';
     // Say so. The transcript is re-read from the database, so no *message* is
     // lost — but the live events that were dropped (tool chips, scout steps,
     // partial tokens) are gone for good, and the view visibly jumping without
