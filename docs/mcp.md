@@ -19,8 +19,11 @@ Three equivalent ways:
    `mcpServers` config (the same JSON Claude Code, Claude Desktop, Cursor, and
    VS Code use),
    hit **Test**, then **Save & Connect**. Existing entries are edited in
-   place via each row's ✎ button (the form opens prefilled; saving
-   reconnects with the new config).
+   place from the pencil button on the row (**Edit server config**): the form
+   opens prefilled and **Save changes** reconnects with the new config. The
+   rest of the row is a reconnect button (re-discovers the server's tools), a
+   remove button, and an on/off toggle that keeps the config but unregisters
+   the tools.
 2. **Ask the agent** — "add the GitHub MCP server". The agent calls
    `mcp_add_server`, which is a dangerous-gated tool: you confirm before
    anything is installed or spawned.
