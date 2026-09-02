@@ -64,7 +64,7 @@ async function _ping() {
     try {
         const resp = await fetch(`${BASE}${PING_PATH}`, {
             method: 'GET',
-            headers: { ..._authHeaders() },
+            headers: { ...authHeaders() },
             cache: 'no-store',
         });
         if (resp.ok || resp.status === 401) _markOnline();
@@ -162,7 +162,10 @@ export function getAuthToken() {
     return _authToken;
 }
 
-function _authHeaders() {
+/** Authorization header for a hand-rolled fetch — the SSE health probes and
+ *  the upload XHR cannot go through api(), and a probe without the header is
+ *  a 401 the caller reads as "the stream is dead". */
+export function authHeaders() {
     const h = {};
     if (_authToken) h['Authorization'] = `Bearer ${_authToken}`;
     return h;
@@ -170,7 +173,7 @@ function _authHeaders() {
 
 export async function api(method, path, body = null) {
     if (!_online) throw new OfflineError();
-    const opts = { method, headers: { ..._authHeaders() } };
+    const opts = { method, headers: { ...authHeaders() } };
     if (body) {
         opts.headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(body);
