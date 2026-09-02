@@ -4,6 +4,7 @@ import { el, text, clear, setSanitizedSvg } from '../../render.js';
 import { get, post, setAuthToken } from '../../api.js';
 import { getPermission, requestPermission } from '../../notifications.js';
 import { runVoiceTest } from '../../voice.js';
+import { announce, openOverlay } from '../../a11y.js';
 
 function _showToast(message, type = 'info') {
     const colors = { success: 'var(--success)', error: 'var(--error)', info: 'var(--text-dim)' };
@@ -22,6 +23,7 @@ function _showToast(message, type = 'info') {
 }
 
 let _overlay = null;
+let _closeOverlay = null;  // teardown from a11y.js openOverlay()
 let _statusTimer = null;  // pending auto-clear of the footer status line
 let _original = {};  // snapshot of settings when modal opened
 let _models = [];    // [{id, valid: null|true|false, info: {}}]
@@ -764,6 +766,7 @@ function _showRestartButton(reason = 'network changes') {
             statusEl.className = 'save-status status-warn';
             statusEl.textContent =
                 `Saved, but a restart is needed to apply ${reason} — restart from the server console (or from a localhost browser).`;
+            announce(statusEl.textContent);
         }
         return;
     }
@@ -771,6 +774,7 @@ function _showRestartButton(reason = 'network changes') {
     if (statusEl) {
         statusEl.className = 'save-status status-warn';
         statusEl.textContent = `Saved, but a restart is needed to apply ${reason}`;
+        announce(statusEl.textContent);
     }
     if (document.getElementById('restart-server-btn')) return;
 
@@ -2272,7 +2276,7 @@ export async function openSettings(opts = {}) {
     _models = (Array.isArray(modelIds) ? modelIds : []).map(id => ({ id, valid: null, info: null }));
 
     const { tabBar, contents } = buildTabs(settings);
-    const statusEl = el('span', { class: 'save-status' });
+    const statusEl = el('span', { class: 'save-status', role: 'status' });
 
     const card = el('div', { class: 'modal-card' }, [
         el('div', { class: 'modal-header' }, [
@@ -2306,6 +2310,7 @@ export async function openSettings(opts = {}) {
                     if (Object.keys(changes).length === 0 && apikeyChanges.length === 0) {
                         statusEl.className = 'save-status status-muted';
                         statusEl.textContent = 'No changes';
+                        announce('No changes to save');
                         return;
                     }
                     try {
@@ -2331,6 +2336,7 @@ export async function openSettings(opts = {}) {
                         if (result.ssl_errors && result.ssl_errors.length > 0) {
                             statusEl.className = 'save-status status-error';
                             statusEl.textContent = result.ssl_errors.join('; ');
+                            announce(statusEl.textContent, { assertive: true });
                             return;
                         }
 
@@ -2382,6 +2388,7 @@ export async function openSettings(opts = {}) {
                             statusEl.textContent =
                                 `Rejected by the server and reverted: ${rejected.map(_labelFor).join(', ')}. `
                                 + 'The value was out of range or the field is edit-locked.';
+                            announce(statusEl.textContent, { assertive: true });
                             return;
                         }
 
@@ -2394,11 +2401,13 @@ export async function openSettings(opts = {}) {
                         } else {
                             statusEl.className = 'save-status';
                             statusEl.textContent = `Saved: ${saved.join(', ')}`;
+                            announce(statusEl.textContent);
                             _statusTimer = setTimeout(() => { statusEl.textContent = ''; }, 3000);
                         }
                     } catch (e) {
                         statusEl.className = 'save-status status-error';
                         statusEl.textContent = `Error: ${e.message}`;
+                        announce(statusEl.textContent, { assertive: true });
                     }
                 },
             }, [text('Save')]),
@@ -2415,7 +2424,9 @@ export async function openSettings(opts = {}) {
     });
 
     document.body.appendChild(_overlay);
-    document.addEventListener('keydown', _onEsc);
+    // Focus trap + inert + focus restore. Esc keeps this modal's own rule
+    // (back out of the search before closing the whole thing).
+    _closeOverlay = openOverlay(card, { onClose: _onEsc });
 
     // If a specific tab was requested, activate it now that the DOM is live.
     if (opts.tab) {
@@ -2435,6 +2446,7 @@ export async function openSettings(opts = {}) {
 }
 
 export function closeSettings() {
+    if (_closeOverlay) { _closeOverlay(); _closeOverlay = null; }
     if (_overlay) {
         document.body.removeChild(_overlay);
         _overlay = null;
@@ -2448,11 +2460,10 @@ export function closeSettings() {
     _restartRequired = false;
     _searchQuery = '';
     clearTimeout(_statusTimer);
-    document.removeEventListener('keydown', _onEsc);
 }
 
-function _onEsc(e) {
-    if (e.key !== 'Escape') return;
+// Called by openOverlay() on Escape.
+function _onEsc() {
     // Escape backs out of the search first — closing the whole modal because
     // the user wanted to clear a filter loses every unsaved edit.
     const search = document.getElementById('settings-search');

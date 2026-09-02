@@ -3,8 +3,10 @@
 import { el, text } from '../render.js';
 import { get, post } from '../api.js';
 import { getPermission, requestPermission } from '../notifications.js';
+import { announce, openOverlay } from '../a11y.js';
 
 let _overlay = null;
+let _closeOverlay = null;  // teardown from a11y.js openOverlay()
 let _selectSessionFn = null;  // set by initBell — jump-to-session for item chips
 let _pollTimer = null;
 let _items = [];  // merged list of questions + notifications
@@ -57,6 +59,8 @@ export function refreshBell() { _poll(); }
 // Badge
 // ---------------------------------------------------------------------------
 
+let _lastBadgeCount = 0;
+
 function _updateBadge(count) {
     const badge = document.getElementById('bell-badge');
     const bell = document.getElementById('notification-bell');
@@ -64,6 +68,16 @@ function _updateBadge(count) {
     badge.textContent = count;
     badge.classList.toggle('has-items', count > 0);
     if (bell) bell.classList.toggle('has-notifications', count > 0);
+    // A badge going 0 -> 1 is invisible to a screen reader (and to anyone not
+    // looking at the corner of the status bar). Only announce arrivals; a
+    // count going DOWN is the user clearing items, which needs no narration.
+    if (count > _lastBadgeCount) {
+        const added = count - _lastBadgeCount;
+        announce(added === 1
+            ? `1 new notification, ${count} waiting`
+            : `${added} new notifications, ${count} waiting`);
+    }
+    _lastBadgeCount = count;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,19 +104,17 @@ export function openBellPanel() {
     }}, [card]);
 
     document.body.appendChild(_overlay);
-    document.addEventListener('keydown', _onEsc);
+    _closeOverlay = openOverlay(card, { onClose: closeBellPanel });
     _renderItems();
 }
 
 export function closeBellPanel() {
+    if (_closeOverlay) { _closeOverlay(); _closeOverlay = null; }
     if (_overlay) {
         document.body.removeChild(_overlay);
         _overlay = null;
     }
-    document.removeEventListener('keydown', _onEsc);
 }
-
-function _onEsc(e) { if (e.key === 'Escape') closeBellPanel(); }
 
 /**
  * Permission banner — browsers suppress permission prompts that aren't
@@ -209,7 +221,7 @@ function _renderQuestion(q) {
         placeholder: 'Type your answer...',
         rows: '2',
     });
-    const statusEl = el('span', { class: 'notif-status' });
+    const statusEl = el('span', { class: 'notif-status', role: 'status' });
 
     const row = el('div', { class: 'notif-item notif-question', 'data-qid': q.id }, [
         el('div', { class: 'notif-item-header' }, [
