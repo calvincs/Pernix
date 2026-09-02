@@ -75,9 +75,12 @@ Or via tools the agent can use:
 - `test_job` (isolated dry-run — prove the job works before it fires)
 - `remove_scheduled_job`
 
-The UI's jobs panel shows the list with next-run times, status, a spec badge
-(`valid` / `invalid` / `unvalidated`), the last test outcome, and a **test**
-button per job.
+The Explorer's Automation → Jobs tab has three sub-tabs — **Scheduled**,
+**Active** (whatever is running right now, including worker and RLM runs and
+snooze cycles) and **History** — plus a search box that filters the sub-tab you
+are on. A scheduled job shows its next-run time, its status, a spec badge
+(`valid` / `invalid` / `unvalidated`) and the last test outcome, with
+**validate**, **run now**, **test**, **edit** and **delete** on the row.
 
 ### Validation and test-runs
 

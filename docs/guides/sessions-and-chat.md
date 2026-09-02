@@ -57,15 +57,15 @@ Not every session in the sidebar is a chat you started. Each carries a colored d
 | **Large-input** | A live view of one `rlm_process` run (internally: *RLM*), nested under the session that launched it (see below). |
 | **Self-check** | A canary run — only present once the canary suite is enabled. |
 
-Click a legend entry to hide or show that type — useful when scheduled runs start to crowd out your own threads. Each entry's tooltip names the internal term the settings and docs use. The filter persists across reloads.
+Click a legend entry to hide or show that type — useful when scheduled runs start to crowd out your own threads. Each entry's tooltip names the internal term the settings and docs use. The filter persists across reloads. The list itself holds the 500 most recent sessions; **Load older sessions** at the end of it fetches the next page and says how many remain.
 
 On a desktop browser you can drag the sidebar's right edge to make it wider or narrower — 200 to 520 pixels, and never more than 45% of the window. Double-click the edge to go back to the default width; with the edge focused, the arrow keys resize it too. The width is remembered by this browser, the same way the collapsed state is (the toggle at the top of the chat pane hides the sidebar altogether). Phones and tablets keep their own sidebar sizes. A row's own controls — copy id, pin, rename, move to space, delete — overlay the right end of the row on hover or keyboard focus rather than sitting beside the title, so the extra width all goes to the title. (On touch there is no hover: the row carries one always-visible `⋯` instead.)
 
 Finding things:
 
-- The sidebar **search box** is full-text over all message content — it finds any past conversation, not just titles.
+- The sidebar **search box** is full-text over all message content — it finds any past conversation, not just titles. It shows the top 20 matching sessions and says so when there are more.
 - **Ctrl+K** opens the command palette. It lists every session, and above them the things you would otherwise go hunting for a button for: a new session (in a space or not), **Open Explorer →** any tab, **Settings**, **Clear conversation**, **Toggle theme**. Matching is a plain substring (not fuzzy) over a session's title and first message, or a command's name and aliases, so type a run of characters that actually appears; with an empty box it is still a plain session switcher.
-- **Ctrl+F** searches within the current transcript.
+- **Ctrl+F** searches the transcript on screen. A session opens on its most recent 200 messages, so **Load earlier messages** at the top brings older ones into range first.
 - **↑** in an empty composer recalls your message history.
 
 (`/help` in any chat lists all of these.)
@@ -96,7 +96,7 @@ Pernix never modifies stored messages. When the conversation gets long enough to
 
 This means:
 
-- Scrolling back through a long session always shows the original turns.
+- Scrolling back through a long session always shows the original turns — the transcript opens on the last 200 messages and **Load earlier messages** at the top fetches the page before, saying how many are left.
 - A failed compaction can be retried without losing state.
 - You can audit what the agent saw at any point via the **State timeline** — the state badge in the status bar opens it.
 
