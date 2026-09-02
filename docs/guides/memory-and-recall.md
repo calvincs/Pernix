@@ -116,16 +116,20 @@ curl -X POST http://localhost:8090/api/memory/maintenance
 
 ## Searching memory directly
 
-Two ways:
+Three ways:
 
-1. **REST:**
+1. **In the UI:** Explorer → **Knowledge → Memory**. The filter box narrows the file list by name, description or keyword; the search box above it searches *entries* across every file, ten at a time with a **Load more** at the bottom. Each result is labelled **strong / good / weak** rather than showing a raw relevance number — hover the label for the score and the scale it belongs to. Click a file to read it, or use the pencil to open it in the editor: memory files are plain markdown and save through the same conflict-aware path as the workspace (if the agent rewrote the file while you were typing, you are offered Reload or Overwrite rather than losing one of the two versions).
+
+2. **REST:**
 
    ```bash
    curl -G --data-urlencode 'q=what do I know about X' \
      http://localhost:8090/api/memory/search
    ```
 
-2. **Ask the agent.** "What do you know about X from prior sessions?" — the agent uses `recall` (or `deep_recall` for a harder dig) and reports back.
+   `limit` (default 10, max 100) and `offset` page the results; `has_more` says whether another page exists.
+
+3. **Ask the agent.** "What do you know about X from prior sessions?" — the agent uses `recall` (or `deep_recall` for a harder dig) and reports back.
 
 For full search syntax (phrase, AND/OR, exclude), see [../api.md](../api.md#memory).
 

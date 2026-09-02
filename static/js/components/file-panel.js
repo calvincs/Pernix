@@ -289,6 +289,12 @@ let _jobRenderTimer = null; // debounce timer for job panel re-renders
 let _memoryFiles = [];
 let _memoryResults = [];
 let _memorySeq = 0;       // request sequencing for search
+let _memoryQuery = '';    // live search query (kept for Load more)
+let _memoryHasMore = false;
+let _memoryFilter = '';   // filter over the FILE list, not the entries
+let _memoryFilterTimer = null;
+let _memoryListEl = null; // stable results/file-list container
+const MEMORY_PAGE = 10;   // rows per search page
 let _selectSessionFn = null;
 let _jobsSubTab = 'scheduled'; // active | scheduled | history
 let _skills = [];
@@ -1108,8 +1114,10 @@ function renderViewer(container) {
 
     const actions = el('div', { class: 'fp-toolbar-actions' });
 
-    // Edit button — not for memory files (read-only)
-    if (file.type === 'text' && file.source !== 'memory-file') {
+    // Memory files open in the same editor as everything else now — they are
+    // plain markdown, and "read-only" was a property of the API, not of the
+    // file. (S9)
+    if (file.type === 'text') {
         const editBtn = el('button', { class: 'fp-btn' }, [text('edit')]);
         editBtn.addEventListener('click', () => {
             _state.viewMode = 'editor';
@@ -1120,8 +1128,13 @@ function renderViewer(container) {
         actions.appendChild(editBtn);
     }
 
+    // open/download address /workspace/<path>, which a memory file does not
+    // have — a memory file lives in data/memories and is reached through the
+    // memory API. Offering them here produced a 404 on click.
+    const inWorkspace = file.source !== 'memory-file';
+
     // Open in new browser tab — for browser-viewable file types
-    if (canOpenInBrowser(file.name)) {
+    if (inWorkspace && canOpenInBrowser(file.name)) {
         const openBtn = el('button', { class: 'fp-btn' }, [text('open')]);
         openBtn.addEventListener('click', () => {
             window.open(`/workspace/${file.path}`, '_blank');
@@ -1129,14 +1142,16 @@ function renderViewer(container) {
         actions.appendChild(openBtn);
     }
 
-    const dlBtn = el('button', { class: 'fp-btn' }, [text('download')]);
-    dlBtn.addEventListener('click', () => {
-        const a = document.createElement('a');
-        a.href = `/workspace/${file.path}`;
-        a.download = file.name;
-        a.click();
-    });
-    actions.appendChild(dlBtn);
+    if (inWorkspace) {
+        const dlBtn = el('button', { class: 'fp-btn' }, [text('download')]);
+        dlBtn.addEventListener('click', () => {
+            const a = document.createElement('a');
+            a.href = `/workspace/${file.path}`;
+            a.download = file.name;
+            a.click();
+        });
+        actions.appendChild(dlBtn);
+    }
 
     const toolbar = el('div', { class: 'fp-toolbar' }, [
         backBtn,
@@ -1572,8 +1587,9 @@ async function loadMemory() {
     try {
         const data = await get('/api/memory/files');
         _memoryFiles = data.files || [];
-    } catch {
+    } catch (e) {
         _memoryFiles = [];
+        notify('error', `Could not list memory files: ${e.message || e}`);
     }
 
     renderMemory();
@@ -1587,6 +1603,10 @@ function renderMemory() {
 
     if (_state.viewMode === 'viewer' && _state.currentFile) {
         renderViewer(container);
+        return;
+    }
+    if (_state.viewMode === 'editor' && _state.currentFile) {
+        renderMemoryEditor(container);
         return;
     }
 
@@ -1603,11 +1623,13 @@ function renderMemory() {
         'Memory files are markdown documents in data/memories/. The agent writes to them during distillation and memory tool calls. Use search to retrieve past observations, decisions, or any context it has retained.',
     ));
 
-    // Search bar
+    // Search bar — searches ENTRIES, across every file.
     const searchInput = el('input', {
         class: 'fp-search-input',
         type: 'text',
-        placeholder: 'Search memory...',
+        placeholder: 'Search memory\u2026',
+        'aria-label': 'Search memory entries',
+        value: _memoryQuery,
     });
     searchInput.addEventListener('input', () => {
         if (_searchTimer) clearTimeout(_searchTimer);
@@ -1615,16 +1637,54 @@ function renderMemory() {
     });
     container.appendChild(el('div', { class: 'fp-search-bar' }, [searchInput]));
 
-    // Results area (shared between search results and file list)
-    const listEl = el('div', { class: 'fp-memory-list', id: 'fp-memory-list' });
-
-    if (_memoryResults.length > 0) {
-        renderSearchResults(listEl);
-    } else {
-        renderMemoryFiles(listEl);
+    // Filter box over the FILE list. A corpus of a hundred files is a wall of
+    // names; this narrows it without spending a search. Hidden while a search
+    // is running, because then the list underneath is results, not files. (S9)
+    if (!_memoryQuery) {
+        const filterInput = el('input', {
+            class: 'fp-search-input fp-filter-input',
+            type: 'text',
+            placeholder: 'Filter files by name\u2026',
+            'aria-label': 'Filter the memory file list',
+            value: _memoryFilter,
+        });
+        filterInput.addEventListener('input', () => {
+            _memoryFilter = filterInput.value.trim();
+            if (_memoryFilterTimer) clearTimeout(_memoryFilterTimer);
+            // In place: re-rendering the tab would take the focus with it.
+            _memoryFilterTimer = setTimeout(_renderMemoryList, 120);
+        });
+        container.appendChild(el('div', { class: 'fp-search-bar fp-filter-bar' }, [filterInput]));
     }
 
-    container.appendChild(listEl);
+    // Results area (shared between search results and file list)
+    _memoryListEl = el('div', { class: 'fp-memory-list', id: 'fp-memory-list' });
+    container.appendChild(_memoryListEl);
+    _renderMemoryList();
+
+    if (_memoryQuery) {
+        requestAnimationFrame(() => {
+            searchInput.focus();
+            searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
+        });
+    }
+}
+
+function _renderMemoryList() {
+    const listEl = _memoryListEl || document.getElementById('fp-memory-list');
+    if (!listEl) return;
+    clear(listEl);
+    if (_memoryQuery) renderSearchResults(listEl);
+    else renderMemoryFiles(listEl);
+}
+
+function _matchesMemoryFilter(f) {
+    const q = _memoryFilter.toLowerCase();
+    if (!q) return true;
+    return f.name.toLowerCase().includes(q)
+        || (f.description || '').toLowerCase().includes(q)
+        || String(f.keywords || '').toLowerCase().includes(q)
+        || (f.space_label || '').toLowerCase().includes(q);
 }
 
 function renderMemoryFiles(listEl) {
@@ -1633,9 +1693,30 @@ function renderMemoryFiles(listEl) {
         return;
     }
 
-    for (const f of _memoryFiles) {
+    const visible = _memoryFiles.filter(_matchesMemoryFilter);
+    if (visible.length === 0) {
+        listEl.appendChild(el('div', { class: 'fp-empty' }, [
+            text(`No memory file matches "${_memoryFilter}".`),
+        ]));
+        return;
+    }
+
+    for (const f of visible) {
+        const editBtn = el('button', {
+            class: 'fp-icon-btn fp-memory-edit',
+            title: `Open ${f.name}.md in the editor`,
+            'aria-label': `Open ${f.name} in the editor`,
+        }, [icon('edit', { size: 12 })]);
+        editBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openMemoryFile(f.name, { edit: true });
+        });
+
         const item = el('div', { class: 'fp-memory-item' }, [
-            el('div', { class: 'fp-memory-name' }, [text(f.name)]),
+            el('div', { class: 'fp-memory-row' }, [
+                el('div', { class: 'fp-memory-name' }, [text(f.name)]),
+                editBtn,
+            ]),
             el('div', { class: 'fp-memory-desc' }, [text(f.description || '')]),
             el('div', { class: 'fp-memory-meta' }, [
                 // Space badge (v33): pernix.space.<slug>.* files carry their
@@ -1646,70 +1727,279 @@ function renderMemoryFiles(listEl) {
                     title: `Space memory bucket (${f.space})`,
                 }, [text(f.space_label || f.space)]) : null,
                 el('span', {}, [text(`${f.entry_count || 0} entries`)]),
+                f.updated ? el('span', { title: 'Last written' }, [text(formatDate(f.updated))]) : text(''),
                 f.keywords ? el('span', {}, [text(f.keywords)]) : text(''),
             ]),
         ]);
-        item.addEventListener('click', () => viewMemoryFile(f.name));
+        // A div with a click handler is not a control to a keyboard or a
+        // screen reader; the delete/edit button inside handles its own keys.
+        _makeActivatable(item, `Open the memory file ${f.name}`, () => openMemoryFile(f.name));
         listEl.appendChild(item);
     }
 }
 
-async function searchMemory(query) {
-    if (!query) {
+/**
+ * Search memory entries. `append` fetches the NEXT page and adds to what is
+ * already on screen — the Load more path — instead of replacing it.
+ */
+async function searchMemory(query, { append = false } = {}) {
+    if (!append) _memoryQuery = query;
+
+    if (!_memoryQuery) {
         _memoryResults = [];
-        const listEl = document.getElementById('fp-memory-list');
-        if (listEl) { clear(listEl); renderMemoryFiles(listEl); }
+        _memoryHasMore = false;
+        renderMemory();
         return;
     }
 
+    const offset = append ? _memoryResults.length : 0;
     const seq = ++_memorySeq;
     try {
-        const data = await get(`/api/memory/search?q=${encodeURIComponent(query)}&limit=10`);
+        const data = await get(
+            `/api/memory/search?q=${encodeURIComponent(_memoryQuery)}&limit=${MEMORY_PAGE}&offset=${offset}`,
+        );
         if (seq !== _memorySeq) return; // stale response
-        _memoryResults = data.results || [];
-    } catch {
+        const page = data.results || [];
+        _memoryResults = append ? [..._memoryResults, ...page] : page;
+        _memoryHasMore = !!data.has_more;
+    } catch (e) {
         if (seq !== _memorySeq) return;
-        _memoryResults = [];
+        if (!append) _memoryResults = [];
+        _memoryHasMore = false;
+        notify('error', `Memory search failed: ${e.message || e}`);
     }
 
-    const listEl = document.getElementById('fp-memory-list');
-    if (listEl) { clear(listEl); renderSearchResults(listEl); }
+    // A fresh search re-renders the tab (the filter box comes and goes with
+    // the query); a Load more only touches the list.
+    if (append) _renderMemoryList();
+    else renderMemory();
+}
+
+// The raw number is meaningless without the scale it belongs to — the store
+// documents > 3.0 as strong, 1.0–3.0 as usable, below 1.0 as noise. Say that
+// instead, and keep the number in the title for anyone tuning search. (S9)
+function _scoreBucket(score) {
+    if (score >= 3) return { label: 'strong', cls: 'strong' };
+    if (score >= 1) return { label: 'good', cls: 'good' };
+    return { label: 'weak', cls: 'weak' };
 }
 
 function renderSearchResults(listEl) {
     if (_memoryResults.length === 0) {
-        listEl.appendChild(el('div', { class: 'fp-empty' }, [text('No results')]));
+        listEl.appendChild(el('div', { class: 'fp-empty' }, [
+            text(`Nothing in memory matches "${_memoryQuery}".`),
+        ]));
         return;
     }
 
     for (const r of _memoryResults) {
+        const bucket = _scoreBucket(r.score);
         const item = el('div', { class: 'fp-search-result' }, [
             el('div', { class: 'fp-search-result-header' }, [
                 el('span', { class: 'fp-search-result-file' }, [text(r.file)]),
-                el('span', { class: 'fp-search-result-score' }, [text(`${r.score}`)]),
+                el('span', {
+                    class: `fp-score-chip score-${bucket.cls}`,
+                    title: `Relevance ${r.score} — the store scores above 3 as a strong match, `
+                         + '1 to 3 as usable, below 1 as noise.',
+                }, [text(bucket.label)]),
             ]),
             el('div', { class: 'fp-search-result-content' }, [text(r.content || '')]),
         ]);
-        item.addEventListener('click', () => viewMemoryFile(r.file));
+        _makeActivatable(item, `Open the memory file ${r.file}`, () => openMemoryFile(r.file));
         listEl.appendChild(item);
+    }
+
+    if (_memoryHasMore) {
+        const more = el('button', {
+            class: 'btn btn--secondary btn--sm fp-load-more',
+            type: 'button',
+        }, [text('Load more')]);
+        more.addEventListener('click', async () => {
+            more.disabled = true;
+            more.textContent = 'Loading\u2026';
+            await searchMemory(_memoryQuery, { append: true });
+        });
+        listEl.appendChild(more);
     }
 }
 
-async function viewMemoryFile(name) {
+/**
+ * Open a memory file in the viewer, or straight into the editor. The mtime
+ * comes back with the content and is what a later save hands to the server as
+ * base_mtime — same optimistic-concurrency contract as the workspace. (S9)
+ */
+async function openMemoryFile(name, { edit = false } = {}) {
+    if (!guardDirty()) return;
     try {
         const data = await get(`/api/memory/files/${encodeURIComponent(name)}`);
-        if (data.error) return;
+        if (data.error) { notify('error', data.error); return; }
         _state.currentFile = {
             path: name,
             content: data.content,
             source: 'memory-file',
             type: 'text',
             name: name + '.md',
+            mtime: data.mtime ?? null,
         };
-        _state.viewMode = 'viewer';
+        _state.originalContent = data.content;
+        _state.dirty = false;
+        _state.viewMode = edit ? 'editor' : 'viewer';
         renderMemory();
     } catch (e) {
         notify('error', `Could not open memory file ${name}: ${e.message || e}`);
+    }
+}
+
+function renderMemoryEditor(container) {
+    const file = _state.currentFile;
+    if (!file) return;
+
+    const backBtn = el('button', {
+        class: 'fp-toolbar-back', title: 'Back',
+        'aria-label': 'Back to the memory file, discarding unsaved changes',
+    }, [icon('arrow-left')]);
+    const leave = () => {
+        if (!guardDirty()) return;
+        disposeActiveEditor();
+        _state.viewMode = 'viewer';
+        _state.dirty = false;
+        renderMemory();
+    };
+    backBtn.addEventListener('click', leave);
+
+    const saveBtn = el('button', { class: 'fp-btn save-btn', disabled: true }, [text('save')]);
+    saveBtn.addEventListener('click', () => { if (_state.dirty) saveMemoryFile(container); });
+
+    const cancelBtn = el('button', { class: 'fp-btn' }, [text('cancel')]);
+    cancelBtn.addEventListener('click', leave);
+
+    const pathLabel = el('span', { class: 'fp-toolbar-path' }, [text(file.name)]);
+    container.appendChild(el('div', { class: 'fp-toolbar' }, [
+        backBtn,
+        pathLabel,
+        el('div', { class: 'fp-toolbar-actions' }, [saveBtn, cancelBtn]),
+    ]));
+
+    const statusEl = el('div', { class: 'fp-editor-status' }, [text('Ready')]);
+    const editorWrap = el('div', { class: 'fp-editor' });
+    const editorHost = el('div', { class: 'fp-editor-host' });
+    editorWrap.appendChild(editorHost);
+    editorWrap.appendChild(statusEl);
+    container.appendChild(editorWrap);
+
+    function onDirtyChange(dirty) {
+        _state.dirty = dirty;
+        saveBtn.disabled = !dirty;
+        saveBtn.className = `fp-btn save-btn${dirty ? ' dirty' : ''}`;
+        statusEl.className = `fp-editor-status${dirty ? ' dirty' : ''}`;
+        statusEl.textContent = dirty ? 'Modified' : 'Ready';
+        pathLabel.textContent = dirty ? `\u25CF ${file.name}` : file.name;
+    }
+
+    createCodeEditor(editorHost, file.content, 'markdown', (value) => {
+        onDirtyChange(value !== _state.originalContent);
+    }).then(inst => {
+        _activeEditor = inst;
+        inst.addSaveCommand(() => saveMemoryFile(container));
+        inst.focus();
+    });
+
+    editorHost.addEventListener('keydown', (e) => {
+        if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            saveMemoryFile(container);
+        }
+    });
+}
+
+// Reload half of a memory conflict — same contract as the workspace one.
+async function _reloadMemoryFile(container) {
+    const file = _state.currentFile;
+    if (!file) return;
+    const statusEl = container.querySelector('.fp-editor-status');
+    try {
+        const data = await get(`/api/memory/files/${encodeURIComponent(file.path)}`);
+        if (data.error) throw new Error(data.error);
+        file.content = data.content;
+        file.mtime = data.mtime ?? null;
+        _state.originalContent = file.content;
+        _state.dirty = false;
+        renderMemory();
+    } catch (e) {
+        if (statusEl) {
+            statusEl.className = 'fp-editor-status error';
+            statusEl.textContent = `Reload failed: ${e.message}`;
+        }
+        notify('error', `Could not reload ${file.name}: ${e.message}`);
+    }
+}
+
+async function saveMemoryFile(container, { force = false } = {}) {
+    const file = _state.currentFile;
+    if (!file || !_activeEditor) return;
+
+    const statusEl = container.querySelector('.fp-editor-status');
+    const saveBtn = container.querySelector('.save-btn');
+    const pathLabel = container.querySelector('.fp-toolbar-path');
+    const content = _activeEditor.getValue();
+
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'saving\u2026'; }
+    if (statusEl) { statusEl.className = 'fp-editor-status'; statusEl.textContent = 'Saving\u2026'; }
+
+    try {
+        const body = { content };
+        // Overwrite = resend without base_mtime, which is the server's own
+        // opt-out and therefore literally last-writer-wins again.
+        if (!force && file.mtime != null) body.base_mtime = file.mtime;
+        const resp = await fetch(`/api/memory/files/${encodeURIComponent(file.path)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', ..._authHdr() },
+            body: JSON.stringify(body),
+        });
+        if (resp.status === 409) {
+            let payload = {};
+            try { payload = await resp.json(); } catch { /* body is optional */ }
+            if (payload.mtime != null) file.mtime = payload.mtime;
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            if (statusEl) {
+                statusEl.className = 'fp-editor-status error';
+                statusEl.textContent = 'Changed on disk';
+            }
+            _showSaveConflict(container, {
+                onReload: () => _reloadMemoryFile(container),
+                onOverwrite: () => saveMemoryFile(container, { force: true }),
+            });
+            return;
+        }
+        if (!resp.ok) throw new Error(await _errorDetail(resp));
+        const saved = await resp.json().catch(() => ({}));
+        if (saved.mtime != null) file.mtime = saved.mtime;
+
+        file.content = content;
+        _state.originalContent = content;
+        _state.dirty = false;
+
+        if (saveBtn) { saveBtn.className = 'fp-btn save-btn'; saveBtn.textContent = 'save'; }
+        if (pathLabel) pathLabel.textContent = file.name;
+        if (statusEl) {
+            statusEl.className = 'fp-editor-status saved';
+            statusEl.textContent = 'Saved';
+            setTimeout(() => {
+                statusEl.className = 'fp-editor-status';
+                statusEl.textContent = 'Ready';
+            }, 1500);
+        }
+        // The entry count and the last-written stamp both just changed.
+        try {
+            const data = await get('/api/memory/files');
+            _memoryFiles = data.files || _memoryFiles;
+        } catch { /* the list refreshes on the next visit */ }
+    } catch (e) {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+        if (statusEl) {
+            statusEl.className = 'fp-editor-status error';
+            statusEl.textContent = `Error: ${e.message}`;
+        }
     }
 }
 

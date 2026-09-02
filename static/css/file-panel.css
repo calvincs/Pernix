@@ -700,10 +700,32 @@ body.fp-resizing #main { pointer-events: none; }
 }
 .fp-memory-item:hover { background: var(--bg-hover); }
 
+/* Name on the left, the open-in-editor affordance on the right. The button
+   only earns its ink on hover/focus — a column of pencils reads as clutter
+   on a list you are mostly scanning. (S9) */
+.fp-memory-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+}
+.fp-memory-edit {
+    opacity: 0;
+    flex-shrink: 0;
+    transition: opacity var(--transition-fast);
+}
+.fp-memory-item:hover .fp-memory-edit,
+.fp-memory-item:focus-within .fp-memory-edit,
+.fp-memory-edit:focus-visible { opacity: 1; }
+
 .fp-memory-name {
     font-size: var(--text-xs);
     color: var(--text-bright);
     margin-bottom: 2px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .fp-memory-desc {
     font-size: 10px;
@@ -746,6 +768,34 @@ body.fp-resizing #main { pointer-events: none; }
     border-radius: 3px;
     padding: 0 4px;
 }
+/* "2.7" told a reader nothing without the scale it belongs to. The bucket
+   says how good the match is; the number stays in the title. (S9) */
+.fp-score-chip {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-radius: var(--radius-sm);
+    padding: 0 5px;
+    border: 1px solid var(--line-faint);
+    color: var(--text-faint);
+    background: var(--bg-surface);
+    cursor: help;
+    flex-shrink: 0;
+}
+.fp-score-chip.score-strong {
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 45%, transparent);
+}
+.fp-score-chip.score-good { color: var(--text-dim); }
+
+/* Paging control under the results. Centred, full width, quiet. */
+.fp-load-more {
+    display: block;
+    width: calc(100% - var(--sp-6));
+    margin: var(--sp-3) auto;
+}
+/* The file filter sits under the search box; the pair needs a hair of air. */
+.fp-filter-bar { padding-top: 0; }
 .fp-search-result-content {
     font-size: var(--text-xs);
     color: var(--text-dim);
