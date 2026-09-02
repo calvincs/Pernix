@@ -70,14 +70,41 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-close:hover { color: var(--text-bright); }
 
 /* ======================================================================
-   Tab bar
+   Navigation — two levels (S7)
+
+   Nine peer tabs wrapped onto two rows at any panel width worth using.
+   Level one is five groups on a single row that SCROLLS rather than wraps
+   (a wrapped strip eats the top of a 360px panel); level two appears only
+   for the groups that actually hold more than one view.
    ====================================================================== */
-.fp-tab-bar {
+.fp-nav {
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
 }
+.fp-group-bar {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+}
+.fp-group-bar::-webkit-scrollbar { display: none; }
+/* A strip that scrolls has to look like one, or the groups past the right
+   edge simply do not exist as far as the reader is concerned. The fade is a
+   sticky flex item, so it rides the right edge of the scroller. */
+.fp-group-bar::after {
+    content: '';
+    position: sticky;
+    right: 0;
+    flex: 0 0 20px;
+    margin-left: -20px;
+    align-self: stretch;
+    pointer-events: none;
+    background: linear-gradient(to left, var(--bg-raised), transparent);
+}
+
 .fp-tab-btn {
     flex: 1 1 auto;
     min-width: 72px;
@@ -100,6 +127,39 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-tab-btn.active {
     color: var(--accent);
     border-bottom-color: var(--accent);
+}
+
+.fp-group-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    flex: 0 0 auto;
+    min-width: 0;
+    white-space: nowrap;
+}
+.fp-group-btn svg { flex-shrink: 0; opacity: 0.85; }
+.fp-group-btn.active svg { opacity: 1; }
+
+/* The second level reads as subordinate: no uppercase, a quieter ground, and
+   an underline that belongs to the strip rather than to the panel edge. */
+.fp-subtab-bar {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--line-faint);
+}
+.fp-subtab-bar::-webkit-scrollbar { display: none; }
+.fp-subtab-btn {
+    flex: 0 0 auto;
+    min-width: 0;
+    text-transform: none;
+    letter-spacing: 0.02em;
+    font-size: var(--text-xs);
+    padding: var(--sp-1) var(--sp-3);
+    white-space: nowrap;
 }
 
 /* ======================================================================

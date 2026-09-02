@@ -247,7 +247,7 @@ The long-running-autonomy substrate: deterministic gates Reflect cannot overrule
 
 ## Canary Suite
 
-Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — an adaptive batch (a targeted post-batch probe), a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — plus a small nightly heartbeat that keeps every active canary's history warm. The Adaptive Layer's tripwire reads the post-batch results per task. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Canary tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — an adaptive batch (a targeted post-batch probe), a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — plus a small nightly heartbeat that keeps every active canary's history warm. The Adaptive Layer's tripwire reads the post-batch results per task. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Self-tuning → Self-checks tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -270,7 +270,7 @@ Golden-task canaries: canned tasks with deterministic gates, run headlessly thro
 
 ## Adaptive Layer
 
-A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies that route through the proposal queue: a **veto window**, not an approval gate. Content is gated at the mouth (v3.1): every machine edit passes an actionability lint (instructions in, narrative out), per-entry usage is measured (scout and reflect citations), unused entries retire on their own, and both you and the agent have direct authorship paths. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Autonomy & idle work → Adaptive Layer; entries, events, and proposals surface in the Explorer's Adaptive tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies that route through the proposal queue: a **veto window**, not an approval gate. Content is gated at the mouth (v3.1): every machine edit passes an actionability lint (instructions in, narrative out), per-entry usage is measured (scout and reflect citations), unused entries retire on their own, and both you and the agent have direct authorship paths. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Autonomy & idle work → Adaptive Layer; entries, events, and proposals surface in the Explorer's Self-tuning → Learning tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -340,7 +340,7 @@ Detached long-compute processes via the `job_start` / `job_status` / `job_tail` 
 Connect external tool servers speaking the Model Context Protocol; each
 server's tools register as `mcp_<server>_<tool>` and flow through scout
 curation, the dangerous-tool gate, and per-tool health metrics like native
-tools. Servers themselves are configured per-item in the Explorer → MCP tab
+tools. Servers themselves are configured per-item in the Explorer → Capabilities → Servers tab
 (or `data/mcp_servers.json`); these settings are the global knobs. Toggles in
 Settings → Integrations → MCP Servers. Full guide: [mcp.md](mcp.md).
 

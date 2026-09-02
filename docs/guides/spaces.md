@@ -36,11 +36,11 @@ A space may replace SOUL.md, RULES.md, or SESSIONS.md **per file** — an undefi
 
 ## Memory
 
-Memories formed in a space route to `pernix.space.<slug>.*` files automatically (an explicitly named file is always honored, global names included). Searches from any session in the space surface the space's entries first — scores are never inflated, only ordering changes — and searches elsewhere still find them on merit. Background consolidation never merges files across spaces or between a space and the global buckets. The Memory tab badges space buckets with the space's color.
+Memories formed in a space route to `pernix.space.<slug>.*` files automatically (an explicitly named file is always honored, global names included). Searches from any session in the space surface the space's entries first — scores are never inflated, only ordering changes — and searches elsewhere still find them on merit. Background consolidation never merges files across spaces or between a space and the global buckets. The Explorer's Knowledge → Memory tab badges space buckets with the space's color.
 
 ## Scheduled jobs
 
-Bind a job to a space in the Jobs tab's add form, via `POST /api/jobs` with `space_id`, or with the `schedule_job` tool — a job scheduled *from* a space session inherits that space automatically (pass `space_id="none"` to opt out). Each firing creates a fresh `Cron:` session inside the space, which inherits the space's directives, memory routing, home folder and kernel. Machine-created cron run sessions still prune after 7 days (pin one to keep it); sessions you created yourself are never auto-pruned.
+Bind a job to a space in the Explorer's Automation → Jobs tab, in its add form, via `POST /api/jobs` with `space_id`, or with the `schedule_job` tool — a job scheduled *from* a space session inherits that space automatically (pass `space_id="none"` to opt out). Each firing creates a fresh `Cron:` session inside the space, which inherits the space's directives, memory routing, home folder and kernel. Machine-created cron run sessions still prune after 7 days (pin one to keep it); sessions you created yourself are never auto-pruned.
 
 ## Shared kernel and RLM
 
