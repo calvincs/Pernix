@@ -876,6 +876,18 @@ def delete_entry(entry_id: str, actor: str = "human", reason: str = "") -> dict:
         actor=actor,
     )
 
+    # Drop the outcome signal with the entry. It is keyed by entry id and
+    # survived the soft-delete, so a producer that re-minted the same slug
+    # (same title -> same id) got its predecessor's failure record: the
+    # usage sweep's failure-dominated branch has no age or epoch gate by
+    # design, so the fresh entry was retired again on the next cycle with
+    # zero new observations. Apply -> canary sweep -> retire -> re-mint,
+    # each turn of the loop spending a batch and two notifications.
+    try:
+        db.delete_signal("adaptive_entry", entry_id)
+    except Exception as e:
+        logger.warning("Could not clear the outcome signal for %s: %s", entry_id, e)
+
     from core.adaptive.render import render_mirror
 
     render_mirror()
