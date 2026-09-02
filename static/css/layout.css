@@ -165,6 +165,11 @@
 .session-delete {
     background: none;
     border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-faint);
     cursor: pointer;
     font-size: var(--text-sm);
@@ -173,7 +178,9 @@
     opacity: 0;
     transition: var(--transition);
 }
-.session-item:hover .session-delete { opacity: 1; }
+.session-item:hover .session-delete,
+.session-item:focus-within .session-delete,
+.session-delete:focus-visible { opacity: 1; }
 .session-delete:hover { color: var(--error); }
 /* Auto-created cron sessions — present but de-emphasized */
 .session-item.cron-session:not(.active) { opacity: 0.6; }
@@ -191,6 +198,11 @@
 .session-id-badge {
     background: none;
     border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-faint);
     cursor: pointer;
     font-family: var(--font-mono, monospace);
@@ -200,8 +212,10 @@
     opacity: 0;
     transition: var(--transition);
 }
-.session-item:hover .session-id-badge { opacity: 0.7; }
-.session-id-badge:hover { opacity: 1 !important; color: var(--accent); }
+.session-item:hover .session-id-badge,
+.session-item:focus-within .session-id-badge { opacity: 0.7; }
+.session-id-badge:hover,
+.session-id-badge:focus-visible { opacity: 1 !important; color: var(--accent); }
 .session-id-badge.copied {
     opacity: 1 !important;
     color: var(--success, #4ade80);
@@ -281,7 +295,9 @@
 }
 .spaces-header .space-btn,
 .spaces-header:hover .space-btn { visibility: visible; }
-.space-group-header:hover .space-btn { visibility: visible; }
+.space-group-header:hover .space-btn,
+.space-group-header:focus-within .space-btn,
+.space-btn:focus-visible { visibility: visible; }
 .space-btn:hover { color: var(--text-bright); }
 .space-group-header .sg-count { margin-left: auto; }
 .space-empty {
@@ -314,6 +330,11 @@
 .session-space-move {
     background: none;
     border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-faint);
     cursor: pointer;
     padding: 0 2px;
@@ -410,8 +431,11 @@
 }
 
 .legend-item {
-    display: flex;
+    display: inline-flex;
     align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    min-height: 24px;
     gap: 4px;
     background: none;
     border: 1px solid transparent;
@@ -1220,6 +1244,11 @@
     position: absolute;
     top: 4px;
     right: 4px;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: var(--bg-raised);
     border: 1px solid var(--border);
     color: var(--text-dim);
@@ -1231,7 +1260,9 @@
     opacity: 0;
     transition: opacity 0.15s, color 0.15s, border-color 0.15s;
 }
-.code-block-wrap:hover .copy-btn { opacity: 1; }
+.code-block-wrap:hover .copy-btn,
+.code-block-wrap:focus-within .copy-btn,
+.copy-btn:focus-visible { opacity: 1; }
 .copy-btn:hover {
     color: var(--accent);
     border-color: var(--accent);
@@ -1626,6 +1657,11 @@
 .status-btn {
     background: none;
     border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-faint);
     cursor: pointer;
     font-size: var(--text-md);
@@ -2334,6 +2370,11 @@
 .file-chip-remove {
     background: none;
     border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-faint);
     cursor: pointer;
     font-size: var(--text-sm);
@@ -2629,7 +2670,8 @@
     opacity: 0;
     transition: opacity 0.15s ease;
 }
-.message:hover .msg-actions { opacity: 1; }
+.message:hover .msg-actions,
+.message:focus-within .msg-actions { opacity: 1; }
 .msg-action-btn {
     background: var(--bg-surface);
     border: 1px solid var(--border-subtle);
@@ -2857,6 +2899,11 @@ mark.ts-mark.current {
 .session-rename {
     background: none;
     border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-faint);
     cursor: pointer;
     font-size: var(--text-xs);
@@ -2866,7 +2913,11 @@ mark.ts-mark.current {
     transition: var(--transition);
 }
 .session-item:hover .session-pin,
-.session-item:hover .session-rename { opacity: 1; }
+.session-item:hover .session-rename,
+.session-item:focus-within .session-pin,
+.session-item:focus-within .session-rename,
+.session-pin:focus-visible,
+.session-rename:focus-visible { opacity: 1; }
 .session-pin:hover,
 .session-rename:hover { color: var(--text-bright); }
 .session-pin.pinned { opacity: 1; color: var(--accent); }

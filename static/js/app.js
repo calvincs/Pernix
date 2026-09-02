@@ -121,13 +121,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Sidebar toggle (desktop only — mobile handled by mobile.js)
     const sidebarToggle = document.getElementById('sidebar-toggle');
     const sidebar = document.getElementById('sidebar');
+    // A collapsed sidebar is width:0 + overflow:hidden, which hides it from
+    // the eye but not from the keyboard: Tab still walked the whole invisible
+    // session list, and a screen reader still read it. inert takes it out of
+    // both. Mobile's drawer is a separate mechanism (mobile.js owns
+    // .mobile-open) so it is deliberately left alone.
+    const syncSidebarInert = () => {
+        sidebar.toggleAttribute('inert', !isMobile() && sidebar.classList.contains('collapsed'));
+    };
     if (localStorage.getItem('pernix:sidebar-hidden') === '1') {
         sidebar.classList.add('collapsed');
     }
+    syncSidebarInert();
     sidebarToggle.addEventListener('click', () => {
         if (isMobile()) return;
         sidebar.classList.toggle('collapsed');
         localStorage.setItem('pernix:sidebar-hidden', sidebar.classList.contains('collapsed') ? '1' : '0');
+        syncSidebarInert();
     });
 
     // Space/session mutations from the sidebar need a re-FETCH, not just a repaint

@@ -299,7 +299,9 @@ body.fp-resizing #main { pointer-events: none; }
     border-radius: var(--radius-sm, 2px);
     padding: 0 2px;
 }
-.fp-tree-item:hover .fp-tree-actions { opacity: 1; }
+.fp-tree-item:hover .fp-tree-actions,
+.fp-tree-item:focus-within .fp-tree-actions,
+.fp-tree-actions:focus-within { opacity: 1; }
 
 .fp-tree-action {
     background: none;
@@ -514,6 +516,12 @@ body.fp-resizing #main { pointer-events: none; }
     resize: none;
     outline: none;
     tab-size: 2;
+}
+/* outline:none above is for the resting state; a keyboard user still needs
+   to see which editor has focus (A12). */
+.ce-fallback:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
 }
 .fp-editor-status {
     font-size: 9px;

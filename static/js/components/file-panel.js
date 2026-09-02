@@ -325,6 +325,15 @@ export function initFilePanel({ selectSession } = {}) {
         document.getElementById('files-btn')?.classList.add('active');
         loadTabData();
     }
+    _syncPanelInert();
+}
+
+// A closed Explorer is width:0 + overflow:hidden — invisible, but every tab
+// button, tree row and editor inside it stayed in the tab order and in the
+// accessibility tree. inert removes both; it is cleared the moment the panel
+// opens. (A12)
+function _syncPanelInert() {
+    _panel?.toggleAttribute('inert', !_state.open);
 }
 
 export function toggleFilePanel() {
@@ -339,6 +348,7 @@ export function toggleFilePanel() {
         _panel.style.width = '';
         document.getElementById('files-btn')?.classList.remove('active');
     }
+    _syncPanelInert();
     saveState();
 }
 
@@ -348,6 +358,7 @@ export function openFilePanel(opts = {}) {
         _panel.classList.add('open');
         if (!isMobile()) _panel.style.width = _state.width + 'px';
         document.getElementById('files-btn')?.classList.add('active');
+        _syncPanelInert();
     }
     if (opts.tab) {
         _state.tab = opts.tab;
