@@ -487,9 +487,12 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'Backups',
-        tab: 'environment',
-        description: 'The 24-hour maintenance tier writes a timestamped snapshot of the session database (SQLite VACUUM INTO, so it is consistent without stopping writes) plus a copy of the memory corpus into data/backups. Rotation is per-artifact — database snapshots and memory corpora rotate independently — so a restore always finds a matching pair. Snapshots are roughly the size of your live database, so the count is a disk-space decision.',
+        // "Backup schedule", not "Backups": the Storage tab's own Backups
+        // ledger sits directly above it, and two headings reading "Backups"
+        // on one screen read as a rendering bug.
+        title: 'Backup schedule',
+        tab: 'storage',
+        description: 'The 24-hour maintenance tier writes a timestamped snapshot of the session database (SQLite VACUUM INTO, so it is consistent without stopping writes) plus a copy of the memory corpus into data/backups. Rotation is per-artifact — database snapshots and memory corpora rotate independently — so a restore always finds a matching pair, and it counts every snapshot in the directory including ones named by older versions. Snapshots are roughly the size of your live database, so the count is a disk-space decision.',
         fields: [
             {
                 key: 'backup_keep_count',
@@ -1326,10 +1329,22 @@ function collectChanges() {
 // Models tab
 // ---------------------------------------------------------------------------
 
+// The one byte formatter in this module. It used to bottom out at MB, which
+// was fine for the Ollama model list (nothing there is smaller) and wrong for
+// the storage ledger, where a fresh database is 200 KB and "0 MB" is not an
+// answer. Zero renders as "0 B": in a ledger that is a fact, not a blank.
 function formatBytes(bytes) {
-    if (!bytes) return '';
-    const gb = bytes / (1024 * 1024 * 1024);
-    return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+    const n = Number(bytes);
+    if (bytes == null || !Number.isFinite(n)) return '';
+    if (n < 1024) return `${Math.round(n)} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let value = n / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+    }
+    return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
 }
 
 async function refreshOllamaModels() {
@@ -1373,7 +1388,9 @@ function renderOllamaList() {
     }
 
     for (const m of _ollamaModels) {
-        const meta = [m.parameter_size, m.quantization, formatBytes(m.size)]
+        // Guarded, not left to the formatter: a model whose size Ollama did
+        // not report should show nothing in that slot, and "0 B" is not that.
+        const meta = [m.parameter_size, m.quantization, m.size ? formatBytes(m.size) : '']
             .filter(Boolean).join(' \u00b7 ');
         const item = el('div', { class: 'or-model-item' }, [
             el('span', { class: 'or-model-id' }, [text(m.name)]),
@@ -2206,36 +2223,88 @@ function buildSessionCleanupSection() {
         id: 'setting-cleanup-keep-min',
     });
 
-    const statusEl = el('div', {
-        style: 'font-size:var(--text-sm); color:var(--text-dim); margin-top:0.5rem; min-height:1.2em;',
+    // The preview used to be a reimplementation: fetch a thousand sessions and
+    // re-derive the server's selection in the browser. It drifted the moment
+    // the server learned to skip anything — a space session, a cron session —
+    // and the number it showed was then confidently wrong. Ask the endpoint
+    // that does the deleting what it would delete. (Contract: POST with
+    // dry_run:true, which selects but removes nothing.)
+    const previewEl = el('div', {
+        style: 'font-size:var(--text-sm); color:var(--text-dim); margin-top:0.5rem;',
     });
+    previewEl.hidden = true;
 
-    async function _computePreview() {
-        const keepDays = Math.max(0, parseInt(daysInput.value || '0', 10));
-        const keepMin = Math.max(0, parseInt(minInput.value || '0', 10));
-        const cutoff = new Date(Date.now() - keepDays * 86400000).toISOString();
-        const data = await get('/api/sessions?limit=1000');
-        const sessions = data.items || [];
-        // Mirror server logic in api/routers/sessions.py:purge_sessions —
-        // sessions sorted by updated_at DESC, candidates older than cutoff,
-        // keep the first keep_min of those candidates.
-        const candidates = sessions.filter(s => (s.updated_at || '') < cutoff);
-        const toDelete = candidates.length > keepMin ? candidates.length - keepMin : 0;
-        return { toDelete, candidates: candidates.length, keepDays, keepMin };
+    function _params() {
+        return {
+            keep_days: Math.max(0, parseInt(daysInput.value || '0', 10)),
+            keep_min: Math.max(0, parseInt(minInput.value || '0', 10)),
+        };
+    }
+
+    // "Leaving 3 pinned, 47 in spaces and 612 automation sessions alone" —
+    // the sentence that explains why the number is smaller than the age
+    // cutoff alone would suggest.
+    function _skippedSentence(skipped) {
+        const parts = [];
+        if (skipped?.pinned) parts.push(`${skipped.pinned} pinned`);
+        if (skipped?.in_space) parts.push(`${skipped.in_space} in spaces`);
+        if (skipped?.other_types) parts.push(`${skipped.other_types} automation session${skipped.other_types === 1 ? '' : 's'}`);
+        if (!parts.length) return '';
+        const list = parts.length > 1
+            ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+            : parts[0];
+        return `Leaving ${list} alone.`;
+    }
+
+    function _renderPreview(result) {
+        clear(previewEl);
+        previewEl.hidden = false;
+        previewEl.style.color = 'var(--text-dim)';
+
+        const n = result.would_delete || 0;
+        previewEl.appendChild(el('div', { style: 'color:var(--text);' }, [
+            text(n === 0
+                ? `Nothing to prune — no plain chats older than ${result.keep_days} day${result.keep_days === 1 ? '' : 's'} past the keep-${result.keep_min} floor.`
+                : `${n} session${n === 1 ? '' : 's'} would be deleted, out of ${result.candidates} older than ${result.keep_days} day${result.keep_days === 1 ? '' : 's'}.`),
+        ]));
+
+        const skipped = _skippedSentence(result.skipped);
+        if (skipped) previewEl.appendChild(el('div', {}, [text(skipped)]));
+
+        // The titles matter more than the count: recognising one is how you
+        // find out the cutoff is wrong before the delete, not after.
+        const sample = result.sample || [];
+        if (sample.length) {
+            previewEl.appendChild(el('ul', {
+                style: 'margin:0.35rem 0 0; padding-left:1.1rem; list-style:disc;',
+            }, sample.slice(0, 5).map(s => el('li', {}, [
+                text(s.title || 'Untitled'),
+                el('span', { style: 'color:var(--text-faint);' }, [
+                    text(`  ${s.message_count ?? 0} message${s.message_count === 1 ? '' : 's'}`),
+                ]),
+            ]))));
+            if (n > sample.length) {
+                previewEl.appendChild(el('div', { style: 'color:var(--text-faint);' }, [
+                    text(`…and ${n - sample.length} more.`),
+                ]));
+            }
+        }
+    }
+
+    function _renderPreviewError(message) {
+        clear(previewEl);
+        previewEl.hidden = false;
+        previewEl.style.color = 'var(--error)';
+        previewEl.appendChild(text(message));
     }
 
     const previewBtn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Preview')]);
     previewBtn.addEventListener('click', async () => {
         previewBtn.disabled = true;
         try {
-            const { toDelete, candidates, keepDays, keepMin } = await _computePreview();
-            statusEl.textContent = candidates === 0
-                ? `No sessions older than ${keepDays} day(s).`
-                : `${toDelete} session(s) would be deleted (${candidates} older than ${keepDays} day(s); keeping the most recent ${keepMin} of those).`;
-            statusEl.style.color = 'var(--text-dim)';
+            _renderPreview(await post('/api/sessions/purge', { ..._params(), dry_run: true }));
         } catch (e) {
-            statusEl.textContent = `Preview failed: ${e.message || e}`;
-            statusEl.style.color = 'var(--error)';
+            _renderPreviewError(`Preview failed: ${e.message || e}`);
         } finally {
             previewBtn.disabled = false;
         }
@@ -2246,41 +2315,41 @@ function buildSessionCleanupSection() {
         pruneBtn.disabled = true;
         previewBtn.disabled = true;
         try {
-            const { toDelete, keepDays, keepMin } = await _computePreview();
-            if (!toDelete) {
-                statusEl.textContent = `Nothing to prune (no sessions older than ${keepDays} day(s) past the keep-${keepMin} floor).`;
-                statusEl.style.color = 'var(--text-dim)';
-                return;
-            }
+            // Always re-run the dry run rather than trusting a stale preview:
+            // the inputs may have changed since, and the confirmation names
+            // the number it is about to delete.
+            const plan = await post('/api/sessions/purge', { ..._params(), dry_run: true });
+            _renderPreview(plan);
+            const n = plan.would_delete || 0;
+            if (!n) return;
+
             // A browser confirm() cannot say which sessions, cannot be styled
             // to look like a deletion, and on some platforms is suppressed
             // entirely — the one dialog where that matters most. (S2)
             const go = await confirmDanger({
-                title: `Delete ${toDelete} session${toDelete === 1 ? '' : 's'}?`,
+                title: `Delete ${n} session${n === 1 ? '' : 's'}?`,
                 body: [
-                    `Everything older than ${keepDays} day${keepDays === 1 ? '' : 's'} goes, `
-                    + `except the ${keepMin} most recent of those.`,
+                    `Plain chats older than ${plan.keep_days} day${plan.keep_days === 1 ? '' : 's'} go, `
+                    + `except the ${plan.keep_min} most recent of those.`,
+                    _skippedSentence(plan.skipped) || 'Nothing is being skipped.',
                     'Their messages go with them, and so do any worker sessions they started. '
                     + 'This cannot be undone.',
                 ],
-                verb: `Delete ${toDelete}`,
+                verb: `Delete ${n}`,
                 cancelLabel: 'Keep them',
             });
             if (!go) {
-                statusEl.textContent = 'Cancelled.';
-                statusEl.style.color = 'var(--text-dim)';
+                previewEl.appendChild(el('div', {}, [text('Cancelled — nothing was deleted.')]));
                 return;
             }
-            const result = await post('/api/sessions/purge', {
-                keep_days: keepDays,
-                keep_min: keepMin,
-            });
-            statusEl.textContent = `Pruned ${result.purged} session(s).`;
-            statusEl.style.color = 'var(--success)';
-            notify('success', `Pruned ${result.purged} session(s)`);
+            const result = await post('/api/sessions/purge', { ..._params(), dry_run: false });
+            clear(previewEl);
+            previewEl.hidden = false;
+            previewEl.style.color = 'var(--success)';
+            previewEl.appendChild(text(`Pruned ${result.purged} session${result.purged === 1 ? '' : 's'}.`));
+            notify('success', `Pruned ${result.purged} session${result.purged === 1 ? '' : 's'}`);
         } catch (e) {
-            statusEl.textContent = `Prune failed: ${e.message || e}`;
-            statusEl.style.color = 'var(--error)';
+            _renderPreviewError(`Prune failed: ${e.message || e}`);
             notify('error', 'Prune failed');
         } finally {
             pruneBtn.disabled = false;
@@ -2294,14 +2363,22 @@ function buildSessionCleanupSection() {
 
     return el('div', { class: 'settings-section' }, [
         el('h3', {}, [
-            text('Session Cleanup'),
+            text('Session cleanup'),
             buildHelpIcon(
-                'Permanently delete old sessions to keep the database tidy. '
+                'Permanently delete old plain chats to keep the database tidy. '
                 + '"Older than" sets the age cutoff (sessions whose updated_at is past this many days are candidates). '
                 + '"Always keep" preserves the N most recent of those candidates as a safety floor. '
-                + 'Worker sessions cascade with their parent. Cron-bound sessions are protected automatically by the daily maintenance task; this manual prune does not skip them, so use with care if you have active cron jobs.'
+                + 'Only ordinary chats are ever eligible: pinned sessions, anything in a space, and every automation '
+                + 'session (workers, cron, canaries, idle work) are skipped, and each of those has its own retention. '
+                + 'Worker sessions cascade with the parent chat that spawned them.'
             ),
         ]),
+        el('p', {
+            style: 'font-size:var(--text-sm); color:var(--text-dim); margin:0 0 0.6rem;',
+        }, [text(
+            'This only ever touches plain chats. Pinned sessions, anything filed in a space, and '
+            + 'automation sessions are left alone — Preview says how many that is.',
+        )]),
         el('div', { class: 'setting-row' }, [
             el('label', { for: 'setting-cleanup-keep-days' }, [text('Older than (days)')]),
             daysInput,
@@ -2311,8 +2388,357 @@ function buildSessionCleanupSection() {
             minInput,
         ]),
         actionRow,
-        statusEl,
+        previewEl,
     ]);
+}
+
+// ---------------------------------------------------------------------------
+// Storage tab
+// ---------------------------------------------------------------------------
+//
+// Everything that answers "why is this thing so big, and what can I get back"
+// in one place. It used to be nowhere: the only cleanup control lived at the
+// bottom of Environment & network, under the SSL settings, where the owner of
+// the box could not find it and the numbers it was acting on were invisible.
+
+// Session types the ledger has a name for. Anything else — a type added later,
+// a hand-written row — renders under its own key rather than being dropped or
+// lumped into "other", because a ledger that quietly omits rows is worse than
+// one with an unfamiliar word in it.
+const SESSION_TYPE_LABELS = {
+    normal: 'Plain chats',
+    worker: 'Workers',
+    cron: 'Scheduled runs',
+    snooze: 'Idle work',
+    canary: 'Canary runs',
+    rlm: 'Large-input runs',
+    dream: 'Dream sessions',
+};
+
+function _typeLabel(key) {
+    return SESSION_TYPE_LABELS[key] || (key.charAt(0).toUpperCase() + key.slice(1));
+}
+
+// One line of the ledger. `.setting-row` is the settings modal's own
+// label-left / value-right row, so the ledger lines up with every other
+// control on the page without a stylesheet of its own — and the settings
+// search, which walks `.setting-row`, finds these too.
+//
+// The inline flex overrides compact.css, which stacks `.setting-row` below
+// 640px so a full-width input has room to be full-width. A ledger line is a
+// label and a number: stacked, every row doubles in height to put "12" on
+// its own line under "Total sessions", and a twelve-row ledger stops fitting
+// on a phone at all.
+function _ledgerRow(label, value, { strong = false, hint = '' } = {}) {
+    const left = hint
+        ? el('div', {
+            class: 'setting-label-cell',
+            style: 'flex:1 1 auto; min-width:0; width:auto;',
+        }, [
+            el('label', {}, [text(label)]),
+            el('div', {
+                style: 'font-size:var(--text-xs); color:var(--text-faint); overflow-wrap:anywhere;',
+            }, [text(hint)]),
+        ])
+        : el('label', { style: 'flex:1 1 auto; min-width:0;' }, [text(label)]);
+    return el('div', {
+        class: 'setting-row',
+        style: 'flex-direction:row; flex-wrap:nowrap; align-items:baseline; '
+            + 'justify-content:space-between; gap:var(--sp-3);',
+    }, [
+        left,
+        el('span', {
+            style: 'flex:0 0 auto; white-space:nowrap; font-size:var(--text-sm); '
+                + `font-variant-numeric:tabular-nums; color:var(--${strong ? 'text' : 'text-dim'});`
+                + (strong ? ' font-weight:500;' : ''),
+        }, [text(value)]),
+    ]);
+}
+
+function _statusLine() {
+    const line = el('div', {
+        style: 'font-size:var(--text-sm); color:var(--text-dim); margin-top:0.5rem;',
+    });
+    line.hidden = true;
+    return line;
+}
+
+function _say(line, message, tone = 'dim') {
+    clear(line);
+    line.hidden = false;
+    line.style.color = tone === 'dim' ? 'var(--text-dim)' : `var(--${tone})`;
+    line.appendChild(text(message));
+}
+
+function _buildSessionsLedger(sessions) {
+    const rows = [_ledgerRow('Total sessions', String(sessions.total ?? 0), { strong: true })];
+    // Biggest first. The server sorts by key for a stable payload; here the
+    // question is "what is filling this up", and alphabetical order answers
+    // a different one.
+    const byType = Object.entries(sessions.by_type || {})
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    for (const [key, count] of byType) {
+        rows.push(_ledgerRow(_typeLabel(key), String(count)));
+    }
+    rows.push(_ledgerRow('Pinned', String(sessions.pinned ?? 0)));
+    rows.push(_ledgerRow('In spaces', String(sessions.in_spaces ?? 0)));
+    // null means the schema has no archive column yet — not zero archived.
+    if (sessions.archived != null) rows.push(_ledgerRow('Archived', String(sessions.archived)));
+
+    return el('div', { class: 'settings-section' }, [
+        el('h3', {}, [
+            text('Sessions'),
+            buildHelpIcon(
+                'Every row in the sessions table, by kind. Pinned sessions and sessions filed in a '
+                + 'space are counted again here — they are flags on a session, not kinds of their own. '
+                + 'Automation sessions (workers, scheduled runs, canaries, idle work) each have their '
+                + 'own retention and are never touched by the cleanup below.'
+            ),
+        ]),
+        ...rows,
+    ]);
+}
+
+function _buildDatabaseLedger(database, onDone, flash) {
+    const status = _statusLine();
+    const reclaimable = database.reclaimable_bytes || 0;
+    // Carried through the refresh that the action itself triggers. Without
+    // this the ledger redraws with new numbers and the sentence explaining
+    // where they came from disappears with the old DOM.
+    if (flash) _say(status, flash.text, flash.tone);
+
+    const compactBtn = el('button', {
+        class: 'btn btn--secondary settings-block-btn', type: 'button',
+    }, [icon('refresh', { size: 12 }), text('Compact database')]);
+
+    compactBtn.addEventListener('click', async () => {
+        compactBtn.disabled = true;
+        _say(status, 'Compacting — this holds the database for a moment…');
+        try {
+            const result = await post('/api/storage/optimize', {});
+            const freed = (result.bytes_before || 0) - (result.bytes_after || 0);
+            if (freed > 0) notify('success', `Database compacted — ${formatBytes(freed)} freed`);
+            onDone({
+                database: {
+                    text: freed > 0
+                        ? `${formatBytes(freed)} returned to the disk — ${formatBytes(result.bytes_before)} became ${formatBytes(result.bytes_after)}.`
+                        : `Nothing to reclaim — the file is still ${formatBytes(result.bytes_after)}.`,
+                    tone: freed > 0 ? 'success' : 'dim',
+                },
+            });
+        } catch (e) {
+            // 409 is the expected answer while a turn is running, not a
+            // failure: say what is in the way, and stay out of the error
+            // colour that means something went wrong.
+            if (e.status === 409) {
+                _say(status, e.detail || 'A turn is running — try again when the agent is idle.', 'warning');
+            } else {
+                _say(status, `Could not compact: ${e.message || e}`, 'error');
+                notify('error', 'Could not compact the database');
+            }
+        } finally {
+            compactBtn.disabled = false;
+        }
+    });
+
+    const rows = [
+        _ledgerRow('Database file', formatBytes(database.bytes), { strong: true, hint: database.path }),
+    ];
+    if (database.wal_bytes) {
+        rows.push(_ledgerRow('Write-ahead log', formatBytes(database.wal_bytes), {
+            hint: 'Committed writes not yet folded back into the file',
+        }));
+    }
+    rows.push(_ledgerRow('Reclaimable', formatBytes(reclaimable), {
+        hint: 'Free pages inside the file — deleted rows give this up, but only compacting hands it back',
+    }));
+
+    return el('div', { class: 'settings-section' }, [
+        el('h3', {}, [
+            text('Database'),
+            buildHelpIcon(
+                'Deleting sessions frees pages inside the database file; SQLite reuses them for new '
+                + 'rows but never returns them to the filesystem. Compacting rebuilds the file so that '
+                + 'space goes back to the disk. It holds a write lock for the whole rebuild, so it is '
+                + 'refused while a turn is running.'
+            ),
+        ]),
+        ...rows,
+        compactBtn,
+        status,
+    ]);
+}
+
+function _buildBackupsLedger(backups, onDone, flash) {
+    const status = _statusLine();
+    const beyond = backups.beyond_keep || [];
+    const beyondBytes = beyond.reduce((n, f) => n + (f.bytes || 0), 0);
+    if (flash) _say(status, flash.text, flash.tone);
+
+    const rows = [
+        _ledgerRow('Snapshots', String(backups.count ?? 0), { strong: true, hint: backups.dir }),
+        _ledgerRow('On disk', formatBytes(backups.bytes)),
+        _ledgerRow('Keeping', backups.keep > 0
+            ? `the newest ${backups.keep}`
+            : 'scheduled backups are off'),
+        _ledgerRow('Last backup', backups.last_backup_at
+            ? new Date(backups.last_backup_at).toLocaleString()
+            : 'never'),
+    ];
+
+    const children = [
+        el('h3', {}, [
+            text('Backups'),
+            buildHelpIcon(
+                'A snapshot of the database and the memory corpus, taken daily. backup_keep_count '
+                + 'sets how many are retained; rotation counts every snapshot in the directory, '
+                + 'including ones written under the older naming schemes earlier versions used.'
+            ),
+        ]),
+        ...rows,
+    ];
+
+    if (beyond.length) {
+        children.push(el('div', {
+            style: 'font-size:var(--text-sm); color:var(--text-dim); margin-top:0.6rem;',
+        }, [text(
+            `${beyond.length} snapshot${beyond.length === 1 ? ' is' : 's are'} past the keep count, `
+            + `holding ${formatBytes(beyondBytes)}:`,
+        )]));
+        children.push(el('ul', {
+            style: 'margin:0.35rem 0 0; padding-left:1.1rem; list-style:disc; '
+                + 'font-size:var(--text-sm); color:var(--text-dim); max-height:12rem; overflow-y:auto;',
+        }, beyond.map(f => el('li', {}, [
+            text(f.name),
+            el('span', { style: 'color:var(--text-faint);' }, [text(`  ${formatBytes(f.bytes)}`)]),
+        ]))));
+
+        const rotateBtn = el('button', {
+            class: 'btn btn--danger settings-block-btn', type: 'button',
+        }, [icon('trash', { size: 12 }), text('Rotate now')]);
+
+        rotateBtn.addEventListener('click', async () => {
+            rotateBtn.disabled = true;
+            try {
+                // Ask the server what it would remove before asking the user
+                // to agree to it. The list on screen may be a minute old; the
+                // dialog names what is about to happen, not what was.
+                const plan = await post('/api/storage/backups/rotate', { dry_run: true });
+                const names = plan.removed || [];
+                if (!names.length) {
+                    onDone({ backups: { text: 'Nothing to rotate — every snapshot is within the keep count.' } });
+                    return;
+                }
+                _say(
+                    status,
+                    `Would remove ${names.length} snapshot${names.length === 1 ? '' : 's'} `
+                    + `(${formatBytes(plan.bytes_freed)}): ${names.join(', ')}`,
+                );
+                const go = await confirmDanger({
+                    title: `Delete ${names.length} snapshot${names.length === 1 ? '' : 's'}?`,
+                    body: [
+                        `${formatBytes(plan.bytes_freed)} goes back to the disk. `
+                        + `The newest ${plan.kept} snapshot${plan.kept === 1 ? '' : 's'} stay.`,
+                        'These are backups. Deleting them is the one action here that cannot be '
+                        + 'undone by taking another one.',
+                    ],
+                    verb: `Delete ${names.length}`,
+                    cancelLabel: 'Keep them',
+                });
+                if (!go) {
+                    _say(status, 'Cancelled — nothing was deleted.');
+                    return;
+                }
+                const result = await post('/api/storage/backups/rotate', { dry_run: false });
+                notify('success', `Rotated ${result.removed.length} old snapshot${result.removed.length === 1 ? '' : 's'}`);
+                onDone({
+                    backups: {
+                        text: `Removed ${result.removed.length} snapshot${result.removed.length === 1 ? '' : 's'}, `
+                            + `freeing ${formatBytes(result.bytes_freed)}.`,
+                        tone: 'success',
+                    },
+                });
+            } catch (e) {
+                _say(status, `Could not rotate: ${e.message || e}`, 'error');
+                notify('error', 'Could not rotate the backups');
+            } finally {
+                rotateBtn.disabled = false;
+            }
+        });
+        children.push(rotateBtn);
+    }
+
+    children.push(status);
+    return el('div', { class: 'settings-section' }, children);
+}
+
+function _buildSweepsLedger(sweeps) {
+    const rows = Object.entries(sweeps)
+        .filter(([key, value]) => key.endsWith('_pruned') && value)
+        .map(([key, value]) => _ledgerRow(
+            _typeLabel(key.replace(/_pruned$/, '').replace(/_/g, ' ')),
+            String(value),
+        ));
+    if (!rows.length) return null;
+
+    return el('div', { class: 'settings-section' }, [
+        el('h3', {}, [
+            text('Swept automatically'),
+            buildHelpIcon(
+                'What the idle-time retention sweeps have removed since the server started. '
+                + 'These run on their own; the counters are here so the manual controls above are '
+                + 'read against what is already happening, not instead of it.'
+            ),
+        ]),
+        ...rows,
+    ]);
+}
+
+// `settingSections` are this tab's declarative sections (the backup schedule),
+// passed in rather than concatenated by the caller so they can land between
+// the backups ledger they configure and the cleanup controls below it.
+// Re-appending the same nodes on a refresh is deliberate: they keep their ids
+// and any edit the user has not saved yet.
+function buildStorageTab(settingSections = []) {
+    // Built async into a host, the way the Security tab is: the tab bodies are
+    // assembled synchronously when the modal opens, and this one needs a
+    // round trip before it has anything true to say.
+    const host = el('div', {}, [
+        el('div', { class: 'settings-tab-loading' }, [text('Loading…')]),
+    ]);
+
+    // `flash` is how an action's own result survives the refresh it triggers:
+    // rotating or compacting changes the numbers, so the ledger has to be
+    // rebuilt, and rebuilding it would otherwise throw away the sentence
+    // saying what just happened.
+    async function render(flash) {
+        let data;
+        try {
+            data = await get('/api/storage');
+        } catch (e) {
+            clear(host);
+            host.appendChild(el('div', { class: 'settings-load-error', role: 'alert' }, [
+                el('strong', {}, [text('Storage could not be read.')]),
+                el('p', {}, [text(e.message || String(e))]),
+            ]));
+            for (const section of settingSections) host.appendChild(section);
+            host.appendChild(buildSessionCleanupSection());
+            return;
+        }
+        clear(host);
+        host.appendChild(_buildSessionsLedger(data.sessions || {}));
+        host.appendChild(_buildDatabaseLedger(data.database || {}, render, flash?.database));
+        host.appendChild(_buildBackupsLedger(data.backups || {}, render, flash?.backups));
+        for (const section of settingSections) host.appendChild(section);
+        const sweeps = data.sweeps ? _buildSweepsLedger(data.sweeps) : null;
+        if (sweeps) host.appendChild(sweeps);
+        host.appendChild(buildSessionCleanupSection());
+        // The tab can land after the user has already started searching.
+        if (_searchQuery) _applySettingsFilter(_searchQuery);
+    }
+
+    render();
+    return host;
 }
 
 async function buildSecurityTab(settings) {
@@ -2556,6 +2982,7 @@ const SETTINGS_TABS = [
     { key: 'tools',        label: 'Tools & safety',       short: 'Tools' },
     { key: 'integrations', label: 'Integrations',         short: 'Integrations' },
     { key: 'environment',  label: 'Environment & network', short: 'Network' },
+    { key: 'storage',      label: 'Storage',              short: 'Storage' },
 ];
 
 // Deep links from elsewhere in the app (openSettings({tab:'security'}) in
@@ -2624,8 +3051,13 @@ function buildTabs(settings) {
             buildEnvTab(settings),
             buildNetworkTab(settings),
             ...sectionsFor('environment'),
-            buildSessionCleanupSection(),
         ],
+        // Session cleanup used to sit at the bottom of this list, below the
+        // SSL settings. It is a storage control, and it now lives with the
+        // numbers it acts on. The tab places its own declarative sections,
+        // so they land beside the ledger they configure rather than after
+        // everything else.
+        storage: [buildStorageTab(sectionsFor('storage'))],
     };
 
     const tabs = [];
@@ -2653,7 +3085,7 @@ function buildTabs(settings) {
     });
 
     const tabBar = el('div', { class: 'tab-bar settings-tab-bar' }, tabs);
-    // Six tabs never fit a phone. The strip has always scrolled; now it says
+    // Seven tabs never fit a phone. The strip has always scrolled; now it says
     // so, and the tab you pick is brought into view rather than left half
     // off the edge you tapped it at. (P8)
     const revealTab = bindStripScroll(tabBar, tabs[0]);
