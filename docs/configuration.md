@@ -448,6 +448,60 @@ Esc cancels a recording without transcribing.
 
 ---
 
+## Storage
+
+**Settings → Storage** is where the disk questions live: how many sessions there
+are and of what kind, how big the database is and how much of that size is
+reclaimable, what the backup directory holds, and the two controls that give
+space back. Session cleanup used to sit at the bottom of *Environment &
+network*, below the SSL settings, where it was hard to find and acted on
+numbers you could not see.
+
+**The ledger.** Sessions by kind, with pinned and in-space counts alongside
+(those are flags on a session, not kinds of their own). The database's size on
+disk, plus **reclaimable** — free pages that deleted rows have already given up
+*inside* the file. SQLite reuses those pages for new rows but never returns
+them to the filesystem, which is why deleting a thousand sessions can change
+nothing about the file size. Then the backup directory: how many snapshots,
+how much they weigh, the retention count, when the last one was taken, and any
+snapshots past the keep count named individually.
+
+**Compact database** rebuilds the file so the reclaimable space goes back to
+the disk (`PRAGMA optimize`, then `VACUUM`, then a WAL checkpoint so the main
+file actually shrinks rather than waiting for the next one). It is refused
+while a turn is running: `VACUUM` holds a write lock for the whole rebuild,
+long enough for a live agent's next write to time out.
+
+**Rotate now** applies `backup_keep_count` to every snapshot in the directory.
+It always shows the dry run first — the exact filenames and the bytes they
+hold — and asks before deleting anything. Rotation recognises all three naming
+schemes past versions of `scripts/backup.py` have used
+(`sessions-<stamp>.db`, `sessions.<ISO>.db`, `sessions.db.<stamp>`); before
+that it globbed only for the one it was writing that day, so snapshots left by
+an earlier version were never counted and never removed. Non-database files in
+the directory are never candidates. From the shell:
+`python scripts/backup.py --dry-run` prints the same plan without taking a
+snapshot.
+
+**Session cleanup** permanently deletes old *plain chats*. Pinned sessions,
+anything filed in a space, and every automation session (workers, scheduled
+runs, canaries, idle work) are skipped — each of those has its own retention.
+**Preview** asks the server exactly what it would delete and reports the count,
+what is being left alone and why, and the first few titles; **Prune now**
+re-runs that preview and names the number in the confirmation before deleting.
+
+### Endpoints
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/storage` | The whole ledger: `sessions` (total, by type, pinned, in spaces, archived), `database` (path, bytes, WAL bytes, page size, `reclaimable_bytes`), `backups` (dir, count, bytes, keep, last backup, `beyond_keep`) and `sweeps` (what the idle-time retention sweeps have pruned). `archived` is `null` — not `0` — while the schema has no `archived_at` column. |
+| `POST /api/storage/backups/rotate` | Body `{"dry_run": true}` (the default) lists what rotation would remove; `{"dry_run": false}` removes it. Returns `removed`, `bytes_freed` and `kept`. |
+| `POST /api/storage/optimize` | `PRAGMA optimize` + `VACUUM` + WAL checkpoint. Returns `bytes_before` / `bytes_after`. Answers **409** while a turn is running. |
+
+Same authentication as every other endpoint: a Bearer token in network mode.
+
+---
+
 ## Sessions
 
 | Setting | Default | Description |
@@ -488,7 +542,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `max_file_write_size` | `104857600` | Max bytes per `file_write` / `file_edit` / `multiedit` call (100 MB). `0` disables. |
 | `max_edit_read_size` | `5242880` | Max file size for `file_edit`'s whole-file fuzzy-match path (5 MB). `0` disables. |
 | `audio_model_overrides` | *(empty list)* | Force `supports_audio = true` for models where auto-detection misses audio capability. |
-| `backup_keep_count` | `7` | Timestamped snapshots kept in `data/backups` by the 24h backup tier. Rotation is per-artifact (DB snapshots and memory corpora rotate independently), so a restore always has a matching pair. Clamped to 0–90 at use time; `0` disables scheduled backups. |
+| `backup_keep_count` | `7` | Timestamped snapshots kept in `data/backups` by the 24h backup tier. Rotation is per-artifact (DB snapshots and memory corpora rotate independently), so a restore always has a matching pair, and it counts every database snapshot in the directory whatever naming scheme wrote it — see [Storage](#storage). Clamped to 0–90 at use time; `0` disables scheduled backups (and rotation then removes nothing, rather than reading the zero as "delete what I have"). Edit it under Settings → Storage → Backup schedule. |
 | `tool_executor_workers` | `32` | Threads in the tool-call pool. Tools run on their own pool so they can never occupy asyncio's default executor, which every API route needs for its DB reads. Occupants are blocked on IO, so raising it costs memory and PIDs rather than throughput. |
 | `background_executor_workers` | `8` | Threads for long-running idle-time background work (dream deep probes, canary maintenance, synthesis, backups, memory dedup). Small on purpose: occupants are heavyweight and idle-time-only. |
 
