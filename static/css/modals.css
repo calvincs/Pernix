@@ -1324,3 +1324,37 @@
     width: 100%;
     margin-top: var(--sp-2);
 }
+
+/* ======================================================================
+   Model picker sheet (app.js — compact only)
+   ----------------------------------------------------------------------
+   The anchored #model-menu keeps the desktop and the wide tablet. Below
+   900px the same list is a bottom sheet built on the same .sheet-item rows
+   as sheet.js, so it inherits the 48px target, the ellipsis and the hint
+   column with nothing restated here. Only three things differ: the list
+   scrolls INSIDE the card (a thirty-model list must not push the title and
+   the way out off the top), the check sits in a fixed gutter so labels line
+   up whether or not a row is the current one, and the id stays monospaced.
+   Nothing in this block can match above 900px — the sheet is not built.
+   ====================================================================== */
+.model-sheet-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    /* A flick that runs past the end of the list must not scroll the
+       transcript underneath it. */
+    overscroll-behavior: contain;
+}
+/* A fixed gutter, present on every row: a check that only some rows have
+   would step every other label 16px to the left. */
+.model-sheet-check {
+    flex: none;
+    width: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+}
+.model-sheet-item.current .sheet-item-label {
+    color: var(--accent);
+}
