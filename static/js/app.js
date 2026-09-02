@@ -2648,7 +2648,8 @@ async function _seedWorkerStrip(sid) {
 // ---------------------------------------------------------------------------
 
 let _sessionModelOverride = null;
-let _modelMenuEl = null;
+let _modelMenuEl = null;     // the anchored menu, or the sheet's overlay
+let _modelSheetClose = null; // openOverlay teardown — the sheet only
 
 function _renderModelBadge() {
     const mEl = document.getElementById('status-model');
@@ -2687,6 +2688,12 @@ function _renderModelBadge() {
 }
 
 function _closeModelMenu() {
+    // The sheet's teardown un-inerts the app and puts focus back on the badge.
+    // Cleared BEFORE it is called: openOverlay routes Escape through onClose,
+    // which is this function, and it must not re-enter its own teardown.
+    const closeSheet = _modelSheetClose;
+    _modelSheetClose = null;
+    if (closeSheet) closeSheet();
     if (_modelMenuEl) {
         _modelMenuEl.remove();
         _modelMenuEl = null;
@@ -2695,83 +2702,161 @@ function _closeModelMenu() {
     document.getElementById('status-model')?.setAttribute('aria-expanded', 'false');
 }
 
+/**
+ * One row of the model picker. Two shapes, one behaviour: the anchored menu's
+ * plain line, and the sheet's 48px row with the check in a fixed gutter so the
+ * labels line up whether or not a row is the current one.
+ */
+function _modelPickerItem({ label, value, current, hint, sheet }, onPick) {
+    const item = sheet
+        ? el('button', {
+            class: `sheet-item model-sheet-item${current ? ' current' : ''}`,
+            type: 'button',
+        }, [
+            el('span', { class: 'model-sheet-check' }, current ? [icon('check', { size: 16 })] : []),
+            el('span', { class: 'sheet-item-label' }, [text(label)]),
+            ...(hint ? [el('span', { class: 'sheet-item-hint' }, [text(hint)])] : []),
+        ])
+        : el('button', {
+            class: `model-menu-item${current ? ' current' : ''}`,
+            type: 'button',
+        }, [text(label)]);
+    if (current) item.setAttribute('aria-current', 'true');
+    item.addEventListener('click', () => onPick(value));
+    return item;
+}
+
 async function _openModelMenu() {
     if (_modelMenuEl) { _closeModelMenu(); return; }
     if (!state.sid) return;
 
-    const menu = el('div', { id: 'model-menu' }, [
-        el('div', { class: 'model-menu-header' }, [text('Model for this session')]),
-        el('div', { class: 'model-menu-loading' }, [text('Loading models…')]),
-    ]);
-    _modelMenuEl = menu;
-    document.body.appendChild(menu);
-    document.getElementById('status-model')?.setAttribute('aria-expanded', 'true');
+    // Below the tablet line the anchored menu is the wrong shape whatever it
+    // is anchored to: it is as wide as the longest model id, it hangs off a
+    // 19px badge that is most of the status row, and picking from thirty
+    // models means dragging a 40vh scroller with a fingertip. A bottom sheet
+    // gets the full width, 48px rows, a scrim and Escape. Wide touch and the
+    // desktop keep the menu — there is room for it there. (P2)
+    const asSheet = isCompact();
+    const list = el('div', { class: asSheet ? 'sheet-items model-sheet-list' : 'model-menu-list' });
+    const loadingEl = el('div', { class: 'model-menu-loading' }, [text('Loading models…')]);
+    let card = null;
 
-    // Anchored to the badge, on whichever side there is room for it. The
-    // status bar is at the BOTTOM on the desktop, so a menu hung above it by
-    // its `bottom` is the right shape there; touch.css moves the whole bar to
-    // the top of the screen, and the same offset then put the menu's bottom
-    // edge 13px down the page with the rest of it off the top. Measured -113px
-    // on a phone, -94px on a landscape iPad: unreachable in both. (P2)
-    const badge = document.getElementById('status-model');
-    const rect = badge.getBoundingClientRect();
-    const anchorAbove = rect.top >= window.innerHeight / 2;
-    if (anchorAbove) {
-        menu.style.bottom = `${window.innerHeight - rect.top + 6}px`;
+    if (asSheet) {
+        list.appendChild(loadingEl);
+        const cancelBtn = el('button', {
+            class: 'btn sheet-cancel', type: 'button', onClick: () => _closeModelMenu(),
+        }, [text('Cancel')]);
+        card = el('div', {
+            class: 'modal-card sheet-card model-sheet', 'data-sheet': 'model',
+        }, [
+            el('h2', { class: 'sheet-title' }, [text('Model for this session')]),
+            list,
+            cancelBtn,
+        ]);
+        const overlay = el('div', { class: 'modal-overlay sheet-overlay' }, [card]);
+        // Only a press that STARTED on the backdrop dismisses, so a drag off
+        // the card does not close it. Same rule as sheet.js.
+        let downOnBackdrop = false;
+        overlay.addEventListener('mousedown', (e) => { downOnBackdrop = e.target === overlay; });
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay && downOnBackdrop) _closeModelMenu();
+            downOnBackdrop = false;
+        });
+        _modelMenuEl = overlay;
+        document.body.appendChild(overlay);
+        const badge = document.getElementById('status-model');
+        badge?.setAttribute('aria-expanded', 'true');
+        // openOverlay puts focus back wherever it was when it opened, and on
+        // iOS a tap does NOT focus the button it lands on — closing the sheet
+        // would drop the user at the top of the page. Claim it first so there
+        // is something to go back to.
+        badge?.focus();
+        // The card itself, not Cancel: the rows are not there yet, and landing
+        // on the way out is the wrong first thing to hear.
+        _modelSheetClose = openOverlay(card, { onClose: _closeModelMenu, initialFocus: card });
     } else {
-        menu.style.top = `${rect.bottom + 6}px`;
+        const menu = el('div', { id: 'model-menu' }, [
+            el('div', { class: 'model-menu-header' }, [text('Model for this session')]),
+            loadingEl,
+        ]);
+        _modelMenuEl = menu;
+        document.body.appendChild(menu);
+        document.getElementById('status-model')?.setAttribute('aria-expanded', 'true');
+
+        // Anchored to the badge, on whichever side there is room for it. The
+        // status bar is at the BOTTOM on the desktop, so a menu hung above it
+        // by its `bottom` is the right shape there; touch.css moves the whole
+        // bar to the top of the screen, and the same offset then put the
+        // menu's bottom edge 13px down the page with the rest of it off the
+        // top. Measured -113px on a phone, -94px on a landscape iPad. (P2)
+        const badge = document.getElementById('status-model');
+        const rect = badge.getBoundingClientRect();
+        const anchorAbove = rect.top >= window.innerHeight / 2;
+        if (anchorAbove) {
+            menu.style.bottom = `${window.innerHeight - rect.top + 6}px`;
+        } else {
+            menu.style.top = `${rect.bottom + 6}px`;
+        }
+        // Left-aligned to the badge until that would hang the menu off the
+        // right edge. Re-run once the models land: the menu is 260px wide
+        // saying "Loading" and as wide as the longest model id afterwards.
+        const clampLeft = () => {
+            // The menu is shrink-to-fit against (viewport − left), so measuring
+            // it where it currently sits makes the measurement chase its own
+            // tail. Measure from the left-most position it could take.
+            menu.style.left = '8px';
+            const menuW = menu.offsetWidth || 260;
+            menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menuW - 8))}px`;
+        };
+        clampLeft();
+        menu._clampLeft = clampLeft;
+
+        // Defer the outside-click closer so the opening click doesn't trigger it.
+        setTimeout(() => document.addEventListener('click', _closeModelMenu), 0);
+        menu.addEventListener('click', (e) => e.stopPropagation());
     }
-    // Left-aligned to the badge until that would hang the menu off the right
-    // edge — which it does on a phone, where the badge is most of the row.
-    // Re-run once the models land: the menu is 260px wide saying "Loading"
-    // and as wide as the longest model id afterwards.
-    const clampLeft = () => {
-        // The menu is shrink-to-fit against (viewport − left), so measuring it
-        // where it currently sits makes the measurement chase its own tail on
-        // a narrow screen. Measure from the left-most position it could take.
-        menu.style.left = '8px';
-        const menuW = menu.offsetWidth || 260;
-        menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menuW - 8))}px`;
-    };
-    clampLeft();
 
-    // Defer the outside-click closer so the opening click doesn't trigger it.
-    setTimeout(() => document.addEventListener('click', _closeModelMenu), 0);
-    menu.addEventListener('click', (e) => e.stopPropagation());
-
+    const opened = _modelMenuEl;
     let models = [];
     try {
         const data = await get('/api/models');
         models = data.models || [];
     } catch { /* render with just the default option */ }
-    if (!_modelMenuEl) return;  // closed while loading
+    if (_modelMenuEl !== opened) return;  // closed, or reopened, while loading
 
-    menu.querySelector('.model-menu-loading')?.remove();
-    const list = el('div', { class: 'model-menu-list' });
+    loadingEl.remove();
 
-    const mkItem = (label, value, current) => {
-        const item = el('button', { class: `model-menu-item${current ? ' current' : ''}` }, [text(label)]);
-        item.addEventListener('click', async () => {
-            try {
-                await patch(`/api/sessions/${state.sid}`, { model_override: value });
-                _sessionModelOverride = value || null;
-                _renderModelBadge();
-            } catch (e) {
-                appendMessage('system', `Model override failed: ${e.message}`);
-            }
-            _closeModelMenu();
-        });
-        return item;
+    const pick = async (value) => {
+        try {
+            await patch(`/api/sessions/${state.sid}`, { model_override: value });
+            _sessionModelOverride = value || null;
+            _renderModelBadge();
+        } catch (e) {
+            appendMessage('system', `Model override failed: ${e.message}`);
+        }
+        _closeModelMenu();
     };
 
     const providerLabels = { ollama: 'Ollama', openrouter: 'OpenRouter' };
     const labelFor = (p) => providerLabels[p] || p;
 
     const defaultProvider = models.find((m) => m.id === state.model)?.provider;
-    const defaultLabel = `default (${state.model}${defaultProvider ? ` · ${labelFor(defaultProvider)}` : ''})`;
-    list.appendChild(mkItem(defaultLabel, '', !_sessionModelOverride));
+    // The sheet has a hint column for the provider, so its rows keep the name
+    // short; the menu has only the one line and carries it inline.
+    const defaultLabel = asSheet
+        ? `Default (${state.model || 'server setting'})`
+        : `default (${state.model}${defaultProvider ? ` · ${labelFor(defaultProvider)}` : ''})`;
+    list.appendChild(_modelPickerItem({
+        label: defaultLabel,
+        value: '',
+        current: !_sessionModelOverride,
+        hint: asSheet && defaultProvider ? labelFor(defaultProvider) : '',
+        sheet: asSheet,
+    }, pick));
 
     // Group by provider, Ollama first (same ordering as the settings modal).
+    // The sheet says the provider per row instead: a header is one more thing
+    // to scroll past on a screen that has room for six rows.
     const byProvider = {};
     for (const m of models) {
         const p = m.provider || 'unknown';
@@ -2781,17 +2866,36 @@ async function _openModelMenu() {
     for (const provider of providerOrder) {
         const group = byProvider[provider];
         if (!group?.length) continue;
-        list.appendChild(el('div', { class: 'model-menu-group' }, [text(labelFor(provider))]));
+        if (!asSheet) {
+            list.appendChild(el('div', { class: 'model-menu-group' }, [text(labelFor(provider))]));
+        }
         for (const m of group) {
-            list.appendChild(mkItem(m.id, m.id, _sessionModelOverride === m.id));
+            list.appendChild(_modelPickerItem({
+                label: m.id,
+                value: m.id,
+                current: _sessionModelOverride === m.id,
+                hint: asSheet ? labelFor(provider) : '',
+                sheet: asSheet,
+            }, pick));
         }
     }
     if (!models.length) {
         list.appendChild(el('div', { class: 'model-menu-empty' }, [text('No models listed — check provider settings.')]));
     }
-    menu.appendChild(list);
-    clampLeft();
+
+    if (asSheet) {
+        // Focus was parked on the card while the list was empty. Move it to the
+        // row that is already selected — but only if nothing else took it in
+        // the meantime.
+        if (document.activeElement === card) {
+            (card.querySelector('.model-sheet-item.current') || card).focus();
+        }
+        return;
+    }
+    _modelMenuEl.appendChild(list);
+    _modelMenuEl._clampLeft?.();
 }
+
 
 const _runningTools = new Map();  // name → summarized args, for tools currently executing
 
