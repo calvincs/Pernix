@@ -67,6 +67,36 @@ const _sessionsById = new Map();
 const _deferredDeletes = new Set();
 const UNDO_MS = 5000;
 
+// The archive: sessions that have left the list without leaving the database.
+// The COUNT rides on every /api/sessions answer, so the legend can offer
+// "Archived (12)" for free; the ROWS are fetched only once the user turns
+// that entry on, so nobody pays for an archive they never open.
+let _archivedCount = 0;
+let _archived = [];
+let _archivedLoading = false;
+let _archivedFailed = false;
+const ARCHIVED_GROUP = 'Archived';
+
+// Sessions the user has archived but that app.js's payload may still carry,
+// because the PATCH and the ten-second list poll are two different clocks.
+// The optimistic mutation cannot live on the payload object itself: a poll
+// replaces the whole array with fresh objects, and the row would reappear
+// for as long as it took the next fetch to notice. Same idea as
+// _deferredDeletes, and it clears itself the moment the server agrees.
+const _archivedLocal = new Set();
+
+function _reconcileArchived(sessions) {
+    if (!_archivedLocal.size) return;
+    const present = new Set();
+    for (const s of sessions) {
+        present.add(s.id);
+        if (s.archived_at) _archivedLocal.delete(s.id);
+    }
+    for (const id of _archivedLocal) {
+        if (!present.has(id)) _archivedLocal.delete(id);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -81,6 +111,47 @@ export function initSidebar(onSelect, onDelete) {
     // The throttled visit stamps are worth nothing if the tab closes before
     // one lands.
     window.addEventListener('pagehide', _flushVisited);
+}
+
+/**
+ * Told by app.js after every /api/sessions response.
+ *
+ * The list endpoint reports `archived_count` alongside the page, so the
+ * legend can say how many sessions are filed away without a second round
+ * trip — and, when the answer is zero, say nothing at all.
+ *
+ * @param {number} n
+ */
+export function setArchivedCount(n) {
+    const next = Number(n) || 0;
+    const changed = next !== _archivedCount;
+    _archivedCount = next;
+    _updateArchivedLegend();
+    // The group is open and its contents just changed underneath it.
+    if (changed && _showArchived()) _loadArchived();
+}
+
+function _showArchived() {
+    return !!_loadState().showArchived;
+}
+
+async function _loadArchived() {
+    if (_archivedLoading) return;
+    _archivedLoading = true;
+    _archivedFailed = false;
+    _repaint();
+    try {
+        const data = await get(`/api/sessions?archived=1&limit=${SESSION_PAGE_LIMIT}`);
+        _archived = data.items || [];
+        _archivedCount = data.archived_count ?? _archived.length;
+    } catch {
+        _archived = [];
+        _archivedFailed = true;
+    } finally {
+        _archivedLoading = false;
+        _updateArchivedLegend();
+        _repaint();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -287,21 +358,34 @@ async function _runSearch(q) {
                 }));
             }
             titleKids.push(text(r.title || 'untitled'));
+            // Search is the one surface archiving deliberately does NOT
+            // remove a session from — that is the whole promise — so the row
+            // has to say why this one is not in the list above it. The mark
+            // goes on the meta line rather than after the title: the title
+            // is a nowrap ellipsis, and a long one would clip the very word
+            // that explains the row.
+            const metaKids = [];
+            if (r.archived) {
+                metaKids.push(el('span', {
+                    class: 'archived-chip',
+                    title: 'Archived — open it to restore',
+                }, [text('archived')]));
+            }
+            metaKids.push(text(`${r.matches} match${r.matches === 1 ? '' : 'es'}`
+                + (r.updated_at ? ' · ' + _relativeTime(r.updated_at) : '')));
             const open = () => _select(r.session_id);
             const hit = el('div', {
                 class: 'session-item search-hit' + (r.session_id === _activeSid ? ' active' : ''),
                 'data-sid': r.session_id,
                 role: 'button',
                 tabindex: '0',
-                'aria-label': `${r.title || 'untitled'}, ${r.matches} match${r.matches === 1 ? '' : 'es'}`,
+                'aria-label': `${r.title || 'untitled'}${r.archived ? ', archived' : ''}, `
+                    + `${r.matches} match${r.matches === 1 ? '' : 'es'}`,
                 onClick: open,
             }, [
                 el('div', { class: 'session-title' }, titleKids),
                 el('div', { class: 'search-snippet' }, [text(r.snippet || '')]),
-                el('div', { class: 'search-meta' }, [
-                    text(`${r.matches} match${r.matches === 1 ? '' : 'es'}`
-                        + (r.updated_at ? ' · ' + _relativeTime(r.updated_at) : '')),
-                ]),
+                el('div', { class: 'search-meta' }, metaKids),
             ]);
             _activateOnKey(hit, open);
             list.appendChild(hit);
@@ -414,14 +498,24 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     _touchVisited(activeSid);
     if (_searchActive) { _refreshSearchRows(sessions, activeSid); return; }
     // Sessions inside their undo window are gone as far as the list is
-    // concerned. Filtering before the guard's fingerprint is what makes the
-    // set part of it — the payload itself has not changed.
-    sessions = (sessions || []).filter(s => !_deferredDeletes.has(s.id));
+    // concerned, and so are archived ones — leaving the list is what
+    // archiving IS. The server already excludes them; the local check is
+    // what makes an optimistic archive move the row on the click rather
+    // than on the round trip. Filtering before the guard's fingerprint is
+    // what makes both sets part of it — the payload itself has not changed.
+    _reconcileArchived(sessions || []);
+    sessions = (sessions || []).filter(
+        s => !_deferredDeletes.has(s.id) && !s.archived_at && !_archivedLocal.has(s.id));
     _sessionsById.clear();
     for (const s of sessions) _sessionsById.set(s.id, s);
+    // Archived sessions are not in the list, but the session header still
+    // has to resolve one by id when the user opens it from search.
+    for (const s of _archived) _sessionsById.set(s.id, s);
     // The guard must see spaces too: a label/color edit with an unchanged
     // session list would otherwise never repaint.
-    const json = JSON.stringify(sessions) + '|' + JSON.stringify(spaces) + '|' + activeSid;
+    const json = JSON.stringify(sessions) + '|' + JSON.stringify(spaces) + '|' + activeSid
+        + '|' + (_showArchived() ? _archived.map(s => s.id).join(',') : 'off')
+        + '|' + _archivedLoading + _archivedFailed;
     if (json === _lastJson) return;
     _lastJson = json;
 
@@ -568,7 +662,9 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
         list.appendChild(el('div', { class: 'sidebar-empty' }, [text(
             sessions.length
                 ? 'Every session type is hidden — turn one back on in the legend below.'
-                : 'No sessions yet — press + new or just start typing.'
+                : _archivedCount
+                    ? 'Nothing live here — your archived sessions are under Archived below.'
+                    : 'No sessions yet — press + new or just start typing.'
         )]));
     }
 
@@ -586,8 +682,62 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
         ]));
     }
 
+    // The archive goes last: it is a place sessions went, not a bucket they
+    // are in, and it must never push the live list down the panel.
+    _renderArchivedGroup(list, activeSid, sidebarState);
+
     list.scrollTop = scrollTop;
     _restoreFocus(list, focusMark);
+}
+
+// ---------------------------------------------------------------------------
+// The Archived group (v34)
+//
+// One collapsed group at the foot of the list, fed by its own
+// `?archived=1` fetch rather than by the payload above — the point of
+// archiving is that those sessions are NOT in the payload above.
+// ---------------------------------------------------------------------------
+
+function _renderArchivedGroup(list, activeSid, sidebarState) {
+    if (!_showArchived()) return;
+
+    const collapsed = sidebarState.collapsed?.[ARCHIVED_GROUP] ?? false;
+    const header = el('div', {
+        class: 'session-group-header archived-group-header' + (collapsed ? ' collapsed' : ''),
+        'data-group': ARCHIVED_GROUP,
+        role: 'button',
+        tabindex: '0',
+        'aria-expanded': String(!collapsed),
+    }, [
+        el('span', { class: 'sg-arrow', 'aria-hidden': 'true' }, [text('\u25BC')]),
+        text(ARCHIVED_GROUP),
+        el('span', { class: 'sg-count' }, [text(String(_archivedCount))]),
+    ]);
+
+    const body = el('div', { class: 'session-group-body' + (collapsed ? ' collapsed' : '') });
+
+    const toggleGroup = () => {
+        const isCollapsed = header.classList.toggle('collapsed');
+        body.classList.toggle('collapsed', isCollapsed);
+        header.setAttribute('aria-expanded', String(!isCollapsed));
+        _saveCollapsed(ARCHIVED_GROUP, isCollapsed);
+    };
+    header.addEventListener('click', toggleGroup);
+    _activateOnKey(header, toggleGroup);
+
+    if (_archivedFailed) {
+        body.appendChild(el('div', { class: 'space-empty' }, [text('Could not load the archive — try again.')]));
+    } else if (_archivedLoading && !_archived.length) {
+        body.appendChild(el('div', { class: 'space-empty' }, [text('Loading…')]));
+    } else if (!_archived.length) {
+        body.appendChild(el('div', { class: 'space-empty' }, [text('Nothing archived yet.')]));
+    }
+    for (const s of _archived) {
+        _renderSessionItem(s, body, activeSid, false);
+    }
+
+    list.appendChild(header);
+    list.appendChild(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -599,11 +749,62 @@ async function _openSpaceSheet(space) {
         title: space.label,
         items: [
             { id: 'settings', label: 'Space settings', icon: 'settings' },
+            { id: 'archive-idle', label: 'Archive idle sessions…', icon: 'archive' },
             { id: 'delete', label: 'Delete space', icon: 'trash', danger: true },
         ],
     });
     if (pick === 'settings') openSpaceModal(space);
+    else if (pick === 'archive-idle') await _archiveIdleInSpace(space);
     else if (pick === 'delete') openSpaceDeleteDialog(space);
+}
+
+/**
+ * Archive everything in one space that has gone quiet.
+ *
+ * Two calls, deliberately: a dry run first, so the number in the dialog is
+ * the number the second call then archives rather than an estimate the user
+ * has to trust. The horizon comes back from the server — it is a setting,
+ * not a constant the sidebar gets to invent.
+ */
+async function _archiveIdleInSpace(space) {
+    let dry;
+    try {
+        dry = await post('/api/sessions/archive-idle', { space_id: space.id, dry_run: true });
+    } catch (err) {
+        notify('error', `Could not check “${space.label}” for idle sessions — ${_reason(err)}.`);
+        return;
+    }
+    const n = dry.count || 0;
+    const days = dry.days || 0;
+    if (!n) {
+        notify('info', `Nothing in “${space.label}” has been idle for more than ${days} days.`);
+        return;
+    }
+    const titles = (dry.sample || []).slice(0, 5).map(x => `· ${x.title || 'untitled'}`);
+    const ok = await confirmDanger({
+        title: 'Archive idle sessions?',
+        body: [
+            `Archive ${n} session${n === 1 ? '' : 's'} in “${space.label}” idle for more than ${days} days?`,
+            'Nothing is deleted: they leave the sidebar, keep every message, stay searchable, '
+                + 'and one click brings any of them back.',
+            ...titles,
+            ...(n > titles.length ? [`…and ${n - titles.length} more.`] : []),
+        ],
+        verb: `Archive ${n}`,
+        cancelLabel: 'Keep',
+    });
+    if (!ok) return;
+    try {
+        const res = await post('/api/sessions/archive-idle', { space_id: space.id, days });
+        const done = res.count || 0;
+        notify('success', `Archived ${done} session${done === 1 ? '' : 's'} from “${space.label}”.`);
+        announce(`${done} session${done === 1 ? '' : 's'} archived`);
+        _lastJson = '';
+        window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
+        if (_showArchived()) _loadArchived();
+    } catch (err) {
+        notify('error', `Could not archive idle sessions in “${space.label}” — ${_reason(err)}.`);
+    }
 }
 
 function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, sidebarState) {
@@ -682,6 +883,15 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
                     openSpaceModal(space);
                 },
             }, [icon('settings', { size: 12 })]),
+            el('button', {
+                class: 'space-btn space-archive-btn',
+                title: `Archive idle sessions in ${space.label}`,
+                'aria-label': `Archive idle sessions in the space ${space.label}`,
+                onClick: (e) => {
+                    e.stopPropagation();
+                    _archiveIdleInSpace(space);
+                },
+            }, [icon('archive', { size: 12 })]),
             el('button', {
                 class: 'space-btn space-del-btn',
                 title: `Delete space ${space.label}`,
@@ -904,6 +1114,8 @@ function _sessionActions(session, titleText) {
                 notify('error', `Could not ${next ? 'pin' : 'unpin'} “${titleText}” — ${_reason(err)}.`);
             }
         },
+        archive() { return _setArchived(session, true, titleText); },
+        restore() { return _setArchived(session, false, titleText); },
         rename() { _startRename(session); },
         move(anchor) { _openMoveMenu(session, anchor); },
         copyId(btn) { return _copySessionId(btn, session.id); },
@@ -922,6 +1134,57 @@ function _sessionActions(session, titleText) {
             if (ok) _deleteWithUndo(session.id, titleText);
         },
     };
+}
+
+/**
+ * Archive or restore one session.
+ *
+ * Optimistic like the pin, and for the same reason: waiting on a round trip
+ * to watch your own decision land is what made delete the only affordance
+ * anyone trusted. The row leaves on the click; the PATCH follows; a failure
+ * puts it straight back and says why.
+ *
+ * @param {object} session  the row's payload (mutated in place)
+ * @param {boolean} archived  true to archive, false to restore
+ * @param {string} titleText  the display title, for the failure message
+ */
+async function _setArchived(session, archived, titleText) {
+    // The row this was clicked on is about to leave the list under the
+    // pointer, and an element removed while hovered never fires mouseleave —
+    // its tooltip would sit there over the transcript with nothing under it.
+    _hideTooltip();
+    const was = session.archived_at || null;
+    const wasCount = _archivedCount;
+    session.archived_at = archived ? new Date().toISOString() : null;
+    if (archived) {
+        _archivedLocal.add(session.id);
+        _archived = [session, ..._archived.filter(x => x.id !== session.id)];
+        _archivedCount += 1;
+    } else {
+        _archivedLocal.delete(session.id);
+        _archived = _archived.filter(x => x.id !== session.id);
+        _archivedCount = Math.max(0, _archivedCount - 1);
+    }
+    _updateArchivedLegend();
+    _repaint();
+    try {
+        await patch(`/api/sessions/${session.id}`, { archived });
+        announce(`${titleText} ${archived ? 'archived' : 'restored'}`);
+        // The row has to move between two lists that come from two different
+        // fetches; ask app.js for the live one rather than guessing at it.
+        window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
+        if (_showArchived()) _loadArchived();
+    } catch (err) {
+        session.archived_at = was;
+        _archivedCount = wasCount;
+        if (archived) _archivedLocal.delete(session.id);
+        _archived = archived
+            ? _archived.filter(x => x.id !== session.id)
+            : [session, ..._archived.filter(x => x.id !== session.id)];
+        _updateArchivedLegend();
+        _repaint();
+        notify('error', `Could not ${archived ? 'archive' : 'restore'} “${titleText}” — ${_reason(err)}.`);
+    }
 }
 
 // The move dropdown is a hover-anchored list of 22px rows: fine under a
@@ -968,11 +1231,17 @@ async function _openSessionSheet(session, { anchor = null } = {}) {
     const isChild = CHILD_TYPES.has(session.session_type);
     const act = _sessionActions(session, titleText);
 
+    const archived = !!session.archived_at;
     const items = [];
     if (!isChild) {
         items.push({ id: 'pin', label: session.pinned ? 'Unpin' : 'Pin to top', icon: 'pin' });
         items.push({ id: 'rename', label: 'Rename', icon: 'edit' });
         if (_spaces.length) items.push({ id: 'move', label: 'Move to space…', icon: 'move' });
+        // Above Delete on purpose: it is the answer to the question Delete
+        // was being asked, and the safe one.
+        items.push(archived
+            ? { id: 'restore', label: 'Restore', icon: 'unarchive' }
+            : { id: 'archive', label: 'Archive', icon: 'archive' });
     }
     items.push({ id: 'copy', label: 'Copy session id', icon: 'copy' });
     items.push({ id: 'delete', label: 'Delete', icon: 'trash', danger: true });
@@ -981,6 +1250,8 @@ async function _openSessionSheet(session, { anchor = null } = {}) {
         case 'pin': return act.togglePin();
         case 'rename': return act.rename();
         case 'move': return _moveSheet(session, titleText);
+        case 'archive': return act.archive();
+        case 'restore': return act.restore();
         case 'copy': return act.copyId(anchor);
         case 'delete': return act.remove();
         default: return undefined;   // cancel, Escape, backdrop
@@ -1083,6 +1354,21 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
                     onClick: (e) => { e.stopPropagation(); act.move(e.currentTarget); },
                 }, [icon('move', { size: 12 })]));
             }
+
+            // Archive / Restore. It joins the overlay rather than the
+            // line, so the sixth control costs the title nothing: the strip
+            // is absolutely positioned and the row does not move.
+            const isArchived = !!session.archived_at;
+            actions.push(el('button', {
+                class: 'session-archive',
+                title: isArchived ? 'Restore session' : 'Archive session — keeps every message',
+                'aria-label': isArchived ? `Restore ${titleText}` : `Archive ${titleText}`,
+                onClick: (e) => {
+                    e.stopPropagation();
+                    if (isArchived) act.restore();
+                    else act.archive();
+                },
+            }, [icon(isArchived ? 'unarchive' : 'archive', { size: 12 })]));
         }
 
         // Delete button. It asks first, naming what it is about to delete,
@@ -1096,6 +1382,10 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
     }
 
     const classes = ['session-item'];
+    // The row is in the Archived group rather than the list. It reads a shade
+    // quieter there, and the class is what tells the two apart for anything
+    // that walks the list.
+    if (session.archived_at) classes.push('archived-row');
     if (session.id === activeSid) classes.push('active');
     if (isWorker) classes.push('worker');
     if (depth > 1) classes.push('depth-2');
@@ -1399,7 +1689,61 @@ function _createLegend() {
         legend.appendChild(item);
     }
 
+    // Not a session type — a place sessions go — so it comes after the key
+    // and toggles a group rather than filtering one. Hidden until there is
+    // something in the archive to show.
+    const archivedItem = el('button', {
+        class: 'legend-item archived',
+        id: 'legend-archived',
+        type: 'button',
+        'aria-pressed': 'false',
+        onClick: () => _toggleArchived(),
+    }, [
+        el('span', { class: 'legend-dot archived' }),
+        el('span', { class: 'legend-label' }, [text('Archived')]),
+        el('span', { class: 'legend-count', id: 'legend-archived-count' }, [text('0')]),
+    ]);
+    archivedItem.hidden = true;
+    legend.appendChild(archivedItem);
+
     sidebar.appendChild(legend);
+    _updateArchivedLegend();
+    // A user who left the group open last time expects it open now.
+    if (_showArchived()) _loadArchived();
+}
+
+function _updateArchivedLegend() {
+    const item = document.getElementById('legend-archived');
+    if (!item) return;
+    const on = _showArchived();
+    item.hidden = _archivedCount === 0 && !on;
+    item.classList.toggle('dimmed', !on);
+    item.setAttribute('aria-pressed', String(on));
+    item.title = on
+        ? 'Hide the archived sessions'
+        : `Show ${_archivedCount} archived session${_archivedCount === 1 ? '' : 's'}`;
+    const count = document.getElementById('legend-archived-count');
+    if (count) count.textContent = String(_archivedCount);
+    // The legend hides itself when it is a key to an empty list; an archive
+    // with something in it is not an empty list.
+    const legend = document.getElementById('sidebar-legend');
+    if (legend && !item.hidden) legend.hidden = false;
+}
+
+function _toggleArchived() {
+    const state = _loadState();
+    state.showArchived = !state.showArchived;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    _updateArchivedLegend();
+    if (state.showArchived) {
+        _loadArchived();
+        announce('Showing archived sessions');
+    } else {
+        _archived = [];
+        _archivedFailed = false;
+        announce('Archived sessions hidden');
+        _repaint();
+    }
 }
 
 function _toggleType(typeKey) {
