@@ -69,8 +69,15 @@ self.addEventListener('install', (e) => {
             // discard the entire precache and leave the app with no offline
             // shell at all. Missing entries just fall through to the fetch
             // handler on first use.
+            // {cache: 'reload'} bypasses the browser's HTTP cache for the
+            // precache fetch. Without it a new SW version happily precaches
+            // whatever the HTTP cache still considers fresh, so a deploy that
+            // changed two modules could stamp the OLD copy of one next to the
+            // NEW copy of the other into the same versioned cache — the
+            // mixed-version app behind the post-deploy "tap to refresh" that
+            // reloads into the same broken state.
             .then((cache) => Promise.all(
-                SHELL_ASSETS.map((url) => cache.add(url).catch(() => {}))
+                SHELL_ASSETS.map((url) => cache.add(new Request(url, { cache: 'reload' })).catch(() => {}))
             ))
             .catch(() => { /* precache is best-effort — fetch handler fills in */ })
             .then(() => self.skipWaiting())
@@ -101,7 +108,11 @@ self.addEventListener('fetch', (event) => {
         event.respondWith(
             caches.open(CACHE_VERSION).then(async (cache) => {
                 const cached = await cache.match(event.request);
-                const refresh = fetch(event.request)
+                // Revalidate against the server, not the HTTP cache: a
+                // heuristically-fresh old module would otherwise be written
+                // straight back into the versioned cache and never updated.
+                const revalidate = new Request(event.request, { cache: 'no-cache' });
+                const refresh = fetch(revalidate)
                     .then((resp) => {
                         if (resp && resp.ok) cache.put(event.request, resp.clone());
                         return resp;

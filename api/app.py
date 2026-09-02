@@ -686,5 +686,23 @@ from pathlib import Path
 
 from fastapi.staticfiles import StaticFiles
 
+
+class _RevalidatingStatic(StaticFiles):
+    """Static assets with `Cache-Control: no-cache`.
+
+    Not "don't cache" — "revalidate before reuse". Without it the browser
+    picks a heuristic freshness lifetime from Last-Modified, so after a
+    deploy the service worker's precache could be satisfied from the HTTP
+    cache and stamp an old module beside a new one in the same versioned
+    cache. Revalidation is one conditional request that answers 304 on a
+    LAN, and it is what makes the SW's cache-busting reliable.
+    """
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers.setdefault("Cache-Control", "no-cache")
+        return resp
+
+
 if Path("static").exists():
-    app.mount("/static", StaticFiles(directory="static"), name="static")
+    app.mount("/static", _RevalidatingStatic(directory="static"), name="static")
