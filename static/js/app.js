@@ -4182,7 +4182,11 @@ function openTranscriptSearch() {
         _searchBarEl.querySelector('input')?.focus();
         return;
     }
-    const input = el('input', { type: 'text', placeholder: 'Search transcript…' });
+    const input = el('input', {
+        type: 'text',
+        placeholder: 'Search transcript…',
+        'aria-label': 'Search transcript',
+    });
     const counter = el('span', { class: 'ts-counter' });
     const prevBtn = el('button', { class: 'ts-nav', title: 'Previous match (Shift+Enter)' }, [text('↑')]);
     const nextBtn = el('button', { class: 'ts-nav', title: 'Next match (Enter)' }, [text('↓')]);
@@ -4228,7 +4232,11 @@ let _closePaletteOverlay = null;   // teardown from a11y.js openOverlay()
 function openSessionPalette() {
     if (_paletteEl) { closeSessionPalette(); return; }
 
-    const input = el('input', { type: 'text', placeholder: 'Jump to session…' });
+    const input = el('input', {
+        type: 'text',
+        placeholder: 'Jump to session…',
+        'aria-label': 'Jump to session',
+    });
     const list = el('div', { class: 'palette-list' });
     const card = el('div', { class: 'palette-card' }, [input, list]);
     _paletteEl = el('div', { class: 'palette-overlay' }, [card]);
@@ -4494,12 +4502,14 @@ function _showLoginScreen() {
             <div class="auth-logo">Pernix</div>
             <div class="auth-subtitle">Enter your access token to connect</div>
             <input class="auth-input" type="text" placeholder="Paste token here"
-                   autocomplete="off" spellcheck="false" autofocus />
+                   autocomplete="off" spellcheck="false" autofocus
+                   aria-label="Access token"
+                   aria-describedby="auth-hint auth-error" />
             <button class="auth-btn">Connect</button>
-            <div class="auth-hint">Find this token in the server console output —
+            <div class="auth-hint" id="auth-hint">Find this token in the server console output —
                 or on a logged-in desktop browser, open Settings &rarr; Network and
                 scan the QR code to sign this device in automatically.</div>
-            <div class="auth-error" role="alert" style="display:none"></div>
+            <div class="auth-error" id="auth-error" role="alert" style="display:none"></div>
         </div>
     `;
     document.body.appendChild(overlay);
