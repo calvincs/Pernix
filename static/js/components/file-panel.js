@@ -2,6 +2,7 @@
 
 import { el, text, clear, renderMarkdown } from '../render.js';
 import { icon } from '../icons.js';
+import { hex, rgba, isLight } from '../theme.js';
 import { get, post, del, getAuthToken } from '../api.js';
 import { isMobile } from '../mobile.js';
 import { notify } from '../feedback.js';
@@ -30,6 +31,38 @@ const MONACO_LANG = {
     'swift': 'swift', 'ini': 'ini',
 };
 
+
+// The editor's chrome, built from the live tokens rather than from a second
+// hard-coded copy of the dark palette — which is what it was, and why it
+// stayed black when the rest of the app went to paper. `base` still has to
+// flip, because it is what supplies the syntax-highlighting rules.
+const MONACO_THEME = 'pernix';
+
+function defineMonacoTheme(monaco) {
+    const paper = isLight();
+    monaco.editor.defineTheme(MONACO_THEME, {
+        base: paper ? 'vs' : 'vs-dark',
+        inherit: true,
+        rules: [],
+        colors: {
+            'editor.background': hex('--bg'),
+            'editor.foreground': hex('--text-bright'),
+            'editor.lineHighlightBackground': hex('--bg-surface'),
+            'editor.selectionBackground': rgba('--accent', 0.15),
+            'editorCursor.foreground': hex('--accent'),
+            'editorLineNumber.foreground': hex('--line-faint'),
+            'editorLineNumber.activeForeground': hex('--text-dim'),
+            'editorIndentGuide.background': hex('--border'),
+            'editorWidget.background': hex('--bg-raised'),
+            'editorWidget.border': hex('--border'),
+            'input.background': hex('--bg-raised'),
+            'input.border': hex('--border'),
+            'scrollbarSlider.background': rgba('--border', 0.6),
+            'scrollbarSlider.hoverBackground': rgba('--line-faint', 0.6),
+        },
+    });
+}
+
 let _monacoReady = null;
 
 function loadMonaco() {
@@ -52,27 +85,13 @@ function loadMonaco() {
             paths: { vs: '/static/vendor/monaco/vs' },
         });
         window.require(['vs/editor/editor.main'], () => {
-            // Define Pernix dark theme once
-            window.monaco.editor.defineTheme('pernix-dark', {
-                base: 'vs-dark',
-                inherit: true,
-                rules: [],
-                colors: {
-                    'editor.background': '#0e0e0e',
-                    'editor.foreground': '#e8e3d6',
-                    'editor.lineHighlightBackground': '#1a1a1a',
-                    'editor.selectionBackground': 'rgba(212, 168, 67, 0.15)',
-                    'editorCursor.foreground': '#d4a843',
-                    'editorLineNumber.foreground': '#504b40',
-                    'editorLineNumber.activeForeground': '#7a7568',
-                    'editorIndentGuide.background': '#252525',
-                    'editorWidget.background': '#151515',
-                    'editorWidget.border': '#252525',
-                    'input.background': '#151515',
-                    'input.border': '#252525',
-                    'scrollbarSlider.background': 'rgba(37, 37, 37, 0.6)',
-                    'scrollbarSlider.hoverBackground': 'rgba(80, 75, 64, 0.6)',
-                },
+            defineMonacoTheme(window.monaco);
+            // Monaco's theme is global, so a live theme change has to redefine
+            // it and re-apply — otherwise the Explorer's editor stays a black
+            // rectangle in the middle of a paper-coloured panel.
+            window.addEventListener('pernix:theme', () => {
+                defineMonacoTheme(window.monaco);
+                window.monaco.editor.setTheme(MONACO_THEME);
             });
             resolve(window.monaco);
         }, reject);
@@ -99,7 +118,7 @@ function createMonacoEditor(host, monaco, content, lang, onChange) {
     const editor = monaco.editor.create(host, {
         value: content,
         language: monacoLang,
-        theme: 'pernix-dark',
+        theme: MONACO_THEME,
         fontSize: 13,
         fontFamily: "'DM Mono', 'SF Mono', 'Fira Code', monospace",
         lineNumbers: 'on',
@@ -1476,7 +1495,7 @@ function renderMemoryFiles(listEl) {
                 // space's label + color from /api/memory/files.
                 f.space ? el('span', {
                     class: 'space-chip-labeled',
-                    style: `--space-color: ${f.space_color || '#888'}`,
+                    style: `--space-color: ${f.space_color || 'var(--text-dim)'}`,
                     title: `Space memory bucket (${f.space})`,
                 }, [text(f.space_label || f.space)]) : null,
                 el('span', {}, [text(`${f.entry_count || 0} entries`)]),

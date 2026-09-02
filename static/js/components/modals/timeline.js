@@ -23,6 +23,7 @@ import { icon } from '../../icons.js';
 import { get } from '../../api.js';
 import { state } from '../../store.js';
 import { openOverlay } from '../../a11y.js';
+import { hex } from '../../theme.js';
 
 // Vendored rather than CDN-loaded: the page ships a `script-src 'self'` CSP
 // (see index.html) and has to work offline on a LAN. Mermaid 10's ESM build
@@ -716,27 +717,20 @@ const _STATE_COLOR_CACHE = new Map();
 function _stateColor(state, part) {
     const key = `${state}|${part}`;
     if (_STATE_COLOR_CACHE.has(key)) return _STATE_COLOR_CACHE.get(key);
-    const raw = getComputedStyle(document.documentElement)
-        .getPropertyValue(`--state-${state}-${part}`).trim();
-    let out = part === 'bg' ? '#1a1a1a' : '#999999';
-    if (raw) {
-        const probe = document.createElement('span');
-        probe.style.cssText = 'position:absolute;left:-9999px;width:0;height:0';
-        probe.style.color = raw;
-        document.body.appendChild(probe);
-        const resolved = getComputedStyle(probe).color;
-        probe.remove();
-        const m = resolved.match(/-?[\d.]+/g);
-        if (m && m.length >= 3) {
-            out = '#' + m.slice(0, 3)
-                .map(v => Math.max(0, Math.min(255, Math.round(parseFloat(v))))
-                    .toString(16).padStart(2, '0'))
-                .join('');
-        }
-    }
+    // The fallback is a token too — an unknown state must not paint a dark
+    // node onto a light diagram. Check the property exists first: `color:
+    // var(--nope)` is invalid at computed-value time, so the probe would
+    // quietly hand back the inherited text colour instead of nothing.
+    const token = `--state-${state}-${part}`;
+    const defined = getComputedStyle(document.documentElement)
+        .getPropertyValue(token).trim();
+    const out = hex(defined ? token : (part === 'bg' ? '--bg-surface' : '--text-dim'));
     _STATE_COLOR_CACHE.set(key, out);
     return out;
 }
+
+// The cache holds resolved hex, so it has to die when the palette changes.
+window.addEventListener('pernix:theme', () => _STATE_COLOR_CACHE.clear());
 
 // `fill:…,stroke:…,color:…` for one Mermaid classDef.
 function _mermaidStyle(state) {

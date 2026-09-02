@@ -1539,7 +1539,7 @@ function _buildQRButton() {
 
             const title = el('h2', { style: 'margin-bottom:0.5rem; font-size:var(--text-lg);' }, [text('Scan to Connect')]);
             const qrContainer = el('div', {
-                style: 'background:#fff; border-radius:8px; padding:12px; display:inline-block; margin:0.75rem 0;',
+                class: 'settings-qr',
             });
             // Raw SVG markup off an HTTP response — inline SVG is a scripting
             // context, so sanitize rather than assigning innerHTML directly.
