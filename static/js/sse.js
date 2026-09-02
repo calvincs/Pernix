@@ -1,6 +1,6 @@
 // Pernix — SSE client with health monitoring and reconnection
 
-import { isOnline } from './api.js';
+import { isOnline, authHeaders } from './api.js';
 
 // Auth token is sent via cookie (set by api.js setAuthToken), no query params needed
 
@@ -189,7 +189,11 @@ async function _probeSessionExists() {
     const handler = _onEvent;
     if (!sid) return;
     try {
-        const resp = await fetch(`/api/sessions/${sid}/status`);
+        // The probe carries the header, not just the cookie: a client whose
+        // cookie is blocked (cross-site, third-party cookie policy, a private
+        // window) got a 401 here, read it as "not a 404, keep trying", and the
+        // dot span on "reconnecting" forever with no diagnosis.
+        const resp = await fetch(`/api/sessions/${sid}/status`, { headers: authHeaders() });
         if (resp.status === 404) {
             console.warn(`SSE: session ${sid} no longer exists — stopping reconnect attempts`);
             disconnectSSE();
@@ -246,7 +250,7 @@ async function _checkStale() {
     _staleProbeInFlight = true;
     let behind;
     try {
-        const resp = await fetch(`/api/sessions/${_sessionId}/status`);
+        const resp = await fetch(`/api/sessions/${_sessionId}/status`, { headers: authHeaders() });
         if (resp.status === 404) {
             // Session deleted elsewhere — same terminal case _probeSessionExists
             // handles for hard errors. Stop pretending it might come back.
@@ -314,7 +318,46 @@ async function _checkStale() {
     _attachListeners(_source, handler);
 }
 
+// A brief reconnect is normal and not worth interrupting anyone over; a long
+// one means the transcript in front of the user has silently stopped updating,
+// which they have no way of knowing. Ten seconds is the line between the two.
+const RECONNECT_BANNER_DELAY = 10000;
+let _reconnectBannerTimer = null;
+
+function _armReconnectBanner() {
+    if (_reconnectBannerTimer) return;
+    _reconnectBannerTimer = setTimeout(() => {
+        _reconnectBannerTimer = null;
+        if (_connectionState !== 'reconnecting') return;
+        // api.js owns the offline banner when the whole server is unreachable;
+        // do not fight it for the slot, and never remove the one it made.
+        if (document.getElementById('offline-banner')) return;
+        const banner = document.createElement('div');
+        banner.id = 'offline-banner';
+        banner.className = 'offline-banner';
+        banner.dataset.owner = 'sse';
+        const spinner = document.createElement('span');
+        spinner.className = 'offline-spinner';
+        const label = document.createElement('span');
+        label.textContent = 'Live updates paused — reconnecting…';
+        banner.appendChild(spinner);
+        banner.appendChild(label);
+        document.body.appendChild(banner);
+    }, RECONNECT_BANNER_DELAY);
+}
+
+function _clearReconnectBanner() {
+    if (_reconnectBannerTimer) {
+        clearTimeout(_reconnectBannerTimer);
+        _reconnectBannerTimer = null;
+    }
+    const banner = document.getElementById('offline-banner');
+    if (banner && banner.dataset.owner === 'sse') banner.remove();
+}
+
 function _updateHealthIndicator(state) {
+    if (state === 'reconnecting') _armReconnectBanner();
+    else _clearReconnectBanner();
     const el = document.getElementById('sse-health');
     if (!el) return;
     el.className = `sse-health ${state}`;
