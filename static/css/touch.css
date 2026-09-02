@@ -764,6 +764,17 @@ body[data-compact].composer-focused #session-header {
     width: 40px;
     height: 40px;
     bottom: calc(var(--bottom-stack, 76px) + var(--sp-2));
+    /* C6 — layout.css centres it with `left: 50%` + a translate, which on
+       a desktop puts it in the empty gutter beside a 960px column. On a
+       phone the column IS the screen, so a centred button lands squarely
+       on the last line of the answer you are reading, and it is exactly
+       the moment a long answer is streaming in. Both centring halves have
+       to be undone: `left: auto` alone would leave the translate pulling
+       it 20px back over the text. Right edge, clear of the landscape
+       notch, one thumb-reach from where the thumb already is. */
+    left: auto;
+    right: max(var(--sp-3), var(--safe-right));
+    transform: none;
 }
 .tool-group-header {
     min-height: 44px;
