@@ -104,8 +104,15 @@
     --chat-max-w: min(960px, calc(100% - 48px));
     --radius: 6px;
     --radius-lg: 10px;
+    --transition-fast: 0.1s ease;
     --transition: 0.15s ease;
     --transition-slow: 0.25s ease;
+
+    /* Two speeds for the one pulse. Anything that means "this is happening
+       right now" beats fast; anything ambient (a waiting badge, a scheduled
+       job) beats slow. */
+    --pulse-fast: 1.2s;
+    --pulse-slow: 2s;
 
     /* Spacing */
     --sp-1: 4px;
@@ -183,6 +190,20 @@ body {
     height: 100dvh; /* visible viewport — excludes mobile browser toolbar */
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+}
+
+/* ONE pulse. The app had eight near-identical fade keyframes — pulse,
+   jobPulse, dot-pulse, statusPulse, browserPulse, sse-pulse, attnPulse and
+   assistantWaiting — differing only in how far they dipped and, in one case,
+   in fading brightness instead of opacity. A custom property is resolved per
+   element, so a single keyframe can carry every depth: set --pulse-dip (and
+   --pulse-peak where the top of the cycle is not full opacity) on the element
+   and animate `pulse`. The two box-shadow halos (#voice-btn.recording,
+   #send-btn.stop-mode) are deliberately NOT folded in: they pulse a ring, not
+   a fade, and cannot be expressed by the same frames. */
+@keyframes pulse {
+    0%, 100% { opacity: var(--pulse-peak, 1); }
+    50%      { opacity: var(--pulse-dip, 0.4); }
 }
 
 /* Scrollbar — cross-browser */

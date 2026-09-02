@@ -39,13 +39,9 @@
     color: var(--info);
 }
 
-@keyframes jobPulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
-
 .jobs-indicator.has-running .jobs-indicator-icon {
-    animation: jobPulse 2s ease-in-out infinite;
+    --pulse-dip: 0.5;
+    animation: pulse var(--pulse-slow) ease-in-out infinite;
 }
 
 .jobs-indicator-icon {

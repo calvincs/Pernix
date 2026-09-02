@@ -72,7 +72,7 @@
 
 /* Expanded modal state */
 .modal-card {
-    transition: max-width 0.2s ease, max-height 0.2s ease, width 0.2s ease;
+    transition: max-width var(--transition), max-height var(--transition), width var(--transition);
 }
 .modal-card.expanded {
     max-width: 90vw;
@@ -540,7 +540,8 @@
 .or-status.invalid { color: var(--error); }
 .or-status.checking {
     color: var(--accent-dim);
-    animation: pulse 1.4s ease infinite;
+    --pulse-dip: 0.3;
+    animation: pulse var(--pulse-fast) ease infinite;
 }
 .or-remove {
     background: none;
@@ -579,11 +580,6 @@
     color: var(--text-faint);
     font-style: italic;
     padding: var(--sp-2) 0;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
 }
 
 /* Ollama model list */
