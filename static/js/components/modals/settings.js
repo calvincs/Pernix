@@ -500,7 +500,9 @@ const SECTIONS = [
                 type: 'number',
                 min: 0,
                 max: 90,
-                hint: '0 disables scheduled backups entirely. Values are clamped to 0–90 when the backup runs.',
+                hint: '0 disables scheduled backups entirely. Values are clamped to 0–90 when the backup runs. '
+                    + 'It applies to each backup directory on its own — a legacy data/.backups, if this '
+                    + 'instance has one, keeps its own newest N rather than sharing the count.',
             },
         ],
     },
@@ -2569,7 +2571,35 @@ function _buildDatabaseLedger(database, onDone, flash) {
     ]);
 }
 
-function _buildBackupsLedger(backups, onDone, flash) {
+// One ledger shape, two directories. `data/backups` is where the schedule
+// writes; `data/.backups` is where it wrote before the rename, and a
+// boot-time path that was never updated still drops a database copy there on
+// every container start — so it is a live directory with nobody's retention
+// applied to it, and on a long-running box it is the bigger of the two. Same
+// block, same dry-run-then-confirm flow, its own `dir` on the rotate call:
+// the keep count means "the newest N in this directory", never a budget
+// pooled across both.
+const BACKUPS_BLOCK = {
+    primary: {
+        title: 'Backups',
+        flashKey: 'backups',
+        help: 'A snapshot of the database and the memory corpus, taken daily. backup_keep_count '
+            + 'sets how many are retained; rotation counts every snapshot in the directory, '
+            + 'including ones written under the older naming schemes earlier versions used.',
+    },
+    legacy: {
+        title: 'Pre-deploy copies (legacy)',
+        flashKey: 'legacyBackups',
+        help: 'The directory backups lived in before it was renamed. Nothing schedules these, but '
+            + 'a start-up path that predates the rename still drops a copy of the database and of '
+            + 'settings.json here every time the server boots — so it keeps growing, and until now '
+            + 'nothing ever swept it. The same keep count applies, counted separately from the '
+            + 'directory above.',
+    },
+};
+
+function _buildBackupsLedger(backups, onDone, flash, which = 'primary') {
+    const { title, help, flashKey } = BACKUPS_BLOCK[which] || BACKUPS_BLOCK.primary;
     const status = _statusLine();
     const beyond = backups.beyond_keep || [];
     const beyondBytes = beyond.reduce((n, f) => n + (f.bytes || 0), 0);
@@ -2587,14 +2617,7 @@ function _buildBackupsLedger(backups, onDone, flash) {
     ];
 
     const children = [
-        el('h3', {}, [
-            text('Backups'),
-            buildHelpIcon(
-                'A snapshot of the database and the memory corpus, taken daily. backup_keep_count '
-                + 'sets how many are retained; rotation counts every snapshot in the directory, '
-                + 'including ones written under the older naming schemes earlier versions used.'
-            ),
-        ]),
+        el('h3', {}, [text(title), buildHelpIcon(help)]),
         ...rows,
     ];
 
@@ -2623,10 +2646,10 @@ function _buildBackupsLedger(backups, onDone, flash) {
                 // Ask the server what it would remove before asking the user
                 // to agree to it. The list on screen may be a minute old; the
                 // dialog names what is about to happen, not what was.
-                const plan = await post('/api/storage/backups/rotate', { dry_run: true });
+                const plan = await post('/api/storage/backups/rotate', { dry_run: true, dir: which });
                 const names = plan.removed || [];
                 if (!names.length) {
-                    onDone({ backups: { text: 'Nothing to rotate — every snapshot is within the keep count.' } });
+                    onDone({ [flashKey]: { text: 'Nothing to rotate — every snapshot is within the keep count.' } });
                     return;
                 }
                 _say(
@@ -2649,10 +2672,10 @@ function _buildBackupsLedger(backups, onDone, flash) {
                     _say(status, 'Cancelled — nothing was deleted.');
                     return;
                 }
-                const result = await post('/api/storage/backups/rotate', { dry_run: false });
+                const result = await post('/api/storage/backups/rotate', { dry_run: false, dir: which });
                 notify('success', `Rotated ${result.removed.length} old snapshot${result.removed.length === 1 ? '' : 's'}`);
                 onDone({
-                    backups: {
+                    [flashKey]: {
                         text: `Removed ${result.removed.length} snapshot${result.removed.length === 1 ? '' : 's'}, `
                             + `freeing ${formatBytes(result.bytes_freed)}.`,
                         tone: 'success',
@@ -2729,6 +2752,12 @@ function buildStorageTab(settingSections = []) {
         host.appendChild(_buildSessionsLedger(data.sessions || {}));
         host.appendChild(_buildDatabaseLedger(data.database || {}, render, flash?.database));
         host.appendChild(_buildBackupsLedger(data.backups || {}, render, flash?.backups));
+        // Null on every instance that has never run a version old enough to
+        // have written to data/.backups — which is most of them, and they get
+        // no block at all rather than an empty one about a path they do not have.
+        if (data.legacy_backups) {
+            host.appendChild(_buildBackupsLedger(data.legacy_backups, render, flash?.legacyBackups, 'legacy'));
+        }
         for (const section of settingSections) host.appendChild(section);
         const sweeps = data.sweeps ? _buildSweepsLedger(data.sweeps) : null;
         if (sweeps) host.appendChild(sweeps);

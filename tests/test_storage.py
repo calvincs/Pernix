@@ -137,6 +137,125 @@ async def test_backups_block_lists_what_rotation_would_remove(monkeypatch):
     assert backups["bytes"] >= 1500
 
 
+# ---------------------------------------------------------------------------
+# The legacy directory: data/.backups
+# ---------------------------------------------------------------------------
+#
+# Backups used to live in a dotted directory. The rename left a boot-time path
+# behind that still writes a database copy and a settings copy into the old one
+# on every container start, so it grows with the deploys and nothing has ever
+# rotated it — on the box it is the larger of the two directories.
+
+# The name shapes actually found in data/.backups, one per scheme.
+LEGACY_NAMES = (
+    "sessions.20260825T183703Z.db",  # compact ISO, the oldest era
+    "sessions.db.20260824-103602",  # suffixed
+    "sessions-20260826-024434.db",  # stamped, what the deploy writes today
+)
+
+
+@pytest.fixture
+def legacy(monkeypatch):
+    """A populated data/.backups, oldest first, beside an empty primary dir."""
+    monkeypatch.setattr(settings, "backup_keep_count", 1)
+    root = backup.legacy_backups_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    base = time.time() - 5000
+    for i, name in enumerate(LEGACY_NAMES):
+        path = root / name
+        path.write_bytes(b"x" * 400)
+        os.utime(path, (base + i, base + i))
+    # The non-snapshots that share the directory: a settings dump the deploy
+    # writes alongside the database copy, and a memory corpus.
+    (root / "settings-20260902-130414.json").write_text("{}")
+    (root / "memories-20260902-160055").mkdir()
+    (root / "memories-20260902-160055" / "notes.md").write_text("corpus")
+    return root
+
+
+async def test_legacy_backups_is_null_when_there_is_no_such_directory():
+    """Present and null, not absent: a key that only appears on the boxes with
+    the problem is a key no client remembers to look for."""
+    payload = (await _get()).json()
+    assert "legacy_backups" in payload
+    assert payload["legacy_backups"] is None
+
+
+async def test_legacy_backups_block_has_the_backups_shape(legacy):
+    block = (await _get()).json()["legacy_backups"]
+    assert block["dir"] == str(legacy)
+    assert block["dir"].endswith(".backups")
+    assert block["count"] == 3, "the settings json and the corpus are not snapshots"
+    assert block["keep"] == 1
+    assert block["last_backup_at"] is not None
+    assert block["bytes"] >= 1200 + 6, "the whole directory, corpus and settings dump included"
+    assert [f["name"] for f in block["beyond_keep"]] == [LEGACY_NAMES[1], LEGACY_NAMES[0]]
+    assert {f["scheme"] for f in block["beyond_keep"]} == {"suffixed", "iso"}
+
+
+async def test_the_two_directories_are_counted_separately(legacy):
+    """The keep count is "the newest N in this directory", not a shared budget."""
+    primary = backup.backups_dir()
+    primary.mkdir(parents=True, exist_ok=True)
+    (primary / "sessions-20260901-010101.db").write_bytes(b"x" * 100)
+
+    payload = (await _get()).json()
+    assert payload["backups"]["count"] == 1
+    assert payload["backups"]["beyond_keep"] == [], "one snapshot, keep 1 — nothing to sweep here"
+    assert payload["legacy_backups"]["count"] == 3
+    assert len(payload["legacy_backups"]["beyond_keep"]) == 2
+
+
+async def test_rotate_legacy_removes_only_the_legacy_snapshots(legacy):
+    primary = backup.backups_dir()
+    primary.mkdir(parents=True, exist_ok=True)
+    (primary / "sessions-20260901-010101.db").write_bytes(b"x" * 100)
+    (primary / "sessions-20260801-010101.db").write_bytes(b"x" * 100)
+
+    plan = (await _post("/api/storage/backups/rotate", {"dry_run": True, "dir": "legacy"})).json()
+    assert plan["dir"] == "legacy"
+    assert plan["removed"] == [LEGACY_NAMES[1], LEGACY_NAMES[0]]
+    assert plan["bytes_freed"] == 800
+    assert plan["kept"] == 1
+    assert len(backup.list_snapshots(legacy)) == 3, "a dry run deletes nothing"
+
+    body = (await _post("/api/storage/backups/rotate", {"dry_run": False, "dir": "legacy"})).json()
+    assert body["removed"] == plan["removed"]
+    assert [s["path"].name for s in backup.list_snapshots(legacy)] == [LEGACY_NAMES[2]]
+    assert (legacy / "settings-20260902-130414.json").exists(), "not a snapshot, not rotation's business"
+    assert (legacy / "memories-20260902-160055").is_dir()
+    assert len(backup.list_snapshots(primary)) == 2, "the primary directory is untouched by a legacy sweep"
+
+
+async def test_rotate_defaults_to_the_primary_directory(legacy):
+    """No `dir` means the directory the schedule writes, as it always did."""
+    body = (await _post("/api/storage/backups/rotate")).json()
+    assert body["dir"] == "primary"
+    assert body["removed"] == []
+    assert len(backup.list_snapshots(legacy)) == 3
+
+
+async def test_rotate_legacy_is_404_when_the_directory_is_absent():
+    resp = await _post("/api/storage/backups/rotate", {"dry_run": True, "dir": "legacy"})
+    assert resp.status_code == 404
+
+
+async def test_rotate_rejects_an_unknown_directory(legacy):
+    """A typo must not fall back to deleting from the primary directory."""
+    resp = await _post("/api/storage/backups/rotate", {"dry_run": False, "dir": "legacyy"})
+    assert resp.status_code == 400
+    assert len(backup.list_snapshots(legacy)) == 3
+
+
+async def test_run_backup_never_writes_to_the_legacy_directory(legacy, monkeypatch):
+    """The schedule owns one directory. Sweeping the other is an explicit act."""
+    monkeypatch.setattr(settings, "memory_dir", str(legacy.parent / "memories"))
+    result = backup.run_backup(keep=1)
+    assert result["dir"] == str(backup.backups_dir())
+    assert len(backup.list_snapshots(legacy)) == 3, "not written to, and not rotated"
+    assert len(backup.list_snapshots(backup.backups_dir())) == 1
+
+
 async def test_sweeps_reports_the_retention_counters():
     payload = (await _get()).json()
     # Omitted rather than faked when the snooze runner cannot be reached.

@@ -119,17 +119,20 @@ def _dir_bytes(root: Path) -> int:
     return total
 
 
-def _backups_ledger() -> dict:
-    """Every snapshot in the backup directory, under every name it has worn.
+def _backups_ledger(root: Path | None = None) -> dict:
+    """Every snapshot in one backup directory, under every name it has worn.
 
     `count` and `beyond_keep` are about database snapshots — the files
     rotation governs. `bytes` is the whole directory, because that is the
     number `du` gives and the memory corpora beside the snapshots are part of
     what is filling the disk.
+
+    Takes a root because there are two of these directories on a box that has
+    been redeployed for long enough, and the same ledger describes both.
     """
     from scripts import backup
 
-    root = backup.backups_dir()
+    root = backup.backups_dir() if root is None else root
     keep = backup.resolve_keep()
     if not root.is_dir():
         return {"dir": str(root), "count": 0, "bytes": 0, "keep": keep, "last_backup_at": None, "beyond_keep": []}
@@ -151,6 +154,28 @@ def _backups_ledger() -> dict:
             for s in backup.snapshots_beyond_keep(keep, snapshots)
         ],
     }
+
+
+def _legacy_backups_ledger() -> dict | None:
+    """The same ledger for `data/.backups`, or None when there isn't one.
+
+    Backups used to live in a dotted directory, and the rename left a
+    boot-time path behind that still writes a database copy and a settings
+    copy into the old one on every container start. So it is not a relic to
+    be migrated once and forgotten: it grows on the same schedule the deploys
+    do, under a retention count nothing was applying to it, and on the box it
+    is the larger of the two by more than a gigabyte.
+
+    None rather than a zeroed block when the directory is absent — most
+    instances have never had one, and a ledger row for a path that does not
+    exist is a question raised for no reason.
+    """
+    from scripts import backup
+
+    root = backup.legacy_backups_dir()
+    if not root.is_dir():
+        return None
+    return _backups_ledger(root)
 
 
 def _sweep_counters() -> dict | None:
@@ -180,13 +205,17 @@ def _sweep_counters() -> dict | None:
 @router.get("/api/storage")
 async def get_storage():
     """One ledger: sessions, the database file, the snapshots, the sweeps."""
-    sessions, database, backups, sweeps = await asyncio.gather(
+    sessions, database, backups, legacy, sweeps = await asyncio.gather(
         asyncio.to_thread(_session_ledger),
         asyncio.to_thread(_database_ledger),
         asyncio.to_thread(_backups_ledger),
+        asyncio.to_thread(_legacy_backups_ledger),
         asyncio.to_thread(_sweep_counters),
     )
-    payload = {"sessions": sessions, "database": database, "backups": backups}
+    # `legacy_backups` is always present and usually null: a key that appears
+    # only on the boxes with the problem is a key no client remembers to look
+    # for. Same shape as `backups` when it is there, so one renderer does both.
+    payload = {"sessions": sessions, "database": database, "backups": backups, "legacy_backups": legacy}
     if sweeps is not None:
         payload["sweeps"] = sweeps
     return payload
@@ -199,13 +228,28 @@ async def rotate_backups(body: dict = {}):
     Defaults to a dry run on purpose: the caller has to ask twice before
     anything is deleted, and the first answer is the list the confirmation
     dialog names.
+
+    `dir` picks which of the two directories to sweep — "primary" (the one
+    the schedule writes) or "legacy" (`data/.backups`, which deploys still
+    write and nothing has ever rotated). Each keeps its own newest `keep`;
+    the count is not a budget shared between them. An unknown name is a 400
+    rather than a silent fall back to the primary, because the one thing this
+    endpoint must never do is delete from a directory the caller did not name.
     """
     from scripts import backup
 
     dry_run = bool(body.get("dry_run", True))
+    which = str(body.get("dir", "primary"))
+    if which not in ("primary", "legacy"):
+        raise HTTPException(400, detail=f"Unknown backup directory {which!r} — expected 'primary' or 'legacy'.")
+
+    root = backup.legacy_backups_dir() if which == "legacy" else backup.backups_dir()
+    if which == "legacy" and not root.is_dir():
+        raise HTTPException(404, detail="This instance has no legacy backup directory.")
+
     keep = backup.resolve_keep()
-    result = await asyncio.to_thread(backup.rotate, keep, dry_run)
-    return {"dry_run": dry_run, **result}
+    result = await asyncio.to_thread(backup.rotate, keep, dry_run, root)
+    return {"dry_run": dry_run, "dir": which, **result}
 
 
 def _vacuum() -> tuple[int, int]:

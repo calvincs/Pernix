@@ -483,6 +483,21 @@ the directory are never candidates. From the shell:
 `python scripts/backup.py --dry-run` prints the same plan without taking a
 snapshot.
 
+**Two backup directories.** Snapshots live in `data/backups`, and on an
+instance that has been upgraded across the rename there is a second directory
+beside it: `data/.backups`, where they lived before. It is not a relic. A
+start-up path that predates the rename still drops a copy of the database and
+of `settings.json` into it every time the server boots, so it grows with your
+deploys, and until now nothing had ever applied a retention count to it — on a
+box redeployed for a year that is 2.7 GB against the live directory's 1.3 GB.
+Storage shows it as **Pre-deploy copies (legacy)** underneath the backups
+block, with its own **Rotate now**, and hides the block entirely on the
+instances that have no such directory. The two are counted and swept
+separately: `backup_keep_count` means "the newest N *in this directory*", never
+a budget shared across both, so rotating one never deletes from the other. The
+scheduled backup writes only to `data/backups`; sweeping the legacy directory
+is always something you ask for.
+
 **Session cleanup** permanently deletes old *plain chats*. Pinned sessions,
 anything filed in a space, and every automation session (workers, scheduled
 runs, canaries, idle work) are skipped — each of those has its own retention.
@@ -494,8 +509,8 @@ re-runs that preview and names the number in the confirmation before deleting.
 
 | Endpoint | What it does |
 |---|---|
-| `GET /api/storage` | The whole ledger: `sessions` (total, by type, pinned, in spaces, archived), `database` (path, bytes, WAL bytes, page size, `reclaimable_bytes`), `backups` (dir, count, bytes, keep, last backup, `beyond_keep`) and `sweeps` (what the idle-time retention sweeps have pruned). `archived` is `null` — not `0` — while the schema has no `archived_at` column. |
-| `POST /api/storage/backups/rotate` | Body `{"dry_run": true}` (the default) lists what rotation would remove; `{"dry_run": false}` removes it. Returns `removed`, `bytes_freed` and `kept`. |
+| `GET /api/storage` | The whole ledger: `sessions` (total, by type, pinned, in spaces, archived), `database` (path, bytes, WAL bytes, page size, `reclaimable_bytes`), `backups` (dir, count, bytes, keep, last backup, `beyond_keep`), `legacy_backups` (the same shape for `data/.backups`, or `null` when there is no such directory) and `sweeps` (what the idle-time retention sweeps have pruned). `archived` is `null` — not `0` — while the schema has no `archived_at` column. |
+| `POST /api/storage/backups/rotate` | Body `{"dry_run": true}` (the default) lists what rotation would remove; `{"dry_run": false}` removes it. `{"dir": "legacy"}` sweeps `data/.backups` instead of the primary directory — **404** when it does not exist, **400** for any other value. Returns `dir`, `removed`, `bytes_freed` and `kept`. |
 | `POST /api/storage/optimize` | `PRAGMA optimize` + `VACUUM` + WAL checkpoint. Returns `bytes_before` / `bytes_after`. Answers **409** while a turn is running. |
 
 Same authentication as every other endpoint: a Bearer token in network mode.
