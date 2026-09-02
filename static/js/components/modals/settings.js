@@ -33,14 +33,29 @@ const LOCKED_KEYS = new Set([
 const LOCKED_NOTE = 'Edit-locked. The settings API rejects changes to this field so a prompt-injected '
     + 'agent cannot widen its own sandbox through it. Change it in data/settings.json and restart.';
 
-// The server only reports restart_required for the network group, but several
-// other values are read exactly once — when the LLM router is constructed —
-// so a live save persists them while the running process keeps the old ones.
-const RESTART_ON_SAVE = new Set([
-    'network_enabled', 'ssl_mode', 'ssl_cert_path', 'ssl_key_path', 'cors_origins',
-    'llm_max_concurrent', 'openrouter_max_concurrent', 'openai_max_concurrent',
-    'llm_session_timeout',
+// The server only reports restart_required for the network group, but many
+// other values are read exactly once at startup — when the LLM router is
+// constructed, when tools register — so a live save persists them while the
+// running process keeps the old ones.
+//
+// Which keys those are is already declared, per field, as the `restart` string
+// that renders the badge beside the control. A second hand-maintained list
+// drifted from the badges the moment one was added: every RESTART_TOOLS field
+// (web_search_enabled, candor_enabled, rlm_enabled, telos_enabled, …) wore a
+// "restart" badge and then saved with a plain "Saved". Derive it instead. (S5)
+const RESTART_EXTRA_KEYS = new Set([
+    // List-valued editors with no field entry of their own. The Allowed
+    // Origins section carries the same warning in its own help text.
+    'cors_origins',
 ]);
+
+function restartKeys() {
+    const keys = new Set(RESTART_EXTRA_KEYS);
+    for (const field of allSettingFields()) {
+        if (field.restart) keys.add(field.key);
+    }
+    return keys;
+}
 
 const RESTART_ROUTER = 'Sizes a provider semaphore when the LLM router is built. Saving stores the '
     + 'value; the running process keeps its current slot count until the server restarts.';
@@ -741,6 +756,7 @@ function _showRestartButton(reason = 'network changes') {
     if (!footer) return;
 
     const statusEl = footer.querySelector('.save-status');
+    const message = `Saved \u00b7 restart required for: ${reason}`;
 
     // The restart endpoint is loopback-only (403 otherwise). A phone or
     // LAN-IP browser used to get the button anyway and a dead-end error —
@@ -750,7 +766,7 @@ function _showRestartButton(reason = 'network changes') {
         if (statusEl) {
             statusEl.className = 'save-status status-warn';
             statusEl.textContent =
-                `Saved, but a restart is needed to apply ${reason} — restart from the server console (or from a localhost browser).`;
+                `${message} — restart from the server console (or from a localhost browser).`;
             announce(statusEl.textContent);
         }
         return;
@@ -758,7 +774,7 @@ function _showRestartButton(reason = 'network changes') {
 
     if (statusEl) {
         statusEl.className = 'save-status status-warn';
-        statusEl.textContent = `Saved, but a restart is needed to apply ${reason}`;
+        statusEl.textContent = message;
         announce(statusEl.textContent);
     }
     if (document.getElementById('restart-server-btn')) return;
@@ -2419,9 +2435,10 @@ export async function openSettings(opts = {}) {
                             return;
                         }
 
-                        // restart_required only covers the network group; the
-                        // provider semaphores are sized once at router build.
-                        const needsRestart = [...accepted].filter(k => RESTART_ON_SAVE.has(k));
+                        // restart_required only covers the network group; every
+                        // other badged field is read once at startup.
+                        const restarts = restartKeys();
+                        const needsRestart = [...accepted].filter(k => restarts.has(k));
                         if (result.restart_required || needsRestart.length > 0) {
                             _restartRequired = true;
                             _showRestartButton(needsRestart.map(_labelFor).join(', ') || 'network changes');
