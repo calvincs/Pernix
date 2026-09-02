@@ -59,15 +59,17 @@ Returns the new session object including `session_id`.
 
 ### List Sessions
 ```
-GET /api/sessions?limit=50&offset=0
+GET /api/sessions?limit=50&offset=0&archived=false
 ```
-One page of sessions, most recent first. Alongside `items`/`count`/`spaces` the response carries `total` (every session in the database) and `has_more` (`offset + limit < total`) — the pair is what lets a client offer the page *behind* the one it is showing instead of stopping at a recency horizon. `has_more` is measured against the requested window rather than the rows returned, because space sessions are unioned back in past that horizon and can make a page longer than `limit`.
+One page of sessions, most recent first. Alongside `items`/`count`/`spaces` the response carries `total` (every session in the population being listed) and `has_more` (`offset + limit < total`) — the pair is what lets a client offer the page *behind* the one it is showing instead of stopping at a recency horizon. `has_more` is measured against the requested window rather than the rows returned, because space sessions are unioned back in past that horizon and can make a page longer than `limit`.
+
+**Archived sessions are absent by default** — leaving this list is what archiving *is*. `?archived=1` returns the same shape over that set instead, and `total`/`has_more` then count only it. Both answers also carry `archived_count` (how many sessions are archived in total) so a client can offer "Archived (N)" without a second round trip, and `archived` (which population it just returned). The archived page does **not** union space sessions back in: an archived session has left its space group.
 
 ### Get Session (with messages)
 ```
 GET /api/sessions/{session_id}?limit=200&before_id=<message_id>
 ```
-Returns the full session object including its messages, oldest first. Pass `?limit=N` to get only the newest N plus `total_messages` (the session's whole count) and `has_more`.
+Returns the full session object including its messages, oldest first. The row carries `archived_at` (`null` when live) alongside `read_only` and `read_only_reason` — and this is the only lookup that finds a session the list no longer contains, which is exactly what an archived one is. Pass `?limit=N` to get only the newest N plus `total_messages` (the session's whole count) and `has_more`.
 
 `before_id` pages further back: the newest `limit` messages **older** than that message id, and nothing the client already holds — which is what makes "load earlier" a prepend rather than a re-render of the whole transcript. A `before_id` with no `limit` gets the default page size (200) instead of the whole transcript. `has_more` is computed from the oldest row returned, so it stays correct on the first page and every page after it.
 
@@ -87,16 +89,20 @@ Returns the append-only state machine transition history for the session. Every 
 ```
 GET /api/sessions/search?q=<query>&limit=20
 ```
-FTS5 full-text search across all sessions' message content.
+FTS5 full-text search across all sessions' message content. Archived sessions are deliberately still findable here — staying searchable is the promise archiving makes — so each hit carries `archived: true|false` alongside `title`, `session_type` and `space_id`.
 
 ### Update Session Metadata
 ```
 PATCH /api/sessions/{session_id}
 ```
 ```json
-{ "title": "New title", "pinned": true, "model_override": "qwen3:32b" }
+{ "title": "New title", "pinned": true, "space_id": null, "archived": false, "model_override": "qwen3:32b" }
 ```
-Any subset of the three keys.
+Any subset of the five keys; absent keys are left unchanged.
+
+`archived: true` stamps `archived_at` with now, `false` clears it. An archived session leaves the session list and its space group, keeps every message, stays searchable, and opens read-only (`read_only_reason` becomes *"Archived — restore it to continue"*). Deleting stays a separate, explicit act.
+
+**Nothing here bumps `updated_at`.** Recency ordering is what the sidebar's time buckets and the idle horizon are computed from, so archiving must not reshuffle the list and restoring must put a session back exactly where it was. Archiving and restoring also emit a `session.archived` SSE event on that session's stream, carrying `archived`, `archived_at`, `read_only` and `read_only_reason`.
 
 ### Pause / Resume a Session
 ```
@@ -116,6 +122,32 @@ DELETE /api/sessions/{session_id}/pending/{message_id}      Remove one queued me
 DELETE /api/sessions/{session_id}
 ```
 Deletes the session and cascades to any worker sessions it spawned.
+
+### Archive Idle Sessions
+```
+POST /api/sessions/archive-idle
+```
+```json
+{ "days": 30, "space_id": null, "dry_run": false }
+```
+Archives ordinary chats idle for more than `days` — or, with `dry_run`, says what it would. All three keys are optional: `days` defaults to `session_archive_idle_days` and must be a non-negative integer (anything else is a `400`); `space_id` narrows the sweep to one space (a `404` if it does not exist); omit it to sweep the whole table.
+
+A candidate is `session_type` `normal`, not already archived, not pinned, last updated before the cutoff. Space sessions **are** included: the v33 rule that spares them from every DELETE sweep is about never losing a transcript, and nothing here deletes one.
+
+A dry run computes exactly the same set as the real run, so the count in a confirmation dialog is a promise this endpoint keeps.
+
+```json
+{
+  "count": 74,
+  "ids": ["a1b2c3d4e5f6", "..."],
+  "sample": [
+    { "id": "a1b2c3d4e5f6", "title": "Old chat", "updated_at": "2026-07-01T09:12:44+00:00", "space_id": null }
+  ],
+  "days": 30,
+  "dry_run": false
+}
+```
+`sample` is the first ten. Sessions archived for longer than `session_delete_archived_days` are hard-deleted by a snooze sweep; that knob is `0` (never) by default.
 
 ### Purge Old Sessions
 ```

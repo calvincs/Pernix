@@ -29,12 +29,14 @@ In the UI:
 - **+ new** in the sidebar header starts a fresh thread. Each session has its own memory recall scope and its own workers.
 - **Switch** by clicking another session in the sidebar — your prior session keeps its state in the background.
 - **Clear** the current session's messages by typing `/clear` in the composer; it asks first, and the session itself remains in the DB. **Delete** a session with the `×` on its sidebar row, or on touch from the row's `⋯` sheet. Either way a dialog names the session and how many messages go with it, and the delete then sits behind a five-second **Undo** in the toast before it reaches the server.
+- **Archive** a session — the box icon in the row's controls, or **Archive** in the `⋯` sheet — when you are done with it but not done *with* it. See [Archiving](#archiving-instead-of-deleting) below.
 
 Programmatically:
 
 | Endpoint | Effect |
 |---|---|
 | `POST /api/sessions` | Create a new session |
+| `PATCH /api/sessions/{id}` | Rename, pin, move to a space, or archive/restore |
 | `POST /api/chat` | Send a message to a session (returns JSON; events flow over the SSE stream) |
 | `GET /api/sessions/{id}` | Fetch session state |
 | `DELETE /api/sessions/{id}` | Delete the session |
@@ -57,9 +59,9 @@ Not every session in the sidebar is a chat you started. Each carries a colored d
 | **Large-input** | A live view of one `rlm_process` run (internally: *RLM*), nested under the session that launched it (see below). |
 | **Self-check** | A canary run — only present once the canary suite is enabled. |
 
-Click a legend entry to hide or show that type — useful when scheduled runs start to crowd out your own threads. Each entry's tooltip names the internal term the settings and docs use. The filter persists across reloads. The list itself holds the 500 most recent sessions; **Load older sessions** at the end of it fetches the next page and says how many remain.
+Click a legend entry to hide or show that type — useful when scheduled runs start to crowd out your own threads. A seventh entry, **Archived**, appears once anything is archived; it is a place rather than a type, and toggling it shows the archived group at the foot of the list. Each entry's tooltip names the internal term the settings and docs use. The filter persists across reloads. The list itself holds the 500 most recent sessions; **Load older sessions** at the end of it fetches the next page and says how many remain.
 
-On a desktop browser you can drag the sidebar's right edge to make it wider or narrower — 200 to 520 pixels, and never more than 45% of the window. Double-click the edge to go back to the default width; with the edge focused, the arrow keys move it 16 pixels at a time and Home and End jump to the narrowest and widest. The width is remembered by this browser, the same way the collapsed state is (the toggle at the top of the chat pane hides the sidebar altogether). Phones and tablets keep their own sidebar sizes. A row's own controls — copy id, pin, rename, move to space, delete — overlay the right end of the row on hover or keyboard focus rather than sitting beside the title, so the extra width all goes to the title. (On touch there is no hover: the row carries one always-visible `⋯` instead.)
+On a desktop browser you can drag the sidebar's right edge to make it wider or narrower — 200 to 520 pixels, and never more than 45% of the window. Double-click the edge to go back to the default width; with the edge focused, the arrow keys move it 16 pixels at a time and Home and End jump to the narrowest and widest. The width is remembered by this browser, the same way the collapsed state is (the toggle at the top of the chat pane hides the sidebar altogether). Phones and tablets keep their own sidebar sizes. A row's own controls — copy id, pin, rename, move to space, archive, delete — overlay the right end of the row on hover or keyboard focus rather than sitting beside the title, so the extra width all goes to the title. (On touch there is no hover: the row carries one always-visible `⋯` instead.)
 
 Finding things:
 
@@ -69,6 +71,27 @@ Finding things:
 - **↑** in an empty composer recalls your message history.
 
 (`/help` in any chat lists all of these.)
+
+---
+
+## Archiving instead of deleting
+
+Deleting used to be the only way to get a finished conversation out of the sidebar, which made a year of chats a choice between clutter and losing the transcript. **Archiving is the third answer.** An archived session:
+
+- leaves the session list and its space group,
+- keeps **every message** — nothing is summarized, trimmed or dropped,
+- stays findable in the sidebar's full-text search, where the hit is marked *archived*,
+- opens read-only, with the composer disabled and a **Restore** button above it.
+
+Restoring is one click and takes effect on the page you are already reading — no reload. Neither archiving nor restoring changes a session's `updated_at`, so a restored chat goes back exactly where it was in the list rather than jumping to the top.
+
+**Where the controls are.** On a mouse, the row's hover overlay gains a box icon between *move to space* and *delete*; on touch the row's `⋯` sheet gains **Archive** (or **Restore**) directly above *Delete*. A space header offers **Archive idle sessions…**, which asks first and names the number — that number comes from a dry run, so it is exactly what the confirm then archives.
+
+**Where they go.** The sidebar legend grows an **Archived (N)** entry once anything is archived. Turning it on adds one collapsed **Archived** group at the foot of the list whose rows offer **Restore** in place of *Archive*; the choice is remembered by this browser like the type filters are. The Ctrl+K palette lists live sessions only — search is how you reach an archived one by name.
+
+**Automatically.** Ordinary chats idle for more than `session_archive_idle_days` (default 30) are archived by a snooze sweep. Pinned chats are exempt. Space sessions are **not** exempt — the rule that spares them from every delete sweep is about never losing a transcript, and archiving loses nothing. Set the knob to `0` to turn the sweep off and use the archive purely by hand.
+
+Sessions that have been archived for longer than `session_delete_archived_days` are hard-deleted. That knob is `0` — never — by default, and deliberately: the archive is what *not deleting* means, so putting a horizon on it is you opting back in to losing transcripts. Both knobs live in **Settings → Storage**.
 
 ---
 
