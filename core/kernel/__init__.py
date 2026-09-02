@@ -178,7 +178,9 @@ class SessionKernel:
                 note += f", {len(failed)} failed ({reasons})"
             return note + "]"
 
-    def execute(self, code: str, timeout: float, cancel_check=None) -> tuple[CellResult, str | None]:
+    def execute(
+        self, code: str, timeout: float, cancel_check=None, lock_timeout: float | None = None
+    ) -> tuple[CellResult, str | None]:
         """Run one cell. Soft aborts on cancel/deadline (SIGINT, namespace
         preserved); a dead child surfaces as KernelError and the next call
         respawns (reviving from the last snapshot, if any)."""
@@ -199,6 +201,7 @@ class SessionKernel:
                 deadline=time.monotonic() + timeout,
                 cancel_check=cancel_check,
                 soft_abort=True,
+                lock_timeout=lock_timeout,
             )
         except ChildBusy as e:
             # Another driver (snapshot/bind) held the round-trip lock past its

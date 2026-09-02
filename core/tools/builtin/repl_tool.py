@@ -63,7 +63,15 @@ def repl(code: str, timeout: int | None = None, _context: dict | None = None) ->
         requested = 0.0
     effective_timeout = min(requested, _MAX_TIMEOUT_S) if requested > 0 else _DEFAULT_TIMEOUT_S
     try:
-        result, note = kernel.execute(code, timeout=effective_timeout, cancel_check=cancel_check)
+        # Cap the wait for a busy shared kernel at this call's own budget:
+        # waiting longer than the executor will wait for US produces a cell
+        # that runs after its result has been discarded.
+        result, note = kernel.execute(
+            code,
+            timeout=effective_timeout,
+            cancel_check=cancel_check,
+            lock_timeout=effective_timeout,
+        )
     except KernelError as e:
         # Kernel-level failure (child died mid-cell / unresponsive). The
         # next call respawns and revives from the last snapshot.
