@@ -89,14 +89,23 @@ def _load_jobs():
                 except Exception as hb_err:
                     logger.warning("Failed to restore heartbeat %s: %s", job["name"], hb_err)
                 continue
-            _add_job_internal(
-                job["name"],
-                job["cron_expr"],
-                job["prompt"],
-                session_id=job.get("session_id"),
-                model=job.get("model", ""),
-                extra_meta=extra,
-            )
+            # Guarded per entry, like the heartbeat branch above. One bad
+            # record — a missing "prompt" key, an expression this APScheduler
+            # rejects — used to abort the loop, so every job AFTER it went
+            # unscheduled and the coalesced catch-up never ran for any of
+            # them, all behind a single "Failed to load cron jobs" line.
+            try:
+                _add_job_internal(
+                    job["name"],
+                    job["cron_expr"],
+                    job["prompt"],
+                    session_id=job.get("session_id"),
+                    model=job.get("model", ""),
+                    extra_meta=extra,
+                )
+            except Exception as job_err:
+                logger.warning("Skipping cron job %r: %s", job.get("name", "<unnamed>"), job_err)
+                continue
             # Restore paused state
             if job.get("paused") and _scheduler:
                 try:
@@ -104,9 +113,15 @@ def _load_jobs():
                 except Exception:
                     pass
         logger.info("Loaded %d cron jobs", len(jobs))
-        _schedule_coalesced_catchup(jobs)
     except Exception as e:
         logger.warning("Failed to load cron jobs: %s", e)
+        return
+    # Outside the try: a catch-up failure must not read as a load failure,
+    # and a load that partially succeeded still deserves its catch-up.
+    try:
+        _schedule_coalesced_catchup(jobs)
+    except Exception as e:
+        logger.warning("Coalesced catch-up scheduling failed: %s", e)
 
 
 def jobs_for_space(space_id: str) -> list[str]:
@@ -1521,6 +1536,12 @@ def update_scheduled_job(
         # last_fired_at, session_mode and created_at from the job (field case:
         # a cron_expr edit dropped the curiosity deep-dive's allow-list).
         extra = {k: v for k, v in current.items() if k not in _ENTRY_STRUCTURAL_KEYS}
+        if cron_expr is not None and cron_expr != current.get("cron_expr", ""):
+            # Re-baseline on a schedule change: last_fired_at was recorded
+            # against the OLD grid, so the catch-up would measure missed
+            # slots of a schedule that no longer exists (weekly -> hourly
+            # produced a burst of "the server was down" runs).
+            extra["last_fired_at"] = datetime.now(timezone.utc).isoformat()
         _add_job_internal(
             name, new_cron, new_prompt, session_id=current.get("session_id"), model=new_model, extra_meta=extra
         )
@@ -1616,6 +1637,12 @@ def resume_job(name: str, _context: dict | None = None) -> str:
     try:
         scheduler.resume_job(name)
         _update_job_field(name, "paused", False)
+        # Re-baseline: last_fired_at still points at the run before the
+        # pause, so the coalesced catch-up would count every slot that
+        # elapsed WHILE PAUSED as missed and dispatch a run claiming the
+        # server was down across them. A deliberately paused period is not
+        # downtime.
+        _update_job_field(name, "last_fired_at", datetime.now(timezone.utc).isoformat())
         return f"Job '{name}' resumed"
     except Exception as e:
         return f"Error resuming job: {e}"
