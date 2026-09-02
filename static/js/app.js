@@ -5200,7 +5200,7 @@ function _paletteEntries() {
             alias: s.first_message || '',
             session: s,
             isVerb: 0,
-            recency: Date.parse((s.updated_at || '').replace(/\+00:00$/, 'Z') + (/[Z+-]\d{2}/.test(s.updated_at || '') ? '' : 'Z')) || 0,
+            recency: _parseMsgTs(s.updated_at),
             order: order++,
             run: () => selectSession(s.id),
         });
