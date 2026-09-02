@@ -1150,9 +1150,18 @@
     transition: color 0.15s;
 }
 .tool-group-header:hover { color: var(--accent-dim); }
+/* Every disclosure header in the app is a <div role="button">, so the only
+   ring it ever had was the UA's — which Chrome draws in its own blue and
+   Safari does not draw at all on a div. One rule for all of them, in the
+   accent. The offset is negative on purpose: these rows are full-bleed
+   inside containers that clip (.scout-activity and .reflect-activity are
+   `overflow: hidden`), so an outward ring would be sliced off. */
 .tool-group-header:focus-visible,
-.tool-item-header:focus-visible {
-    outline: 2px solid var(--accent-dim);
+.tool-item-header:focus-visible,
+.scout-activity-header:focus-visible,
+.reflect-header:focus-visible,
+.timeline-turn-header:focus-visible {
+    outline: 2px solid var(--accent);
     outline-offset: -2px;
 }
 /* A round that failed says so on the one line that stays visible when the
