@@ -928,6 +928,24 @@
     overflow-wrap: break-word;
     min-width: 0;
 }
+/* Presence. Between "sent" and the first token the assistant bubble is an
+   empty card with a label on it, which reads as a hang rather than as work.
+   The dots are content, not decoration, so they stay put for a reader who
+   asked for no motion — the global prefers-reduced-motion rule already cuts
+   the animation to a stop. */
+.message.assistant .content:empty::after {
+    content: '\00b7\00b7\00b7';
+    display: inline-block;
+    color: var(--text-faint);
+    letter-spacing: 0.18em;
+    font-family: var(--mono);
+    animation: assistantWaiting 1.4s ease-in-out infinite;
+}
+@keyframes assistantWaiting {
+    0%, 100% { opacity: 0.3; }
+    50%      { opacity: 0.95; }
+}
+
 .message.assistant .content p { margin-bottom: 0.75em; }
 .message.assistant .content p:last-child { margin-bottom: 0; }
 .message.assistant .content ul,
@@ -1089,6 +1107,12 @@
 }
 .tool-item:last-child { border-bottom: none; }
 .tool-item:hover { background: var(--bg-hover); }
+
+/* A tool that has started but not returned. The row is replaced in place by
+   the finished one, so the group never reflows underneath the reader. It has
+   no body to open yet — hence no chevron and no pointer cursor. */
+.tool-item.running .tool-item-header { cursor: default; }
+.tool-item.running .tool-item-summary { color: var(--text-dim); }
 
 .tool-item-header {
     display: flex;

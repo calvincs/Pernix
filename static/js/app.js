@@ -368,6 +368,7 @@ async function selectSession(sid) {
     _toolGroupCount = 0;
     _toolGroupErrors = 0;
     _toolGroupLatency = 0;
+    _clearRunningTools();
     if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
     closeRlmViewer();
     renderSidebar(state.sessions, state.sid, state.spaces);
@@ -1346,6 +1347,7 @@ let _toolGroup = null;
 let _toolGroupCount = 0;
 let _toolGroupErrors = 0;      // failures in the OPEN group (drives the header)
 let _toolGroupLatency = 0;     // summed ms in the open group
+let _toolGroupRunning = 0;     // announced-but-unfinished calls in the open group
 let _parseTimer = null;
 let _activityTimer = null;
 let _lastSeq = 0;  // track last processed event seq for dedup on SSE reconnect
@@ -1793,6 +1795,10 @@ function handleEvent(event) {
             _streamingEl = appendMessage('assistant', '');
             _collected = '';
         }
+        // The scout line summarises a step that has already finished; the
+        // moment the model starts answering it is stale, and it used to sit
+        // in the status bar for the rest of the turn.
+        if (!_collected) _clearScoutStatus();
         _collected += event.content;
         // Debounced activity update (first ~40 chars of response)
         if (!_activityTimer && state.sid) {
@@ -1889,7 +1895,8 @@ function handleEvent(event) {
         const preview = (event.result || '').slice(0, 300);
         const full = event.full_result || event.result || '';
         const isTruncated = event.truncated || full.length > 300;
-        appendToolToGroup(event.name, preview, full, isTruncated, event.was_error, event.latency_ms, event.arguments, !!event.truncated);
+        const runningEl = _takeRunningTool(event.name, event.call_id || event.tool_call_id);
+        appendToolToGroup(event.name, preview, full, isTruncated, event.was_error, event.latency_ms, event.arguments, !!event.truncated, runningEl);
         if (isTimelineOpen()) {
             appendTimelineToolRow({
                 name: event.name,
@@ -1920,6 +1927,7 @@ function handleEvent(event) {
         }
         _runningTools.set(event.name, event.arguments || {});
         _showToolStatus(event.name, event.arguments || {}, { running: true });
+        _appendRunningTool(event.name, event.arguments || {}, event.call_id || event.tool_call_id);
         if (isTimelineOpen()) {
             appendTimelineToolStart({ name: event.name, args: event.arguments || null });
         }
@@ -2800,9 +2808,11 @@ function appendMessage(role, content, meta = {}) {
         processFileRefs(contentEl);
     } else if (role === 'system' && content) {
         contentEl.appendChild(renderMarkdown(content));
-    } else {
-        contentEl.appendChild(text(content || ''));
+    } else if (content) {
+        contentEl.appendChild(text(content));
     }
+    // Nothing is appended for empty content — not even a zero-length text
+    // node — so `.content:empty` can style the waiting streaming bubble.
 
     if (role === 'user' || role === 'assistant') _attachMessageActions(msgEl, role);
 
@@ -2994,6 +3004,82 @@ function appendCommandCard(title, rows, customBody) {
 // Tool call grouping
 // ---------------------------------------------------------------------------
 
+/** One-line reading of a tool call's arguments. Shared by the live
+ *  placeholder row and the finished row so a tool does not visibly change
+ *  its own description the instant it returns. */
+function _toolArgsSummary(name, args) {
+    if (!args || typeof args !== 'object') return '';
+    if (name === 'bash' && args.command) return '$ ' + args.command;
+    if (args.path) return args.path;
+    return Object.entries(args).map(([k, v]) => {
+        const str = String(v);
+        return `${k}: ${str.length > 60 ? str.slice(0, 60) + '...' : str}`;
+    }).join(', ');
+}
+
+// Placeholder rows for tools that have STARTED but not returned. tool.start
+// carries no call id today, so the fallback key is the tool name and the
+// queue is FIFO — two concurrent calls to the same tool resolve in the order
+// they were announced, which is the order the executor runs them in.
+const _pendingToolItems = new Map();   // key -> [placeholder element, ...]
+
+function _toolKey(name, callId) { return callId ? `id:${callId}` : `name:${name}`; }
+
+/**
+ * Append a live "running" row for a tool that just started. Until this
+ * existed the transcript showed nothing at all for the whole runtime of a
+ * slow call — a 40-second bash looked like a hung UI, with only a status-bar
+ * word to say otherwise.
+ */
+function _appendRunningTool(name, args, callId) {
+    const group = ensureToolGroup();
+    const items = group.querySelector('.tool-group-items');
+    const itemEl = el('div', { class: 'tool-item running' }, [
+        el('div', { class: 'tool-item-header' }, [
+            el('span', { class: 'tool-item-running-dot', 'aria-hidden': 'true' }),
+            el('div', { class: 'tool-item-name' }, [text(name)]),
+            el('span', { class: 'tool-item-summary' }, [text(_toolArgsSummary(name, args))]),
+        ]),
+    ]);
+    items.appendChild(itemEl);
+    const key = _toolKey(name, callId);
+    if (!_pendingToolItems.has(key)) _pendingToolItems.set(key, []);
+    _pendingToolItems.get(key).push(itemEl);
+    _toolGroupRunning++;
+    _updateToolGroupHeader(group);
+    scrollToBottom();
+    return itemEl;
+}
+
+/** The placeholder a finished call belongs to, if it is still on screen. */
+function _takeRunningTool(name, callId) {
+    const keys = callId ? [_toolKey(name, callId), `name:${name}`] : [`name:${name}`];
+    for (const key of keys) {
+        const queue = _pendingToolItems.get(key);
+        if (!queue) continue;
+        while (queue.length) {
+            const node = queue.shift();
+            if (!queue.length) _pendingToolItems.delete(key);
+            if (node.isConnected) {
+                _toolGroupRunning = Math.max(0, _toolGroupRunning - 1);
+                return node;
+            }
+        }
+        _pendingToolItems.delete(key);
+    }
+    return null;
+}
+
+/** Drop any placeholder whose result never arrived (cancelled turn, dropped
+ *  stream) — a dot pulsing forever is worse than no row at all. */
+function _clearRunningTools() {
+    for (const queue of _pendingToolItems.values()) {
+        for (const node of queue) node.remove();
+    }
+    _pendingToolItems.clear();
+    _toolGroupRunning = 0;
+}
+
 /** ms → the shortest honest reading of it. A tool chip that says "44500ms"
  *  makes the reader do the division; the header summing a whole round would
  *  be worse still. */
@@ -3014,6 +3100,7 @@ function _updateToolGroupHeader(group) {
     const label = group.querySelector('.tg-label');
     if (!label) return;
     const parts = [_toolGroupCount === 1 ? '1 tool call' : `${_toolGroupCount} tool calls`];
+    if (_toolGroupRunning) parts.push(`${_toolGroupRunning} running`);
     if (_toolGroupErrors) parts.push(`${_toolGroupErrors} failed`);
     if (_toolGroupLatency) parts.push(_humanizeMs(_toolGroupLatency));
     label.textContent = parts.join(' · ');
@@ -3030,6 +3117,7 @@ function ensureToolGroup() {
     _toolGroupCount = 0;
     _toolGroupErrors = 0;
     _toolGroupLatency = 0;
+    _toolGroupRunning = 0;
     const header = el('div', { class: 'tool-group-header' }, [
         el('span', { class: 'tg-toggle' }, [text('\u25BC')]),
         el('span', { class: 'tg-label' }, [text('0 tool calls')]),
@@ -3054,13 +3142,14 @@ function closeToolGroup() {
     if (_toolGroupCount > 2 && _toolGroupErrors === 0) {
         _toolGroup.classList.add('collapsed');
     }
+    _clearRunningTools();
     _toolGroup = null;
     _toolGroupCount = 0;
     _toolGroupErrors = 0;
     _toolGroupLatency = 0;
 }
 
-function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = false, latencyMs = 0, args = null, serverTruncated = false) {
+function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = false, latencyMs = 0, args = null, serverTruncated = false, replaceEl = null) {
     const group = ensureToolGroup();
     const items = group.querySelector('.tool-group-items');
     _toolGroupCount++;
@@ -3079,19 +3168,7 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
     const nameEl = el('div', { class: 'tool-item-name' }, nameChildren);
 
     // Inline summary — single-line preview of args or output
-    let summaryText = '';
-    if (args && typeof args === 'object') {
-        if (name === 'bash' && args.command) {
-            summaryText = '$ ' + args.command;
-        } else if (args.path) {
-            summaryText = args.path;
-        } else {
-            summaryText = Object.entries(args).map(([k, v]) => {
-                const s = String(v);
-                return `${k}: ${s.length > 60 ? s.slice(0, 60) + '...' : s}`;
-            }).join(', ');
-        }
-    }
+    let summaryText = _toolArgsSummary(name, args);
     if (!summaryText && preview) {
         summaryText = preview.slice(0, 80).replace(/\n/g, ' ');
     }
@@ -3194,7 +3271,10 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
         }
     });
 
-    items.appendChild(itemEl);
+    // Replace the live placeholder in place when there is one, so a finished
+    // row does not jump to the bottom of the group the moment it lands.
+    if (replaceEl && replaceEl.isConnected) replaceEl.replaceWith(itemEl);
+    else items.appendChild(itemEl);
 
     const scroll = _messagesScroll();
     scrollToBottom();
@@ -3871,6 +3951,13 @@ async function loadHealth() {
 function updateStatus(msg) {
     const infoEl = document.getElementById('status-info');
     if (infoEl) infoEl.textContent = msg;
+}
+
+/** Clear the scout summary specifically — anything else in the status line
+ *  (a retry, a compaction) is still current and must survive. */
+function _clearScoutStatus() {
+    const infoEl = document.getElementById('status-info');
+    if (infoEl && /^Scout:/.test(infoEl.textContent || '')) infoEl.textContent = '';
 }
 
 // ---------------------------------------------------------------------------
