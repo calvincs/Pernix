@@ -34,15 +34,23 @@ _spawn_lock = threading.Lock()
 _WORKER_INACTIVE_STATUSES = frozenset({"idle", "error", "deleted", "unknown"})
 
 
-def _count_active_workers(manager, parent) -> int:
+def _count_active_workers(manager, parent, *, ignore: str = "") -> int:
     """Workers of `parent` still occupying a slot.
 
     Single definition shared by both spawn gates below. They used to carry
     separate inline tuples that disagreed about "unknown", so the capacity
     warning and the max_concurrent_workers limit counted different things.
+
+    `ignore` excludes one worker that the caller has just cancelled but that
+    has not finished unwinding: retry_worker cancels the old worker and
+    immediately spawns its replacement, and at the cap the still-CANCELLING
+    original made the retry fail with "Max active workers reached" instead
+    of retrying.
     """
     return sum(
-        1 for wid in list(parent.worker_ids) if manager.get_status(wid).get("status") not in _WORKER_INACTIVE_STATUSES
+        1
+        for wid in list(parent.worker_ids)
+        if wid != ignore and manager.get_status(wid).get("status") not in _WORKER_INACTIVE_STATUSES
     )
 
 
@@ -53,6 +61,7 @@ def spawn_worker(
     kind: str = "",
     auto_resume_parent: bool = False,
     _context: dict | None = None,
+    _replacing: str = "",
 ) -> str:
     """Spawn a worker session for a subtask. Returns worker session ID.
 
@@ -111,7 +120,7 @@ def spawn_worker(
             from core.llm.client import _get_semaphore_stats
 
             stats = _get_semaphore_stats()
-            active_workers = _count_active_workers(manager, parent)
+            active_workers = _count_active_workers(manager, parent, ignore=_replacing)
             if active_workers >= stats["capacity"]:
                 return (
                     f"Warning: {active_workers} worker(s) already active but only "
@@ -152,7 +161,7 @@ def spawn_worker(
     with _spawn_lock:
         parent = manager.get(parent_id)
         if parent:
-            active_count = _count_active_workers(manager, parent)
+            active_count = _count_active_workers(manager, parent, ignore=_replacing)
             if active_count >= settings.max_concurrent_workers:
                 return f"Error: Max active workers ({settings.max_concurrent_workers}) reached. Wait for running workers to complete."
 
@@ -936,6 +945,15 @@ def await_workers(
             if v2 is sv2.SessionStateV2.IDLE_READY and has_started:
                 done_count += 1
                 continue
+            # A worker whose spawn FAILED never starts a turn, so has_started
+            # stays False and it sat here as "pending" until the caller's
+            # full max_wait (30 minutes by default) elapsed — even though
+            # spawn-time cleanup had already stamped it errored. The reaper
+            # and the suspend path both treat this as terminal; this was the
+            # one place that did not.
+            if v2 is sv2.SessionStateV2.IDLE_READY and (w.error or w.termination_reason):
+                done_count += 1
+                continue
             pending_count += 1
             if v2 in STALE_GATED_STATES:
                 idle = int(w.idle_seconds)
@@ -1376,7 +1394,10 @@ def retry_worker(
 
     # The replacement inherits the original's typed kind so its allowlist and
     # verification gate survive the retry.
-    return spawn_worker(task, title=f"Retry: {old_title}", kind=old_kind, _context=_context)
+    # _replacing: the worker we just cancelled is still unwinding, so at the
+    # cap it would otherwise count against its own replacement and the retry
+    # would fail with "Max active workers reached".
+    return spawn_worker(task, title=f"Retry: {old_title}", kind=old_kind, _context=_context, _replacing=worker_id)
 
 
 def cross_pollinate(_context: dict | None = None) -> str:
