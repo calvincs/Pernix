@@ -244,7 +244,8 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'Candor (Operational Memory)',
+        title: 'Operational memory (Candor)',
+        term: 'Internal name: Candor. Settings keys are candor_*.',
         description: 'Calibrated reliability tracking: tool outcomes and reflect verdicts feed an auditable evidence ledger, and scout receives an operational-intel brief flagging degraded tools, discovered conditions, and open questions. Observation capture, snooze maintenance, and the scout brief toggle immediately; the agent-facing tools (predict_reliability, why_reliability, reliability_questions) register at startup, so they appear/disappear after a restart.',
         fields: [
             { key: 'candor_enabled', label: 'Candor Enabled', type: 'bool', restart: RESTART_TOOLS },
@@ -253,7 +254,8 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'RLM (Recursive Processing)',
+        title: 'Large-input runs (RLM)',
+        term: 'Internal name: RLM \u2014 Recursive Language Models. Settings keys are rlm_*.',
         description: 'Recursive Language Models: the agent processes inputs far beyond the context window (huge files, corpora, transcripts) by writing code in a sandboxed REPL that holds the input as a variable and delegates chunks to sub-LLM calls. The caps guard against runaway runs: iterations bounds root turns, sub-calls bounds total LLM spend per run, depth 2+ allows recursive child RLMs. Caps apply immediately; the rlm_process tool registers at startup, so enabling/disabling takes a restart. RLM adds no model roles of its own: the root runs on your Primary model and sub-calls run on Background (both set under Models → Model Roles).',
         fields: [
             { key: 'rlm_enabled', label: 'RLM Enabled', type: 'bool', restart: RESTART_TOOLS },
@@ -338,7 +340,8 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'Autonomy (Gates, Goals, Heartbeats, Kernel)',
+        title: 'Autonomy',
+        term: 'Internal names: gates, goals, heartbeats, session kernel.',
         description: 'Long-running autonomous task substrate. Gates: deterministic shell checks Reflect cannot overrule. Goals: persistent objectives with budgets and auto-continuations. Heartbeats: recurring instructions steered into running work. Session kernel: a persistent per-session Python REPL whose variables survive turns and restarts.',
         fields: [
             { key: 'gates_enabled', label: 'Deterministic Gates', type: 'bool' },
@@ -449,7 +452,8 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'Telos (Teleological Layer)',
+        title: 'Goals (Telos)',
+        term: 'Internal name: Telos \u2014 the teleological layer. Settings keys are telos_*.',
         description: 'The operational question loop (carved down in v3.1): turn anomalies the rest of the system cannot explain mint questions, the SOUP generates falsifiable hypotheses at idle, supported claims can become scout routing hints, and a weekly entropy control keeps exploration from going stale. State lives in data/telos/ as markdown. Enabling the agent tools needs a restart; everything else applies immediately.',
         fields: [
             { key: 'telos_enabled', label: 'Telos Enabled', type: 'bool', restart: RESTART_TOOLS },
@@ -474,7 +478,8 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'Webhook Notifications',
+        title: 'Notifications (webhooks)',
+        term: 'Internal name: webhook notifications. Settings keys are notify_webhook_*.',
         description: 'Pernix POSTs a JSON body to this URL whenever the agent calls ask_user and needs a human — the escape hatch for long autonomous runs you are not watching in the browser. Pair it with ntfy, Pushover, Slack, Discord or a home-automation hook. Leave the URL empty to disable.',
         fields: [
             {
@@ -2251,7 +2256,9 @@ function buildTabs(settings) {
         const heading = [text(section.title)];
         if (section.description) heading.push(buildHelpIcon(section.description));
         return el('div', { class: 'settings-section' }, [
-            el('h3', {}, heading),
+            // `term` carries the internal name of a section the UI renamed for
+            // humans, so searching for "Telos" or "Candor" still lands. (N9)
+            el('h3', section.term ? { title: section.term } : {}, heading),
             ...(section.description ? [buildSectionDesc(section.description)] : []),
             ...fields,
         ]);
