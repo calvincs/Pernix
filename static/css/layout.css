@@ -2264,6 +2264,14 @@
 #attach-btn.has-files {
     color: var(--accent);
 }
+/* A read-only session turns the whole composer off, not just the textarea —
+   these two used to stay live and lead only to a server refusal. */
+#attach-btn:disabled,
+#voice-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+}
 #attach-btn svg {
     width: 18px;
     height: 18px;
