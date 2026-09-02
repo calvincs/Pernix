@@ -57,6 +57,16 @@ export function initSidebar(onSelect, onDelete) {
     _createTooltip();
     _createLegend();
     _createSearchBox();
+    // The throttled visit stamps are worth nothing if the tab closes before
+    // one lands.
+    window.addEventListener('pagehide', _flushVisited);
+}
+
+// Every selection the sidebar makes goes through here so the visit is
+// recorded exactly once, at the moment the user actually opens the session.
+function _select(sessionId) {
+    _touchVisited(sessionId, { force: true });
+    if (_onSelect) _onSelect(sessionId);
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +142,7 @@ async function _runSearch(q) {
                 }));
             }
             titleKids.push(text(r.title || 'untitled'));
-            const open = () => { if (_onSelect) _onSelect(r.session_id); };
+            const open = () => _select(r.session_id);
             const hit = el('div', {
                 class: 'session-item search-hit' + (r.session_id === _activeSid ? ' active' : ''),
                 'data-sid': r.session_id,
@@ -253,6 +263,10 @@ function _restoreFocus(list, mark) {
 export function renderSessionList(sessions, activeSid, spaces = []) {
     _spaces = spaces || [];
     _activeSid = activeSid;
+    // Sessions can also be opened from the palette, a URL or a notification —
+    // stamping the active one on every render catches all of those without
+    // app.js having to know the ledger exists.
+    _touchVisited(activeSid);
     if (_searchActive) { _refreshSearchRows(sessions, activeSid); return; }
     // Sessions inside their undo window are gone as far as the list is
     // concerned. Filtering before the guard's fingerprint is what makes the
@@ -483,7 +497,7 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
                     const r = await post('/api/sessions', { title: 'New session', space_id: space.id });
                     _lastJson = '';
                     window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
-                    if (_onSelect && r.session_id) _onSelect(r.session_id);
+                    if (r.session_id) _select(r.session_id);
                 } catch { /* stay put on failure */ }
             },
         }, [text('+')]),
@@ -625,14 +639,23 @@ function _renderSessionWithWorkers(session, container, activeSid, childrenByPare
 // background turn finished since you last looked. Shared by the session rows
 // and the search hits so a search does not hide the one signal that says a
 // session wants you.
+function _attentionOf(session) {
+    if (session._attention === 'input') return 'input';
+    // app.js's in-memory "finished just now" set still wins; the persisted
+    // ledger is what survives a reload.
+    if (session._attention === 'done') return 'done';
+    return _finishedWhileAway(session) ? 'done' : null;
+}
+
 function _attentionBadge(session) {
-    if (session._attention === 'input') {
+    const kind = _attentionOf(session);
+    if (kind === 'input') {
         return el('span', {
             class: 'session-attn attn-input',
             title: 'Waiting for your input',
         }, [text('?')]);
     }
-    if (session._attention === 'done') {
+    if (kind === 'done') {
         return el('span', {
             class: 'session-attn attn-done',
             title: 'Finished while you were away',
@@ -772,12 +795,7 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
     if (isWorker) {
         titleChildren.push(el('span', { class: 'worker-prefix' }, [text('\u21B3')]));
     }
-    // Active = the session is doing something right now. state_v2 is the
-    // real state machine; the legacy `state` column stopped updating when v2
-    // landed (it reads 'idle' even mid-turn), which silently killed the slow
-    // blink on active dots. RLM view sessions still use the legacy field.
-    const _sv = session.state_v2 || session.state;
-    const isActive = !!_sv && !['idle', 'idle_ready', 'awaiting_user', 'error'].includes(_sv);
+    const isActive = _isBusy(session);
     const dotCls = `session-dot ${typeDef.cls}${isActive ? ' active-pulse' : ''}`;
     titleChildren.push(el('span', { class: dotCls, 'aria-hidden': 'true' }));
     titleChildren.push(el('span', { class: 'session-title-text' }, [text(titleText)]));
@@ -804,10 +822,11 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
     // the dot, the ticker text and those buttons out of what gets read.
     const nameParts = [titleText];
     if (typeKey !== 'chat') nameParts.push(typeDef.label);
-    if (session._attention === 'input') nameParts.push('waiting for your input');
-    else if (session._attention === 'done') nameParts.push('finished while you were away');
+    const attentionKind = _attentionOf(session);
+    if (attentionKind === 'input') nameParts.push('waiting for your input');
+    else if (attentionKind === 'done') nameParts.push('finished while you were away');
 
-    const select = () => { if (_onSelect) _onSelect(session.id); };
+    const select = () => _select(session.id);
     const item = el('div', {
         class: classes.join(' '),
         'data-sid': session.id,
@@ -1231,6 +1250,76 @@ function _formatTokens(n) {
     if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
     if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
     return String(n);
+}
+
+// ---------------------------------------------------------------------------
+// Visit ledger — when you last had each session open
+//
+// The "finished while you were away" tick used to live in an app.js Set that
+// only knew about turns that completed with the tab open. Reload the page and
+// every tick vanished, which is the one moment you most want them: you were
+// away. Persisting the last-visited stamp lets the tick be derived instead —
+// updated since you last looked, and not running now.
+// ---------------------------------------------------------------------------
+
+const VISITED_MAX = 600;         // stamps kept; oldest dropped past this
+const VISITED_FLUSH_MS = 15000;  // renders are frequent; writes need not be
+
+let _visited = null;             // sid → epoch ms, lazily loaded
+let _visitedDirty = false;
+let _visitedFlushAt = 0;
+
+function _visitedMap() {
+    if (!_visited) _visited = _loadState().lastVisited || {};
+    return _visited;
+}
+
+function _touchVisited(sid, { force = false } = {}) {
+    if (!sid) return;
+    _visitedMap()[sid] = Date.now();
+    _visitedDirty = true;
+    if (force || Date.now() - _visitedFlushAt > VISITED_FLUSH_MS) _flushVisited();
+}
+
+function _flushVisited() {
+    if (!_visitedDirty) return;
+    const seen = _visitedMap();
+    const ids = Object.keys(seen);
+    if (ids.length > VISITED_MAX) {
+        ids.sort((a, b) => seen[a] - seen[b])
+            .slice(0, ids.length - VISITED_MAX)
+            .forEach(id => delete seen[id]);
+    }
+    const state = _loadState();
+    state.lastVisited = seen;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    _visitedDirty = false;
+    _visitedFlushAt = Date.now();
+}
+
+function _epoch(isoStr) {
+    if (!isoStr) return 0;
+    let s = isoStr.replace(/\+00:00$/, 'Z');
+    if (!/[Z+-]\d{2}/.test(s)) s += 'Z';
+    const t = new Date(s).getTime();
+    return isNaN(t) ? 0 : t;
+}
+
+// A session is doing something right now. state_v2 is the real state machine;
+// the legacy `state` column stopped updating when v2 landed (it reads 'idle'
+// even mid-turn), so RLM view sessions are the only readers left of it.
+function _isBusy(session) {
+    const sv = session.state_v2 || session.state;
+    return !!sv && !['idle', 'idle_ready', 'awaiting_user', 'error'].includes(sv);
+}
+
+function _finishedWhileAway(session) {
+    if (!session.updated_at) return false;
+    if (session.id === _activeSid) return false;   // you are looking at it
+    if (_isBusy(session)) return false;            // still going: not finished
+    const seen = _visitedMap()[session.id];
+    if (!seen) return false;                       // never opened: never away from
+    return _epoch(session.updated_at) > seen;
 }
 
 // ---------------------------------------------------------------------------
