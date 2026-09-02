@@ -426,6 +426,14 @@
 .settings-btn-row--flush { margin-top: 0; }
 /* A button that sits on its own line under the control it belongs to. */
 .settings-block-btn { margin-top: var(--sp-2); }
+/* The QR's quiet zone — see --qr-paper. */
+.settings-qr {
+    background: var(--qr-paper);
+    border-radius: var(--radius-lg);
+    padding: var(--sp-3);
+    display: inline-block;
+    margin: var(--sp-3) 0;
+}
 
 .save-status {
     font-size: var(--text-xs);

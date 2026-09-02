@@ -94,6 +94,10 @@ const PATHS = {
 
     pause: ['M9.5 5v14', 'M14.5 5v14'],
     play: ['M7.5 4.8L19 12 7.5 19.2z'],
+    // Filled, because a hollow square next to a filled send arrow reads as
+    // "disabled" rather than "stop".
+    stop: [{ t: 'rect', x: 6.5, y: 6.5, width: 11, height: 11, rx: 2,
+             fill: 'currentColor', stroke: 'none' }],
 
     check: ['M4.5 12.5l5 5 10-11'],
     x: ['M6 6l12 12', 'M18 6L6 18'],

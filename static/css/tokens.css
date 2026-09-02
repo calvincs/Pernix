@@ -173,6 +173,15 @@
        here are what an element without one falls back to. --safe-* is
        re-declared identically in mobile.css, which is where it matters. */
     --space-color: var(--accent);
+    /* The sigil canvas blends into the page rather than sitting on it. Screen
+       is lighten-only: perfect over black, and on paper it drives every pixel
+       to white — which is exactly how the brand mark vanished on the light
+       theme. Multiply is its mirror. */
+    --sigil-blend: screen;
+    /* A QR code is a machine target, not UI chrome: the scanner needs the
+       quiet zone white in both themes, so this one is intentionally the same
+       on paper and on black. */
+    --qr-paper: #ffffff;
     --ticker-duration: 12s;
     --safe-top: env(safe-area-inset-top, 0px);
     --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -246,6 +255,7 @@
     --shadow-lg: 0 8px 24px rgba(60, 50, 30, 0.18);
     --scrim: rgba(60, 50, 30, 0.35);
     --shadow-color: rgba(60, 50, 30, 0.18);
+    --sigil-blend: multiply;
     }
 }
 
@@ -297,6 +307,7 @@
     --shadow-lg: 0 8px 24px rgba(60, 50, 30, 0.18);
     --scrim: rgba(60, 50, 30, 0.35);
     --shadow-color: rgba(60, 50, 30, 0.18);
+    --sigil-blend: multiply;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }

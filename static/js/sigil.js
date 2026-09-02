@@ -7,9 +7,35 @@
 //   // ...later, when removing the canvas:
 //   stop();   // optional — natural pause kicks in when offscreen anyway
 
+import { readColor, isLight } from './theme.js';
+
 export function initSigil(canvas) {
     if (!canvas) return () => {};
     const ctx = canvas.getContext('2d', { alpha: true });
+
+    // The filaments used to be a hard-coded rgba(212,168,67,…) — the dark
+    // theme's gold, at alphas between 0.12 and 0.42. On paper that is a
+    // near-invisible smear: the whole point of a low alpha is that the page
+    // shows through, and a white page shows through gold completely. Read the
+    // accent from the live palette, and lift every alpha on a light ground so
+    // the same drawing reads with the same weight.
+    let INK = [212, 168, 67];   // last-resort fallback if --accent is unreadable
+    let ALPHA_LIFT = 1;
+    let GLOW = '';
+
+    const readPalette = () => {
+        INK = readColor('--accent', [212, 168, 67]).slice(0, 3);
+        // On paper the canvas blends with `multiply` (see --sigil-blend), which
+        // darkens rather than lightens, so the same alphas land much closer to
+        // the intended weight — a smaller lift than a straight overlay would
+        // need, and a far quieter glow.
+        const paper = isLight();
+        ALPHA_LIFT = paper ? 1.45 : 1;
+        GLOW = `rgba(${INK[0]},${INK[1]},${INK[2]},${paper ? 0.30 : 0.95})`;
+    };
+    const stroke = (alpha) =>
+        `rgba(${INK[0]},${INK[1]},${INK[2]},${Math.min(1, alpha * ALPHA_LIFT)})`;
+    readPalette();
 
     // Performance tiering — fewer strings + lower DPR + no glow on mobile/low-power
     const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -102,7 +128,7 @@ export function initSigil(canvas) {
                 ctx.quadraticCurveTo(cpx, cpy, B[0], B[1]);
             }
         }
-        ctx.strokeStyle = `rgba(212,168,67,${alpha})`;
+        ctx.strokeStyle = stroke(alpha);
         ctx.lineWidth = lw;
         ctx.stroke();
     };
@@ -116,7 +142,7 @@ export function initSigil(canvas) {
             if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
         }
         ctx.closePath();
-        ctx.strokeStyle = `rgba(212,168,67,${alpha})`;
+        ctx.strokeStyle = stroke(alpha);
         ctx.lineWidth = lw;
         ctx.stroke();
     };
@@ -155,7 +181,7 @@ export function initSigil(canvas) {
         const baseR = Math.min(w, h) * 0.44 * scale;
 
         if (blur > 0) {
-            ctx.shadowColor = 'rgba(212,168,67,0.95)';
+            ctx.shadowColor = GLOW;
             ctx.shadowBlur = blur;
         } else {
             ctx.shadowBlur = 0;
@@ -198,6 +224,15 @@ export function initSigil(canvas) {
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
 
+    // The theme can change under a running canvas — from Settings, or because
+    // the OS flipped while "System" is selected. Re-read and repaint.
+    const onTheme = () => {
+        readPalette();
+        if (reduced) drawFrame(performance.now());
+        else start();
+    };
+    window.addEventListener('pernix:theme', onTheme);
+
     if (reduced) {
         drawFrame(performance.now());  // single static frame
     } else {
@@ -211,6 +246,7 @@ export function initSigil(canvas) {
             rafId = null;
         }
         window.removeEventListener('resize', onResize);
+        window.removeEventListener('pernix:theme', onTheme);
         document.removeEventListener('visibilitychange', onVisibilityChange);
         if (io) {
             io.disconnect();

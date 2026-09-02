@@ -3151,9 +3151,9 @@ function _showStopButton() {
     btn.disabled = _stopPending;
     btn.title = 'Stop generation';
     btn.classList.add('stop-mode');
-    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
-        <rect x="6" y="6" width="12" height="12" rx="2"/>
-    </svg>`;
+    btn.setAttribute('aria-label', 'Stop generation');
+    clear(btn);
+    btn.appendChild(icon('stop'));
 }
 
 function _showSendButton() {
@@ -3165,10 +3165,9 @@ function _showSendButton() {
     btn.disabled = !!document.getElementById('msg-input')?.disabled;
     btn.title = 'Send message';
     btn.classList.remove('stop-mode');
-    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="22" y1="2" x2="11" y2="13"></line>
-        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-    </svg>`;
+    btn.setAttribute('aria-label', 'Send message');
+    clear(btn);
+    btn.appendChild(icon('send'));
 }
 
 async function _cancelSession() {
@@ -4581,8 +4580,10 @@ function _updatePauseButton(stateStr) {
     const active = stateStr === 'processing' || stateStr === 'scouting' || stateStr === 'compacting';
     btn.hidden = !(active || paused);
     btn._paused = paused;
-    btn.innerHTML = paused ? '&#9654;' : '&#10074;&#10074;';
+    clear(btn);
+    btn.appendChild(icon(paused ? 'play' : 'pause'));
     btn.title = paused ? 'Resume the session' : 'Pause after the current step';
+    btn.setAttribute('aria-label', btn.title);
 }
 
 function _renderStateBadge(event) {

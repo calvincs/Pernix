@@ -273,7 +273,7 @@ function _buildJobRow(job, models, spaces = []) {
                         const sp = spaces.find(s => s.id === job.space_id);
                         return el('span', {
                             class: 'space-chip-labeled',
-                            style: `--space-color: ${sp ? sp.color : '#888'}`,
+                            style: `--space-color: ${sp ? sp.color : 'var(--text-dim)'}`,
                             title: sp ? `Runs in space "${sp.label}"` : 'Bound to a deleted space',
                         }, [text(sp ? sp.label : 'space?')]);
                     })(),

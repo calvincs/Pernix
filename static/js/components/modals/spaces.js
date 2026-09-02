@@ -13,6 +13,11 @@ import { announce, openOverlay } from '../../a11y.js';
 import { notify } from '../../feedback.js';
 import { confirmDanger } from './confirm.js';
 
+// DATA, not chrome: these are the colours a user can assign to a space, they
+// are stored per-space in the database and rendered as exactly that colour, so
+// they are literals on purpose — the one set of hard-coded colours in the app
+// that a theme must NOT reinterpret. Chosen mid-value so each reads on both
+// the dark and the light ground.
 const SWATCHES = ['#7c9cff', '#ff8a65', '#4db6ac', '#ba68c8', '#ffd54f', '#81c784', '#f06292', '#90a4ae'];
 const DIRECTIVES = ['SOUL', 'RULES', 'SESSIONS'];
 const DIRECTIVE_HINT = {
