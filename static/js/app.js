@@ -550,6 +550,7 @@ async function selectSession(sid) {
     _resetContextReadout();
     // Reset streaming state to prevent cross-session leakage
     _streamingEl = null;
+    _lastStreamModel = null;
     _collected = '';
     _toolGroup = null;
     _toolGroupCount = 0;
@@ -824,7 +825,15 @@ function _replayMessages(messages, { container = null } = {}) {
                 appendMessage('system', m.content || '', { createdAt: m.created_at });
             } else {
                 closeToolGroup();
-                appendMessage(m.role, m.content, { createdAt: m.created_at, messageId: m.id });
+                appendMessage(m.role, m.content, {
+                    createdAt: m.created_at,
+                    messageId: m.id,
+                    // The assistant chip's two facts: which model answered and
+                    // what it cost. Metadata first, the column as the fallback
+                    // for rows written before the metadata carried it.
+                    metadata: m.metadata,
+                    latencyMs: m.latency_ms,
+                });
             }
         }
         closeToolGroup();
@@ -1929,6 +1938,9 @@ function _announceState(to) {
 // ---------------------------------------------------------------------------
 
 let _streamingEl = null;
+// The model that answered the round in progress, when it is not the session's
+// own — set by stream.fallback, read by the per-message chip on stream.done.
+let _lastStreamModel = null;
 let _collected = '';
 let _toolGroup = null;
 let _toolGroupCount = 0;
@@ -2446,6 +2458,16 @@ function handleEvent(event) {
                 processFileRefs(contentEl);
             }
         }
+        // Stamp the answer with what produced it while the bubble is still in
+        // hand. The event names the model that actually answered, which is not
+        // necessarily the session's — a failover swaps it mid-turn.
+        if (_streamingEl && _collected) {
+            _setMessageChip(
+                _streamingEl,
+                event.model || _lastStreamModel || _sessionModelOverride || state.model,
+                _streamingEl._openedAt ? Date.now() - _streamingEl._openedAt : 0,
+            );
+        }
         _collected = '';
         _streamingEl = null;
         announce('Pernix finished responding');
@@ -2944,7 +2966,9 @@ function handleEvent(event) {
     }
 
     else if (type === 'stream.fallback') {
-        // Rate-limit / provider failover switched the model mid-stream.
+        // Rate-limit / provider failover switched the model mid-stream. Hold
+        // on to the name: this, not the session default, is what answered.
+        _lastStreamModel = event.model || _lastStreamModel;
         appendMessage('system', `LLM failover → ${event.model || 'fallback'}`);
         const mEl = document.getElementById('status-model');
         if (mEl) mEl.textContent = event.model || state.model;
@@ -3421,6 +3445,40 @@ function _parseMsgTs(createdAt) {
     return isNaN(t) ? 0 : t;
 }
 
+/**
+ * "qwen3-27b · 4.2s" under one assistant answer.
+ *
+ * Which model wrote a given reply is not a constant: a failover or an
+ * in-turn switch_model changes it mid-conversation, and the status bar only
+ * ever showed the CURRENT one. Same for cost in time. Both facts are saved
+ * with the row now, so a reopened transcript can still answer the question.
+ * Written by both paths — replay reads the row's metadata, the live stream
+ * fills it in on stream.done.
+ */
+function _setMessageChip(msgEl, model, latencyMs) {
+    if (!msgEl) return;
+    const ms = Number(latencyMs) || 0;
+    const parts = [];
+    if (model) parts.push(String(model));
+    if (ms > 0) parts.push(_humanizeMs(ms));
+    let chip = msgEl.querySelector('.msg-chip');
+    if (!parts.length) {
+        if (chip) chip.remove();
+        return;
+    }
+    if (!chip) {
+        chip = el('div', { class: 'msg-chip' });
+        // Before the action toolbar, which is the message's last child.
+        msgEl.insertBefore(chip, msgEl.querySelector('.msg-actions'));
+    }
+    clear(chip);
+    chip.appendChild(text(parts.join(' · ')));
+    chip.title = model
+        ? (ms > 0 ? `Answered by ${model} in ${_humanizeMs(ms)}` : `Answered by ${model}`)
+        : `Answered in ${_humanizeMs(ms)}`;
+    return chip;
+}
+
 /** Hover action toolbar: copy on every message, edit-&-resend on user messages. */
 function _attachMessageActions(msgEl, role) {
     const actions = el('div', { class: 'msg-actions' });
@@ -3508,6 +3566,21 @@ function appendMessage(role, content, meta = {}) {
     // node — so `.content:empty` can style the waiting streaming bubble.
 
     if (role === 'user' || role === 'assistant') _attachMessageActions(msgEl, role);
+
+    if (role === 'assistant') {
+        // When the live stream ends, stream.done fills this in against the
+        // moment the bubble opened.
+        msgEl._openedAt = Date.now();
+        const row = _parseRowMetadata(meta.metadata);
+        const model = meta.model || row.model || '';
+        const latency = row.latency_ms ?? meta.latencyMs ?? 0;
+        _setMessageChip(msgEl, model, latency);
+        // On a phone the chip is one more line of clutter on every single
+        // answer, so mobile.css folds it away and the meta row is the handle
+        // that brings it back.
+        roleLabel.classList.add('role-label--toggle');
+        roleLabel.addEventListener('click', () => msgEl.classList.toggle('show-meta'));
+    }
 
     inner.appendChild(msgEl);
     scrollToBottom(role === 'user');

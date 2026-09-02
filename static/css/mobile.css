@@ -99,6 +99,24 @@
     opacity: 0.55;
 }
 
+/* The model/latency chip is a per-answer footnote. On a narrow screen a
+   footnote under every single reply is just noise between the answers, so it
+   folds away and the meta row (role + time) is the tap target that brings it
+   back — the row is already there, and tapping a label costs nothing. */
+.message.assistant .msg-chip {
+    display: none;
+}
+.message.assistant.show-meta .msg-chip {
+    display: block;
+}
+.message.assistant .role-label--toggle {
+    cursor: pointer;
+    /* A comfortable tap target without moving the label. */
+    padding-top: var(--sp-1);
+    padding-bottom: var(--sp-1);
+    margin-bottom: 0;
+}
+
 /* File tree actions — hidden on touch; swipe-to-delete is used instead */
 .fp-tree-item .fp-tree-actions {
     display: none;
