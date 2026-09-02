@@ -2945,7 +2945,10 @@ function _attachMessageActions(msgEl, role) {
     actions.appendChild(copyBtn);
 
     if (role === 'user') {
-        const editBtn = el('button', { class: 'msg-action-btn', title: 'Edit & resend — copies this message into the input' }, [text('✎')]);
+        // "Edit & resend" promised something this button does not do: it
+        // neither edits the stored message nor resends anything, it only
+        // puts the text back in the composer for you to change and send.
+        const editBtn = el('button', { class: 'msg-action-btn', title: 'Copy to composer' }, [text('✎')]);
         editBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             const textarea = document.getElementById('msg-input');

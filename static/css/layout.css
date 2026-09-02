@@ -2717,6 +2717,13 @@
     transition: opacity 0.15s ease;
 }
 .message:hover .msg-time { opacity: 1; }
+/* Hover-to-reveal is not a gesture a touch device has, so on one the
+   timestamps are simply always on — dimmed, but reachable. Keyed on
+   (hover: none) rather than on width: a touchscreen laptop has the same
+   problem as a phone and none of its narrowness. */
+@media (hover: none) {
+    .msg-time { opacity: 0.55; }
+}
 
 /* Idle-gap divider between messages far apart in time */
 .msg-gap-divider {
