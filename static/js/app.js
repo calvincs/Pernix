@@ -1293,7 +1293,9 @@ let _sending = false;
 function _setSendingState(sending, label) {
     _sending = sending;
     const btn = document.getElementById('send-btn');
-    if (btn) btn.disabled = sending || !!document.getElementById('msg-input')?.disabled;
+    // _stopPending is checked too: a stop pressed between the upload finishing
+    // and the POST resolving must not have its button handed back here.
+    if (btn) btn.disabled = sending || _stopPending || !!document.getElementById('msg-input')?.disabled;
     const infoEl = document.getElementById('status-info');
     if (!infoEl) return;
     if (sending && label) infoEl.textContent = label;
