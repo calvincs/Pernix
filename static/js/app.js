@@ -2344,7 +2344,12 @@ function handleEvent(event) {
 
     else if (type === 'session.queue_dropped') {
         const reason = event.reason ? ` (${event.reason})` : '';
-        appendMessage('notice', `[${event.count} queued message(s) dropped${reason}]`);
+        // 'system', not 'notice': there is no .message.notice rule anywhere in
+        // the CSS, so the live line rendered as unstyled body text — while the
+        // very same row, replayed from the database, comes back through the
+        // role='notice' branch of loadMessages as a system message. Same event,
+        // two different-looking lines depending on whether you reloaded.
+        appendMessage('system', `[${event.count} queued message(s) dropped${reason}]`);
     }
 
     else if (type === 'eval.start') {
