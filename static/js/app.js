@@ -357,6 +357,9 @@ let _selectSeq = 0;
 async function selectSession(sid) {
     const mySeq = ++_selectSeq;
     if (isMobile()) closeSidebar();
+    // Land any half-typed draft for the session we are LEAVING before state.sid
+    // moves and _restoreDraft overwrites the textarea.
+    _flushDraft();
     state.sid = sid;
     _historyLimit = HISTORY_PAGE;  // fresh window per session
     _recentlyFinished.delete(sid);  // visiting clears the "done" attention tick
@@ -855,6 +858,7 @@ const _DRAFT_PREFIX = 'pernix:draft:';
 const _PROMPT_HISTORY_KEY = 'pernix:prompt-history';
 const _PROMPT_HISTORY_MAX = 50;
 let _draftTimer = null;
+let _pendingDraftWrite = null;   // the debounced write, so it can be flushed
 let _histIdx = -1;        // -1 = not navigating history
 let _histStash = '';      // text that was in the input when navigation started
 
@@ -862,12 +866,34 @@ function _draftKey() { return _DRAFT_PREFIX + (state.sid || 'new'); }
 
 function _saveDraft(value) {
     clearTimeout(_draftTimer);
-    _draftTimer = setTimeout(() => {
+    // The key is bound NOW, not 300ms from now. _draftKey() reads state.sid,
+    // and switching session inside the debounce window filed the text you had
+    // typed in the OLD session under the NEW session's key — so the draft
+    // vanished from where you left it and appeared where you had never typed.
+    const key = _draftKey();
+    _pendingDraftWrite = () => {
         try {
-            if (value.trim()) localStorage.setItem(_draftKey(), value);
-            else localStorage.removeItem(_draftKey());
+            if (value.trim()) localStorage.setItem(key, value);
+            else localStorage.removeItem(key);
         } catch { /* storage full/unavailable */ }
+    };
+    _draftTimer = setTimeout(() => {
+        _draftTimer = null;
+        const write = _pendingDraftWrite;
+        _pendingDraftWrite = null;
+        if (write) write();
     }, 300);
+}
+
+/** Write a pending debounced draft out immediately, under the key it was
+ *  captured with. Called before a session switch reads the new one. */
+function _flushDraft() {
+    if (!_draftTimer) return;
+    clearTimeout(_draftTimer);
+    _draftTimer = null;
+    const write = _pendingDraftWrite;
+    _pendingDraftWrite = null;
+    if (write) write();
 }
 
 function _restoreDraft() {
@@ -881,6 +907,8 @@ function _restoreDraft() {
 
 function _clearDraft() {
     clearTimeout(_draftTimer);
+    _draftTimer = null;
+    _pendingDraftWrite = null;   // a queued write would resurrect what we just cleared
     try { localStorage.removeItem(_draftKey()); } catch { /* unavailable */ }
 }
 
