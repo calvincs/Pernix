@@ -59,6 +59,10 @@ def call_mcp_tool_sync(
         return "Error: MCP is disabled (Settings → MCP Servers). No call was made."
     conn = manager.connections.get(server)
     if conn is None:
+        if not manager.started:
+            # shutdown() drops its connections; the tools stay registered so
+            # a restart lands them on the same names.
+            return "Error: the MCP manager is stopped (shutting down, or MCP was disabled). No call was made."
         return f"Error: MCP server '{server}' is no longer configured; this tool is stale."
     loop = (_context or {}).get("_loop") or manager._loop
     if loop is None or not loop.is_running():
