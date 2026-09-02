@@ -188,13 +188,6 @@
 .session-item.snooze-session:not(.active) { opacity: 0.6; }
 .session-item.snooze-session:not(.active):hover { opacity: 1; }
 
-.session-delete.confirm {
-    opacity: 1;
-    color: var(--error);
-    font-size: var(--text-xxs);
-    font-weight: 500;
-}
-
 .session-id-badge {
     background: none;
     border: none;
