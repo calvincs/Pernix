@@ -2430,7 +2430,21 @@ export async function openSettings(opts = {}) {
     }
 }
 
+// Everything typed into this modal lives in the DOM until Save, so every
+// dismissal — the ×, Cancel, the backdrop, Escape — is a discard. (S2)
+function _hasUnsavedChanges() {
+    if (!_overlay) return false;
+    if (Object.keys(collectChanges()).length > 0) return true;
+    // API keys never reach collectChanges(): the server only ever reports
+    // whether one is set, so there is nothing to diff a typed key against.
+    return SECTIONS.some(section => section.fields.some(f =>
+        f.type === 'apikey'
+        && (document.getElementById(`setting-${f.key}`)?.value || '').trim() !== ''
+    ));
+}
+
 export function closeSettings() {
+    if (_hasUnsavedChanges() && !confirm('Discard unsaved settings changes?')) return;
     if (_closeOverlay) { _closeOverlay(); _closeOverlay = null; }
     if (_overlay) {
         document.body.removeChild(_overlay);
