@@ -509,6 +509,31 @@
 .tab-content { display: none; }
 .tab-content.active { display: block; }
 
+/* Settings carries six goal-named tabs rather than five subsystem-named ones,
+   so the card gets the width to show them and the strip scrolls instead of
+   stacking into a second row that pushes the first control off the screen.
+   Scoped to .settings-card: .tab-bar is shared with Spaces and the timeline,
+   which have two or three short tabs and want none of this. (S6) */
+.modal-card.settings-card { max-width: min(94vw, 880px); }
+.settings-tab-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 0 var(--sp-3);
+}
+.settings-tab-bar::-webkit-scrollbar { display: none; }
+.settings-tab-bar .tab-btn {
+    white-space: nowrap;
+    flex: 0 0 auto;
+    font-size: var(--text-xs);
+    padding: var(--sp-2) var(--sp-2);
+}
+.settings-tab-loading {
+    padding: var(--sp-4);
+    color: var(--text-faint);
+    font-size: var(--text-sm);
+}
+
 /* OpenRouter model list */
 .or-hint {
     font-size: var(--text-xs);

@@ -83,6 +83,7 @@ const NETWORK_FIELDS = [
 const SECTIONS = [
     {
         title: 'LLM Providers',
+        tab: 'providers',
         description: 'Configure endpoints and concurrency for LLM providers. Max Concurrent limits parallel requests per provider. Session LLM Timeout caps how long a single session may hold LLM slots — prevents a hung or runaway session from blocking others indefinitely (0 = unlimited). Reasoning applies to Ollama models that have a thinking mode (the qwen3 family, nemotron3, …) and is off for both roles by default: it buys quality on hard turns and costs latency and output tokens everywhere. If Primary and Background name the same model the two cannot be told apart — Primary\'s setting applies to both. Model selection is on the Models tab.',
         fields: [
             { key: 'llm_base_url', label: 'Ollama Base URL', type: 'text' },
@@ -113,6 +114,7 @@ const SECTIONS = [
     },
     {
         title: 'Context',
+        tab: 'agent',
         description: 'Context is auto-managed by default: the harness reads each model\'s real window and completion cap from the provider (Ollama /api/show, OpenRouter /models), budgets against it, and pins Ollama\'s num_ctx so the server window matches — turn Auto off to force the manual Context Budget / Max Output Tokens instead. The Ollama Context Cap bounds KV-cache VRAM use on big-window models (0 = model max). Compaction automatically summarizes older messages when context fills up; critical threshold triggers a hard reset if compaction can\'t free enough space. View pruning is the cheaper step before compaction: under budget pressure it stubs oversized tool results out of the compiled view only — stored messages are never touched.',
         fields: [
             { key: 'context_auto', label: 'Auto (use model-reported limits)', type: 'bool' },
@@ -129,6 +131,7 @@ const SECTIONS = [
     },
     {
         title: 'Agent',
+        tab: 'agent',
         description: 'Limits on the agent loop. Max Tool Rounds is a backstop against a runaway loop, not a spend cap — goal token/time budgets and the stuck detector are the real guards, so a high value is fine. Scout sends a lightweight model (the Background role) ahead to discover relevant tools and context before the Primary model responds. Forced follow-up: when a reply ends by announcing more work ("Next, I\'ll…") without doing it, the harness injects one bounded in-turn nudge to keep the agent working instead of ending the turn.',
         fields: [
             { key: 'max_tool_rounds', label: 'Max Tool Rounds', type: 'number' },
@@ -140,6 +143,7 @@ const SECTIONS = [
     },
     {
         title: 'Shell & Tools',
+        tab: 'tools',
         description: 'Timeouts and security for tool execution. Strict shell security restricts commands to a built-in allowlist. Permissive mode allows any command. Size caps below: 0 = no cap. RLIMIT_FSIZE caps each bash subprocess\'s file writes; lift it for large model/video downloads.',
         fields: [
             { key: 'tool_timeout', label: 'Tool Timeout (seconds)', type: 'number' },
@@ -154,6 +158,7 @@ const SECTIONS = [
     },
     {
         title: 'Web',
+        tab: 'tools',
         description: 'Web search uses Tavily (requires API key — free tier at tavily.com). Browser uses Playwright for JS-rendered page extraction. Disable headless for login flows or visual debugging.',
         fields: [
             { key: 'web_search_enabled', label: 'Web Search', type: 'bool', restart: RESTART_TOOLS },
@@ -165,6 +170,7 @@ const SECTIONS = [
     },
     {
         title: 'Voice Input',
+        tab: 'integrations',
         description: 'Speech-to-text for the chat input. Each engine has a different privacy profile — the disclaimer below the engine selector says where your voice audio goes. Local Whisper transcribes on the Pernix server; Remote Whisper uploads recordings to an OpenAI-compatible endpoint; Direct-to-Model attaches the recording for an audio-capable chat model to hear; Browser Dictation uses your browser vendor\'s speech service.',
         fields: [
             { key: 'voice_mode', label: 'Engine', type: 'select', options: ['off', 'local_whisper', 'remote_whisper', 'model_direct', 'web_speech'] },
@@ -209,6 +215,7 @@ const SECTIONS = [
     },
     {
         title: 'Memory',
+        tab: 'agent',
         description: 'Automatic memory recall surfaces relevant past conversations at the start of each turn. The distillation audit is the feedback loop on memory quality: during snooze it re-derives the durable facts of an already-distilled session with the Background model and repairs anything the first pass missed. It costs a couple of background LLM calls per day — set the per-day count to 0 to keep the audit off without disabling the machinery.',
         fields: [
             { key: 'memory_recall', label: 'Auto-Recall', type: 'bool' },
@@ -224,6 +231,7 @@ const SECTIONS = [
     },
     {
         title: 'Background Work (Snooze)',
+        tab: 'autonomy',
         description: 'The master switch for everything the agent does while you are idle: memory maintenance and distillation, dreaming, telos loops, canary sweeps, adaptive edits and embedding sweeps all run inside a snooze cycle. Turning Background Work off stops all of it and is the one control that reliably ends idle-time LLM spend, whatever the individual feature toggles say. Cooldown is how long the machine must be quiet before a cycle may start; the tick interval paces how often the scheduler even looks. The cycle time limit is a hang backstop, not a scheduler — a cycle normally ends when its activity ladder finishes or you start typing; raise it for slow local models.',
         fields: [
             {
@@ -246,6 +254,7 @@ const SECTIONS = [
     },
     {
         title: 'Operational memory (Candor)',
+        tab: 'integrations',
         term: 'Internal name: Candor. Settings keys are candor_*.',
         description: 'Calibrated reliability tracking: tool outcomes and reflect verdicts feed an auditable evidence ledger, and scout receives an operational-intel brief flagging degraded tools, discovered conditions, and open questions. Observation capture, snooze maintenance, and the scout brief toggle immediately; the agent-facing tools (predict_reliability, why_reliability, reliability_questions) register at startup, so they appear/disappear after a restart.',
         fields: [
@@ -256,6 +265,7 @@ const SECTIONS = [
     },
     {
         title: 'Large-input runs (RLM)',
+        tab: 'tools',
         term: 'Internal name: RLM \u2014 Recursive Language Models. Settings keys are rlm_*.',
         description: 'Recursive Language Models: the agent processes inputs far beyond the context window (huge files, corpora, transcripts) by writing code in a sandboxed REPL that holds the input as a variable and delegates chunks to sub-LLM calls. The caps guard against runaway runs: iterations bounds root turns, sub-calls bounds total LLM spend per run, depth 2+ allows recursive child RLMs. Caps apply immediately; the rlm_process tool registers at startup, so enabling/disabling takes a restart. RLM adds no model roles of its own: the root runs on your Primary model and sub-calls run on Background (both set under Models → Model Roles).',
         fields: [
@@ -270,6 +280,7 @@ const SECTIONS = [
     },
     {
         title: 'MCP Servers',
+        tab: 'integrations',
         description: 'Model Context Protocol: plug external tool servers into the agent. Servers are configured in the Explorer → MCP tab (or data/mcp_servers.json, standard mcpServers format); each connected server\'s tools register as mcp_<server>_<tool> and go through the normal safety gate, scout curation, and health metrics. Enabling/disabling applies immediately — no restart. Turning it off kills local server processes but keeps the tool names visible; their calls return a clear "disabled" error.',
         fields: [
             { key: 'mcp_enabled', label: 'MCP Enabled', type: 'bool' },
@@ -287,6 +298,7 @@ const SECTIONS = [
     },
     {
         title: 'Dream (Introspection)',
+        tab: 'autonomy',
         description: 'Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems, generates typed hypotheses about itself (contradictions, stale lessons, tool patterns), validates them against recorded outcomes, and writes a periodic dream report to workspace/dreams/. Hypotheses influence nothing until validated; replays/day bounds the counterfactual scout-replay spend (0 disables replay). All settings apply immediately.',
         fields: [
             { key: 'dream_enabled', label: 'Dreaming Enabled', type: 'bool' },
@@ -300,6 +312,7 @@ const SECTIONS = [
     },
     {
         title: 'Reflect',
+        tab: 'agent',
         description: 'Post-task verification re-reads the agent\'s work and checks for mistakes or incomplete steps. If issues are found, the agent retries automatically. Min messages prevents reflect from firing on trivial exchanges. Deferred grading keeps interactive turns off the critical path: the grade runs in the background after a quiet period and can record lessons, but never retries the turn.',
         fields: [
             { key: 'reflect_enabled', label: 'Post-Task Verification', type: 'bool' },
@@ -324,6 +337,7 @@ const SECTIONS = [
     },
     {
         title: 'Evaluation',
+        tab: 'agent',
         description: 'Feature-level QA against acceptance criteria in the feature registry (data/registry.json). When auto-evaluate is enabled, runs after each task to score registered features. Browser screenshots provide visual verification evidence.',
         fields: [
             { key: 'eval_auto', label: 'Auto-Evaluate', type: 'bool' },
@@ -334,6 +348,7 @@ const SECTIONS = [
     },
     {
         title: 'Orchestration',
+        tab: 'agent',
         description: 'Controls for multi-worker task decomposition. Max workers limits parallel sub-agents. Stall threshold detects stuck workers. Plan review timeout is how long you have to approve a generated plan before it auto-proceeds.',
         fields: [
             { key: 'max_concurrent_workers', label: 'Max Workers', type: 'number' },
@@ -342,6 +357,7 @@ const SECTIONS = [
     },
     {
         title: 'Autonomy',
+        tab: 'autonomy',
         term: 'Internal names: gates, goals, heartbeats, session kernel.',
         description: 'Long-running autonomous task substrate. Gates: deterministic shell checks Reflect cannot overrule. Goals: persistent objectives with budgets and auto-continuations. Heartbeats: recurring instructions steered into running work. Session kernel: a persistent per-session Python REPL whose variables survive turns and restarts.',
         fields: [
@@ -353,6 +369,7 @@ const SECTIONS = [
     },
     {
         title: 'Canary Suite',
+        tab: 'autonomy',
         description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline. Change-driven: canaries run when something they cover changes (an adaptive batch, a skill edit, a model swap, a deploy), plus a small nightly heartbeat that keeps history warm. The Adaptive Layer\'s tripwire reads the post-batch results per task. Canary sessions are isolated and tool-allowlisted: computation and reads only.',
         fields: [
             { key: 'canary_enabled', label: 'Canary Suite Enabled', type: 'bool', restart: RESTART_TOOLS },
@@ -404,6 +421,7 @@ const SECTIONS = [
     },
     {
         title: 'Adaptive Layer',
+        tab: 'autonomy',
         description: 'Governed machine-editable policy: routing hints and prompt notes the agent may auto-apply at idle (with full history and one-click rollback), and policies/worker specs that always wait for your approval. The canary tripwire flags any batch that makes the agent measurably worse. Run the canary suite for at least a week before enabling auto-apply.',
         fields: [
             { key: 'adaptive_enabled', label: 'Adaptive Layer Enabled', type: 'bool', risk: 'autonomy' },
@@ -454,6 +472,7 @@ const SECTIONS = [
     },
     {
         title: 'Goals (Telos)',
+        tab: 'autonomy',
         term: 'Internal name: Telos \u2014 the teleological layer. Settings keys are telos_*.',
         description: 'The operational question loop (carved down in v3.1): turn anomalies the rest of the system cannot explain mint questions, the SOUP generates falsifiable hypotheses at idle, supported claims can become scout routing hints, and a weekly entropy control keeps exploration from going stale. State lives in data/telos/ as markdown. Enabling the agent tools needs a restart; everything else applies immediately.',
         fields: [
@@ -466,6 +485,7 @@ const SECTIONS = [
     },
     {
         title: 'Backups',
+        tab: 'environment',
         description: 'The 24-hour maintenance tier writes a timestamped snapshot of the session database (SQLite VACUUM INTO, so it is consistent without stopping writes) plus a copy of the memory corpus into data/backups. Rotation is per-artifact — database snapshots and memory corpora rotate independently — so a restore always finds a matching pair. Snapshots are roughly the size of your live database, so the count is a disk-space decision.',
         fields: [
             {
@@ -480,6 +500,7 @@ const SECTIONS = [
     },
     {
         title: 'Notifications (webhooks)',
+        tab: 'integrations',
         term: 'Internal name: webhook notifications. Settings keys are notify_webhook_*.',
         description: 'Pernix POSTs a JSON body to this URL whenever the agent calls ask_user and needs a human — the escape hatch for long autonomous runs you are not watching in the browser. Pair it with ntfy, Pushover, Slack, Discord or a home-automation hook. Leave the URL empty to disable.',
         fields: [
@@ -2422,56 +2443,108 @@ function buildSearchBar() {
     return el('div', { class: 'settings-search' }, [input, count]);
 }
 
+// One "General" tab held twenty-one sections; four specialist tabs held the
+// rest. Finding a setting meant knowing which subsystem owned it, then
+// scrolling past every other subsystem to reach it. The tabs below group by
+// what someone came to DO. Every field still appears exactly once — the
+// grouping is a `tab` key on each section, so a field cannot be listed twice
+// or dropped by an edit to one list. (S6)
+const SETTINGS_TABS = [
+    { key: 'providers',    label: 'Providers & models' },
+    { key: 'agent',        label: 'Agent behaviour' },
+    { key: 'autonomy',     label: 'Autonomy & idle work' },
+    { key: 'tools',        label: 'Tools & safety' },
+    { key: 'integrations', label: 'Integrations' },
+    { key: 'environment',  label: 'Environment & network' },
+];
+
+// Deep links from elsewhere in the app (openSettings({tab:'security'}) in
+// file-panel.js, anything a bookmark or a doc still names) keep working.
+const SETTINGS_TAB_ALIASES = {
+    general: 'providers',
+    models: 'providers',
+    network: 'environment',
+    security: 'tools',
+};
+
+function _resolveSettingsTab(key) {
+    if (!key) return null;
+    if (SETTINGS_TABS.some(t => t.key === key)) return key;
+    return SETTINGS_TAB_ALIASES[key] || null;
+}
+
+// Activate a tab by key, alias included. Safe to call before or after the
+// modal is in the document.
+function _activateSettingsTab(key) {
+    const resolved = _resolveSettingsTab(key);
+    if (!resolved) return false;
+    const btn = _overlay?.querySelector(`.tab-btn[data-tab="${resolved}"]`);
+    if (!btn) return false;
+    btn.click();
+    return true;
+}
+
+function _buildSettingsSection(section, settings) {
+    const fields = section.fields.map(f => buildField(f, settings[f.key]));
+    const heading = [text(section.title)];
+    if (section.description) heading.push(buildHelpIcon(section.description));
+    return el('div', { class: 'settings-section' }, [
+        // `term` carries the internal name of a section the UI renamed for
+        // humans, so searching for "Telos" or "Candor" still lands. (N9)
+        el('h3', section.term ? { title: section.term } : {}, heading),
+        ...(section.description ? [buildSectionDesc(section.description)] : []),
+        ...fields,
+    ]);
+}
+
 function buildTabs(settings) {
-    // Tab buttons
-    const generalTab = el('button', { class: 'tab-btn active', 'data-tab': 'general' }, [text('General')]);
-    const modelsTab = el('button', { class: 'tab-btn', 'data-tab': 'models' }, [text('Models')]);
-    const envTab = el('button', { class: 'tab-btn', 'data-tab': 'environment' }, [text('Environment')]);
-    const networkTab = el('button', { class: 'tab-btn', 'data-tab': 'network' }, [text('Network')]);
-    const securityTab = el('button', { class: 'tab-btn', 'data-tab': 'security' }, [text('Security')]);
-    const tabBar = el('div', { class: 'tab-bar' }, [generalTab, modelsTab, envTab, networkTab, securityTab]);
+    const sectionsFor = key => SECTIONS.filter(s => s.tab === key).map(s => _buildSettingsSection(s, settings));
 
-    // General tab content
-    const generalSections = SECTIONS.map(section => {
-        const fields = section.fields.map(f => buildField(f, settings[f.key]));
-        const heading = [text(section.title)];
-        if (section.description) heading.push(buildHelpIcon(section.description));
-        return el('div', { class: 'settings-section' }, [
-            // `term` carries the internal name of a section the UI renamed for
-            // humans, so searching for "Telos" or "Candor" still lands. (N9)
-            el('h3', section.term ? { title: section.term } : {}, heading),
-            ...(section.description ? [buildSectionDesc(section.description)] : []),
-            ...fields,
-        ]);
-    });
-    generalSections.push(buildAppearanceSection());
-    generalSections.push(buildNotificationsSection());
-    generalSections.push(buildSessionCleanupSection());
-    const generalContent = el('div', { class: 'tab-content active', 'data-tab': 'general' }, generalSections);
-
-    // Models tab content
-    const modelsContent = el('div', { class: 'tab-content', 'data-tab': 'models' }, [buildModelsTab()]);
-
-    // Environment tab content
-    const envContent = el('div', { class: 'tab-content', 'data-tab': 'environment' }, [buildEnvTab(settings)]);
-
-    // Network tab content
-    const networkContent = el('div', { class: 'tab-content', 'data-tab': 'network' }, [buildNetworkTab(settings)]);
-
-    // Security tab content — async build, render placeholder then swap in
-    const securityPlaceholder = el('div', { class: 'tab-content', 'data-tab': 'security' }, [
-        el('div', { style: 'padding:var(--sp-4); color:var(--text-faint); font-size:var(--text-sm);' }, [text('Loading…')]),
+    // The Security content is built async; it lands in Tools & safety, which
+    // is where the rest of the sandbox lives.
+    const securityHost = el('div', {}, [
+        el('div', { class: 'settings-tab-loading' }, [text('Loading\u2026')]),
     ]);
     buildSecurityTab(settings).then(content => {
-        clear(securityPlaceholder);
-        securityPlaceholder.appendChild(content);
+        clear(securityHost);
+        securityHost.appendChild(content);
         // The tab arrives after the user may already be searching.
         if (_searchQuery) _applySettingsFilter(_searchQuery);
     });
 
-    // Tab switching
-    const tabs = [generalTab, modelsTab, envTab, networkTab, securityTab];
-    const contents = [generalContent, modelsContent, envContent, networkContent, securityPlaceholder];
+    const bodies = {
+        // Appearance leads: it is the one setting a first-time user wants and
+        // the only one that changes nothing about the agent.
+        providers: [buildAppearanceSection(), buildModelsTab(), ...sectionsFor('providers')],
+        agent: sectionsFor('agent'),
+        autonomy: sectionsFor('autonomy'),
+        tools: [...sectionsFor('tools'), securityHost],
+        integrations: [buildNotificationsSection(), ...sectionsFor('integrations')],
+        environment: [
+            buildEnvTab(settings),
+            buildNetworkTab(settings),
+            ...sectionsFor('environment'),
+            buildSessionCleanupSection(),
+        ],
+    };
+
+    const tabs = [];
+    const contents = [];
+    SETTINGS_TABS.forEach((t, i) => {
+        const first = i === 0;
+        tabs.push(el('button', {
+            class: `tab-btn${first ? ' active' : ''}`,
+            'data-tab': t.key,
+            type: 'button',
+        }, [text(t.label)]));
+        contents.push(el('div', {
+            class: `tab-content${first ? ' active' : ''}`,
+            'data-tab': t.key,
+        }, bodies[t.key]));
+    });
+
+    const tabBar = el('div', { class: 'tab-bar settings-tab-bar' }, tabs);
+
     tabs.forEach((tab, i) => {
         tab.addEventListener('click', () => {
             tabs.forEach(t => t.classList.remove('active'));
@@ -2537,10 +2610,7 @@ function _openLoadFailure(message, opts) {
 export async function openSettings(opts = {}) {
     if (_overlay) {
         // Already open — just switch to the requested tab if specified
-        if (opts.tab) {
-            const btn = _overlay.querySelector(`.tab-btn[data-tab="${opts.tab}"]`);
-            if (btn) btn.click();
-        }
+        if (opts.tab) _activateSettingsTab(opts.tab);
         return;
     }
 
@@ -2575,7 +2645,7 @@ export async function openSettings(opts = {}) {
     const { tabBar, contents } = buildTabs(settings);
     const statusEl = el('span', { class: 'save-status', role: 'status' });
 
-    const card = el('div', { class: 'modal-card' }, [
+    const card = el('div', { class: 'modal-card settings-card' }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text('Settings')]),
             el('button', {
@@ -2732,10 +2802,7 @@ export async function openSettings(opts = {}) {
     _closeOverlay = openOverlay(card, { onClose: _onEsc });
 
     // If a specific tab was requested, activate it now that the DOM is live.
-    if (opts.tab) {
-        const btn = _overlay.querySelector(`.tab-btn[data-tab="${opts.tab}"]`);
-        if (btn) btn.click();
-    }
+    if (opts.tab) _activateSettingsTab(opts.tab);
 
     // Wire network section visibility toggles (must be after DOM append)
     _wireNetworkSection();
