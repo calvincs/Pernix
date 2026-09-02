@@ -135,7 +135,7 @@ For mobile without browser certificate warnings (and for Web Push notifications 
 
 ### Does the UI work properly on a phone or a tablet?
 
-Yes, and it is not the desktop layout shrunk. Below 900px the sidebar becomes a drawer (swipe from the left edge or tap the hamburger), the Explorer and the modals become full-screen sheets, and each session row carries one `⋯` menu instead of hover-revealed icons. A tablet in landscape is treated as a big screen with a finger on it: the sidebar stays docked and the Explorer sits beside the conversation, at touch sizes.
+Yes, and it is not the desktop layout shrunk. Below 900px the sidebar becomes a drawer (swipe from the left edge or tap the hamburger), the Explorer and the modals become full-screen sheets, and each session row carries one `⋯` menu instead of hover-revealed icons. A tablet in landscape is treated as a big screen with a finger on it: the sidebar stays docked and the Explorer sits beside the conversation, at touch sizes. Dragging the sidebar's edge to resize it is a desktop affordance only — a phone and a tablet keep their own sidebar sizes.
 
 On touch, Enter adds a new line and the send button sends — the opposite of the desktop default, because Enter is the on-screen keyboard's newline key. **Ctrl+Enter / Cmd+Enter always sends**, which is the answer for a tablet with a keyboard attached, and you can flip the default under Settings → Providers & models → *This browser* → "Enter sends the message". That preference is stored in the browser you set it in and is not synced.
 
