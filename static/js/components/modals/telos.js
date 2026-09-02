@@ -95,8 +95,12 @@ export async function renderTelosTab(container) {
     ));
 
     const resultSlot = el('div');
+    // Chips first, then buttons. The row wraps on a narrow panel (E2), and a
+    // wrapped row that alternates chip / button / chip / button leaves a
+    // status badge stranded on a line of its own below the controls.
     const head = el('div', { class: 'adaptive-head' }, [
         badge(overview.enabled ? 'enabled' : 'disabled', overview.enabled ? 'ok' : 'off'),
+        ...(overview.enabled ? [badge(`slow loops ${overview.schedule}`)] : []),
         el('button', {
             class: 'adaptive-btn',
             title: 'Reload the Telos state',
@@ -105,7 +109,6 @@ export async function renderTelosTab(container) {
         }, [icon('refresh', { size: 12 }), text('Refresh')]),
     ]);
     if (overview.enabled) {
-        head.appendChild(badge(`slow loops ${overview.schedule}`));
         const runBtn = el('button', {
             class: 'adaptive-btn',
             title: 'Run the slow loops now instead of waiting for the schedule',
