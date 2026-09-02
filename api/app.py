@@ -577,6 +577,7 @@ from api.routers import (
     sessions,
     skills,
     spaces,
+    storage,
     telos,
     tools,
     voice,
@@ -602,6 +603,7 @@ app.include_router(rlm.router)
 app.include_router(telos.router)
 app.include_router(voice.router)
 app.include_router(mcp.router)
+app.include_router(storage.router)
 
 
 @app.get("/")
