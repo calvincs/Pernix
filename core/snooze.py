@@ -405,12 +405,40 @@ class SnoozeRunner:
             self._running = False
             self._stats["cycles"] += 1
             self._stats["last_cycle"] = datetime.now(timezone.utc).isoformat()
-            self._activity_since_last_cycle = False
+            # Only clear on a cycle that actually ran to an end. A cycle that
+            # YIELDED was preempted by a user prompt, and the prompt sets this
+            # flag on its way in — clobbering it here made the interrupted
+            # rung wait out the 15-minute cadence gate instead of resuming at
+            # the next slot, while the log claimed it would resume.
+            if outcome != "yielded":
+                self._activity_since_last_cycle = False
             self._last_cycle_time = time.time()
             duration_ms = int((time.time() - _start) * 1000)
             bus.emit({"type": "snooze.done", "duration_ms": duration_ms, "outcome": outcome, "stats": {**self._stats}})
             logger.info("Snooze cycle complete (outcome=%s, stats: %s)", outcome, self._stats)
         return outcome
+
+    async def _rung(self, label: str, coro, *, default=None):
+        """Await one ladder activity, containing its failure to itself.
+
+        _do_cycle is a long sequence of awaits with no guard between them, so
+        an exception in an early rung — a permissions error on one RLM run
+        dir, a corrupt FTS row, one hand-created memory file with a space in
+        its name — ended the whole coroutine. Everything after it (refine,
+        skill auto-apply, dream, telos, adaptive) was then skipped on EVERY
+        cycle for as long as the fault persisted, and the only sign was a
+        single "Snooze cycle error" line.
+        """
+        try:
+            return await coro
+        except asyncio.CancelledError:
+            coro_close = getattr(coro, "close", None)
+            if coro_close:
+                coro_close()
+            raise
+        except Exception as e:
+            logger.error("Snooze activity %r failed (cycle continues): %s", label, e, exc_info=True)
+            return default
 
     async def _do_cycle(self) -> None:
         """Execute activities in priority order."""
@@ -425,12 +453,12 @@ class SnoozeRunner:
         # Activity 1: Catch-up distillation (max 1 LLM call)
         if not self._is_cancelled() and not did_llm and self._llm_ready():
             _announce(bus, "distill", "Catching up on un-reviewed sessions")
-            did_llm = await self._catchup_distill()
+            did_llm = await self._rung("catchup_distill", self._catchup_distill(), default=False)
 
         # Activity 2: User insight extraction (LLM, if distill didn't use it)
         if not self._is_cancelled() and not did_llm and self._llm_ready():
             _announce(bus, "user_insights", "Extracting user profile insights from conversations")
-            did_llm = await self._extract_user_insights()
+            did_llm = await self._rung("extract_user_insights", self._extract_user_insights(), default=False)
 
         # Activity 2c: Skill requirements install (no LLM). Hash-triggered:
         # a skill whose requirements.txt changed since the last successful
@@ -439,68 +467,71 @@ class SnoozeRunner:
         # skill per cycle to keep cycles short.
         if not self._is_cancelled():
             _announce(bus, "skill_requirements", "Installing changed skill requirements into workspace venv")
-            await self._install_skill_requirements()
+            await self._rung("install_skill_requirements", self._install_skill_requirements())
 
         # Activity 3: Dedup sweep (no LLM)
         if not self._is_cancelled():
             _announce(bus, "dedup", "Checking for duplicate memory entries")
-            await self._dedup_sweep()
+            await self._rung("dedup_sweep", self._dedup_sweep())
 
         # Activity 3b: Cross-file consolidation (trivial=no LLM, ambiguous=LLM)
         if not self._is_cancelled():
             _announce(bus, "consolidate", "Consolidating overlapping memory files")
-            did_llm = await self._consolidate_files(did_llm) or did_llm
+            did_llm = await self._rung("consolidate_files", self._consolidate_files(did_llm), default=False) or did_llm
 
         # Activity 3c: Entry re-routing (fix entries in the wrong file)
         if not self._is_cancelled():
             _announce(bus, "reroute", "Re-routing misplaced memory entries to correct files")
-            did_llm = await self._reroute_misplaced_entries(did_llm) or did_llm
+            did_llm = (
+                await self._rung("reroute_misplaced_entries", self._reroute_misplaced_entries(did_llm), default=False)
+                or did_llm
+            )
 
         # Activity 4: Tag enrichment (no LLM)
         if not self._is_cancelled():
             _announce(bus, "enrich_tags", "Enriching memory entry tags")
-            await self._enrich_tags()
+            await self._rung("enrich_tags", self._enrich_tags())
 
         # Activity 5: Index reconciliation (no LLM)
         if not self._is_cancelled():
             _announce(bus, "reconcile", "Reconciling memory index")
-            await self._reconcile_index()
+            await self._rung("reconcile_index", self._reconcile_index())
 
         # Activity 6: File splitting (LLM, maintenance budget — independent of did_llm)
         if not self._is_cancelled() and not did_maintenance_llm and self._llm_ready():
             _announce(bus, "split", "Splitting large memory files")
-            did_maintenance_llm = await self._split_file()
+            did_maintenance_llm = await self._rung("split_file", self._split_file(), default=False)
 
         # Activity 7: Cron cleanup (no LLM)
         if not self._is_cancelled():
-            await self._cleanup_cron(bus)
+            await self._rung("cleanup_cron", self._cleanup_cron(bus))
 
         # Activity 8: Staleness pruning (LLM, maintenance budget — runs even when distill used LLM)
         if not self._is_cancelled() and not did_maintenance_llm and self._llm_ready():
             _announce(bus, "stale_prune", "Pruning stale low-recall memory entries")
-            await self._prune_stale_entries()
+            await self._rung("prune_stale_entries", self._prune_stale_entries())
 
         # Activity 9: Skill cooccurrence update (no LLM)
         if not self._is_cancelled():
             _announce(bus, "skill_cooccurrence", "Updating skill co-occurrence map from memory")
-            await self._update_skill_cooccurrence()
+            await self._rung("update_skill_cooccurrence", self._update_skill_cooccurrence())
 
         # Activity 10: Synthesize post-mortems into tool/skill performance counters (no LLM)
         if not self._is_cancelled():
             _announce(bus, "synthesize_signals", "Synthesizing post-mortems into scout signals")
-            await self._synthesize_signals()
+            await self._rung("synthesize_signals", self._synthesize_signals())
 
         # Activity 11: Post-mortem TTL cleanup (no LLM)
         if not self._is_cancelled():
             _announce(bus, "cleanup_post_mortems", "Pruning old synthesized post-mortems")
-            await self._cleanup_post_mortems()
+            await self._rung("cleanup_post_mortems", self._cleanup_post_mortems())
 
         # Activity 12a: RLM run directory cleanup (no LLM). Age-based only —
         # runs are one-shot transient work products ("extract and discard"),
         # so there is no keep-N-per-name window.
         if not self._is_cancelled():
             _announce(bus, "cleanup_rlm_runs", "Pruning old RLM run directories")
-            await self._cleanup_rlm_runs()
+            await self._rung("cleanup_rlm_runs", self._cleanup_rlm_runs())
 
         # Activity 12b: Candor operational-memory maintenance (no LLM).
         # Runs the admission gate (the expensive sweep — this is its only
@@ -509,7 +540,7 @@ class SnoozeRunner:
         # cancellation is polled between phases and drain chunks.
         if not self._is_cancelled() and settings.candor_enabled:
             _announce(bus, "candor_gate", "Sweeping Candor operational memory (gate + buffer drain)")
-            await self._candor_maintenance()
+            await self._rung("candor_maintenance", self._candor_maintenance())
 
         # Activity 12c: Canary retention cleanup (no LLM). Prunes canary_runs
         # rows and the canary sessions behind them past canary_retention_days.
@@ -518,7 +549,7 @@ class SnoozeRunner:
         # snooze activity would cancel the cycle that produced the batch).
         if not self._is_cancelled() and settings.canary_enabled:
             _announce(bus, "cleanup_canary_runs", "Pruning old canary runs and sessions")
-            await self._cleanup_canary_runs()
+            await self._rung("cleanup_canary_runs", self._cleanup_canary_runs())
 
         # Activity 12d: Canary suite auto-maintenance (no LLM). Promotes
         # vetted auto-admitted canaries, tags flapping ones flaky, retires
@@ -527,7 +558,7 @@ class SnoozeRunner:
         # auto-mutated.
         if not self._is_cancelled() and settings.canary_enabled and settings.canary_auto_maintain:
             _announce(bus, "canary_maintain", "Maintaining the canary suite (promote/flaky/retire/purge)")
-            await self._canary_maintain()
+            await self._rung("canary_maintain", self._canary_maintain())
 
         # Activity 13: Refine pass — the single session-improvement rung.
         # Runs independent of did_llm: refine has its own budget, bounded to
@@ -535,7 +566,7 @@ class SnoozeRunner:
         # a session that grows past its watermark re-arms).
         if not self._is_cancelled() and self._llm_ready():
             _announce(bus, "refine", "Crystallizing skill/memory updates from an idle session")
-            await self._refine_one_session()
+            await self._rung("refine_one_session", self._refine_one_session())
 
         # Activity 13b: Skill proposal veto-window auto-apply (no LLM).
         # Pending SKILL.md proposals older than the veto window are
@@ -543,7 +574,7 @@ class SnoozeRunner:
         # skill-file counterpart of adaptive's auto_approve_stale_proposals.
         if not self._is_cancelled() and settings.skill_proposal_auto_apply_after_hours > 0:
             _announce(bus, "skill_auto_apply", "Applying skill proposals past the veto window")
-            await self._auto_apply_skill_proposals()
+            await self._rung("auto_apply_skill_proposals", self._auto_apply_skill_proposals())
 
         # Activity 13c: Skill content-change sweep (no LLM). When a skill's
         # SKILL.md/scripts change (proposal apply, agent edit, human edit),
@@ -552,7 +583,7 @@ class SnoozeRunner:
         # re-judged against the new reality instead of lingering.
         if not self._is_cancelled():
             _announce(bus, "skill_change_sweep", "Checking skills for content changes")
-            await self._sweep_skill_content_changes()
+            await self._rung("sweep_skill_content_changes", self._sweep_skill_content_changes())
 
         # Activity 14: Dream step — idle-time introspection (core/dream).
         # Runs independent of did_llm like refine: one bounded unit per cycle
@@ -568,7 +599,7 @@ class SnoozeRunner:
             # lines. A journal where every line carries content is the
             # feature; the cadence marker was noise.
             _announce(bus, "dream", "Dreaming: examining memory and outcome evidence for hypotheses")
-            await self._dream_step()
+            await self._rung("dream_step", self._dream_step())
 
         # Activity 14b: Distillation coverage audit — the feedback loop on
         # the memory lens itself (core/memory/audit.py). One sampled session
@@ -577,7 +608,7 @@ class SnoozeRunner:
         # did_llm.
         if not self._is_cancelled() and settings.distill_audit_enabled and self._llm_ready():
             _announce(bus, "distill_audit", "Auditing distillation coverage against a raw transcript")
-            await self._distill_audit()
+            await self._rung("distill_audit", self._distill_audit())
 
         # Activity 16 (runs before 15's store work so its LLM call sits in
         # the same cancellation window as dream's): TELOS fast loop — one
@@ -586,7 +617,7 @@ class SnoozeRunner:
         # 15% serendipity). Gated on telos_enabled — fully absent when off.
         if not self._is_cancelled() and settings.telos_enabled and self._llm_ready():
             _announce(bus, "telos", "TELOS: generating or evaluating hypotheses for open questions")
-            await self._telos_step()
+            await self._rung("telos_step", self._telos_step())
 
         # Activity 15: Adaptive layer — drain pending auto-applies, enqueue
         # post-batch canary sweeps, evaluate the tripwire (plan §6c). Runs
@@ -595,7 +626,7 @@ class SnoozeRunner:
         # No LLM — pure store work.
         if not self._is_cancelled() and settings.adaptive_enabled:
             _announce(bus, "adaptive_apply", "Applying pending adaptive edits and evaluating the tripwire")
-            await self._adaptive_step()
+            await self._rung("adaptive_step", self._adaptive_step())
 
         # Activity 17: fallback-burn watch — pure store read + at most one
         # notification/day. Encodes the 2026-08-19 silent-reroute incident
@@ -604,7 +635,7 @@ class SnoozeRunner:
         # routing. Gated inside check_fallback_burn (share=0 or no
         # fallback_model configured → no-op).
         if not self._is_cancelled():
-            await self._fallback_burn_check()
+            await self._rung("fallback_burn_check", self._fallback_burn_check())
 
     # ------------------------------------------------------------------
     # Activity 1: Catch-up distillation
@@ -1322,7 +1353,11 @@ Output valid JSON only. No markdown fences. /no_think"""
         if bus:
             _announce(bus, "cron_cleanup", "Pruning old cron runs and sessions")
 
-        counts = retention.prune_cron()
+        # Off-loop: prune_cron cascade-deletes every doomed cron session
+        # (each one an FTS delete plus a message cascade) and then walks
+        # session_state_log. A week of aged-out sessions froze every SSE
+        # stream for seconds when this ran inline.
+        counts = await asyncio.to_thread(retention.prune_cron)
         if any(counts.values()):
             logger.info(
                 "Snooze cron cleanup: %d runs pruned, %d sessions pruned, %d state_log rows pruned",
@@ -1341,7 +1376,7 @@ Output valid JSON only. No markdown fences. /no_think"""
         notifications past theirs (the bell is a surface, not an archive)."""
         from core import retention
 
-        self._bump("post_mortems_pruned", retention.prune_post_mortems())
+        self._bump("post_mortems_pruned", await asyncio.to_thread(retention.prune_post_mortems))
         self._bump("notifications_pruned", await asyncio.to_thread(retention.prune_notifications))
 
     async def _cleanup_canary_runs(self) -> None:
