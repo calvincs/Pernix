@@ -187,6 +187,12 @@ _SETTING_BOUNDS = {
     "rlm_max_concurrent_subcalls": (1, 8),
     "rlm_timeout_seconds": (60, 3600),
     "rlm_run_retention_days": (1, 365),
+    # Archive horizons. 0 is a real setting on both — "never auto-archive"
+    # and "never delete the archive" — so the floor is 0 rather than 1, and
+    # the ceiling is a decade because an archive is meant to outlive the
+    # sweep that fills it.
+    "session_archive_idle_days": (0, 3650),
+    "session_delete_archived_days": (0, 3650),
     # Session kernel. kernel_idle_seconds must stay under the 1800s session
     # reap in practice, but the hard ceiling is a day; below 60s the kernel
     # would be reaped between tool rounds and never persist anything.

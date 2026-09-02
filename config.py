@@ -654,6 +654,16 @@ class Settings:
 
     # --- Storage ---
     max_fetch_size: int = 100_000
+    # Archive, not delete. A chat idle this long leaves the sidebar and its
+    # space group; every message stays, it stays searchable, and it opens
+    # read-only with a Restore button. Pinned chats are exempt. 0 = never
+    # auto-archive (the archive is then a manual filing cabinet, which is
+    # still the point — deleting was the only way to clear the list before).
+    session_archive_idle_days: int = 30
+    # Hard-delete sessions that have been archived this long. Off by
+    # default, and deliberately: the archive is what "not delete" means, so
+    # a horizon on it is the user opting back in to losing transcripts.
+    session_delete_archived_days: int = 0
 
     # --- Backups (maintenance.py 24h tier; scripts/backup.py on demand) ---
     # How many timestamped snapshots to keep in data/backups. Rotation is
