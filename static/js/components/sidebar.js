@@ -498,7 +498,9 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
                     _lastJson = '';
                     window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
                     if (r.session_id) _select(r.session_id);
-                } catch { /* stay put on failure */ }
+                } catch (err) {
+                    notify('error', `Could not start a session in “${space.label}” — ${_reason(err)}.`);
+                }
             },
         }, [text('+')]),
         el('button', {
@@ -718,13 +720,19 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
             'aria-pressed': String(!!session.pinned),
             onClick: async (e) => {
                 e.stopPropagation();
+                const was = session.pinned;
                 const next = !session.pinned;
+                // Optimistic: a pin that waits on a round trip before the row
+                // moves reads as a click that did not register.
+                session.pinned = next ? 1 : 0;
+                _repaint();
                 try {
                     await patch(`/api/sessions/${session.id}`, { pinned: next });
-                    session.pinned = next ? 1 : 0;
-                    _lastJson = '';  // force re-render with new grouping
-                    window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
-                } catch { /* leave as-is on failure */ }
+                } catch (err) {
+                    session.pinned = was;
+                    _repaint();
+                    notify('error', `Could not ${next ? 'pin' : 'unpin'} “${titleText}” — ${_reason(err)}.`);
+                }
             },
         }, [text('⚲')]));
 
@@ -899,7 +907,9 @@ function _deleteWithUndo(sessionId, titleText) {
         // hovering must not keep offering an Undo that no longer exists.
         dismiss();
         Promise.resolve(_onDelete ? _onDelete(sessionId) : null)
-            .catch(() => { /* app.js reports its own failures */ })
+            .catch((err) => {
+                notify('error', `Could not delete “${titleText}” — ${_reason(err)}.`);
+            })
             .finally(() => {
                 // Whatever happened, stop hiding it: either the server no
                 // longer has it, or the delete failed and it is still there.
@@ -912,6 +922,16 @@ function _deleteWithUndo(sessionId, titleText) {
 function _repaint() {
     _lastJson = '';
     window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
+}
+
+// Every one of these used to be `catch { /* leave as-is */ }`: the pin did
+// not move, the rename did not stick, the session did not change space, and
+// nothing anywhere said why. api.js gives us either an OfflineError or the
+// server's own detail string.
+function _reason(err) {
+    if (err && err.offline) return 'you are offline';
+    const msg = err && (err.message || err.detail);
+    return msg ? String(msg) : 'the server did not say why';
 }
 
 // ---------------------------------------------------------------------------
@@ -928,7 +948,10 @@ function _openMoveMenu(session, anchor) {
             await patch(`/api/sessions/${session.id}`, { space_id: spaceId });
             _lastJson = '';
             window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
-        } catch { /* leave membership as-is on failure */ }
+        } catch (err) {
+            const to = spaceId ? (spaceById(spaceId)?.label || 'that space') : 'no space';
+            notify('error', `Could not move “${session.title || 'this session'}” to ${to} — ${_reason(err)}.`);
+        }
     };
     for (const sp of _spaces) {
         menu.appendChild(el('div', {
@@ -983,13 +1006,21 @@ function _startRename(session) {
         finished = true;
         const newTitle = input.value.trim();
         if (save && newTitle && newTitle !== session.title) {
+            const was = session.title;
+            // Optimistic, then put the old name back if the save failed —
+            // silently keeping the old title looked identical to the rename
+            // never having been typed.
+            session.title = newTitle;
+            _repaint();
             try {
                 const res = await patch(`/api/sessions/${session.id}`, { title: newTitle });
                 session.title = res.title || newTitle;
-            } catch { /* keep old title */ }
+            } catch (err) {
+                session.title = was;
+                notify('error', `Could not rename to “${newTitle}” — ${_reason(err)}.`);
+            }
         }
-        _lastJson = '';
-        window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
+        _repaint();
     };
 
     input.addEventListener('keydown', (e) => {
