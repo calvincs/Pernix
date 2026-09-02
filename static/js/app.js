@@ -4942,6 +4942,14 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
 // Copy buttons for code blocks
 // ---------------------------------------------------------------------------
 
+// The copy button used to float over the top-right corner of the <pre>, which
+// is fine while it only appears on hover and fatal once it does not: on touch
+// it is always visible and 44px wide, so it sat on the first line of every
+// code block ("list[En" was as much as a phone could read). It moves into a
+// head strip above the code, with the fence's language beside it — the shape
+// every code block on the web has. The desktop keeps the floating button
+// exactly as it was: there the head is display:contents, so it contributes no
+// box at all and the button is still positioned against .code-block-wrap. (C2)
 function addCopyButtons(container) {
     const pres = container.querySelectorAll('pre');
     pres.forEach(pre => {
@@ -4949,9 +4957,10 @@ function addCopyButtons(container) {
         const wrap = document.createElement('div');
         wrap.className = 'code-block-wrap';
         pre.parentNode.insertBefore(wrap, pre);
-        wrap.appendChild(pre);
+
         const btn = document.createElement('button');
         btn.className = 'copy-btn';
+        btn.type = 'button';
         btn.textContent = 'copy';
         btn.addEventListener('click', () => {
             const code = pre.querySelector('code') || pre;
@@ -4960,7 +4969,24 @@ function addCopyButtons(container) {
                 setTimeout(() => { btn.textContent = 'copy'; }, 1500);
             });
         });
-        wrap.appendChild(btn);
+
+        // marked puts the fence's language on the <code> as language-*.
+        // An unfenced or unlabelled block just says what it is.
+        const codeEl = pre.querySelector('code');
+        const lang = (codeEl?.className || '').match(/language-([\w+#.-]+)/)?.[1] || 'code';
+        const langEl = document.createElement('span');
+        langEl.className = 'code-block-lang';
+        langEl.textContent = lang;
+
+        const head = document.createElement('div');
+        head.className = 'code-block-head';
+        head.appendChild(langEl);
+        head.appendChild(btn);
+
+        // Head before the <pre>: on touch that is the strip, and on the
+        // desktop an absolutely positioned button has no order to disturb.
+        wrap.appendChild(head);
+        wrap.appendChild(pre);
     });
 }
 

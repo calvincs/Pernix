@@ -1561,6 +1561,57 @@ body[data-compact] .worker-strip-summary:focus-visible > svg {
     border-color: var(--accent);
 }
 
+/* The head strip (C2). On a fine pointer it contributes NO box: display
+   contents takes it out of the layout entirely, so the copy button is still
+   laid out against .code-block-wrap and sits exactly where it always has, and
+   the language label is display:none — not merely invisible, so it stays out
+   of innerText and out of a copied transcript. */
+.code-block-head { display: contents; }
+.code-block-lang { display: none; }
+
+/* ---- TEMP (M2B): relocate to touch.css in M3 ------------------------------
+   Everything below is the touch shape: the button is always visible there
+   (touch.css) and 44px wide, so floating it over the corner covered the first
+   line of every block. It becomes a 36px strip above the code instead, and
+   the <pre> loses its top margin and its top corners so the two read as one
+   block. Nothing here can match under a mouse.                             */
+body[data-touch] .code-block-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    min-height: 36px;
+    margin-top: 0.75em;
+    padding: 0 var(--sp-2) 0 var(--sp-3);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: var(--radius) var(--radius) 0 0;
+}
+body[data-touch] .code-block-lang {
+    display: block;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    /* A language name is one word; a pasted class list is not. */
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+body[data-touch] .code-block-wrap .copy-btn {
+    position: static;
+    opacity: 1;
+}
+/* Spelt out this far because `.message.assistant .content pre` sets the
+   margin and the radius, and a shorter selector loses to it. */
+body[data-touch] .message .content .code-block-wrap > pre {
+    margin-top: 0;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+}
+/* ---- end TEMP (M2B) ---- */
+
 /* Legacy tool messages (kept for backward compat with loadMessages) */
 .message.tool .content {
     font-family: var(--mono);
