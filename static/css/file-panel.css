@@ -1246,8 +1246,8 @@ body.fp-resizing #main { pointer-events: none; }
     margin-top: var(--sp-1);
 }
 
-/* The mobile tab-desc touch targets moved to mobile.css — a bare
-   `max-width: 768px` cannot see an iPad. See the header of mobile.css. */
+/* The mobile tab-desc touch targets moved to touch.css — a bare
+   `max-width: 768px` cannot see an iPad. See the header of touch.css. */
 
 /* ── Run Dangerously mode banner (Explorer → Tools) ─────────── */
 .fp-danger-mode-banner {

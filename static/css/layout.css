@@ -596,7 +596,7 @@
 /* Session header — one quiet line naming the conversation you are in and the
    space it belongs to. The left padding clears the floating #sidebar-toggle
    above; on touch layouts mobile.js moves that button into the status bar and
-   mobile.css drops the clearance. */
+   touch.css drops the clearance. */
 #session-header {
     display: flex;
     align-items: center;
@@ -2698,11 +2698,12 @@
     :root { --sidebar-w: 220px; }
 }
 
-/* The touch overrides that used to live here moved to mobile.css. This copy of
+/* The touch overrides that used to live here moved to touch.css. This copy of
    `(max-width: 768px), (hover: none) and (pointer: coarse)` never matched on an
    iPad — iPadOS desktop-class browsing reports hover/fine and a width over
-   768px — and mobile.css is the only stylesheet whose gate JavaScript can
-   reach. See the header of mobile.css and touch-boot.js. */
+   768px — and touch.css is the only stylesheet whose gate JavaScript can
+   reach. The narrow-viewport half of those overrides lives in compact.css.
+   See the headers of both files and touch-boot.js. */
 
 
 /* ======================================================================
@@ -2881,7 +2882,7 @@
     user-select: text;
 }
 
-/* The meta row is the phone's handle for the chip (mobile.css folds it away).
+/* The meta row is the phone's handle for the chip (touch.css folds it away).
    On a fine pointer nothing is hidden, so it stays an ordinary label. */
 .role-label--toggle { cursor: default; }
 
@@ -3444,7 +3445,7 @@ mark.ts-mark.current {
    Toasts (feedback.js) — F3
    ----------------------------------------------------------------------
    One stacked region for every transient message in the app. Bottom-right
-   on desktop; mobile.css moves it above the composer. Tokens only.
+   on desktop; touch.css moves it above the composer. Tokens only.
    ====================================================================== */
 .toast-region {
     position: fixed;

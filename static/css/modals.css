@@ -299,7 +299,7 @@
    width (flex-shrink:0 + a 140px floor), which made long captions run out
    from under the label column and collide with the control. Inside the label
    cell the caption must be free to wrap instead. Specificity is deliberate:
-   mobile.css also targets `.setting-row label`. */
+   compact.css also targets `.setting-row label`. */
 .setting-row .setting-label-cell label {
     min-width: 0;
     flex-shrink: 1;

@@ -63,14 +63,21 @@
     <link rel="stylesheet" href="/static/css/modals.css">
     <link rel="stylesheet" href="/static/css/jobs.css">
     <link rel="stylesheet" href="/static/css/file-panel.css">
-    <!-- mobile.css carries its touch gate HERE, on the link, instead of in an
-         @media inside the file — because JavaScript has to be able to override
-         it. iPadOS defaults to desktop-class browsing in Safari and Chrome
-         alike (Chrome on iOS is WebKit), and in that mode the browser reports
+    <!-- Two tiers, two gates, on purpose. compact.css answers "is the viewport
+         narrower than 900px?" — a question every browser answers honestly, so
+         its gate is a plain width query and no JavaScript touches it.
+         touch.css answers "is the pointer a finger?", and THAT question a
+         browser will lie about: iPadOS defaults to desktop-class browsing in
+         Safari and Chrome alike (Chrome on iOS is WebKit), reporting
          `hover: hover`, `pointer: fine` and a layout width over 768px, so no
-         media query can see an iPad. touch-boot.js flips this to media="all"
-         when it finds one. -->
-    <link rel="stylesheet" href="/static/css/mobile.css"
+         media query can see an iPad. Its gate therefore lives HERE, on the
+         link, instead of in an @media inside the file — touch-boot.js flips
+         this one to media="all" when it finds an iPad. Never wrap touch.css's
+         contents in an @media; that is exactly what breaks the tablet.
+         touch.css loads last so it wins ties. -->
+    <link rel="stylesheet" href="/static/css/compact.css"
+          media="(max-width: 899px)">
+    <link rel="stylesheet" href="/static/css/touch.css"
           media="(max-width: 768px), (hover: none) and (pointer: coarse)">
     <!-- Must come after that link (it mutates it) and stay in <head> so the
          switch happens before first paint — no flash of the desktop layout.
