@@ -17,7 +17,7 @@ import {
 } from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
-import { initMobile, isCompact, isTouch, closeSidebar } from './mobile.js';
+import { initMobile, isCompact, isTouch, closeSidebar, syncDrawerInert } from './mobile.js';
 import { initVoice, stopVoice } from './voice.js';
 import { announce, openOverlay } from './a11y.js';
 import { setTheme, isLight } from './theme.js';
@@ -144,7 +144,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     // this is a layout question, not a pointer one: a docked sidebar on a
     // tablet collapses exactly as it does under a mouse.
     const syncSidebarInert = () => {
-        sidebar.toggleAttribute('inert', !isCompact() && sidebar.classList.contains('collapsed'));
+        // Two mechanisms, one attribute. Below 900px the sidebar is a drawer
+        // and mobile.js owns the rule (closed = inert); above it, "collapsed"
+        // is what makes it unreachable. Both run on the same resize, so this
+        // delegates rather than racing mobile.js to the last write.
+        if (isCompact()) { syncDrawerInert(); return; }
+        sidebar.toggleAttribute('inert', sidebar.classList.contains('collapsed'));
     };
     if (localStorage.getItem('pernix:sidebar-hidden') === '1') {
         sidebar.classList.add('collapsed');
