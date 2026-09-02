@@ -726,55 +726,6 @@
 .worker-chip-dot.rlm { background: var(--rlm); }
 .worker-chip.rlm-chip:hover { color: var(--rlm); border-color: var(--rlm); }
 
-/* ---- TEMP (M2B): relocate to compact.css in M3 ----------------------------
-   The compact strip is one 44px line, not three rows of 16px chips (P3).
-   app.js builds .worker-strip-summary instead of the chips below 900px, so
-   these rules have nothing to match above it; the body attribute is belt and
-   braces for the frame in which a tier flip is still being reconciled.
-   #worker-strip drops its own padding: the button carries the 44px, and 4px
-   of strip padding on top of it is what would push the line over the 48px
-   the phone can spare.                                                     */
-body[data-compact] #worker-strip {
-    padding: 0;
-    flex-wrap: nowrap;
-}
-body[data-compact] .worker-strip-summary {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    width: 100%;
-    min-height: 44px;
-    padding-left: max(var(--sp-3), var(--safe-left));
-    padding-right: max(var(--sp-3), var(--safe-right));
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-family: var(--mono);
-    font-size: var(--text-xs);
-    text-align: left;
-    cursor: pointer;
-}
-/* The counts get the room; the chevron never wraps off the end. */
-body[data-compact] .worker-strip-summary-label {
-    flex: 1;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-}
-body[data-compact] .worker-strip-summary > svg {
-    flex: none;
-    color: var(--text-faint);
-}
-body[data-compact] .worker-strip-summary:hover,
-body[data-compact] .worker-strip-summary:focus-visible {
-    color: var(--accent);
-}
-body[data-compact] .worker-strip-summary:hover > svg,
-body[data-compact] .worker-strip-summary:focus-visible > svg {
-    color: var(--accent);
-}
-/* ---- end TEMP (M2B) ---- */
-
 /* Upload progress bar inside a file chip */
 .file-chip-bar {
     position: absolute;
@@ -1568,49 +1519,6 @@ body[data-compact] .worker-strip-summary:focus-visible > svg {
    of innerText and out of a copied transcript. */
 .code-block-head { display: contents; }
 .code-block-lang { display: none; }
-
-/* ---- TEMP (M2B): relocate to touch.css in M3 ------------------------------
-   Everything below is the touch shape: the button is always visible there
-   (touch.css) and 44px wide, so floating it over the corner covered the first
-   line of every block. It becomes a 36px strip above the code instead, and
-   the <pre> loses its top margin and its top corners so the two read as one
-   block. Nothing here can match under a mouse.                             */
-body[data-touch] .code-block-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--sp-2);
-    min-height: 36px;
-    margin-top: 0.75em;
-    padding: 0 var(--sp-2) 0 var(--sp-3);
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-bottom: none;
-    border-radius: var(--radius) var(--radius) 0 0;
-}
-body[data-touch] .code-block-lang {
-    display: block;
-    font-family: var(--mono);
-    font-size: var(--text-xxs);
-    color: var(--text-faint);
-    letter-spacing: 0.04em;
-    /* A language name is one word; a pasted class list is not. */
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-}
-body[data-touch] .code-block-wrap .copy-btn {
-    position: static;
-    opacity: 1;
-}
-/* Spelt out this far because `.message.assistant .content pre` sets the
-   margin and the radius, and a shorter selector loses to it. */
-body[data-touch] .message .content .code-block-wrap > pre {
-    margin-top: 0;
-    border-top-left-radius: 0;
-    border-top-right-radius: 0;
-}
-/* ---- end TEMP (M2B) ---- */
 
 /* Legacy tool messages (kept for backward compat with loadMessages) */
 .message.tool .content {
@@ -2986,12 +2894,11 @@ body[data-touch] .message .content .code-block-wrap > pre {
    On a fine pointer nothing is hidden, so it stays an ordinary label. */
 .role-label--toggle { cursor: default; }
 
-/* ---- TEMP (M2B): relocate to touch.css in M3 ------------------------------
-   The chevron that says the label is a control (C4). Gated on data-touch and
-   not data-compact, deliberately: touch.css is what hides .msg-chip, so touch
-   is exactly the set of layouts where the label has something to reveal. A
-   narrow window with a MOUSE shows the chip already, and a chevron promising
-   to reveal it there would be a lie.                                       */
+/* The chevron that says the label is a control (C4). Hidden here, revealed
+   in touch.css: under a mouse the chip is never folded away, so a chevron
+   promising to reveal it would be a lie. This base rule cannot travel with
+   the touch ones — touch.css does not load under a mouse at all, and without
+   the display:none the caret would show on every desktop answer.         */
 .role-label-caret {
     display: none;
     vertical-align: -1px;
@@ -2999,13 +2906,6 @@ body[data-touch] .message .content .code-block-wrap > pre {
     color: var(--text-faint);
     transition: transform var(--transition);
 }
-body[data-touch] .message.assistant .role-label--toggle .role-label-caret {
-    display: inline-block;
-}
-body[data-touch] .message.assistant.show-meta .role-label--toggle .role-label-caret {
-    transform: rotate(180deg);
-}
-/* ---- end TEMP (M2B) ---- */
 
 /* Message timestamps — revealed on hover so the transcript stays quiet */
 .msg-time {

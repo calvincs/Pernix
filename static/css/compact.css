@@ -128,6 +128,56 @@
 }
 
 /* ------------------------------------------------------------------
+   Worker strip — one 44px line, not three rows of 16px chips (P3)
+   ------------------------------------------------------------------ */
+/* app.js builds .worker-strip-summary instead of the chips below 900px, so
+   these rules have nothing to match above it; the body attribute is belt and
+   braces for the frame in which a tier flip is still being reconciled — and
+   keeping it is what leaves their specificity exactly as layout.css had it.
+   #worker-strip drops its own padding: the button carries the 44px, and 4px
+   of strip padding on top of it is what would push the line over the 48px
+   the phone can spare.                                                     */
+body[data-compact] #worker-strip {
+    padding: 0;
+    flex-wrap: nowrap;
+}
+body[data-compact] .worker-strip-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    width: 100%;
+    min-height: 44px;
+    padding-left: max(var(--sp-3), var(--safe-left));
+    padding-right: max(var(--sp-3), var(--safe-right));
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    text-align: left;
+    cursor: pointer;
+}
+/* The counts get the room; the chevron never wraps off the end. */
+body[data-compact] .worker-strip-summary-label {
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+body[data-compact] .worker-strip-summary > svg {
+    flex: none;
+    color: var(--text-faint);
+}
+body[data-compact] .worker-strip-summary:hover,
+body[data-compact] .worker-strip-summary:focus-visible {
+    color: var(--accent);
+}
+body[data-compact] .worker-strip-summary:hover > svg,
+body[data-compact] .worker-strip-summary:focus-visible > svg {
+    color: var(--accent);
+}
+
+/* ------------------------------------------------------------------
    Modals — bottom-sheet pattern
    ------------------------------------------------------------------ */
 .modal-overlay {

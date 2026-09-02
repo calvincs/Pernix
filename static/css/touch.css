@@ -129,6 +129,20 @@
     margin-bottom: 0;
 }
 
+/* C4 — the chevron that says the meta label is a control. Gated on
+   data-touch and not data-compact, deliberately: this file is what hides
+   .msg-chip (above), so touch is exactly the set of layouts where the label
+   has something to reveal. A narrow window with a MOUSE shows the chip
+   already. The base `.role-label-caret { display: none }` stays in
+   layout.css — it is the desktop state, and it has to be written in a file
+   the desktop loads.                                                      */
+body[data-touch] .message.assistant .role-label--toggle .role-label-caret {
+    display: inline-block;
+}
+body[data-touch] .message.assistant.show-meta .role-label--toggle .role-label-caret {
+    transform: rotate(180deg);
+}
+
 /* File tree actions — hidden on touch; swipe-to-delete is used instead */
 .fp-tree-item .fp-tree-actions {
     display: none;
@@ -342,6 +356,51 @@ body[data-compact].composer-focused #session-header {
 .message .content table.is-scrollable {
     -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
     mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
+}
+
+/* C2 — the code header strip. The copy button is permanently visible here
+   (above) and 44px wide, so floating it over the top-right corner covered
+   the first line of every block. It becomes a 36px strip above the code
+   instead, and the <pre> loses its top margin and its top corners so the two
+   read as one block. layout.css keeps the desktop shape — `.code-block-head
+   { display: contents }`, `.code-block-lang { display: none }` — so the
+   strip contributes no box at all under a mouse and its label stays out of a
+   copied transcript. The body[data-touch] prefixes come across verbatim:
+   they are what these rules' specificity was measured against.           */
+body[data-touch] .code-block-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    min-height: 36px;
+    margin-top: 0.75em;
+    padding: 0 var(--sp-2) 0 var(--sp-3);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: var(--radius) var(--radius) 0 0;
+}
+body[data-touch] .code-block-lang {
+    display: block;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    /* A language name is one word; a pasted class list is not. */
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+body[data-touch] .code-block-wrap .copy-btn {
+    position: static;
+    opacity: 1;
+}
+/* Spelt out this far because `.message.assistant .content pre` sets the
+   margin and the radius, and a shorter selector loses to it. */
+body[data-touch] .message .content .code-block-wrap > pre {
+    margin-top: 0;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
 }
 
 #messages,
