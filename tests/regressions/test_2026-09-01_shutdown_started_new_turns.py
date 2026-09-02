@@ -16,6 +16,7 @@ def mgr(monkeypatch):
     monkeypatch.setattr("sessions.manager._manager", fresh)
     return fresh
 
+
 async def test_shutdown_flag_stops_pending_dispatch(mgr, monkeypatch):
     sid = mgr.create_session(title="S")
     session = mgr.get(sid)
