@@ -3281,3 +3281,56 @@ mark.ts-mark.current {
 @media (prefers-reduced-motion: reduce) {
     .toast { animation: none; }
 }
+
+
+/* ======================================================================
+   Service-worker update pill (pwa.js) — N5
+   ====================================================================== */
+#sw-update-banner {
+    position: fixed;
+    left: 50%;
+    bottom: calc(var(--sp-4) + var(--safe-bottom));
+    transform: translateX(-50%);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1);
+    max-width: min(92vw, 420px);
+    padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-4);
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    box-shadow: var(--shadow-md);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+}
+.sw-update-action {
+    flex: 1;
+    min-height: 24px;
+    padding: var(--sp-1) 0;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.sw-update-action:hover { color: var(--text-bright); }
+.sw-update-dismiss {
+    flex-shrink: 0;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    border-radius: 50%;
+    color: var(--text-dim);
+    font-size: var(--text-md);
+    line-height: 1;
+    cursor: pointer;
+    transition: var(--transition);
+}
+.sw-update-dismiss:hover { color: var(--text-bright); background: var(--bg-hover); }

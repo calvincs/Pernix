@@ -1058,3 +1058,38 @@
 .toast {
     max-width: 100%;
 }
+
+
+/* ------------------------------------------------------------------
+   Spaces modal — the desktop card is a fixed, user-resizable box
+   (min-width 560px, height min(82vh, 950px)); on a 360px phone that
+   overflowed the sheet sideways and could not be scrolled back.
+   ------------------------------------------------------------------ */
+.space-modal-card {
+    min-width: 0;
+    width: 100%;
+    height: auto;
+    resize: none;
+}
+/* Hover-revealed on desktop — there is no hover here, so the rename/delete
+   controls on a space were simply unreachable. */
+.space-group-header .space-btn,
+.spaces-header .space-btn {
+    visibility: visible;
+    min-width: 36px;
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ------------------------------------------------------------------
+   Service-worker update pill — above the composer, not on top of it
+   ------------------------------------------------------------------ */
+#sw-update-banner {
+    left: max(var(--sp-3), var(--safe-left));
+    right: max(var(--sp-3), var(--safe-right));
+    max-width: none;
+    transform: none;
+    bottom: calc(76px + var(--safe-bottom));
+}
