@@ -264,7 +264,8 @@ a new line is worse than a phone that says nothing.
   a failure (iOS 15–18 not shrinking `dvh` for the on-screen keyboard) that no
   automated check sees, and the same is true of native text selection, rotation
   with the keyboard up, and VoiceOver's reading order. Those have to be checked
-  by hand on real hardware.
+  by hand on real hardware:
+  [`docs/mobile-device-checklist.md`](../mobile-device-checklist.md).
 - **There is an acceptance gate for the rest.** `tools/ui-gate/run.sh` drives
   an isolated seeded instance across seven viewports and asserts the tier
   contracts, the touch floors and a desktop layout baseline. Run it before and
