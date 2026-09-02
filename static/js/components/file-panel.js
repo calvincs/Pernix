@@ -188,6 +188,10 @@ let _wsParent = null;      // parent path (null at root)
 let _wsSearchQuery = '';   // active search query
 let _wsSearchTimer = null;  // debounce timer for workspace search
 let _wsSeq = 0;           // request sequencing — discard stale directory responses
+// Upload rows: an entry per file being sent, kept OUTSIDE the DOM so a
+// directory re-render cannot wipe an error the user has not read yet.
+// [{ name, state: 'uploading' | 'error', detail }] (F1/S8)
+let _wsUploads = [];
 let _jobRenderTimer = null; // debounce timer for job panel re-renders
 let _memoryFiles = [];
 let _memoryResults = [];
@@ -522,6 +526,9 @@ async function loadWorkspace(opts = {}) {
             saveState();
             return loadWorkspace();
         }
+        // Already at the root and it still failed — that is not a stale
+        // bookmark, it is the workspace being unreadable.
+        notify('error', `Could not list the workspace: ${e.message || e}`);
     }
     renderWorkspace();
 }
@@ -596,6 +603,12 @@ function renderWorkspace() {
         container.appendChild(breadcrumb);
     }
 
+    if (_wsUploads.length) {
+        const upEl = el('div', { class: 'fp-tree' });
+        _renderUploadRows(upEl);
+        container.appendChild(upEl);
+    }
+
     if (_wsEntries.length === 0) {
         const label = _wsSearchQuery ? `No results for "${_wsSearchQuery}"` : 'Empty directory';
         container.appendChild(el('div', { class: 'fp-empty' }, [text(label)]));
@@ -615,6 +628,34 @@ function renderWorkspace() {
             searchInput.focus();
             searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
         });
+    }
+}
+
+// One row per file in flight. It becomes the real file (row removed, listing
+// refreshed) or an error row that stays until dismissed. (F1/S8)
+function _renderUploadRows(parent) {
+    for (const up of _wsUploads) {
+        const isErr = up.state === 'error';
+        const row = el('div', { class: `fp-tree-item fp-upload-row${isErr ? ' error' : ''}` }, [
+            el('span', { class: 'fp-tree-icon' }, [text(isErr ? '\u26A0' : '\u2191')]),
+            el('span', { class: 'fp-tree-name' }, [text(up.name)]),
+            el('span', { class: 'fp-tree-count' }),
+            el('span', { class: 'fp-tree-meta' }, [text(isErr ? up.detail : 'uploading\u2026')]),
+            el('span', { class: 'fp-tree-date' }),
+        ]);
+        if (isErr) {
+            const dismiss = el('button', {
+                class: 'fp-tree-action',
+                title: 'Dismiss',
+                'aria-label': `Dismiss the upload error for ${up.name}`,
+            }, [text('\u00d7')]);
+            dismiss.addEventListener('click', () => {
+                _wsUploads = _wsUploads.filter(u => u !== up);
+                renderWorkspace();
+            });
+            row.appendChild(el('span', { class: 'fp-tree-actions' }, [dismiss]));
+        }
+        parent.appendChild(row);
     }
 }
 
@@ -804,7 +845,7 @@ async function viewFile(path, source = 'workspace') {
         _state.dirty = false;
         renderCurrentTab();
     } catch (e) {
-        console.error('Failed to load file:', e);
+        notify('error', `Could not open ${path}: ${e.message || e}`);
     }
 }
 
@@ -945,6 +986,19 @@ function disposeActiveEditor() {
 // on save so a PUT can tell "nobody touched it" from "the agent rewrote it
 // while you were typing". Missing/garbled header = no conflict detection,
 // i.e. exactly the old behaviour. (S3)
+// The server's own explanation of a failure, when it has one. Every fetch()
+// in this file used to swallow the body and print a status code to a console
+// nobody has open. (F1/S8)
+async function _errorDetail(resp) {
+    try {
+        const data = await resp.json();
+        const d = data && data.detail;
+        if (d) return typeof d === 'string' ? d : JSON.stringify(d);
+        if (data && data.error) return String(data.error);
+    } catch { /* not JSON — fall through to the status line */ }
+    return `${resp.status} ${resp.statusText || 'request failed'}`;
+}
+
 function _mtimeOf(resp) {
     const v = parseFloat(resp.headers.get('X-File-Mtime') || '');
     return Number.isFinite(v) ? v : null;
@@ -1152,7 +1206,7 @@ async function deleteEntry(path, type = 'file') {
         }
         await loadWorkspace({ path: _wsCurrentPath });
     } catch (e) {
-        console.error('Delete failed:', e);
+        notify('error', `Could not delete ${path}: ${e.message || e}`);
     }
 }
 
@@ -1224,13 +1278,35 @@ function triggerUpload() {
     input.multiple = true;
     input.addEventListener('change', async () => {
         for (const file of input.files) {
-            const formData = new FormData();
-            formData.append('file', file);
+            const entry = { name: file.name, state: 'uploading', detail: '' };
+            _wsUploads.push(entry);
+            renderWorkspace();
+
+            let detail = null;
             try {
-                await fetch('/api/upload', { method: 'POST', body: formData, headers: _authHdr() });
+                const formData = new FormData();
+                formData.append('file', file);
+                const resp = await fetch('/api/upload', {
+                    method: 'POST', body: formData, headers: _authHdr(),
+                });
+                // A 2xx was assumed here, so a rejected upload (too large,
+                // blocked extension, collision) looked exactly like a success
+                // that had not appeared in the listing yet.
+                if (!resp.ok) detail = await _errorDetail(resp);
             } catch (e) {
-                console.error('Upload failed:', e);
+                detail = e.message || String(e);
             }
+
+            if (detail) {
+                // One rejection almost always applies to the rest of the batch
+                // (same size cap, same extension rule), so stop instead of
+                // firing the identical error once per file.
+                entry.state = 'error';
+                entry.detail = detail;
+                notify('error', `Upload failed — ${file.name}: ${detail}`);
+                break;
+            }
+            _wsUploads = _wsUploads.filter(u => u !== entry);
         }
         await loadWorkspace({ path: _wsCurrentPath });
     });
@@ -1385,7 +1461,7 @@ async function viewMemoryFile(name) {
         _state.viewMode = 'viewer';
         renderMemory();
     } catch (e) {
-        console.error('Failed to load memory file:', e);
+        notify('error', `Could not open memory file ${name}: ${e.message || e}`);
     }
 }
 
@@ -1514,10 +1590,12 @@ function renderSkills() {
                     _state.viewMode = 'viewer';
                     renderSkills();
                 } catch (e) {
-                    console.error('Failed to load skill for proposal review:', e);
-                    // Show inline error — skill may have been deleted since proposal was created
+                    // Inline on the button — the skill may have been deleted
+                    // since the proposal was written — plus the reason, which
+                    // "skill not found" alone cannot carry.
                     reviewBtn.textContent = 'skill not found';
                     reviewBtn.disabled = true;
+                    notify('error', `Could not open ${proposal.skill_name}: ${e.message || e}`);
                 }
             });
             row.appendChild(info);
@@ -1652,7 +1730,7 @@ async function viewSkill(name) {
         _state.viewMode = 'viewer';
         renderSkills();
     } catch (e) {
-        console.error('Failed to load skill:', e);
+        notify('error', `Could not open skill ${name}: ${e.message || e}`);
     }
 }
 
@@ -1734,7 +1812,7 @@ function renderSkillViewer(container) {
                 await loadSkills();
                 renderSkills();
             } catch (e) {
-                alert(`Failed to apply proposal: ${e.message || e}`);
+                notify('error', `Could not apply the proposal: ${e.message || e}`);
             }
         });
 
@@ -1746,7 +1824,7 @@ function renderSkillViewer(container) {
                 file.pendingProposal = null;
                 renderSkills();
             } catch (e) {
-                console.error('Failed to reject proposal:', e);
+                notify('error', `Could not reject the proposal: ${e.message || e}`);
             }
         });
 
@@ -1945,14 +2023,18 @@ async function saveSkill(container, { force = false } = {}) {
 
 async function toggleSkill(name, enabled) {
     try {
-        await fetch(`/api/skills/${encodeURIComponent(name)}`, {
+        const resp = await fetch(`/api/skills/${encodeURIComponent(name)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json', ..._authHdr() },
             body: JSON.stringify({ enabled }),
         });
+        // fetch() only rejects on a network error, so a 404/500 used to leave
+        // the toggle looking flipped after a reload that quietly undid it.
+        if (!resp.ok) throw new Error(await _errorDetail(resp));
         await loadSkills();
     } catch (e) {
-        console.error('Toggle failed:', e);
+        notify('error', `Could not ${enabled ? 'enable' : 'disable'} ${name}: ${e.message || e}`);
+        await loadSkills();
     }
 }
 
@@ -1966,7 +2048,7 @@ async function deleteSkill(name) {
         }
         await loadSkills();
     } catch (e) {
-        console.error('Delete failed:', e);
+        notify('error', `Could not delete skill ${name}: ${e.message || e}`);
     }
 }
 
@@ -2328,17 +2410,24 @@ function _renderToolsFiltered() {
         toggle.addEventListener('click', async (e) => {
             e.stopPropagation();
             try {
-                await fetch('/api/tools/toggle', {
+                const resp = await fetch('/api/tools/toggle', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', ..._authHdr() },
                     body: JSON.stringify({ name: tool.name, enabled: !tool.enabled }),
                 });
+                if (!resp.ok) throw new Error(await _errorDetail(resp));
                 await loadTools();
-            } catch (err) { console.error('Tool toggle failed:', err); }
+            } catch (err) {
+                notify('error', `Could not ${tool.enabled ? 'disable' : 'enable'} ${tool.name}: ${err.message || err}`);
+                await loadTools();
+            }
         });
 
         // Safety level select
         const level = tool.safety_level || 'safe';
+        // The value to fall back to when a change is rejected — the last one
+        // the server actually acknowledged, not the one this row rendered with.
+        let acceptedLevel = level;
         const safetySelect = el('select', {
             class: `fp-tool-safety sl-${level}`,
             title: 'Safety level — controls whether auto_approve_dangerous gate applies',
@@ -2348,6 +2437,14 @@ function _renderToolsFiltered() {
             if (lvl === level) opt.selected = true;
             safetySelect.appendChild(opt);
         }
+        // A rejected change used to repaint the colour but leave the select
+        // showing the level the user picked — the UI claiming a safety level
+        // the server never took. Put the VALUE back too. (F1/S8)
+        const revertSafety = (why) => {
+            safetySelect.value = acceptedLevel;
+            safetySelect.className = `fp-tool-safety sl-${acceptedLevel}`;
+            notify('error', `Safety level for ${tool.name} not changed: ${why}`);
+        };
         safetySelect.addEventListener('change', async (e) => {
             e.stopPropagation();
             const newLevel = e.target.value;
@@ -2358,14 +2455,12 @@ function _renderToolsFiltered() {
                     headers: { 'Content-Type': 'application/json', ..._authHdr() },
                     body: JSON.stringify({ name: tool.name, safety_level: newLevel }),
                 });
-                const data = await res.json();
-                if (data.error) {
-                    console.error('Safety level update failed:', data.error);
-                    safetySelect.className = `fp-tool-safety sl-${level}`;
-                }
+                if (!res.ok) { revertSafety(await _errorDetail(res)); return; }
+                const data = await res.json().catch(() => ({}));
+                if (data.error) { revertSafety(String(data.error)); return; }
+                acceptedLevel = newLevel;
             } catch (err) {
-                console.error('Safety level update failed:', err);
-                safetySelect.className = `fp-tool-safety sl-${level}`;
+                revertSafety(err.message || String(err));
             }
         });
 
@@ -2532,7 +2627,7 @@ function _buildMcpServerItem(s) {
         if (_mcpBusy) return;
         _mcpBusy = true;
         try { await post(`/api/mcp/servers/${encodeURIComponent(s.name)}/toggle`, { enabled: !s.enabled }); }
-        catch (err) { console.error('MCP toggle failed:', err); }
+        catch (err) { notify('error', `Could not ${s.enabled ? 'disable' : 'enable'} ${s.name}: ${err.message || err}`); }
         _mcpBusy = false;
         await loadMcp();
     });
@@ -2556,7 +2651,7 @@ function _buildMcpServerItem(s) {
         _mcpBusy = true;
         reloadBtn.textContent = '…';
         try { await post(`/api/mcp/servers/${encodeURIComponent(s.name)}/reload`, {}); }
-        catch (err) { console.error('MCP reload failed:', err); }
+        catch (err) { notify('error', `Could not reconnect ${s.name}: ${err.message || err}`); }
         _mcpBusy = false;
         await loadMcp();
     });
@@ -2566,7 +2661,7 @@ function _buildMcpServerItem(s) {
         e.stopPropagation();
         if (!confirm(`Remove MCP server '${s.name}' and unregister its tools?`)) return;
         try { await del(`/api/mcp/servers/${encodeURIComponent(s.name)}`); }
-        catch (err) { console.error('MCP remove failed:', err); }
+        catch (err) { notify('error', `Could not remove ${s.name}: ${err.message || err}`); }
         await loadMcp();
     });
 
