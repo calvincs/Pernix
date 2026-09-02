@@ -13,7 +13,7 @@ import { initBell, openBellPanel, closeBellPanel, refreshBell } from './componen
 import { initJobsIndicator } from './components/jobs-indicator.js';
 import {
     initSidebar, renderSessionList as renderSidebar, updateSessionActivity,
-    setSessionPaging, setSessionPagingBusy,
+    setSessionPaging, setSessionPagingBusy, openSessionSheet,
 } from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
@@ -164,7 +164,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.addEventListener('resize', syncSidebarInert);
     // Crossing 900px swaps the worker strip's whole shape (P3): chips above
     // the line, one summary line below it.
-    window.addEventListener('pernix:tier-change', () => _renderWorkerStrip());
+    window.addEventListener('pernix:tier-change', () => {
+        _renderWorkerStrip();
+        _syncHeaderTitleAffordance();   // and the title changes what it opens (P6)
+    });
     sidebarToggle.addEventListener('click', () => {
         if (isCompact()) return;   // the drawer is mobile.js's to open
         sidebar.classList.toggle('collapsed');
@@ -172,7 +175,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         syncSidebarInert();
     });
 
-    document.getElementById('session-header-title')?.addEventListener('click', _startHeaderRename);
+    // On compact the title opens the session sheet the drawer rows already
+    // use; the inline rename lives on the sheet's "Rename" item. (P6)
+    document.getElementById('session-header-title')?.addEventListener('click', () => {
+        if (isCompact()) {
+            if (state.sid) openSessionSheet(state.sid);
+            return;
+        }
+        _startHeaderRename();
+    });
 
     // One rename path for the whole app. The header raises the intent; this
     // listener is what talks to the server, so the sidebar's own inline rename
@@ -1255,8 +1266,7 @@ function _renderSessionHeader() {
     header.hidden = false;
     const title = sess.title || 'New session';
     titleBtn.textContent = title;
-    titleBtn.title = `${title} — click to rename`;
-    titleBtn.setAttribute('aria-label', `Session: ${title}. Click to rename.`);
+    _syncHeaderTitleAffordance();
 
     const space = sess.space_id ? (state.spaces || []).find((sp) => sp.id === sess.space_id) : null;
     if (chip) {
@@ -1315,6 +1325,28 @@ function _renderParentBreadcrumb(header, sess) {
     crumb.appendChild(el('span', {}, [text(`Parent: ${parentTitle}`)]));
     crumb.title = `Open the parent session — ${parentTitle}`;
     crumb.setAttribute('aria-label', `Open the parent session: ${parentTitle}`);
+}
+
+/**
+ * The header title does two different jobs, and its label has to say which:
+ * on compact it opens the session sheet, everywhere else it swaps in the
+ * inline field. (P6) Separate from _renderSessionHeader so crossing 900px can
+ * re-run just this without rebuilding the header.
+ */
+function _syncHeaderTitleAffordance() {
+    const titleBtn = document.getElementById('session-header-title');
+    if (!titleBtn) return;
+    const sess = (state.sessions || []).find((x) => x.id === state.sid);
+    const title = (sess && sess.title) || 'New session';
+    if (isCompact()) {
+        titleBtn.title = `${title} — session actions`;
+        titleBtn.setAttribute('aria-label', `Session: ${title}. Opens session actions.`);
+        titleBtn.setAttribute('aria-haspopup', 'dialog');
+    } else {
+        titleBtn.title = `${title} — click to rename`;
+        titleBtn.setAttribute('aria-label', `Session: ${title}. Click to rename.`);
+        titleBtn.removeAttribute('aria-haspopup');
+    }
 }
 
 /**
