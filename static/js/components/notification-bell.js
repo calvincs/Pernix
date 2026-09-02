@@ -96,7 +96,12 @@ export function openBellPanel() {
     const card = el('div', { class: 'modal-card bell-panel' }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text('Notifications')]),
-            el('button', { class: 'modal-close', onClick: closeBellPanel }, [text('\u00d7')]),
+            el('button', {
+                class: 'modal-close',
+                title: 'Close notifications',
+                'aria-label': 'Close notifications',
+                onClick: closeBellPanel,
+            }, [text('\u00d7')]),
         ]),
         el('div', { class: 'modal-body' }, banner ? [banner, itemsContainer] : [itemsContainer]),
     ]);
@@ -208,7 +213,9 @@ function _sessionChip(sessionId) {
     if (!sessionId) return null;
     return el('a', {
         class: 'notif-session-link',
+        href: '#',
         title: 'Open this session',
+        'aria-label': `Open session ${sessionId}`,
         onClick: (e) => {
             e.preventDefault();
             closeBellPanel();
@@ -221,6 +228,7 @@ function _renderQuestion(q) {
     const answerInput = el('textarea', {
         class: 'question-answer',
         placeholder: 'Type your answer...',
+        'aria-label': 'Your answer',
         rows: '2',
     });
     const statusEl = el('span', { class: 'notif-status', role: 'status' });
@@ -239,8 +247,12 @@ function _renderQuestion(q) {
             answerInput,
             el('div', { class: 'notif-item-buttons' }, [
                 statusEl,
-                el('button', { class: 'btn btn-secondary btn-sm', onClick: () => _dismissQuestion(q.id) }, [text('Dismiss')]),
-                el('button', { class: 'btn btn-primary btn-sm', onClick: async () => {
+                el('button', {
+                    class: 'btn btn-secondary btn-sm',
+                    'aria-label': 'Dismiss this question',
+                    onClick: () => _dismissQuestion(q.id),
+                }, [text('Dismiss')]),
+                el('button', { class: 'btn btn-primary btn-sm', 'aria-label': 'Send your answer', onClick: async () => {
                     const answer = answerInput.value.trim();
                     if (!answer) { statusEl.textContent = 'Type an answer'; return; }
                     try {
@@ -267,7 +279,11 @@ function _renderNotification(n) {
         n.body ? el('div', { class: 'notif-item-text' }, [text(n.body)]) : null,
         el('div', { class: 'notif-item-actions' }, [
             el('div', { class: 'notif-item-buttons' }, [
-                el('button', { class: 'btn btn-secondary btn-sm', onClick: () => _dismissNotification(n.id) }, [text('Dismiss')]),
+                el('button', {
+                    class: 'btn btn-secondary btn-sm',
+                    'aria-label': `Dismiss notification: ${n.title || 'Notification'}`,
+                    onClick: () => _dismissNotification(n.id),
+                }, [text('Dismiss')]),
             ]),
         ]),
     ].filter(Boolean));
