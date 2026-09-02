@@ -1616,6 +1616,14 @@ function setupInput() {
         }
     });
 
+    // Top chrome is a quarter of a landscape phone and all of it once the
+    // keyboard is up (measured: 94px of a 214px visual viewport, leaving the
+    // transcript 0px). Focus is the only signal that says the keyboard is
+    // coming, so it is what sets the class; the CSS that folds the session
+    // header away while it is set is compact-only. (P5)
+    textarea.addEventListener('focus', () => document.body.classList.add('composer-focused'));
+    textarea.addEventListener('blur', () => document.body.classList.remove('composer-focused'));
+
     textarea.placeholder = _composerPlaceholder();
     textarea.title = _composerHint();
     // The binding the placeholder no longer has room for. aria-description
