@@ -337,6 +337,26 @@ export function initFilePanel({ selectSession } = {}) {
 // button, tree row and editor inside it stayed in the tab order and in the
 // accessibility tree. inert removes both; it is cleared the moment the panel
 // opens. (A12)
+// Tree rows, breadcrumb segments and sortable column headers were plain
+// <div>/<span> elements carrying a click handler: visible, clickable by mouse,
+// and completely unreachable from a keyboard or a screen reader. role=button +
+// a tab stop + Enter/Space is the minimum that makes them real controls. (A1)
+function _makeActivatable(node, label, onActivate) {
+    node.setAttribute('role', 'button');
+    node.setAttribute('tabindex', '0');
+    if (label) node.setAttribute('aria-label', label);
+    node.addEventListener('click', onActivate);
+    node.addEventListener('keydown', (e) => {
+        // A real <button> nested inside the row (delete) handles its own keys;
+        // without this the row would fire a second time on the way up.
+        if (e.target !== node) return;
+        if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+        e.preventDefault();
+        onActivate(e);
+    });
+    return node;
+}
+
 function _syncPanelInert() {
     _panel?.toggleAttribute('inert', !_state.open);
 }
@@ -454,10 +474,23 @@ function renderTabs() {
         { key: 'telos', label: 'Telos' },
     ];
 
+    // A row of <button>s is not a tab strip to anything but a mouse: nothing
+    // said which one was current, and Tab walked through all nine. (A1)
+    tabBar.setAttribute('role', 'tablist');
+    tabBar.setAttribute('aria-label', 'Explorer sections');
+
     tabs.forEach(t => {
+        const selected = t.key === _state.tab;
         const btn = el('button', {
-            class: `fp-tab-btn${t.key === _state.tab ? ' active' : ''}`,
+            class: `fp-tab-btn${selected ? ' active' : ''}`,
             'data-tab': t.key,
+            id: `fp-tab-${t.key}`,
+            role: 'tab',
+            'aria-selected': String(selected),
+            'aria-controls': `fp-${t.key}`,
+            // Roving tabindex: one tab stop for the strip, arrows move inside
+            // it — the contract role="tab" commits you to.
+            tabindex: selected ? '0' : '-1',
         }, [text(t.label)]);
         btn.addEventListener('click', () => {
             if (t.key !== _state.tab && !guardDirty()) return;
@@ -469,13 +502,29 @@ function renderTabs() {
             loadTabData();
             saveState();
         });
+        btn.addEventListener('keydown', (e) => {
+            const delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+            if (!delta) return;
+            e.preventDefault();
+            const at = tabs.findIndex(x => x.key === t.key);
+            const nextKey = tabs[(at + delta + tabs.length) % tabs.length].key;
+            document.getElementById(`fp-tab-${nextKey}`)?.click();
+            // The click rebuilt the strip — focus the NEW node, not this one.
+            document.getElementById(`fp-tab-${nextKey}`)?.focus();
+        });
         tabBar.appendChild(btn);
     });
 
     // Show/hide tab content
     ['workspace', 'memory', 'skills', 'tools', 'mcp', 'jobs', 'adaptive', 'canary', 'telos'].forEach(key => {
         const container = document.getElementById(`fp-${key}`);
-        if (container) container.classList.toggle('active', key === _state.tab);
+        if (!container) return;
+        container.classList.toggle('active', key === _state.tab);
+        container.setAttribute('role', 'tabpanel');
+        container.setAttribute('aria-labelledby', `fp-tab-${key}`);
+        // The panel scrolls, so it needs to be reachable in its own right.
+        // Inactive panels are display:none and therefore not focusable.
+        container.setAttribute('tabindex', '0');
     });
 }
 
@@ -673,11 +722,12 @@ function _buildColumnHeaders() {
         const classes = ['fp-col-h', colClass, key ? 'sortable' : '', isActive ? 'active' : ''].filter(Boolean).join(' ');
         const span = el('span', { class: classes }, [text(label + indicator)]);
         if (key) {
-            span.addEventListener('click', () => {
+            _makeActivatable(span, `Sort by ${label.toLowerCase()}`, () => {
                 _state.wsSortBy = key;
                 saveState();
                 renderWorkspace();
             });
+            span.setAttribute('aria-pressed', String(!!isActive));
         }
         return span;
     }
@@ -699,7 +749,9 @@ function _buildBreadcrumb() {
     const rootLink = el('span', { class: `fp-breadcrumb-part${parts.length === 0 ? ' active' : ''}` }, [text('\u2302')]);
     if (parts.length > 0) {
         rootLink.style.cursor = 'pointer';
-        rootLink.addEventListener('click', () => loadWorkspace({ path: '' }));
+        _makeActivatable(rootLink, 'Go to the workspace root', () => loadWorkspace({ path: '' }));
+    } else {
+        rootLink.setAttribute('aria-label', 'Workspace root');
     }
     bar.appendChild(rootLink);
 
@@ -711,7 +763,7 @@ function _buildBreadcrumb() {
         const seg = el('span', { class: `fp-breadcrumb-part${isLast ? ' active' : ''}` }, [text(parts[i])]);
         if (!isLast) {
             seg.style.cursor = 'pointer';
-            seg.addEventListener('click', () => loadWorkspace({ path: segPath }));
+            _makeActivatable(seg, `Go to ${segPath}`, () => loadWorkspace({ path: segPath }));
         }
         bar.appendChild(seg);
     }
@@ -742,7 +794,7 @@ function _renderEntries(parent, entries) {
             el('span', { class: 'fp-tree-icon' }, [text('\u2190')]),
             el('span', { class: 'fp-tree-name' }, [text('..')]),
         ]);
-        upItem.addEventListener('click', () => loadWorkspace({ path: _wsParent }));
+        _makeActivatable(upItem, 'Go up one folder', () => loadWorkspace({ path: _wsParent }));
         parent.appendChild(upItem);
     }
 
@@ -759,7 +811,7 @@ function _renderEntries(parent, entries) {
             const dirDelBtn = el('button', { class: 'fp-tree-action danger', title: 'Delete' }, [text('\u00d7')]);
             dirDelBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteEntry(entry.path, 'dir'); });
             item.appendChild(el('span', { class: 'fp-tree-actions' }, [dirDelBtn]));
-            item.addEventListener('click', () => {
+            _makeActivatable(item, `Open the folder ${entry.name}`, () => {
                 _wsSearchQuery = '';
                 loadWorkspace({ path: entry.path });
             });
@@ -784,7 +836,7 @@ function _renderEntries(parent, entries) {
             delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteEntry(entry.path); });
             item.appendChild(el('span', { class: 'fp-tree-actions' }, [delBtn]));
 
-            item.addEventListener('click', () => viewFile(entry.path, 'workspace'));
+            _makeActivatable(item, `Open ${displayName}`, () => viewFile(entry.path, 'workspace'));
             const fileWrap = el('div', { class: 'fp-tree-item-wrap' }, [
                 el('div', { class: 'fp-swipe-delete-bg' }, [text('Delete')]),
                 item,

@@ -523,6 +523,23 @@ body.fp-resizing #main { pointer-events: none; }
     outline: 2px solid var(--accent);
     outline-offset: -2px;
 }
+/* Rows, breadcrumb segments and sortable headers are now keyboard-reachable
+   (A1). The browser's default ring is easy to lose against this palette, so
+   the focus state is stated rather than inherited. */
+.fp-tree-item[role="button"]:focus-visible,
+.fp-breadcrumb-part[role="button"]:focus-visible,
+.fp-col-h.sortable:focus-visible,
+.adaptive-event-head:focus-visible,
+.fp-tab-content:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    border-radius: var(--radius-sm);
+}
+.fp-col-h.sortable,
+.fp-breadcrumb-part[role="button"] {
+    cursor: pointer;
+}
+
 /* In-flight and failed upload rows — an upload used to be invisible until
    the directory listing happened to refresh with the file already in it. */
 .fp-upload-row {

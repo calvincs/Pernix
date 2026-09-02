@@ -5,7 +5,7 @@
 
 import { el, text, clear } from '../../render.js';
 import { del, get, post } from '../../api.js';
-import { resultLine, tabGlossary } from './telos.js';
+import { makeDisclosure, resultLine, tabGlossary } from './telos.js';
 
 // Every action here ends in a refresh() that rebuilds the whole tab, so an
 // inline line written before it would be wiped a frame later. Park the message
@@ -246,9 +246,12 @@ export async function renderAdaptiveTab(container) {
         const diff = el('pre', { class: 'adaptive-diff', style: 'display:none' });
         const fmt = (j) => { try { return JSON.stringify(JSON.parse(j), null, 1); } catch (_e) { return j || '(none)'; } };
         diff.textContent = `BEFORE:\n${fmt(ev.before_json)}\n\nAFTER:\n${fmt(ev.after_json)}\n\nEVIDENCE: ${ev.evidence_json || '[]'}`;
-        head.addEventListener('click', () => {
-            diff.style.display = diff.style.display === 'none' ? 'block' : 'none';
-        });
+        makeDisclosure(
+            head,
+            () => diff.style.display !== 'none',
+            () => { diff.style.display = diff.style.display === 'none' ? 'block' : 'none'; },
+        );
+        head.setAttribute('aria-label', `Event ${ev.id}: ${ev.action} on ${ev.entry_id}`);
         row.appendChild(head);
         row.appendChild(diff);
         container.appendChild(row);
