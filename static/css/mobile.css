@@ -1093,3 +1093,23 @@
     transform: none;
     bottom: calc(76px + var(--safe-bottom));
 }
+
+/* ---- Phase 2B: sidebar / bell / confirm ---- */
+
+/* The only new tappable control in the sidebar. 24px is the desktop minimum;
+   a thumb needs the same 36px the space buttons get above. */
+.spaces-create-btn {
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+}
+
+/* Rows and group headers are focusable now, so an on-screen keyboard's
+   next/previous buttons walk them — keep the ring inside the row rather than
+   letting it clip against the sidebar's overflow:hidden. */
+.session-item:focus-visible,
+.session-group-header:focus-visible,
+.session-group-header .sg-toggle:focus-visible,
+.worker-summary:focus-visible {
+    outline-offset: -2px;
+}
