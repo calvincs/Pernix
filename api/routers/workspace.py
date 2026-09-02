@@ -8,7 +8,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from config import settings
@@ -288,7 +288,14 @@ async def list_datafiles():
 
 
 @router.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), path: str = Form("")):
+    """Upload one file into the workspace.
+
+    ``path`` is an optional directory relative to the workspace root — the
+    folder the Explorer is currently showing. Omitted, uploads land at the
+    root, which is the old behaviour and what every other caller does. It goes
+    through the same traversal check as every other workspace route.
+    """
     if not file.filename:
         raise HTTPException(400, detail="No filename")
 
@@ -310,17 +317,27 @@ async def upload_file(file: UploadFile = File(...)):
     # Save to workspace
     workspace = Path(settings.workspace_dir)
     workspace.mkdir(parents=True, exist_ok=True)
-    dest = workspace / filename
+    workspace = workspace.resolve()
+
+    dest_dir = workspace
+    if path:
+        candidate = (workspace / path).resolve()
+        if not candidate.is_relative_to(workspace):
+            raise HTTPException(403, detail="Path traversal blocked")
+        dest_dir = candidate
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / filename
 
     # Handle collision
     if dest.exists():
         stem = dest.stem
         for i in range(1, 101):
-            dest = workspace / f"{stem}_{i}{ext}"
+            dest = dest_dir / f"{stem}_{i}{ext}"
             if not dest.exists():
                 break
         else:
             raise HTTPException(409, detail="Too many filename collisions")
 
     dest.write_bytes(content)
-    return {"filename": dest.name, "size": len(content)}
+    rel = dest.relative_to(workspace).as_posix()
+    return {"filename": dest.name, "path": rel, "size": len(content)}
