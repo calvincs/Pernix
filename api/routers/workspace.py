@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from config import settings
 
@@ -19,6 +19,11 @@ MAX_SEARCH_RESULTS = 50
 
 BLOCKED_EXTENSIONS = {".exe", ".sh", ".php", ".bat", ".cmd", ".com", ".scr", ".msi", ".dll"}
 MAX_UPLOAD_SIZE = 250 * 1024 * 1024  # 250MB
+
+# Slack for the mtime comparison in a conditional PUT. Filesystem timestamp
+# resolution and the round-trip through JSON both cost precision, and a
+# sub-second difference is never a real second writer.
+MTIME_TOLERANCE_S = 0.5
 
 _CONTENT_TYPES = {
     ".html": "text/html",
@@ -178,6 +183,13 @@ async def serve_workspace_file(path: str):
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(404, detail="File not found")
     media_type = _CONTENT_TYPES.get(file_path.suffix.lower())
+    # The editor keeps this value and hands it back as base_mtime on save,
+    # which is how a PUT can tell "nobody touched it" from "the agent
+    # rewrote it while you were typing".
+    try:
+        mtime = file_path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
     # Workspace files are agent- and upload-authored, i.e. untrusted. Served
     # bare, an .html/.svg document would execute on the app origin with the
     # auth token one `localStorage` read away. `sandbox` (no allow-* flags)
@@ -191,8 +203,30 @@ async def serve_workspace_file(path: str):
             "Content-Security-Policy": "sandbox",
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "no-referrer",
+            "X-File-Mtime": f"{mtime:.6f}",
+            "Access-Control-Expose-Headers": "X-File-Mtime",
         },
     )
+
+
+def _stale(file_path: Path, base_mtime) -> float | None:
+    """Current mtime when ``base_mtime`` is stale, else None.
+
+    Optimistic concurrency, opt-in: a caller that omits ``base_mtime`` keeps
+    the old last-writer-wins behaviour, so agent tools, curl and older clients
+    are unaffected. Only the editor, which knows what it read, sends one.
+    """
+    if base_mtime is None or not file_path.is_file():
+        return None
+    try:
+        base = float(base_mtime)
+    except (TypeError, ValueError):
+        return None
+    try:
+        current = file_path.stat().st_mtime
+    except OSError:
+        return None
+    return current if abs(current - base) > MTIME_TOLERANCE_S else None
 
 
 @router.put("/workspace/{path:path}")
@@ -201,12 +235,15 @@ async def save_workspace_file(path: str, body: dict):
     file_path = (workspace / path).resolve()
     if not file_path.is_relative_to(workspace):
         raise HTTPException(403, detail="Path traversal blocked")
-    file_path.parent.mkdir(parents=True, exist_ok=True)
     content = body.get("content", "")
     if len(content) > MAX_UPLOAD_SIZE:
         raise HTTPException(413, detail=f"Content too large ({len(content)} bytes, max {MAX_UPLOAD_SIZE})")
+    changed = _stale(file_path, body.get("base_mtime"))
+    if changed is not None:
+        return JSONResponse(status_code=409, content={"detail": "changed_on_disk", "mtime": changed})
+    file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(content)
-    return {"saved": True, "path": path, "bytes": len(content)}
+    return {"saved": True, "path": path, "bytes": len(content), "mtime": file_path.stat().st_mtime}
 
 
 @router.delete("/workspace/{path:path}")
