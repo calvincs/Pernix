@@ -140,6 +140,7 @@ If you're new to the codebase, this is the rough mental map:
 | Snooze (idle housekeeping) | `core/snooze.py` |
 | REST + SSE | `api/app.py`, `api/routers/*.py` |
 | Frontend | `static/` (vanilla JS PWA) |
+| Frontend device tiers | `static/css/compact.css`, `static/css/touch.css`, `static/js/mobile.js` ([../internals/web-client.md](../internals/web-client.md)) |
 | DB schema + migrations | `db/database.py` (`MIGRATIONS` list) |
 | Settings | `config.py` |
 

@@ -1,4 +1,9 @@
-// Pernix — Touch and compact tiers: detection, sidebar drawer, swipe, keyboard.
+// Pernix — the two device tiers: detection, the sidebar drawer, the edge
+// swipes, the on-screen keyboard, and the three viewport custom properties
+// touch.css sizes itself from (--vvh, --vv-top, --bottom-stack).
+//
+// The whole layer, including which stylesheet a rule belongs in and why the
+// two gates differ, is written up in docs/internals/web-client.md.
 //
 // (openOverlay is not used here: the drawer is not a <div> dropped on top of
 // the page but a permanent part of the layout that slides. Only overlayDepth()

@@ -14,8 +14,11 @@
 // bottom sheet on a narrow screen and modals.css centres it as a card
 // everywhere else, with no work here.
 //
-// Nothing calls this yet; the row menus, the model switcher and the session
-// title all land on it in the next phase.
+// Callers: the session and space row menus and the move picker (sidebar.js),
+// the Explorer's file and directory rows (file-panel.js), the worker strip's
+// summary line and the session-header title on compact (app.js). The model
+// switcher builds its own sheet rather than calling this one: its rows are a
+// live, grouped, async list, not a fixed set of actions.
 import { el, text } from '../../render.js';
 import { icon } from '../../icons.js';
 import { openOverlay } from '../../a11y.js';
