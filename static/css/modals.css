@@ -126,6 +126,16 @@
     text-transform: none;
     letter-spacing: 0;
     line-height: 1;
+    position: relative;
+}
+/* A10: 24x24 pointer target without a 24px painted disc — the heading row is
+   11px uppercase text and a circle that size would dominate it. The
+   pseudo-element is part of the button's own hit area. */
+.section-help::after {
+    content: '';
+    position: absolute;
+    inset: -5px;
+    border-radius: 50%;
 }
 .section-help:hover,
 .section-help:focus {
@@ -1124,6 +1134,10 @@
     font-family: var(--mono);
     font-size: 13px;
     line-height: 1.55;
+}
+.space-dir-editor .ce-fallback:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
 }
 
 /* Delete dialog */
