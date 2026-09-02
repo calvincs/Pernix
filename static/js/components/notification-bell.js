@@ -60,6 +60,7 @@ export function refreshBell() { _poll(); }
 // ---------------------------------------------------------------------------
 
 let _lastBadgeCount = 0;
+let _badgeSeen = false;   // first poll is the existing backlog, not an arrival
 
 function _updateBadge(count) {
     const badge = document.getElementById('bell-badge');
@@ -71,13 +72,14 @@ function _updateBadge(count) {
     // A badge going 0 -> 1 is invisible to a screen reader (and to anyone not
     // looking at the corner of the status bar). Only announce arrivals; a
     // count going DOWN is the user clearing items, which needs no narration.
-    if (count > _lastBadgeCount) {
+    if (_badgeSeen && count > _lastBadgeCount) {
         const added = count - _lastBadgeCount;
         announce(added === 1
             ? `1 new notification, ${count} waiting`
             : `${added} new notifications, ${count} waiting`);
     }
     _lastBadgeCount = count;
+    _badgeSeen = true;
 }
 
 // ---------------------------------------------------------------------------
