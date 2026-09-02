@@ -10,6 +10,7 @@ import { announce, openOverlay } from '../../a11y.js';
 import { notify } from '../../feedback.js';
 import { confirmDanger } from './confirm.js';
 import { bindStripScroll } from '../file-panel.js';
+import { isTouch } from '../../mobile.js';
 
 let _overlay = null;
 let _closeOverlay = null;  // teardown from a11y.js openOverlay()
@@ -2051,6 +2052,66 @@ function _buildOriginsEditor(origins) {
     return container;
 }
 
+// ---------------------------------------------------------------------------
+// Enter sends the message (T5)
+//
+// Browser-local, like Appearance: it belongs to the keyboard in front of you
+// and not to the agent, so it is NOT in the settings payload and NOT in the
+// dirty diff — the change takes effect the moment the box is ticked, and
+// Save has nothing to do with it. The composer reads the same key and
+// listens for the same event.
+//
+// The default has to differ by device. On a desktop Enter has always sent,
+// and Shift+Enter is the newline everyone already knows. On a phone Enter IS
+// the on-screen keyboard's newline key — there is a send button an inch away
+// — and a message that fires the moment you reach for a second line is the
+// single most expensive misfire the composer has.
+// ---------------------------------------------------------------------------
+
+const ENTER_SENDS_KEY = 'pernix:enter-sends';
+
+/**
+ * @returns {boolean} true when Enter sends and Shift+Enter adds a line;
+ *          false when Enter adds a line and Ctrl/Cmd+Enter sends.
+ */
+export function enterSends() {
+    try {
+        const raw = localStorage.getItem(ENTER_SENDS_KEY);
+        if (raw === '1') return true;
+        if (raw === '0') return false;
+    } catch { /* private mode, or storage denied — fall through to the default */ }
+    return !isTouch();
+}
+
+function buildEnterSendsRow() {
+    const input = el('input', { type: 'checkbox', id: 'pref-enter-sends' });
+    input.checked = enterSends();
+    input.addEventListener('change', () => {
+        try {
+            localStorage.setItem(ENTER_SENDS_KEY, input.checked ? '1' : '0');
+        } catch { /* the event still fires: this session gets the new behaviour */ }
+        window.dispatchEvent(new CustomEvent('pernix:enter-sends', { detail: input.checked }));
+        announce(input.checked
+            ? 'Enter sends the message'
+            : 'Enter adds a line; Ctrl or Cmd plus Enter sends');
+    });
+
+    // Hand-built rather than buildField()'d on purpose: buildField is driven
+    // by the server schema, and everything it builds is collected into the
+    // save payload by key. This row has no server key to collect.
+    return el('div', { class: 'setting-row setting-row-bool', 'data-key': 'enter_sends' }, [
+        el('div', { class: 'setting-label-cell' }, [
+            el('span', { class: 'setting-label-line' }, [
+                el('label', { for: 'pref-enter-sends' }, [text('Enter sends the message')]),
+            ]),
+            el('span', { class: 'setting-hint' }, [text(
+                'Off: Enter adds a line and Ctrl/Cmd+Enter sends. '
+                + 'On by default with a mouse, off on touch.')]),
+        ]),
+        input,
+    ]);
+}
+
 function buildAppearanceSection() {
     // Browser-local, not a server setting: it belongs to this device, not to
     // the agent. Stored in localStorage and applied by theme.js.
@@ -2081,10 +2142,12 @@ function buildAppearanceSection() {
         el('h3', {}, [
             text('Appearance'),
             buildHelpIcon('Dark is the default. System follows the operating system\'s '
-                + 'light/dark setting. This preference lives in this browser only — it is '
-                + 'not synced to the server or to your other devices.'),
+                + 'light/dark setting. Both preferences in this section live in this '
+                + 'browser only — they are not synced to the server or to your other '
+                + 'devices, and they take effect without saving.'),
         ]),
         row,
+        buildEnterSendsRow(),
     ]);
 }
 
