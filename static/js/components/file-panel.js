@@ -8,6 +8,7 @@ import { isCompact, isTouch, setMainInert } from '../mobile.js';
 import { notify } from '../feedback.js';
 import { openSettings } from './modals/settings.js';
 import { confirmDanger } from './modals/confirm.js';
+import { actionSheet } from './modals/sheet.js';
 
 function _authHdr() { const t = getAuthToken(); return t ? { 'Authorization': `Bearer ${t}` } : {}; }
 import {
@@ -1040,6 +1041,63 @@ function _sortedWsEntries(entries, sortBy) {
     return all;
 }
 
+/** Save a workspace file. Shared by the viewer's button and the row sheet. */
+function downloadWorkspaceFile(path, name) {
+    const a = document.createElement('a');
+    a.href = `/workspace/${path}`;
+    a.download = name || path.split('/').pop();
+    a.click();
+}
+
+/**
+ * The overflow control on a workspace row (E6).
+ *
+ * On the desktop a row's only action is a delete × that hover reveals; on
+ * touch that × is hidden outright (there is no hover) and the swipe was the
+ * ONLY way to act on a row — a gesture with nothing on screen to suggest it
+ * exists. This is the discoverable half: the swipe stays as the accelerator
+ * for people who know it. Every item dispatches to the handler the desktop
+ * already uses.
+ */
+function _rowMenuButton(entry, type) {
+    const isDir = type === 'dir';
+    const btn = el('button', {
+        class: 'fp-row-menu',
+        type: 'button',
+        title: 'Actions',
+        'aria-label': `Actions for ${isDir ? 'the folder ' : ''}${entry.name}`,
+        'aria-haspopup': 'dialog',
+    }, [icon('more', { size: 18 })]);
+
+    btn.addEventListener('click', async (e) => {
+        // The row itself is a role=button that opens the entry.
+        e.stopPropagation();
+        const items = [{ id: 'open', label: isDir ? 'Open folder' : 'Open', icon: 'folder' }];
+        if (!isDir) items.push({ id: 'download', label: 'Download', icon: 'download' });
+        items.push({ id: 'delete', label: 'Delete', icon: 'trash', danger: true });
+
+        switch (await actionSheet({ title: entry.name, items })) {
+            case 'open':
+                if (isDir) {
+                    _wsSearchQuery = '';
+                    loadWorkspace({ path: entry.path });
+                } else {
+                    viewFile(entry.path, 'workspace');
+                }
+                break;
+            case 'download':
+                downloadWorkspaceFile(entry.path, entry.name);
+                break;
+            case 'delete':
+                deleteEntry(entry.path, type);
+                break;
+            default:
+                break;   // cancel, Escape, backdrop
+        }
+    });
+    return btn;
+}
+
 function _renderEntries(parent, entries) {
     // "Go up" entry when not at root and not searching
     if (!_wsSearchQuery && _wsParent !== null) {
@@ -1068,6 +1126,7 @@ function _renderEntries(parent, entries) {
             }, [text('\u00d7')]);
             dirDelBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteEntry(entry.path, 'dir'); });
             item.appendChild(el('span', { class: 'fp-tree-actions' }, [dirDelBtn]));
+            if (isTouch()) item.appendChild(_rowMenuButton(entry, 'dir'));
             _makeActivatable(item, `Open the folder ${entry.name}`, () => {
                 _wsSearchQuery = '';
                 loadWorkspace({ path: entry.path });
@@ -1096,6 +1155,7 @@ function _renderEntries(parent, entries) {
             }, [text('\u00d7')]);
             delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteEntry(entry.path); });
             item.appendChild(el('span', { class: 'fp-tree-actions' }, [delBtn]));
+            if (isTouch()) item.appendChild(_rowMenuButton(entry, 'file'));
 
             _makeActivatable(item, `Open ${displayName}`, () => viewFile(entry.path, 'workspace'));
             const fileWrap = el('div', { class: 'fp-tree-item-wrap' }, [
@@ -1214,12 +1274,7 @@ function renderViewer(container) {
 
     if (inWorkspace) {
         const dlBtn = el('button', { class: 'fp-btn' }, [text('download')]);
-        dlBtn.addEventListener('click', () => {
-            const a = document.createElement('a');
-            a.href = `/workspace/${file.path}`;
-            a.download = file.name;
-            a.click();
-        });
+        dlBtn.addEventListener('click', () => downloadWorkspaceFile(file.path, file.name));
         actions.appendChild(dlBtn);
     }
 
