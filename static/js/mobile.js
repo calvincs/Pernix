@@ -55,7 +55,6 @@ export function initMobile() {
     touchMq.addEventListener('change', () => { _stamp(); _applyTouch(); });
     compactMq.addEventListener('change', () => { _stamp(); _applyCompact(); });
 
-    _createScrim();
     _setupSidebarDrawer();
     _setupSwipeGesture();
     _setupFilePanelSwipe();
@@ -82,13 +81,19 @@ function _applyTouch() {
     else _restoreToggleFromHeader();
 }
 
-// Leaving the compact tier turns the drawer back into a docked sidebar; the
-// open state and its scrim mean nothing there and would leave a dead overlay.
+// Crossing 900px swaps one sidebar mechanism for the other, and each has to
+// leave nothing of itself behind: a stale .mobile-open would show a docked
+// sidebar as an off-canvas drawer, and a scrim that outlives the tier is an
+// invisible sheet of glass over the whole app.
 function _applyCompact() {
-    if (isCompact()) return;
-    const sidebar = document.getElementById('sidebar');
-    sidebar?.classList.remove('mobile-open');
-    _scrim?.classList.remove('visible');
+    if (isCompact()) {
+        _ensureScrim();
+        return;
+    }
+    document.getElementById('sidebar')?.classList.remove('mobile-open');
+    _removeScrim();
+    // The docked sidebar's own inert rule (collapsed, not closed) is app.js's;
+    // it re-runs on the same resize that got us here.
 }
 
 // ---------------------------------------------------------------------------
@@ -117,15 +122,26 @@ function _restoreToggleFromHeader() {
 
 // ---------------------------------------------------------------------------
 // Scrim (backdrop behind drawer)
+//
+// Exists only while the compact tier does. A docked sidebar has nothing to
+// wash out behind it, and an element with `inset: 0` sitting in #app on a
+// tablet is one CSS mistake away from swallowing every tap on the app.
 // ---------------------------------------------------------------------------
 
 let _scrim = null;
 
-function _createScrim() {
+function _ensureScrim() {
+    if (_scrim && _scrim.isConnected) return _scrim;
     _scrim = document.createElement('div');
     _scrim.className = 'mobile-scrim';
-    document.getElementById('app').appendChild(_scrim);
+    document.getElementById('app')?.appendChild(_scrim);
     _scrim.addEventListener('click', () => closeSidebar());
+    return _scrim;
+}
+
+function _removeScrim() {
+    _scrim?.remove();
+    _scrim = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +165,7 @@ function _setupSidebarDrawer() {
         e.stopPropagation();
         const sidebar = document.getElementById('sidebar');
         const isOpen = sidebar.classList.toggle('mobile-open');
-        _scrim.classList.toggle('visible', isOpen);
+        _ensureScrim().classList.toggle('visible', isOpen);
 
         // Mutual exclusion: close file panel if open
         if (isOpen) {
@@ -238,7 +254,7 @@ function _setupSwipeGesture() {
         if (!isOpen && dx > THRESHOLD && startX < EDGE_ZONE) {
             // Swipe right from edge -> open
             sidebar.classList.add('mobile-open');
-            _scrim?.classList.add('visible');
+            _ensureScrim().classList.add('visible');
         } else if (isOpen && dx < -THRESHOLD) {
             // Swipe left -> close
             closeSidebar();
