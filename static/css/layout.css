@@ -597,7 +597,6 @@
     background: var(--bg-raised);
     font-size: var(--text-xxs);
 }
-#worker-strip[hidden] { display: none; }
 .worker-strip-label { color: var(--text-faint); }
 .worker-chip {
     display: inline-flex;
@@ -2175,10 +2174,6 @@
 
 /* Mic button — same footprint as attach; recording state pulses red so a
    hot mic is never ambiguous. */
-#voice-btn[hidden] {
-    /* display:flex below would defeat the hidden attribute (voice_mode=off) */
-    display: none;
-}
 #voice-btn {
     background: transparent;
     color: var(--text-dim);

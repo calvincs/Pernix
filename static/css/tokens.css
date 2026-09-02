@@ -162,6 +162,16 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+/* The UA stylesheet's `[hidden] { display: none }` loses to ANY author rule
+   that sets display, whatever its specificity — origin beats specificity. So
+   every author `display` on a control that toggles via the hidden attribute
+   silently defeated it: #pause-btn (index.html) rendered in the idle header
+   on a phone because mobile.css gives .status-btn `display: flex`, and the
+   same trap was waiting for #voice-btn and #worker-strip, each of which had
+   grown its own `#id[hidden] { display: none }` patch. One rule instead, so
+   `el.hidden = true` means hidden everywhere. */
+[hidden] { display: none !important; }
+
 body {
     font-family: var(--mono);
     font-size: var(--text-base);
