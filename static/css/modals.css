@@ -89,6 +89,35 @@
     gap: var(--sp-2);
 }
 
+/* Section description, opened in place. The `?` tooltip is hover-only and so
+   invisible on touch; this is the same text where a thumb can reach it. */
+.settings-section-desc-wrap {
+    margin: 0 0 var(--sp-2);
+}
+.settings-section-desc-toggle {
+    background: none;
+    border: none;
+    padding: 2px 0;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--accent);
+    cursor: pointer;
+    opacity: 0.7;
+    transition: var(--transition);
+}
+.settings-section-desc-toggle:hover,
+.settings-section-desc-toggle:focus-visible {
+    opacity: 1;
+}
+.settings-section-desc {
+    margin-top: var(--sp-1);
+    padding-left: var(--sp-2);
+    border-left: 2px solid var(--line-faint);
+    font-size: var(--text-xs);
+    line-height: 1.6;
+    color: var(--text-dim);
+}
+
 /* The shell rendered when /api/settings could not be read at all. */
 .settings-load-error {
     border-left: 3px solid var(--warning);
