@@ -188,11 +188,84 @@ const STORAGE_KEY = 'pernix:file-panel';
 const MIN_WIDTH = 260;
 const DEFAULT_WIDTH = 360;
 
+// ---------------------------------------------------------------------------
+// Navigation
+//
+// The Explorer carried nine peer tabs in one wrapping strip. At any panel
+// width worth using they took two rows of ten-point uppercase, and nothing
+// said that "Telos" and "Workspace" are different KINDS of thing — a file
+// browser sat beside a governance surface as equals.
+//
+// Five groups, each with its own sub-tabs, puts the nine leaves one level
+// down and gives the top strip a shape that fits (and scrolls, rather than
+// wrapping, when it doesn't). LEAF KEYS ARE UNCHANGED: every existing deep
+// link — openFilePanel({tab:'memory'}), {tab:'jobs'}, {tab:'workspace'} —
+// still lands exactly where it did. The internal names the docs and the
+// settings still use ride along in each tab's title. (S7)
+// ---------------------------------------------------------------------------
+
+const EXPLORER_GROUPS = [
+    {
+        key: 'files', label: 'Files', icon: 'folder',
+        tabs: [{ key: 'workspace', label: 'Workspace' }],
+    },
+    {
+        key: 'knowledge', label: 'Knowledge', icon: 'search',
+        tabs: [{ key: 'memory', label: 'Memory' }],
+    },
+    {
+        key: 'capabilities', label: 'Capabilities', icon: 'settings',
+        tabs: [
+            { key: 'skills', label: 'Skills' },
+            { key: 'tools', label: 'Tools' },
+            { key: 'mcp', label: 'Servers', term: 'MCP' },
+        ],
+    },
+    {
+        key: 'automation', label: 'Automation', icon: 'clock',
+        tabs: [{ key: 'jobs', label: 'Jobs' }],
+    },
+    {
+        key: 'tuning', label: 'Self-tuning', icon: 'refresh',
+        tabs: [
+            { key: 'adaptive', label: 'Learning', term: 'Adaptive' },
+            { key: 'canary', label: 'Self-checks', term: 'Canary' },
+            { key: 'telos', label: 'Goals', term: 'Telos' },
+        ],
+    },
+];
+
+const TAB_KEYS = EXPLORER_GROUPS.flatMap(g => g.tabs.map(t => t.key));
+
+// The sub-tab each group opens on when nothing else is remembered.
+const DEFAULT_GROUP_TABS = Object.fromEntries(
+    EXPLORER_GROUPS.map(g => [g.key, g.tabs[0].key]),
+);
+
+function _groupOf(tabKey) {
+    return EXPLORER_GROUPS.find(g => g.tabs.some(t => t.key === tabKey)) || EXPLORER_GROUPS[0];
+}
+
+/**
+ * Resolve what a caller asked for: a leaf key (every old one still works),
+ * or a group key meaning "whichever sub-tab I was last on there".
+ * Returns null for anything unrecognised, so the caller can leave the panel
+ * where it is rather than jumping somewhere arbitrary.
+ */
+function _resolveTab(key) {
+    if (TAB_KEYS.includes(key)) return key;
+    const group = EXPLORER_GROUPS.find(g => g.key === key);
+    if (group) return _state.groupTabs[group.key] || group.tabs[0].key;
+    return null;
+}
+
 let _panel = null;        // root DOM element
 let _state = {
     open: false,
     width: DEFAULT_WIDTH,
-    tab: 'workspace',     // workspace | memory | skills | jobs | signals
+    tab: 'workspace',     // one of TAB_KEYS
+    group: 'files',       // the group that tab lives in
+    groupTabs: { ...DEFAULT_GROUP_TABS },  // last sub-tab visited per group
     viewMode: 'tree',     // tree | viewer | editor
     expandedDirs: new Set(),
     currentFile: null,    // { path, content, source, modified }
@@ -294,6 +367,11 @@ function saveState() {
             open: _state.open,
             width: _state.width,
             tab: _state.tab,
+            // Which group you were in, and where you were inside each of the
+            // others — so coming back to Capabilities returns you to Servers
+            // rather than starting over at Skills. (S7)
+            group: _state.group,
+            groupTabs: _state.groupTabs,
             expandedDirs: [..._state.expandedDirs],
             wsPath: _wsCurrentPath,
             wsSortBy: _state.wsSortBy,
@@ -308,7 +386,18 @@ function loadState() {
         const s = JSON.parse(raw);
         if (typeof s.open === 'boolean') _state.open = s.open;
         if (typeof s.width === 'number') _state.width = Math.max(MIN_WIDTH, s.width);
-        if (typeof s.tab === 'string') _state.tab = s.tab;
+        // A tab key from a build that had different ones (or a hand-edited
+        // entry) must not leave the panel showing nothing.
+        if (typeof s.tab === 'string' && TAB_KEYS.includes(s.tab)) _state.tab = s.tab;
+        if (s.groupTabs && typeof s.groupTabs === 'object') {
+            for (const [gk, tk] of Object.entries(s.groupTabs)) {
+                if (gk in _state.groupTabs && TAB_KEYS.includes(tk) && _groupOf(tk).key === gk) {
+                    _state.groupTabs[gk] = tk;
+                }
+            }
+        }
+        _state.group = _groupOf(_state.tab).key;
+        _state.groupTabs[_state.group] = _state.tab;
         if (Array.isArray(s.expandedDirs)) _state.expandedDirs = new Set(s.expandedDirs);
         if (typeof s.wsPath === 'string') _wsCurrentPath = s.wsPath;
         if (s.wsSortBy === 'name' || s.wsSortBy === 'date' || s.wsSortBy === 'size') {
@@ -419,8 +508,15 @@ export function openFilePanel(opts = {}) {
         _syncPanelInert();
     }
     if (opts.tab) {
-        _state.tab = opts.tab;
-        renderTabs();
+        // Leaf keys and group keys both work; anything unknown leaves the
+        // panel on whatever it was already showing.
+        const key = _resolveTab(opts.tab);
+        if (key) {
+            _state.tab = key;
+            _state.group = _groupOf(key).key;
+            _state.groupTabs[_state.group] = key;
+            renderTabs();
+        }
     }
     if (opts.file) {
         if (!guardDirty()) return;
@@ -450,7 +546,7 @@ function buildPanelDOM() {
     ]);
 
     // Tab bar
-    const tabBar = el('div', { class: 'fp-tab-bar', id: 'fp-tab-bar' });
+    const tabBar = el('div', { class: 'fp-nav', id: 'fp-tab-bar' });
 
     // Tab content containers
     const wsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'workspace', id: 'fp-workspace' });
@@ -479,75 +575,126 @@ function buildPanelDOM() {
     renderTabs();
 }
 
+// Roving tabindex: one tab stop per strip, arrows move inside it — the
+// contract role="tab" commits you to. Shared by both levels.
+function _stripArrows(e, ids, index) {
+    const delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+    let target = null;
+    if (delta) target = ids[(index + delta + ids.length) % ids.length];
+    else if (e.key === 'Home') target = ids[0];
+    else if (e.key === 'End') target = ids[ids.length - 1];
+    if (!target) return;
+    e.preventDefault();
+    // The click rebuilds the strip — focus the NEW node, not this one.
+    document.getElementById(target)?.click();
+    document.getElementById(target)?.focus();
+}
+
+function _selectTab(key) {
+    if (!key || key === _state.tab) return;
+    if (!guardDirty()) return;
+    if (_state.tab === 'jobs' && key !== 'jobs') clearElapsedTimers();
+    _state.tab = key;
+    _state.group = _groupOf(key).key;
+    _state.groupTabs[_state.group] = key;
+    _state.viewMode = 'tree';
+    _state.currentFile = null;
+    renderTabs();
+    loadTabData();
+    saveState();
+}
+
 function renderTabs() {
-    const tabBar = document.getElementById('fp-tab-bar');
-    if (!tabBar) return;
-    clear(tabBar);
+    const nav = document.getElementById('fp-tab-bar');
+    if (!nav) return;
+    clear(nav);
 
-    const tabs = [
-        { key: 'workspace', label: 'Workspace' },
-        { key: 'memory', label: 'Memory' },
-        { key: 'skills', label: 'Skills' },
-        { key: 'tools', label: 'Tools' },
-        { key: 'mcp', label: 'MCP' },
-        { key: 'jobs', label: 'Jobs' },
-        { key: 'adaptive', label: 'Adaptive' },
-        { key: 'canary', label: 'Canary' },
-        { key: 'telos', label: 'Telos' },
-    ];
+    const activeTab = _state.tab;
+    const activeGroup = _groupOf(activeTab);
+    const groupIds = EXPLORER_GROUPS.map(g => `fp-group-${g.key}`);
 
-    // A row of <button>s is not a tab strip to anything but a mouse: nothing
-    // said which one was current, and Tab walked through all nine. (A1)
-    tabBar.setAttribute('role', 'tablist');
-    tabBar.setAttribute('aria-label', 'Explorer sections');
-
-    tabs.forEach(t => {
-        const selected = t.key === _state.tab;
+    // --- level one: the five groups, one non-wrapping row ---
+    const groupBar = el('div', {
+        class: 'fp-group-bar', role: 'tablist', 'aria-label': 'Explorer sections',
+    });
+    EXPLORER_GROUPS.forEach((g, gi) => {
+        const selected = g.key === activeGroup.key;
+        const lands = selected ? activeTab : (_state.groupTabs[g.key] || g.tabs[0].key);
         const btn = el('button', {
-            class: `fp-tab-btn${selected ? ' active' : ''}`,
-            'data-tab': t.key,
-            id: `fp-tab-${t.key}`,
+            class: `fp-tab-btn fp-group-btn${selected ? ' active' : ''}`,
+            id: `fp-group-${g.key}`,
+            type: 'button',
+            'data-group': g.key,
             role: 'tab',
             'aria-selected': String(selected),
-            'aria-controls': `fp-${t.key}`,
-            // Roving tabindex: one tab stop for the strip, arrows move inside
-            // it — the contract role="tab" commits you to.
+            'aria-controls': `fp-${lands}`,
             tabindex: selected ? '0' : '-1',
-        }, [text(t.label)]);
-        btn.addEventListener('click', () => {
-            if (t.key !== _state.tab && !guardDirty()) return;
-            if (_state.tab === 'jobs' && t.key !== 'jobs') clearElapsedTimers();
-            _state.tab = t.key;
-            _state.viewMode = 'tree';
-            _state.currentFile = null;
-            renderTabs();
-            loadTabData();
-            saveState();
-        });
-        btn.addEventListener('keydown', (e) => {
-            const delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-            if (!delta) return;
-            e.preventDefault();
-            const at = tabs.findIndex(x => x.key === t.key);
-            const nextKey = tabs[(at + delta + tabs.length) % tabs.length].key;
-            document.getElementById(`fp-tab-${nextKey}`)?.click();
-            // The click rebuilt the strip — focus the NEW node, not this one.
-            document.getElementById(`fp-tab-${nextKey}`)?.focus();
-        });
-        tabBar.appendChild(btn);
+            title: g.tabs.length > 1
+                ? `${g.label} — ${g.tabs.map(t => (t.term ? `${t.label} (${t.term})` : t.label)).join(', ')}`
+                : g.label,
+        }, [
+            icon(g.icon, { size: 13 }),
+            el('span', { class: 'fp-group-label' }, [text(g.label)]),
+        ]);
+        btn.addEventListener('click', () => _selectTab(_resolveTab(g.key)));
+        btn.addEventListener('keydown', (e) => _stripArrows(e, groupIds, gi));
+        groupBar.appendChild(btn);
     });
+    nav.appendChild(groupBar);
+
+    // --- level two: only where a group actually has more than one view ---
+    if (activeGroup.tabs.length > 1) {
+        const subIds = activeGroup.tabs.map(t => `fp-tab-${t.key}`);
+        const subBar = el('div', {
+            class: 'fp-subtab-bar', role: 'tablist',
+            'aria-label': `${activeGroup.label} views`,
+        });
+        activeGroup.tabs.forEach((t, ti) => {
+            const selected = t.key === activeTab;
+            const btn = el('button', {
+                class: `fp-tab-btn fp-subtab-btn${selected ? ' active' : ''}`,
+                id: `fp-tab-${t.key}`,
+                type: 'button',
+                'data-tab': t.key,
+                role: 'tab',
+                'aria-selected': String(selected),
+                'aria-controls': `fp-${t.key}`,
+                tabindex: selected ? '0' : '-1',
+                // The internal term stays one hover away: the docs, the
+                // settings and the agent's logs all still say "Adaptive".
+                title: t.term ? `${t.label} (${t.term})` : t.label,
+            }, [text(t.label)]);
+            btn.addEventListener('click', () => _selectTab(t.key));
+            btn.addEventListener('keydown', (e) => _stripArrows(e, subIds, ti));
+            subBar.appendChild(btn);
+        });
+        nav.appendChild(subBar);
+    }
 
     // Show/hide tab content
-    ['workspace', 'memory', 'skills', 'tools', 'mcp', 'jobs', 'adaptive', 'canary', 'telos'].forEach(key => {
+    TAB_KEYS.forEach(key => {
         const container = document.getElementById(`fp-${key}`);
         if (!container) return;
-        container.classList.toggle('active', key === _state.tab);
+        const group = _groupOf(key);
+        container.classList.toggle('active', key === activeTab);
         container.setAttribute('role', 'tabpanel');
-        container.setAttribute('aria-labelledby', `fp-tab-${key}`);
+        // A panel is labelled by whichever control is actually on screen for
+        // it: its sub-tab when that strip is showing, its group otherwise.
+        container.setAttribute(
+            'aria-labelledby',
+            group.key === activeGroup.key && group.tabs.length > 1
+                ? `fp-tab-${key}`
+                : `fp-group-${group.key}`,
+        );
         // The panel scrolls, so it needs to be reachable in its own right.
         // Inactive panels are display:none and therefore not focusable.
         container.setAttribute('tabindex', '0');
     });
+
+    // The strip scrolls, so the group you just landed on can be off its right
+    // edge — after a deep link, or on a narrow panel. Bring it into view.
+    document.getElementById(`fp-group-${activeGroup.key}`)
+        ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
 async function loadTabData() {
@@ -2691,7 +2838,10 @@ function renderMcp() {
     const connected = servers.filter(s => s.status === 'ready').length;
     container.appendChild(el('div', { class: 'fp-section-header' }, [
         el('div', {}, [
-            el('span', { class: 'fp-section-label' }, [text('MCP Servers')]),
+            el('span', {
+                class: 'fp-section-label',
+                title: 'Model Context Protocol servers',
+            }, [text('Servers (MCP)')]),
             el('div', { class: 'fp-section-sub' }, [text(
                 _mcpData ? `${servers.length} configured · ${connected} connected` : 'unavailable',
             )]),
