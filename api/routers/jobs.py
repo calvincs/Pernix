@@ -124,6 +124,47 @@ async def validate_job_endpoint(name: str):
     return {"name": name, "validation": v}
 
 
+@router.post("/api/jobs/{name}/run")
+async def run_job_now(name: str):
+    """Fire a scheduled job once, right now, without touching its schedule.
+
+    Reuses the scheduler's own dispatch, so a manual run IS a run: same
+    claim-before-deliver row, same job.started / job.completed events, same
+    entry in History, same session type. Nothing here duplicates that logic.
+
+    The meta handed to the dispatcher is a COPY of the live job's, exactly as
+    the missed-run coalescer does it — ``_execute_cron_job`` writes
+    ``last_fired_at`` into whatever dict it is given, and a manual run must
+    not shift the schedule's missed-run grid. A paused job can still be run
+    this way; that is the point of a manual trigger.
+
+    Returns immediately: a run can take minutes, and its outcome arrives on
+    /api/jobs/events like every other run's.
+    """
+    from core.extensions.scheduling import _execute_cron_job, _get_scheduler, _read_jobs_json
+
+    meta = None
+    scheduler = _get_scheduler()
+    if scheduler is not None:
+        job = scheduler.get_job(name)
+        if job is not None:
+            meta = dict(job.kwargs.get("meta") or {})
+    if meta is None:
+        # No live scheduler (or no live job) — fall back to what is on disk.
+        stored = next((j for j in _read_jobs_json() if j.get("name") == name), None)
+        if stored is None:
+            raise HTTPException(404, detail=f"Job '{name}' not found")
+        meta = {k: v for k, v in stored.items() if k not in ("cron_trigger", "paused")}
+    meta["name"] = name
+    # Never persisted as a recurring job by a _save_jobs() the dispatcher runs.
+    meta["transient"] = True
+
+    task = asyncio.create_task(_execute_cron_job(meta))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return {"status": "run_started", "name": name}
+
+
 @router.post("/api/jobs/{name}/test")
 async def test_job_endpoint(name: str):
     """Start an isolated dry-run of the job (spec Feature 7).

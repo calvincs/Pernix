@@ -1,5 +1,6 @@
 """Tests for API routers using httpx AsyncClient + ASGITransport."""
 
+import asyncio
 import json
 
 import pytest
@@ -695,3 +696,88 @@ async def test_health_reports_build_id():
 
     data = await health()
     assert data.get("build") == BUILD_ID
+
+
+# ---------------------------------------------------------------------------
+# Jobs router — POST /api/jobs/{name}/run ("Run now")
+# ---------------------------------------------------------------------------
+
+
+async def test_run_job_now_dispatches_a_copy_of_the_live_meta(monkeypatch):
+    """A manual run reuses the scheduler's dispatch, on a COPY of the meta.
+
+    `_execute_cron_job` writes `last_fired_at` into whatever dict it is handed
+    (the live APScheduler job's, when the scheduler calls it). Handing it the
+    live dict from a manual run would move the missed-run grid, and a restart
+    would then believe a scheduled slot had already fired.
+    """
+    from api.routers import jobs as jobs_router
+
+    live_meta = {"name": "nightly", "prompt": "do the thing", "cron_expr": "0 3 * * *"}
+
+    class _Job:
+        kwargs = {"meta": live_meta}
+
+    class _Scheduler:
+        def get_job(self, name):
+            return _Job() if name == "nightly" else None
+
+    seen = {}
+
+    async def _fake_execute(meta):
+        seen["meta"] = meta
+        meta["last_fired_at"] = "written-by-the-dispatcher"
+
+    monkeypatch.setattr("core.extensions.scheduling._get_scheduler", lambda: _Scheduler(), raising=False)
+    monkeypatch.setattr("core.extensions.scheduling._execute_cron_job", _fake_execute, raising=False)
+
+    app = _make_app(jobs_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/jobs/nightly/run")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "run_started", "name": "nightly"}
+
+    # Fire-and-forget: give the created task a turn on the loop.
+    for _ in range(20):
+        if "meta" in seen:
+            break
+        await asyncio.sleep(0.01)
+
+    assert seen["meta"]["prompt"] == "do the thing"
+    assert seen["meta"]["transient"] is True
+    # The live job's dict is untouched.
+    assert "last_fired_at" not in live_meta
+    assert "transient" not in live_meta
+
+
+async def test_run_job_now_falls_back_to_disk_then_404s(monkeypatch, tmp_path):
+    from api.routers import jobs as jobs_router
+
+    stored = [{"name": "ondisk", "prompt": "p", "cron_expr": "* * * * *", "paused": True, "cron_trigger": "cron[...]"}]
+    seen = {}
+
+    async def _fake_execute(meta):
+        seen["meta"] = meta
+
+    monkeypatch.setattr("core.extensions.scheduling._get_scheduler", lambda: None, raising=False)
+    monkeypatch.setattr("core.extensions.scheduling._read_jobs_json", lambda: stored, raising=False)
+    monkeypatch.setattr("core.extensions.scheduling._execute_cron_job", _fake_execute, raising=False)
+
+    app = _make_app(jobs_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ok = await client.post("/api/jobs/ondisk/run")
+        missing = await client.post("/api/jobs/nope/run")
+
+    assert ok.status_code == 200
+    assert missing.status_code == 404
+
+    for _ in range(20):
+        if "meta" in seen:
+            break
+        await asyncio.sleep(0.01)
+
+    # The persisted-only fields never reach the dispatcher.
+    assert "cron_trigger" not in seen["meta"]
+    assert "paused" not in seen["meta"]
+    assert seen["meta"]["name"] == "ondisk"

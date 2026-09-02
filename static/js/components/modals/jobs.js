@@ -65,6 +65,21 @@ function statusBadge(status) {
     return el('span', { class: `jobs-status ${status}` }, [text(status)]);
 }
 
+// Inline result line — an alert() cannot be read next to the row it is about,
+// steals focus from the panel, and is unreachable to a screen reader that was
+// somewhere else. Returns { el, set } so a row can own its own line. (S12)
+function resultLine() {
+    const node = el('div', { class: 'jobs-result', role: 'status' });
+    return {
+        el: node,
+        set(message, isError = false) {
+            node.textContent = message || '';
+            node.classList.toggle('err', !!isError);
+            node.setAttribute('role', isError ? 'alert' : 'status');
+        },
+    };
+}
+
 function _refreshPanel() {
     if (_refreshCallback) _refreshCallback();
 }
@@ -231,6 +246,7 @@ function _buildJobRow(job, models, spaces = []) {
 
     function renderView() {
         clear(wrapper);
+        const result = resultLine();
         // Validation + last-test badges (spec Feature 7). A job saved before
         // the feature has no validation record — shown as "unvalidated".
         const v = job.validation;
@@ -273,40 +289,102 @@ function _buildJobRow(job, models, spaces = []) {
                     el('span', { style: { color: 'var(--text-faint)' } },
                         [text(job.prompt.length > 80 ? job.prompt.slice(0, 80) + '...' : job.prompt)]),
                 ]),
+                result.el,
             ]),
             el('div', { class: 'jobs-item-actions' }, [
+                // The endpoint already existed and nothing in the UI could
+                // reach it, so a job's "unvalidated" badge was a dead end
+                // short of editing and re-saving it. (S12)
+                el('button', {
+                    class: 'jobs-btn',
+                    title: 'Re-check this job\u2019s cron expression, prompt and model against the spec',
+                    'aria-label': `Validate the job ${job.name}`,
+                    onClick: async (e) => {
+                        const btn = e.target;
+                        btn.disabled = true;
+                        result.set('Validating\u2026');
+                        try {
+                            const res = await post(`/api/jobs/${encodeURIComponent(job.name)}/validate`);
+                            const v = res.validation || {};
+                            job.validation = v;
+                            const warnings = v.warnings || [];
+                            const errors = v.errors || [];
+                            if (v.ok) {
+                                result.set(warnings.length
+                                    ? `Valid, with warnings: ${warnings.join(' \u00b7 ')}`
+                                    : 'Valid \u2014 cron, prompt and model all check out.');
+                            } else {
+                                result.set(`Invalid: ${errors.join(' \u00b7 ') || 'the spec was rejected'}`, true);
+                            }
+                        } catch (err) {
+                            result.set(`Validate failed: ${err.message}`, true);
+                        }
+                        btn.disabled = false;
+                    },
+                }, [text('validate')]),
+                el('button', {
+                    class: 'jobs-btn',
+                    title: 'Fire this job once now, for real \u2014 same session, history and notifications as a scheduled run',
+                    'aria-label': `Run the job ${job.name} now`,
+                    onClick: async (e) => {
+                        const btn = e.target;
+                        if (!confirm(
+                            `Run "${job.name}" now? This is a real run in a new session, `
+                            + 'not a dry run \u2014 use "test" for that. The schedule is unchanged.'
+                        )) return;
+                        btn.disabled = true;
+                        result.set('Starting\u2026');
+                        try {
+                            await post(`/api/jobs/${encodeURIComponent(job.name)}/run`);
+                            result.set('Started \u2014 follow it under Active, then History.');
+                        } catch (err) {
+                            result.set(`Could not start: ${err.message}`, true);
+                        }
+                        btn.disabled = false;
+                    },
+                }, [text('run now')]),
                 el('button', {
                     class: 'jobs-btn',
                     title: 'Dry-run this job once in an isolated workspace — result arrives as a notification',
+                    'aria-label': `Dry-run the job ${job.name}`,
                     onClick: async (e) => {
                         e.target.disabled = true;
                         e.target.textContent = 'testing…';
                         try {
                             await post(`/api/jobs/${encodeURIComponent(job.name)}/test`);
+                            result.set('Test started \u2014 the outcome arrives as a notification.');
                         } catch (err) {
                             e.target.disabled = false;
                             e.target.textContent = 'test';
-                            alert(`Test failed to start: ${err.message}`);
+                            result.set(`Test failed to start: ${err.message}`, true);
                         }
                     },
                 }, [text('test')]),
                 el('button', {
                     class: 'jobs-btn',
+                    'aria-label': `Edit the job ${job.name}`,
                     onClick: () => renderEdit(),
                 }, [text('edit')]),
                 el('button', {
                     class: 'jobs-btn',
+                    'aria-label': `${job.paused ? 'Resume' : 'Pause'} the job ${job.name}`,
                     onClick: async () => {
-                        if (job.paused) {
-                            await post(`/api/jobs/${encodeURIComponent(job.name)}/resume`);
-                        } else {
-                            await post(`/api/jobs/${encodeURIComponent(job.name)}/pause`);
+                        try {
+                            if (job.paused) {
+                                await post(`/api/jobs/${encodeURIComponent(job.name)}/resume`);
+                            } else {
+                                await post(`/api/jobs/${encodeURIComponent(job.name)}/pause`);
+                            }
+                        } catch (err) {
+                            result.set(`Could not ${job.paused ? 'resume' : 'pause'}: ${err.message}`, true);
+                            return;
                         }
                         _refreshPanel();
                     },
                 }, [text(job.paused ? 'resume' : 'pause')]),
                 el('button', {
                     class: 'jobs-btn danger',
+                    'aria-label': `Delete the job ${job.name}`,
                     onClick: async () => {
                         if (confirm(`Delete the scheduled job "${job.name}" \u2014 this cannot be undone. Its run history is kept.`)) {
                             await del(`/api/jobs/${encodeURIComponent(job.name)}`);
@@ -625,11 +703,15 @@ export async function buildHistoryTab() {
             ...jobNames.map(n => el('option', { value: n }, [text(n)])),
         ]);
 
+        const historyResult = resultLine();
         const clearBtn = el('button', {
             class: 'jobs-btn danger',
+            'aria-label': 'Clear the run history shown by the current filter',
             onClick: async () => {
                 if (filter === 'rlm') {
-                    alert('RLM runs are purged automatically by retention (rlm_run_retention_days).');
+                    historyResult.set(
+                        'RLM runs are purged automatically by retention (rlm_run_retention_days).',
+                    );
                     return;
                 }
                 const target = filter || 'all';
@@ -639,7 +721,7 @@ export async function buildHistoryTab() {
                     await del(`/api/jobs/runs${qs}`);
                     _refreshPanel();
                 } catch (e) {
-                    alert(`Error: ${e.message}`);
+                    historyResult.set(`Could not clear the history: ${e.message}`, true);
                 }
             },
         }, [text('clear')]);
@@ -655,6 +737,7 @@ export async function buildHistoryTab() {
             ]),
         ]);
         container.appendChild(header);
+        container.appendChild(historyResult.el);
 
         const listEl = el('div');
         container.appendChild(listEl);

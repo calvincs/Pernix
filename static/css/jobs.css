@@ -330,6 +330,25 @@
     outline-offset: -2px;
 }
 
+/* Per-row and per-panel result line — what alert() used to say, said where
+   the row it is about still is. */
+.jobs-result {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    margin-top: 2px;
+    padding-left: var(--sp-2);
+    border-left: 2px solid var(--line-faint);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.jobs-result:empty {
+    display: none;
+}
+.jobs-result.err {
+    color: var(--error);
+    border-left-color: var(--error);
+}
+
 .jobs-error-detail {
     font-size: var(--text-xs);
     color: var(--error);
