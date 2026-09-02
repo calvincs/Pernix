@@ -98,7 +98,7 @@ This means:
 
 - Scrolling back through a long session always shows the original turns.
 - A failed compaction can be retried without losing state.
-- You can audit what the agent saw at any point via the timeline drawer.
+- You can audit what the agent saw at any point via the **State timeline** — the state badge in the status bar opens it.
 
 Three triggers fire compaction:
 

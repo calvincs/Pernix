@@ -80,7 +80,7 @@ Click **+ new** in the sidebar. Type something:
 
 > *"What time is it, and who am I according to your memory? If we haven't met, just say so."*
 
-Watch the timeline panel — you'll see scout plan the turn, then the main agent run. The reply streams in real time.
+Watch the transcript: a collapsed `scout` block shows how the turn was planned, then the main agent runs and the reply streams in real time. The state badge in the status bar tracks the turn — click it for the **State timeline**, every state change and tool call in order.
 
 ---
 

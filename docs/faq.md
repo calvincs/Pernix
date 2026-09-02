@@ -56,7 +56,7 @@ If you really want to skip it, set `scout_enabled = false` in Settings — but e
 
 A few possibilities:
 
-- **The agent is genuinely working.** Long tool calls (browser, big file edits) can take a while. Watch the timeline drawer in the UI for tool activity.
+- **The agent is genuinely working.** Long tool calls (browser, big file edits) can take a while. Tool calls stream into the transcript as they run; the state badge in the status bar opens the **State timeline** for the full step-by-step view.
 - **A boot-time crash didn't clean up.** On startup, the manager sweeps `PROCESSING` and `AWAITING_WORKERS` sessions stuck from a prior crash and resets them to `IDLE_READY`. If you started cleanly, this should already have happened.
 - **The reaper will free it.** A 5-minute reaper tick force-resets `PROCESSING` sessions that have no background tasks holding them. Just wait.
 - **Last resort:** click cancel in the UI, or restart the server (`POST /api/admin/restart` from localhost, or Ctrl+C and `python run.py`).

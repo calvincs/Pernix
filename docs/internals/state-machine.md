@@ -133,7 +133,7 @@ Sessions/manager.py `reap_idle_sessions()`:
 - `GET /api/sessions/{id}/status` — now includes `state` (new 10-value enum, defined in `sessions/state_v2.py:SessionStateV2`), `compat_status` (legacy 3-value for CLI compat), `turn_id`, `retry_index`, `termination_reason`.
 - `GET /api/sessions/{id}/state-log?since_id=<id>&limit=<n>` — paginated replay of the transition log.
 - `POST /api/sessions/{id}/workers/{wid}/pause` / `/resume` — HTTP wrappers over the state-machine-aware `pause_worker` / `resume_worker` tools.
-- Frontend timeline drawer (`openTimeline()` in `static/js/components/modals/timeline.js:57`) reads from `/state-log` and subscribes to `session.state_changed` for live updates.
+- The frontend **State timeline** modal (`openTimeline()` in `static/js/components/modals/timeline.js:63`, opened from the status bar's state badge) reads from `/state-log` and subscribes to `session.state_changed` for live updates.
 
 ---
 

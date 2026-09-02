@@ -50,7 +50,7 @@ Cron sessions skip the dangerous-tool gate, so `search_web` runs without prompti
 
 ### What you'll see
 
-Three workers spawn (visible in the parent timeline drawer). Each runs independently, calls `search_web` and `browse_web` as needed, drafts its evaluation. The parent waits with `AWAITING_WORKERS`. As workers complete, the parent reads each result, synthesizes, and writes the final file.
+Three workers spawn (a Workers card in the parent transcript, and chips in the strip above the composer). Each runs independently, calls `search_web` and `browse_web` as needed, drafts its evaluation. The parent waits with `AWAITING_WORKERS`. As workers complete, the parent reads each result, synthesizes, and writes the final file.
 
 This gets the parallelism benefit (research happens 3× faster) and isolates context (each worker keeps its own scope, so you don't spend tokens on three databases all loaded into one prompt).
 
