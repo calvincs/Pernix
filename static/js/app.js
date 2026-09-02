@@ -582,10 +582,16 @@ function _composerHint() {
     return _isCoarsePointer() ? 'Tap send' : 'Enter to send · Shift+Enter for a new line';
 }
 
+// The fine-pointer placeholder used to carry both key bindings, which ran
+// past the end of the textarea at any realistic width — with the Explorer
+// open at 1280px it wrapped to a second line the composer clips, so it read
+// "…for a new lin". The second binding is a discovery, not an instruction:
+// it belongs in the tooltip and the accessible description, where it has as
+// much room as it needs. _composerHint() still carries both.
 function _composerPlaceholder() {
     return _isCoarsePointer()
         ? 'Message Pernix — tap send'
-        : 'Message Pernix — Enter to send · Shift+Enter for a new line';
+        : 'Message Pernix… Enter to send';
 }
 
 function _setComposerReadOnly(readonly, reason) {
@@ -605,6 +611,7 @@ function _setComposerReadOnly(readonly, reason) {
         ? (reason || 'This session is read-only')
         : _composerPlaceholder();
     input.title = readonly ? (reason || 'This session is read-only') : _composerHint();
+    input.setAttribute('aria-description', input.title);
 }
 
 // Monotonic token for session switches. Every await in selectSession (and
@@ -1598,6 +1605,9 @@ function setupInput() {
 
     textarea.placeholder = _composerPlaceholder();
     textarea.title = _composerHint();
+    // The binding the placeholder no longer has room for. aria-description
+    // reaches a screen reader without needing a visible element to point at.
+    textarea.setAttribute('aria-description', _composerHint());
 
     _restoreDraft();
 }
