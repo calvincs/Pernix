@@ -10,11 +10,11 @@ Spaces group; they do not isolate. Ordinary sessions can read a space's files an
 
 ## Creating and managing spaces
 
-- **Create**: the `+` next to "Spaces" in the sidebar. Pick a label and color. The label derives an immutable **slug** (e.g. "Research Lab" → `research-lab`) that names everything on disk — renaming the label later never moves files.
+- **Create**: the `+` next to "Spaces" in the sidebar — or, before you have any spaces, the **+ New space** row at the bottom of the session list (the Spaces header only appears once a space exists). Pick a label and color. The label derives an immutable **slug** (e.g. "Research Lab" → `research-lab`) that names everything on disk — renaming the label later never moves files.
 - **New session in a space**: the `+` on the space's header row. Sessions created this way stay grouped under the space, pinned-first then newest-first.
-- **Move a session in or out**: the ▣ button on a session row opens a space picker. Moving never changes the session's recency ordering.
-- **Edit**: the gear on the space header — label, color, and the directive editor.
-- **Delete**: the × on the space header. By default everything is kept (sessions return to the normal list, memory files and the workspace folder stay, jobs unbind). Tick the checkbox in the dialog to also delete its sessions, memory files, workspace folder, and bound jobs.
+- **Move a session in or out**: the move button (four arrows) on a session row opens a space picker; on touch it is **Move to space…** in the row's `⋯` sheet. Moving never changes the session's recency ordering.
+- **Edit**: the cog on the space header — label, color, and the directive editor. On touch the cog and the × move behind one `⋯` on the header (**Space settings**, **Delete space**); the `+` stays.
+- **Delete**: the × on the space header (the same `⋯` sheet on touch). By default everything is kept (sessions return to the normal list, memory files and the workspace folder stay, jobs unbind). Tick the checkbox in the dialog to also delete its sessions, memory files, workspace folder, and bound jobs.
 
 What a space owns on disk:
 
@@ -32,7 +32,7 @@ Space sessions run bash in `spaces/<slug>/` and resolve relative paths there fir
 
 ## Directive overrides
 
-A space may replace SOUL.md, RULES.md, or SESSIONS.md **per file** — an undefined file falls back to the default. The editor (space gear → Directives) shows the current default read-only; **Customize** copies it into an editable buffer, **Revert to default** removes the override. The files are plain markdown under `data/agent/spaces/<slug>/` and can be hand-edited; changes apply on the next turn. Both the main agent and the scout read the space's versions. The agent birthdate always comes from the default SOUL.md.
+A space may replace SOUL.md, RULES.md, or SESSIONS.md **per file** — an undefined file falls back to the default. The editor (space settings → **Directives**) shows the current default read-only; **Customize** copies it into an editable buffer, **Revert to default** removes the override. The files are plain markdown under `data/agent/spaces/<slug>/` and can be hand-edited; changes apply on the next turn. Both the main agent and the scout read the space's versions. The agent birthdate always comes from the default SOUL.md.
 
 ## Memory
 

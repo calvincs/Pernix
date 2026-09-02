@@ -59,7 +59,7 @@ A few possibilities:
 - **The agent is genuinely working.** Long tool calls (browser, big file edits) can take a while. Tool calls stream into the transcript as they run; the state badge in the status bar opens the **State timeline** for the full step-by-step view.
 - **A boot-time crash didn't clean up.** On startup, the manager sweeps `PROCESSING` and `AWAITING_WORKERS` sessions stuck from a prior crash and resets them to `IDLE_READY`. If you started cleanly, this should already have happened.
 - **The reaper will free it.** A 5-minute reaper tick force-resets `PROCESSING` sessions that have no background tasks holding them. Just wait.
-- **Last resort:** click cancel in the UI, or restart the server (`POST /api/admin/restart` from localhost, or Ctrl+C and `python run.py`).
+- **Last resort:** press **Stop** in the UI — the send button becomes it while a turn is running — or restart the server (`POST /api/admin/restart` from localhost, or Ctrl+C and `python run.py`).
 
 For the full reaper rules and timeouts, see [internals/state-machine.md §0.7](internals/state-machine.md#07-reaper-rules-10-state).
 
@@ -70,7 +70,7 @@ Two safety nets:
 - **`max_tool_rounds`** (default 50) caps the number of tool-call cycles per turn. The loop ends with a `round_ceiling` outcome instead of looping forever. It is a backstop against a runaway loop, not a spending limit — goal token/time budgets and the stuck detector are what actually bound cost. (It defaulted to 10 before the 2026-08 refactor, which was low enough that ordinary long tasks tripped it and had to be papered over by goal continuations.)
 - **Reflect** runs after every turn. It compares the original request against what the agent produced, and can trigger up to 2 retries with corrective lessons (`reflect_max_retries = 2`). After that it escalates by surfacing the issue to you.
 
-If the agent is doing something destructive, hit the cancel button in the UI — that triggers a `CANCELLING → IDLE_READY` transition and tears down the loop within ~30 seconds.
+If the agent is doing something destructive, press **Stop** — the send button becomes it while a turn is running — which triggers a `CANCELLING → IDLE_READY` transition and tears down the loop within ~30 seconds.
 
 ### Why doesn't my Settings change take effect?
 
