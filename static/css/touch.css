@@ -207,6 +207,15 @@
     max-width: 14ch;
     min-height: 28px;
 }
+/* Renaming a session is the header title's whole purpose on a phone, and
+   the input it swaps in was 12px in a 22px box: iOS zooms the page in on
+   focus and never zooms back, so the rename you just started is happening
+   somewhere off the right edge. 16px is the threshold. (T3) */
+#session-header-rename {
+    font-size: 16px;
+    min-height: 32px;
+    padding: var(--sp-1) var(--sp-2);
+}
 
 /* ------------------------------------------------------------------
    Scrollbar hiding (native indicators are better on mobile)
@@ -851,6 +860,13 @@
    ------------------------------------------------------------------ */
 .palette-overlay {
     padding-top: max(var(--sp-4), var(--safe-top));
+}
+/* The command palette's own field — --text-md, so 15px, one pixel under
+   the iOS zoom threshold. The field has no class of its own; app.js builds
+   it as the .palette-card's only <input>. (T3) */
+.palette-card input {
+    font-size: 16px;
+    min-height: 44px;
 }
 #model-menu {
     max-width: calc(100vw - 16px);
