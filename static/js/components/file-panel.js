@@ -3,6 +3,7 @@
 import { el, text, clear, renderMarkdown } from '../render.js';
 import { get, post, del, getAuthToken } from '../api.js';
 import { isMobile } from '../mobile.js';
+import { notify } from '../feedback.js';
 import { openSettings } from './modals/settings.js';
 
 function _authHdr() { const t = getAuthToken(); return t ? { 'Authorization': `Bearer ${t}` } : {}; }
@@ -786,14 +787,15 @@ async function viewFile(path, source = 'workspace') {
                     };
                 } else {
                     const content = await resp.text();
+                    const mtime = _mtimeOf(resp);
                     // Double-check: if the fetched text is huge (chunked response with no content-length)
                     if (content.length > MAX_TEXT_SIZE) {
                         _state.currentFile = {
                             path, content: content.slice(0, MAX_TEXT_SIZE),
-                            source, type: 'text', name, truncated: true,
+                            source, type: 'text', name, truncated: true, mtime,
                         };
                     } else {
-                        _state.currentFile = { path, content, source, type: 'text', name };
+                        _state.currentFile = { path, content, source, type: 'text', name, mtime };
                     }
                 }
             }
@@ -939,6 +941,34 @@ function disposeActiveEditor() {
     }
 }
 
+// The mtime the server stamped on the file we read. Handed back as base_mtime
+// on save so a PUT can tell "nobody touched it" from "the agent rewrote it
+// while you were typing". Missing/garbled header = no conflict detection,
+// i.e. exactly the old behaviour. (S3)
+function _mtimeOf(resp) {
+    const v = parseFloat(resp.headers.get('X-File-Mtime') || '');
+    return Number.isFinite(v) ? v : null;
+}
+
+// Inline result line for a 409, same shape as the MCP add form's: say what
+// happened, and offer the only two honest choices. Never a confirm() — the
+// user needs to see which file this is about. (S3)
+function _showSaveConflict(container, { onReload, onOverwrite }) {
+    container.querySelector('.fp-conflict')?.remove();
+    const reloadBtn = el('button', { class: 'fp-btn' }, [text('Reload')]);
+    reloadBtn.addEventListener('click', () => { box.remove(); onReload(); });
+    const overwriteBtn = el('button', { class: 'fp-btn fp-btn-danger' }, [text('Overwrite')]);
+    overwriteBtn.addEventListener('click', () => { box.remove(); onOverwrite(); });
+    const box = el('div', { class: 'fp-conflict', role: 'alert' }, [
+        el('span', { class: 'fp-conflict-msg' }, [text('Changed on disk since you opened it')]),
+        el('span', { class: 'fp-conflict-actions' }, [reloadBtn, overwriteBtn]),
+    ]);
+    const toolbar = container.querySelector('.fp-toolbar');
+    if (toolbar) toolbar.after(box);
+    else container.prepend(box);
+    return box;
+}
+
 // Warn on browser close/refresh with unsaved changes
 window.addEventListener('beforeunload', (e) => {
     if (_state.dirty) { e.preventDefault(); }
@@ -1016,7 +1046,30 @@ function renderEditor(container) {
     });
 }
 
-async function saveFile(container) {
+// Pull the on-disk text back into the open editor, discarding local edits.
+// The Reload half of a conflict — the user chose the other writer's version.
+async function _reloadWorkspaceFile(container) {
+    const file = _state.currentFile;
+    if (!file) return;
+    const statusEl = container.querySelector('.fp-editor-status');
+    try {
+        const resp = await fetch(`/workspace/${file.path}`, { headers: _authHdr() });
+        if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+        file.content = await resp.text();
+        file.mtime = _mtimeOf(resp);
+        _state.originalContent = file.content;
+        _state.dirty = false;
+        renderCurrentTab();
+    } catch (e) {
+        if (statusEl) {
+            statusEl.className = 'fp-editor-status error';
+            statusEl.textContent = `Reload failed: ${e.message}`;
+        }
+        notify('error', `Could not reload ${file.path}: ${e.message}`);
+    }
+}
+
+async function saveFile(container, { force = false } = {}) {
     const file = _state.currentFile;
     if (!file || !_activeEditor) return;
 
@@ -1031,12 +1084,33 @@ async function saveFile(container) {
     if (statusEl) { statusEl.className = 'fp-editor-status'; statusEl.textContent = 'Saving\u2026'; }
 
     try {
+        const body = { content };
+        // Overwrite = resend without base_mtime, which is the server's own
+        // opt-out and therefore literally last-writer-wins again.
+        if (!force && file.mtime != null) body.base_mtime = file.mtime;
         const resp = await fetch(url, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', ..._authHdr() },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify(body),
         });
+        if (resp.status === 409) {
+            let payload = {};
+            try { payload = await resp.json(); } catch { /* body is optional */ }
+            if (payload.mtime != null) file.mtime = payload.mtime;
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            if (statusEl) {
+                statusEl.className = 'fp-editor-status error';
+                statusEl.textContent = 'Changed on disk';
+            }
+            _showSaveConflict(container, {
+                onReload: () => _reloadWorkspaceFile(container),
+                onOverwrite: () => saveFile(container, { force: true }),
+            });
+            return;
+        }
         if (!resp.ok) throw new Error(`Save failed: ${resp.statusText}`);
+        const saved = await resp.json().catch(() => ({}));
+        if (saved.mtime != null) file.mtime = saved.mtime;
 
         file.content = content;
         _state.originalContent = content;
@@ -1433,6 +1507,7 @@ function renderSkills() {
                         source: 'skill',
                         type: 'text',
                         name: 'SKILL.md',
+                        mtime: skillData.mtime ?? null,
                         skillData,
                         pendingProposal: proposal,
                     };
@@ -1571,6 +1646,7 @@ async function viewSkill(name) {
             source: 'skill',
             type: 'text',
             name: 'SKILL.md',
+            mtime: data.mtime ?? null,
             skillData: data,
         };
         _state.viewMode = 'viewer';
@@ -1783,7 +1859,29 @@ function renderSkillEditor(container) {
     });
 }
 
-async function saveSkill(container) {
+// Reload half of a SKILL.md conflict — same contract as the workspace one.
+async function _reloadSkillFile(container) {
+    const file = _state.currentFile;
+    if (!file) return;
+    const statusEl = container.querySelector('.fp-editor-status');
+    try {
+        const data = await get(`/api/skills/${encodeURIComponent(file.path)}`);
+        file.content = data.raw_content || '';
+        file.mtime = data.mtime ?? null;
+        file.skillData = data;
+        _state.originalContent = file.content;
+        _state.dirty = false;
+        renderSkills();
+    } catch (e) {
+        if (statusEl) {
+            statusEl.className = 'fp-editor-status error';
+            statusEl.textContent = `Reload failed: ${e.message}`;
+        }
+        notify('error', `Could not reload ${file.path}/SKILL.md: ${e.message}`);
+    }
+}
+
+async function saveSkill(container, { force = false } = {}) {
     const file = _state.currentFile;
     if (!file || !_activeEditor) return;
 
@@ -1796,12 +1894,31 @@ async function saveSkill(container) {
     if (statusEl) { statusEl.className = 'fp-editor-status'; statusEl.textContent = 'Saving\u2026'; }
 
     try {
+        const body = { content };
+        if (!force && file.mtime != null) body.base_mtime = file.mtime;
         const resp = await fetch(`/api/skills/${encodeURIComponent(file.path)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', ..._authHdr() },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify(body),
         });
+        if (resp.status === 409) {
+            let payload = {};
+            try { payload = await resp.json(); } catch { /* body is optional */ }
+            if (payload.mtime != null) file.mtime = payload.mtime;
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            if (statusEl) {
+                statusEl.className = 'fp-editor-status error';
+                statusEl.textContent = 'Changed on disk';
+            }
+            _showSaveConflict(container, {
+                onReload: () => _reloadSkillFile(container),
+                onOverwrite: () => saveSkill(container, { force: true }),
+            });
+            return;
+        }
         if (!resp.ok) throw new Error(`Save failed: ${resp.statusText}`);
+        const saved = await resp.json().catch(() => ({}));
+        if (saved.mtime != null) file.mtime = saved.mtime;
 
         file.content = content;
         _state.originalContent = content;

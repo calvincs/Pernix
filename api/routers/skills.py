@@ -14,12 +14,17 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from config import settings
 
 router = APIRouter(tags=["skills"])
 logger = logging.getLogger("pernix.api.skills")
+
+# Mirrors api/routers/workspace.py: the SKILL.md editor is the same editor,
+# so an edit racing the agent's own rewrite has to fail the same way.
+MTIME_TOLERANCE_S = 0.5
 
 
 @router.get("/api/skills")
@@ -175,6 +180,11 @@ async def get_skill(name: str):
     # Read SKILL.md raw content for editing
     skill_md = skill.path / "SKILL.md"
     raw_content = skill_md.read_text(encoding="utf-8") if skill_md.exists() else ""
+    # Handed back as base_mtime on save — see update_skill below.
+    try:
+        mtime = skill_md.stat().st_mtime if skill_md.exists() else None
+    except OSError:
+        mtime = None
 
     return {
         "name": skill.name,
@@ -184,6 +194,7 @@ async def get_skill(name: str):
         "enabled": not reg.is_disabled(name),
         "instructions": instructions,
         "raw_content": raw_content,
+        "mtime": mtime,
         "resources": resources,
         "path": str(skill.path),
     }
@@ -191,6 +202,7 @@ async def get_skill(name: str):
 
 class SkillUpdate(BaseModel):
     content: str
+    base_mtime: float | None = None
 
 
 @router.put("/api/skills/{name}")
@@ -204,13 +216,22 @@ async def update_skill(name: str, body: SkillUpdate):
         raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
 
     skill_md = skill.path / "SKILL.md"
+    # Optimistic concurrency, opt-in: only a caller that read the file sends
+    # base_mtime, so every other writer keeps last-writer-wins.
+    if body.base_mtime is not None and skill_md.is_file():
+        try:
+            current = skill_md.stat().st_mtime
+        except OSError:
+            current = None
+        if current is not None and abs(current - body.base_mtime) > MTIME_TOLERANCE_S:
+            return JSONResponse(status_code=409, content={"detail": "changed_on_disk", "mtime": current})
     skill_md.write_text(body.content, encoding="utf-8")
 
     # Rescan to pick up changes
     reg.rescan(Path(settings.skills_dir))
     logger.info("Skill '%s' updated via API", name)
 
-    return {"ok": True}
+    return {"ok": True, "mtime": skill_md.stat().st_mtime}
 
 
 class SkillToggle(BaseModel):

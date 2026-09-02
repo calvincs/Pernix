@@ -523,6 +523,28 @@ body.fp-resizing #main { pointer-events: none; }
     outline: 2px solid var(--accent);
     outline-offset: -2px;
 }
+/* Save conflict banner — the file changed on disk while the editor was open.
+   Sits between the toolbar and the editor so it cannot be scrolled past. */
+.fp-conflict {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    flex-wrap: wrap;
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--warning-bg);
+    border-bottom: 1px solid var(--line-faint);
+    font-size: var(--text-xs);
+}
+.fp-conflict-msg {
+    color: var(--warning);
+}
+.fp-conflict-actions {
+    display: flex;
+    gap: var(--sp-2);
+    flex-shrink: 0;
+}
+
 .fp-editor-status {
     font-size: 9px;
     color: var(--text-faint);
