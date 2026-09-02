@@ -30,6 +30,7 @@ class MaintenanceRunner:
     def __init__(self):
         self._task: asyncio.Task | None = None
         self._tracked_tasks: set[asyncio.Task] = set()
+        self._snooze_task: asyncio.Task | None = None
         self._tick_count = 0
         self._last_tick_time = 0.0
         self._stats = {
@@ -112,8 +113,20 @@ class MaintenanceRunner:
                 # settings.snooze_max_cycle_seconds, which can legitimately
                 # exceed TICK_TIMEOUT; running it inside meant the tick's
                 # wait_for force-cancelled every cycle partway through.
-                if self._tick_count % settings.snooze_interval_ticks == 0:
-                    await self._run_snooze()
+                # Snooze runs as its own task, not awaited here: a cycle can
+                # legitimately last up to its backstop (900s, and ×4 for a
+                # local background model). Awaiting it inline stalled the
+                # whole heartbeat for that long — no subscriber reaping, no
+                # CANCELLING/FINALIZING/PROCESSING unstick, no WAL checkpoint
+                # — and froze _tick_count, so the hourly and daily tiers
+                # drifted by however long the cycle took.
+                interval = max(1, int(settings.snooze_interval_ticks))
+                if self._tick_count % interval == 0:
+                    if self._snooze_task is None or self._snooze_task.done():
+                        self._snooze_task = asyncio.create_task(self._run_snooze())
+                        self.track_task(self._snooze_task)
+                    else:
+                        logger.debug("Snooze cycle still running — skipping this slot")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -146,6 +159,30 @@ class MaintenanceRunner:
             raise  # shutdown — let the heartbeat's handler stop the loop
         except Exception as e:
             logger.error("Snooze cycle error: %s", e, exc_info=True)
+
+    _DAILY_TIER_KEY = "maintenance_last_daily_at"
+    _DAILY_TIER_INTERVAL_S = 24 * 3600
+
+    def _daily_tier_due(self) -> bool:
+        """True at most once a day, by the clock, and stamp the run.
+
+        Reads and writes a snooze_state row so the schedule survives a
+        restart — the whole point, since the tick counter does not.
+        """
+        from db import models as db
+
+        now = time.time()
+        try:
+            last = float(db.get_snooze_state(self._DAILY_TIER_KEY) or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if last and now - last < self._DAILY_TIER_INTERVAL_S:
+            return False
+        try:
+            db.set_snooze_state(self._DAILY_TIER_KEY, str(now))
+        except Exception as e:
+            logger.warning("Could not stamp the daily maintenance tier: %s", e)
+        return True
 
     async def _tick(self) -> None:
         """Execute stratified maintenance duties.
@@ -268,8 +305,12 @@ class MaintenanceRunner:
             except Exception as e:
                 logger.warning("Backup failed: %s", e)
 
-        # Every 1440 ticks (24 hours): memory maintenance, vacuum
-        if tick % 1440 == 0:
+        # Once every 24h by the CLOCK, not by tick count. The counter starts
+        # at 0 each process and is further delayed by any long snooze cycle,
+        # so a box that restarts daily never reached 1440 and never ran the
+        # memory self-repair, the vacuum, or the aux-table prunes at all.
+        # Same wall-clock treatment the backup above already gets.
+        if self._daily_tier_due():
             # The mutating steps here (health_check(fix=True) rewrites the
             # memory index, the prunes delete rows) always run with a backup
             # at most ~24h old: the hourly check above shares this tick's
