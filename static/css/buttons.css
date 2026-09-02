@@ -236,7 +236,25 @@
 }
 
 /* ----------------------------------------------------------------------
-   4. States.
+   4. Icons. One shape for every icon in the app (static/js/icons.js), sized
+      by its width/height attributes and coloured by the control it is in.
+   ---------------------------------------------------------------------- */
+.pxi {
+    display: block;
+    flex-shrink: 0;
+}
+/* A status-bar button may carry a word beside its icon on a wide screen. An
+   icon alone is a guess; two of these open surfaces most users never find. */
+.status-btn-label {
+    display: none;
+    font-size: var(--text-xs);
+}
+@media (min-width: 900px) {
+    .status-btn-label { display: inline; }
+}
+
+/* ----------------------------------------------------------------------
+   5. States.
    ---------------------------------------------------------------------- */
 .btn:disabled,
 .btn-primary:disabled,
