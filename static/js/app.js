@@ -134,6 +134,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         sidebar.classList.add('collapsed');
     }
     syncSidebarInert();
+    // Narrowing a desktop window past the mobile breakpoint turns the same
+    // element into the drawer, which mobile.js opens with .mobile-open — a
+    // stale inert from the desktop state would leave that drawer visible but
+    // dead. Re-evaluated on resize because mobile.js owns the media query.
+    window.addEventListener('resize', syncSidebarInert);
     sidebarToggle.addEventListener('click', () => {
         if (isMobile()) return;
         sidebar.classList.toggle('collapsed');
