@@ -6,7 +6,7 @@
 import { el, text, clear } from '../../render.js';
 import { get, post, put, del, patch } from '../../api.js';
 import { actionBtn, setActionNotice, takeActionNotice } from './adaptive.js';
-import { resultLine, tabGlossary } from './telos.js';
+import { makeDisclosure, resultLine, tabGlossary } from './telos.js';
 import { createCodeEditor } from '../file-panel.js';
 
 // The open raw-CANARY.md editor, if any. Refresh and Cancel both tear the tab
@@ -292,9 +292,12 @@ export async function renderCanaryTab(container) {
             ? gates.map(g => `${g.passed ? '✓' : '✗'} ${g.name}: ${g.command}\n${(g.output_tail || '').slice(-400)}`).join('\n\n')
             : '(no gate detail recorded)';
         detail.textContent = r.error ? `error: ${r.error}\n\n${gateText}` : gateText;
-        headEl.addEventListener('click', () => {
-            detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
-        });
+        makeDisclosure(
+            headEl,
+            () => detail.style.display !== 'none',
+            () => { detail.style.display = detail.style.display === 'none' ? 'block' : 'none'; },
+        );
+        headEl.setAttribute('aria-label', `Gate detail for the ${r.task} run`);
         row.appendChild(headEl);
         row.appendChild(detail);
         container.appendChild(row);

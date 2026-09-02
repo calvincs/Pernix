@@ -533,12 +533,23 @@ async function _renderGraph(pane) {
         return;
     }
 
-    // Cross-tab linking: clicking a state node filters the Timeline tab.
+    // Cross-tab linking: activating a state node filters the Timeline tab.
+    // These are SVG <g> elements, so nothing about them was focusable or
+    // announced — the link between the two tabs was mouse-only. (A1)
     container.querySelectorAll('g.node').forEach(node => {
         const label = (node.textContent || '').trim();
         if (!nodeNames.has(label)) return;
         node.style.cursor = 'pointer';
-        node.addEventListener('click', () => _filterTimelineByState(label));
+        node.setAttribute('role', 'button');
+        node.setAttribute('tabindex', '0');
+        node.setAttribute('aria-label', `Filter the timeline to the ${label} state`);
+        const activate = () => _filterTimelineByState(label);
+        node.addEventListener('click', activate);
+        node.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+            e.preventDefault();
+            activate();
+        });
         const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
         title.textContent = 'Filter timeline to this state';
         node.appendChild(title);
@@ -966,6 +977,26 @@ function _isErrorContent(content) {
     return head.startsWith('error:') || head.includes('traceback');
 }
 
+/**
+ * Make a header <div> that toggles a detail block behave like the control it
+ * already looks like: focusable, announced as a button, and driven by
+ * Enter/Space as well as a click. (A1)
+ */
+function _makeDisclosure(headerEl, isExpanded, toggle) {
+    headerEl.setAttribute('role', 'button');
+    headerEl.setAttribute('tabindex', '0');
+    const sync = () => headerEl.setAttribute('aria-expanded', String(!!isExpanded()));
+    const activate = () => { toggle(); sync(); };
+    headerEl.addEventListener('click', activate);
+    headerEl.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+        e.preventDefault();
+        activate();
+    });
+    sync();
+    return headerEl;
+}
+
 function _computeTurnMeta(entries) {
     const meta = new Map();
     for (const entry of entries) {
@@ -999,7 +1030,13 @@ function _buildTurnGroup(turn, meta) {
     const header = _buildTurnHeader(turn, meta);
     const body = el('div', { class: 'tl-turn-body' });
     const group = el('div', { class: 'tl-turn-group', 'data-turn': String(turn ?? '') }, [header, body]);
-    header.addEventListener('click', () => group.classList.toggle('collapsed'));
+    // A bare <div> with a click handler: no tab stop, no role, no state. (A1)
+    _makeDisclosure(
+        header,
+        () => !group.classList.contains('collapsed'),
+        () => group.classList.toggle('collapsed'),
+    );
+    header.setAttribute('aria-label', `Turn ${turn ?? 'unknown'}`);
     return group;
 }
 
@@ -1142,7 +1179,12 @@ function _buildToolRow(tool, ts) {
         class: `tool-item timeline-tool-row${tool.was_error ? ' error' : ''}`,
     }, [headerEl, bodyEl]);
 
-    headerEl.addEventListener('click', () => itemEl.classList.toggle('expanded'));
+    _makeDisclosure(
+        headerEl,
+        () => itemEl.classList.contains('expanded'),
+        () => itemEl.classList.toggle('expanded'),
+    );
+    headerEl.setAttribute('aria-label', `${tool.name || 'tool'} call details`);
     return itemEl;
 }
 
