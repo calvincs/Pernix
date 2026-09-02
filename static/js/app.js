@@ -331,7 +331,15 @@ function _setComposerReadOnly(readonly, reason) {
         : 'Message Pernix...';
 }
 
+// Monotonic token for session switches. Every await in selectSession (and
+// loadMessages) is a chance for a second click to overtake the first: the
+// slower chain used to finish last and write its own _lastSeq, badge and
+// connectSSE over the newer session's, leaving a mixed transcript wired to
+// the wrong stream. file-panel.js already guards its loads this way.
+let _selectSeq = 0;
+
 async function selectSession(sid) {
+    const mySeq = ++_selectSeq;
     if (isMobile()) closeSidebar();
     state.sid = sid;
     _historyLimit = HISTORY_PAGE;  // fresh window per session
@@ -369,7 +377,9 @@ async function selectSession(sid) {
     }
 
     await loadMessages(sid);
+    if (mySeq !== _selectSeq) return;
     await loadContextInfo(sid);
+    if (mySeq !== _selectSeq) return;
     _seedWorkerStrip(sid);
 
     // Read-only sessions (dream journals): policy rides on the session payload.
@@ -385,6 +395,7 @@ async function selectSession(sid) {
     _renderModelBadge();
     try {
         const status = await get(`/api/sessions/${sid}/status`);
+        if (mySeq !== _selectSeq) return;
         // Set _lastSeq to server's current event_seq so SSE dedup skips
         // events already rendered from DB — prevents the load+replay race
         _lastSeq = status.event_seq || 0;
@@ -399,10 +410,12 @@ async function selectSession(sid) {
             _collected = '';
         }
     } catch {
+        if (mySeq !== _selectSeq) return;
         _lastSeq = 0;
     }
 
     await loadPendingQuestions(sid);
+    if (mySeq !== _selectSeq) return;
     connectSSE(sid, handleEvent);
 
 }
@@ -411,6 +424,7 @@ const HISTORY_PAGE = 200;   // messages rendered initially; grows on demand
 let _historyLimit = HISTORY_PAGE;
 
 async function loadMessages(sid, { keepScroll = false } = {}) {
+    const mySeq = _selectSeq;
     const inner = _messagesInner();
     const scroll = _messagesScroll();
     // Anchor to distance-from-bottom so "load earlier" re-renders keep the
@@ -421,6 +435,9 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
     _lastMsgTs = 0;  // gap dividers restart per render
     try {
         const data = await get(`/api/sessions/${sid}?limit=${_historyLimit}`);
+        // A newer selectSession already cleared and re-rendered this
+        // container; appending now would interleave two transcripts.
+        if (mySeq !== _selectSeq) return;
         const messages = data.messages || [];
         if (messages.length === 0) {
             showEmptyState();
