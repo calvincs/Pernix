@@ -11,6 +11,40 @@ from core.tools.registry import ToolRegistry
 logger = logging.getLogger("pernix.tools.loader")
 
 
+def _quarantine_custom_module(pkg, modname: str, err: Exception) -> None:
+    """Rename an agent-authored module that cannot be imported.
+
+    Agent-written tools are re-imported on every boot. A module that raises
+    at import time logs and is skipped, so the same failure repeats forever
+    and the tool is simply missing with no signal; one that BLOCKS at import
+    (a module-level loop or network wait) never returns at all and the app
+    never finishes starting. Moving it aside makes the next boot clean and
+    leaves the file for inspection.
+    """
+    from pathlib import Path as _P
+
+    try:
+        src = _P(pkg.__path__[0]) / f"{modname}.py"
+        if not src.exists():
+            return
+        dest = src.with_suffix(".py.broken")
+        src.rename(dest)
+        logger.error("Quarantined %s -> %s (%s)", src.name, dest.name, err)
+        try:
+            from db import models as _db
+
+            _db.add_notification(
+                title=f"Custom tool '{modname}' was quarantined",
+                body=f"It failed to import ({type(err).__name__}: {err}) and was renamed to {dest.name}.",
+                urgency="normal",
+                dedup_key=f"custom-tool-broken:{modname}",
+            )
+        except Exception:
+            pass
+    except OSError as e:
+        logger.warning("Could not quarantine %s: %s", modname, e)
+
+
 def load_builtin_tools(registry: ToolRegistry) -> None:
     """Auto-discover and register all built-in tool modules.
 
@@ -46,6 +80,7 @@ def load_builtin_tools(registry: ToolRegistry) -> None:
         except Exception as e:
             if is_custom:
                 logger.error("Custom tool failed to load: %s: %s", modname, e)
+                _quarantine_custom_module(pkg, modname, e)
             else:
                 logger.warning("Failed to load tool module %s: %s", modname, e)
 
