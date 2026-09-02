@@ -591,11 +591,42 @@ async def http_resume_worker(session_id: str, worker_id: str, body: dict = {}):
     return {"status": "resumed", "worker_id": worker_id, "detail": msg}
 
 
+def _non_negative_int(value, name: str) -> int:
+    """A purge knob, or a 400. Silently coercing garbage here would delete
+    the wrong set of sessions and report a number for it."""
+    if isinstance(value, bool) or isinstance(value, (list, dict)):
+        raise HTTPException(400, detail=f"{name} must be a non-negative integer")
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, detail=f"{name} must be a non-negative integer")
+    if n < 0:
+        raise HTTPException(400, detail=f"{name} must be a non-negative integer")
+    return n
+
+
 @router.post("/api/sessions/purge")
 async def purge_sessions(body: dict = {}):
-    """Bulk delete old sessions."""
-    keep_days = body.get("keep_days", 7)
-    keep_min = body.get("keep_min", 5)
+    """Bulk-delete stale ordinary sessions — or, with dry_run, say what it would.
+
+    Body: ``{keep_days: 7, keep_min: 5, dry_run: false}``. keep_days 0 means
+    "everything already idle"; keep_min is how many of the stale candidates
+    survive regardless, newest first.
+
+    Candidates are ordinary user chats only: unpinned, spaceless, session_type
+    'normal', last touched before the cutoff. Typed sessions (canary, worker,
+    cron, rlm, snooze) each have their own retention horizon in
+    core/retention.py and are counted, not deleted. The scan is the whole
+    table — it used to be the 1,000 most recently updated rows, which hid
+    exactly the oldest sessions a purge is aimed at.
+
+    Both modes compute the same set from the same query, so a dry run is a
+    promise the real run keeps.
+    """
+    body = body or {}
+    keep_days = _non_negative_int(body.get("keep_days", 7), "keep_days")
+    keep_min = _non_negative_int(body.get("keep_min", 5), "keep_min")
+    dry_run = bool(body.get("dry_run", False))
 
     from datetime import datetime, timedelta, timezone
 
@@ -603,15 +634,25 @@ async def purge_sessions(body: dict = {}):
 
     import asyncio as _asyncio
 
-    sessions = await _asyncio.to_thread(db.list_sessions, 1000)
-    # Sort by updated_at, keep at least keep_min. Space sessions are
-    # long-lived by contract (v33) — the bulk sweep never touches them;
-    # they go only via explicit delete or their space's cascade delete.
-    candidates = [s for s in sessions if (s.get("updated_at") or "") < cutoff and not s.get("space_id")]
-    to_delete = candidates[keep_min:] if len(candidates) > keep_min else []
+    found = await _asyncio.to_thread(db.list_purge_candidates, cutoff)
+    candidates = found["candidates"]
+    to_delete = candidates[keep_min:]
 
-    manager = get_manager()
-    for s in to_delete:
-        manager.delete_session(s["id"])
+    purged = 0
+    if not dry_run:
+        manager = get_manager()
+        for s in to_delete:
+            manager.delete_session(s["id"])
+            purged += 1
 
-    return {"purged": len(to_delete)}
+    return {
+        "dry_run": dry_run,
+        "keep_days": keep_days,
+        "keep_min": keep_min,
+        "cutoff": cutoff,
+        "candidates": len(candidates),
+        "would_delete": len(to_delete),
+        "purged": purged,
+        "sample": [{k: s[k] for k in ("id", "title", "updated_at", "message_count")} for s in to_delete[:10]],
+        "skipped": found["skipped"],
+    }

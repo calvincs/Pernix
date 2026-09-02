@@ -134,6 +134,82 @@ def list_sessions_enriched(limit: int = 50, offset: int = 0) -> list[dict]:
         return result
 
 
+# Everything older than the cutoff, bucketed by the first rule that spares it.
+# One statement over the whole table: the purge used to read the 1,000 most
+# recently updated rows and filter those, which made the OLDEST sessions — the
+# only ones a bulk purge is for — the ones it could not see, and widened the
+# blind spot by one row per new session.
+#
+# The message count is computed inside the CASE so the correlated subquery
+# runs only for rows that are actually candidates; SQLite evaluates CASE
+# branches lazily, so a table full of pinned and typed sessions costs one
+# scan, not one scan plus a COUNT per row.
+_PURGE_CANDIDATES_SQL = """SELECT
+    s.id,
+    s.title,
+    COALESCE(s.session_type, 'normal') AS session_type,
+    s.updated_at,
+    CASE
+        WHEN COALESCE(s.session_type, 'normal') != 'normal' THEN 'other_types'
+        WHEN COALESCE(s.pinned, 0) != 0 THEN 'pinned'
+        WHEN s.space_id IS NOT NULL THEN 'in_space'
+        ELSE ''
+    END AS spared_by,
+    CASE
+        WHEN COALESCE(s.session_type, 'normal') = 'normal'
+             AND COALESCE(s.pinned, 0) = 0
+             AND s.space_id IS NULL
+        THEN (SELECT COUNT(*) FROM messages m
+              WHERE m.session_id = s.id AND m.role IN ('user', 'assistant'))
+        ELSE 0
+    END AS message_count
+FROM sessions s
+WHERE s.updated_at < ?
+ORDER BY s.updated_at DESC
+"""
+
+
+def list_purge_candidates(cutoff_iso: str) -> dict:
+    """What the bulk purge may delete, and what it deliberately spared.
+
+    A candidate is an ordinary user chat gone stale: ``session_type =
+    'normal'``, not pinned, not in a space, ``updated_at`` before the cutoff.
+    Everything else older than the cutoff is counted under the FIRST rule
+    that spares it — other_types, then pinned, then in_space — so the buckets
+    partition the excluded rows and can be shown to a user as a sentence
+    rather than three overlapping numbers.
+
+    The three rules exist for three different reasons. Canary, worker, cron,
+    rlm and snooze sessions each have their own horizon in core/retention.py,
+    tuned to what that machinery needs to keep; a blanket age sweep deleted
+    them out from under it. Pinning is the user saying "keep this" and had no
+    effect here at all. Space sessions are long-lived by contract (v33) and
+    leave only by explicit delete or their space's cascade.
+
+    Returns ``{"candidates": [{id, title, session_type, updated_at,
+    message_count}, ...] newest first, "skipped": {"pinned": n, "in_space":
+    n, "other_types": n}}``.
+    """
+    candidates: list[dict] = []
+    skipped = {"pinned": 0, "in_space": 0, "other_types": 0}
+    with connect_sessions() as conn:
+        for r in conn.execute(_PURGE_CANDIDATES_SQL, (cutoff_iso,)):
+            spared_by = r["spared_by"]
+            if spared_by:
+                skipped[spared_by] += 1
+                continue
+            candidates.append(
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "session_type": r["session_type"],
+                    "updated_at": r["updated_at"],
+                    "message_count": int(r["message_count"] or 0),
+                }
+            )
+    return {"candidates": candidates, "skipped": skipped}
+
+
 def update_session(session_id: str, **kwargs) -> None:
     """Update session fields. Only known columns are set."""
     allowed = {
