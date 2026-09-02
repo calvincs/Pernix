@@ -10,6 +10,10 @@ from sessions.manager import get_manager
 
 router = APIRouter(tags=["sessions"])
 
+# Matches HISTORY_PAGE in static/js/app.js — the transcript window the client
+# asks for, and the fallback when a caller passes a cursor with no size.
+DEFAULT_HISTORY_PAGE = 200
+
 
 @router.post("/api/sessions")
 async def create_session(body: dict = {}):
@@ -145,10 +149,19 @@ async def list_workers(session_id: str):
 
 
 @router.get("/api/sessions/{session_id}")
-async def get_session(session_id: str, limit: int | None = None):
+async def get_session(session_id: str, limit: int | None = None, before_id: int | None = None):
     """Session metadata + messages. With `limit`, only the newest N messages
     (oldest-first) plus a total count — the UI uses this so opening a long
-    session doesn't load (and render) the entire unbounded transcript."""
+    session doesn't load (and render) the entire unbounded transcript.
+
+    `before_id` pages further back: the newest `limit` rows OLDER than that
+    id, and nothing the client already holds. That is what makes "load
+    earlier" a prepend instead of a re-render of the whole transcript.
+
+    `has_more` answers "is there anything behind the page I just got" —
+    computed from the oldest row returned, so it stays correct on both the
+    first page and every page after it.
+    """
     import asyncio as _asyncio
 
     from sessions.policy import annotate_read_only
@@ -157,9 +170,18 @@ async def get_session(session_id: str, limit: int | None = None):
     if not session:
         raise HTTPException(404, detail=f"Session {session_id} not found")
     annotate_read_only(session)
-    messages = await _asyncio.to_thread(db.get_messages, session_id, limit)
+    # A cursor with no window size is a whole-transcript read wearing a page's
+    # clothes; give it the default page instead of ignoring it.
+    if before_id is not None and limit is None:
+        limit = DEFAULT_HISTORY_PAGE
+    messages = await _asyncio.to_thread(db.get_messages, session_id, limit, before_id)
     total = await _asyncio.to_thread(db.count_messages, session_id) if limit is not None else len(messages)
-    return {**session, "messages": messages, "total_messages": total, "has_more": total > len(messages)}
+    has_more = False
+    if limit is not None and messages:
+        oldest_id = messages[0].get("id")
+        if oldest_id is not None:
+            has_more = await _asyncio.to_thread(db.count_messages, session_id, int(oldest_id)) > 0
+    return {**session, "messages": messages, "total_messages": total, "has_more": has_more}
 
 
 @router.get("/api/sessions/{session_id}/status")

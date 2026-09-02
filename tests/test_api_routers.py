@@ -172,6 +172,79 @@ async def test_get_session_found():
     assert len(data["messages"]) == 1
 
 
+async def test_get_session_paging_returns_newest_page_and_has_more():
+    """?limit= hands back the NEWEST page, oldest-first, and admits there is more."""
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Long one")
+    for i in range(25):
+        db.add_message(sid, "user", f"m{i}")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/sessions/{sid}?limit=10")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_messages"] == 25
+    assert data["has_more"] is True
+    contents = [m["content"] for m in data["messages"]]
+    assert contents == [f"m{i}" for i in range(15, 25)]
+
+
+async def test_get_session_before_id_returns_only_older_rows():
+    """The 'load earlier' fetch returns rows the client does not already hold."""
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Paged")
+    ids = [db.add_message(sid, "user", f"m{i}") for i in range(25)]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        page1 = (await client.get(f"/api/sessions/{sid}?limit=10")).json()
+        oldest = page1["messages"][0]["id"]
+        page2 = (await client.get(f"/api/sessions/{sid}?limit=10&before_id={oldest}")).json()
+        page3 = (await client.get(f"/api/sessions/{sid}?limit=10&before_id={page2['messages'][0]['id']}")).json()
+    assert [m["content"] for m in page2["messages"]] == [f"m{i}" for i in range(5, 15)]
+    assert page2["has_more"] is True
+    # Every id in page 2 is strictly older than the page-1 cursor: no overlap.
+    assert all(m["id"] < oldest for m in page2["messages"])
+    # The last page is short and says so — nothing is left behind it.
+    assert [m["content"] for m in page3["messages"]] == [f"m{i}" for i in range(0, 5)]
+    assert page3["has_more"] is False
+    assert page3["messages"][0]["id"] == ids[0]
+
+
+async def test_get_session_before_id_past_the_start_is_empty_not_a_reload():
+    """A cursor older than everything returns nothing — not the whole transcript."""
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Edge")
+    first = db.add_message(sid, "user", "only one")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/sessions/{sid}?limit=10&before_id={first}")
+    data = resp.json()
+    assert data["messages"] == []
+    assert data["has_more"] is False
+
+
+async def test_get_session_without_limit_still_returns_everything():
+    """No limit = the old whole-transcript read, and never a false has_more."""
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Whole")
+    for i in range(5):
+        db.add_message(sid, "user", f"m{i}")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        data = (await client.get(f"/api/sessions/{sid}")).json()
+    assert len(data["messages"]) == 5
+    assert data["total_messages"] == 5
+    assert data["has_more"] is False
+
+
 async def test_get_session_status():
     from api.routers import sessions
     from db import models as db

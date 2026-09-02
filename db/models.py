@@ -632,9 +632,18 @@ def get_messages(session_id: str, last: int | None = None, before_id: int | None
         return [dict(r) for r in rows]
 
 
-def count_messages(session_id: str) -> int:
+def count_messages(session_id: str, before_id: int | None = None) -> int:
+    """How many messages the session holds. With `before_id`, only those
+    older than that row — which is exactly "is there another page behind
+    this one" for the transcript's prepend-only paging."""
     with connect_sessions() as conn:
-        row = conn.execute("SELECT COUNT(*) AS c FROM messages WHERE session_id = ?", (session_id,)).fetchone()
+        if before_id is not None:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM messages WHERE session_id = ? AND id < ?",
+                (session_id, before_id),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT COUNT(*) AS c FROM messages WHERE session_id = ?", (session_id,)).fetchone()
         return int(row["c"]) if row else 0
 
 
