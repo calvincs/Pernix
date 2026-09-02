@@ -277,7 +277,16 @@ class MCPConnection:
             clean_drop = False
             try:
                 async with AsyncExitStack() as stack:
-                    read, write = await self._enter_transport(stack)
+                    # Bounded like initialize and tools/list below. The legacy
+                    # SSE transport in particular waits for the server's
+                    # `endpoint` event with the SDK's own 300s read timeout,
+                    # so an endpoint that accepts the socket and then says
+                    # nothing held the supervisor for five minutes per attempt
+                    # while every caller timed out at 40s against a status
+                    # that still read "connecting".
+                    read, write = await asyncio.wait_for(
+                        self._enter_transport(stack), timeout=settings.mcp_connect_timeout
+                    )
                     from mcp import ClientSession
                     from mcp import types as mcp_types
 
@@ -467,6 +476,13 @@ class MCPManager:
 
     def __init__(self):
         self.connections: dict[str, MCPConnection] = {}
+        # One lock per server name. add/remove/toggle/reload all `await
+        # close()` and then spawn: two callers interleaving at that await
+        # (the UI saving while the agent runs mcp_reload_server) each closed
+        # the same old connection and spawned a new one, and only the last
+        # landed in self.connections — the other kept a live supervisor and
+        # a child process nothing could reach.
+        self._server_locks: dict[str, asyncio.Lock] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self.started = False
 
@@ -517,6 +533,12 @@ class MCPManager:
 
     # --- server CRUD (call on the event loop) ---
 
+    def _lock_for(self, name: str) -> asyncio.Lock:
+        lock = self._server_locks.get(name)
+        if lock is None:
+            lock = self._server_locks[name] = asyncio.Lock()
+        return lock
+
     async def add_server(self, cfg: MCPServerConfig) -> MCPConnection:
         """Add or replace a server: persist config, (re)spawn, wait for ready.
 
@@ -524,69 +546,75 @@ class MCPManager:
         visible/editable in the MCP tab either way — but the raised error
         tells the caller exactly what went wrong.
         """
-        existing = self.connections.get(cfg.name)
-        if existing is None and len(self.connections) >= settings.mcp_max_servers:
-            raise ValueError(f"Server cap reached ({settings.mcp_max_servers}); remove one or raise mcp_max_servers")
-        if existing is not None:
-            # Same shape as reload_server: the old connection's tools go with
-            # it. Leaving them registered while the new connection registered
-            # its own set duplicated every tool under a hash suffix (observed
-            # 2026-09-01 on every UI "Save changes").
-            await existing.close()
-            self._unregister_tools(existing)
-        self._persist()  # snapshot current set first so a crash keeps the file coherent
-        conn = self._spawn(cfg)
-        self._persist()
-        if cfg.enabled:
-            await conn.ensure_ready()
-        return conn
+        async with self._lock_for(cfg.name):
+            existing = self.connections.get(cfg.name)
+            if existing is None and len(self.connections) >= settings.mcp_max_servers:
+                raise ValueError(
+                    f"Server cap reached ({settings.mcp_max_servers}); remove one or raise mcp_max_servers"
+                )
+            if existing is not None:
+                # Same shape as reload_server: the old connection's tools go with
+                # it. Leaving them registered while the new connection registered
+                # its own set duplicated every tool under a hash suffix (observed
+                # 2026-09-01 on every UI "Save changes").
+                await existing.close()
+                self._unregister_tools(existing)
+            self._persist()  # snapshot current set first so a crash keeps the file coherent
+            conn = self._spawn(cfg)
+            self._persist()
+            if cfg.enabled:
+                await conn.ensure_ready()
+            return conn
 
     async def remove_server(self, name: str) -> bool:
-        conn = self.connections.pop(name, None)
-        if conn is None:
-            return False
-        await conn.close()
-        self._unregister_tools(conn)
-        self._persist()
-        return True
-
-    async def toggle_server(self, name: str, enabled: bool) -> MCPConnection:
-        conn = self.connections.get(name)
-        if conn is None:
-            raise KeyError(f"No MCP server named '{name}'")
-        conn.cfg.enabled = enabled
-        self._persist()
-        if enabled:
-            # Already running: leave it alone. Overwriting the status of a
-            # live connection with "connecting" wedged it — start() is a
-            # no-op while the task is alive, so nothing ever set it back, and
-            # every call then waited the full connect timeout and failed.
-            if conn._task is not None and not conn._task.done():
-                return conn
-            conn.status = "connecting"
-            conn.start()
-        else:
+        async with self._lock_for(name):
+            conn = self.connections.pop(name, None)
+            if conn is None:
+                return False
             await conn.close()
             self._unregister_tools(conn)
-            conn.status = "disabled"
-        return conn
+            self._persist()
+            return True
+
+    async def toggle_server(self, name: str, enabled: bool) -> MCPConnection:
+        async with self._lock_for(name):
+            conn = self.connections.get(name)
+            if conn is None:
+                raise KeyError(f"No MCP server named '{name}'")
+            conn.cfg.enabled = enabled
+            self._persist()
+            if enabled:
+                # Already running: leave it alone. Overwriting the status of a
+                # live connection with "connecting" wedged it — start() is a
+                # no-op while the task is alive, so nothing ever set it back, and
+                # every call then waited the full connect timeout and failed.
+                if conn._task is not None and not conn._task.done():
+                    return conn
+                conn.status = "connecting"
+                conn.start()
+            else:
+                await conn.close()
+                self._unregister_tools(conn)
+                conn.status = "disabled"
+            return conn
 
     async def reload_server(self, name: str) -> MCPConnection:
         """Full reconnect: re-reads this server's entry from disk (picking up
         hand edits), drops the connection, and waits for ready."""
-        conn = self.connections.get(name)
-        if conn is None:
-            raise KeyError(f"No MCP server named '{name}'")
-        disk = load_server_configs().get(name)
-        if disk is not None:
-            conn.cfg = disk
-        if not conn.cfg.enabled:
-            raise ValueError(f"MCP server '{name}' is disabled — enable it first")
-        await conn.close()
-        self._unregister_tools(conn)
-        fresh = self._spawn(conn.cfg)
-        await fresh.ensure_ready()
-        return fresh
+        async with self._lock_for(name):
+            conn = self.connections.get(name)
+            if conn is None:
+                raise KeyError(f"No MCP server named '{name}'")
+            disk = load_server_configs().get(name)
+            if disk is not None:
+                conn.cfg = disk
+            if not conn.cfg.enabled:
+                raise ValueError(f"MCP server '{name}' is disabled — enable it first")
+            await conn.close()
+            self._unregister_tools(conn)
+            fresh = self._spawn(conn.cfg)
+            await fresh.ensure_ready()
+            return fresh
 
     def _persist(self) -> None:
         save_server_configs({name: c.cfg for name, c in self.connections.items()})
