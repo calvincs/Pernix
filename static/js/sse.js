@@ -362,4 +362,14 @@ function _updateHealthIndicator(state) {
     if (!el) return;
     el.className = `sse-health ${state}`;
     el.title = `SSE: ${state}`;
+    // The dot is a 6px coloured circle with a tooltip: no text, no name, and
+    // nothing at all on a touch device. Carry the state as real text for
+    // anyone who cannot see the colour.
+    let label = el.querySelector('.visually-hidden');
+    if (!label) {
+        label = document.createElement('span');
+        label.className = 'visually-hidden';
+        el.appendChild(label);
+    }
+    label.textContent = `Live updates: ${state}`;
 }
