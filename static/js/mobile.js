@@ -65,6 +65,7 @@ export function initMobile() {
     _setupSwipeGesture();
     _setupFilePanelSwipe();
     _setupKeyboardHandler();
+    _setupBottomStack();
 
     _applyTouch();
     _applyCompact();
@@ -464,4 +465,38 @@ function _setupKeyboardHandler() {
             messages.scrollTop = messages.scrollHeight;
         });
     });
+}
+
+// ---------------------------------------------------------------------------
+// --bottom-stack — how much bottom chrome the floating layer has to clear
+//
+// Five things float above the composer on touch: the status line, a recovery
+// notice, toasts, the service-worker update pill and jump-to-bottom. All five
+// carried the same hard-coded 76px (96px for the button), measured once
+// against an empty composer. A composer with a long draft in it is 147px, and
+// a worker strip adds another ~75px underneath the transcript — so the layer
+// that is meant to sit ABOVE the composer sat on top of it the moment anyone
+// typed a paragraph, and covered the workers whenever there were any.
+//
+// One measurement, five consumers. Runs on every device: a ResizeObserver on
+// two elements costs nothing, and no desktop rule reads the token.
+// ---------------------------------------------------------------------------
+
+function _setupBottomStack() {
+    const parts = ['input-wrapper', 'worker-strip']
+        .map((id) => document.getElementById(id))
+        .filter(Boolean);
+    if (!parts.length) return;
+
+    const measure = () => {
+        // A hidden worker strip has no box at all, which is exactly 0 of the
+        // stack — no special case needed for `hidden`.
+        const total = parts.reduce((sum, el) => sum + el.getBoundingClientRect().height, 0);
+        document.documentElement.style.setProperty('--bottom-stack', `${Math.round(total)}px`);
+    };
+
+    measure();
+    if (typeof ResizeObserver !== 'function') return;
+    const ro = new ResizeObserver(measure);
+    for (const part of parts) ro.observe(part);
 }
