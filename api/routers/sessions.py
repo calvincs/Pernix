@@ -35,7 +35,7 @@ async def create_session(body: dict = {}):
 
 
 @router.get("/api/sessions")
-async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False):
+async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False, exclude_types: str = ""):
     """One page of sessions, newest first, plus how many there are in total.
 
     `total`/`has_more` are what let the sidebar offer the page behind this one
@@ -53,16 +53,44 @@ async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False
     and `total`/`has_more` then count only it. `archived_count` rides on
     both answers so the sidebar can offer "Archived (N)" without a second
     round trip — and, when it is zero, say nothing at all.
+
+    `exclude_types` is a comma list of session types to leave out entirely —
+    the sidebar's legend, moved from the client to the SQL. A machine-heavy
+    instance spends most of its page on rows nobody asked to see: on the
+    owner's box the 500 newest sessions are 277 canary self-checks, 47
+    workers and 33 cron runs, so only 106 of 310 chats fit on page one and
+    the rest sit behind "Load older sessions". Hiding a type in the browser
+    could not fix that — the row was already on the page it was hiding it
+    from. Unknown names are ignored rather than rejected, and `total` and
+    `has_more` count the same narrowed population so the paging control
+    agrees with the list above it.
+
+    `type_counts` is how many LIVE sessions wear each type, over the whole
+    unfiltered, unarchived population. The legend needs it precisely because
+    the filter is now server-side: the hidden type's rows are no longer in
+    the page to be counted, and a legend entry that reads 0 is a control the
+    user can no longer reason about.
     """
     import asyncio as _asyncio
 
     from sessions.policy import annotate_read_only
 
-    rows = await _asyncio.to_thread(db.list_sessions_enriched, limit, offset, archived=archived)
+    wanted = [t.strip() for t in (exclude_types or "").split(",")]
+    excluded = [t for t in dict.fromkeys(wanted) if t in db.SESSION_TYPE_NAMES]
+
+    rows = await _asyncio.to_thread(db.list_sessions_enriched, limit, offset, archived=archived, exclude_types=excluded)
     sessions = [annotate_read_only(s) for s in rows]
     spaces = await _asyncio.to_thread(db.list_spaces)
-    total = await _asyncio.to_thread(db.count_sessions, archived=archived)
-    archived_count = total if archived else await _asyncio.to_thread(db.count_sessions, archived=True)
+    type_counts = await _asyncio.to_thread(db.count_sessions_by_type)
+    if archived:
+        total = await _asyncio.to_thread(db.count_sessions, archived=True, exclude_types=excluded)
+        archived_count = total if not excluded else await _asyncio.to_thread(db.count_sessions, archived=True)
+    else:
+        # type_counts already partitions the live population by exactly the
+        # thing `exclude_types` names, so the live total is a sum rather than
+        # a second full scan of the table.
+        total = sum(n for t, n in type_counts.items() if t not in excluded)
+        archived_count = await _asyncio.to_thread(db.count_sessions, archived=True)
     return {
         "items": sessions,
         "count": len(sessions),
@@ -71,6 +99,8 @@ async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False
         "has_more": (offset + limit) < total,
         "archived": archived,
         "archived_count": archived_count,
+        "excluded_types": excluded,
+        "type_counts": type_counts,
     }
 
 

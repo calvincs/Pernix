@@ -65,7 +65,36 @@ def list_sessions(limit: int = 50, offset: int = 0) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def count_sessions(*, archived: bool | None = False) -> int:
+# The session types the sidebar's legend names, and the only values
+# `exclude_types` accepts. They are the `session_type` column's own words, not
+# a title heuristic: the old `title LIKE 'Cron: %'` sweep deleted a chat
+# somebody had renamed and never saw a cron session titled anything else
+# (see list_cron_sessions_before), and a filter that hides the wrong rows is
+# worse than one that hides none.
+SESSION_TYPE_NAMES = ("normal", "worker", "cron", "rlm", "snooze", "canary")
+
+
+def _exclude_types_sql(exclude_types: Iterable[str] | None, prefix: str = "") -> tuple[str, list[str]]:
+    """A WHERE condition that leaves whole session types out, and its params.
+
+    Unknown names are dropped rather than rejected, so a client that has
+    learned a type this build never heard of degrades to showing it instead
+    of erroring on every list request.
+
+    COALESCE is what makes 'normal' mean what a reader expects. The column
+    has defaulted to 'normal' for a long time, but rows written before that
+    default hold NULL, and an untyped session IS an ordinary chat — without
+    the COALESCE, excluding 'normal' would leave exactly the oldest chats on
+    screen.
+    """
+    names = [t for t in dict.fromkeys(exclude_types or ()) if t in SESSION_TYPE_NAMES]
+    if not names:
+        return "", []
+    holes = ",".join("?" * len(names))
+    return f"COALESCE({prefix}session_type, 'normal') NOT IN ({holes})", names
+
+
+def count_sessions(*, archived: bool | None = False, exclude_types: Iterable[str] | None = None) -> int:
     """How many sessions exist — what the sidebar's page is a slice of.
     Without it the list could only say "showing the most recent N" and leave
     the reader to guess whether anything was behind it.
@@ -75,14 +104,22 @@ def count_sessions(*, archived: bool | None = False) -> int:
     False rather than None because every caller counting "the sessions"
     means the ones the list is showing, and an archived session is exactly
     the one that has left it.
+
+    ``exclude_types`` narrows it the same way the listing is narrowed, so
+    ``total`` and ``has_more`` count the population the caller is actually
+    being shown rather than one it has asked the server to leave out.
     """
-    where = ""
+    conds: list[str] = []
     if archived is True:
-        where = " WHERE archived_at IS NOT NULL"
+        conds.append("archived_at IS NOT NULL")
     elif archived is False:
-        where = " WHERE archived_at IS NULL"
+        conds.append("archived_at IS NULL")
+    ex_sql, params = _exclude_types_sql(exclude_types)
+    if ex_sql:
+        conds.append(ex_sql)
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
     with connect_sessions() as conn:
-        row = conn.execute(f"SELECT COUNT(*) AS c FROM sessions{where}").fetchone()
+        row = conn.execute(f"SELECT COUNT(*) AS c FROM sessions{where}", params).fetchone()
         return int(row["c"]) if row else 0
 
 
@@ -118,7 +155,13 @@ LEFT JOIN (
 """
 
 
-def list_sessions_enriched(limit: int = 50, offset: int = 0, *, archived: bool = False) -> list[dict]:
+def list_sessions_enriched(
+    limit: int = 50,
+    offset: int = 0,
+    *,
+    archived: bool = False,
+    exclude_types: Iterable[str] | None = None,
+) -> list[dict]:
     """List sessions with message_count, total_tokens, and first_message.
 
     Space sessions are long-lived by contract: any that fall outside the
@@ -130,12 +173,24 @@ def list_sessions_enriched(limit: int = 50, offset: int = 0, *, archived: bool =
     sidebar and its space group, so the never-roll-off union is skipped for
     the archived page — an archived space session belongs in the Archived
     group, not back in the space it was pulled out of.
+
+    ``exclude_types`` drops whole session types in SQL, BEFORE the LIMIT.
+    That is the whole point of it: a box whose 500 newest rows are 277 canary
+    self-checks was spending more than half of every page on sessions the
+    user had already told the legend to hide, and the chats they were looking
+    for sat behind a "load older" button. Filtering after the page has been
+    cut only makes the page shorter. The space union takes the same clause,
+    or an excluded type would walk straight back in through it.
     """
-    where = "WHERE s.archived_at IS NOT NULL " if archived else "WHERE s.archived_at IS NULL "
+    conds = ["s.archived_at IS NOT NULL" if archived else "s.archived_at IS NULL"]
+    ex_sql, ex_params = _exclude_types_sql(exclude_types, "s.")
+    if ex_sql:
+        conds.append(ex_sql)
+    where = "WHERE " + " AND ".join(conds) + " "
     with connect_sessions() as conn:
         rows = conn.execute(
             _ENRICHED_SELECT + where + "ORDER BY s.updated_at DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            (*ex_params, limit, offset),
         ).fetchall()
         result = [dict(r) for r in rows]
         if archived:
@@ -148,11 +203,44 @@ def list_sessions_enriched(limit: int = 50, offset: int = 0, *, archived: bool =
         if not conn.execute("SELECT 1 FROM spaces LIMIT 1").fetchone():
             return result
         seen = {r["id"] for r in result}
+        union_where = "WHERE s.space_id IS NOT NULL AND s.archived_at IS NULL "
+        if ex_sql:
+            union_where += "AND " + ex_sql + " "
         extra = conn.execute(
-            _ENRICHED_SELECT + "WHERE s.space_id IS NOT NULL AND s.archived_at IS NULL ORDER BY s.updated_at DESC",
+            _ENRICHED_SELECT + union_where + "ORDER BY s.updated_at DESC",
+            ex_params,
         ).fetchall()
         result.extend(dict(r) for r in extra if r["id"] not in seen)
         return result
+
+
+def count_sessions_by_type() -> dict[str, int]:
+    """How many live sessions there are of each type — the legend's numbers.
+
+    Deliberately NOT narrowed by ``exclude_types``: the legend has to keep
+    naming what it is hiding. A count that fell to zero the moment a type was
+    filtered out would erase the only control that turns it back on, and the
+    user would be left with a dot they could no longer read.
+
+    Archived sessions are out for the same reason they are out of the list —
+    the legend is a key to what is on screen, and the archive has its own
+    entry with its own count. One GROUP BY over ``sessions``, which is the
+    same shape and cost as the COUNT(*) beside it.
+
+    The six known names are always present, at 0 if nothing wears them. A
+    type this build does not know about is reported under its own name
+    rather than folded into 'normal': it is a real population, and calling
+    it an ordinary chat would be a lie the client cannot check.
+    """
+    out = dict.fromkeys(SESSION_TYPE_NAMES, 0)
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            "SELECT COALESCE(session_type, 'normal') AS t, COUNT(*) AS c "
+            "FROM sessions WHERE archived_at IS NULL GROUP BY t"
+        ).fetchall()
+    for r in rows:
+        out[r["t"]] = out.get(r["t"], 0) + int(r["c"])
+    return out
 
 
 # Everything older than the cutoff, bucketed by the first rule that spares it.
