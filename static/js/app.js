@@ -243,7 +243,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         // open Settings or bell dialog, stacking a second focus trap on top of
         // the first with no way back except Escape twice.
         if (_modalOverlayOpen()) return;
-        if (e.key === 'f' && state.sid) {
+        // Ctrl/Cmd+F is the browser's own find, and taking it away everywhere
+        // meant a reader could not search the sidebar, the Explorer or any
+        // other pane at all. Claim it only where the transcript search is
+        // actually the better answer: with focus inside the chat column.
+        if (e.key === 'f' && state.sid && _focusInsideMain()) {
             e.preventDefault();
             openTranscriptSearch();
         } else if (e.key === 'k') {
@@ -315,6 +319,23 @@ document.addEventListener('DOMContentLoaded', async () => {
         loadHealth();
     });
 });
+
+/**
+ * Is the caret (or the focus ring) inside the chat column?
+ *
+ * With nothing focused at all the answer is yes: the composer is where the
+ * page starts, the transcript is what fills the screen, and Ctrl+F on a fresh
+ * page load is asking about the conversation. Focus anywhere else — the
+ * sidebar, the Explorer, a settings field — leaves the browser's own find
+ * alone, which is the only search those panes have.
+ */
+function _focusInsideMain() {
+    const main = document.getElementById('main');
+    if (!main) return true;
+    const active = document.activeElement;
+    if (!active || active === document.body || active === document.documentElement) return true;
+    return main.contains(active);
+}
 
 /** True when a modal overlay is on screen. The session palette is excluded so
  *  Ctrl+K still toggles it shut — it is the thing the shortcut owns. */
