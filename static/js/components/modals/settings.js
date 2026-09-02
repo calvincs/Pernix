@@ -2112,9 +2112,16 @@ function buildEnterSendsRow() {
     ]);
 }
 
-function buildAppearanceSection() {
-    // Browser-local, not a server setting: it belongs to this device, not to
-    // the agent. Stored in localStorage and applied by theme.js.
+// The section is named for where its settings LIVE, not for what they do.
+// Both of them are localStorage on this device: nothing here is in the
+// settings payload, nothing here is in the dirty diff, and Save does not
+// touch either one. Under the old "Appearance" heading the Enter-sends row
+// looked like one more server preference that had wandered into the wrong
+// group — and a preference that quietly does not sync is worse than one that
+// says so, because the first you hear of it is the other device behaving
+// differently.
+function buildThisBrowserSection() {
+    // Applied by theme.js, which reads the same key.
     const select = el('select', {
         id: 'setting-appearance',
         'aria-label': 'Appearance',
@@ -2140,12 +2147,17 @@ function buildAppearanceSection() {
 
     return el('div', { class: 'settings-section' }, [
         el('h3', {}, [
-            text('Appearance'),
+            text('This browser'),
             buildHelpIcon('Dark is the default. System follows the operating system\'s '
-                + 'light/dark setting. Both preferences in this section live in this '
-                + 'browser only — they are not synced to the server or to your other '
-                + 'devices, and they take effect without saving.'),
+                + 'light/dark setting. Enter sends is on by default with a mouse and '
+                + 'off on touch, where Enter is the on-screen keyboard\'s newline key.'),
         ]),
+        // Visible, not folded behind "What's this?": it is the reason the
+        // section exists, and a reader who has to open it has already made
+        // the assumption it is there to correct.
+        el('p', { class: 'settings-section-desc' }, [text(
+            'Stored in this browser only — not synced to the server or to your '
+            + 'other devices, and not part of Save.')]),
         row,
         buildEnterSendsRow(),
     ]);
@@ -2601,9 +2613,9 @@ function buildTabs(settings) {
     });
 
     const bodies = {
-        // Appearance leads: it is the one setting a first-time user wants and
-        // the only one that changes nothing about the agent.
-        providers: [buildAppearanceSection(), buildModelsTab(), ...sectionsFor('providers')],
+        // "This browser" leads: the settings a first-time user reaches for
+        // first, and the only ones that change nothing about the agent.
+        providers: [buildThisBrowserSection(), buildModelsTab(), ...sectionsFor('providers')],
         agent: sectionsFor('agent'),
         autonomy: sectionsFor('autonomy'),
         tools: [...sectionsFor('tools'), securityHost],
