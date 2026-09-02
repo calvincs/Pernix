@@ -81,6 +81,7 @@ export async function renderAdaptiveTab(container) {
         + 'one-click rollback for all of it.',
     ));
 
+    // Chips then buttons, in one row that wraps below 900px and on touch (E2).
     const head = el('div', { class: 'adaptive-head' }, [
         badge(entriesRes.enabled ? 'enabled' : 'disabled', entriesRes.enabled ? 'ok' : 'off'),
         badge(entriesRes.auto_apply ? 'auto-apply on' : 'auto-apply off', entriesRes.auto_apply ? 'ok' : 'warn'),

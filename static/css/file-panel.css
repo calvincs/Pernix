@@ -1344,6 +1344,30 @@ body.fp-resizing #main { pointer-events: none; }
 --------------------------------------------------------------------------- */
 #fp-adaptive, #fp-canary, #fp-telos { overflow-y: auto; padding: 10px 14px; }
 .adaptive-head { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+/* Six controls in a 360px column had nowhere to go: flex shrank every button
+   until its label was unreadable, and on a phone the last one ran off the
+   edge. Let the row wrap instead, and stop the shrink that made the crushing
+   possible — a control that will not fit beside the previous one goes on the
+   next line at its own size. Width and pointer both, because the Explorer is
+   360px wide on a tablet too. (E2) */
+body[data-compact] .adaptive-head,
+body[data-touch] .adaptive-head {
+    flex-wrap: wrap;
+    row-gap: var(--sp-2);
+    align-items: center;
+}
+body[data-compact] .adaptive-head > *,
+body[data-touch] .adaptive-head > * {
+    flex: 0 0 auto;
+    max-width: 100%;
+}
+body[data-touch] .adaptive-btn {
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+}
 .adaptive-section-title {
     font-weight: 500; margin: 14px 0 6px; font-size: 0.95em;
     border-bottom: 1px solid var(--border); padding-bottom: 3px;

@@ -160,6 +160,9 @@ export async function renderCanaryTab(container) {
         + '\u2014 the suite that catches it quietly getting worse.',
     ));
 
+    // Two status chips and up to four buttons in one row that wraps on a
+    // narrow panel (E2) — chips first so a wrapped line never strands one
+    // under the controls it describes.
     const head = el('div', { class: 'adaptive-head' }, [
         badge(suite.enabled ? 'enabled' : 'disabled', suite.enabled ? 'ok' : 'off'),
         badge(`heartbeat ${suite.heartbeat_per_night || 2}/night · ${suite.schedule}`),
