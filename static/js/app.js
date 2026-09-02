@@ -344,6 +344,7 @@ function goHome() {
     _activeWorkers.clear();
     _recentDeadWorkers.clear();
     _activeRlmRuns.clear();
+    _workerCard = null;
     _renderWorkerStrip();
     state.streaming = false;
     _setComposerReadOnly(false);
@@ -570,6 +571,7 @@ async function selectSession(sid) {
         disconnectSSE();
         _activeWorkers.clear();
         _activeRlmRuns.clear();
+        _workerCard = null;
         _renderWorkerStrip();
         _setComposerReadOnly(true, _sess.read_only_reason);
         state.streaming = false;
@@ -2052,6 +2054,65 @@ function _addDeadWorker(wid, entry) {
     }
 }
 
+// The strip is rebuilt every five seconds to move the elapsed clocks on.
+// It used to do that with `innerHTML = ''`, which threw away the pause
+// button's disabled state mid-request (so a second click could fire the same
+// pause again), its tooltip, and any focus a keyboard user had on it. Nodes
+// are created once and their text updated in place now; the map is what makes
+// a node findable on the next pass.
+const _stripNodes = new Map();   // key → { wrap, chip, label, ctl }
+
+/** Put `nodes` in this exact order under `parent`, moving as few as possible
+ *  and never recreating one that is already there. */
+function _reconcileChildren(parent, nodes) {
+    let ref = parent.firstChild;
+    for (const node of nodes) {
+        if (ref === node) { ref = node.nextSibling; continue; }
+        parent.insertBefore(node, ref);
+    }
+    while (ref) {
+        const next = ref.nextSibling;
+        ref.remove();
+        ref = next;
+    }
+}
+
+function _elapsedStr(sinceMs) {
+    const elapsed = Math.max(0, Math.round((Date.now() - sinceMs) / 1000));
+    const mins = Math.floor(elapsed / 60);
+    return mins > 0 ? `${mins}m${elapsed % 60}s` : `${elapsed}s`;
+}
+
+/** One chip + its control button, created once and reused. */
+function _stripChip(key, { chipClass, dotClass, onOpen, ctlLabel, onCtl }) {
+    let entry = _stripNodes.get(key);
+    if (entry) return entry;
+    const label = el('span', { class: 'worker-chip-text' });
+    const chip = el('button', { class: chipClass, type: 'button' }, [
+        el('span', { class: dotClass }),
+        label,
+    ]);
+    chip.addEventListener('click', onOpen);
+    const wrap = el('span', { class: 'worker-chip-wrap' }, [chip]);
+    let ctl = null;
+    if (onCtl) {
+        ctl = el('button', { class: 'worker-chip-ctl', type: 'button' }, [icon(ctlLabel, { size: 11 })]);
+        ctl.addEventListener('click', (e) => { e.stopPropagation(); onCtl(ctl); });
+        wrap.appendChild(ctl);
+    }
+    entry = { wrap, chip, label, ctl };
+    _stripNodes.set(key, entry);
+    return entry;
+}
+
+/** Swap a control button's icon without disturbing anything else about it. */
+function _setCtlIcon(ctl, name) {
+    if (!ctl || ctl.dataset.icon === name) return;
+    ctl.dataset.icon = name;
+    clear(ctl);
+    ctl.appendChild(icon(name, { size: 11 }));
+}
+
 function _renderWorkerStrip() {
     const strip = document.getElementById('worker-strip');
     if (!strip) return;
@@ -2061,111 +2122,324 @@ function _renderWorkerStrip() {
     }
     if (_activeWorkers.size === 0 && _activeRlmRuns.size === 0 && _recentDeadWorkers.size === 0) {
         strip.hidden = true;
-        strip.innerHTML = '';
+        clear(strip);
+        _stripNodes.clear();
         if (_workerTicker) { clearInterval(_workerTicker); _workerTicker = null; }
         return;
     }
     strip.hidden = false;
-    strip.innerHTML = '';
+
+    let labelEl = strip.querySelector('.worker-strip-label');
+    if (!labelEl) labelEl = el('span', { class: 'worker-strip-label' });
     const labelParts = [];
     if (_activeWorkers.size) labelParts.push(`${_activeWorkers.size} worker${_activeWorkers.size === 1 ? '' : 's'}`);
     if (_activeRlmRuns.size) labelParts.push(`${_activeRlmRuns.size} RLM`);
     if (_recentDeadWorkers.size) labelParts.push(`${_recentDeadWorkers.size} finished`);
-    strip.appendChild(el('span', { class: 'worker-strip-label' }, [
-        text(labelParts.join(' · ')),
-    ]));
+    labelEl.textContent = labelParts.join(' · ');
+
+    const order = [labelEl];
+    const seen = new Set(['__label']);
+
     for (const [wid, w] of _activeWorkers) {
-        const elapsed = Math.max(0, Math.round((Date.now() - w.startedAt) / 1000));
-        const mins = Math.floor(elapsed / 60);
-        const elapsedStr = mins > 0 ? `${mins}m${elapsed % 60}s` : `${elapsed}s`;
-        const kindTag = w.kind ? `[${w.kind}] ` : '';
-        const chip = el('button', {
-            class: `worker-chip${w.paused ? ' paused' : ''}`,
-            title: `${kindTag}${w.title} — click to open transcript`,
-            onClick: () => selectSession(wid),
-        }, [
-            el('span', { class: 'worker-chip-dot' }),
-            text(` ${kindTag}${w.title.slice(0, 30)} · ${w.paused ? 'paused' : elapsedStr}`),
-        ]);
+        const key = `w:${wid}`;
+        seen.add(key);
         // Pause/resume the worker without leaving the parent session — the
         // endpoints exist per-worker; this is their first UI affordance.
-        const ctlBtn = el('button', {
-            class: 'worker-chip-ctl',
-            title: w.paused ? 'Resume this worker' : 'Pause this worker after its current step',
-            'aria-label': w.paused
-                ? `Resume worker ${w.title}`
-                : `Pause worker ${w.title} after its current step`,
-        }, [icon(w.paused ? 'play' : 'pause', { size: 11 })]);
-        ctlBtn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            ctlBtn.disabled = true;
-            const action = w.paused ? 'resume' : 'pause';
-            try {
-                await post(`/api/sessions/${state.sid}/workers/${wid}/${action}`, {});
-                w.paused = !w.paused;
-            } catch (err) {
-                appendMessage('system', `Worker ${action} failed: ${err.message}`);
-            }
-            _renderWorkerStrip();
+        const entry = _stripChip(key, {
+            chipClass: 'worker-chip',
+            dotClass: 'worker-chip-dot',
+            onOpen: () => selectSession(wid),
+            ctlLabel: 'pause',
+            onCtl: async (ctl) => {
+                ctl.disabled = true;
+                const action = w.paused ? 'resume' : 'pause';
+                try {
+                    await post(`/api/sessions/${state.sid}/workers/${wid}/${action}`, {});
+                    w.paused = !w.paused;
+                    _setWorkerRowState(wid, w.paused ? 'paused' : 'running');
+                } catch (err) {
+                    appendMessage('system', `Worker ${action} failed: ${err.message}`);
+                }
+                ctl.disabled = false;
+                _renderWorkerStrip();
+            },
         });
-        strip.appendChild(el('span', { class: 'worker-chip-wrap' }, [chip, ctlBtn]));
+        const kindTag = w.kind ? `[${w.kind}] ` : '';
+        entry.chip.classList.toggle('paused', !!w.paused);
+        entry.chip.title = `${kindTag}${w.title} — click to open transcript`;
+        entry.label.textContent = ` ${kindTag}${w.title.slice(0, 30)} · ${w.paused ? 'paused' : _elapsedStr(w.startedAt)}`;
+        if (entry.ctl) {
+            _setCtlIcon(entry.ctl, w.paused ? 'play' : 'pause');
+            entry.ctl.title = w.paused ? 'Resume this worker' : 'Pause this worker after its current step';
+            entry.ctl.setAttribute('aria-label', w.paused
+                ? `Resume worker ${w.title}`
+                : `Pause worker ${w.title} after its current step`);
+        }
+        order.push(entry.wrap);
     }
+
     // Dead-worker chips: dimmed, with the termination reason and a revive
     // button. Reviving fires worker.resumed, which flips the chip back to
     // the active map.
     for (const [wid, d] of _recentDeadWorkers) {
-        const kindTag = d.kind ? `[${d.kind}] ` : '';
-        const chip = el('button', {
-            class: 'worker-chip dead',
-            title: `${kindTag}${d.title} — ended: ${d.reason}. Click to open transcript.`,
-            onClick: () => selectSession(wid),
-        }, [
-            el('span', { class: 'worker-chip-dot dead' }),
-            text(` ${kindTag}${d.title.slice(0, 24)} · ${d.reason}`),
-        ]);
-        const reviveBtn = el('button', {
-            class: 'worker-chip-ctl',
-            title: 'Resume this worker from where it stopped',
-            'aria-label': `Resume worker ${d.title} from where it stopped`,
-        }, [icon('refresh', { size: 11 })]);
-        reviveBtn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            reviveBtn.disabled = true;
-            try {
-                await post(`/api/sessions/${state.sid}/workers/${wid}/resume`, {});
-                _recentDeadWorkers.delete(wid);
-            } catch (err) {
-                appendMessage('system', `Worker resume failed: ${err.message}`);
-                reviveBtn.disabled = false;
-            }
-            _renderWorkerStrip();
+        const key = `d:${wid}`;
+        seen.add(key);
+        const entry = _stripChip(key, {
+            chipClass: 'worker-chip dead',
+            dotClass: 'worker-chip-dot dead',
+            onOpen: () => selectSession(wid),
+            ctlLabel: 'refresh',
+            onCtl: async (ctl) => {
+                ctl.disabled = true;
+                try {
+                    await post(`/api/sessions/${state.sid}/workers/${wid}/resume`, {});
+                    _recentDeadWorkers.delete(wid);
+                } catch (err) {
+                    appendMessage('system', `Worker resume failed: ${err.message}`);
+                    ctl.disabled = false;
+                }
+                _renderWorkerStrip();
+            },
         });
-        strip.appendChild(el('span', { class: 'worker-chip-wrap' }, [chip, reviveBtn]));
+        const kindTag = d.kind ? `[${d.kind}] ` : '';
+        entry.chip.title = `${kindTag}${d.title} — ended: ${d.reason}. Click to open transcript.`;
+        entry.label.textContent = ` ${kindTag}${d.title.slice(0, 24)} · ${d.reason}`;
+        if (entry.ctl) {
+            entry.ctl.title = 'Resume this worker from where it stopped';
+            entry.ctl.setAttribute('aria-label', `Resume worker ${d.title} from where it stopped`);
+        }
+        order.push(entry.wrap);
     }
+
     // RLM run chips — live iteration/sub-call counters; click opens the
     // run's read-only trace view (its sidebar pseudo-session).
     for (const [rid, r] of _activeRlmRuns) {
-        const elapsed = Math.max(0, Math.round((Date.now() - r.startedAt) / 1000));
-        const mins = Math.floor(elapsed / 60);
-        const elapsedStr = mins > 0 ? `${mins}m${elapsed % 60}s` : `${elapsed}s`;
+        const key = `r:${rid}`;
+        seen.add(key);
+        const entry = _stripChip(key, {
+            chipClass: 'worker-chip rlm-chip',
+            dotClass: 'worker-chip-dot rlm',
+            onOpen: () => { const cur = _activeRlmRuns.get(rid); if (cur && cur.uiSid) selectSession(cur.uiSid); },
+        });
+        entry.wrap.dataset.run = rid;
         const iter = r.maxIterations ? `it ${r.iterations}/${r.maxIterations}` : `it ${r.iterations}`;
-        const chip = el('button', {
-            class: 'worker-chip rlm-chip',
-            title: `${r.label} — click to watch the run`,
-            onClick: () => { if (r.uiSid) selectSession(r.uiSid); },
-        }, [
-            el('span', { class: 'worker-chip-dot rlm' }),
-            text(` RLM · ${iter} · ${r.subcalls} calls · ${elapsedStr}`),
-        ]);
-        strip.appendChild(el('span', { class: 'worker-chip-wrap', 'data-run': rid }, [chip]));
+        entry.chip.title = `${r.label} — click to watch the run`;
+        entry.label.textContent = ` RLM · ${iter} · ${r.subcalls} calls · ${_elapsedStr(r.startedAt)}`;
+        order.push(entry.wrap);
     }
+
+    for (const [k, n] of _stripNodes) {
+        if (!seen.has(k)) { n.wrap.remove(); _stripNodes.delete(k); }
+    }
+    _reconcileChildren(strip, order);
+    _updateWorkerCard();
     if (!_workerTicker) _workerTicker = setInterval(_renderWorkerStrip, 5000);
+}
+
+// ---------------------------------------------------------------------------
+// Worker lifecycle card — one card per fan-out, updated in place
+// ---------------------------------------------------------------------------
+// A fan-out of six workers wrote twelve system lines into the transcript
+// ("Worker started: …" six times, then "Worker done: …" six times), scattered
+// through the answer and through each other. The one question a reader has —
+// how many are still going, and did any of them fail? — took counting, and
+// the count was only ever correct if you had been watching the whole time.
+// One card answers it, keeps answering it, and holds the per-worker controls
+// that were previously only in the strip.
+
+let _workerCard = null;   // { el, headerEl, labelEl, rowsEl, rows: Map(wid → row) }
+
+const _WORKER_STATE_LABEL = {
+    running: 'running',
+    paused: 'paused',
+    done: 'done',
+    failed: 'failed',
+};
+
+function _newWorkerCard() {
+    closeToolGroup();
+    const labelEl = el('span', { class: 'wc-label' }, [text('Workers')]);
+    const headerEl = el('div', { class: 'worker-card-header' }, [
+        el('span', { class: 'wc-toggle' }, [icon('chevron-right', { size: 10 })]),
+        labelEl,
+    ]);
+    const rowsEl = el('div', { class: 'wc-rows' });
+    const cardEl = el('div', { class: 'worker-card' }, [headerEl, rowsEl]);
+    _makeDisclosure(headerEl, false, () => {
+        cardEl.classList.toggle('expanded');
+        return cardEl.classList.contains('expanded');
+    });
+    _messagesInner().appendChild(cardEl);
+    scrollToBottom();
+    _workerCard = { el: cardEl, headerEl, labelEl, rowsEl, rows: new Map() };
+    return _workerCard;
+}
+
+/** The card a newly-started worker belongs to: the current one while anything
+ *  in it is still alive, a fresh one otherwise. With no batch id on the wire,
+ *  that boundary is what "one card per fan-out" can mean. */
+function _ensureWorkerCard() {
+    if (_workerCard && _workerCard.el.isConnected) {
+        for (const r of _workerCard.rows.values()) {
+            if (r.state === 'running' || r.state === 'paused') return _workerCard;
+        }
+    }
+    return _newWorkerCard();
+}
+
+/** The card to record an ENDING in — never a new one for a worker that this
+ *  client watched start, and never a card conjured out of nothing. */
+function _openWorkerCard() {
+    if (_workerCard && _workerCard.el.isConnected) return _workerCard;
+    return _newWorkerCard();
+}
+
+function _workerCardStart(wid, { title, kind = '', note = '' }) {
+    const card = _ensureWorkerCard();
+    const row = card.rows.get(wid) || { wid };
+    Object.assign(row, {
+        title: title || row.title || String(wid).slice(0, 8),
+        kind: kind || row.kind || '',
+        note,
+        state: 'running',
+        startedAt: Date.now(),
+        endedAt: 0,
+        reason: '',
+    });
+    card.rows.set(wid, row);
+    _updateWorkerCard();
+}
+
+function _workerCardEnd(wid, { title = '', state = 'done', reason = '', spawnFailed = false }) {
+    const card = _openWorkerCard();
+    const row = card.rows.get(wid) || { wid, kind: '', startedAt: Date.now() };
+    Object.assign(row, {
+        title: title || row.title || String(wid).slice(0, 8),
+        state,
+        reason,
+        spawnFailed: spawnFailed || row.spawnFailed || false,
+        endedAt: Date.now(),
+    });
+    card.rows.set(wid, row);
+    _updateWorkerCard();
+}
+
+/** Keep the card honest when the strip's pause button is what changed. */
+function _setWorkerRowState(wid, state) {
+    if (!_workerCard) return;
+    const row = _workerCard.rows.get(wid);
+    if (!row || (row.state !== 'running' && row.state !== 'paused')) return;
+    row.state = state;
+    _updateWorkerCard();
+}
+
+function _workerRowNode(card, row) {
+    if (row.el) return row.el;
+    const titleEl = el('span', { class: 'wc-row-title' });
+    const stateEl = el('span', { class: 'wc-row-state' });
+    const timeEl = el('span', { class: 'wc-row-time' });
+    const actions = el('span', { class: 'wc-row-actions' });
+
+    const openBtn = el('button', {
+        class: 'btn btn--ghost btn--xs', type: 'button',
+    }, [text('open')]);
+    openBtn.addEventListener('click', (e) => { e.stopPropagation(); selectSession(row.wid); });
+
+    // One button, two jobs: pause/resume while it runs, revive once it has
+    // stopped. Same endpoints the strip uses.
+    const ctlBtn = el('button', { class: 'btn btn--ghost btn--xs', type: 'button' }, [text('pause')]);
+    ctlBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const live = row.state === 'running' || row.state === 'paused';
+        const action = live ? (row.state === 'paused' ? 'resume' : 'pause') : 'resume';
+        ctlBtn.disabled = true;
+        try {
+            await post(`/api/sessions/${state.sid}/workers/${row.wid}/${action}`, {});
+            if (live) {
+                row.state = action === 'pause' ? 'paused' : 'running';
+                const w = _activeWorkers.get(row.wid);
+                if (w) w.paused = action === 'pause';
+            } else {
+                row.state = 'running';
+                row.startedAt = Date.now();
+                _recentDeadWorkers.delete(row.wid);
+                _activeWorkers.set(row.wid, {
+                    title: row.title, kind: row.kind, startedAt: Date.now(), paused: false,
+                });
+            }
+        } catch (err) {
+            appendMessage('system', `Worker ${action} failed: ${err.message}`);
+        }
+        ctlBtn.disabled = false;
+        _renderWorkerStrip();
+        _updateWorkerCard();
+    });
+
+    actions.appendChild(ctlBtn);
+    actions.appendChild(openBtn);
+    row.el = el('div', { class: 'wc-row', 'data-worker': String(row.wid) }, [
+        el('span', { class: 'wc-row-dot' }),
+        titleEl, stateEl, timeEl, actions,
+    ]);
+    row.nodes = { titleEl, stateEl, timeEl, openBtn, ctlBtn };
+    card.rowsEl.appendChild(row.el);
+    return row.el;
+}
+
+function _updateWorkerCard() {
+    const card = _workerCard;
+    if (!card || !card.el.isConnected) return;
+    const counts = { running: 0, paused: 0, done: 0, failed: 0 };
+    for (const row of card.rows.values()) counts[row.state] = (counts[row.state] || 0) + 1;
+    const parts = [];
+    for (const k of ['running', 'paused', 'done', 'failed']) {
+        if (counts[k]) parts.push(`${counts[k]} ${k}`);
+    }
+    const total = card.rows.size;
+    card.labelEl.textContent = parts.length
+        ? `Workers · ${parts.join(' · ')}`
+        : `Workers · ${total}`;
+    card.el.classList.toggle('has-error', counts.failed > 0);
+    card.headerEl.setAttribute(
+        'aria-label',
+        `${total} worker${total === 1 ? '' : 's'}: ${parts.join(', ') || 'none started'}`,
+    );
+
+    for (const row of card.rows.values()) {
+        _workerRowNode(card, row);
+        const { titleEl, stateEl, timeEl, openBtn, ctlBtn } = row.nodes;
+        const kindTag = row.kind ? `[${row.kind}] ` : '';
+        titleEl.textContent = `${kindTag}${row.title}`;
+        titleEl.title = row.note ? `${row.title} — ${row.note}` : row.title;
+        const live = row.state === 'running' || row.state === 'paused';
+        stateEl.textContent = row.reason
+            ? `${_WORKER_STATE_LABEL[row.state] || row.state} · ${row.reason}`
+            : (_WORKER_STATE_LABEL[row.state] || row.state);
+        stateEl.className = `wc-row-state ${row.state}`;
+        timeEl.textContent = live
+            ? _elapsedStr(row.startedAt)
+            : _humanizeMs(Math.max(0, (row.endedAt || Date.now()) - row.startedAt));
+        row.el.classList.toggle('finished', !live);
+        row.el.classList.toggle('failed', row.state === 'failed');
+        // A worker that never spawned has no transcript and nothing to revive.
+        openBtn.hidden = !!row.spawnFailed;
+        ctlBtn.hidden = !!row.spawnFailed;
+        if (!row.spawnFailed) {
+            ctlBtn.textContent = live ? (row.state === 'paused' ? 'resume' : 'pause') : 'revive';
+            ctlBtn.title = live
+                ? (row.state === 'paused' ? 'Resume this worker' : 'Pause this worker after its current step')
+                : 'Resume this worker from where it stopped';
+            ctlBtn.setAttribute('aria-label', `${ctlBtn.textContent} worker ${row.title}`);
+            openBtn.setAttribute('aria-label', `Open the transcript of worker ${row.title}`);
+        }
+    }
 }
 
 async function _seedWorkerStrip(sid) {
     _activeWorkers.clear();
     _recentDeadWorkers.clear();
     _activeRlmRuns.clear();
+    _workerCard = null;   // the old card belongs to a transcript that is gone
     try {
         const data = await get(`/api/sessions/${sid}/workers`);
         const now = Date.now();
@@ -2210,6 +2484,20 @@ async function _seedWorkerStrip(sid) {
             });
         }
     } catch { /* chips stay absent */ }
+    // Coming back to a session with a fan-out still in flight should show the
+    // fan-out, not just a strip of chips above the composer. Only for workers
+    // that are actually still going: a card of nothing but corpses is noise.
+    if (_activeWorkers.size) {
+        for (const [wid, w] of _activeWorkers) {
+            _workerCardStart(wid, { title: w.title, kind: w.kind, note: 'already running' });
+            const row = _workerCard.rows.get(wid);
+            if (row) {
+                row.startedAt = w.startedAt;
+                if (w.paused) row.state = 'paused';
+            }
+        }
+        _updateWorkerCard();
+    }
     _renderWorkerStrip();
 }
 
@@ -2687,15 +2975,21 @@ function handleEvent(event) {
     }
 
     else if (type === 'worker.started') {
-        const workerModel = event.model ? ` [${event.model}]` : '';
-        const workerKind = event.kind ? ` (${event.kind})` : '';
-        appendMessage('system', `Worker started: ${event.title || event.worker_id}${workerKind}${workerModel}`);
+        // No system line: the card below is the one place a fan-out is
+        // reported, and it stays correct as the fan-out moves.
+        const workerModel = event.model ? `on ${event.model}` : '';
         _recentDeadWorkers.delete(event.worker_id);
         _activeWorkers.set(event.worker_id, {
             title: event.title || event.worker_id,
             kind: event.kind || '',
             startedAt: Date.now(),
         });
+        _workerCardStart(event.worker_id, {
+            title: event.title || event.worker_id,
+            kind: event.kind || '',
+            note: workerModel,
+        });
+        _announceSystem(`Worker started: ${event.title || event.worker_id}`);
         _renderWorkerStrip();
     }
 
@@ -2703,36 +2997,47 @@ function handleEvent(event) {
         // A terminated/reaped worker was revived (resume_worker) — treat it
         // like a fresh start for the activity strip, with an honest note
         // about what it is resuming from.
-        const prior = event.prior_termination ? ` (was: ${event.prior_termination})` : '';
-        const kindNote = event.kind ? ` (${event.kind})` : '';
-        appendMessage('system', `Worker resumed: ${event.title || event.worker_id}${kindNote}${prior}`);
+        const prior = event.prior_termination ? `resumed after ${event.prior_termination}` : 'resumed';
         _recentDeadWorkers.delete(event.worker_id);
         _activeWorkers.set(event.worker_id, {
             title: event.title || event.worker_id,
             kind: event.kind || '',
             startedAt: Date.now(),
         });
+        _workerCardStart(event.worker_id, {
+            title: event.title || event.worker_id,
+            kind: event.kind || '',
+            note: prior,
+        });
+        _announceSystem(`Worker resumed: ${event.title || event.worker_id}`);
         _renderWorkerStrip();
     }
 
     else if (type === 'worker.done') {
-        const reason = event.termination_reason ? ` (${event.termination_reason})` : '';
-        const err = event.error ? ` error: ${humanizeError(event.error)}` : '';
         // A raw uuid told the reader nothing about which of five parallel
         // workers had just finished. The strip and the session list both know
         // its title.
         // Resolve the name BEFORE the strip forgets it — _workerLabel reads
         // _activeWorkers, and the delete below is what empties it.
         const doneLabel = _workerLabel(event.worker_id, event.title);
-        appendMessage('system', `Worker done: ${doneLabel}${reason}${err}`);
         const prev = _activeWorkers.get(event.worker_id);
         _activeWorkers.delete(event.worker_id);
+        const doneReason = event.error
+            ? humanizeError(event.error)
+            : (event.termination_reason || 'done');
         _addDeadWorker(event.worker_id, {
             title: doneLabel,
             kind: (prev && prev.kind) || '',
             reason: event.termination_reason || (event.error ? 'error' : 'done'),
             endedAt: Date.now(),
         });
+        _workerCardEnd(event.worker_id, {
+            title: doneLabel,
+            state: event.error ? 'failed' : 'done',
+            reason: doneReason,
+        });
+        // The card is silent to a screen reader; this line is not.
+        _announceSystem(`Worker done: ${doneLabel} — ${doneReason}`);
         _renderWorkerStrip();
     }
 
@@ -2741,10 +3046,15 @@ function handleEvent(event) {
         // ever ran. Distinct from worker.done with an error — that's a
         // worker that ran and errored mid-turn. This is a worker that
         // never started, so there's no transcript or summary to inspect.
+        // It keeps its own line: an error the fan-out never recovers from is
+        // not something to fold into a collapsed card.
         const wid = event.worker_id || 'unknown';
         const err = event.error || '(no error message)';
         appendMessage('system', `⚠ Worker failed to start: ${wid} — ${err}`);
         _activeWorkers.delete(wid);
+        if (_workerCard && _workerCard.rows.has(wid)) {
+            _workerCardEnd(wid, { state: 'failed', reason: 'never started', spawnFailed: true });
+        }
         _renderWorkerStrip();
     }
 
