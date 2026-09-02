@@ -296,6 +296,28 @@ body.fp-resizing #main { pointer-events: none; }
 }
 .fp-tree-item.dir .fp-tree-icon { color: var(--accent-dim); }
 
+/* The row's overflow control — touch only, and rendered only there (E6).
+   The negative block margin cancels the row's own 8px touch padding so a
+   44px target does not turn a 44px row into a 60px one. */
+.fp-row-menu {
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    margin-block: -8px;
+    margin-left: var(--sp-1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: var(--radius);
+    color: var(--text-faint);
+    cursor: pointer;
+}
+.fp-row-menu:active { background: var(--bg-hover); color: var(--text-bright); }
+.fp-row-menu:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+
 .fp-tree-name {
     flex: 1;
     overflow: hidden;
