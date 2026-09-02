@@ -56,14 +56,20 @@ async def run_step(is_cancelled) -> dict:
     # this list came back empty — which reads exactly like "nothing to
     # validate". Dream then generated on every cycle instead, for two days,
     # while 58 real candidates sat unreachable behind them.
+    # The fetch window must exceed the backpressure cap, or the comparison
+    # below can never be true: a hard limit=200 against a cap of 200 made
+    # `len(pending) > cap` unreachable, backpressure never engaged, and the
+    # queue grew unbounded (observed at 310 pending). The 200 floor keeps
+    # the batch big enough to do real work when the cap is small.
+    _cap = max(1, settings.dream_max_pending)
     pending = db.list_dream_hypotheses(
-        status="pending", limit=200, oldest_first=True, exclude_kinds=_NON_VALIDATED_KINDS
+        status="pending", limit=max(200, _cap + 1), oldest_first=True, exclude_kinds=_NON_VALIDATED_KINDS
     )
     last_action = db.get_snooze_state("dream_last_action") or ""
     # Backpressure: generation adds up to dream_hypotheses_per_cycle rows per
     # step while validation resolves ~one, so an unbounded queue only grows.
     # Past the cap, every step validates until the backlog drains.
-    backlogged = len(pending) > max(1, settings.dream_max_pending)
+    backlogged = len(pending) > _cap
 
     did = None
     if pending and (last_action != "validate" or backlogged):
