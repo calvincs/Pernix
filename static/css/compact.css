@@ -269,6 +269,103 @@
     display: none;
 }
 
+/* ------------------------------------------------------------------
+   P8 — a scrolling tab strip has to say which way it scrolls
+
+   Four strips in the app hide their scrollbar and then run off the edge
+   of a narrow viewport: Settings' six tabs, the shared .tab-bar (Spaces,
+   timeline), and the Explorer's group and subtab rows. Two of them
+   already carry a permanent right-edge fade; the other two carry
+   nothing, and none of them says anything about the tabs behind you.
+
+   file-panel.js / modals.js (M2C) write data-scroll on the strip as it
+   scrolls: `start` (more to the right), `mid` (more both ways), `end`
+   (more to the left), `none` (it all fits). The fades follow, so an
+   edge with nothing past it is never greyed — which is what makes the
+   greying mean something.
+
+   Both fades are STICKY FLEX ITEMS, the idiom modals.css and
+   file-panel.css already use here, not absolutely positioned ones: an
+   absolute child of a scroller scrolls away with the content, and the
+   whole point is to stay pinned to the scrollport edge. Each takes 20px
+   and gives it straight back with a negative margin, so the strip's
+   measurement is unchanged and the gradient lies over the tab it is
+   telling you about.
+   ------------------------------------------------------------------ */
+.settings-tab-bar,
+.tab-bar,
+.fp-group-bar,
+.fp-subtab-bar {
+    /* proximity, not mandatory: these strips are also scrolled
+       programmatically (Settings brings the active tab into view) and a
+       mandatory snap fights that. */
+    scroll-snap-type: x proximity;
+    /* The strip's own ground, named once so the two gradients below can
+       be written without knowing which strip they are on. */
+    --strip-bg: var(--bg-raised);
+}
+.fp-subtab-bar {
+    --strip-bg: var(--bg-surface);
+}
+.settings-tab-bar .tab-btn,
+.tab-bar .tab-btn,
+.fp-group-bar .fp-tab-btn,
+.fp-subtab-bar .fp-subtab-btn {
+    scroll-snap-align: start;
+}
+
+.settings-tab-bar::before,
+.settings-tab-bar::after,
+.tab-bar::before,
+.tab-bar::after,
+.fp-group-bar::before,
+.fp-group-bar::after,
+.fp-subtab-bar::before,
+.fp-subtab-bar::after {
+    content: '';
+    position: sticky;
+    align-self: stretch;
+    flex: 0 0 20px;
+    pointer-events: none;
+    background: none;
+}
+.settings-tab-bar::before,
+.tab-bar::before,
+.fp-group-bar::before,
+.fp-subtab-bar::before {
+    left: 0;
+    margin-right: -20px;
+}
+.settings-tab-bar::after,
+.tab-bar::after,
+.fp-group-bar::after,
+.fp-subtab-bar::after {
+    right: 0;
+    margin-left: -20px;
+}
+/* More to the right. */
+.settings-tab-bar[data-scroll="start"]::after,
+.settings-tab-bar[data-scroll="mid"]::after,
+.tab-bar[data-scroll="start"]::after,
+.tab-bar[data-scroll="mid"]::after,
+.fp-group-bar[data-scroll="start"]::after,
+.fp-group-bar[data-scroll="mid"]::after,
+.fp-subtab-bar[data-scroll="start"]::after,
+.fp-subtab-bar[data-scroll="mid"]::after {
+    background: linear-gradient(to left, var(--strip-bg), transparent);
+}
+/* More to the left. */
+.settings-tab-bar[data-scroll="mid"]::before,
+.settings-tab-bar[data-scroll="end"]::before,
+.tab-bar[data-scroll="mid"]::before,
+.tab-bar[data-scroll="end"]::before,
+.fp-group-bar[data-scroll="mid"]::before,
+.fp-group-bar[data-scroll="end"]::before,
+.fp-subtab-bar[data-scroll="mid"]::before,
+.fp-subtab-bar[data-scroll="end"]::before {
+    background: linear-gradient(to right, var(--strip-bg), transparent);
+}
+
 @keyframes slideUpMobile {
     from { opacity: 0; transform: translateY(30%); }
     to   { opacity: 1; transform: translateY(0); }
