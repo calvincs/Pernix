@@ -336,15 +336,39 @@ async function deleteSession(sid) {
     }
 }
 
+// A phone has no Shift+Enter and no hover, so the two keyboards need two
+// different sentences — and the coarse one has to be visible, not a tooltip.
+function _isCoarsePointer() {
+    return typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+}
+
+function _composerHint() {
+    return _isCoarsePointer() ? 'Tap send' : 'Enter to send · Shift+Enter for a new line';
+}
+
+function _composerPlaceholder() {
+    return _isCoarsePointer()
+        ? 'Message Pernix — tap send'
+        : 'Message Pernix — Enter to send · Shift+Enter for a new line';
+}
+
 function _setComposerReadOnly(readonly, reason) {
     const input = document.getElementById('msg-input');
     const btn = document.getElementById('send-btn');
     if (!input || !btn) return;
     input.disabled = readonly;
     btn.disabled = readonly;
+    // The composer is more than the textarea. Attach and mic both feed a
+    // session the server will refuse, so leaving them live offered a path
+    // whose only possible ending was an error.
+    for (const id of ['attach-btn', 'voice-btn']) {
+        const b = document.getElementById(id);
+        if (b) b.disabled = readonly;
+    }
     input.placeholder = readonly
         ? (reason || 'This session is read-only')
-        : 'Message Pernix...';
+        : _composerPlaceholder();
+    input.title = readonly ? (reason || 'This session is read-only') : _composerHint();
 }
 
 // Monotonic token for session switches. Every await in selectSession (and
@@ -1015,16 +1039,46 @@ function setupInput() {
         }
     });
 
+    textarea.placeholder = _composerPlaceholder();
+    textarea.title = _composerHint();
+
     _restoreDraft();
 }
 
+// True from the moment a send starts until its POST resolves. Without it a
+// second Enter during a slow upload started the whole loop again on the same
+// _pendingFiles — uploading every attachment twice and sending two messages.
+let _sending = false;
+
+function _setSendingState(sending, label) {
+    _sending = sending;
+    const btn = document.getElementById('send-btn');
+    if (btn) btn.disabled = sending || !!document.getElementById('msg-input')?.disabled;
+    const infoEl = document.getElementById('status-info');
+    if (!infoEl) return;
+    if (sending && label) infoEl.textContent = label;
+    else if (!sending && /^Uploading /.test(infoEl.textContent || '')) infoEl.textContent = '';
+}
+
 async function send() {
+    if (_sending) return;
     // A dictation session still running would keep writing into the input
     // after we clear it below.
     stopVoice();
     const textarea = document.getElementById('msg-input');
     const message = textarea.value.trim();
     if (!message && _pendingFiles.length === 0) return;
+
+    // Mirror of the server's cap (api/routers/chat.py). Bouncing it here costs
+    // nothing; letting it through costs a full upload of the body and comes
+    // back as a bare 413.
+    if (message.length > MAX_MESSAGE_CHARS) {
+        appendMessage('system',
+            `That message is ${message.length.toLocaleString()} characters — over the `
+            + `${MAX_MESSAGE_CHARS.toLocaleString()} limit. Save it as a file and attach it, `
+            + 'or trim it. Your text is still in the composer.');
+        return;
+    }
 
     // Slash commands — check before streaming guard so /cancel works mid-stream
     const cmd = Object.keys(SLASH_COMMANDS).find(c => message.startsWith(c));
@@ -1072,86 +1126,95 @@ async function send() {
 
     // Upload pending files first (XHR for per-chip progress — a 100MB file
     // on phone Wi-Fi used to look like a hang).
-    const uploadedFiles = [];
-    if (_pendingFiles.length > 0) {
-        let failed = 0;
-        for (const pf of _pendingFiles) {
-            if (pf.uploaded && pf.serverName) {
-                uploadedFiles.push(pf.serverName);
-                continue;
+    _setSendingState(true);
+    try {
+        const uploadedFiles = [];
+        if (_pendingFiles.length > 0) {
+            let failed = 0;
+            let index = 0;
+            const total = _pendingFiles.length;
+            for (const pf of _pendingFiles) {
+                index++;
+                if (pf.uploaded && pf.serverName) {
+                    uploadedFiles.push(pf.serverName);
+                    continue;
+                }
+                _setSendingState(true, `Uploading ${index}/${total}…`);
+                try {
+                    pf.uploading = true;
+                    const result = await _uploadWithProgress(pf);
+                    pf.uploading = false;
+                    pf.uploaded = true;
+                    pf.serverName = result.filename;
+                    uploadedFiles.push(result.filename);
+                } catch (e) {
+                    failed++;
+                    pf.uploading = false;
+                    appendMessage('system', `Upload failed: ${pf.name} — ${e.message}`);
+                }
             }
-            try {
-                pf.uploading = true;
-                const result = await _uploadWithProgress(pf);
-                pf.uploading = false;
-                pf.uploaded = true;
-                pf.serverName = result.filename;
-                uploadedFiles.push(result.filename);
-            } catch (e) {
-                failed++;
-                pf.uploading = false;
-                appendMessage('system', `Upload failed: ${pf.name} — ${e.message}`);
+            if (failed > 0) {
+                // Don't silently send a message missing its attachments — keep
+                // the chips (successful ones stay marked uploaded) and restore
+                // the text so the user can remove the failed file or retry.
+                appendMessage('system', `${failed} upload(s) failed — message not sent. Remove the failed file(s) or try again.`);
+                if (!textarea.value) {
+                    textarea.value = message;
+                    textarea.dispatchEvent(new Event('input'));
+                    _saveDraft(message);
+                }
+                renderFileChips();
+                return;
             }
+            clearPendingFiles();
         }
-        if (failed > 0) {
-            // Don't silently send a message missing its attachments — keep
-            // the chips (successful ones stay marked uploaded) and restore
-            // the text so the user can remove the failed file or retry.
-            appendMessage('system', `${failed} upload(s) failed — message not sent. Remove the failed file(s) or try again.`);
+
+        // Build final message with file references
+        let finalMessage = message;
+        if (uploadedFiles.length > 0) {
+            const fileRefs = uploadedFiles.map(f => `[attached: ${f}]`).join(' ');
+            finalMessage = finalMessage ? `${finalMessage}\n\n${fileRefs}` : fileRefs;
+        }
+
+        // Remove empty state if present
+        const emptyEl = document.querySelector('.empty-state');
+        if (emptyEl) emptyEl.remove();
+
+        const userBubble = appendMessage('user', finalMessage);
+        state.streaming = true;
+        _showStopButton();
+        _streamingEl = appendMessage('assistant', '');
+        _collected = '';
+        _toolGroup = null;
+
+        // All events arrive via the persistent SSE connection.
+        // POST /api/chat just accepts the message and returns JSON.
+        try {
+            // Through the shared client, not a bare fetch: api() is what routes
+            // a 401 to the login screen and what trips the offline detector on a
+            // network failure. A hand-rolled fetch here surfaced an expired
+            // session as an inline "failed to send" that no amount of retrying
+            // could fix.
+            await post('/api/chat', { session_id: state.sid, message: finalMessage });
+        } catch (e) {
+            appendMessage('system', `Error: ${e.message}`);
+            // The optimistic bubble was never persisted — mark it so it doesn't
+            // read as sent (it vanishes on reload), restore the text so the user
+            // can retry without retyping, and drop the empty assistant ghost.
+            if (userBubble) userBubble.classList.add('rejected');
             if (!textarea.value) {
                 textarea.value = message;
                 textarea.dispatchEvent(new Event('input'));
                 _saveDraft(message);
             }
-            renderFileChips();
-            return;
+            if (_streamingEl) _streamingEl.remove();
+            state.streaming = false;
+            _showSendButton();
+            _streamingEl = null;
+            _toolGroup = null;
         }
-        clearPendingFiles();
-    }
-
-    // Build final message with file references
-    let finalMessage = message;
-    if (uploadedFiles.length > 0) {
-        const fileRefs = uploadedFiles.map(f => `[attached: ${f}]`).join(' ');
-        finalMessage = finalMessage ? `${finalMessage}\n\n${fileRefs}` : fileRefs;
-    }
-
-    // Remove empty state if present
-    const emptyEl = document.querySelector('.empty-state');
-    if (emptyEl) emptyEl.remove();
-
-    const userBubble = appendMessage('user', finalMessage);
-    state.streaming = true;
-    _showStopButton();
-    _streamingEl = appendMessage('assistant', '');
-    _collected = '';
-    _toolGroup = null;
-
-    // All events arrive via the persistent SSE connection.
-    // POST /api/chat just accepts the message and returns JSON.
-    try {
-        // Through the shared client, not a bare fetch: api() is what routes
-        // a 401 to the login screen and what trips the offline detector on a
-        // network failure. A hand-rolled fetch here surfaced an expired
-        // session as an inline "failed to send" that no amount of retrying
-        // could fix.
-        await post('/api/chat', { session_id: state.sid, message: finalMessage });
-    } catch (e) {
-        appendMessage('system', `Error: ${e.message}`);
-        // The optimistic bubble was never persisted — mark it so it doesn't
-        // read as sent (it vanishes on reload), restore the text so the user
-        // can retry without retyping, and drop the empty assistant ghost.
-        if (userBubble) userBubble.classList.add('rejected');
-        if (!textarea.value) {
-            textarea.value = message;
-            textarea.dispatchEvent(new Event('input'));
-            _saveDraft(message);
-        }
-        if (_streamingEl) _streamingEl.remove();
-        state.streaming = false;
-        _showSendButton();
-        _streamingEl = null;
-        _toolGroup = null;
+    } finally {
+        _setSendingState(false);
     }
     // Streaming cleanup happens in handleEvent() on stream.done / stream.error / turn.complete
 }
@@ -1288,6 +1351,10 @@ function _nameClipboardFile(file) {
 // Mirror of the server-side cap (api/routers/workspace.py) — reject before
 // the whole body is uploaded only to be bounced.
 const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
+
+// Mirror of the per-message cap in api/routers/chat.py (1MB). Python's len()
+// counts characters, so this counts characters too.
+const MAX_MESSAGE_CHARS = 1_000_000;
 
 function addPendingFiles(fileList) {
     for (const file of fileList) {
