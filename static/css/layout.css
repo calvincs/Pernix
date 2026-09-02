@@ -3400,3 +3400,14 @@ mark.ts-mark.current {
 .spaces-create-btn:hover,
 .spaces-create-btn:focus-visible { color: var(--text-dim); }
 .bell-empty { text-wrap: pretty; line-height: 1.5; }
+
+/* N7 — the list stops at 500; say so under the last bucket. */
+.sidebar-truncated {
+    padding: var(--sp-3) var(--sp-3) var(--sp-2);
+    border-top: 1px solid var(--line-faint);
+    margin-top: var(--sp-2);
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+    line-height: 1.5;
+    text-wrap: pretty;
+}
