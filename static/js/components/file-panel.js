@@ -420,7 +420,9 @@ function buildPanelDOM() {
     initResize(handle);
 
     // Header
-    const closeBtn = el('button', { class: 'fp-close', title: 'Close' }, [text('\u00d7')]);
+    const closeBtn = el('button', {
+        class: 'fp-close', title: 'Close', 'aria-label': 'Close the Explorer',
+    }, [text('\u00d7')]);
     closeBtn.addEventListener('click', toggleFilePanel);
     const header = el('div', { class: 'fp-header' }, [
         el('span', { class: 'fp-header-title' }, [text('Explorer')]),
@@ -598,7 +600,9 @@ function renderWorkspace() {
     }
 
     // Section header with refresh + upload buttons
-    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('\u21bb')]);
+    const refreshBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the workspace listing',
+    }, [text('\u21bb')]);
     refreshBtn.addEventListener('click', () => {
         _wsSearchQuery = '';
         loadWorkspace({ path: _wsCurrentPath });
@@ -607,6 +611,9 @@ function renderWorkspace() {
     const uploadBtn = el('button', {
         class: 'fp-icon-btn',
         title: _wsCurrentPath ? `Upload into ${_wsCurrentPath}/` : 'Upload into the workspace root',
+        'aria-label': _wsCurrentPath
+            ? `Upload a file into ${_wsCurrentPath}`
+            : 'Upload a file into the workspace root',
     }, [text('\u2191')]);
     uploadBtn.addEventListener('click', triggerUpload);
 
@@ -808,7 +815,11 @@ function _renderEntries(parent, entries) {
                 el('span', { class: 'fp-tree-meta' }, [text(entry.size > 0 ? formatSize(entry.size) : '')]),
                 el('span', { class: 'fp-tree-date' }, [text(formatDate(entry.modified))]),
             ]);
-            const dirDelBtn = el('button', { class: 'fp-tree-action danger', title: 'Delete' }, [text('\u00d7')]);
+            const dirDelBtn = el('button', {
+                class: 'fp-tree-action danger',
+                title: 'Delete',
+                'aria-label': `Delete the folder ${entry.name}`,
+            }, [text('\u00d7')]);
             dirDelBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteEntry(entry.path, 'dir'); });
             item.appendChild(el('span', { class: 'fp-tree-actions' }, [dirDelBtn]));
             _makeActivatable(item, `Open the folder ${entry.name}`, () => {
@@ -832,7 +843,11 @@ function _renderEntries(parent, entries) {
                 el('span', { class: 'fp-tree-date' }, [text(formatDate(entry.modified))]),
             ]);
 
-            const delBtn = el('button', { class: 'fp-tree-action danger', title: 'Delete' }, [text('\u00d7')]);
+            const delBtn = el('button', {
+                class: 'fp-tree-action danger',
+                title: 'Delete',
+                'aria-label': `Delete ${entry.name}`,
+            }, [text('\u00d7')]);
             delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteEntry(entry.path); });
             item.appendChild(el('span', { class: 'fp-tree-actions' }, [delBtn]));
 
@@ -909,7 +924,9 @@ function renderViewer(container) {
     if (!file) return;
 
     // Toolbar
-    const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back to tree' }, [text('\u2190')]);
+    const backBtn = el('button', {
+        class: 'fp-toolbar-back', title: 'Back to tree', 'aria-label': 'Back to the file tree',
+    }, [text('\u2190')]);
     backBtn.addEventListener('click', () => {
         if (file.type === 'image' && file.content.startsWith('blob:')) {
             URL.revokeObjectURL(file.content);
@@ -1088,7 +1105,9 @@ function renderEditor(container) {
     if (!file) return;
 
     // Toolbar
-    const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back' }, [text('\u2190')]);
+    const backBtn = el('button', {
+        class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the file, discarding unsaved changes',
+    }, [text('\u2190')]);
     backBtn.addEventListener('click', () => {
         if (!guardDirty()) return;
         disposeActiveEditor();
@@ -1588,7 +1607,9 @@ function renderSkills() {
     }
 
     // Section header
-    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('\u21bb')]);
+    const refreshBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the skills list',
+    }, [text('\u21bb')]);
     refreshBtn.addEventListener('click', loadSkills);
 
     container.appendChild(el('div', { class: 'fp-section-header' }, [
@@ -1710,6 +1731,8 @@ function _renderSkillsFiltered() {
         const toggle = el('button', {
             class: `fp-skill-toggle${skill.enabled ? ' on' : ''}`,
             title: skill.enabled ? 'Disable skill' : 'Enable skill',
+            'aria-label': `${skill.enabled ? 'Disable' : 'Enable'} the skill ${skill.name}`,
+            'aria-pressed': String(!!skill.enabled),
         }, [text(skill.enabled ? 'on' : 'off')]);
         toggle.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -1719,6 +1742,7 @@ function _renderSkillsFiltered() {
         const deleteBtn = el('button', {
             class: 'fp-tree-action danger',
             title: 'Delete skill',
+            'aria-label': `Delete the skill ${skill.name}`,
         }, [text('\u00d7')]);
         deleteBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -1799,7 +1823,9 @@ function renderSkillViewer(container) {
     const data = file.skillData;
 
     // Toolbar
-    const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back' }, [text('\u2190')]);
+    const backBtn = el('button', {
+        class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the skills list',
+    }, [text('\u2190')]);
     backBtn.addEventListener('click', () => {
         _state.viewMode = 'tree';
         _state.currentFile = null;
@@ -1934,7 +1960,9 @@ function renderSkillEditor(container) {
     if (!file) return;
 
     // Toolbar
-    const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back' }, [text('\u2190')]);
+    const backBtn = el('button', {
+        class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the skill, discarding unsaved changes',
+    }, [text('\u2190')]);
     backBtn.addEventListener('click', () => {
         if (!guardDirty()) return;
         disposeActiveEditor();
@@ -2221,7 +2249,9 @@ async function renderJobs() {
         subTabBar.appendChild(btn);
     }
 
-    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('↻')]);
+    const refreshBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the jobs list',
+    }, [text('↻')]);
     refreshBtn.addEventListener('click', () => loadJobs());
 
     const subTabRow = el('div', { class: 'fp-jobs-header-row' }, [subTabBar, refreshBtn]);
@@ -2331,10 +2361,14 @@ function renderTools() {
     clear(container);
 
     // Header
-    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('↻')]);
+    const refreshBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the tools list',
+    }, [text('↻')]);
     refreshBtn.addEventListener('click', loadTools);
 
-    const sortSelect = el('select', { class: 'fp-ws-sort', title: 'Sort tools by…' }, [
+    const sortSelect = el('select', {
+        class: 'fp-ws-sort', title: 'Sort tools by…', 'aria-label': 'Sort tools by',
+    }, [
         el('option', { value: 'name',     ...(_toolsSortBy === 'name'     ? { selected: '' } : {}) }, [text('Name')]),
         el('option', { value: 'safety',   ...(_toolsSortBy === 'safety'   ? { selected: '' } : {}) }, [text('Safety')]),
         el('option', { value: 'category', ...(_toolsSortBy === 'category' ? { selected: '' } : {}) }, [text('Category')]),
@@ -2465,6 +2499,8 @@ function _renderToolsFiltered() {
         const toggle = el('button', {
             class: `fp-skill-toggle${tool.enabled ? ' on' : ''}`,
             title: tool.enabled ? 'Disable tool' : 'Enable tool',
+            'aria-label': `${tool.enabled ? 'Disable' : 'Enable'} the tool ${tool.name}`,
+            'aria-pressed': String(!!tool.enabled),
         }, [text(tool.enabled ? 'on' : 'off')]);
         toggle.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -2490,6 +2526,7 @@ function _renderToolsFiltered() {
         const safetySelect = el('select', {
             class: `fp-tool-safety sl-${level}`,
             title: 'Safety level — controls whether auto_approve_dangerous gate applies',
+            'aria-label': `Safety level for ${tool.name}`,
         });
         for (const lvl of ['safe', 'caution', 'dangerous']) {
             const opt = el('option', { value: lvl }, [text(lvl)]);
@@ -2602,9 +2639,13 @@ function renderMcp() {
     if (!container) return;
     clear(container);
 
-    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('↻')]);
+    const refreshBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the MCP server list',
+    }, [text('↻')]);
     refreshBtn.addEventListener('click', loadMcp);
-    const addBtn = el('button', { class: 'fp-icon-btn', title: 'Add server' }, [text('+')]);
+    const addBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Add server', 'aria-label': 'Add an MCP server',
+    }, [text('+')]);
     addBtn.addEventListener('click', () => {
         if (_mcpShowAdd && _mcpEditTarget === null) {
             _mcpShowAdd = false;                    // toggle a plain add form closed
@@ -2680,6 +2721,8 @@ function _buildMcpServerItem(s) {
     const toggle = el('button', {
         class: `fp-skill-toggle${s.enabled ? ' on' : ''}`,
         title: s.enabled ? 'Disable server (unregisters its tools)' : 'Enable server',
+        'aria-label': `${s.enabled ? 'Disable' : 'Enable'} the MCP server ${s.name}`,
+        'aria-pressed': String(!!s.enabled),
     }, [text(s.enabled ? 'on' : 'off')]);
     toggle.addEventListener('click', async (e) => {
         e.stopPropagation();
@@ -2691,7 +2734,10 @@ function _buildMcpServerItem(s) {
         await loadMcp();
     });
 
-    const editBtn = el('button', { class: 'fp-icon-btn', title: 'Edit server config' }, [text('✎')]);
+    const editBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Edit server config',
+        'aria-label': `Edit the config for ${s.name}`,
+    }, [text('✎')]);
     editBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         const cfg = _mcpData?.configs?.[s.name];
@@ -2703,7 +2749,10 @@ function _buildMcpServerItem(s) {
         renderMcp();
     });
 
-    const reloadBtn = el('button', { class: 'fp-icon-btn', title: 'Reconnect + re-discover tools' }, [text('↻')]);
+    const reloadBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Reconnect + re-discover tools',
+        'aria-label': `Reconnect ${s.name} and re-discover its tools`,
+    }, [text('↻')]);
     reloadBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (_mcpBusy) return;
@@ -2715,7 +2764,10 @@ function _buildMcpServerItem(s) {
         await loadMcp();
     });
 
-    const delBtn = el('button', { class: 'fp-icon-btn', title: 'Remove server' }, [text('×')]);
+    const delBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Remove server',
+        'aria-label': `Remove the MCP server ${s.name}`,
+    }, [text('×')]);
     delBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!confirm(`Remove the MCP server "${s.name}" and unregister its tools \u2014 this cannot be undone.`)) return;
