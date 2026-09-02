@@ -24,9 +24,14 @@ export function initJobsIndicator(container, { onOpenPanel }) {
     _iconEl = el('span', { class: 'jobs-indicator-icon' }, ['\u23F1']);  // stopwatch
     _countEl = el('span', { class: 'jobs-indicator-count' });
 
-    _el = el('span', {
+    // A <span> with a click handler: no tab stop, no role, and a title
+    // attribute is not an accessible name a keyboard user can reach. It opens
+    // the Jobs panel, so it is a button. (A1)
+    _el = el('button', {
         class: 'jobs-indicator',
+        type: 'button',
         title: 'Background jobs',
+        'aria-label': 'Background jobs',
         onClick: () => {
             _hasError = false;   // they are about to see it for themselves
             _render();
@@ -102,6 +107,9 @@ function _render() {
     if (_hasError) {
         _el.title = 'A background job failed — open Jobs for the details';
     }
+    // The title carries the live count; the accessible name has to say the
+    // same thing, or a screen-reader user hears only "Background jobs".
+    _el.setAttribute('aria-label', _el.title);
 }
 
 function _connectSSE() {

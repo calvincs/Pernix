@@ -7,6 +7,10 @@
 .jobs-indicator {
     display: inline-flex;
     align-items: center;
+    /* It is a <button> now, so the UA font and chrome have to be undone. */
+    background: none;
+    border: none;
+    font-family: inherit;
     gap: var(--sp-1);
     padding: 2px var(--sp-2);
     border-radius: var(--radius);
@@ -20,6 +24,11 @@
 .jobs-indicator:hover {
     color: var(--text-dim);
     background: var(--bg-hover);
+}
+
+.jobs-indicator:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
 }
 
 .jobs-indicator.has-running {
