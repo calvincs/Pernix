@@ -308,6 +308,122 @@ async def nudge_stale_canaries(max_age_days: int = 90) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Archive — the sweep that hides a session instead of ending it
+# ---------------------------------------------------------------------------
+
+
+def _archive_sample(rows: list[dict]) -> list[dict]:
+    """The first ten rows, trimmed to what a confirmation dialog can show."""
+    return [{k: r.get(k) for k in ("id", "title", "updated_at", "space_id")} for r in rows[:10]]
+
+
+def archive_idle_sessions(
+    days: int | None = None,
+    *,
+    dry_run: bool = False,
+    space_id: str | None = None,
+) -> dict:
+    """Archive ordinary chats idle for longer than ``days``.
+
+    Archiving is not deletion, and this sweep does not inherit the delete
+    side's exemptions: every message stays, the session stays searchable,
+    and one PATCH puts it back. What it does is take a chat that stopped
+    being a live thread a month ago out of a sidebar the user reads daily.
+
+    Pinned sessions are exempt — pinning is the user saying keep this in
+    front of me. Space sessions are NOT exempt: the v33 "long-lived by
+    contract" rule spares them from every DELETE sweep because losing a
+    transcript is irreversible, and nothing here is.
+
+    ``days`` defaults to ``session_archive_idle_days``; 0 or less turns the
+    sweep off and returns an empty result. ``space_id`` narrows it to one
+    space, which is what a space header's "Archive idle sessions..." runs.
+    ``dry_run`` computes exactly the same set and writes nothing, so the
+    number in the confirmation is a promise the real run keeps.
+
+    Returns ``{"count", "ids", "sample", "days", "dry_run"}``.
+    """
+    days = int((days if days is not None else settings.session_archive_idle_days) or 0)
+    empty = {"count": 0, "ids": [], "sample": [], "days": days, "dry_run": dry_run}
+    if days <= 0:
+        return empty
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        rows = db.list_idle_sessions_to_archive(cutoff, space_id)
+    except Exception as e:
+        logger.warning("Idle-session archive: could not list candidates: %s", e)
+        return empty
+    if not rows:
+        return empty
+
+    ids = [r["id"] for r in rows]
+    if not dry_run:
+        archived = 0
+        for sid in ids:
+            try:
+                db.set_session_meta(sid, archived=True)
+                archived += 1
+            except Exception as e:
+                logger.warning("Idle-session archive: could not archive %s: %s", sid, e)
+        logger.info("Archived %d session(s) idle for more than %dd", archived, days)
+    return {"count": len(ids), "ids": ids, "sample": _archive_sample(rows), "days": days, "dry_run": dry_run}
+
+
+def prune_archived_sessions(days: int | None = None, *, dry_run: bool = False) -> dict:
+    """Delete sessions that have been archived for longer than ``days``.
+
+    The one sweep in this file that can end a conversation the user started,
+    so it is off by default (``session_delete_archived_days`` = 0) and it
+    only ever looks at rows the archive already holds: a session reaches it
+    by being archived and then left alone, never by age alone.
+
+    Deletion goes through the manager rather than ``db.delete_session`` so a
+    session's workspace summary, RLM artifacts and kernel state go with it —
+    the same path the bulk purge takes.
+
+    Returns ``{"count", "ids", "sample", "days", "dry_run"}``.
+    """
+    days = int((days if days is not None else settings.session_delete_archived_days) or 0)
+    empty = {"count": 0, "ids": [], "sample": [], "days": days, "dry_run": dry_run}
+    if days <= 0:
+        return empty
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        rows = db.list_archived_sessions_before(cutoff)
+    except Exception as e:
+        logger.warning("Archived-session prune: could not list candidates: %s", e)
+        return empty
+    if not rows:
+        return empty
+
+    ids = [r["id"] for r in rows]
+    result = {"count": len(ids), "ids": ids, "sample": _archive_sample(rows), "days": days, "dry_run": dry_run}
+    if dry_run:
+        return result
+
+    # Distill before delete: past this point the transcript is gone.
+    try:
+        _digest_pruned("archived", [_session_digest_line(r) for r in rows])
+    except Exception as e:
+        logger.warning("Archived-session prune digest failed (prune continues): %s", e)
+
+    from sessions.manager import get_manager
+
+    manager = get_manager()
+    deleted = 0
+    for sid in ids:
+        try:
+            manager.delete_session(sid)
+            deleted += 1
+        except Exception as e:
+            logger.warning("Archived-session prune: could not delete %s: %s", sid, e)
+    if deleted:
+        logger.info("Deleted %d session(s) archived for more than %dd", deleted, days)
+    result["count"] = deleted
+    return result
+
+
+# ---------------------------------------------------------------------------
 # RLM run directories
 # ---------------------------------------------------------------------------
 
