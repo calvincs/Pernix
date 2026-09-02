@@ -120,6 +120,20 @@ def _entry_body(section: str) -> str:
     return "\n".join(line for line in section.splitlines() if not line.startswith("<!-- @merged_")).strip()
 
 
+def _bucket_matches(file_name: str, space_prefix: str | None) -> bool:
+    """Whether a candidate file is in the bucket the caller is writing to.
+
+    With a space active, only that space's files qualify. Without one, only
+    global files do — a global session must never be routed into a space,
+    whose contents the space's own cascade delete is entitled to destroy.
+    """
+    from core.memory.routing import space_bucket
+
+    if space_prefix:
+        return file_name.startswith(space_prefix)
+    return space_bucket(file_name) is None
+
+
 class MemoryStore:
     """Persistent memory with markdown files + FTS5 search.
 
@@ -499,7 +513,12 @@ class MemoryStore:
             rows = conn.execute("SELECT name, keywords FROM memory_files WHERE entry_count > 0").fetchall()
             file_count = len(rows)
             for row in rows:
-                if space_prefix and not row["name"].startswith(space_prefix):
+                # The bucket boundary cuts BOTH ways. Filtering only when a
+                # space is active let a global remember() land in a space's
+                # file (space files are the content-richest on a busy space,
+                # so they win keyword overlap), and the space cascade delete
+                # then destroyed a memory that never belonged to it.
+                if not _bucket_matches(row["name"], space_prefix):
                     continue
                 file_kws = set(row["keywords"].lower().split(","))
                 content_words = set(content_lower.split())
@@ -524,6 +543,11 @@ class MemoryStore:
                     file_scores: dict[str, float] = {}
                     for r in results:
                         fn = r.entry.file_name
+                        # search_bm25's file_prefix only constrains the
+                        # in-space direction; a global write still had every
+                        # space file as a candidate here.
+                        if not _bucket_matches(fn, space_prefix):
+                            continue
                         file_scores[fn] = file_scores.get(fn, 0) + r.score
                     for fn, score in file_scores.items():
                         # Require strong FTS5 signal (>= 3.0) to influence routing

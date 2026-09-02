@@ -24,6 +24,7 @@ from difflib import SequenceMatcher
 from typing import Callable
 
 from config import settings
+from core.memory.routing import space_bucket
 from core.pools import run_background
 
 logger = logging.getLogger("pernix.memory.sweeps")
@@ -395,8 +396,6 @@ def classify_entry(entry, src_file: str, file_keywords: dict[str, set[str]]) -> 
     tag/keyword affinity scoring (medium — the current file scores zero while
     some other file scores at least 1.0).
     """
-    from core.memory.routing import space_bucket
-
     src_bucket = space_bucket(src_file)
 
     if entry.entry_type == "profile" and src_file != "user.profile" and src_bucket is None:
@@ -618,6 +617,18 @@ async def reroute_misplaced_entries(
                 target = dec.get("target_file", "")
                 src = epoch_to_src.get(epoch)
                 if not src or not target or src == target:
+                    continue
+                # Hard boundary. The LLM picks this name freely, and the
+                # guards added with spaces covered score_pair/classify_entry
+                # but not the reroute decision itself — so a space entry
+                # could be moved into a global file (and out of the reach of
+                # its space's own cascade) or vice versa.
+                if space_bucket(target) != space_bucket(src):
+                    logger.debug(
+                        "Snooze: reroute rejected %s → %s (crosses the space boundary)",
+                        src,
+                        target,
+                    )
                     continue
                 # New file: only allow if it's a genuine cluster (>=2 entries)
                 if target not in known_files:
@@ -879,7 +890,11 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
     entry_summaries = [f"{i}: [{e.entry_type}] {e.content[:150]}" for i, e in enumerate(sample)]
 
     _existing = await asyncio.to_thread(store.list_files)
-    existing_files = [f.name for f in _existing]
+    # Only files in the source's own bucket are candidates: listing global
+    # files to a space split (or the reverse) invited the LLM to name one,
+    # and the move below would have carried the entries across.
+    _target_bucket = space_bucket(target.name)
+    existing_files = [f.name for f in _existing if space_bucket(f.name) == _target_bucket]
 
     from core.llm.client import get_llm_client
 
@@ -942,6 +957,11 @@ async def split_file(store, is_cancelled: Callable[[], bool]) -> tuple[bool, int
         # Sanitize LLM-generated filename (defense-in-depth)
         file_name = file_name.replace("/", ".").replace("\\", ".").replace("..", ".")
         if not file_name or not indices or file_name == target.name:
+            continue
+        # A NEW name the model invented can also cross the boundary — a
+        # space file must split into space files, a global one into global.
+        if space_bucket(file_name) != _target_bucket:
+            logger.debug("Snooze: split rejected %r (crosses the space boundary)", file_name)
             continue
         unique_epochs = []
         for idx in indices:
