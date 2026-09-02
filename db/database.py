@@ -45,6 +45,17 @@ class _TrackedConnection(sqlite3.Connection):
     def __exit__(self, *exc_info):
         try:
             return super().__exit__(*exc_info)
+        except Exception:
+            # A COMMIT that fails (busy timeout under a long writer) leaves
+            # the transaction OPEN on a connection this thread will reuse:
+            # the next `with conn:` block inherits it, and that block's own
+            # commit or rollback then decides the fate of these writes too.
+            # Roll back here so each block's outcome stays its own.
+            try:
+                super().rollback()
+            except Exception:
+                pass
+            raise
         finally:
             self._checkouts -= 1
 
