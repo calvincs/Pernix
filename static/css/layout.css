@@ -569,6 +569,10 @@
 
 /* Sidebar toggle */
 #sidebar-toggle {
+    /* Its content is an <svg> now, not a glyph — centre it as a box. */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     position: absolute;
     top: var(--sp-3);
     left: var(--sp-3);
@@ -778,7 +782,11 @@
     transition: var(--transition);
     line-height: 1;
 }
-#jump-to-bottom.visible { display: block; }
+#jump-to-bottom {
+    align-items: center;
+    justify-content: center;
+}
+#jump-to-bottom.visible { display: flex; }
 #jump-to-bottom:hover {
     color: var(--accent);
     border-color: var(--accent);
