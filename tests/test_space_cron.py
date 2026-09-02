@@ -120,8 +120,10 @@ def test_unbind_and_list_space_jobs(monkeypatch):
 
 def test_pinned_cron_sessions_survive_prune():
     old = "2020-01-01T00:00:00+00:00"
-    doomed = db.create_session(title="Cron: sweep-me")
-    kept = db.create_session(title="Cron: keep-me")
+    # session_type, not the title, is what marks a cron session: the title
+    # is a display string the user and the LLM titler both rewrite.
+    doomed = db.create_session(title="Cron: sweep-me", session_type="cron")
+    kept = db.create_session(title="Cron: keep-me", session_type="cron")
     with db.connect_sessions() as conn:
         conn.execute("UPDATE sessions SET updated_at = ? WHERE id IN (?, ?)", (old, doomed, kept))
         conn.execute("UPDATE sessions SET pinned = 1 WHERE id = ?", (kept,))
