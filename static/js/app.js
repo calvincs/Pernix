@@ -388,6 +388,7 @@ function goHome() {
     _clearToolStatus();
     _resetContextReadout();
     _applyStateBadge('idle_ready', '');
+    _renderModelBadge();   // no session -> the override badge goes quiet (P2)
     showEmptyState();
     _restoreDraft();
     renderSidebar(state.sessions, state.sid, state.spaces);
@@ -2654,6 +2655,21 @@ function _renderModelBadge() {
     if (!mEl) return;
     mEl.classList.remove('has-override');
     mEl.textContent = '';
+    // A per-SESSION override needs a session. With none open the badge used to
+    // look and feel live and then do nothing at all when tapped — the kind of
+    // dead control that reads as a broken app rather than an unavailable one.
+    // Say so instead, and let it come back the moment a session opens. (P2)
+    if (!state.sid) {
+        mEl.disabled = true;
+        mEl.setAttribute('aria-disabled', 'true');
+        mEl.appendChild(text(state.model || '...'));
+        mEl.title = 'Open a session to give it its own model';
+        mEl.setAttribute('aria-label',
+            `Model: ${state.model || 'not set'}. Open a session to change it.`);
+        return;
+    }
+    mEl.disabled = false;
+    mEl.removeAttribute('aria-disabled');
     if (_sessionModelOverride) {
         mEl.appendChild(text(_sessionModelOverride));
         const pin = document.createElement('span');
@@ -2691,11 +2707,33 @@ async function _openModelMenu() {
     document.body.appendChild(menu);
     document.getElementById('status-model')?.setAttribute('aria-expanded', 'true');
 
-    // Position above the status bar, anchored to the badge.
+    // Anchored to the badge, on whichever side there is room for it. The
+    // status bar is at the BOTTOM on the desktop, so a menu hung above it by
+    // its `bottom` is the right shape there; touch.css moves the whole bar to
+    // the top of the screen, and the same offset then put the menu's bottom
+    // edge 13px down the page with the rest of it off the top. Measured -113px
+    // on a phone, -94px on a landscape iPad: unreachable in both. (P2)
     const badge = document.getElementById('status-model');
     const rect = badge.getBoundingClientRect();
-    menu.style.left = `${Math.max(8, rect.left)}px`;
-    menu.style.bottom = `${window.innerHeight - rect.top + 6}px`;
+    const anchorAbove = rect.top >= window.innerHeight / 2;
+    if (anchorAbove) {
+        menu.style.bottom = `${window.innerHeight - rect.top + 6}px`;
+    } else {
+        menu.style.top = `${rect.bottom + 6}px`;
+    }
+    // Left-aligned to the badge until that would hang the menu off the right
+    // edge — which it does on a phone, where the badge is most of the row.
+    // Re-run once the models land: the menu is 260px wide saying "Loading"
+    // and as wide as the longest model id afterwards.
+    const clampLeft = () => {
+        // The menu is shrink-to-fit against (viewport − left), so measuring it
+        // where it currently sits makes the measurement chase its own tail on
+        // a narrow screen. Measure from the left-most position it could take.
+        menu.style.left = '8px';
+        const menuW = menu.offsetWidth || 260;
+        menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menuW - 8))}px`;
+    };
+    clampLeft();
 
     // Defer the outside-click closer so the opening click doesn't trigger it.
     setTimeout(() => document.addEventListener('click', _closeModelMenu), 0);
@@ -2752,6 +2790,7 @@ async function _openModelMenu() {
         list.appendChild(el('div', { class: 'model-menu-empty' }, [text('No models listed — check provider settings.')]));
     }
     menu.appendChild(list);
+    clampLeft();
 }
 
 const _runningTools = new Map();  // name → summarized args, for tools currently executing
