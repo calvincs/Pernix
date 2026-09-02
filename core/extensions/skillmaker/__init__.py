@@ -189,14 +189,28 @@ def update_skill(
         frontmatter["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
     body = instructions if instructions else existing_body
 
-    # Write updated SKILL.md
-    content = _build_skill_md(
-        name=frontmatter["name"],
-        description=frontmatter["description"],
-        instructions=body,
-        tags=frontmatter.get("tags", []),
-        version=frontmatter.get("version", "1.0"),
-    )
+    # Write updated SKILL.md.
+    #
+    # Round-trip the WHOLE frontmatter and overwrite only the touched keys.
+    # _build_skill_md emits four fixed keys, so rebuilding from it silently
+    # dropped everything else the file carried — `verify:` above all, whose
+    # loss makes the maintenance sweep retire the skill's behavioural canary
+    # ("verify block removed") and purge it 30 days later, and `scripts:`,
+    # the contract the skill's own helper programs are declared under.
+    updated = dict(frontmatter)
+    updated["name"] = frontmatter["name"]
+    updated["description"] = frontmatter["description"]
+    updated["tags"] = frontmatter.get("tags", [])
+    updated.setdefault("version", "1.0")
+    yaml_str = yaml.dump(updated, default_flow_style=False, sort_keys=False).strip()
+    content = f"---\n{yaml_str}\n---\n\n{body}\n"
+
+    # Same backup create_skill takes: this path can now rewrite a file the
+    # user hand-edited, so a bad update must be recoverable.
+    try:
+        (skill_path / "SKILL.md.bak").write_text(skill_md.read_text(encoding="utf-8"), encoding="utf-8")
+    except OSError as e:
+        logger.warning("Could not back up %s before update: %s", skill_md, e)
     skill_md.write_text(content, encoding="utf-8")
 
     # Rescan
