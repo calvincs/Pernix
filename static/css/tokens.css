@@ -33,6 +33,11 @@
     /* Accent */
     --accent: #d4a843;
     --accent-dim: #9a7a30;
+    /* The lit top of the wordmark's gradient. Its own token because the two
+       themes want opposite ends of the value scale: on black the wordmark
+       reads brightest at the top, on paper it has to stay dark all the way
+       down or the big display type falls under 3:1. */
+    --accent-tint: #ece1c4;
     /* Washes derive from the accent so a theme swap reaches them; mixing
        with `transparent` is premultiplied, so this is exactly an alpha. */
     --accent-subtle: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -132,6 +137,9 @@
     --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
     --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
     --scrim: rgba(0, 0, 0, 0.6);
+    /* For the handful of shadows whose geometry is bespoke (a drawer casts
+       sideways) and so cannot use a whole --shadow-* value. */
+    --shadow-color: rgba(0, 0, 0, 0.5);
 
     /* ------------------------------------------------------------------
        Aliases for names the CSS and JS already referenced but that were
@@ -218,6 +226,7 @@
        #8a6410 is 5.0:1. */
     --accent: #8a6410;
     --accent-dim: #6b4d0a;
+    --accent-tint: #5c400a;
 
     /* Semantics, all >= 5.8:1 on paper. */
     --error: #a32620;
@@ -236,6 +245,7 @@
     --shadow-md: 0 4px 12px rgba(60, 50, 30, 0.14);
     --shadow-lg: 0 8px 24px rgba(60, 50, 30, 0.18);
     --scrim: rgba(60, 50, 30, 0.35);
+    --shadow-color: rgba(60, 50, 30, 0.18);
     }
 }
 
@@ -267,6 +277,7 @@
        #8a6410 is 5.0:1. */
     --accent: #8a6410;
     --accent-dim: #6b4d0a;
+    --accent-tint: #5c400a;
 
     /* Semantics, all >= 5.8:1 on paper. */
     --error: #a32620;
@@ -285,6 +296,7 @@
     --shadow-md: 0 4px 12px rgba(60, 50, 30, 0.14);
     --shadow-lg: 0 8px 24px rgba(60, 50, 30, 0.18);
     --scrim: rgba(60, 50, 30, 0.35);
+    --shadow-color: rgba(60, 50, 30, 0.18);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
