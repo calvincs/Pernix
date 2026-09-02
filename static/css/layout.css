@@ -410,11 +410,64 @@ body.sidebar-resizing {
 }
 .spaces-header .space-btn,
 .spaces-header:hover .space-btn { visibility: visible; }
-.space-group-header:hover .space-btn,
-.space-group-header:focus-within .space-btn,
-.space-btn:focus-visible { visibility: visible; }
 .space-btn:hover { color: var(--text-bright); }
 .space-group-header .sg-count { margin-left: auto; }
+
+/* A space header's three controls — new session, settings, delete — over the
+   label's tail rather than beside it. The same move the session rows make one
+   level down, for the same reason: three targets that are invisible until a
+   pointer asks for them were taking 48px out of the row in flow, and the
+   label — the one thing that tells two spaces apart — was reading them at
+   122px of a 253px header. Positioned against the header, so the label is
+   measured against the whole row and the buttons cost it nothing. */
+.space-group-header {
+    position: relative;
+    /* What the overlay paints itself with. The header has no background of
+       its own — hover only changes its colour — so this is the sidebar it
+       sits on, and it is a token, so a theme swap reaches it. */
+    --row-veil: var(--bg-raised);
+}
+.space-actions {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: var(--sp-3);
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    /* 20px of runway for the gradient, and the header's own 8px-over-3px
+       padding carried onto the strip so the icons centre on the label rather
+       than on the box, which sits 2.5px higher. */
+    padding: 5px 0 0 20px;
+    opacity: 0;
+    transition: opacity var(--transition);
+    background: linear-gradient(to right, transparent, var(--row-veil) 20px);
+    /* The strip is a backdrop, not a target: the fade and the gaps between
+       the icons pass their clicks to the header, so a near miss collapses the
+       group instead of doing nothing. Only the buttons take a click, and only
+       once they are visible. */
+    pointer-events: none;
+}
+.space-actions > * { pointer-events: none; }
+.space-group-header:hover .space-actions,
+.space-group-header:focus-within .space-actions { opacity: 1; }
+.space-group-header:hover .space-actions > *,
+.space-group-header:focus-within .space-actions > * { pointer-events: auto; }
+/* The overlay states its own visibility rather than inheriting .space-btn's
+   hidden default. That default was the whole of the old mechanism, and inside
+   a strip that already fades as one it would do the same job twice — and do
+   it worse: `visibility: hidden` takes an element out of the tab order, so
+   the buttons would only exist for the keyboard once something else in the
+   header had focus. Opacity leaves them where Tab can find them. */
+.space-actions .space-btn {
+    visibility: visible;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
 .space-empty {
     padding: 4px var(--sp-3) 8px;
     font-size: var(--text-xxs);
