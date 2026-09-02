@@ -6,6 +6,7 @@ JS-rendered page extraction.
 
 from __future__ import annotations
 
+import asyncio as _asyncio_mod
 import atexit
 import logging
 import os
@@ -782,13 +783,16 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
         html = html[:_MAX_HTML_BYTES]
         logger.warning("HTML truncated to %d bytes before extraction for %s", _MAX_HTML_BYTES, url)
 
-    # Trafilatura — pure CPU. Capped at 5MB above; runs inline. If profiling
-    # later shows blocking, wrap in `await asyncio.to_thread(...)`.
+    # Trafilatura — pure CPU over up to 5MB of DOM, on the event loop until
+    # now. A heavy page froze every SSE stream, state transition and API
+    # route for seconds; the comment here used to say "if profiling shows
+    # blocking, wrap in to_thread", and it does, so it is.
     content = None
     try:
         import trafilatura
 
-        content = trafilatura.extract(
+        content = await _asyncio_mod.to_thread(
+            trafilatura.extract,
             html,
             output_format="markdown",
             include_links=True,
@@ -824,9 +828,14 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
                         if t:
                             self.parts.append(t)
 
-            extractor = _TextExtractor()
-            extractor.feed(html)
-            content = "\n".join(extractor.parts)
+            def _extract_text(raw: str) -> str:
+                ex = _TextExtractor()
+                ex.feed(raw)
+                return "\n".join(ex.parts)
+
+            # Same reasoning as trafilatura above: HTMLParser over 5MB is
+            # CPU-bound and must not run on the loop.
+            content = await _asyncio_mod.to_thread(_extract_text, html)
         except Exception:
             content = "(Failed to extract content)"
 
