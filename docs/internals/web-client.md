@@ -160,7 +160,8 @@ relayouting the shell for that is free of any visible benefit.
 - **Modals become bottom sheets**, Settings included.
 - The **model picker is a bottom sheet** rather than a menu anchored to a 19px
   badge: full width, 48px rows, a scrim and Escape.
-- The **worker strip is one line** — `N workers · M RLM · K finished` with a
+- The **worker strip is one line** — `N workers · R running · P paused · M RLM ·
+  K finished`, each part present only when its count is non-zero, with a
   chevron — instead of three rows of chips. Tapping it opens the worker sheet.
 - The **session-header title opens the session sheet** (pin, rename, move, copy
   id, delete) instead of swapping in an inline rename field.
