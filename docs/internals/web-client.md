@@ -265,7 +265,8 @@ a new line is worse than a phone that says nothing.
   automated check sees, and the same is true of native text selection, rotation
   with the keyboard up, and VoiceOver's reading order. Those have to be checked
   by hand on real hardware.
-- **There is an acceptance gate for the rest.** It drives an isolated seeded
-  instance across seven viewports and asserts the tier contracts, the touch
-  floors and a desktop layout baseline. Run it before and after any change to
-  these files.
+- **There is an acceptance gate for the rest.** `tools/ui-gate/run.sh` drives
+  an isolated seeded instance across seven viewports and asserts the tier
+  contracts, the touch floors and a desktop layout baseline. Run it before and
+  after any change to these files; see
+  [`tools/ui-gate/README.md`](../../tools/ui-gate/README.md).
