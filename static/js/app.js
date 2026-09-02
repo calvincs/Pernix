@@ -3715,23 +3715,28 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
     const summaryEl = el('span', { class: 'tool-item-summary' }, [text(summaryText)]);
 
     const headerChildren = [chevron, nameEl, summaryEl];
+    const headerEl = el('div', { class: 'tool-item-header' }, headerChildren);
 
-    // File view button — in header for quick access
+    // "view" jumps to the file the call wrote. It used to sit INSIDE the
+    // header — which is a role="button" — so it was a control nested in a
+    // button: invalid ARIA, and unreachable from the keyboard because the
+    // outer button owns the tab stop. It is a sibling now, in a flex row
+    // that the header still fills. (A1)
+    let headRowEl = headerEl;
     const fileMatch = (fullResult || preview || '').match(/Written \d+ chars to (.+)/);
     if (fileMatch) {
         const [, filePath] = fileMatch;
         const viewBtn = el('button', {
             class: 'file-view-btn',
+            type: 'button',
             'aria-label': `Open ${filePath.trim()} in the Explorer`,
         }, [text('view')]);
         viewBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             openWorkspaceFile(filePath.trim());
         });
-        headerChildren.push(viewBtn);
+        headRowEl = el('div', { class: 'tool-item-headrow' }, [headerEl, viewBtn]);
     }
-
-    const headerEl = el('div', { class: 'tool-item-header' }, headerChildren);
 
     // --- Expandable body (hidden until .expanded) ---
     const bodyChildren = [];
@@ -3794,7 +3799,7 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
     const isBrowse = name === 'browse_web' && !wasError;
     const itemEl = el('div', {
         class: `tool-item${wasError ? ' error' : ''}${isBrowse ? ' browse' : ''}`
-    }, [headerEl, bodyEl]);
+    }, [headRowEl, bodyEl]);
 
     // Header toggles item expansion; the show-more button appears after the
     // first open if the content actually overflows.
