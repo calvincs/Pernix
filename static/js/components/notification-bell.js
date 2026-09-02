@@ -255,7 +255,7 @@ function _renderQuestion(q) {
     const statusEl = el('span', { class: 'notif-status', role: 'status' });
 
     const row = el('div', {
-        class: 'notif-item notif-question',
+        class: 'notif-item notif-question' + (q.urgency === 'high' ? ' urgent' : ''),
         'data-qid': q.id,
         'data-key': `q:${q.id}`,
     }, [
@@ -295,7 +295,7 @@ function _renderQuestion(q) {
 
 function _renderNotification(n) {
     return el('div', {
-        class: 'notif-item notif-notification',
+        class: 'notif-item notif-notification' + (n.urgency === 'high' ? ' urgent' : ''),
         'data-key': `n:${n.id}`,
     }, [
         el('div', { class: 'notif-item-header' }, [

@@ -12,6 +12,12 @@ let _openPanel = null;  // callback to open jobs panel
 
 let _status = { running_jobs: 0, scheduled_count: 0, snooze: { running: false } };
 
+// A job.error used to decrement the running count and otherwise vanish: the
+// indicator went back to grey and the only trace was inside a panel nobody
+// had a reason to open. It stays red until a later job succeeds or the user
+// goes and looks.
+let _hasError = false;
+
 export function initJobsIndicator(container, { onOpenPanel }) {
     _openPanel = onOpenPanel;
 
@@ -21,7 +27,11 @@ export function initJobsIndicator(container, { onOpenPanel }) {
     _el = el('span', {
         class: 'jobs-indicator',
         title: 'Background jobs',
-        onClick: () => { if (_openPanel) _openPanel(); },
+        onClick: () => {
+            _hasError = false;   // they are about to see it for themselves
+            _render();
+            if (_openPanel) _openPanel();
+        },
     }, [_iconEl, _countEl]);
 
     container.insertBefore(_el, document.getElementById('notification-bell'));
@@ -56,14 +66,22 @@ function _render() {
     const scheduled = _status.scheduled_count || 0;
     const snoozing = _status.snooze?.running || false;
 
-    if (scheduled === 0 && !snoozing) {
+    // State first, visibility second: hiding on the early return below must
+    // not leave a stale has-error on a node that is about to come back.
+    // Mutually exclusive so the error colour is not fighting the running
+    // colour at the same specificity.
+    _el.classList.toggle('has-error', _hasError);
+    _el.classList.toggle('has-running', !_hasError && running > 0);
+    _el.classList.toggle('has-snooze', !_hasError && snoozing && running === 0);
+
+    // Running jobs are the one thing that must never be invisible. A manual
+    // job on an empty schedule hit exactly that: scheduled_count 0, so the
+    // indicator hid itself while the work was still going.
+    if (scheduled === 0 && !snoozing && running === 0 && !_hasError) {
         _el.style.display = 'none';
         return;
     }
     _el.style.display = '';
-
-    _el.classList.toggle('has-running', running > 0);
-    _el.classList.toggle('has-snooze', snoozing && running === 0);
 
     if (running > 0) {
         _iconEl.textContent = '\u23F1';  // stopwatch
@@ -79,6 +97,10 @@ function _render() {
         _iconEl.textContent = '\u23F1';
         _countEl.textContent = String(scheduled);
         _el.title = `${scheduled} job${scheduled > 1 ? 's' : ''} scheduled`;
+    }
+
+    if (_hasError) {
+        _el.title = 'A background job failed — open Jobs for the details';
     }
 }
 
@@ -111,6 +133,7 @@ function _handleEvent(type, data) {
         _status.running_jobs = (_status.running_jobs || 0) + 1;
     } else if (type === 'job.completed' || type === 'job.error') {
         _status.running_jobs = Math.max(0, (_status.running_jobs || 0) - 1);
+        _hasError = type === 'job.error';
     } else if (type === 'snooze.start') {
         _status.snooze = { ..._status.snooze, running: true, activity: null, detail: null };
     } else if (type === 'snooze.activity') {
