@@ -8,7 +8,7 @@
 import { el, text, clear } from '../../render.js';
 import { get, post, del, patch, apiJson } from '../../api.js';
 import { createCodeEditor } from '../file-panel.js';
-import { openOverlay } from '../../a11y.js';
+import { announce, openOverlay } from '../../a11y.js';
 import { notify } from '../../feedback.js';
 import { confirmDanger } from './confirm.js';
 
@@ -182,7 +182,14 @@ export function openSpaceModal(space) {
     const overlay = el('div', { class: 'modal-overlay space-modal-overlay' }, [card]);
     _armBackdropClose(overlay, close);
     document.body.appendChild(overlay);
+    // openOverlay moves focus into the card and puts it back on the opener
+    // when close() runs; the announcement is what tells a screen reader the
+    // dialog arrived at all, since the focus move alone is not narrated
+    // consistently.
     closeOverlay = openOverlay(card, { onClose: close, initialFocus: labelInput });
+    announce(isEdit
+        ? `Space settings for ${space.label}`
+        : 'New space. Name it and pick a colour.');
 }
 
 // Backdrop close that only fires when the press STARTED on the backdrop.
