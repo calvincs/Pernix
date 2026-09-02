@@ -186,6 +186,26 @@ body {
     scrollbar-color: var(--border) transparent;
 }
 
+/* Reduced motion — A9/V11.
+   The app animates a lot by default: the brand mark breathes, session dots
+   and the SSE indicator pulse, the state badge pulses while the agent works,
+   the activity ticker scrolls, modals slide up and messages fade in. For a
+   user with a vestibular disorder that is not decoration, it is a reason to
+   close the tab. One global stop, near-zero rather than zero so transitionend
+   and animationend listeners still fire. sidebar.js additionally skips
+   ADDING the ticker class at all (a marquee that snaps between two frames is
+   worse than a truncated line). */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
 /* Selection */
 ::selection {
     background: var(--accent-subtle);
