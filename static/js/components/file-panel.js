@@ -634,6 +634,63 @@ function buildPanelDOM() {
     renderTabs();
 }
 
+/**
+ * Make a horizontally scrolling tab strip say where it is (P8).
+ *
+ * A strip that scrolls looks exactly like one that does not: the tabs past
+ * the edge are invisible, and nothing suggests there is anything to swipe
+ * to. This writes `data-scroll` on the strip — "none" when everything fits,
+ * otherwise "start", "mid" or "end" for which edge still has tabs behind it
+ * — and the stylesheet paints an edge fade from that.
+ *
+ * The four strips that need it (the Explorer's two, the settings tabs and
+ * the shared .tab-bar in the space and timeline modals) all call this, so
+ * they cannot drift apart.
+ *
+ * @param {HTMLElement} strip     the scrolling container.
+ * @param {HTMLElement} [active]  the selected tab, brought into view.
+ * @returns {(next?: HTMLElement) => void} call it when the selection changes:
+ *          the tab you just landed on can be off the right edge, after a
+ *          deep link or on a narrow panel.
+ */
+export function bindStripScroll(strip, active = null) {
+    if (!strip) return () => {};
+
+    const sync = () => {
+        const slack = strip.scrollWidth - strip.clientWidth;
+        if (slack <= 1) { strip.dataset.scroll = 'none'; return; }
+        const x = strip.scrollLeft;
+        strip.dataset.scroll = x <= 1 ? 'start' : x >= slack - 1 ? 'end' : 'mid';
+    };
+
+    strip.addEventListener('scroll', sync, { passive: true });
+    // A ResizeObserver on the strip catches the Explorer's drag handle, a
+    // rotation and the 900px crossing alike, and stops on its own when the
+    // strip is thrown away — which these are, on every re-render.
+    if (typeof ResizeObserver === 'function') {
+        new ResizeObserver(sync).observe(strip);
+    } else {
+        const onResize = () => {
+            if (!strip.isConnected) { window.removeEventListener('resize', onResize); return; }
+            sync();
+        };
+        window.addEventListener('resize', onResize);
+    }
+
+    const reveal = (next) => {
+        sync();
+        (next || active)?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    };
+
+    sync();
+    // scrollWidth is only right once the browser has laid the buttons out,
+    // and this runs on the render that builds them. Wrapped, not passed
+    // directly: rAF hands its callback a timestamp, and reveal() would take
+    // that number for the tab to scroll to.
+    requestAnimationFrame(() => reveal());
+    return reveal;
+}
+
 // Roving tabindex: one tab stop per strip, arrows move inside it — the
 // contract role="tab" commits you to. Shared by both levels.
 function _stripArrows(e, ids, index) {
@@ -676,6 +733,7 @@ function renderTabs() {
     const groupBar = el('div', {
         class: 'fp-group-bar', role: 'tablist', 'aria-label': 'Explorer sections',
     });
+    let activeGroupBtn = null;
     EXPLORER_GROUPS.forEach((g, gi) => {
         const selected = g.key === activeGroup.key;
         const lands = selected ? activeTab : (_state.groupTabs[g.key] || g.tabs[0].key);
@@ -697,9 +755,11 @@ function renderTabs() {
         ]);
         btn.addEventListener('click', () => _selectTab(_resolveTab(g.key)));
         btn.addEventListener('keydown', (e) => _stripArrows(e, groupIds, gi));
+        if (selected) activeGroupBtn = btn;
         groupBar.appendChild(btn);
     });
     nav.appendChild(groupBar);
+    bindStripScroll(groupBar, activeGroupBtn);
 
     // --- level two: only where a group actually has more than one view ---
     if (activeGroup.tabs.length > 1) {
@@ -708,6 +768,7 @@ function renderTabs() {
             class: 'fp-subtab-bar', role: 'tablist',
             'aria-label': `${activeGroup.label} views`,
         });
+        let activeSubBtn = null;
         activeGroup.tabs.forEach((t, ti) => {
             const selected = t.key === activeTab;
             const btn = el('button', {
@@ -725,9 +786,11 @@ function renderTabs() {
             }, [text(t.label)]);
             btn.addEventListener('click', () => _selectTab(t.key));
             btn.addEventListener('keydown', (e) => _stripArrows(e, subIds, ti));
+            if (selected) activeSubBtn = btn;
             subBar.appendChild(btn);
         });
         nav.appendChild(subBar);
+        bindStripScroll(subBar, activeSubBtn);
     }
 
     // Show/hide tab content
@@ -750,10 +813,6 @@ function renderTabs() {
         container.setAttribute('tabindex', '0');
     });
 
-    // The strip scrolls, so the group you just landed on can be off its right
-    // edge — after a deep link, or on a narrow panel. Bring it into view.
-    document.getElementById(`fp-group-${activeGroup.key}`)
-        ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
 async function loadTabData() {

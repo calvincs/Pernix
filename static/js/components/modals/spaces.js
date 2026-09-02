@@ -8,7 +8,7 @@
 import { el, text, clear } from '../../render.js';
 import { icon } from '../../icons.js';
 import { get, post, del, patch, apiJson } from '../../api.js';
-import { createCodeEditor } from '../file-panel.js';
+import { createCodeEditor, bindStripScroll } from '../file-panel.js';
 import { announce, openOverlay } from '../../a11y.js';
 import { notify } from '../../feedback.js';
 import { confirmDanger } from './confirm.js';
@@ -225,6 +225,9 @@ function _buildDirectivesSection(space, dirState, disposers, onSave) {
     ]));
 
     const tabBar = el('div', { class: 'tab-bar space-dir-tabbar' });
+    // Bound once, outside renderTabs: the strip element survives every
+    // re-render, so binding inside would stack a listener per keystroke. (P8)
+    const revealDirTab = bindStripScroll(tabBar);
     const pane = el('div', { class: 'space-dir-pane' }, [text('Loading…')]);
     section.appendChild(tabBar);
     section.appendChild(pane);
@@ -234,18 +237,22 @@ function _buildDirectivesSection(space, dirState, disposers, onSave) {
 
     const renderTabs = () => {
         clear(tabBar);
+        let activeBtn = null;
         for (const name of DIRECTIVES) {
             const st = dirState[name];
             const overridden = st ? (st.mode === 'edit' && !st.revert) : !!files?.[name]?.override;
-            tabBar.appendChild(el('button', {
+            const btn = el('button', {
                 class: 'tab-btn' + (name === active ? ' active' : ''),
                 title: overridden ? `${name}.md — space override active` : `${name}.md — using the default`,
                 onClick: () => { active = name; renderTabs(); renderPane(); },
             }, [
                 text(name),
                 overridden ? el('span', { class: 'space-dir-ovr-dot' }) : null,
-            ]));
+            ]);
+            if (name === active) activeBtn = btn;
+            tabBar.appendChild(btn);
         }
+        revealDirTab(activeBtn);
     };
 
     const renderPane = () => {
