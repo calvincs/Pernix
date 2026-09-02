@@ -305,6 +305,11 @@ async function deleteSession(sid) {
         await del(`/api/sessions/${sid}`);
         if (state.sid === sid) {
             state.sid = null;
+            // Event sequences are per-session and restart at 1. Carrying this
+            // session's high-water mark into the next one made the dedup at
+            // handleEvent drop every event of the new session — an empty
+            // assistant bubble and a stop button that never cleared.
+            _lastSeq = 0;
             disconnectSSE();
             closeRlmViewer();
             showEmptyState();
@@ -932,6 +937,7 @@ async function send() {
         try {
             const data = await post('/api/sessions', { title: 'New session' });
             state.sid = data.session_id;
+            _lastSeq = 0;  // fresh session, seqs start at 1 (see deleteSession)
             await loadSessions();
             connectSSE(state.sid, handleEvent);
         } catch (e) {
@@ -2345,8 +2351,11 @@ async function _syncStreamingState() {
         // event would be silently dropped by the `seq <= _lastSeq` dedup and
         // gap detection would never fire (seqs went down, not up). Reset and
         // reload so the UI doesn't go permanently dead.
-        const serverSeq = status.event_seq || 0;
-        if (serverSeq < _lastSeq) {
+        // A reaped-from-memory session reports a null seq; that is not a
+        // restart, and treating it as 0 forced a reload and a scroll jump
+        // every time a backgrounded tab came back.
+        const serverSeq = status.in_memory === false ? null : status.event_seq;
+        if (serverSeq != null && serverSeq < _lastSeq) {
             console.warn(`SSE: server seq went backwards (server=${serverSeq}, client=${_lastSeq}) — server restarted, resyncing`);
             _lastSeq = serverSeq;
             await _softReload();
@@ -2427,11 +2436,29 @@ async function _softReload() {
 }
 
 async function _reconcile() {
-    // Lightweight check: compare server event_seq with client _lastSeq
-    if (!state.sid || state.streaming || _isRlmView()) return;  // no stream (or no transcript) to reconcile
+    // Lightweight check: compare server event_seq with client _lastSeq.
+    // Runs while streaming too — a stream that is silently dropping every
+    // event looks exactly like a healthy one from here, and skipping the
+    // check was why a deleted-then-recreated session or a mid-turn server
+    // restart left the UI stuck with a stop button and no tokens.
+    if (!state.sid || _isRlmView()) return;  // no transcript to reconcile
     try {
         const status = await get(`/api/sessions/${state.sid}/status`);
-        const serverSeq = status.event_seq || 0;
+        // A session reaped from memory reports in_memory:false and a null
+        // seq. That is "nothing to reconcile", not "the counter reset".
+        if (status.in_memory === false || status.event_seq == null) return;
+        const serverSeq = status.event_seq;
+        if (state.streaming) {
+            // Mid-stream, only the backwards case is actionable: a forward
+            // gap resolves itself as the stream drains, while reloading the
+            // transcript underneath a live turn splits the answer in two.
+            if (serverSeq < _lastSeq) {
+                console.warn(`SSE: server seq went backwards mid-stream (server=${serverSeq}, client=${_lastSeq}) — resyncing`);
+                _lastSeq = serverSeq;
+                await _syncStreamingState();
+            }
+            return;
+        }
         if (serverSeq > _lastSeq + 5) {
             // Significant gap — soft reload
             console.warn(`SSE: reconciliation detected drift (server=${serverSeq}, client=${_lastSeq})`);
@@ -2451,12 +2478,12 @@ async function _reconcile() {
 }
 
 // Periodic reconciliation every 45 seconds (safety net)
-setInterval(() => { if (state.sid && !state.streaming) _reconcile(); }, 45000);
+setInterval(() => { if (state.sid) _reconcile(); }, 45000);
 
 // Intervals are throttled while the tab is backgrounded — reconcile
 // immediately on return (phone unlock) instead of waiting up to a minute.
 document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && state.sid && !state.streaming) _reconcile();
+    if (document.visibilityState === 'visible' && state.sid) _reconcile();
 });
 
 // ---------------------------------------------------------------------------
