@@ -297,10 +297,30 @@ def _kill_session_process(session):
     kill_session_processes(session)
 
 
+def require_idle(session_id: str, action: str) -> None:
+    """409 unless the session is idle enough to have its transcript rewritten.
+
+    Retry and clear delete messages the running turn is still working from:
+    the agent's next round then compiles a history with no root for its own
+    tool calls, and manager.prompt QUEUES the re-prompt behind the live turn
+    instead of replacing it, so the user gets the work twice. Compaction has
+    always guarded this way; these two did not.
+    """
+    from sessions import state_v2 as _sv2
+
+    session = get_manager().get(session_id)
+    if session is None:
+        return  # not resident: no turn can be running
+    current = _sv2._current_state(session)
+    if current not in (_sv2.SessionStateV2.IDLE_READY, _sv2.SessionStateV2.AWAITING_USER):
+        raise HTTPException(409, detail=f"Session is {current.value}; cancel it before you {action}")
+
+
 @router.post("/api/sessions/{session_id}/clear")
 async def clear_session(session_id: str):
     import asyncio as _asyncio
 
+    require_idle(session_id, "clear it")
     await _asyncio.to_thread(db.clear_messages_only, session_id)
     await _asyncio.to_thread(db.update_session, session_id, title="New session")
     return {"status": "cleared"}
@@ -308,8 +328,9 @@ async def clear_session(session_id: str):
 
 @router.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
-    manager = get_manager()
-    manager.delete_session(session_id)
+    # Async form: cancels the turn and kills its subprocesses on the loop,
+    # then does the DB cascade and file cleanup off it.
+    await get_manager().delete_session_async(session_id)
     return {"status": "deleted"}
 
 
