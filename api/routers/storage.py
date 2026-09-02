@@ -178,12 +178,20 @@ def _legacy_backups_ledger() -> dict | None:
     return _backups_ledger(root)
 
 
+# The idle-archive sweep's counter does not end in `_pruned`, and it must not:
+# archiving deletes nothing. It belongs in this block anyway, because it is the
+# sweep that moves the `archived` number the sessions ledger reports — reading
+# "Archived 41" without knowing that 38 of them were filed away automatically
+# is how an owner concludes the archive is doing something it is not.
+_EXTRA_SWEEP_COUNTERS = ("sessions_archived",)
+
+
 def _sweep_counters() -> dict | None:
     """The retention counters the snooze runner already keeps.
 
     `get_stats()` is a dict copy of in-memory counters — the same read
     `/api/health/detailed` makes on every poll — so this costs nothing. Only
-    the prune counters and the cycle stamp come through: the rest of the
+    the retention counters and the cycle stamp come through: the rest of the
     stats block is about memory synthesis, which is not a storage question.
     """
     try:
@@ -192,7 +200,7 @@ def _sweep_counters() -> dict | None:
         stats = get_snooze().get_stats()
     except Exception:
         return None
-    counters = {k: v for k, v in stats.items() if k.endswith("_pruned")}
+    counters = {k: v for k, v in stats.items() if k.endswith("_pruned") or k in _EXTRA_SWEEP_COUNTERS}
     counters["last_cycle"] = stats.get("last_cycle")
     return counters
 
@@ -250,6 +258,45 @@ async def rotate_backups(body: dict = {}):
     keep = backup.resolve_keep()
     result = await asyncio.to_thread(backup.rotate, keep, dry_run, root)
     return {"dry_run": dry_run, "dir": which, **result}
+
+
+@router.post("/api/storage/prune-archived")
+async def prune_archived(body: dict = {}):
+    """Delete sessions archived longer than `days` ago — or say what it would.
+
+    Body: ``{days: <session_delete_archived_days>, dry_run: true}``. This is
+    the manual hand on the sweep that `session_delete_archived_days` runs, and
+    that knob is `0` — never — by default, so an omitted `days` normally means
+    "do nothing" and the caller has to name a horizon to get an answer.
+
+    It defaults to a dry run for the same reason rotation does, only more so:
+    a session reaches this endpoint by having been archived and then left
+    alone, and past this point its transcript is gone. The dry run computes
+    exactly the set the real call then deletes, so the number a confirmation
+    dialog shows is a promise and not an estimate.
+
+    Lives here rather than beside `/api/sessions/archive-idle` because it is
+    not a sessions operation a client performs in passing — it is the one
+    control on this screen that trades transcripts for disk space, and it
+    belongs next to the ledger reporting what that bought.
+
+    Returns ``{count, ids, sample, days, dry_run}``.
+    """
+    # The same validator the archive and purge knobs go through, imported
+    # rather than copied: a second implementation of "non-negative integer or
+    # 400" is a second place for the two to drift, and what drifts is which
+    # set of sessions gets deleted.
+    from api.routers.sessions import _non_negative_int
+    from core import retention
+
+    body = body or {}
+    raw_days = body.get("days", None)
+    days = _non_negative_int(raw_days if raw_days is not None else settings.session_delete_archived_days, "days")
+    return await asyncio.to_thread(
+        retention.prune_archived_sessions,
+        days,
+        dry_run=bool(body.get("dry_run", True)),
+    )
 
 
 def _vacuum() -> tuple[int, int]:
