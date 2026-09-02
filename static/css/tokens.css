@@ -19,9 +19,16 @@
 
     /* Text scale */
     --text: #c4bfb2;
-    --text-dim: #7a7568;
-    --text-faint: #504b40;
+    /* --text-dim / --text-faint carry real content (timestamps, metadata,
+       hints, placeholder text), so both clear 4.5:1 against --bg rather than
+       the 3:1 large-text floor. The old #504b40 measured 2.23:1 — invisible
+       on a dim laptop screen and a WCAG AA failure on every surface. */
+    --text-dim: #8a8577;    /* 5.24:1 on --bg */
+    --text-faint: #807b6e;  /* 4.57:1 on --bg */
     --text-bright: #e8e3d6;
+    /* The old --text-faint value, kept for the one thing it was fine at:
+       lines and decorative fills that carry no meaning. */
+    --line-faint: #504b40;
 
     /* Accent */
     --accent: #d4a843;
@@ -30,8 +37,8 @@
     --accent-glow: rgba(212, 168, 67, 0.06);
 
     /* Semantic */
-    --error: #c25450;
-    --error-subtle: rgba(194, 84, 80, 0.10);
+    --error: #d0605c;  /* 5.06:1 on --bg */
+    --error-subtle: rgba(208, 96, 92, 0.10);
     --success: #5a9a4a;
     --success-subtle: rgba(90, 154, 74, 0.10);
     --info: #5a8ab4;
@@ -50,7 +57,7 @@
     --mono: 'DM Mono', 'SF Mono', 'Fira Code', monospace;
     --serif: 'Newsreader', Georgia, serif;
     --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --text-xxs: 0.625rem;   /* 10px */
+    --text-xxs: 0.6875rem;  /* 11px — 10px was below the legibility floor */
     --text-xs: 0.6875rem;   /* 11px */
     --text-sm: 0.75rem;     /* 12px */
     --text-base: 0.8125rem; /* 13px */
@@ -101,7 +108,7 @@ body {
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+::-webkit-scrollbar-thumb:hover { background: var(--line-faint); }
 
 * {
     scrollbar-width: thin;
