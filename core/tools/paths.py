@@ -245,6 +245,27 @@ def _base_roots() -> list[Path]:
     return roots
 
 
+def _relative_resolution_roots(roots: list[Path]) -> list[Path]:
+    """The roots a BARE relative name may land in: the space home (when one
+    is active) and the global workspace, in that order.
+
+    Every other root — /tmp, skills, the spill trees, kernel state — is a
+    read/write target by absolute path only. They must not compete for a
+    relative name, or an unrelated file that happens to share the name
+    captures the write.
+    """
+    allowed: list[Path] = []
+    home = WORKSPACE_HOME.get()
+    if home and WORKSPACE_OVERRIDE.get() is None:
+        resolved_home = Path(home).resolve()
+        if resolved_home in roots:
+            allowed.append(resolved_home)
+    ws = workspace()
+    if ws in roots and ws not in allowed:
+        allowed.append(ws)
+    return allowed or roots
+
+
 def check_protected(resolved: Path, roots: list[Path]) -> None:
     """Raise ValueError if path targets a protected location.
 
@@ -288,8 +309,16 @@ def _resolve_within(path: str, roots: list[Path], create_roots: bool = False) ->
     # lives; only genuinely new files default into the home. Without a home
     # the historical rule stands unchanged: first root wins outright.
     prefer_existing = WORKSPACE_HOME.get() is not None and WORKSPACE_OVERRIDE.get() is None
+    # ...but only across the two workspace-ish roots. Scanning EVERY root for
+    # an existing file let a bare name be captured by a later root that has
+    # nothing to do with the session's workspace: with a space home active,
+    # `file_write("notes.md")` silently overwrote /tmp/notes.md whenever one
+    # happened to exist (bash leaves scratch files there), and file_read
+    # would then read it back. Those roots stay reachable by absolute path,
+    # which is the loop above.
+    scan_roots = _relative_resolution_roots(roots) if prefer_existing else roots
     first_valid: Path | None = None
-    for root in roots:
+    for root in scan_roots:
         candidate = (root / path).resolve()
         if candidate.is_relative_to(root):
             if not prefer_existing or candidate.exists():
