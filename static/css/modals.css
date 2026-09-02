@@ -413,7 +413,19 @@
     cursor: pointer;
 }
 
-/* Buttons — the base, the roles and the sizes all live in buttons.css. */
+/* Buttons — the base, the roles and the sizes all live in buttons.css.
+   What is left here is the handful of places a button needs a position
+   rather than a look; each of these replaced an inline style attribute on
+   the element itself. (V7) */
+.settings-btn-row {
+    display: flex;
+    gap: var(--sp-2);
+    justify-content: flex-end;
+    margin-top: var(--sp-4);
+}
+.settings-btn-row--flush { margin-top: 0; }
+/* A button that sits on its own line under the control it belongs to. */
+.settings-block-btn { margin-top: var(--sp-2); }
 
 .save-status {
     font-size: var(--text-xs);

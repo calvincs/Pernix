@@ -416,8 +416,9 @@ function _buildJobRow(job, models, spaces = []) {
 
         const statusMsg = el('span', { style: { fontSize: 'var(--text-xs)', color: 'var(--text-dim)' } });
         const saveBtn = el('button', {
-            class: 'btn btn-primary',
-            style: { padding: '4px 12px', fontSize: 'var(--text-sm)', display: 'none' },
+            class: 'btn btn--primary',
+            type: 'button',
+            hidden: '',
         }, [text('Save')]);
 
         function checkDirty() {
@@ -427,7 +428,7 @@ function _buildJobRow(job, models, spaces = []) {
             const dirty = (newCron !== job.cron_expr) ||
                           (newPrompt !== job.prompt) ||
                           (newModel !== (job.model || ''));
-            saveBtn.style.display = dirty ? '' : 'none';
+            saveBtn.hidden = !dirty;
             if (dirty) statusMsg.textContent = '';
         }
 
@@ -449,7 +450,7 @@ function _buildJobRow(job, models, spaces = []) {
                 await apiJson('PUT', `/api/jobs/${encodeURIComponent(job.name)}`, body);
                 statusMsg.textContent = 'Saved';
                 statusMsg.style.color = 'var(--success)';
-                saveBtn.style.display = 'none';
+                saveBtn.hidden = true;
                 setTimeout(() => _refreshPanel(), 500);
             } catch (e) {
                 statusMsg.textContent = e.message;
@@ -564,8 +565,8 @@ function _buildAddSection(models, spaces = []) {
             editorInstance = null;
         }
         const btn = el('button', {
-            class: 'jobs-btn',
-            style: { margin: 'var(--sp-3)', fontSize: 'var(--text-sm)' },
+            class: 'jobs-btn jobs-add-btn',
+            type: 'button',
             onClick: renderForm,
         }, [text('+ Add Job')]);
         wrapper.appendChild(btn);
@@ -625,8 +626,8 @@ function _buildAddSection(models, spaces = []) {
                 modelSelect,
                 spaces.length ? spaceSelect : null,
                 el('button', {
-                    class: 'btn btn-primary',
-                    style: { padding: '4px 12px', fontSize: 'var(--text-sm)' },
+                    class: 'btn btn--primary',
+                    type: 'button',
                     onClick: async () => {
                         const name = nameInput.value.trim();
                         const cron_expr = cronInput.value.trim();

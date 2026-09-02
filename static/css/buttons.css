@@ -83,7 +83,6 @@
 .btn-primary,
 .btn-secondary.active,
 .fp-btn.primary,
-.fp-btn-primary,
 .fp-mcp-add-btn.primary,
 .fp-btn.save-btn.dirty,
 .auth-btn {
@@ -98,7 +97,6 @@
 .btn-primary:hover:not(:disabled),
 .btn-secondary.active:hover:not(:disabled),
 .fp-btn.primary:hover:not(:disabled),
-.fp-btn-primary:hover:not(:disabled),
 .fp-mcp-add-btn.primary:hover:not(:disabled),
 .fp-btn.save-btn.dirty:hover:not(:disabled),
 .auth-btn:hover:not(:disabled) {

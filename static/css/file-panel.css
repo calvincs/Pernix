@@ -927,6 +927,8 @@ body.fp-resizing #main { pointer-events: none; }
     font-style: italic;
 }
 .fp-btn-xs { flex-shrink: 0; }
+/* The raw/rendered toggle above a markdown preview. */
+.fp-viewer-toggle { margin-bottom: var(--sp-2); }
 .fp-proposal-callout {
     margin-bottom: var(--sp-3);
     border: 1px solid var(--accent-dim);
