@@ -4,6 +4,7 @@
 Usage:
     python scripts/backup.py               # snapshot, then rotate to backup_keep_count
     python scripts/backup.py --keep 30     # override the retained-snapshot count
+    python scripts/backup.py --dry-run     # list what rotation would remove; snapshot nothing
     python scripts/backup.py --json        # machine-readable result
 
 Called on demand here and from maintenance.py's 24h tier — one implementation,
@@ -37,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import shutil
 import sqlite3
 import sys
@@ -86,15 +88,17 @@ def _unique(path: Path) -> Path:
     second (a manual run racing the scheduled one). VACUUM INTO refuses to
     overwrite, so disambiguate rather than fail.
 
-    The separator is '_' on purpose: rotation sorts by name, and '_' (0x5f)
-    sorts after '.' (0x2e), so `sessions-<ts>_001.db` orders *after*
-    `sessions-<ts>.db`. With '-' it sorted before, and rotation deleted the
-    snapshot it had just taken.
+    The separator is '_' on purpose: '_' (0x5f) sorts after '.' (0x2e), so
+    `sessions-<ts>_001.db` orders *after* `sessions-<ts>.db`. With '-' it
+    sorted before, and the name-ordered rotation of the day deleted the
+    snapshot it had just taken. Snapshot rotation goes by mtime now, which is
+    immune to that on its own, but the name is still the tiebreaker within a
+    filesystem tick — and the monotonic reading is what a human scanning the
+    directory expects.
 
     The counter continues past the highest name already present rather than
     filling the lowest gap, so the name stays monotonic even after rotation
-    has removed earlier entries from the same second — otherwise a reused
-    lower name would sort as the oldest and be rotated out immediately.
+    has removed earlier entries from the same second.
     """
     used: set[int] = set()
     for sibling in path.parent.glob(f"{path.stem}*"):
@@ -109,7 +113,7 @@ def _unique(path: Path) -> Path:
             used.add(int(tail[1:]))
     if not used:
         return path
-    # Zero-padded so `_002` still sorts after `_001` — rotation is name-ordered.
+    # Zero-padded so `_002` still sorts after `_001` on any name-ordered read.
     return path.with_name(f"{path.stem}_{max(used) + 1:03d}{path.suffix}")
 
 
@@ -143,6 +147,108 @@ def _snapshot_memories(dest: Path) -> tuple[Path | None, int]:
     return dest, len(files)
 
 
+# Every name this script — or a version of it that came before — has given a
+# database snapshot. Rotation used to glob for exactly the one it writes
+# today, so each rename orphaned a generation of files permanently: on a box
+# that had run all three, `backup_keep_count = 7` was holding 40 snapshots and
+# 2.7 GB, and no amount of waiting was going to reclaim it.
+#
+# The stamp each pattern captures is not parsed. It is here so the regexes
+# stay anchored to a timestamp shape and cannot swallow an unrelated file that
+# merely starts with "sessions".
+_SNAPSHOT_SCHEMES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # Current: sessions-20260102-030405.db, plus _001 same-second collisions.
+    ("stamped", re.compile(r"^sessions-\d{8}-\d{6}(?:_\d+)?\.db$")),
+    # Older: sessions.2026-01-02T03:04:05.123456+00:00.db
+    ("iso", re.compile(r"^sessions\.\d{4}-\d{2}-\d{2}[T_][0-9:.\-+T]*\.db$")),
+    # Older still: sessions.db.20260102-030405
+    ("suffixed", re.compile(r"^sessions\.db\.\d{8}-\d{6}$")),
+)
+
+
+def snapshot_scheme(name: str) -> str | None:
+    """Which naming scheme ``name`` belongs to, or None if it is not a snapshot.
+
+    Anything else in the directory — ``settings-*.json`` dropped there by
+    hand, the ``memories-*`` corpus directories, the live database and its
+    ``-wal``/``-shm`` siblings — returns None and is never a rotation
+    candidate.
+    """
+    for scheme, pattern in _SNAPSHOT_SCHEMES:
+        if pattern.match(name):
+            return scheme
+    return None
+
+
+def list_snapshots(root: Path | str | None = None) -> list[dict]:
+    """Every database snapshot in ``root``, newest first.
+
+    Ordered by mtime rather than by name: the three schemes sort against each
+    other lexicographically in an order that has nothing to do with time
+    ("sessions-2026…" sorts after "sessions.2026…" whatever the dates say), so
+    a name-ordered rotation across all three would delete by naming era
+    instead of by age. The name breaks mtime ties so the order is stable when
+    two snapshots land in the same filesystem tick.
+    """
+    root = backups_dir() if root is None else Path(root)
+    if not root.is_dir():
+        return []
+    found: list[dict] = []
+    for path in root.iterdir():
+        if not path.is_file():
+            continue
+        scheme = snapshot_scheme(path.name)
+        if scheme is None:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        found.append({"path": path, "scheme": scheme, "mtime": stat.st_mtime, "bytes": stat.st_size})
+    found.sort(key=lambda s: (s["mtime"], s["path"].name), reverse=True)
+    return found
+
+
+def snapshots_beyond_keep(keep: int, snapshots: list[dict] | None = None) -> list[dict]:
+    """The snapshots rotation would remove: everything past the newest ``keep``.
+
+    ``keep == 0`` removes nothing. In ``settings.backup_keep_count`` a zero
+    means "stop taking scheduled backups", not "delete the ones I have" — the
+    reading that would wipe an operator's entire history the moment they
+    turned the schedule off.
+    """
+    if keep <= 0:
+        return []
+    if snapshots is None:
+        snapshots = list_snapshots()
+    return snapshots[keep:]
+
+
+def rotate(keep: int, dry_run: bool = False) -> dict:
+    """Keep the newest ``keep`` snapshots across every scheme; drop the rest.
+
+    Returns what was (or would be) removed, the bytes it frees, and how many
+    snapshots are left standing.
+    """
+    snapshots = list_snapshots()
+    stale = snapshots_beyond_keep(keep, snapshots)
+    removed: list[str] = []
+    freed = 0
+    for entry in stale:
+        if dry_run:
+            removed.append(entry["path"].name)
+            freed += entry["bytes"]
+            continue
+        try:
+            entry["path"].unlink()
+        except OSError as e:
+            logger.warning("Could not rotate out %s: %s", entry["path"], e)
+            continue
+        removed.append(entry["path"].name)
+        freed += entry["bytes"]
+    return {"removed": removed, "bytes_freed": freed, "kept": len(snapshots) - len(removed)}
+
+
 def _rotate(root: Path, pattern: str, keep: int) -> list[str]:
     """Keep the newest ``keep`` entries matching ``pattern``, delete the rest.
 
@@ -150,6 +256,9 @@ def _rotate(root: Path, pattern: str, keep: int) -> list[str]:
     chronological order — no stat() calls, and no dependence on mtimes that a
     restore or an rsync would have rewritten. Families rotate independently so
     a retained DB snapshot always has its same-generation memory corpus.
+
+    Still the memory corpus's rotation: those directories have only ever worn
+    one name, so there is nothing for a scheme-aware sweep to find.
     """
     entries = sorted(root.glob(pattern))
     removed: list[str] = []
@@ -207,7 +316,10 @@ def run_backup(keep: int | None = None) -> dict:
     generation = db_path.stem[len(_DB_PREFIX) + 1 :]
     mem_path, mem_files = _snapshot_memories(root / f"{_MEMORIES_PREFIX}-{generation}")
 
-    removed = _rotate(root, f"{_DB_PREFIX}-*.db", resolved)
+    # Snapshots rotate scheme-aware (every name this script ever wrote);
+    # corpora by their single glob. Two calls, because the DB family is the
+    # only one with a history of renames.
+    removed = rotate(resolved)["removed"]
     removed += _rotate(root, f"{_MEMORIES_PREFIX}-*", resolved)
 
     return {
@@ -230,7 +342,30 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Snapshots to retain (default: settings.backup_keep_count; clamped to {KEEP_MIN}..{KEEP_MAX})",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of plaintext")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Take no snapshot; list the snapshots rotation would remove and stop",
+    )
     args = parser.parse_args(argv)
+
+    if args.dry_run:
+        # Deliberately does not snapshot first: a dry run that wrote a new
+        # backup before reporting would change the very set it is reporting on.
+        keep = resolve_keep(args.keep)
+        plan = rotate(keep, dry_run=True)
+        if args.json:
+            print(json.dumps({"dry_run": True, "keep": keep, **plan}, indent=2))
+        else:
+            print(f"Backup directory: {backups_dir()}")
+            print(f"  retaining the newest {keep} snapshot(s) across all naming schemes")
+            if plan["removed"]:
+                for name in plan["removed"]:
+                    print(f"  would remove: {name}")
+                print(f"  would free {plan['bytes_freed']:,} bytes, leaving {plan['kept']} snapshot(s)")
+            else:
+                print(f"  nothing to remove — {plan['kept']} snapshot(s) present")
+        return 0
 
     # A manual run is an explicit request, so honour --keep 0 as "keep only
     # this one" rather than as the scheduler's "disabled" meaning.
