@@ -95,6 +95,7 @@ class MCPConnection:
         self.last_used = 0.0
         self.last_refresh = 0.0
         self.consecutive_call_failures = 0
+        self._degraded_until = 0.0
         self._session = None
         self._task: asyncio.Task | None = None
         self._closing = False
@@ -148,6 +149,17 @@ class MCPConnection:
             raise MCPUnavailable(f"MCP server '{self.cfg.name}' is {self.status}")
         if self.status == "ready" and self._session is not None:
             return self._session
+        # A degraded server is already being retried on an exponential
+        # backoff. Waking it on every agent call defeated that: against a
+        # host that blackholes packets (paused container, dropping firewall)
+        # each call paid the full connect timeout — 30-40s — and a
+        # scout-curated turn with two such calls burned over a minute.
+        # Inside the window, answer immediately with the known reason.
+        if self.status == "degraded" and time.time() < self._degraded_until:
+            raise MCPUnavailable(
+                f"MCP server '{self.cfg.name}' is degraded; retrying shortly"
+                f"{': ' + self.error if self.error else ''}"
+            )
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._ready_waiters.append(fut)
         self._resume_evt.set()
@@ -288,6 +300,12 @@ class MCPConnection:
                     self.last_refresh = time.time()
                     self.error = ""
                     self._fail_cycles = 0
+                    # The call-failure breaker counts toward a forced
+                    # reconnect and was only ever reset by a SUCCESSFUL call.
+                    # After one trip, every later MCPError — including an
+                    # ordinary per-call read timeout — tripped it again and
+                    # forced a full drop/initialize/list/re-register cycle.
+                    self.consecutive_call_failures = 0
                     self._was_ready = True
                     self._alerted = False
                     backoff = _BACKOFF_INITIAL
@@ -327,6 +345,9 @@ class MCPConnection:
                 # a failure on that attempt lands in the backoff branch below.
                 continue
             self.status = "degraded"
+            # Recorded so ensure_ready can fail fast inside the window
+            # instead of kicking the supervisor awake on every agent call.
+            self._degraded_until = time.time() + backoff
             await self._wait_event("_resume_evt", backoff)
             backoff = min(backoff * 2, _BACKOFF_MAX)
         self.status = "stopped"
@@ -517,6 +538,12 @@ class MCPManager:
         conn.cfg.enabled = enabled
         self._persist()
         if enabled:
+            # Already running: leave it alone. Overwriting the status of a
+            # live connection with "connecting" wedged it — start() is a
+            # no-op while the task is alive, so nothing ever set it back, and
+            # every call then waited the full connect timeout and failed.
+            if conn._task is not None and not conn._task.done():
+                return conn
             conn.status = "connecting"
             conn.start()
         else:
