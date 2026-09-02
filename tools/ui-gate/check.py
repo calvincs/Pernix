@@ -16,6 +16,7 @@ THIS FILE — it is committed, unlike everything under out/ — written when the
 
 import json
 import os
+import sqlite3
 import sys
 import time
 import traceback
@@ -482,6 +483,154 @@ def desktop_layout(browser):
     return out
 
 
+# ---------------------------------------------------------------------------
+# State timeline — the Graph tab's colours
+# ---------------------------------------------------------------------------
+
+STATE_ARC = [
+    (None, "idle_ready", "session-created", 0),
+    ("idle_ready", "scouting", "user-message", 900),
+    ("scouting", "processing", "scout-done", 4200),
+    ("processing", "compacting", "context-pressure", 31000),
+    ("compacting", "processing", "compaction-done", 5200),
+    ("processing", "awaiting_workers", "workers-spawned", 18000),
+    ("awaiting_workers", "processing", "workers-done", 26000),
+    ("processing", "paused", "user-pause", 9000),
+    ("paused", "processing", "user-resume", 12000),
+    ("processing", "finalizing", "turn-complete", 7400),
+    ("finalizing", "awaiting_user", "response-sent", 1300),
+]
+
+
+def seed_state_log(sid):
+    """Give a seeded session a turn's worth of transitions for the graph to draw.
+
+    seed.py writes messages and nothing else, so session_state_log is empty and
+    the Graph tab renders "No state transitions yet" — against which the check
+    below would pass by drawing nothing at all. Written straight into the
+    throwaway's sqlite (run.sh cd's into the app dir before running this, so
+    data/sessions.db is that instance's own) rather than through seed.py, to
+    keep this addition inside one file. Returns "" or a reason it could not.
+    """
+    path = os.path.join(os.getcwd(), "data", "sessions.db")
+    if not os.path.exists(path):
+        return f"no sessions.db at {path}"
+    ts = int(time.time() * 1000) - 180_000
+    conn = sqlite3.connect(path, timeout=10)
+    try:
+        for from_state, to_state, reason, elapsed in STATE_ARC:
+            conn.execute(
+                "INSERT INTO session_state_log (session_id, turn_id, from_state, to_state,"
+                " reason, timestamp_ms, elapsed_ms) VALUES (?, 1, ?, ?, ?, ?, ?)",
+                (sid, from_state, to_state, reason, ts, elapsed),
+            )
+            ts += elapsed
+        conn.commit()
+    except Exception as e:  # noqa: BLE001
+        return f"state-log insert failed: {e}"
+    finally:
+        conn.close()
+    return ""
+
+
+TOKENS_JS = """async () => {
+  const t = await import('/static/js/theme.js');
+  const out = {};
+  for (const k of ['--state-processing-bg','--state-processing-fg','--state-paused-bg',
+                   '--state-paused-fg','--accent','--bg']) out[k] = t.hex(k);
+  return out; }"""
+
+STATE_GRAPH_JS = r"""() => {
+  const lum = (c) => { const f = (x) => { x/=255; return x<=0.03928 ? x/12.92 : ((x+0.055)/1.055)**2.4; };
+                       return 0.2126*f(c[0])+0.7152*f(c[1])+0.0722*f(c[2]); };
+  const parse = (s) => { const m=(s||'').match(/[-+]?(?:\d*\.\d+|\d+)/g);
+                         return m && m.length>=3 ? m.slice(0,3).map(Number) : null; };
+  const bad = [];
+  // The [*] start/end markers are bare <circle>s: no box, no label to colour.
+  const nodes = [...document.querySelectorAll('#timeline-graph g.node')]
+                  .filter(n => (n.textContent||'').trim());
+  for (const n of nodes) {
+    const rect = n.querySelector('rect.label-container, rect, polygon, path');
+    // Mermaid paints the glyphs on the <tspan>. The parent <text> keeps the
+    // library's own default fill whatever the classDef says, so reading that
+    // one measures nothing.
+    const label = n.querySelector('tspan') || n.querySelector('text');
+    const name = (n.textContent||'').trim().split('Filter')[0].slice(0, 18);
+    const rc = parse(rect && getComputedStyle(rect).fill);
+    if (!rc) { bad.push(name + ': node has no fill'); continue; }
+    // Every palette colour is a long way from #000; the regression painted
+    // them exactly #000000/#010101, so proximity to black is the signature.
+    if (Math.max(rc[0], rc[1], rc[2]) <= 8) { bad.push(name + ': box ' + getComputedStyle(rect).fill); continue; }
+    const lc = label ? parse(getComputedStyle(label).fill) : null;
+    if (!lc) { bad.push(name + ': label has no fill'); continue; }
+    const a = lum(rc), b = lum(lc);
+    const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    if (ratio < 3) bad.push(name + ': label ' + ratio.toFixed(2) + ':1 on its box');
+  }
+  const flat = [...document.querySelectorAll('.tl-dwell-seg, .tl-dwell-dot')]
+      .map(s => getComputedStyle(s).backgroundColor)
+      .filter(c => c === 'rgb(0, 0, 0)' || c === 'rgba(0, 0, 0, 0)');
+  return {n: nodes.length, bad, dwell: flat.length,
+          status: (document.querySelector('.timeline-graph-status')||{}).textContent || ''}; }"""
+
+
+def state_graph_colours(browser):
+    """m1: the State timeline's graph is painted from the --state-* palette.
+
+    Its own context, after the baseline pass, because it writes state-log rows
+    the other passes have no reason to see.
+
+    Two ways readColor() (static/js/theme.js) has handed back the wrong colour,
+    each of which painted every box, label and dwell bar black in both themes:
+
+      * the --state-*-fg/-bg pairs are color-mix() expressions, and a
+        color-mix() computes to `color(srgb 0.807 0.845 0.861)` — 0..1 floats —
+        where a plain hex token computes to `rgb(138, 100, 16)`;
+      * the reduced-motion block in tokens.css puts a .01ms transition-duration
+        on `*`, which includes the probe span readColor() resolves tokens on, so
+        the value read back is the interpolated one — the previous colour, in
+        oklab(). Every token then reads as whatever was read first.
+
+    This context asks for reduced motion, so one pass covers both.
+    """
+    problems = []
+    seeded = seed_state_log(MAIN)
+    if seeded:
+        problems.append(seeded)
+
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
+    pg = ctx.new_page()
+    pg.on("console", lambda m: console_errors.append(f"[state-graph] {m.text}") if m.type == "error" else None)
+    pg.on("pageerror", lambda e: console_errors.append(f"[state-graph] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.8)
+
+    toks = pg.evaluate(TOKENS_JS)
+    problems += [f"{k} reads {v}" for k, v in toks.items() if v in ("#000000", "#010101")]
+    if toks.get("--state-processing-bg") == toks.get("--state-processing-fg"):
+        problems.append("state fg and bg read the same: " + str(toks.get("--state-processing-bg")))
+
+    pg.evaluate(f"() => document.querySelector('[data-sid=\"{MAIN}\"]')?.click()")
+    time.sleep(1.2)
+    pg.click("#state-badge")
+    time.sleep(0.5)
+    try:
+        pg.wait_for_selector("#timeline-graph g.node rect", timeout=15000)
+        time.sleep(0.6)
+        g = pg.evaluate(STATE_GRAPH_JS)
+        problems += g["bad"]
+        if g["dwell"]:
+            problems.append(f"{g['dwell']} black time-in-state segments")
+        if g["n"] < 3:
+            problems.append(f"only {g['n']} nodes drawn ({g['status']!r})")
+    except Exception as e:  # noqa: BLE001
+        status = pg.evaluate("() => (document.querySelector('.timeline-graph-status')||{}).textContent || ''")
+        problems.append(f"graph never rendered: {str(e)[:80]} status={status!r}")
+    pg.screenshot(path=f"{shots}/{tag}-state-graph.png")
+    check("state-graph", "state graph nodes are painted from the palette", not problems, problems[:6])
+    ctx.close()
+
+
 def sidebar_resizer(browser):
     """The desktop tier's own control: drag the sidebar's edge to resize it.
 
@@ -582,6 +731,15 @@ with sync_playwright() as p:
             check("desktop", "desktop baseline present", False, "run with tag=baseline first")
     except Exception as e:
         check("desktop", "desktop pass completed", False, str(e))
+    try:
+        state_graph_colours(browser)
+    except Exception as e:
+        check(
+            "state-graph",
+            "state graph nodes are painted from the palette",
+            False,
+            f"{e}\n{traceback.format_exc()[-400:]}",
+        )
     if LEVEL == "m2":
         try:
             sidebar_resizer(browser)
