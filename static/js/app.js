@@ -3279,6 +3279,7 @@ function handleEvent(event) {
 
     else if (type === 'stream.done') {
         closeToolGroup();
+        _clearScoutStatus();
         if (_activityTimer) { clearTimeout(_activityTimer); _activityTimer = null; }
         // Clear pending debounce before final render
         if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
@@ -3319,6 +3320,7 @@ function handleEvent(event) {
 
     else if (type === 'stream.error') {
         if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+        _clearScoutStatus();
         _dropEmptyStreamingBubble();
         const streamMsg = humanizeError(event.error || 'Unknown error');
         // A stream.error ends the turn, so say how to get back: the exception
@@ -3403,6 +3405,10 @@ function handleEvent(event) {
             state.streaming = true;
             _showStopButton();
         }
+        // The scout picked the tools; one of them is now running, and the
+        // running-tool row in the transcript says so. The scout summary is the
+        // previous step and stops being the live signal here.
+        _clearScoutStatus();
         _runningTools.set(event.name, event.arguments || {});
         _showToolStatus(event.name, event.arguments || {}, { running: true });
         _appendRunningTool(event.name, event.arguments || {}, event.call_id || event.tool_call_id);
@@ -3503,6 +3509,7 @@ function handleEvent(event) {
 
     else if (type === 'dialog.question' || type === 'user_question') {
         closeToolGroup();
+        _clearScoutStatus();
         if (event.question_id) {
             appendQuestionBubble(event.question_id, event.question || '', event.context || '');
         }
@@ -3937,6 +3944,7 @@ function handleEvent(event) {
 
     else if (type === 'turn.complete') {
         // Safety net: ensure button is always reset when turn finishes
+        _clearScoutStatus();
         _dropEmptyStreamingBubble();
         _setStopPending(false);
         if (state.streaming) {
@@ -5942,9 +5950,33 @@ async function loadHealth() {
     }
 }
 
+// A status message that ends in an ellipsis is still happening — a retry that
+// is retrying, a compaction that is compacting — and only the event that ends
+// it knows when it is over. Everything else states a fact that is already true
+// and only gets staler from there.
+const _STATUS_IN_PROGRESS = /(\u2026|\.\.\.)$/;
+let _statusFadeTimer = null;
+
 function updateStatus(msg) {
     const infoEl = document.getElementById('status-info');
-    if (infoEl) infoEl.textContent = msg;
+    if (!infoEl) return;
+    if (_statusFadeTimer) { clearTimeout(_statusFadeTimer); _statusFadeTimer = null; }
+    infoEl.textContent = msg;
+    // On a phone this is not a quiet row in the status bar: touch.css floats it
+    // as a strip over the bottom of the transcript, where a finished fact
+    // ("Scout: 3 tools · 1.2s") sits covering the conversation until
+    // something else happens to write over it — which, on a turn that runs
+    // tools for a minute before it says anything, is a long time, and on a turn
+    // that never streams text, never. So on touch a finished fact gets a life
+    // span. In-progress messages keep theirs until their own event lands, and
+    // the desktop row is out of the way, so nothing expires there.
+    if (!isTouch() || !msg || _STATUS_IN_PROGRESS.test(msg)) return;
+    _statusFadeTimer = setTimeout(() => {
+        _statusFadeTimer = null;
+        // Only if it is still the same message — a later status owns the slot
+        // now, and has its own timer if it wanted one.
+        if (infoEl.textContent === msg) infoEl.textContent = '';
+    }, 6000);
 }
 
 /** Clear the scout summary specifically — anything else in the status line
