@@ -1,7 +1,8 @@
 // Pernix — Sidebar component: session list with grouping, dots, tooltips, legend
 import { el, text, clear } from '../render.js';
 import { icon } from '../icons.js';
-import { isTouch } from '../mobile.js';
+import { isTouch, isCompact } from '../mobile.js';
+import { announce } from '../a11y.js';
 import { get, post, patch } from '../api.js';
 import { openSpaceModal, openSpaceDeleteDialog } from './modals/spaces.js';
 import { confirmDanger } from './modals/confirm.js';
@@ -76,9 +77,134 @@ export function initSidebar(onSelect, onDelete) {
     _createTooltip();
     _createLegend();
     _createSearchBox();
+    _initResizer();
     // The throttled visit stamps are worth nothing if the tab closes before
     // one lands.
     window.addEventListener('pagehide', _flushVisited);
+}
+
+// ---------------------------------------------------------------------------
+// The sidebar's width
+//
+// 270px was a constant, and a constant is a guess about somebody else's
+// screen: too narrow for a user who names sessions in sentences, too wide for
+// one who works in a 13" window. The edge is a control now — drag it, or
+// focus it and use the arrow keys — and the number it writes is the token
+// --sidebar-w on the root element, so layout.css, the 1024px media rule and
+// touch.css's Explorer clamp all follow without knowing anything about it.
+//
+// sidebar-boot.js owns the storage key, the range and the clamp, and applies
+// the stored width in <head> before the first paint. This is only the input.
+// ---------------------------------------------------------------------------
+
+const WIDTH_STEP = 16;            // one arrow key
+const WIDTH_ANNOUNCE_MS = 300;    // quiet before the live region hears it
+const WIDTH_RECLAMP_MS = 150;     // quiet before a window resize re-clamps
+
+function _currentWidth() {
+    const v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-w'));
+    return Number.isFinite(v) ? Math.round(v) : 270;
+}
+
+function _initResizer() {
+    const handle = document.getElementById('sidebar-resizer');
+    const sidebar = document.getElementById('sidebar');
+    // Published by sidebar-boot.js. If that script did not run there is
+    // nothing holding the stored width, so the handle stays inert rather
+    // than becoming a second, drifting copy of the same rules.
+    const gate = window.__pernixSidebarWidth;
+    if (!handle || !sidebar || !gate) return;
+
+    const clamp = (w) => Math.round(Math.min(Math.max(w, gate.MIN), gate.max()));
+
+    let announceTimer = null;
+    const syncAria = (say) => {
+        const w = _currentWidth();
+        handle.setAttribute('aria-valuemin', String(gate.MIN));
+        handle.setAttribute('aria-valuemax', String(gate.max()));
+        handle.setAttribute('aria-valuenow', String(w));
+        if (!say) return;
+        // A held arrow key is one decision, not thirty: the live region hears
+        // where the edge came to rest, not every pixel on the way.
+        clearTimeout(announceTimer);
+        announceTimer = setTimeout(() => announce(`Sidebar width ${w} pixels`), WIDTH_ANNOUNCE_MS);
+    };
+    syncAria(false);
+
+    const store = () => {
+        try { localStorage.setItem(gate.KEY, String(_currentWidth())); } catch { /* storage blocked */ }
+    };
+
+    let dragging = false;
+    handle.addEventListener('pointerdown', (e) => {
+        // The handle is display:none on the other two tiers, so this only
+        // ever fires under a mouse. The guard is here for the reason
+        // file-panel.js has the same one: a stylesheet is not a contract.
+        if (isTouch() || isCompact() || e.button !== 0) return;
+        dragging = true;
+        // Capture, so a pointer that outruns a 6px strip — which it will —
+        // keeps sending its moves here instead of to whatever it flew over.
+        handle.setPointerCapture(e.pointerId);
+        handle.classList.add('dragging');
+        sidebar.classList.add('resizing');
+        document.body.classList.add('sidebar-resizing');
+    });
+    handle.addEventListener('pointermove', (e) => {
+        // The sidebar starts at x=0 on this tier, so the pointer's x IS the
+        // width it is asking for.
+        if (dragging) gate.apply(clamp(e.clientX));
+    });
+    const endDrag = (e) => {
+        if (!dragging) return;
+        dragging = false;
+        if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+        handle.classList.remove('dragging');
+        sidebar.classList.remove('resizing');
+        document.body.classList.remove('sidebar-resizing');
+        // Once, at the end. A width written on every pointermove is sixty
+        // storage writes a second for one decision.
+        store();
+        syncAria(true);
+    };
+    handle.addEventListener('pointerup', endDrag);
+    handle.addEventListener('pointercancel', endDrag);
+
+    // Double-click puts the width back to whatever the stylesheets say, which
+    // is not one number: 270 on a desktop, 220 under the 1024px rule.
+    handle.addEventListener('dblclick', () => {
+        gate.clear();
+        syncAria(true);
+    });
+
+    handle.addEventListener('keydown', (e) => {
+        let w = null;
+        if (e.key === 'ArrowLeft') w = _currentWidth() - WIDTH_STEP;
+        else if (e.key === 'ArrowRight') w = _currentWidth() + WIDTH_STEP;
+        else if (e.key === 'Home') w = gate.MIN;
+        else if (e.key === 'End') w = gate.max();
+        else return;
+        e.preventDefault();
+        gate.apply(clamp(w));
+        store();
+        syncAria(true);
+    });
+
+    // A width chosen on a monitor is half the screen on a laptop, and the
+    // 45% cap is only true of the window it was measured against.
+    let reclampTimer = null;
+    window.addEventListener('resize', () => {
+        clearTimeout(reclampTimer);
+        reclampTimer = setTimeout(() => {
+            // Only re-clamp a width the user actually chose. An untouched
+            // sidebar has no inline property and must keep following the
+            // stylesheet, media rule included.
+            if (!document.documentElement.style.getPropertyValue('--sidebar-w')) return;
+            const w = _currentWidth();
+            const capped = clamp(w);
+            if (capped !== w) gate.apply(capped);
+            syncAria(false);
+        }, WIDTH_RECLAMP_MS);
+    });
 }
 
 // Every selection the sidebar makes goes through here so the visit is

@@ -75,6 +75,12 @@
     transform: translateX(0);
     box-shadow: 4px 0 24px var(--shadow-color);
 }
+/* A drawer has no edge to drag: its width is the 280px above, !important,
+   and the strip would be left floating over the transcript. (touch.css hides
+   the same handle for the other reason — see the note by .fp-resize-handle.) */
+#sidebar-resizer {
+    display: none;
+}
 
 /* Scrim behind drawer */
 .mobile-scrim {

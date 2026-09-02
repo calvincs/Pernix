@@ -87,6 +87,9 @@
     <!-- Same reasoning, for the same reason it cannot be inline: applies an
          explicit Dark/Light choice before the first paint. -->
     <script src="/static/js/theme-boot.js"></script>
+    <!-- And again, for a dragged sidebar width: without it every load lays
+         out at 270px and then animates to the stored number. -->
+    <script src="/static/js/sidebar-boot.js"></script>
 </head>
 <body>
     <!-- First focusable thing on the page. Keyboard users otherwise tab through
@@ -116,6 +119,15 @@
             </header>
             <div id="session-list"></div>
         </nav>
+        <!-- The sidebar's own right edge, as a control. Outside the <nav>
+             rather than in it: #sidebar is `overflow: hidden` and `position:
+             static`, and making it a containing block to hold this would move
+             the desktop layout. sidebar.js arms the drag; layout.css pins it
+             to calc(var(--sidebar-w) - 3px) and hides it when the sidebar is
+             collapsed, touch.css and compact.css when there is no mouse or no
+             room. -->
+        <div id="sidebar-resizer" role="separator" aria-orientation="vertical"
+             aria-label="Resize sidebar" tabindex="0"></div>
 
         <!-- Main -->
         <main id="main">

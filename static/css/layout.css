@@ -29,6 +29,61 @@
     width: 0;
     border-right-color: transparent;
 }
+/* While the edge is being dragged the width has to follow the pointer, not
+   trail a quarter second behind it. */
+#sidebar.resizing {
+    transition: none;
+}
+
+/* The drag handle for that width. `position: fixed` rather than absolute:
+   #sidebar is `position: static` and `overflow: hidden`, and both of those
+   are load-bearing (the desktop baseline records the first, the collapse
+   depends on the second), so the handle sits over the seam instead of
+   inside it. The sidebar is always flush left on this tier, which is what
+   makes calc() on the token exact. */
+#sidebar-resizer {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--sidebar-w) - 3px);
+    width: 6px;
+    z-index: 50;
+    cursor: col-resize;
+    /* An invisible strip. Six pixels is what a mouse needs to catch an edge;
+       a visible six-pixel bar is a rule down the middle of the app. */
+    background: none;
+    border: none;
+    padding: 0;
+}
+#sidebar-resizer::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 2px;
+    width: 2px;
+    background: transparent;
+    transition: background var(--transition);
+}
+#sidebar-resizer:hover::after,
+#sidebar-resizer:focus-visible::after,
+#sidebar-resizer.dragging::after {
+    background: var(--accent);
+}
+#sidebar-resizer:focus-visible {
+    outline: none;   /* the accent line above IS the focus indicator */
+}
+/* Nothing to resize, and nothing under the strip to grab. */
+#sidebar.collapsed ~ #sidebar-resizer {
+    display: none;
+}
+/* A drag that starts on a 6px strip must not turn into a text selection the
+   moment the pointer leaves it, and the cursor has to stay col-resize over
+   whatever it passes. */
+body.sidebar-resizing {
+    user-select: none;
+    cursor: col-resize;
+}
 
 #sidebar header {
     padding: var(--sp-4) var(--sp-4) var(--sp-3);

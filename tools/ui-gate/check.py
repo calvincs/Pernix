@@ -136,6 +136,21 @@ def run_vp(browser, name, w, h, opts):
     # --- sidebar tier
     sbr = rect(pg, "#sidebar")
     scrim = pg.evaluate("() => !!document.querySelector('.mobile-scrim')")
+    if LEVEL == "m2":
+        # The drag handle for --sidebar-w is a mouse affordance: a 6px strip
+        # is not something a finger can aim at, on a phone or on a docked
+        # 1180px tablet. touch.css and compact.css each hide it, for their
+        # own reason, so this has to fail on every touch viewport.
+        check(
+            name,
+            "m2: no sidebar resize handle on touch",
+            pg.evaluate(
+                "() => { const e=document.getElementById('sidebar-resizer');"
+                " return !e || getComputedStyle(e).display === 'none'; }"
+            ),
+            "",
+            "m2",
+        )
     if compact:
         check(name, "compact: sidebar off-canvas when closed", sbr and sbr["r"] <= 0, sbr)
         check(
@@ -434,6 +449,62 @@ def desktop_layout(browser):
     return out
 
 
+def sidebar_resizer(browser):
+    """The desktop tier's own control: drag the sidebar's edge to resize it.
+
+    Its own context, after the baseline pass, because it writes
+    pernix:sidebar-width — a stored width would move every box the baseline
+    records if the two shared a browser profile.
+    """
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark",
+                              reduced_motion="reduce")
+    pg = ctx.new_page()
+    pg.on("console", lambda m: console_errors.append(f"[resizer] {m.text}") if m.type == "error" else None)
+    pg.on("pageerror", lambda e: console_errors.append(f"[resizer] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.8)
+
+    h = pg.evaluate(
+        """() => { const e=document.getElementById('sidebar-resizer'); if(!e) return null;
+        const r=e.getBoundingClientRect();
+        return {role:e.getAttribute('role'), orient:e.getAttribute('aria-orientation'),
+                now:e.getAttribute('aria-valuenow'), min:e.getAttribute('aria-valuemin'),
+                l:Math.round(r.left), w:Math.round(r.width),
+                cursor:getComputedStyle(e).cursor}; }"""
+    )
+    check("resizer", "m2: handle is a labelled vertical separator",
+          h and h["role"] == "separator" and h["orient"] == "vertical" and h["cursor"] == "col-resize", h, "m2")
+    check("resizer", "m2: handle sits on the sidebar's seam at the default width",
+          h and h["w"] == 6 and h["l"] == 267 and h["now"] == "270" and h["min"] == "200", h, "m2")
+
+    width = "() => Math.round(document.getElementById('sidebar').getBoundingClientRect().width)"
+    pg.mouse.move(270, 400)
+    pg.mouse.down()
+    pg.mouse.move(330, 400, steps=5)
+    pg.mouse.move(390, 400, steps=5)
+    pg.mouse.up()
+    time.sleep(0.4)
+    dragged = pg.evaluate(width)
+    main_w = pg.evaluate("() => Math.round(document.getElementById('main').getBoundingClientRect().width)")
+    check("resizer", "m2: dragging the edge +120px widens the sidebar to 390", dragged == 390, dragged, "m2")
+    check("resizer", "m2: #main gives the width back", main_w == 1280 - 390 - 1, main_w, "m2")
+    pg.screenshot(path=f"{shots}/{tag}-desktop-resized.png")
+
+    pg.reload(wait_until="load")
+    time.sleep(1.5)
+    check("resizer", "m2: the width survives a reload", pg.evaluate(width) == 390, pg.evaluate(width), "m2")
+
+    pg.dblclick("#sidebar-resizer")
+    time.sleep(0.4)
+    reset = pg.evaluate(
+        "() => [Math.round(document.getElementById('sidebar').getBoundingClientRect().width),"
+        " localStorage.getItem('pernix:sidebar-width')]"
+    )
+    check("resizer", "m2: double-click restores 270 and drops the stored width",
+          reset[0] == 270 and reset[1] is None, reset, "m2")
+    ctx.close()
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch()
     for name, w, h, opts in VPS:
@@ -466,6 +537,11 @@ with sync_playwright() as p:
             check("desktop", "desktop baseline present", False, "run with tag=baseline first")
     except Exception as e:
         check("desktop", "desktop pass completed", False, str(e))
+    if LEVEL == "m2":
+        try:
+            sidebar_resizer(browser)
+        except Exception as e:
+            check("resizer", "m2: resizer pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
     browser.close()
 
 check("all", "no console errors", len(console_errors) == 0, console_errors[:6])
