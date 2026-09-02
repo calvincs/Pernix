@@ -155,7 +155,7 @@ export async function buildActiveTab() {
         const snoozing = status.snooze?.running;
 
         if (running.length === 0 && rlmRunning.length === 0 && !snoozing) {
-            container.appendChild(el('div', { class: 'jobs-empty' }, [text('No active tasks')]));
+            container.appendChild(el('div', { class: 'jobs-empty' }, [text('Nothing is running — worker runs, RLM runs and snooze cycles appear here while they work.')]));
             return container;
         }
 
@@ -226,7 +226,7 @@ export async function buildScheduledTab() {
         }, [text('Cron expressions and next-run times are in UTC.')]));
 
         if (jobs.length === 0) {
-            container.appendChild(el('div', { class: 'jobs-empty' }, [text('No scheduled jobs')]));
+            container.appendChild(el('div', { class: 'jobs-empty' }, [text('No scheduled jobs — use + Add Job below, or ask the agent to schedule one for you.')]));
         } else {
             for (const job of jobs) {
                 container.appendChild(_buildJobRow(job, models, spaces));
@@ -778,7 +778,7 @@ export async function buildHistoryTab() {
             countEl.textContent = filter ? `${shown} of ${totalAll} runs` : `${totalAll} runs`;
 
             if (shown === 0) {
-                listEl.appendChild(el('div', { class: 'jobs-empty' }, [text('No runs yet')]));
+                listEl.appendChild(el('div', { class: 'jobs-empty' }, [text('No runs recorded yet — history fills in the first time a job fires.')]));
                 return;
             }
 

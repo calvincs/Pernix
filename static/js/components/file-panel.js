@@ -837,14 +837,26 @@ function renderWorkspace() {
     }
 
     if (_wsUploads.length) {
-        const upEl = el('div', { class: 'fp-tree' });
+        // Its own container, not a second .fp-tree: .fp-tree is flex:1, so a
+        // one-row upload list stretched to fill the panel and pushed the
+        // actual listing to the bottom of it.
+        const upEl = el('div', { class: 'fp-uploads' });
         _renderUploadRows(upEl);
         container.appendChild(upEl);
     }
 
     if (_wsEntries.length === 0) {
-        const label = _wsSearchQuery ? `No results for "${_wsSearchQuery}"` : 'Empty directory';
-        container.appendChild(el('div', { class: 'fp-empty' }, [text(label)]));
+        container.appendChild(_wsSearchQuery
+            ? _emptyState(
+                `No file under this workspace matches "${_wsSearchQuery}".`,
+                { label: 'Clear the search', onClick: () => { _wsSearchQuery = ''; loadWorkspace({ path: _wsCurrentPath }); } },
+            )
+            : _emptyState(
+                _wsCurrentPath
+                    ? `${_wsCurrentPath}/ is empty — upload a file here, or ask the agent to write one into it.`
+                    : 'The workspace is empty — upload a file, or ask the agent to write one.',
+                { label: 'Upload a file', onClick: triggerUpload },
+            ));
         return;
     }
 
@@ -873,7 +885,13 @@ function _renderUploadRows(parent) {
             el('span', { class: 'fp-tree-icon' }, [icon(isErr ? 'warning' : 'arrow-up', { size: 12 })]),
             el('span', { class: 'fp-tree-name' }, [text(up.name)]),
             el('span', { class: 'fp-tree-count' }),
-            el('span', { class: 'fp-tree-meta' }, [text(isErr ? up.detail : 'uploading\u2026')]),
+            // The reason lives in a column sized for "12.4K", so it truncates
+            // to nonsense ("Faile"). Keep it readable and put the whole thing
+            // in the title; the toast carries it in full too.
+            el('span', {
+                class: 'fp-tree-meta fp-upload-detail',
+                title: isErr ? up.detail : 'Uploading\u2026',
+            }, [text(isErr ? up.detail : 'uploading\u2026')]),
             el('span', { class: 'fp-tree-date' }),
         ]);
         if (isErr) {
@@ -1651,7 +1669,7 @@ function renderMemory() {
     // Filter box over the FILE list. A corpus of a hundred files is a wall of
     // names; this narrows it without spending a search. Hidden while a search
     // is running, because then the list underneath is results, not files. (S9)
-    if (!_memoryQuery) {
+    if (!_memoryQuery && _memoryFiles.length > 1) {
         const filterInput = el('input', {
             class: 'fp-search-input fp-filter-input',
             type: 'text',
@@ -1700,15 +1718,28 @@ function _matchesMemoryFilter(f) {
 
 function renderMemoryFiles(listEl) {
     if (_memoryFiles.length === 0) {
-        listEl.appendChild(el('div', { class: 'fp-empty' }, [text('No memory files')]));
+        listEl.appendChild(_emptyState(
+            'Nothing remembered yet — Pernix writes memory files as it distils sessions, '
+            + 'and whenever you ask it to remember something.',
+            {
+                label: 'Start a conversation',
+                onClick: () => {
+                    // On a phone the panel is a full-screen overlay, so the
+                    // composer it is sending you to is behind it.
+                    if (isMobile()) toggleFilePanel();
+                    document.getElementById('msg-input')?.focus();
+                },
+            },
+        ));
         return;
     }
 
     const visible = _memoryFiles.filter(_matchesMemoryFilter);
     if (visible.length === 0) {
-        listEl.appendChild(el('div', { class: 'fp-empty' }, [
-            text(`No memory file matches "${_memoryFilter}".`),
-        ]));
+        listEl.appendChild(_emptyState(
+            `No memory file matches "${_memoryFilter}".`,
+            { label: 'Clear the filter', onClick: () => { _memoryFilter = ''; renderMemory(); } },
+        ));
         return;
     }
 
@@ -1797,9 +1828,11 @@ function _scoreBucket(score) {
 
 function renderSearchResults(listEl) {
     if (_memoryResults.length === 0) {
-        listEl.appendChild(el('div', { class: 'fp-empty' }, [
-            text(`Nothing in memory matches "${_memoryQuery}".`),
-        ]));
+        listEl.appendChild(_emptyState(
+            `Nothing in memory matches "${_memoryQuery}" — memory search is over what the agent `
+            + 'wrote down, not over your chat transcripts.',
+            { label: 'Clear the search', onClick: () => searchMemory('') },
+        ));
         return;
     }
 
@@ -2189,9 +2222,16 @@ function _renderSkillsFiltered() {
         : [..._skills];
 
     if (visible.length === 0) {
-        _skillsListEl.appendChild(el('div', { class: 'fp-empty' }, [
-            text(q ? `No skills match "${q}"` : 'No skills installed'),
-        ]));
+        _skillsListEl.appendChild(q
+            ? _emptyState(
+                `No skill matches "${_skillsSearchQuery}".`,
+                { label: 'Clear the search', onClick: () => { _skillsSearchQuery = ''; renderSkills(); } },
+            )
+            : _emptyState(
+                'No skills installed — drop a skill folder into data/skills/, or ask the agent '
+                + 'to write one for a task you keep repeating.',
+                { label: 'Reload', onClick: loadSkills },
+            ));
         return;
     }
 
@@ -2808,6 +2848,23 @@ function _onJobEvent(e) {
 // Tab description — shared helper used by all tabs
 // ---------------------------------------------------------------------------
 
+// An empty state that says what is missing AND what to do about it. "No
+// skills installed" and "Empty directory" leave a reader at a dead end: they
+// describe a state and offer no way out of it. One sentence, then the next
+// action — as a real button wherever there is one to press. (F11)
+function _emptyState(sentence, action = null) {
+    const kids = [el('div', { class: 'fp-empty-line' }, [text(sentence)])];
+    if (action) {
+        const btn = el('button', {
+            class: 'btn btn--secondary btn--sm',
+            type: 'button',
+        }, [text(action.label)]);
+        btn.addEventListener('click', action.onClick);
+        kids.push(btn);
+    }
+    return el('div', { class: 'fp-empty' }, kids);
+}
+
 function _buildTabDesc(brief, full) {
     let open = false;
     const fullEl = el('div', { class: 'fp-tab-desc-full' }, [text(full)]);
@@ -2975,9 +3032,16 @@ function _renderToolsFiltered() {
     });
 
     if (visible.length === 0) {
-        _toolsListEl.appendChild(el('div', { class: 'fp-empty' }, [
-            text(q ? `No tools match "${q}"` : 'No tools loaded'),
-        ]));
+        _toolsListEl.appendChild(q
+            ? _emptyState(
+                `No tool matches "${_toolsSearchQuery}".`,
+                { label: 'Clear the search', onClick: () => { _toolsSearchQuery = ''; renderTools(); } },
+            )
+            : _emptyState(
+                'No tools registered — the registry loads at startup, so an empty list usually '
+                + 'means the server is still coming up.',
+                { label: 'Reload', onClick: loadTools },
+            ));
         return;
     }
 
@@ -3192,13 +3256,21 @@ function renderMcp() {
     if (_mcpShowAdd) container.appendChild(_buildMcpAddForm());
 
     if (!_mcpData) {
-        container.appendChild(el('div', { class: 'fp-empty' }, [text('Could not load MCP status')]));
+        container.appendChild(_emptyState(
+            'Could not read the MCP status — the server may still be starting.',
+            { label: 'Try again', onClick: loadMcp },
+        ));
         return;
     }
     if (servers.length === 0) {
-        container.appendChild(el('div', { class: 'fp-empty' }, [
-            text('No MCP servers configured. Click + to add one, or ask the agent to run mcp_add_server.'),
-        ]));
+        container.appendChild(_emptyState(
+            'No servers configured — add one by pasting a standard mcpServers config, '
+            + 'or ask the agent to run mcp_add_server.',
+            {
+                label: 'Add a server',
+                onClick: () => { _mcpShowAdd = true; _mcpEditTarget = null; _mcpFormJustOpened = true; renderMcp(); },
+            },
+        ));
         return;
     }
 
