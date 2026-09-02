@@ -3975,8 +3975,9 @@ function renderScoutReport(event) {
 
     // Collapsed by default
     const container = el('div', { class: 'scout-activity scout-collapsed' }, [header, body]);
-    header.addEventListener('click', () => {
+    _makeDisclosure(header, false, () => {
         container.classList.toggle('scout-collapsed');
+        return !container.classList.contains('scout-collapsed');
     });
 
     inner.appendChild(container);
@@ -4076,8 +4077,9 @@ function renderReflectCard(event) {
     // Collapsed by default for pass, expanded for retry/escalate
     const collapsed = verdict === 'pass' ? ' scout-collapsed' : '';
     const container = el('div', { class: `reflect-activity${collapsed}` }, [header, body]);
-    header.addEventListener('click', () => {
+    _makeDisclosure(header, !collapsed, () => {
         container.classList.toggle('scout-collapsed');
+        return !container.classList.contains('scout-collapsed');
     });
 
     inner.appendChild(container);
@@ -4136,8 +4138,9 @@ function renderEvalCard(event) {
     // Collapsed by default if everything passed; expanded if any failed.
     const collapsed = allPassed ? ' scout-collapsed' : '';
     const container = el('div', { class: `reflect-activity${collapsed}` }, [header, body]);
-    header.addEventListener('click', () => {
+    _makeDisclosure(header, !collapsed, () => {
         container.classList.toggle('scout-collapsed');
+        return !container.classList.contains('scout-collapsed');
     });
 
     inner.appendChild(container);
@@ -4198,7 +4201,10 @@ function renderGateCard(event) {
     const body = el('div', { class: 'scout-body' }, sections);
     const collapsed = allPassed ? ' scout-collapsed' : '';
     const container = el('div', { class: `reflect-activity${collapsed}` }, [header, body]);
-    header.addEventListener('click', () => container.classList.toggle('scout-collapsed'));
+    _makeDisclosure(header, !collapsed, () => {
+        container.classList.toggle('scout-collapsed');
+        return !container.classList.contains('scout-collapsed');
+    });
 
     inner.appendChild(container);
     scrollToBottom();
