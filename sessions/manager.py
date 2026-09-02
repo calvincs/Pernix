@@ -2636,8 +2636,12 @@ class SessionManager:
     def active_count(self) -> int:
         return len(self._sessions)
 
-    def has_active_work(self, strict: bool = False) -> bool:
-        """Return True if any in-memory session is non-idle.
+    def _working_sessions(self, strict: bool = False):
+        """Yield the in-memory sessions that are actually doing something.
+
+        The single definition of "busy", so the question "is anything
+        running?" and the question "how many things are running?" can never
+        answer from two different rules.
 
         strict=True ignores goal-continuation transparency: only canary
         sessions stay invisible. Mutating snooze work (adaptive applies,
@@ -2648,7 +2652,6 @@ class SessionManager:
         Uses the v2 state machine directly. AWAITING_USER and AWAITING_WORKERS
         are excluded (agent genuinely suspended); FINALIZING is caught by the
         has_background_tasks check below (post-hooks hold a ref).
-        Used by snooze to skip cycles while real work is happening.
         """
         _idle_v2 = (
             sv2.SessionStateV2.IDLE_READY,
@@ -2667,10 +2670,29 @@ class SessionManager:
             elif snooze_transparent(session):
                 continue
             if sv2._current_state(session) not in _idle_v2:
-                return True
-            if session.has_background_tasks:
-                return True
-        return False
+                yield session
+            elif session.has_background_tasks:
+                yield session
+
+    def has_active_work(self, strict: bool = False) -> bool:
+        """True if any in-memory session is non-idle (see _working_sessions).
+
+        Used by snooze to skip cycles while real work is happening; the
+        generator is lazy, so this still stops at the first busy session.
+        """
+        return next(self._working_sessions(strict), None) is not None
+
+    def busy_count(self, strict: bool = False) -> int:
+        """How many in-memory sessions are non-idle (see _working_sessions).
+
+        The same rule has_active_work asks, counted rather than
+        short-circuited. This — not active_count — is what "sessions active"
+        means to a reader: a session stays loaded for up to half an hour
+        after its last turn (reap_idle_sessions), so the loaded count
+        reported nine busy sessions on a box where every one of them was
+        sitting idle waiting to be reaped.
+        """
+        return sum(1 for _ in self._working_sessions(strict))
 
     # ------------------------------------------------------------------
     # Maintenance
