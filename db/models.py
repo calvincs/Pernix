@@ -65,12 +65,24 @@ def list_sessions(limit: int = 50, offset: int = 0) -> list[dict]:
         return [dict(r) for r in rows]
 
 
-def count_sessions() -> int:
-    """How many sessions exist at all — what the sidebar's page is a slice of.
+def count_sessions(*, archived: bool | None = False) -> int:
+    """How many sessions exist — what the sidebar's page is a slice of.
     Without it the list could only say "showing the most recent N" and leave
-    the reader to guess whether anything was behind it."""
+    the reader to guess whether anything was behind it.
+
+    ``archived`` selects which population is being counted: False (default)
+    the live ones, True the archived ones, None every row. The default is
+    False rather than None because every caller counting "the sessions"
+    means the ones the list is showing, and an archived session is exactly
+    the one that has left it.
+    """
+    where = ""
+    if archived is True:
+        where = " WHERE archived_at IS NOT NULL"
+    elif archived is False:
+        where = " WHERE archived_at IS NULL"
     with connect_sessions() as conn:
-        row = conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()
+        row = conn.execute(f"SELECT COUNT(*) AS c FROM sessions{where}").fetchone()
         return int(row["c"]) if row else 0
 
 
@@ -106,19 +118,28 @@ LEFT JOIN (
 """
 
 
-def list_sessions_enriched(limit: int = 50, offset: int = 0) -> list[dict]:
+def list_sessions_enriched(limit: int = 50, offset: int = 0, *, archived: bool = False) -> list[dict]:
     """List sessions with message_count, total_tokens, and first_message.
 
     Space sessions are long-lived by contract: any that fall outside the
     recency window are unioned back in, so the sidebar's space groups never
     lose members to the LIMIT no matter how stale they get.
+
+    ``archived`` picks the population: False (default) the live list, True
+    the archived one. Archiving is precisely how a session leaves the
+    sidebar and its space group, so the never-roll-off union is skipped for
+    the archived page — an archived space session belongs in the Archived
+    group, not back in the space it was pulled out of.
     """
+    where = "WHERE s.archived_at IS NOT NULL " if archived else "WHERE s.archived_at IS NULL "
     with connect_sessions() as conn:
         rows = conn.execute(
-            _ENRICHED_SELECT + "ORDER BY s.updated_at DESC LIMIT ? OFFSET ?",
+            _ENRICHED_SELECT + where + "ORDER BY s.updated_at DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
         result = [dict(r) for r in rows]
+        if archived:
+            return result
         # _ENRICHED_SELECT GROUP BYs all of messages and token_usage and runs
         # a ROW_NUMBER() over every user message before the outer LIMIT, so
         # running it twice doubles the disk and CPU of every sidebar refresh.
@@ -128,7 +149,7 @@ def list_sessions_enriched(limit: int = 50, offset: int = 0) -> list[dict]:
             return result
         seen = {r["id"] for r in result}
         extra = conn.execute(
-            _ENRICHED_SELECT + "WHERE s.space_id IS NOT NULL ORDER BY s.updated_at DESC",
+            _ENRICHED_SELECT + "WHERE s.space_id IS NOT NULL AND s.archived_at IS NULL ORDER BY s.updated_at DESC",
         ).fetchall()
         result.extend(dict(r) for r in extra if r["id"] not in seen)
         return result
@@ -210,6 +231,66 @@ def list_purge_candidates(cutoff_iso: str) -> dict:
     return {"candidates": candidates, "skipped": skipped}
 
 
+# ---------------------------------------------------------------------------
+# Archive (migration v34)
+#
+# Both selectors are ONE statement over the whole table. The pruners that
+# walked list_sessions(500) could not see the oldest rows — exactly the ones
+# an age sweep is for — and an archive sweep has the same shape and would
+# have inherited the same blind spot.
+# ---------------------------------------------------------------------------
+
+
+def list_idle_sessions_to_archive(cutoff_iso: str, space_id: str | None = None) -> list[dict]:
+    """Ordinary chats idle since before the cutoff and not already archived.
+
+    'normal' only: canary, worker, cron, rlm and snooze sessions are
+    machinery with their own horizon in core/retention.py, and archiving
+    them would only hide residue that is due to be deleted anyway. Pinned is
+    the user saying keep this in front of me, so it is exempt here for the
+    same reason it is exempt from the purge.
+
+    Space sessions ARE included. A space is a grouping, not a promise of
+    permanent visibility: the v33 rule that keeps them out of every DELETE
+    sweep is about never losing the transcript, and archiving loses nothing.
+
+    ``space_id`` narrows the sweep to one space ("Archive idle sessions…"
+    on a space header); None sweeps the whole table.
+    """
+    sql = """SELECT s.id, s.title, s.updated_at, s.space_id
+             FROM sessions s
+             WHERE COALESCE(s.session_type, 'normal') = 'normal'
+               AND s.archived_at IS NULL
+               AND COALESCE(s.pinned, 0) = 0
+               AND s.updated_at < ?"""
+    params: list = [cutoff_iso]
+    if space_id:
+        sql += " AND s.space_id = ?"
+        params.append(space_id)
+    sql += " ORDER BY s.updated_at ASC"
+    with connect_sessions() as conn:
+        return [dict(r) for r in conn.execute(sql, params)]
+
+
+def list_archived_sessions_before(cutoff_iso: str) -> list[dict]:
+    """Sessions archived before the cutoff — the hard-delete sweep's input.
+
+    Any session type: once a row carries an archived_at it is in the
+    archive, and the archive has one horizon rather than six.
+    """
+    with connect_sessions() as conn:
+        return [
+            dict(r)
+            for r in conn.execute(
+                """SELECT s.id, s.title, s.updated_at, s.space_id, s.archived_at
+                   FROM sessions s
+                   WHERE s.archived_at IS NOT NULL AND s.archived_at < ?
+                   ORDER BY s.archived_at ASC""",
+                (cutoff_iso,),
+            )
+        ]
+
+
 def update_session(session_id: str, **kwargs) -> None:
     """Update session fields. Only known columns are set."""
     allowed = {
@@ -251,11 +332,18 @@ def set_session_meta(
     title: str | None = None,
     pinned: bool | None = None,
     space_id: object = _UNSET,
+    archived: bool | None = None,
 ) -> None:
     """Set user-facing session metadata WITHOUT bumping updated_at —
-    renaming, pinning, or moving a session between spaces must not change
-    its recency ordering. space_id accepts None (remove from space); omit
-    the argument to leave membership untouched."""
+    renaming, pinning, moving a session between spaces or archiving it must
+    not change its recency ordering. space_id accepts None (remove from
+    space); omit the argument to leave membership untouched.
+
+    ``archived`` is the same contract one level up: True stamps
+    ``archived_at`` with now, False clears it. Recency is what the idle
+    horizon and the sidebar's time buckets are computed from, so a restore
+    has to put the session back exactly where it was rather than at the top
+    of Today."""
     updates: dict = {}
     if title is not None:
         updates["title"] = title
@@ -263,6 +351,8 @@ def set_session_meta(
         updates["pinned"] = 1 if pinned else 0
     if space_id is not _UNSET:
         updates["space_id"] = space_id
+    if archived is not None:
+        updates["archived_at"] = _now() if archived else None
     if not updates:
         return
     cols = ", ".join(f"{k} = ?" for k in updates)
@@ -321,14 +411,20 @@ def get_space_by_slug(slug: str) -> dict | None:
 
 
 def list_spaces() -> list[dict]:
-    """All spaces with a live session count, in user sort order."""
+    """All spaces with a live session count, in user sort order.
+
+    Live means not archived: an archived session has left its space group
+    for the Archived one, so counting it here would name a number the group
+    below does not show."""
     with connect_sessions() as conn:
         rows = conn.execute(
             """SELECT sp.*, COALESCE(sc.session_count, 0) AS session_count
                FROM spaces sp
                LEFT JOIN (
                    SELECT space_id, COUNT(*) AS session_count
-                   FROM sessions WHERE space_id IS NOT NULL GROUP BY space_id
+                   FROM sessions
+                   WHERE space_id IS NOT NULL AND archived_at IS NULL
+                   GROUP BY space_id
                ) sc ON sc.space_id = sp.id
                ORDER BY sp.sort_order, sp.created_at""",
         ).fetchall()
@@ -951,6 +1047,7 @@ def search_messages_fts(
             SELECT f.rowid as msg_id, f.session_id, f.role, f.content,
                    s.title as session_title, s.session_type,
                    s.space_id as session_space_id,
+                   s.archived_at as session_archived_at,
                    s.created_at as session_created_at,
                    s.updated_at as session_updated_at,
                    bm25(messages_fts, 1.0) as score
@@ -981,6 +1078,10 @@ def search_messages_fts(
                     "session_title": r["session_title"] or "untitled",
                     "session_type": r["session_type"] or "normal",
                     "session_space_id": r["session_space_id"],
+                    # Search is the one surface an archived session still
+                    # appears on — that is the promise archiving makes — so
+                    # the hit has to say which of them are archived.
+                    "session_archived": bool(r["session_archived_at"]),
                     "session_created_at": (r["session_created_at"] or "")[:16],
                     "session_updated_at": (r["session_updated_at"] or "")[:16],
                     "role": r["role"],
@@ -2436,7 +2537,11 @@ def checkpoint() -> None:
 
 
 def get_unreviewed_sessions(min_age_minutes: int = 10, limit: int = 5) -> list[dict]:
-    """Get sessions eligible for Snooze catch-up distillation."""
+    """Get sessions eligible for Snooze catch-up distillation.
+
+    Archived sessions are out: archiving is the user saying this
+    conversation is finished, and spending a distillation call on it burns
+    budget the live backlog wants."""
     from datetime import timedelta
 
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=min_age_minutes)).isoformat()
@@ -2446,6 +2551,7 @@ def get_unreviewed_sessions(min_age_minutes: int = 10, limit: int = 5) -> list[d
                WHERE s.snooze_reviewed_at IS NULL
                  AND {SQL_SESSION_IS_IDLE}
                  AND s.updated_at < ?
+                 AND s.archived_at IS NULL
                  AND s.session_type NOT IN ('worker', 'canary')
                  AND (
                      SELECT COUNT(*) FROM messages m
@@ -2512,6 +2618,7 @@ def get_unrefined_sessions(min_idle_minutes: int = 10, limit: int = 1) -> list[d
                WHERE (s.state_v2 IS NULL OR s.state_v2 IN
                       ('idle_ready', 'cancelling', 'finalizing'))
                  AND s.updated_at < ?
+                 AND s.archived_at IS NULL
                  AND s.session_type NOT IN ('worker', 'canary')
                  AND NOT EXISTS (
                      SELECT 1 FROM snooze_state ss

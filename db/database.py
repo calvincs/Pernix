@@ -1054,6 +1054,20 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_sessions_space ON sessions(space_id) WHERE space_id IS NOT NULL",
         ],
     ),
+    (
+        34,
+        "archive, not delete: a session can leave the sidebar with every message intact",
+        [
+            # NULL means live. A timestamp means the session is out of the
+            # sidebar and out of its space group, still searchable, still
+            # whole — the opposite of the delete it used to be the only
+            # alternative to.
+            "ALTER TABLE sessions ADD COLUMN archived_at TEXT",
+            # Every list query now filters on this column, and the archived
+            # set is the small one — a partial index is the whole cost.
+            "CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at) WHERE archived_at IS NOT NULL",
+        ],
+    ),
 ]
 
 
