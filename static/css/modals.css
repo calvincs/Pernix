@@ -1183,6 +1183,15 @@
 .space-dir-size { font-size: var(--text-xxs); color: var(--text-faint); }
 .space-dir-size.over { color: var(--error); }
 .space-dir-action { flex-shrink: 0; }
+/* The mode selector and its label are one cell, so the toolbar's other
+   items lay out against the pair rather than against the <select>. */
+.space-dir-mode-cell {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2);
+    flex: 1;
+    min-width: 0;
+}
 .space-dir-hint { font-size: var(--text-xxs); color: var(--text-faint); margin-top: var(--sp-2); flex-shrink: 0; }
 .space-dir-default {
     flex: 1;
