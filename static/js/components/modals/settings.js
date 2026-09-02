@@ -2227,6 +2227,48 @@ function buildTabs(settings) {
 // Modal lifecycle
 // ---------------------------------------------------------------------------
 
+// /api/settings failing made the gear icon do nothing at all — no modal, no
+// message, no way to try again, and no way to tell a dead server from a dead
+// button. Render the shell with the reason and a Retry instead. (F2)
+function _openLoadFailure(message, opts) {
+    const retryBtn = el('button', { class: 'btn btn-primary' }, [text('Retry')]);
+    const card = el('div', { class: 'modal-card' }, [
+        el('div', { class: 'modal-header' }, [
+            el('h2', {}, [text('Settings')]),
+            el('button', {
+                class: 'modal-close',
+                title: 'Close',
+                'aria-label': 'Close settings',
+                onClick: closeSettings,
+            }, [text('\u00d7')]),
+        ]),
+        el('div', { class: 'modal-body' }, [
+            el('div', { class: 'settings-load-error', role: 'alert' }, [
+                el('strong', {}, [text('Settings could not be loaded.')]),
+                el('p', {}, [text(message)]),
+                el('p', {}, [text(
+                    'Nothing has been changed. The server may be restarting, or the '
+                    + 'request may have been rejected — retry once it is back.',
+                )]),
+            ]),
+        ]),
+        el('div', { class: 'modal-footer' }, [
+            el('button', { class: 'btn btn-secondary', onClick: closeSettings }, [text('Close')]),
+            retryBtn,
+        ]),
+    ]);
+    retryBtn.addEventListener('click', () => {
+        closeSettings();
+        openSettings(opts);
+    });
+
+    _overlay = el('div', { class: 'modal-overlay' }, [card]);
+    _overlay.addEventListener('click', (e) => { if (e.target === _overlay) closeSettings(); });
+    document.body.appendChild(_overlay);
+    _closeOverlay = openOverlay(card, { onClose: closeSettings, initialFocus: retryBtn });
+    announce('Settings could not be loaded', { assertive: true });
+}
+
 export async function openSettings(opts = {}) {
     if (_overlay) {
         // Already open — just switch to the requested tab if specified
@@ -2251,7 +2293,7 @@ export async function openSettings(opts = {}) {
         _ollamaModels = om.models || [];
         _ollamaError = om.error || '';
     } catch (e) {
-        console.error('Failed to load settings:', e);
+        _openLoadFailure(e.message || String(e), opts);
         return;
     }
     _original = { ...settings };
