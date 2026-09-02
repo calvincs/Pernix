@@ -8,6 +8,7 @@ import { getTheme, setTheme } from '../../theme.js';
 import { runVoiceTest } from '../../voice.js';
 import { announce, openOverlay } from '../../a11y.js';
 import { notify } from '../../feedback.js';
+import { confirmDanger } from './confirm.js';
 
 let _overlay = null;
 let _closeOverlay = null;  // teardown from a11y.js openOverlay()
@@ -2175,10 +2176,21 @@ function buildSessionCleanupSection() {
                 statusEl.style.color = 'var(--text-dim)';
                 return;
             }
-            if (!confirm(
-                `Permanently delete ${toDelete} session(s) and all of their messages `
-                + '— this cannot be undone. It cascades to any worker sessions.'
-            )) {
+            // A browser confirm() cannot say which sessions, cannot be styled
+            // to look like a deletion, and on some platforms is suppressed
+            // entirely — the one dialog where that matters most. (S2)
+            const go = await confirmDanger({
+                title: `Delete ${toDelete} session${toDelete === 1 ? '' : 's'}?`,
+                body: [
+                    `Everything older than ${keepDays} day${keepDays === 1 ? '' : 's'} goes, `
+                    + `except the ${keepMin} most recent of those.`,
+                    'Their messages go with them, and so do any worker sessions they started. '
+                    + 'This cannot be undone.',
+                ],
+                verb: `Delete ${toDelete}`,
+                cancelLabel: 'Keep them',
+            });
+            if (!go) {
                 statusEl.textContent = 'Cancelled.';
                 statusEl.style.color = 'var(--text-dim)';
                 return;
@@ -2285,11 +2297,18 @@ async function buildSecurityTab(settings) {
             // request failed, because the bare fetch() carried no auth header
             // and its rejection was swallowed. (S10)
             const scopeCount = tools.reduce((n, t) => n + (data[t] || []).length, 0);
-            if (!confirm(
-                `Clear every remembered approval (${scopeCount} scope${scopeCount === 1 ? '' : 's'} `
-                + `across ${tools.length} tool${tools.length === 1 ? '' : 's'}) — this cannot be undone. `
-                + 'The agent will ask again the next time it needs each of them.'
-            )) return;
+            const go = await confirmDanger({
+                title: 'Clear every remembered approval?',
+                body: [
+                    `${scopeCount} approved scope${scopeCount === 1 ? '' : 's'} across `
+                    + `${tools.length} tool${tools.length === 1 ? '' : 's'} will be forgotten.`,
+                    'The agent will stop and ask you again the next time it needs any of them — '
+                    + 'which is the point, but it cannot be undone.',
+                ],
+                verb: 'Clear all',
+                cancelLabel: 'Keep them',
+            });
+            if (!go) return;
             clearBtn.disabled = true;
             try {
                 await del('/api/settings/tool-approvals');
