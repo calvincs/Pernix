@@ -2569,6 +2569,9 @@ class SessionManager:
             except asyncio.QueueFull:
                 dead.append(q)
         for q in dead:
+            from core.events import mark_queue_dropped
+
+            mark_queue_dropped(q)
             if q in self._global_subscribers:
                 self._global_subscribers.remove(q)
 

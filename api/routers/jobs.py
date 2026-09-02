@@ -9,7 +9,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Query
 
 from api.streaming import sse_event, sse_response
-from core.events import get_event_bus
+from core.events import get_event_bus, queue_was_dropped
 from db import models as db
 
 logger = logging.getLogger("pernix.api.jobs")
@@ -252,11 +252,15 @@ async def job_events():
                     async with asyncio.timeout(HEARTBEAT_INTERVAL):
                         event = await queue.get()
                 except asyncio.TimeoutError:
+                    if queue_was_dropped(queue):
+                        return
                     yield ": heartbeat\n\n"
                     continue
                 event_type = event.get("type", "message")
                 clean = {k: v for k, v in event.items() if not k.startswith("_")}
                 yield sse_event(event_type, clean)
+                if queue_was_dropped(queue):
+                    return
         except (asyncio.CancelledError, GeneratorExit):
             pass
         finally:

@@ -389,6 +389,9 @@ class AgentSession:
             except asyncio.QueueFull:
                 dead.append(q)
         for q in dead:
+            from core.events import mark_queue_dropped
+
+            mark_queue_dropped(q)
             if q in self.subscribers:
                 self.subscribers.remove(q)
 
