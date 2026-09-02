@@ -272,6 +272,19 @@
     min-height: 32px;
     padding: var(--sp-1) var(--sp-2);
 }
+/* P5 — while the keyboard is up on a narrow screen, the visible viewport
+   is roughly halved and the header is a row of chrome above a
+   conversation that has nowhere left to go. mobile.js puts
+   `composer-focused` on <body> on #msg-input focus and takes it off on
+   blur; this is the whole visual effect of it.
+
+   Compact only: a landscape iPad has the height to keep its header, and
+   losing it there would be a flicker every time you started typing. The
+   selector carries the id so it outranks layout.css's `#session-header`,
+   which an id-less `body[data-compact].composer-focused` could not. */
+body[data-compact].composer-focused #session-header {
+    display: none;
+}
 
 /* ------------------------------------------------------------------
    Scrollbar hiding (native indicators are better on mobile)
@@ -781,7 +794,13 @@
     min-height: 22px;
     padding: 5px 0;
     line-height: 1.4;
-    max-height: 120px;
+    /* P5 — a flat 120px cap was written against a portrait phone. With the
+       keyboard up on a landscape phone the visible viewport is ~200px
+       tall, and a composer that grows to 120px of it leaves two lines of
+       the conversation you are replying to. dvh here is the VISUAL
+       viewport on every browser that shrinks it for the keyboard, so the
+       cap tightens exactly when room runs out. */
+    max-height: min(120px, 30dvh);
 }
 /* Send is the most-tapped control in the app; 40px keeps it close to
    the 44px guidance without making the composer bar taller. */
@@ -1032,6 +1051,15 @@
         padding-top: max(var(--sp-1), var(--safe-top));
         padding-bottom: var(--sp-1);
         min-height: 36px;
+    }
+    /* P5 — with ~260px of usable height, four rows of chrome (status bar,
+       session header, composer, home indicator) leave about three lines of
+       transcript. The session header is the one that repeats information
+       already on screen: its title is the row the drawer has highlighted,
+       and tapping it is not what anyone came here to do. It comes back the
+       moment the phone is upright. */
+    #session-header {
+        display: none;
     }
     /* Longhand only: the shorthand here would wipe the horizontal
        safe-area insets set at the main breakpoint. */
