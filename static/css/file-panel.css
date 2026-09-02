@@ -555,9 +555,26 @@ body.fp-resizing #main { pointer-events: none; }
 
 /* In-flight and failed upload rows — an upload used to be invisible until
    the directory listing happened to refresh with the file already in it. */
+/* In-flight uploads sit above the listing and are only ever a few rows, so
+   this container must NOT be a .fp-tree — that is flex:1 and would push the
+   real listing to the bottom of the panel. */
+.fp-uploads {
+    flex: 0 0 auto;
+    padding: var(--sp-1) 0;
+}
 .fp-upload-row {
     cursor: default;
     opacity: 0.85;
+}
+/* The reason a file was rejected has to be readable, not clipped to the
+   width of a size column. */
+.fp-upload-row .fp-upload-detail {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .fp-upload-row .fp-tree-meta {
     font-style: italic;
@@ -1108,6 +1125,16 @@ body.fp-resizing #main { pointer-events: none; }
     text-align: center;
     color: var(--text-faint);
     font-size: var(--text-xs);
+    /* A sentence and, under it, the way out of the state it describes. (F11) */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--sp-3);
+}
+.fp-empty-line {
+    line-height: 1.55;
+    max-width: 34em;
+    text-wrap: pretty;
 }
 
 /* ======================================================================

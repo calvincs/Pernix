@@ -99,7 +99,7 @@ export async function renderAdaptiveTab(container) {
     const proposals = proposalsRes.proposals || [];
     container.appendChild(section(`Proposals awaiting review (${proposals.length})`));
     if (!proposals.length) {
-        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No pending proposals.')]));
+        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No proposals waiting — one appears here when the agent wants a change you have to allow, and applies itself if you do not veto it in time.')]));
     }
     for (const p of proposals) {
         let edits = [];
@@ -203,7 +203,7 @@ export async function renderAdaptiveTab(container) {
             ]));
         }
     }
-    if (!entries.length) container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No active entries.')]));
+    if (!entries.length) container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No entries yet — routing hints and prompt notes land here once the agent starts writing rules about its own behaviour.')]));
 
     // --- Batches ---
     const batches = (batchesRes.batches || []).filter(b => b.status !== 'pending');

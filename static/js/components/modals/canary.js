@@ -199,7 +199,7 @@ export async function renderCanaryTab(container) {
         text(`Suite (${canaries.length} task${canaries.length === 1 ? '' : 's'}${parkedCount ? `, ${parkedCount} parked` : ''})`),
     ]));
     if (!canaries.length) {
-        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No canaries in data/canaries/.')]));
+        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No self-checks yet — use New canary above to write one, or let the agent propose one for a task you care about not regressing.')]));
     }
     for (const c of canaries) {
         const s = c.stats || { runs: 0, passed: 0, last_run: null };
@@ -303,5 +303,5 @@ export async function renderCanaryTab(container) {
         row.appendChild(detail);
         container.appendChild(row);
     }
-    if (!runs.length) container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No recorded runs yet.')]));
+    if (!runs.length) container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No runs yet — self-checks fire on change (an adaptive batch, a skill edit, a deploy) plus a small nightly heartbeat.')]));
 }
