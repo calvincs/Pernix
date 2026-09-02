@@ -584,14 +584,63 @@ async function deleteSession(sid) {
     }
 }
 
-// A phone has no Shift+Enter and no hover, so the two keyboards need two
-// different sentences — and the coarse one has to be visible, not a tooltip.
-function _isCoarsePointer() {
-    return typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+// ---------------------------------------------------------------------------
+// What sends a message (T5)
+// ---------------------------------------------------------------------------
+// Enter used to send unless the device was touch, and touch had no other way
+// to send from the keyboard at all: every iPad with a Magic Keyboard and every
+// Android tablet with one could type a prompt and then had to reach up and tap
+// the button. Two changes fix that. Ctrl/Cmd+Enter sends on every device,
+// always, whatever the setting says — it is the binding a hardware keyboard
+// expects and it collides with nothing. And bare Enter is now a preference
+// rather than a verdict about the hardware: stored per browser, defaulting to
+// on under a mouse and off under a finger, because a soft keyboard has no
+// Shift+Enter and send-on-Enter makes a multi-line prompt impossible to type.
+const ENTER_SENDS_KEY = 'pernix:enter-sends';
+// Set by the settings toggle's event. localStorage is the store; this is only
+// so a flip lands without a reload even if the write is refused.
+let _enterSendsCache = null;
+
+/** Does a bare Enter send? '1'/'0' from the setting, else the device default. */
+function enterSends() {
+    if (_enterSendsCache !== null) return _enterSendsCache;
+    let stored = null;
+    try { stored = localStorage.getItem(ENTER_SENDS_KEY); } catch { /* private mode */ }
+    if (stored === '1') return true;
+    if (stored === '0') return false;
+    return !isTouch();
 }
 
+/**
+ * Does this keypress mean "send"? Pure on purpose: the decision is the part
+ * that has to agree with the hint the composer shows and with the setting, and
+ * a function that reads nothing can be asked directly in a test.
+ *
+ * @param {{key: string, shiftKey?: boolean, ctrlKey?: boolean, metaKey?: boolean,
+ *          altKey?: boolean, isComposing?: boolean, keyCode?: number}} e
+ * @param {{enterSends?: boolean|null, touch?: boolean}} [opts]
+ *        enterSends is the resolved preference; when it is not a boolean the
+ *        device default (send under a mouse, not under a finger) is used.
+ */
+function shouldSendOnKey(e, { enterSends = null, touch = false } = {}) {
+    if (!e || e.key !== 'Enter') return false;
+    // An Enter that commits an IME candidate is not a send — it is the user
+    // choosing a character, and swallowing it sends half a sentence.
+    if (e.isComposing || e.keyCode === 229) return false;
+    // The binding that always means send, on every device and in either
+    // setting: the answer for a tablet with a keyboard attached.
+    if (e.ctrlKey || e.metaKey) return true;
+    // Shift+Enter is how you get a new line; Alt+Enter is not ours to take.
+    if (e.shiftKey || e.altKey) return false;
+    return typeof enterSends === 'boolean' ? enterSends : !touch;
+}
+
+// Three sentences for three states, and the visible hint has to match what the
+// keys actually do — a phone that says "Enter to send" when its Enter makes a
+// new line is worse than saying nothing.
 function _composerHint() {
-    return _isCoarsePointer() ? 'Tap send' : 'Enter to send · Shift+Enter for a new line';
+    if (enterSends()) return 'Enter to send · Shift+Enter for a new line';
+    return isTouch() ? 'Tap send' : 'Ctrl+Enter to send';
 }
 
 // The fine-pointer placeholder used to carry both key bindings, which ran
@@ -609,9 +658,8 @@ const _NARROW_COMPOSER_PX = 400;
 
 function _composerPlaceholder() {
     if (window.innerWidth < _NARROW_COMPOSER_PX) return 'Message Pernix';
-    return _isCoarsePointer()
-        ? 'Message Pernix — tap send'
-        : 'Message Pernix… Enter to send';
+    if (enterSends()) return 'Message Pernix… Enter to send';
+    return isTouch() ? 'Message Pernix — tap send' : 'Message Pernix… Ctrl+Enter to send';
 }
 
 /** Re-read the width-dependent placeholder. Cheap, and a no-op on a session
@@ -1604,11 +1652,7 @@ function setupInput() {
         }
     });
     textarea.addEventListener('keydown', (e) => {
-        // On touch, Enter inserts a newline — soft keyboards have no
-        // Shift+Enter, so send-on-Enter made multi-line prompts impossible.
-        // The send button is the submit action there. (A hardware keyboard on
-        // a tablet is left out in the cold by this; T5/D4 is where that lands.)
-        if (e.key === 'Enter' && !e.shiftKey && !isTouch()) {
+        if (shouldSendOnKey(e, { enterSends: enterSends(), touch: isTouch() })) {
             e.preventDefault();
             send();
             return;
@@ -1641,6 +1685,13 @@ function setupInput() {
     // header away while it is set is compact-only. (P5)
     textarea.addEventListener('focus', () => document.body.classList.add('composer-focused'));
     textarea.addEventListener('blur', () => document.body.classList.remove('composer-focused'));
+
+    // Settings → Appearance flips the Enter binding. Both the placeholder and
+    // the hint state it, so both are re-read the moment it changes. (T5)
+    window.addEventListener('pernix:enter-sends', (e) => {
+        _enterSendsCache = !!(e && e.detail);
+        _refreshComposerText();
+    });
 
     // A rotation, or a desktop window dragged narrow, crosses the width the
     // placeholder depends on (P7). Debounced: a drag fires this dozens of
