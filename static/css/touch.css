@@ -36,7 +36,7 @@
 /* from file-panel.css — larger touch target for the tab desc toggle */
 .fp-tab-desc-toggle {
     padding: 4px 2px;
-    font-size: 10px;
+    font-size: var(--text-xxs);   /* C7 — was 10px, under the floor */
     opacity: 0.8;
 }
 .fp-tab-desc-brief > span {
@@ -159,6 +159,62 @@
     --text-md:  0.9375rem;   /* 15px, up from 14px */
     --text-lg:  1rem;        /* 16px, up from 15px */
     --text-xl:  1.0625rem;   /* 17px, up from 16px */
+}
+
+/* ------------------------------------------------------------------
+   C7 — the 11px legibility floor
+
+   The bump above raises every token, but a couple of dozen rules across
+   layout.css, modals.css and file-panel.css write a literal font-size
+   instead: 7px chevrons, 9px counts, 10px labels. Those are mouse-and-
+   monitor sizes. On a phone held at arm's length they are texture, not
+   text, and several of them ARE the label that says what the row is.
+
+   --text-xxs is 11px here, which is the floor itself, so every rule below
+   is the same statement: whatever this was, it is now the smallest type
+   the app is willing to draw. The two chevrons go to 12px instead — a
+   glyph needs a little more than prose to keep its shape.
+
+   Written with the same descendant selectors the originals use, because
+   a bare `.sg-count` loses to `.session-group-header .sg-count` no matter
+   which file it is in.
+   ------------------------------------------------------------------ */
+.session-activity {
+    font-size: var(--text-xxs);            /* 10px */
+}
+.session-group-header .sg-count,
+.space-group-header .sg-count,
+.sg-count,
+.legend-count {
+    font-size: var(--text-xxs);            /* 9px */
+}
+.session-group-header .sg-arrow,
+.worker-summary .ws-arrow {
+    font-size: 12px;                       /* 7px */
+}
+/* The `?` disc grows with its glyph — 11px in a 14px circle overflows it.
+   16px is still well under the 11px-uppercase heading it sits beside, and
+   the ::after hit area above stays a comfortable 30x30. */
+.section-help {
+    font-size: var(--text-xxs);            /* 9px */
+    width: 16px;
+    height: 16px;
+}
+/* Explorer: the group strip's labels (.fp-group-label inherits from
+   .fp-tab-btn), the workspace section header and its file count, the file
+   type glyph, and the Self-checks badges. */
+.fp-tab-btn {
+    font-size: var(--text-xxs);            /* 10px */
+}
+.fp-section-label,
+.fp-tree-icon {
+    font-size: var(--text-xxs);            /* 10px */
+}
+.fp-section-sub {
+    font-size: var(--text-xxs);            /* 9px */
+}
+.adaptive-badge {
+    font-size: var(--text-xxs);            /* 0.75em -> 10.5px */
 }
 
 /* ------------------------------------------------------------------
