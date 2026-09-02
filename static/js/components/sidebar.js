@@ -18,13 +18,18 @@ import { notify } from '../feedback.js';
 // machinery ("Cron", "RLM", "Canary") taught a first-time reader six words
 // for things they have never made — so the row says what the session IS and
 // keeps the internal term one hover away, in the title. (N9)
+//
+// `api` is the same type under the name the server knows it by — the
+// session_type column's own word, which is what ?exclude_types= and
+// type_counts speak. The legend's key is 'chat' because that is what the
+// user made; the column has always called it 'normal'.
 const SESSION_TYPES = {
-    chat:   { label: 'Session',     cls: 'chat',   color: 'var(--accent)' },
-    cron:   { label: 'Scheduled',   cls: 'cron',   color: 'var(--info)',     term: 'cron' },
-    worker: { label: 'Worker',      cls: 'worker', color: 'var(--teal-dim)' },
-    snooze: { label: 'Dream',       cls: 'snooze', color: 'var(--dream)' },
-    rlm:    { label: 'Large-input', cls: 'rlm',    color: 'var(--rlm)',      term: 'RLM' },
-    canary: { label: 'Self-check',  cls: 'canary', color: 'var(--canary)',   term: 'canary' },
+    chat:   { label: 'Session',     cls: 'chat',   color: 'var(--accent)',   api: 'normal' },
+    cron:   { label: 'Scheduled',   cls: 'cron',   color: 'var(--info)',     term: 'cron',   api: 'cron' },
+    worker: { label: 'Worker',      cls: 'worker', color: 'var(--teal-dim)', api: 'worker' },
+    snooze: { label: 'Dream',       cls: 'snooze', color: 'var(--dream)',    api: 'snooze' },
+    rlm:    { label: 'Large-input', cls: 'rlm',    color: 'var(--rlm)',      term: 'RLM',    api: 'rlm' },
+    canary: { label: 'Self-check',  cls: 'canary', color: 'var(--canary)',   term: 'canary', api: 'canary' },
 };
 
 // "Hide Scheduled sessions (cron)" — the internal term rides along so the
@@ -85,6 +90,17 @@ const ARCHIVED_GROUP = 'Archived';
 // _deferredDeletes, and it clears itself the moment the server agrees.
 const _archivedLocal = new Set();
 
+// The legend's numbers. `_typeCounts` is the server's `type_counts` — every
+// LIVE session of each type, whatever this page happens to hold — and
+// `_payloadCounts` is the fallback: what is actually on screen.
+//
+// The distinction exists because the filter is server-side now. A hidden
+// type's rows are not in the payload to be counted, so counting the payload
+// would show "Self-check 0" the moment self-checks were switched off, and
+// the legend would be naming a population it had made invisible to itself.
+let _typeCounts = null;
+let _payloadCounts = null;
+
 function _reconcileArchived(sessions) {
     if (!_archivedLocal.size) return;
     const present = new Set();
@@ -131,6 +147,60 @@ export function setArchivedCount(n) {
     if (changed && _showArchived()) _loadArchived();
 }
 
+/**
+ * Told by app.js after every /api/sessions response — the whole payload,
+ * because two things on it belong to the sidebar rather than to the list.
+ *
+ * @param {{archived_count?: number, type_counts?: Object}} data
+ */
+export function setListMeta(data) {
+    setArchivedCount(data?.archived_count || 0);
+    setTypeCounts(data?.type_counts || null);
+}
+
+/** The server's per-type census, or null to fall back to counting the page. */
+export function setTypeCounts(counts) {
+    _typeCounts = counts && typeof counts === 'object' ? counts : null;
+    _updateLegendCounts();
+}
+
+// ---------------------------------------------------------------------------
+// What the session list asks for
+// ---------------------------------------------------------------------------
+// The legend hid types in the browser for as long as it has existed, and that
+// cannot help with the problem it looks like it solves: the row was already
+// on the page it was being hidden from. On a machine-heavy instance the 500
+// most recently updated sessions are mostly canary self-checks, workers and
+// cron runs — so a third of the user's chats made page one and the rest sat
+// behind "Load older sessions", with "Self-check" switched off the whole time.
+//
+// So the hidden set drives the REQUEST now. The server drops those types in
+// SQL before the LIMIT, which is what makes the page refill with what is left
+// rather than merely get shorter. The browser-side filter in
+// renderSessionList stays as a second line: a payload can be unfiltered (a
+// poll already in flight when the toggle was clicked), and a legacy cron
+// session typed 'normal' is one the server's column-keyed clause cannot see.
+//
+// These two are the seam. app.js owns the fetch and the sidebar owns the
+// legend, so the sidebar has to be asked what the legend currently means.
+
+/** Session types the legend is hiding, under the names the API knows. */
+export function getHiddenTypes() {
+    const hidden = _loadState().hiddenTypes || {};
+    return Object.entries(SESSION_TYPES)
+        .filter(([key]) => hidden[key])
+        .map(([, def]) => def.api);
+}
+
+/**
+ * The query-string fragment /api/sessions should carry, or '' for none.
+ * Leading '&', so it appends to a URL that already has its `?limit=`.
+ */
+export function sessionsQuery() {
+    const hidden = getHiddenTypes();
+    return hidden.length ? `&exclude_types=${hidden.join(',')}` : '';
+}
+
 function _showArchived() {
     return !!_loadState().showArchived;
 }
@@ -141,7 +211,9 @@ async function _loadArchived() {
     _archivedFailed = false;
     _repaint();
     try {
-        const data = await get(`/api/sessions?archived=1&limit=${SESSION_PAGE_LIMIT}`);
+        // The legend's hidden set applies to the archive too: a type the
+        // user has switched off is one they do not want to read here either.
+        const data = await get(`/api/sessions?archived=1&limit=${SESSION_PAGE_LIMIT}${sessionsQuery()}`);
         _archived = data.items || [];
         _archivedCount = data.archived_count ?? _archived.length;
     } catch {
@@ -531,12 +603,17 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     const allTopLevel = sessions.filter(s => !CHILD_TYPES.has(s.session_type));
     const allChildren = sessions.filter(s => CHILD_TYPES.has(s.session_type));
 
-    // Count all types (before filtering) for legend
+    // What this page holds, per type — the legend's fallback when no server
+    // census has arrived. setTypeCounts() supersedes it the moment one does.
     const counts = { chat: 0, cron: 0, worker: 0, snooze: 0, rlm: 0, canary: 0 };
     for (const s of sessions) counts[_getTypeKey(s)]++;
-    _updateLegendCounts(counts);
+    _payloadCounts = counts;
+    _updateLegendCounts();
 
-    // Filter by hidden types
+    // Hidden types are left out of the REQUEST now (see sessionsQuery), so
+    // this is the second line rather than the first: it catches a payload
+    // fetched before the toggle, and a legacy cron session typed 'normal',
+    // which the server's column-keyed clause cannot see as a cron session.
     const topLevel = allTopLevel.filter(s => !hidden[_getTypeKey(s)]);
     const children = allChildren.filter(s => !hidden[_getTypeKey(s)]);
 
@@ -946,11 +1023,17 @@ export function spaceById(id) {
 // Type detection
 // ---------------------------------------------------------------------------
 
+// The column first, the title only as a fallback. The scheduler stamps
+// session_type='cron' on everything it creates, and that is the word
+// ?exclude_types= speaks; keying on the title alone made the legend and the
+// server disagree about a cron session the titler had renamed. The title
+// clause stays for sessions written before the scheduler stamped the column.
 function _getTypeKey(session) {
     if (session.session_type === 'worker') return 'worker';
     if (session.session_type === 'snooze') return 'snooze';
     if (session.session_type === 'rlm') return 'rlm';
     if (session.session_type === 'canary') return 'canary';
+    if (session.session_type === 'cron') return 'cron';
     if (session.title && session.title.startsWith('Cron:')) return 'cron';
     return 'chat';
 }
@@ -1761,8 +1844,42 @@ function _toggleType(typeKey) {
 
     // Force re-render
     _lastJson = '';
-    // Dispatch custom event so app.js can trigger re-render
+
+    // Three events, because a toggle now changes three things.
+    //
+    // The repaint is what the sidebar owes the rows already on screen. The
+    // announcement is what it owes a screen reader. And the REFETCH is the
+    // new one: the excluded type is left out in SQL, so the sessions that
+    // were sitting behind it do not exist on this client until the list is
+    // asked again. Without it, switching a type off would empty its rows and
+    // leave the page that much shorter instead of refilling it.
+    //
+    // pernix:sessions-query carries the new exclusion for anything that
+    // builds the request without importing this module.
     document.dispatchEvent(new CustomEvent('sidebar:filter-changed'));
+    window.dispatchEvent(new CustomEvent('pernix:sessions-query', {
+        detail: { excludeTypes: getHiddenTypes(), query: sessionsQuery() },
+    }));
+    window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
+    if (_showArchived()) _loadArchived();
+    announce(state.hiddenTypes[typeKey]
+        ? `${SESSION_TYPES[typeKey].label} sessions hidden`
+        : `${SESSION_TYPES[typeKey].label} sessions shown`);
+}
+
+/**
+ * The number beside each dot: the server's census when there is one, and
+ * otherwise what the page in hand holds.
+ *
+ * The server's numbers win because they answer the question the legend is
+ * actually asking — how many self-checks are there — rather than how many of
+ * them survived this page's LIMIT and this session's filter.
+ */
+function _legendCounts() {
+    if (!_typeCounts) return _payloadCounts || {};
+    const out = {};
+    for (const [key, def] of Object.entries(SESSION_TYPES)) out[key] = _typeCounts[def.api] || 0;
+    return out;
 }
 
 // A legend is a key to what is on screen. Listing all six types on a fresh
@@ -1770,7 +1887,13 @@ function _toggleType(typeKey) {
 // four of them are machinery they never create by hand. Only types that are
 // actually present get a row — 'chat' always stays, because it is the one
 // the user makes themselves and the filter has to remain reachable.
-function _updateLegendCounts(counts) {
+//
+// So does a type the user has switched off, whatever it counts. Once the
+// filter is server-side its rows are not in the payload at all, and hiding
+// the entry at zero would take away the only control that turns it back on.
+function _updateLegendCounts() {
+    const counts = _legendCounts();
+    const hidden = _loadState().hiddenTypes || {};
     let total = 0;
     for (const key of Object.keys(SESSION_TYPES)) {
         const n = counts[key] || 0;
@@ -1778,7 +1901,7 @@ function _updateLegendCounts(counts) {
         const span = document.querySelector(`.legend-count[data-count-type="${key}"]`);
         if (span) span.textContent = String(n);
         const item = document.querySelector(`.legend-item[data-type="${key}"]`);
-        if (item) item.hidden = n === 0 && key !== 'chat';
+        if (item) item.hidden = n === 0 && key !== 'chat' && !hidden[key];
     }
     // Nothing at all: the legend is a key to an empty list.
     const legend = document.getElementById('sidebar-legend');
