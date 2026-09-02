@@ -151,6 +151,17 @@
     min-height: 0;
 }
 
+/* The hamburger lives inside the status bar here (mobile.js moves it), so the
+   session header needs none of the desktop clearance for it. */
+#session-header {
+    min-height: 30px;
+    padding: var(--sp-1) max(var(--sp-3), var(--safe-right)) var(--sp-1) max(var(--sp-3), var(--safe-left));
+}
+.session-header-title {
+    max-width: 100%;
+    min-height: 28px;
+}
+
 /* ------------------------------------------------------------------
    Scrollbar hiding (native indicators are better on mobile)
    ------------------------------------------------------------------ */

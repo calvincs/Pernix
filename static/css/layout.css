@@ -600,6 +600,58 @@
     background: var(--accent-glow);
 }
 
+/* Session header — one quiet line naming the conversation you are in and the
+   space it belongs to. The left padding clears the floating #sidebar-toggle
+   above; on touch layouts mobile.js moves that button into the status bar and
+   mobile.css drops the clearance. */
+#session-header {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    min-height: 34px;
+    padding: var(--sp-2) var(--sp-4) var(--sp-2) calc(var(--sp-3) + 42px);
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+}
+.session-header-title {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    padding: 2px var(--sp-1);
+    max-width: 60ch;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    text-align: left;
+    cursor: text;
+    transition: var(--transition);
+}
+.session-header-title:hover {
+    border-color: var(--border-subtle);
+    color: var(--text-bright);
+}
+.session-header-title:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: 1px;
+}
+#session-header-rename {
+    flex: 1 1 320px;
+    min-width: 0;
+    max-width: 60ch;
+    background: var(--bg-surface);
+    border: 1px solid var(--accent-dim);
+    border-radius: var(--radius-sm);
+    color: var(--text-bright);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    padding: 2px var(--sp-1);
+    outline: none;
+}
+
 /* ======================================================================
    Messages
    ====================================================================== */

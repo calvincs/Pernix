@@ -105,6 +105,14 @@
         <!-- Main -->
         <main id="main">
             <button id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">&#9776;</button>
+            <!-- Wayfinding. The session list is not always on screen — it can be
+                 collapsed on desktop and is a drawer on a phone — so nothing in
+                 the main pane said which conversation you were reading. Hidden
+                 on the empty state (app.js). -->
+            <header id="session-header" hidden>
+                <span class="space-chip-labeled" id="session-header-space" hidden></span>
+                <button type="button" id="session-header-title" class="session-header-title"></button>
+            </header>
             <!-- role=region, not role=log: a log region turns every appended
                  node into an automatic announcement, so during a streaming
                  turn a screen reader narrates the model token by token. -->

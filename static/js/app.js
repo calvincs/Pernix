@@ -16,6 +16,7 @@ import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
 import { initMobile, isMobile, closeSidebar } from './mobile.js';
 import { initVoice, stopVoice } from './voice.js';
 import { openOverlay } from './a11y.js';
+import { notify } from './feedback.js';
 
 // ---------------------------------------------------------------------------
 // File uploads state
@@ -144,6 +145,25 @@ document.addEventListener('DOMContentLoaded', async () => {
         sidebar.classList.toggle('collapsed');
         localStorage.setItem('pernix:sidebar-hidden', sidebar.classList.contains('collapsed') ? '1' : '0');
         syncSidebarInert();
+    });
+
+    document.getElementById('session-header-title')?.addEventListener('click', _startHeaderRename);
+
+    // One rename path for the whole app. The header raises the intent; this
+    // listener is what talks to the server, so the sidebar's own inline rename
+    // and this one cannot drift apart.
+    window.addEventListener('pernix:rename-session', async (e) => {
+        const { sid, title } = (e && e.detail) || {};
+        if (!sid || !title) return;
+        try {
+            const res = await patch(`/api/sessions/${sid}`, { title });
+            const sess = (state.sessions || []).find((x) => x.id === sid);
+            if (sess) sess.title = res.title || title;
+            renderSidebar(state.sessions, state.sid, state.spaces);
+            _renderSessionHeader();
+        } catch (err) {
+            notify('error', `Rename failed: ${err.message}`);
+        }
     });
 
     // Space/session mutations from the sidebar need a re-FETCH, not just a repaint
@@ -311,6 +331,7 @@ async function loadSessions() {
                 : null;
         }
         renderSidebar(state.sessions, state.sid, state.spaces);
+        _renderSessionHeader();   // titles are generated a beat after the first turn
     } catch (e) {
         if (!e.offline) console.warn('Failed to load sessions:', e);
     }
@@ -403,6 +424,7 @@ async function selectSession(sid) {
     if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
     closeRlmViewer();
     renderSidebar(state.sessions, state.sid, state.spaces);
+    _renderSessionHeader();
 
     // RLM run views have no transcript — the chat area renders the live
     // trace viewer instead, and the composer stays off (the server enforces
@@ -736,11 +758,98 @@ function setupNewSession() {
 }
 
 // ---------------------------------------------------------------------------
+// Session header — which conversation am I in, and in which space
+// ---------------------------------------------------------------------------
+
+function _renderSessionHeader() {
+    const header = document.getElementById('session-header');
+    if (!header) return;
+    const titleBtn = document.getElementById('session-header-title');
+    const chip = document.getElementById('session-header-space');
+    const sess = (state.sessions || []).find((x) => x.id === state.sid);
+    if (!state.sid || !sess || !titleBtn) {
+        header.hidden = true;
+        return;
+    }
+    header.hidden = false;
+    const title = sess.title || 'New session';
+    titleBtn.textContent = title;
+    titleBtn.title = `${title} — click to rename`;
+    titleBtn.setAttribute('aria-label', `Session: ${title}. Click to rename.`);
+
+    const space = sess.space_id ? (state.spaces || []).find((sp) => sp.id === sess.space_id) : null;
+    if (chip) {
+        if (space) {
+            chip.hidden = false;
+            chip.style.setProperty('--space-color', space.color || 'var(--accent)');
+            chip.textContent = space.label || '';
+            chip.title = `Space: ${space.label || ''}`;
+        } else {
+            chip.hidden = true;
+            chip.textContent = '';
+        }
+    }
+    // The tab title is the other half of wayfinding: five Pernix tabs all
+    // called "Pernix" are indistinguishable in a browser's tab strip.
+    document.title = `${title} · Pernix`;
+}
+
+/**
+ * Rename in place from the header. The PATCH is not issued here — a
+ * 'pernix:rename-session' event is, so the sidebar (which owns the other
+ * rename affordance) and anything else interested see one path.
+ */
+function _startHeaderRename() {
+    const header = document.getElementById('session-header');
+    const titleBtn = document.getElementById('session-header-title');
+    if (!header || !titleBtn || !titleBtn.isConnected) return;
+    const sess = (state.sessions || []).find((x) => x.id === state.sid);
+    const current = (sess && sess.title) || '';
+
+    const input = el('input', {
+        id: 'session-header-rename',
+        type: 'text',
+        value: current,
+        'aria-label': 'Session title',
+    });
+
+    let finished = false;
+    const finish = (save) => {
+        if (finished) return;
+        finished = true;
+        const next = input.value.trim();
+        input.replaceWith(titleBtn);
+        if (save && next && next !== current) {
+            window.dispatchEvent(new CustomEvent('pernix:rename-session', {
+                detail: { sid: state.sid, title: next },
+            }));
+        }
+        titleBtn.focus();
+    };
+
+    input.addEventListener('keydown', (e) => {
+        e.stopPropagation();          // Ctrl+K / Ctrl+F must not fire while typing a title
+        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+        else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+
+    titleBtn.replaceWith(input);
+    input.focus();
+    input.select();
+}
+
+// ---------------------------------------------------------------------------
 // Empty state
 // ---------------------------------------------------------------------------
 
 let _sigilStop = null;
 function showEmptyState() {
+    // The hero screen is its own wayfinding; a header above it would name a
+    // session with nothing in it.
+    const header = document.getElementById('session-header');
+    if (header) header.hidden = true;
+    document.title = 'Pernix';
     const inner = _messagesInner();
     if (_sigilStop) { _sigilStop(); _sigilStop = null; }
     clear(inner);
@@ -2123,6 +2232,7 @@ function handleEvent(event) {
             s.title = event.title;
             if (event.subtitle) s.subtitle = event.subtitle;
             renderSidebar(state.sessions, state.sid, state.spaces);
+            _renderSessionHeader();
         }
     }
 
@@ -2968,7 +3078,10 @@ function appendMessage(role, content, meta = {}) {
 
     // Remove empty state if present
     const emptyEl = inner.querySelector('.empty-state');
-    if (emptyEl) emptyEl.remove();
+    if (emptyEl) {
+        emptyEl.remove();
+        _renderSessionHeader();   // the hero is gone; the session has a name again
+    }
 
     const ts = _parseMsgTs(meta.createdAt ?? Date.now());
 
