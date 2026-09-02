@@ -3041,6 +3041,13 @@ mark.ts-mark.current {
     cursor: pointer;
 }
 .palette-item.selected { background: var(--bg-hover); }
+/* A verb is an action, not a place. The mono face is the same signal the rest
+   of the app uses for "this does something", and it keeps the two kinds of
+   row apart without a badge or a second colour. */
+.palette-item.verb .palette-title {
+    font-family: var(--mono);
+    color: var(--text-bright);
+}
 .palette-title {
     color: var(--text);
     overflow: hidden;

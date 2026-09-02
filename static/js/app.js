@@ -20,6 +20,7 @@ import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
 import { initMobile, isMobile, closeSidebar } from './mobile.js';
 import { initVoice, stopVoice } from './voice.js';
 import { announce, openOverlay } from './a11y.js';
+import { setTheme, isLight } from './theme.js';
 import { notify } from './feedback.js';
 import { confirmDanger } from './components/modals/confirm.js';
 
@@ -5060,13 +5061,172 @@ function closeTranscriptSearch() {
 let _paletteEl = null;
 let _closePaletteOverlay = null;   // teardown from a11y.js openOverlay()
 
+// The Explorer's tabs, as things you can ask for by name. The KEYS are the
+// ones openFilePanel has always taken and must not change; the labels are how
+// the Explorer names them now, with the older name kept as a search alias so
+// muscle memory ("memory", "skills", "jobs") still finds the right pane.
+const PALETTE_EXPLORER_TABS = [
+    { key: 'workspace', label: 'Files', alias: 'workspace files' },
+    { key: 'memory', label: 'Knowledge', alias: 'memory notes recall' },
+    { key: 'skills', label: 'Capabilities', alias: 'skills' },
+    { key: 'tools', label: 'Tools', alias: 'capabilities' },
+    { key: 'mcp', label: 'MCP', alias: 'servers capabilities' },
+    { key: 'jobs', label: 'Automation', alias: 'jobs cron schedule' },
+    { key: 'adaptive', label: 'Self-tuning', alias: 'adaptive learning' },
+    { key: 'canary', label: 'Canary', alias: 'self-tuning tests' },
+    { key: 'telos', label: 'Telos', alias: 'self-tuning goals purpose' },
+];
+
+/** The legend's hidden-type map, read straight from the sidebar's own store —
+ *  a type switched off in the legend is switched off here too. */
+function _paletteHiddenTypes() {
+    try {
+        return JSON.parse(localStorage.getItem('pernix:sidebar') || '{}').hiddenTypes || {};
+    } catch { return {}; }
+}
+
+/** The sidebar's type key for one session, mirrored so the palette can honour
+ *  the same legend without reaching into the sidebar's internals. */
+function _paletteTypeKey(s) {
+    if (s.session_type === 'worker') return 'worker';
+    if (s.session_type === 'snooze') return 'snooze';
+    if (s.session_type === 'rlm') return 'rlm';
+    if (s.session_type === 'canary') return 'canary';
+    if (s.title && s.title.startsWith('Cron:')) return 'cron';
+    return 'chat';
+}
+
+/**
+ * The things the palette can DO, as opposed to the places it can go.
+ *
+ * Ctrl+K was a session switcher and nothing else, so every other action in
+ * the app was a hunt for the right button. These are the same actions the
+ * buttons fire — no new code paths, just a keyboard-first way in.
+ */
+function _paletteVerbs() {
+    const verbs = [];
+    verbs.push({
+        title: 'New session',
+        hint: 'session',
+        run: () => document.getElementById('new-session-btn')?.click(),
+    });
+    for (const sp of (state.spaces || [])) {
+        verbs.push({
+            title: `New session in ${sp.label}`,
+            hint: 'space',
+            color: sp.color,
+            run: async () => {
+                try {
+                    const data = await post('/api/sessions', { title: 'New session', space_id: sp.id });
+                    await loadSessions();
+                    selectSession(data.session_id);
+                } catch (e) {
+                    notify('error', `Couldn't create the session — ${humanizeError(e)}`);
+                }
+            },
+        });
+    }
+    for (const tab of PALETTE_EXPLORER_TABS) {
+        verbs.push({
+            title: `Open Explorer → ${tab.label}`,
+            hint: 'explorer',
+            alias: tab.alias,
+            run: () => openFilePanel({ tab: tab.key }),
+        });
+    }
+    verbs.push({ title: 'Settings', hint: 'app', alias: 'preferences models keys', run: openSettings });
+    verbs.push({
+        title: 'Clear conversation',
+        hint: 'session',
+        alias: 'delete messages transcript',
+        run: () => SLASH_COMMANDS['/clear'](),
+    });
+    verbs.push({
+        title: 'Toggle theme',
+        hint: 'app',
+        alias: 'dark light appearance',
+        run: () => setTheme(isLight() ? 'dark' : 'light'),
+    });
+    return verbs;
+}
+
+/** Everything the palette can offer right now, verbs first. */
+function _paletteEntries() {
+    const hidden = _paletteHiddenTypes();
+    const entries = [];
+    let order = 0;
+    for (const v of _paletteVerbs()) {
+        entries.push({ ...v, isVerb: 1, recency: 0, order: order++ });
+    }
+    for (const s of (state.sessions || [])) {
+        // Workers live under their parent, not in a flat jump list; the rest
+        // answer to the legend the same way the sidebar does.
+        if (s.session_type === 'worker') continue;
+        if (hidden[_paletteTypeKey(s)]) continue;
+        entries.push({
+            title: s.title || 'New session',
+            hint: _paletteTime(s.updated_at),
+            alias: s.first_message || '',
+            session: s,
+            isVerb: 0,
+            recency: Date.parse((s.updated_at || '').replace(/\+00:00$/, 'Z') + (/[Z+-]\d{2}/.test(s.updated_at || '') ? '' : 'Z')) || 0,
+            order: order++,
+            run: () => selectSession(s.id),
+        });
+    }
+    return entries;
+}
+
+/** 3 = the query starts the text, 2 = it starts a word in it, 1 = it is in
+ *  there somewhere, 0 = no match at all. */
+function _matchScore(text, query) {
+    if (!query) return 1;
+    const t = (text || '').toLowerCase();
+    if (!t) return 0;
+    const i = t.indexOf(query);
+    if (i < 0) return 0;
+    if (i === 0) return 3;
+    return /[\s\-_/·:.,(→]/.test(t[i - 1]) ? 2 : 1;
+}
+
+/**
+ * Rank, do not filter-in-place.
+ *
+ * The palette used to show whatever the API happened to return first among
+ * the substring matches, so typing the exact name of a session could still
+ * leave it below three others that merely contained the word. Strength of
+ * match first, then recency, with verbs winning a tie only once something has
+ * actually been typed — with an empty box this is still a session switcher.
+ */
+function _rankPalette(entries, query) {
+    const q = (query || '').trim().toLowerCase();
+    const scored = [];
+    for (const e of entries) {
+        let score = _matchScore(e.title, q);
+        if (q && score < 3) {
+            // Secondary text (a session's first message, a verb's aliases)
+            // can only ever earn the weakest kind of match.
+            score = Math.max(score, Math.min(1, _matchScore(e.alias, q)));
+        }
+        if (!score) continue;
+        scored.push({ e, score });
+    }
+    scored.sort((a, b) => (b.score - a.score)
+        || (q ? (b.e.isVerb - a.e.isVerb) : 0)
+        || (b.e.recency - a.e.recency)
+        || (a.e.order - b.e.order));
+    return scored.map((s) => s.e);
+}
+
+const PALETTE_MAX_ROWS = 20;
+
 function openSessionPalette() {
     if (_paletteEl) { closeSessionPalette(); return; }
 
     const input = el('input', {
         type: 'text',
-        placeholder: 'Jump to session…',
-        'aria-label': 'Jump to session',
+        placeholder: 'Jump to a session, or type a command…',
+        'aria-label': 'Jump to a session or run a command',
     });
     const list = el('div', { class: 'palette-list' });
     const card = el('div', { class: 'palette-card' }, [input, list]);
@@ -5075,48 +5235,55 @@ function openSessionPalette() {
     document.body.appendChild(_paletteEl);
     // The palette has no heading of its own — name it from the input's own
     // placeholder text rather than inventing a visible title.
-    card.setAttribute('aria-label', 'Jump to session');
+    card.setAttribute('aria-label', 'Jump to a session or run a command');
     _closePaletteOverlay = openOverlay(card, { initialFocus: input });
 
+    // Snapshot once per open: the ten-second session poll must not reshuffle
+    // the list under the reader's fingers between a keystroke and Enter.
+    const all = _paletteEntries();
     let items = [];
     let selected = 0;
 
+    const run = (entry) => {
+        if (!entry) return;
+        closeSessionPalette();
+        entry.run();
+    };
+
     const render = (q) => {
         clear(list);
-        const query = (q || '').toLowerCase();
-        const matches = (state.sessions || [])
-            .filter(s => s.session_type !== 'worker')
-            .filter(s => {
-                if (!query) return true;
-                return (s.title || '').toLowerCase().includes(query)
-                    || (s.first_message || '').toLowerCase().includes(query);
-            })
-            .slice(0, 15);
+        const matches = _rankPalette(all, q).slice(0, PALETTE_MAX_ROWS);
         items = matches;
         selected = 0;
-        matches.forEach((s, i) => {
+        matches.forEach((entry, i) => {
             const titleKids = [];
-            const sp = s.space_id ? (state.spaces || []).find(x => x.id === s.space_id) : null;
+            const sp = entry.session && entry.session.space_id
+                ? (state.spaces || []).find((x) => x.id === entry.session.space_id)
+                : null;
             if (sp) {
                 titleKids.push(el('span', {
                     class: 'space-chip',
                     style: `--space-color: ${sp.color}`,
                     title: `Space: ${sp.label}`,
                 }));
+            } else if (entry.color) {
+                titleKids.push(el('span', { class: 'space-chip', style: `--space-color: ${entry.color}` }));
             }
-            titleKids.push(text(s.title || 'New session'));
-            const row = el('div', { class: `palette-item${i === 0 ? ' selected' : ''}` }, [
+            titleKids.push(text(entry.title));
+            const row = el('div', {
+                class: `palette-item${entry.isVerb ? ' verb' : ''}${i === 0 ? ' selected' : ''}`,
+            }, [
                 el('span', { class: 'palette-title' }, titleKids),
-                el('span', { class: 'palette-meta' }, [text(_paletteTime(s.updated_at))]),
+                el('span', { class: 'palette-meta' }, [text(entry.hint || '')]),
             ]);
-            row.addEventListener('click', () => { closeSessionPalette(); selectSession(s.id); });
+            row.addEventListener('click', () => run(entry));
             row.addEventListener('mousemove', () => {
                 selected = i;
                 list.querySelectorAll('.palette-item').forEach((r, j) => r.classList.toggle('selected', j === i));
             });
             list.appendChild(row);
         });
-        if (!matches.length) list.appendChild(el('div', { class: 'palette-empty' }, [text('No matching sessions')]));
+        if (!matches.length) list.appendChild(el('div', { class: 'palette-empty' }, [text('Nothing matches')]));
     };
 
     input.addEventListener('input', () => render(input.value));
@@ -5124,8 +5291,7 @@ function openSessionPalette() {
         if (e.key === 'Escape') { e.preventDefault(); closeSessionPalette(); return; }
         if (e.key === 'Enter') {
             e.preventDefault();
-            const s = items[selected];
-            if (s) { closeSessionPalette(); selectSession(s.id); }
+            run(items[selected]);
             return;
         }
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
