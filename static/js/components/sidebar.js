@@ -1,5 +1,6 @@
 // Pernix — Sidebar component: session list with grouping, dots, tooltips, legend
 import { el, text, clear } from '../render.js';
+import { icon } from '../icons.js';
 import { isMobile } from '../mobile.js';
 import { get, post, patch } from '../api.js';
 import { openSpaceModal, openSpaceDeleteDialog } from './modals/spaces.js';
@@ -475,7 +476,7 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
         'aria-expanded': String(!collapsed),
         'aria-label': `Space ${space.label}, ${group.length} session${group.length === 1 ? '' : 's'}`,
     }, [
-        el('span', { class: 'sg-arrow', 'aria-hidden': 'true' }, [text('▼')]),
+        el('span', { class: 'sg-arrow', 'aria-hidden': 'true' }, [icon('chevron-down', { size: 9 })]),
         el('span', { class: 'space-dot', 'aria-hidden': 'true' }),
         el('span', { class: 'space-label' }, [text(space.label)]),
         el('span', { class: 'sg-count' }, [text(String(group.length))]),
@@ -511,7 +512,7 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
                 e.stopPropagation();
                 openSpaceModal(space);
             },
-        }, [text('⚙')]),
+        }, [icon('settings', { size: 12 })]),
         el('button', {
             class: 'space-btn space-del-btn',
             title: `Delete space ${space.label}`,
@@ -520,7 +521,7 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
                 e.stopPropagation();
                 openSpaceDeleteDialog(space);
             },
-        }, [text('×')]),
+        }, [icon('x', { size: 12 })]),
     ]);
 
     const body = el('div', { class: 'session-group-body' + (collapsed ? ' collapsed' : '') });
@@ -734,7 +735,7 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
                     notify('error', `Could not ${next ? 'pin' : 'unpin'} “${titleText}” — ${_reason(err)}.`);
                 }
             },
-        }, [text('⚲')]));
+        }, [icon(session.pinned ? 'pin-filled' : 'pin', { size: 12 })]));
 
         // Rename — swaps the title for an inline editor.
         meta.push(el('button', {
@@ -745,7 +746,7 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
                 e.stopPropagation();
                 _startRename(session);
             },
-        }, [text('✎')]));
+        }, [icon('edit', { size: 12 })]));
 
         // Move to space — dropdown of spaces (+ "No space"). Only rendered
         // when at least one space exists; membership changes never bump
@@ -761,7 +762,7 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
                     e.stopPropagation();
                     _openMoveMenu(session, e.currentTarget);
                 },
-            }, [text('▣')]));
+            }, [icon('move', { size: 12 })]));
         }
     }
 

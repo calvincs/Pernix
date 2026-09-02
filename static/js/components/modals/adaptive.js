@@ -4,6 +4,7 @@
 // dismiss tripwire flags.
 
 import { el, text, clear } from '../../render.js';
+import { icon } from '../../icons.js';
 import { del, get, post } from '../../api.js';
 import { makeDisclosure, resultLine, tabGlossary } from './telos.js';
 
@@ -88,7 +89,7 @@ export async function renderAdaptiveTab(container) {
             title: 'Reload entries, proposals, batches and the journal',
             'aria-label': 'Refresh the Adaptive tab',
             onClick: refresh,
-        }, [text('↻ Refresh')]),
+        }, [icon('refresh', { size: 12 }), text('Refresh')]),
     ]);
     container.appendChild(head);
     const notice = takeActionNotice();

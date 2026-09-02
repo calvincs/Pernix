@@ -6,6 +6,7 @@
 // directive tabs reuse the shared .tab-bar/.tab-btn look. The edit card is
 // user-resizable (CSS resize: both); Monaco's automaticLayout tracks it.
 import { el, text, clear } from '../../render.js';
+import { icon } from '../../icons.js';
 import { get, post, del, patch, apiJson } from '../../api.js';
 import { createCodeEditor } from '../file-panel.js';
 import { announce, openOverlay } from '../../a11y.js';
@@ -169,7 +170,7 @@ export function openSpaceModal(space) {
                 title: 'Close',
                 'aria-label': 'Close',
                 onClick: close,
-            }, [text('×')]),
+            }, [icon('x', { size: 14 })]),
         ]),
         body,
         el('div', { class: 'modal-footer' }, [

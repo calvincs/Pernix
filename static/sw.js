@@ -38,6 +38,7 @@ const SHELL_ASSETS = [
     '/static/js/app.js',
     '/static/js/store.js',
     '/static/js/render.js',
+    '/static/js/icons.js',
     '/static/js/api.js',
     '/static/js/sse.js',
     '/static/js/voice.js',

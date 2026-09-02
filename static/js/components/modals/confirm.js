@@ -14,6 +14,7 @@
 // Styling reuses the shared .modal-* / .btn classes; the only rule of its own
 // is the card width, which lives in layout.css.
 import { el, text } from '../../render.js';
+import { icon } from '../../icons.js';
 import { announce, openOverlay } from '../../a11y.js';
 
 let _openConfirm = null;   // the live instance — one at a time
@@ -75,7 +76,7 @@ export function confirmDanger({ title, body, verb = 'Delete', cancelLabel = 'Kee
                     title: cancelLabel,
                     'aria-label': cancelLabel,
                     onClick: cancel,
-                }, [text('×')]),
+                }, [icon('x', { size: 14 })]),
             ]),
             el('div', { class: 'modal-body confirm-body' }, paragraphs),
             el('div', { class: 'modal-footer' }, [

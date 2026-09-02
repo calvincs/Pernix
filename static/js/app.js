@@ -6,6 +6,7 @@ import { connectSSE, disconnectSSE } from './sse.js';
 import { getPermission, requestPermission, connectGlobalNotifications, registerServiceWorker, subscribePush } from './notifications.js';
 import { el, text, clear, initMarked, renderMarkdown } from './render.js';
 import { initSigil } from './sigil.js';
+import { icon } from './icons.js';
 import { openSettings } from './components/modals/settings.js';
 import { openTimeline, appendTimelineRow, appendTimelineToolRow, appendTimelineToolStart, isTimelineOpen } from './components/modals/timeline.js';
 import { initBell, openBellPanel, closeBellPanel, refreshBell } from './components/notification-bell.js';
@@ -1500,7 +1501,7 @@ function _addQueueRemoveButton(msgEl, messageId) {
         class: 'queued-remove',
         title: 'Remove from queue (not yet seen by the agent)',
         'aria-label': 'Remove this queued message',
-    }, [text('×')]);
+    }, [icon('x', { size: 12 })]);
     btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         btn.disabled = true;
@@ -1910,7 +1911,7 @@ function _renderWorkerStrip() {
             'aria-label': w.paused
                 ? `Resume worker ${w.title}`
                 : `Pause worker ${w.title} after its current step`,
-        }, [text(w.paused ? '▶' : '❚❚')]);
+        }, [icon(w.paused ? 'play' : 'pause', { size: 11 })]);
         ctlBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
             ctlBtn.disabled = true;
@@ -1942,7 +1943,7 @@ function _renderWorkerStrip() {
             class: 'worker-chip-ctl',
             title: 'Resume this worker from where it stopped',
             'aria-label': `Resume worker ${d.title} from where it stopped`,
-        }, [text('↻')]);
+        }, [icon('refresh', { size: 11 })]);
         reviveBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
             reviveBtn.disabled = true;
@@ -3248,14 +3249,15 @@ function _attachMessageActions(msgEl, role) {
     const actions = el('div', { class: 'msg-actions' });
     const copyBtn = el('button', {
         class: 'msg-action-btn', title: 'Copy message', 'aria-label': 'Copy message',
-    }, [text('⧉')]);
+    }, [icon('copy', { size: 12 })]);
     copyBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         const raw = msgEl._rawContent ?? msgEl.querySelector('.content')?.innerText ?? '';
         try {
             await navigator.clipboard.writeText(raw);
-            copyBtn.textContent = '✓';
-            setTimeout(() => { copyBtn.textContent = '⧉'; }, 1200);
+            clear(copyBtn);
+        copyBtn.appendChild(icon('check', { size: 12 }));
+            setTimeout(() => { clear(copyBtn); copyBtn.appendChild(icon('copy', { size: 12 })); }, 1200);
         } catch { /* clipboard unavailable (non-secure context) */ }
     });
     actions.appendChild(copyBtn);
@@ -3266,7 +3268,7 @@ function _attachMessageActions(msgEl, role) {
         // puts the text back in the composer for you to change and send.
         const editBtn = el('button', {
             class: 'msg-action-btn', title: 'Copy to composer', 'aria-label': 'Copy to composer',
-        }, [text('✎')]);
+        }, [icon('edit', { size: 12 })]);
         editBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             const textarea = document.getElementById('msg-input');
@@ -3664,7 +3666,7 @@ function ensureToolGroup() {
     _toolGroupLatency = 0;
     _toolGroupRunning = 0;
     const header = el('div', { class: 'tool-group-header' }, [
-        el('span', { class: 'tg-toggle' }, [text('\u25BC')]),
+        el('span', { class: 'tg-toggle' }, [icon('chevron-down', { size: 10 })]),
         el('span', { class: 'tg-label' }, [text('0 tool calls')]),
     ]);
     _makeDisclosure(header, true, () => {
@@ -3706,7 +3708,7 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
     _updateToolGroupHeader(group);
 
     // --- Compact header row (always visible) ---
-    const chevron = el('span', { class: 'tool-item-chevron' }, [text('\u25B6')]);
+    const chevron = el('span', { class: 'tool-item-chevron' }, [icon('chevron-right', { size: 10 })]);
 
     const nameChildren = [text(name)];
     if (latencyMs) {
@@ -3936,7 +3938,7 @@ function renderScoutReport(event) {
     const headerText = `scout — ${count} tools, ${ms}ms${cache}`;
 
     const header = el('div', { class: 'scout-activity-header' }, [
-        el('span', { class: 'scout-toggle' }, [text('\u25BC')]),
+        el('span', { class: 'scout-toggle' }, [icon('chevron-down', { size: 10 })]),
         el('span', {}, [text(headerText)]),
     ]);
 
@@ -4054,7 +4056,7 @@ function renderReflectCard(event) {
     const headerText = `reflect — ${verdict}${ms ? `, ${ms}ms` : ''}`;
 
     const header = el('div', { class: 'reflect-header' }, [
-        el('span', { class: 'scout-toggle' }, [text('\u25BC')]),
+        el('span', { class: 'scout-toggle' }, [icon('chevron-down', { size: 10 })]),
         el('span', { class: `reflect-badge reflect-${verdict}` }, [text(verdict)]),
         el('span', {}, [text(headerText)]),
     ]);
@@ -4118,7 +4120,7 @@ function renderEvalCard(event) {
 
     const reflectModel = event.reflect_model || '';
     const headerChildren = [
-        el('span', { class: 'scout-toggle' }, [text('▼')]),
+        el('span', { class: 'scout-toggle' }, [icon('chevron-down', { size: 10 })]),
         el('span', { class: `reflect-badge reflect-${verdict}` }, [text(verdict)]),
         el('span', {}, [text(headerText)]),
     ];
@@ -4183,7 +4185,7 @@ function renderGateCard(event) {
     const attemptSuffix = attempt > 1 ? ` · attempt ${attempt}` : '';
 
     const header = el('div', { class: 'reflect-header' }, [
-        el('span', { class: 'scout-toggle' }, [text('▼')]),
+        el('span', { class: 'scout-toggle' }, [icon('chevron-down', { size: 10 })]),
         el('span', { class: `reflect-badge reflect-${verdict}` }, [text(verdict)]),
         el('span', {}, [text(`gates — ${passedCount}/${gates.length} passed${attemptSuffix}`)]),
     ]);
@@ -4332,13 +4334,13 @@ function openTranscriptSearch() {
     const counter = el('span', { class: 'ts-counter', role: 'status', 'aria-live': 'polite' });
     const prevBtn = el('button', {
         class: 'ts-nav', title: 'Previous match (Shift+Enter)', 'aria-label': 'Previous match',
-    }, [text('↑')]);
+    }, [icon('arrow-up', { size: 12 })]);
     const nextBtn = el('button', {
         class: 'ts-nav', title: 'Next match (Enter)', 'aria-label': 'Next match',
-    }, [text('↓')]);
+    }, [icon('arrow-down', { size: 12 })]);
     const closeBtn = el('button', {
         class: 'ts-close', title: 'Close (Esc)', 'aria-label': 'Close transcript search',
-    }, [text('×')]);
+    }, [icon('x', { size: 12 })]);
 
     input.addEventListener('input', () => {
         clearTimeout(_searchDebounce);

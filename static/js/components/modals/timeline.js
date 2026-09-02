@@ -19,6 +19,7 @@
 // Mermaid is vendored and lazy-loaded from disk on first open.
 
 import { el, text, setSanitizedSvg } from '../../render.js';
+import { icon } from '../../icons.js';
 import { get } from '../../api.js';
 import { state } from '../../store.js';
 import { openOverlay } from '../../a11y.js';
@@ -106,7 +107,7 @@ export async function openTimeline() {
                 title: 'Close',
                 'aria-label': 'Close the state timeline',
                 onClick: closeTimeline,
-            }, [text('×')]),
+            }, [icon('x', { size: 14 })]),
         ]),
         tabBar,
         modalBody,
@@ -446,7 +447,9 @@ function _buildFilterBar() {
         }, 150);
     });
 
-    const nextErrBtn = el('button', { class: 'tl-next-error', title: 'Jump to next error' }, [text('⚠ next')]);
+    const nextErrBtn = el('button', { class: 'tl-next-error', title: 'Jump to next error' }, [
+        icon('warning', { size: 11 }), text('next'),
+    ]);
     nextErrBtn.addEventListener('click', _jumpToNextError);
 
     return el('div', { class: 'tl-filter-bar' }, [..._filterBtns, _filterInput, nextErrBtn]);
@@ -1051,14 +1054,14 @@ function _buildTurnGroup(turn, meta) {
 
 function _buildTurnHeader(turn, meta = {}) {
     const parts = [
-        el('span', { class: 'tl-turn-chevron' }, [text('▾')]),
+        el('span', { class: 'tl-turn-chevron' }, [icon('chevron-down', { size: 10 })]),
         el('span', {}, [text(`Turn ${turn ?? '—'}`)]),
     ];
     if (meta.elapsedMs) parts.push(el('span', { class: 'tl-turn-meta' }, [text(_fmtMs(meta.elapsedMs))]));
     if (meta.toolCount) parts.push(el('span', { class: 'tl-turn-meta' }, [text(`${meta.toolCount} tool${meta.toolCount === 1 ? '' : 's'}`)]));
     if (meta.compactions) parts.push(el('span', { class: 'tl-turn-meta' }, [text(`${meta.compactions} compaction${meta.compactions === 1 ? '' : 's'}`)]));
-    if (meta.reflectRetries) parts.push(el('span', { class: 'tl-turn-meta' }, [text(`↻ ${meta.reflectRetries} reflect`)]));
-    if (meta.evalRetries) parts.push(el('span', { class: 'tl-turn-meta' }, [text(`↻ ${meta.evalRetries} eval`)]));
+    if (meta.reflectRetries) parts.push(el('span', { class: 'tl-turn-meta' }, [icon('refresh', { size: 10 }), text(`${meta.reflectRetries} reflect`)]));
+    if (meta.evalRetries) parts.push(el('span', { class: 'tl-turn-meta' }, [icon('refresh', { size: 10 }), text(`${meta.evalRetries} eval`)]));
     if (meta.errors) parts.push(el('span', { class: 'tl-turn-meta tl-turn-errors' }, [text(`${meta.errors} error${meta.errors === 1 ? '' : 's'}`)]));
     if (meta.termination) {
         const slug = meta.termination.replace(/_/g, '-');
@@ -1110,11 +1113,16 @@ function _buildStateRow(row, ts) {
     } else if (reason === 'compact-done') {
         badges.push(el('span', { class: 'tl-badge tl-badge-compact' }, [text('compact done')]));
     }
-    if (reason === 'reflect-retry') badges.push(el('span', { class: 'tl-badge tl-badge-retry' }, [text('↻ reflect')]));
-    else if (reason === 'eval-retry') badges.push(el('span', { class: 'tl-badge tl-badge-retry' }, [text('↻ eval')]));
-    if (toState === 'awaiting_user') badges.push(el('span', { class: 'tl-badge tl-badge-await' }, [text('⏳ awaiting')]));
-    else if (toState === 'awaiting_workers') badges.push(el('span', { class: 'tl-badge tl-badge-await' }, [text('⏳ workers')]));
-    if (toState === 'paused' || toState === 'pause_requested') badges.push(el('span', { class: 'tl-badge tl-badge-pause' }, [text('⏸ paused')]));
+    // ⏳ and ⏸ carry EMOJI presentation in most fonts — they rendered in
+    // colour, at emoji size, inside an 11px monochrome pill.
+    const badge = (cls, name, label) => el('span', { class: `tl-badge ${cls}` }, [
+        icon(name, { size: 10 }), text(label),
+    ]);
+    if (reason === 'reflect-retry') badges.push(badge('tl-badge-retry', 'refresh', 'reflect'));
+    else if (reason === 'eval-retry') badges.push(badge('tl-badge-retry', 'refresh', 'eval'));
+    if (toState === 'awaiting_user') badges.push(badge('tl-badge-await', 'clock', 'awaiting'));
+    else if (toState === 'awaiting_workers') badges.push(badge('tl-badge-await', 'clock', 'workers'));
+    if (toState === 'paused' || toState === 'pause_requested') badges.push(badge('tl-badge-pause', 'pause', 'paused'));
     if (badges.length) {
         const badgeRow = document.createElement('span');
         badgeRow.className = 'tl-badge-row';
@@ -1145,7 +1153,7 @@ function _buildToolRow(tool, ts) {
         return el('div', { class: 'tool-item timeline-tool-row running' }, [headerEl]);
     }
 
-    const chevron = el('span', { class: 'tool-item-chevron' }, [text('▶')]);
+    const chevron = el('span', { class: 'tool-item-chevron' }, [icon('chevron-right', { size: 10 })]);
 
     const nameChildren = [text(tool.name || 'tool')];
     if (tool.latency_ms) {

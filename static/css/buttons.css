@@ -240,8 +240,22 @@
       by its width/height attributes and coloured by the control it is in.
    ---------------------------------------------------------------------- */
 .pxi {
-    display: block;
+    /* inline-block, not block: an icon has to work both as a flex item (where
+       it is blockified anyway and centred by the row) and inline beside a
+       word, where a block box would break the line. The nudge sits it on the
+       mono x-height instead of the baseline. */
+    display: inline-block;
+    vertical-align: -0.14em;
     flex-shrink: 0;
+}
+/* Icon beside a word in a container that is not already a flex row. */
+.tl-badge,
+.tl-turn-meta,
+.tl-next-error,
+.fp-col-h {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
 }
 /* A status-bar button may carry a word beside its icon on a wide screen. An
    icon alone is a guess; two of these open surfaces most users never find. */
