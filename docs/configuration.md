@@ -51,7 +51,7 @@ These are the most important settings to configure before first use.
 
 ### OpenAI (and OpenAI-compatible servers)
 
-A native provider for the OpenAI API — and, because `openai_base_url` is overridable, for any OpenAI-compatible server (vLLM, LM Studio, llama.cpp server). The API key is **env-only**: set `OPENAI_API_KEY` in `.env` (or via Settings → LLM Providers → OpenAI API Key); it is deliberately never a `settings.json` field because that file is plaintext on disk.
+A native provider for the OpenAI API — and, because `openai_base_url` is overridable, for any OpenAI-compatible server (vLLM, LM Studio, llama.cpp server). The API key is **env-only**: set `OPENAI_API_KEY` in `.env` (or via Settings → Providers & models → LLM Providers → OpenAI API Key); it is deliberately never a `settings.json` field because that file is plaintext on disk.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -153,7 +153,7 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 
 ## Candor (Operational Memory Add-on)
 
-Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Operational memory (Candor). How it works: [internals/candor.md](internals/candor.md); design history: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
+Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Integrations → Operational memory (Candor). How it works: [internals/candor.md](internals/candor.md); design history: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -170,7 +170,7 @@ The store lives at `data/candor/` (machine-local, not in `settings.json`).
 
 ## RLM (Recursive Processing Add-on)
 
-Recursive Language Models (arXiv 2512.24601): the agent processes inputs far beyond the context window — huge files, corpora, transcripts, log dumps — by writing code in a sandboxed child REPL that holds the input as a variable and delegates chunk work to budgeted sub-LLM calls. Adapted from the MIT-licensed reference implementation (no new dependency). Toggles live in Settings → General → Large-input runs (RLM). RLM adds **no model roles of its own** — it reuses Primary and Background (see below). Architecture + security posture: [internals/rlm.md](internals/rlm.md).
+Recursive Language Models (arXiv 2512.24601): the agent processes inputs far beyond the context window — huge files, corpora, transcripts, log dumps — by writing code in a sandboxed child REPL that holds the input as a variable and delegates chunk work to budgeted sub-LLM calls. Adapted from the MIT-licensed reference implementation (no new dependency). Toggles live in Settings → Tools & safety → Large-input runs (RLM). RLM adds **no model roles of its own** — it reuses Primary and Background (see below). Architecture + security posture: [internals/rlm.md](internals/rlm.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -190,7 +190,7 @@ Recursive Language Models (arXiv 2512.24601): the agent processes inputs far bey
 
 ## Dream (Introspection Add-on)
 
-Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems; generates typed hypotheses about itself (contradictions, stale memory, ineffective lessons, tool patterns); validates them against recorded outcomes; and writes a periodic report to `workspace/dreams/`. Hypotheses influence nothing until validated. Each day of dreaming narrates itself into a read-only Dream journal session in the sidebar. Toggles live in Settings → Dream (Introspection); all apply hot. How it works: [internals/dream.md](internals/dream.md).
+Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems; generates typed hypotheses about itself (contradictions, stale memory, ineffective lessons, tool patterns); validates them against recorded outcomes; and writes a periodic report to `workspace/dreams/`. Hypotheses influence nothing until validated. Each day of dreaming narrates itself into a read-only Dream journal session in the sidebar. Toggles live in Settings → Autonomy & idle work → Dream (Introspection); all apply hot. How it works: [internals/dream.md](internals/dream.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -207,7 +207,7 @@ Idle-time introspection: during snooze the agent examines its own memory, Candor
 
 ## Telos (Teleological Layer Add-on)
 
-A non-convergent drive with correction machinery over the whole loop: turn anomalies mint Questions, an idle-time SOUP generates cross-domain hypotheses (only falsifiable ones execute; the rest wait in a speculation pool), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (Ordo), detecting Goodhart binding, measuring goal discharge (Hevel), reconciling the agent's self-story against its append-only trace ledger, and keeping exploration entropy above floor. All state is markdown+YAML under `data/telos/`. Toggles live in Settings → Goals (Telos); everything applies hot except tool registration (restart). How it works: [internals/telos.md](internals/telos.md); derivation: [dev/telos-spec.md](dev/telos-spec.md).
+A non-convergent drive with correction machinery over the whole loop: turn anomalies mint Questions, an idle-time SOUP generates cross-domain hypotheses (only falsifiable ones execute; the rest wait in a speculation pool), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (Ordo), detecting Goodhart binding, measuring goal discharge (Hevel), reconciling the agent's self-story against its append-only trace ledger, and keeping exploration entropy above floor. All state is markdown+YAML under `data/telos/`. Toggles live in Settings → Autonomy & idle work → Goals (Telos); everything applies hot except tool registration (restart). How it works: [internals/telos.md](internals/telos.md); derivation: [dev/telos-spec.md](dev/telos-spec.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -229,7 +229,7 @@ A non-convergent drive with correction machinery over the whole loop: turn anoma
 
 ## Autonomy (Gates, Goals, Heartbeats, Session Kernel)
 
-The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, heartbeats steered into running work, and a persistent per-session Python REPL. All off by default; a goal + gates + a heartbeat compose into an autonomous task. Toggles live in Settings → Autonomy. How it works: [internals/autonomy.md](internals/autonomy.md).
+The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, heartbeats steered into running work, and a persistent per-session Python REPL. All off by default; a goal + gates + a heartbeat compose into an autonomous task. Toggles live in Settings → Autonomy & idle work → Autonomy. How it works: [internals/autonomy.md](internals/autonomy.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -247,7 +247,7 @@ The long-running-autonomy substrate: deterministic gates Reflect cannot overrule
 
 ## Canary Suite
 
-Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — an adaptive batch (a targeted post-batch probe), a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — plus a small nightly heartbeat that keeps every active canary's history warm. The Adaptive Layer's tripwire reads the post-batch results per task. Zero rows, zero behavior change while off. Toggles live in Settings → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Canary tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — an adaptive batch (a targeted post-batch probe), a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — plus a small nightly heartbeat that keeps every active canary's history warm. The Adaptive Layer's tripwire reads the post-batch results per task. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Canary tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -270,7 +270,7 @@ Golden-task canaries: canned tasks with deterministic gates, run headlessly thro
 
 ## Adaptive Layer
 
-A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies that route through the proposal queue: a **veto window**, not an approval gate. Content is gated at the mouth (v3.1): every machine edit passes an actionability lint (instructions in, narrative out), per-entry usage is measured (scout and reflect citations), unused entries retire on their own, and both you and the agent have direct authorship paths. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Adaptive Layer; entries, events, and proposals surface in the Explorer's Adaptive tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies that route through the proposal queue: a **veto window**, not an approval gate. Content is gated at the mouth (v3.1): every machine edit passes an actionability lint (instructions in, narrative out), per-entry usage is measured (scout and reflect citations), unused entries retire on their own, and both you and the agent have direct authorship paths. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Autonomy & idle work → Adaptive Layer; entries, events, and proposals surface in the Explorer's Adaptive tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -318,7 +318,7 @@ When `auto_approve_dangerous` is `false` (the default), every tool marked `dange
 
 Approvals are **per-invocation by default** — approving `bash` for `ps aux` does not cover a later `mv /etc/passwd`. Pass `persistent=True` only for genuinely repetitive low-risk actions (e.g. browsing several pages during research) where re-asking each call would be noise.
 
-**Previously approved scopes are remembered** in `data/tool_approvals.json`. The next time the agent calls `approve_dangerous_tool()` with the same scope, the `ask_user` step is skipped automatically. You can view and clear this file in **Settings → Security → Remembered Approvals**.
+**Previously approved scopes are remembered** in `data/tool_approvals.json`. The next time the agent calls `approve_dangerous_tool()` with the same scope, the `ask_user` step is skipped automatically. You can view and clear this file in **Settings → Tools & safety → Remembered Approvals**.
 
 ---
 
@@ -342,7 +342,7 @@ server's tools register as `mcp_<server>_<tool>` and flow through scout
 curation, the dangerous-tool gate, and per-tool health metrics like native
 tools. Servers themselves are configured per-item in the Explorer → MCP tab
 (or `data/mcp_servers.json`); these settings are the global knobs. Toggles in
-Settings → MCP Servers. Full guide: [mcp.md](mcp.md).
+Settings → Integrations → MCP Servers. Full guide: [mcp.md](mcp.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -405,7 +405,7 @@ Settings → MCP Servers. Full guide: [mcp.md](mcp.md).
 |---|---|---|
 | `web_search_enabled` | `true` | Enable the `search_web` tool. |
 
-`search_web` requires a Tavily API key. Add it in Settings → Web → Tavily API Key
+`search_web` requires a Tavily API key. Add it in Settings → Tools & safety → Web → Tavily API Key
 (free tier at tavily.com). Without it the tool returns a setup hint rather than
 silently degrading. `web_search_enabled` can be used to disable the tool entirely.
 
@@ -417,14 +417,14 @@ silently degrading. `web_search_enabled` can be used to disable the tool entirel
 |---|---|---|
 | `voice_mode` | `off` | Speech-to-text engine behind the chat mic button: `off`, `local_whisper`, `remote_whisper`, `model_direct`, or `web_speech`. |
 | `voice_whisper_model` | `base` | faster-whisper model size for `local_whisper`: `tiny`, `base`, `small`, `medium`, or `large-v3`. Downloads on first use (~150MB for `base`) — pre-fetch when baking images for offline boxes. |
-| `voice_remote_url` | *(empty)* | OpenAI-compatible base URL for `remote_whisper` (the server POSTs to `{url}/audio/transcriptions`). API key via the `VOICE_STT_API_KEY` env var (Settings → Voice Input → Remote STT API Key). |
+| `voice_remote_url` | *(empty)* | OpenAI-compatible base URL for `remote_whisper` (the server POSTs to `{url}/audio/transcriptions`). API key via the `VOICE_STT_API_KEY` env var (Settings → Integrations → Voice Input → Remote STT API Key). |
 | `voice_remote_model` | `whisper-1` | Model name sent to the remote transcription endpoint. |
 | `voice_language` | *(empty)* | ISO-639-1 language hint for the whisper engines and browser dictation. Empty = autodetect. |
 | `voice_auto_send` | `false` | Send the message automatically once dictation produces a non-empty transcript. Transcription engines only — an empty transcript (no speech detected) never sends, and `model_direct` voice notes stay manual. |
 | `voice_web_speech_fallback` | `false` | Fall back to browser dictation when the chosen engine is unavailable (whisper not installed, chat model can't hear audio). Off by default: enabling it is your acknowledgment that fallback audio is processed by your browser vendor's speech service, not your machines. |
 
 Each engine has a different privacy profile, shown as a disclaimer in
-Settings → Voice Input: `local_whisper` keeps audio on the Pernix server;
+Settings → Integrations → Voice Input: `local_whisper` keeps audio on the Pernix server;
 `remote_whisper` uploads recordings to the endpoint you configure;
 `model_direct` attaches the recording to your message so an audio-capable chat
 model hears it directly (local with Ollama, remote with cloud providers);

@@ -40,7 +40,7 @@ You can disable recall entirely with `memory_recall = false`. There is no releva
 
 ### Semantic retrieval
 
-By default memory search is purely lexical (BM25 over the FTS5 index) — an entry about "deploy credentials" won't match a query about "release passwords". Setting **`embedding_model`** to a local Ollama embedding model (e.g. `nomic-embed-text`, in Settings → Models) turns search **hybrid**: BM25 and vector cosine similarity each contribute their top matches, fused with reciprocal-rank fusion, so both exact-term and by-meaning matches surface.
+By default memory search is purely lexical (BM25 over the FTS5 index) — an entry about "deploy credentials" won't match a query about "release passwords". Setting **`embedding_model`** to a local Ollama embedding model (e.g. `nomic-embed-text`, in Settings → Providers & models) turns search **hybrid**: BM25 and vector cosine similarity each contribute their top matches, fused with reciprocal-rank fusion, so both exact-term and by-meaning matches surface.
 
 The mechanics stay true to the store's design:
 
