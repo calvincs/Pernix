@@ -98,7 +98,7 @@ Onboarding links put the token in the URL **fragment** (`/#token=`), which brows
 
 Easiest way to log in from your phone:
 
-1. **Generate the URL.** Hit `GET /api/settings/access-qr` (or run `python run.py --qr` on startup). You get a URL like `https://192.168.1.50:8090/#token=<32-byte-token>`. Settings → Network → Remote Access has the same thing as a button, alongside **Show Token** to copy it by hand.
+1. **Generate the URL.** Hit `GET /api/settings/access-qr` (or run `python run.py --qr` on startup). You get a URL like `https://192.168.1.50:8090/#token=<32-byte-token>`. Settings → Environment & network → Remote Access has the same thing as a button, alongside **Show Token** to copy it by hand.
 2. **Scan it on your phone.** The QR encodes the URL; any camera app reads it.
 3. **The browser opens, reads the token from `location.hash`, and stores it in `localStorage`.** Subsequent requests use the `Authorization` header automatically. Because it travelled in the fragment, the server never saw it.
 

@@ -5,8 +5,9 @@ evidence ledger into Pernix so the agent learns, from recorded outcomes, how
 reliable its own tools and behaviors actually are. Not vibes, not
 self-assessment — earned probabilities with an auditable derivation chain.
 
-Off by default. Enable in Settings → Candor (Operational Memory); observation
-capture, snooze maintenance, and the scout brief toggle hot, while the agent
+Off by default. Enable in Settings → Integrations → Operational memory
+(Candor); observation capture, snooze maintenance, and the scout brief toggle
+hot, while the agent
 tools register at startup (restart after toggling). Requires the separate
 `candor` package (installed via the vendored wheel in `vendor/` by
 `pip install -r requirements.txt`); an absent package or broken store degrades

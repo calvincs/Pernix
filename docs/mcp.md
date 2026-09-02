@@ -3,8 +3,9 @@
 Pernix speaks the Model Context Protocol as a client: point it at any MCP
 server — local (a subprocess over stdio) or remote (Streamable HTTP) — and
 that server's tools become normal Pernix tools named `mcp_<server>_<tool>`.
-They show up in the Tools tab, go through the dangerous-tool gate, get
-scout-curated into turns like everything else, and accrue the same health
+They show up in the Explorer's Capabilities → Tools tab, go through the
+dangerous-tool gate, get scout-curated into turns like everything else, and
+accrue the same health
 metrics and reputation signals.
 
 MCP support is on by default but completely inert until you configure a
@@ -14,15 +15,16 @@ server. Configuring a server is the opt-in.
 
 Three equivalent ways:
 
-1. **Explorer → MCP tab** — click `+`, paste a standard `mcpServers` config
-   (the same JSON Claude Code, Claude Desktop, Cursor, and VS Code use),
+1. **Explorer → Capabilities → Servers (MCP)** — click `+`, paste a standard
+   `mcpServers` config (the same JSON Claude Code, Claude Desktop, Cursor, and
+   VS Code use),
    hit **Test**, then **Save & Connect**. Existing entries are edited in
    place via each row's ✎ button (the form opens prefilled; saving
    reconnects with the new config).
 2. **Ask the agent** — "add the GitHub MCP server". The agent calls
    `mcp_add_server`, which is a dangerous-gated tool: you confirm before
    anything is installed or spawned.
-3. **Edit `data/mcp_servers.json`** directly, then reload from the MCP tab
+3. **Edit `data/mcp_servers.json`** directly, then reload from the Servers tab
    (or ask the agent to run `mcp_reload_server`).
 
 ### Config format
@@ -65,7 +67,7 @@ Three equivalent ways:
   `[MCP:<server>]` so provenance is always visible in the prompt.
 - **Safety**: default `caution`. A server-sent `destructiveHint` escalates
   that tool to `dangerous`; server annotations can never *lower* a level.
-  Per-tool overrides in the Tools tab work and survive reconnects.
+  Per-tool overrides in Capabilities → Tools work and survive reconnects.
 - **Surface**: MCP tools are scout-curated — they enter a turn's schema when
   scout recommends them (or once the session has used them), so a server
   with 40 tools doesn't bloat every prompt.
@@ -92,8 +94,8 @@ Three equivalent ways:
 
 ## Settings
 
-Settings → MCP Servers: `mcp_enabled`, `mcp_stdio_enabled` (off = remote
-servers only — the supply-chain valve), `mcp_default_safety`,
+Settings → Integrations → MCP Servers: `mcp_enabled`, `mcp_stdio_enabled`
+(off = remote servers only — the supply-chain valve), `mcp_default_safety`,
 `mcp_call_timeout`, `mcp_connect_timeout`, `mcp_idle_seconds`,
 `mcp_max_servers`, `mcp_max_tools_per_server`, `mcp_refresh_interval_s`.
 

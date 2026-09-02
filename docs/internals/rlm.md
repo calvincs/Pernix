@@ -8,7 +8,7 @@ CSAIL), adapted from the MIT-licensed reference implementation at
 and rewritten for Pernix rather than taken as a dependency (each adapted file
 carries an attribution header).
 
-Off by default. Enable in Settings → General → RLM (Recursive Processing);
+Off by default. Enable in Settings → Tools & safety → Large-input runs (RLM);
 the `rlm_process` tool registers at startup (restart after toggling).
 
 RLM adds **no model roles of its own**. The root runs on the Primary role
@@ -204,7 +204,7 @@ layers now surface it, all reading from the same trace:
   precedent). Deleting the view session purges the finished run's dir + rows
   (`manager._purge_rlm_artifacts`); retention deletes the view session with
   the run — symmetric, no orphans. Dream probes (`session_id="dream"`) get no
-  view session; their runs remain inspectable from the Jobs tab.
+  view session; their runs remain inspectable from the Automation → Jobs tab.
 
 ## How the agent discovers it
 

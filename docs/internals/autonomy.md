@@ -7,10 +7,10 @@ overrule), **goals** (persistent cross-turn objectives with budgets),
 **session kernel** (a persistent per-session Python REPL whose state survives
 everything shorter than the task itself).
 
-All four are off by default. Enable them in Settings → Autonomy (Gates,
-Goals, Heartbeats, Kernel); each flag registers its tools at startup, so
-flipping one takes a restart. Each is useful alone; the last section explains
-how they compose into an autonomous task.
+All four are off by default. Enable them in Settings → Autonomy & idle work →
+Autonomy (Gates, Goals, Heartbeats, Kernel); each flag registers its tools at
+startup, so flipping one takes a restart. Each is useful alone; the last
+section explains how they compose into an autonomous task.
 
 ## Gates — a finish line Reflect can't argue with
 

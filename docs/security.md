@@ -183,7 +183,7 @@ Tools classified as `dangerous` require explicit per-invocation user confirmatio
 | `create_skill`, `add_skill_script` | Authors instructions the agent will later load and follow, and scripts `load_skill` then tells it to run under `bash` |
 | `add_gate` | Registers shell that re-runs unattended at every turn end for the life of the session |
 
-You can promote or demote any tool via `POST /api/tools/set-safety` or the Explorer → Tools panel.
+You can promote or demote any tool via `POST /api/tools/set-safety` or the Explorer → Capabilities → Tools panel.
 
 ### What the gate is, and what it is not
 
@@ -206,7 +206,7 @@ The agent must go through a two-step handshake for every distinct dangerous acti
 1. **`ask_user()`** — the agent describes the exact action it intends to perform. You see the specific command, URL, or file path — not just the tool name. The session suspends until you respond.
 2. **`approve_dangerous_tool(tool_name, scope)`** — after you confirm, the agent registers approval for that specific action. Approvals are consumed after one use; a different call to the same tool requires a new confirmation.
 
-Approved scopes are persisted to `data/tool_approvals.json`. If you've confirmed an action before (e.g. "run ps aux to list processes"), the `ask_user` step is skipped automatically on future occurrences. View and clear remembered approvals in **Settings → Security**.
+Approved scopes are persisted to `data/tool_approvals.json`. If you've confirmed an action before (e.g. "run ps aux to list processes"), the `ask_user` step is skipped automatically on future occurrences. View and clear remembered approvals in **Settings → Tools & safety → Security**.
 
 Workers spawned from interactive sessions face the same gate — the agent cannot escalate privilege by spawning sub-agents. The exception is unattended runs: cron-scheduled and canary sessions (and workers spawned from them) skip the gate, because no user is present to answer `ask_user` prompts.
 
@@ -214,7 +214,7 @@ Workers spawned from interactive sessions face the same gate — the agent canno
 
 Start the server with `python run.py --dangerous` to bypass the approval gate entirely. All dangerous tools execute immediately without confirmation in every session, including workers and cron jobs.
 
-**This flag is the only activation path.** It cannot be set via `settings.json`, the API, or any environment variable while the server is running — this prevents a rogue process or prompt injection from silently elevating privileges mid-session. The current mode is shown read-only in **Settings → Security** and as a persistent red banner in the **Explorer → Tools** panel.
+**This flag is the only activation path.** It cannot be set via `settings.json`, the API, or any environment variable while the server is running — this prevents a rogue process or prompt injection from silently elevating privileges mid-session. The current mode is shown read-only in **Settings → Tools & safety → Security** and as a persistent red banner in the **Explorer → Capabilities → Tools** panel.
 
 **Keep `auto_approve_dangerous = false` (do not use `--dangerous`)** unless you fully trust the current session context and plan to disable it immediately after.
 
@@ -268,7 +268,7 @@ MCP servers are third-party software the agent calls as tools ([mcp.md](mcp.md))
 
 - **Supply chain (stdio).** A stdio server entry is a command Pernix executes — arbitrary local code. `mcp_add_server` is `dangerous` (always confirmed), the Explorer add path is an explicit human action, and `mcp_stdio_enabled=false` turns stdio off entirely (remote-only mode). Pin versions in stdio commands (`npx -y pkg@1.2.3`): an unpinned `npx -y` runs whatever was published most recently.
 - **Prompt injection via tool metadata.** Server-supplied names, descriptions, and schemas end up in the model's prompt. Descriptions are length-capped (`mcp_max_description_chars`) and provenance-prefixed `[MCP:<server>]` so the model always sees where a tool came from. Treat a server you add as able to talk to your agent.
-- **Overbroad access.** Default safety is `caution`, a server-sent `destructiveHint` escalates to `dangerous` (never the reverse), per-server `tool_allowlist` narrows what registers, individual tools can be disabled in the Tools tab, and canary sessions are denied MCP tools outright.
+- **Overbroad access.** Default safety is `caution`, a server-sent `destructiveHint` escalates to `dangerous` (never the reverse), per-server `tool_allowlist` narrows what registers, individual tools can be disabled in Capabilities → Tools, and canary sessions are denied MCP tools outright.
 - **Credentials.** Secrets live only in `.env` and are referenced as `${VAR}` in `mcp_servers.json`; literal-looking tokens in config are rejected. Pernix never forwards its own auth token or provider keys to an MCP server.
 - **Network scope.** MCP URLs are operator-configured and not subject to the fetch tools' SSRF blocklist — that is deliberate (private, docker-network-local servers are a supported pattern), and it means adding a server URL is trusted input. Only a confirmed `mcp_add_server` call or an authenticated REST/UI action can add one.
 

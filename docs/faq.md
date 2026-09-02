@@ -32,7 +32,7 @@ There used to be a DuckDuckGo fallback; it was removed because it produced unrel
 
 That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `create_skill`) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
 
-Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Security**.
+Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Tools & safety → Security**.
 
 ### How do I bypass the dangerous-tool gate for unattended cron jobs?
 
@@ -115,7 +115,7 @@ Delete the relevant `data/memories/*.md` files, or wipe everything with `python 
 
 ### What's the "Dream" session in my sidebar?
 
-If you've enabled Dream (Settings → Dream (Introspection)), Pernix spends idle time examining its own memory and operational history — raising hypotheses about itself and testing them against recorded outcomes. Each day of dreaming keeps a journal as a read-only session in the sidebar (purple dot, titled like "Dream Jul 31"). You can't chat in it — Pernix writes it while dreaming — and it's excluded from search and memory distillation. Hide the whole category with the sidebar legend if you'd rather not see it, or turn `dream_enabled` off to stop dreaming entirely. Details: [internals/dream.md](internals/dream.md).
+If you've enabled Dream (Settings → Autonomy & idle work → Dream (Introspection)), Pernix spends idle time examining its own memory and operational history — raising hypotheses about itself and testing them against recorded outcomes. Each day of dreaming keeps a journal as a read-only session in the sidebar (purple dot, titled like "Dream Jul 31"). You can't chat in it — Pernix writes it while dreaming — and it's excluded from search and memory distillation. Hide the whole category with the sidebar legend if you'd rather not see it, or turn `dream_enabled` off to stop dreaming entirely. Details: [internals/dream.md](internals/dream.md).
 
 ### Where do the agent's file outputs land?
 
@@ -193,6 +193,6 @@ Use the OpenRouter dashboard — Pernix doesn't have a built-in per-month limit.
 
 - `OPENROUTER_MODELS` whitelist — restrict which models the UI even shows.
 - `llm_session_timeout` — caps how long any single session can hold an LLM slot.
-- If RLM is enabled, it is the biggest single-call spend vector (one `rlm_process` run can fire up to `rlm_max_subcalls` sub-calls, default 50). Sub-calls run on the **Background** model (`background_model`; the root runs on Primary), so point that at a local/Ollama model to keep runs free, and tune `rlm_max_subcalls`, `rlm_max_concurrent_subcalls`, and `rlm_timeout_seconds` in Settings → General → RLM.
+- If RLM is enabled, it is the biggest single-call spend vector (one `rlm_process` run can fire up to `rlm_max_subcalls` sub-calls, default 50). Sub-calls run on the **Background** model (`background_model`; the root runs on Primary), so point that at a local/Ollama model to keep runs free, and tune `rlm_max_subcalls`, `rlm_max_concurrent_subcalls`, and `rlm_timeout_seconds` in Settings → Tools & safety → Large-input runs (RLM).
 
 For hard limits, configure them on OpenRouter's side.

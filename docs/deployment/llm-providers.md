@@ -82,7 +82,7 @@ A native provider for the OpenAI API. Because the base URL is overridable, the s
 
 Setup:
 
-1. Add `OPENAI_API_KEY=sk-...` to `.env` (or set it in Settings → LLM Providers → OpenAI API Key). The key is **env-only by design** — it is never stored in `settings.json`, which is plaintext on disk.
+1. Add `OPENAI_API_KEY=sk-...` to `.env` (or set it in Settings → Providers & models → LLM Providers → OpenAI API Key). The key is **env-only by design** — it is never stored in `settings.json`, which is plaintext on disk.
 2. List the models you want in `openai_models` (Settings) or `OPENAI_MODELS` in `.env` (comma-separated, e.g. `gpt-4o,gpt-4o-mini`). This is what routes bare names to the provider.
 3. In Settings, set `llm_model` (or any role) to one of those names.
 
