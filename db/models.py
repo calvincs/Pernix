@@ -363,6 +363,12 @@ def delete_session(session_id: str) -> None:
             (session_id,),
         )
         conn.execute("DELETE FROM session_messages WHERE sender_id = ? OR recipient_id = ?", (session_id, session_id))
+        # session_state_log has no FK to sessions, so its rows outlived every
+        # deleted session. Cron/worker/canary sessions are deleted after a
+        # week and each leaves 10-50 transitions behind forever, which made
+        # this the largest table by row count and slowed the prune sweep
+        # (whose own DISTINCT scan grows with it).
+        conn.execute("DELETE FROM session_state_log WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
 
@@ -510,13 +516,27 @@ def prune_state_log(
             sid = r["session_id"]
             floor = int(r["keep_floor"])
             if floor == 0:
-                continue  # fewer rows than keep_per_session
+                # Fewer rows than keep_per_session: the count floor does not
+                # apply, but age still does. Without this, any session under
+                # the floor was exempt from pruning forever regardless of how
+                # old its rows were — which is most cron and worker sessions.
+                cur = conn.execute(
+                    "DELETE FROM session_state_log WHERE session_id = ? AND timestamp_ms < ?",
+                    (sid, cutoff_ms),
+                )
+                total += cur.rowcount
+                continue
             cur = conn.execute(
                 """DELETE FROM session_state_log
                    WHERE session_id = ? AND id < ? AND timestamp_ms < ?""",
                 (sid, floor, cutoff_ms),
             )
             total += cur.rowcount
+        # Rows whose session is already gone (deleted before the cascade
+        # above existed, or removed by a path that bypasses delete_session).
+        total += conn.execute(
+            "DELETE FROM session_state_log WHERE session_id NOT IN (SELECT id FROM sessions)"
+        ).rowcount
         return total
 
 
