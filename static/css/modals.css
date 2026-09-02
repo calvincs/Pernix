@@ -522,11 +522,45 @@
     padding: 0 var(--sp-3);
 }
 .settings-tab-bar::-webkit-scrollbar { display: none; }
+/* A strip that can scroll has to look like one, or the tabs past the right
+   edge do not exist as far as the reader is concerned. Same sticky-flex-item
+   fade the Explorer's group strip uses, riding the right edge of the
+   scroller. Unlike that one it keeps its width (no negative margin): the
+   16px is trailing gutter, so a tab that fits is never read through a
+   gradient, and a tab that has to be scrolled to can be scrolled clear of
+   it. Invisible when nothing overflows — it is the card's own colour over
+   the card. */
+.settings-tab-bar::after {
+    content: '';
+    position: sticky;
+    right: 0;
+    flex: 0 0 16px;
+    align-self: stretch;
+    pointer-events: none;
+    background: linear-gradient(to left, var(--bg-raised), transparent);
+}
 .settings-tab-bar .tab-btn {
     white-space: nowrap;
     flex: 0 0 auto;
     font-size: var(--text-xs);
     padding: var(--sp-2) var(--sp-2);
+}
+/* Both labels are in the DOM; width picks one. */
+.settings-tab-bar .tab-label-short { display: none; }
+
+/* Below ~1024px the card is bounded by its 90% width, not by max-width, and
+   the six full labels stop fitting: at 900px the strip overflowed by 12px and
+   the last tab sat half off the edge. Tighten the gutters first — that alone
+   carries the band down to ~900 with the full names intact. */
+@media (max-width: 1024px) {
+    .settings-tab-bar { padding: 0 var(--sp-2); }
+    .settings-tab-bar .tab-btn { padding-left: 5px; padding-right: 5px; }
+}
+/* Narrower than that, tighter padding cannot buy 130px. Swap in the short
+   labels; `aria-label` and `title` keep the full name on every tab. */
+@media (max-width: 900px) {
+    .settings-tab-bar .tab-label-full { display: none; }
+    .settings-tab-bar .tab-label-short { display: inline; }
 }
 .settings-tab-loading {
     padding: var(--sp-4);
