@@ -4,7 +4,7 @@ import { el, text, clear, renderMarkdown } from '../render.js';
 import { icon } from '../icons.js';
 import { hex, rgba, isLight } from '../theme.js';
 import { get, post, del, getAuthToken } from '../api.js';
-import { isCompact, isTouch } from '../mobile.js';
+import { isCompact, isTouch, setMainInert } from '../mobile.js';
 import { notify } from '../feedback.js';
 import { openSettings } from './modals/settings.js';
 import { confirmDanger } from './modals/confirm.js';
@@ -438,6 +438,10 @@ export function initFilePanel({ selectSession } = {}) {
     // Listen for SSE job events to refresh jobs tab
     window.addEventListener('pernix:job-event', _onJobEvent);
 
+    // Rotating a tablet into portrait turns an open side column into a
+    // full-screen overlay and back; the modality has to follow.
+    window.addEventListener('pernix:tier-change', () => _syncPanelModality(false));
+
     buildPanelDOM();
 
     if (_state.open) {
@@ -447,6 +451,9 @@ export function initFilePanel({ selectSession } = {}) {
         loadTabData();
     }
     _syncPanelInert();
+    // A restored-open panel is modal on compact, but it did not steal focus
+    // from anyone: nobody has typed yet at boot.
+    _syncPanelModality(false);
 }
 
 // A closed Explorer is width:0 + overflow:hidden — invisible, but every tab
@@ -477,6 +484,34 @@ function _syncPanelInert() {
     _panel?.toggleAttribute('inert', !_state.open);
 }
 
+// Below 900px the Explorer covers the whole screen, so it is a modal surface
+// in every sense the assistive layer cares about: the transcript underneath
+// goes inert and focus moves inside, the way openOverlay does it for a dialog.
+// Above 899px it is a column BESIDE the chat — inerting #main there would take
+// away the conversation the file was opened to answer. (E4)
+let _fpReturnFocus = null;
+
+function _syncPanelModality(moveFocus = true) {
+    const modal = _state.open && isCompact();
+    if (modal && !_fpReturnFocus) _fpReturnFocus = document.activeElement;
+    setMainInert('explorer', modal);
+    if (modal) {
+        // #main's inert is cleared/applied above; the panel's own is cleared by
+        // _syncPanelInert, and focus() into an inert subtree is a silent no-op.
+        if (!moveFocus) return;
+        const target = _panel.querySelector('.fp-close')
+            || _panel.querySelector('.fp-group-btn.active, .fp-tab-btn.active')
+            || _panel;
+        target.focus();
+        return;
+    }
+    const back = _fpReturnFocus;
+    _fpReturnFocus = null;
+    if (!moveFocus || !back) return;
+    if (document.contains(back) && typeof back.focus === 'function') back.focus();
+    else document.getElementById('files-btn')?.focus();
+}
+
 // One question in one place. Every path that throws away an in-progress edit
 // — closing the panel, switching tabs, opening another file, Back/Cancel in
 // either editor — asks through this, and a confirmed discard clears the flag
@@ -505,6 +540,7 @@ export function toggleFilePanel() {
         document.getElementById('files-btn')?.classList.remove('active');
     }
     _syncPanelInert();
+    _syncPanelModality();
     saveState();
 }
 
@@ -515,6 +551,7 @@ export function openFilePanel(opts = {}) {
         if (!isCompact()) _panel.style.width = _state.width + 'px';
         document.getElementById('files-btn')?.classList.add('active');
         _syncPanelInert();
+        _syncPanelModality();
     }
     if (opts.tab) {
         // Leaf keys and group keys both work; anything unknown leaves the
