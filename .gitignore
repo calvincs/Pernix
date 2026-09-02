@@ -142,3 +142,9 @@ data/candor/
 data/kernels/
 data/telos/
 data/settings.json.bak*
+
+# =============================================================================
+# UI gate output (throwaway instance, screenshots, results) — see
+# tools/ui-gate/README.md. desktop-baseline.json beside it IS committed.
+# =============================================================================
+tools/ui-gate/out/

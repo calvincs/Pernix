@@ -60,9 +60,19 @@ pytest --cov                                        # with coverage report
 
 Two pytest markers are defined: `slow` and `integration`. Most tests run in seconds; the `slow` markers are skipped in fast iterations.
 
+### The UI gate (front-end changes only)
+
+`./check.sh` never opens a browser, so nothing in it can see a stylesheet. If you touch `static/css/touch.css`, `static/css/compact.css` or `static/js/mobile.js`, run the device-tier gate as well:
+
+```bash
+tools/ui-gate/run.sh my-tag          # seven viewports, level m2
+```
+
+It boots a throwaway instance, seeds it, drives phones and tablets with Playwright, and fails if the **desktop** layout moved by more than a pixel — which is the check that catches a rule filed in the wrong stylesheet. Needs Playwright and Chromium in the `.venv`; see [../../tools/ui-gate/README.md](../../tools/ui-gate/README.md).
+
 ### Coverage
 
-`./check.sh` enforces ≥63%. Coverage **omits** `tests/`, the virtualenvs (`.venv/`, `venv/`), `data/`, `static/`, `docs/`, `run.py`, and `core/certs.py` (paths that are either themselves tests, runtime data, or thin entry/glue layers). `core/extensions/*` is deliberately **not** omitted — it holds some of the largest, most concurrent code in the repo, and the gate must see it.
+`./check.sh` enforces ≥63%. Coverage **omits** `tests/`, the virtualenvs (`.venv/`, `venv/`), `data/`, `static/`, `docs/`, `tools/`, `run.py`, and `core/certs.py` (paths that are either themselves tests, runtime data, or thin entry/glue layers). `core/extensions/*` is deliberately **not** omitted — it holds some of the largest, most concurrent code in the repo, and the gate must see it.
 
 If your change drops coverage below 63%, write tests until it's back over.
 
