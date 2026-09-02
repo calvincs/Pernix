@@ -277,21 +277,34 @@ class ToolIndex:
         self._entries: dict[str, _IndexEntry] = {}
 
     def rebuild(self, tools: dict[str, ToolDef]) -> None:
-        """Rebuild index from registry."""
-        self._entries.clear()
+        """Rebuild index from registry.
+
+        Built into a fresh dict and swapped at the end, with each tool guarded:
+        MCP tool schemas come from a remote server, so `properties` can be
+        null or a list. Clearing in place and then raising on the first bad
+        one left the index holding only the tools iterated before it —
+        builtins included — and the supervisor re-wiped it on every retry.
+        One malformed remote tool must cost that tool, not discovery.
+        """
+        built: dict[str, _IndexEntry] = {}
         for name, tool in tools.items():
-            param_names = set(tool.parameters.get("properties", {}).keys())
-            entry = _IndexEntry(
-                name=name,
-                description=tool.description,
-                category=tool.category,
-                tags=list(tool.tags),
-                name_tokens=_tokenize(name.replace("_", " ")),
-                desc_tokens=_tokenize(tool.description),
-                tag_tokens={t.lower() for t in tool.tags},
-                param_tokens={p.lower() for p in param_names},
-            )
-            self._entries[name] = entry
+            try:
+                params = tool.parameters if isinstance(tool.parameters, dict) else {}
+                props = params.get("properties")
+                param_names = set(props.keys()) if isinstance(props, dict) else set()
+                built[name] = _IndexEntry(
+                    name=name,
+                    description=tool.description,
+                    category=tool.category,
+                    tags=list(tool.tags),
+                    name_tokens=_tokenize(name.replace("_", " ")),
+                    desc_tokens=_tokenize(tool.description),
+                    tag_tokens={t.lower() for t in tool.tags},
+                    param_tokens={p.lower() for p in param_names},
+                )
+            except Exception as e:
+                logger.warning("Skipping tool %r in the discovery index: %s", name, e)
+        self._entries = built
 
     def search(self, query: str, category: str | None = None, limit: int = 10) -> list[ToolSummary]:
         """Search tools by natural language query."""
