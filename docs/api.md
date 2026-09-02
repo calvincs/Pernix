@@ -122,9 +122,43 @@ Deletes the session and cascades to any worker sessions it spawned.
 POST /api/sessions/purge
 ```
 ```json
-{ "keep_days": 7, "keep_min": 5 }
+{ "keep_days": 7, "keep_min": 5, "dry_run": false }
 ```
-Bulk-deletes sessions whose last activity is older than `keep_days`, always keeping at least `keep_min` of the stale candidates.
+Bulk-deletes stale ordinary sessions. All three keys are optional and shown with their defaults; `keep_days` and `keep_min` must be non-negative integers (anything else is a `400`). `keep_days: 0` means "everything already idle".
+
+A **candidate** is a session that is all of: `session_type` `normal`, not pinned, not in a space, and last updated before the cutoff. The scan covers the whole table, not a recency window. The newest `keep_min` candidates are always kept; the rest are deleted (or, with `dry_run: true`, only counted).
+
+Sessions older than the cutoff that are *not* candidates are counted under `skipped`, each one under the first rule that spared it — `other_types`, then `pinned`, then `in_space`. Typed sessions (canary, worker, cron, rlm, snooze) are never purged here; each has its own retention horizon.
+
+Response (identical shape in both modes):
+```json
+{
+  "dry_run": false,
+  "keep_days": 7,
+  "keep_min": 5,
+  "cutoff": "2026-08-26T12:00:00+00:00",
+  "candidates": 312,
+  "would_delete": 307,
+  "purged": 307,
+  "sample": [
+    { "id": "a1b2c3d4e5f6", "title": "Old chat", "updated_at": "2026-07-01T09:12:44+00:00", "message_count": 18 }
+  ],
+  "skipped": { "pinned": 4, "in_space": 11, "other_types": 96 }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `dry_run` | Echo of the request — `true` means nothing was deleted |
+| `keep_days` / `keep_min` | The validated values actually applied |
+| `cutoff` | ISO-8601 UTC timestamp; a session is stale when `updated_at` is before it |
+| `candidates` | How many sessions matched the candidate rules |
+| `would_delete` | `candidates` minus the `keep_min` newest — the set the real run acts on |
+| `purged` | How many were deleted; always `0` when `dry_run` is `true` |
+| `sample` | The first 10 of the delete set (`id`, `title`, `updated_at`, `message_count`), newest first — enough to show a user before they commit |
+| `skipped` | Counts of the older-than-cutoff sessions each rule spared |
+
+A dry run and the real run compute the same set from the same query, so `would_delete` is a promise the real run keeps.
 
 ---
 
