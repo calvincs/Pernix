@@ -182,7 +182,11 @@ async function _start() {
                 engine = 'web_speech';
                 if (!_fallbackNoticeShown) {
                     _fallbackNoticeShown = true;
-                    _deps.appendMessage('notice',
+                    // 'system', not 'notice': there is no .message.notice
+                    // rule in any stylesheet, so a notice rendered as an
+                    // unstyled block. loadMessages already maps a stored
+                    // role='notice' onto a system message.
+                    _deps.appendMessage('system',
                         `[voice: ${st.reason} — falling back to browser dictation. ` +
                         'Audio is processed by your browser vendor’s speech service, not this machine. ' +
                         'Configure this in Settings → Voice Input.]');
