@@ -51,12 +51,13 @@ Not every session in the sidebar is a chat you started. Each carries a colored d
 | Type | What it is |
 |---|---|
 | **Session** | A conversation you started. |
-| **Cron** | A scheduled job run — each firing gets its own session. |
+| **Scheduled** | A scheduled job run (internally: *cron*) — each firing gets its own session. |
 | **Worker** | A sub-agent spawned by another session. |
 | **Dream** | The idle-time introspection journal (see below). |
-| **RLM** | A live view of one `rlm_process` run, nested under the session that launched it (see below). |
+| **Large-input** | A live view of one `rlm_process` run (internally: *RLM*), nested under the session that launched it (see below). |
+| **Self-check** | A canary run — only present once the canary suite is enabled. |
 
-Click a legend entry to hide or show that type — useful when cron runs start to crowd out your own threads. The filter persists across reloads.
+Click a legend entry to hide or show that type — useful when scheduled runs start to crowd out your own threads. Each entry's tooltip names the internal term the settings and docs use. The filter persists across reloads.
 
 Finding things:
 

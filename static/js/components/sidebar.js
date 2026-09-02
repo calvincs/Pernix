@@ -11,14 +11,26 @@ import { notify } from '../feedback.js';
 // Session type definitions
 // ---------------------------------------------------------------------------
 
+// The label is what a user reads; `term` is the internal word the docs, the
+// settings and the agent's own logs still use. Naming the row after the
+// machinery ("Cron", "RLM", "Canary") taught a first-time reader six words
+// for things they have never made — so the row says what the session IS and
+// keeps the internal term one hover away, in the title. (N9)
 const SESSION_TYPES = {
-    chat:   { label: 'Session', cls: 'chat',   color: 'var(--accent)' },
-    cron:   { label: 'Cron',   cls: 'cron',   color: 'var(--info)' },
-    worker: { label: 'Worker', cls: 'worker', color: 'var(--teal-dim)' },
-    snooze: { label: 'Dream',  cls: 'snooze', color: 'var(--dream)' },
-    rlm:    { label: 'RLM',    cls: 'rlm',    color: 'var(--rlm)' },
-    canary: { label: 'Canary', cls: 'canary', color: 'var(--canary)' },
+    chat:   { label: 'Session',     cls: 'chat',   color: 'var(--accent)' },
+    cron:   { label: 'Scheduled',   cls: 'cron',   color: 'var(--info)',     term: 'cron' },
+    worker: { label: 'Worker',      cls: 'worker', color: 'var(--teal-dim)' },
+    snooze: { label: 'Dream',       cls: 'snooze', color: 'var(--dream)' },
+    rlm:    { label: 'Large-input', cls: 'rlm',    color: 'var(--rlm)',      term: 'RLM' },
+    canary: { label: 'Self-check',  cls: 'canary', color: 'var(--canary)',   term: 'canary' },
 };
+
+// "Hide Scheduled sessions (cron)" — the internal term rides along so the
+// legend stays searchable by the word the rest of the system uses.
+function _legendTitle(def, isHidden) {
+    const term = def.term ? ` (${def.term})` : '';
+    return `${isHidden ? 'Show' : 'Hide'} ${def.label} sessions${term}`;
+}
 
 // Types that nest under their parent session instead of the top-level list.
 const CHILD_TYPES = new Set(['worker', 'rlm']);
@@ -1057,7 +1069,7 @@ function _createLegend() {
         const isHidden = !!hidden[key];
         const item = el('button', {
             class: `legend-item ${def.cls}${isHidden ? ' dimmed' : ''}`,
-            title: `${isHidden ? 'Show' : 'Hide'} ${def.label} sessions`,
+            title: _legendTitle(def, isHidden),
             'data-type': key,
             onClick: () => _toggleType(key),
         }, [
@@ -1081,7 +1093,7 @@ function _toggleType(typeKey) {
     const btn = document.querySelector(`.legend-item[data-type="${typeKey}"]`);
     if (btn) {
         btn.classList.toggle('dimmed', !!state.hiddenTypes[typeKey]);
-        btn.title = `${state.hiddenTypes[typeKey] ? 'Show' : 'Hide'} ${SESSION_TYPES[typeKey].label} sessions`;
+        btn.title = _legendTitle(SESSION_TYPES[typeKey], !!state.hiddenTypes[typeKey]);
     }
 
     // Force re-render

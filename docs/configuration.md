@@ -153,7 +153,7 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 
 ## Candor (Operational Memory Add-on)
 
-Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Candor (Operational Memory). How it works: [internals/candor.md](internals/candor.md); design history: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
+Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Operational memory (Candor). How it works: [internals/candor.md](internals/candor.md); design history: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -170,7 +170,7 @@ The store lives at `data/candor/` (machine-local, not in `settings.json`).
 
 ## RLM (Recursive Processing Add-on)
 
-Recursive Language Models (arXiv 2512.24601): the agent processes inputs far beyond the context window — huge files, corpora, transcripts, log dumps — by writing code in a sandboxed child REPL that holds the input as a variable and delegates chunk work to budgeted sub-LLM calls. Adapted from the MIT-licensed reference implementation (no new dependency). Toggles live in Settings → General → RLM (Recursive Processing). RLM adds **no model roles of its own** — it reuses Primary and Background (see below). Architecture + security posture: [internals/rlm.md](internals/rlm.md).
+Recursive Language Models (arXiv 2512.24601): the agent processes inputs far beyond the context window — huge files, corpora, transcripts, log dumps — by writing code in a sandboxed child REPL that holds the input as a variable and delegates chunk work to budgeted sub-LLM calls. Adapted from the MIT-licensed reference implementation (no new dependency). Toggles live in Settings → General → Large-input runs (RLM). RLM adds **no model roles of its own** — it reuses Primary and Background (see below). Architecture + security posture: [internals/rlm.md](internals/rlm.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -207,7 +207,7 @@ Idle-time introspection: during snooze the agent examines its own memory, Candor
 
 ## Telos (Teleological Layer Add-on)
 
-A non-convergent drive with correction machinery over the whole loop: turn anomalies mint Questions, an idle-time SOUP generates cross-domain hypotheses (only falsifiable ones execute; the rest wait in a speculation pool), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (Ordo), detecting Goodhart binding, measuring goal discharge (Hevel), reconciling the agent's self-story against its append-only trace ledger, and keeping exploration entropy above floor. All state is markdown+YAML under `data/telos/`. Toggles live in Settings → Telos (Teleological Layer); everything applies hot except tool registration (restart). How it works: [internals/telos.md](internals/telos.md); derivation: [dev/telos-spec.md](dev/telos-spec.md).
+A non-convergent drive with correction machinery over the whole loop: turn anomalies mint Questions, an idle-time SOUP generates cross-domain hypotheses (only falsifiable ones execute; the rest wait in a speculation pool), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (Ordo), detecting Goodhart binding, measuring goal discharge (Hevel), reconciling the agent's self-story against its append-only trace ledger, and keeping exploration entropy above floor. All state is markdown+YAML under `data/telos/`. Toggles live in Settings → Goals (Telos); everything applies hot except tool registration (restart). How it works: [internals/telos.md](internals/telos.md); derivation: [dev/telos-spec.md](dev/telos-spec.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -229,7 +229,7 @@ A non-convergent drive with correction machinery over the whole loop: turn anoma
 
 ## Autonomy (Gates, Goals, Heartbeats, Session Kernel)
 
-The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, heartbeats steered into running work, and a persistent per-session Python REPL. All off by default; a goal + gates + a heartbeat compose into an autonomous task. Toggles live in Settings → Autonomy (Gates, Goals, Heartbeats, Kernel). How it works: [internals/autonomy.md](internals/autonomy.md).
+The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, heartbeats steered into running work, and a persistent per-session Python REPL. All off by default; a goal + gates + a heartbeat compose into an autonomous task. Toggles live in Settings → Autonomy. How it works: [internals/autonomy.md](internals/autonomy.md).
 
 | Setting | Default | Description |
 |---|---|---|
