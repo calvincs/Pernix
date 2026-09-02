@@ -122,6 +122,10 @@
                 <span id="browser-status"></span>
                 <span id="tool-status"></span>
                 <span class="info" id="status-info"></span>
+                <!-- Separate from #status-info on purpose: a notice ("reconnected
+                     — transcript refreshed") outlives the transient status line,
+                     and any updateStatus('') used to wipe it mid-read. -->
+                <span class="notice" id="status-notice"></span>
                 <span class="status-divider" aria-hidden="true"></span>
                 <button id="notification-bell" class="status-btn" title="Notifications" aria-label="Notifications"><span class="bell-icon">&#9678;</span><span class="bell-badge" id="bell-badge">0</span></button>
                 <button id="copy-transcript-btn" class="status-btn" title="Copy transcript" aria-label="Copy transcript">&#9112;</button>
