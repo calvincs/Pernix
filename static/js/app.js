@@ -4405,7 +4405,19 @@ function appendMessage(role, content, meta = {}) {
         // answer, so touch.css folds it away and the meta row is the handle
         // that brings it back.
         roleLabel.classList.add('role-label--toggle');
-        roleLabel.addEventListener('click', () => msgEl.classList.toggle('show-meta'));
+        // The toggle worked and nothing said so: the label looked exactly like
+        // the one on a user message, which does nothing when tapped. A chevron
+        // that turns when the chip is out says it to the eye; aria-expanded
+        // says it to a screen reader. Both are folded away under a mouse,
+        // where the chip is never hidden and the label is only a label. (C4)
+        roleLabel.setAttribute('aria-expanded', 'false');
+        const caret = icon('chevron-down', { size: 10 });
+        caret.classList.add('role-label-caret');
+        roleLabel.appendChild(caret);
+        roleLabel.addEventListener('click', () => {
+            const shown = msgEl.classList.toggle('show-meta');
+            roleLabel.setAttribute('aria-expanded', shown ? 'true' : 'false');
+        });
     }
 
     inner.appendChild(msgEl);

@@ -2986,6 +2986,27 @@ body[data-touch] .message .content .code-block-wrap > pre {
    On a fine pointer nothing is hidden, so it stays an ordinary label. */
 .role-label--toggle { cursor: default; }
 
+/* ---- TEMP (M2B): relocate to touch.css in M3 ------------------------------
+   The chevron that says the label is a control (C4). Gated on data-touch and
+   not data-compact, deliberately: touch.css is what hides .msg-chip, so touch
+   is exactly the set of layouts where the label has something to reveal. A
+   narrow window with a MOUSE shows the chip already, and a chevron promising
+   to reveal it there would be a lie.                                       */
+.role-label-caret {
+    display: none;
+    vertical-align: -1px;
+    margin-left: 4px;
+    color: var(--text-faint);
+    transition: transform var(--transition);
+}
+body[data-touch] .message.assistant .role-label--toggle .role-label-caret {
+    display: inline-block;
+}
+body[data-touch] .message.assistant.show-meta .role-label--toggle .role-label-caret {
+    transform: rotate(180deg);
+}
+/* ---- end TEMP (M2B) ---- */
+
 /* Message timestamps — revealed on hover so the transcript stays quiet */
 .msg-time {
     font-size: var(--text-xxs);
