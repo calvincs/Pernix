@@ -157,6 +157,42 @@ export function updateSessionActivity(sessionId, activityText) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Focus preservation across rebuilds
+//
+// renderSessionList throws the whole list away and rebuilds it — on every SSE
+// tick and every poll. Now that rows and headers are focusable that silently
+// dropped keyboard focus back on <body>, mid-Tab, several times a minute.
+// Mark what had focus by (row or group key, control class) and hand focus to
+// the node that replaced it.
+// ---------------------------------------------------------------------------
+
+const FOCUS_CONTROLS = [
+    'session-id-badge', 'session-pin', 'session-rename', 'session-space-move',
+    'session-delete', 'sg-toggle', 'spaces-new-btn', 'space-add-btn',
+    'space-gear-btn', 'space-del-btn',
+];
+
+function _focusMark(list) {
+    const active = document.activeElement;
+    if (!active || !list.contains(active) || !active.closest) return null;
+    const control = FOCUS_CONTROLS.find(c => active.classList.contains(c)) || null;
+    const host = active.closest('[data-sid]') || active.closest('[data-group]');
+    if (!host) return null;
+    const attr = host.hasAttribute('data-sid') ? 'data-sid' : 'data-group';
+    return { key: `[${attr}="${host.getAttribute(attr)}"]`, control };
+}
+
+function _restoreFocus(list, mark) {
+    if (!mark) return false;
+    const host = list.querySelector(mark.key);
+    if (!host) return false;                       // the row is gone; nothing to restore
+    const target = (mark.control && host.querySelector('.' + mark.control)) || host;
+    if (typeof target.focus !== 'function') return false;
+    target.focus({ preventScroll: true });         // the scrollTop restore already ran
+    return true;
+}
+
 export function renderSessionList(sessions, activeSid, spaces = []) {
     if (_searchActive) return;  // search results own the list until cleared
     _spaces = spaces || [];
@@ -168,6 +204,7 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
 
     const list = document.getElementById('session-list');
     const scrollTop = list.scrollTop;
+    const focusMark = _focusMark(list);
     clear(list);
 
     const sidebarState = _loadState();
@@ -204,7 +241,7 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
             (bySpace[s.space_id] = bySpace[s.space_id] || []).push(s);
         }
     }
-    list.appendChild(el('div', { class: 'spaces-header' }, [
+    list.appendChild(el('div', { class: 'spaces-header', 'data-group': 'spaces' }, [
         el('span', { class: 'spaces-header-label' }, [text('Spaces')]),
         el('button', {
             class: 'space-btn spaces-new-btn',
@@ -255,6 +292,7 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
 
         const header = el('div', {
             class: 'session-group-header' + (collapsed ? ' collapsed' : ''),
+            'data-group': label,
             role: 'button',
             tabindex: '0',
             'aria-expanded': String(!collapsed),
@@ -294,6 +332,7 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     }
 
     list.scrollTop = scrollTop;
+    _restoreFocus(list, focusMark);
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +371,7 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
 
     const header = el('div', {
         class: 'session-group-header space-group-header' + (collapsed ? ' collapsed' : ''),
+        'data-group': 'space:' + space.id,
         style: `--space-color: ${space.color}`,
     }, [
         toggle,
