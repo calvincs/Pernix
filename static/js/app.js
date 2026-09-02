@@ -23,6 +23,7 @@ import { announce, openOverlay } from './a11y.js';
 import { setTheme, isLight } from './theme.js';
 import { notify } from './feedback.js';
 import { confirmDanger } from './components/modals/confirm.js';
+import { actionSheet } from './components/modals/sheet.js';
 
 // ---------------------------------------------------------------------------
 // File uploads state
@@ -160,6 +161,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // stale inert from the docked state would leave that drawer visible but
     // dead. Re-evaluated on resize because mobile.js owns the media query.
     window.addEventListener('resize', syncSidebarInert);
+    // Crossing 900px swaps the worker strip's whole shape (P3): chips above
+    // the line, one summary line below it.
+    window.addEventListener('pernix:tier-change', () => _renderWorkerStrip());
     sidebarToggle.addEventListener('click', () => {
         if (isCompact()) return;   // the drawer is mobile.js's to open
         sidebar.classList.toggle('collapsed');
@@ -2253,6 +2257,130 @@ function _setCtlIcon(ctl, name) {
     ctl.appendChild(icon(name, { size: 11 }));
 }
 
+// ---------------------------------------------------------------------------
+// The strip has two shapes (P3)
+// ---------------------------------------------------------------------------
+// Chips are a desktop shape: a row of them is one line at 1180px and three
+// rows of 16px targets at 390px, which is 75px of a phone spent on a list you
+// cannot read and cannot hit. Below 900px the strip is one 44px line that says
+// how many of what, and taps through to the worker card in the transcript —
+// where the per-worker controls already live at a usable size. Above 900px
+// nothing changes.
+let _stripMode = null;             // 'chips' | 'summary' — which shape is built
+let _stripSummaryBtn = null;       // the compact one-liner, created once
+
+/** The fan-out card this strip is about: the live one, else the last one still
+ *  in the transcript. */
+function _visibleWorkerCard() {
+    if (_workerCard && _workerCard.el.isConnected) return _workerCard.el;
+    const cards = _messagesInner()?.querySelectorAll('.worker-card');
+    return cards && cards.length ? cards[cards.length - 1] : null;
+}
+
+/** Tapping the summary goes to the card, opening it if it is collapsed. */
+function _revealWorkerCard() {
+    const card = _visibleWorkerCard();
+    if (!card) { _openWorkerSheet(); return; }
+    if (!card.classList.contains('expanded')) {
+        card.classList.add('expanded');
+        _syncDisclosure(card.querySelector('.worker-card-header'), true);
+    }
+    card.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+/**
+ * No card to scroll to — a session resumed from the server, or a fan-out whose
+ * card has been scrolled out of a trimmed transcript. The sheet is then the
+ * only place the per-worker controls exist on a phone, so it carries them:
+ * the same endpoints the chips call, one 48px row each.
+ */
+async function _openWorkerSheet() {
+    const items = [];
+    const actions = [];      // parallel to items; the id is the index
+    const add = (item, run) => {
+        items.push({ ...item, id: String(actions.length) });
+        actions.push(run);
+    };
+
+    for (const [wid, w] of _activeWorkers) {
+        const kindTag = w.kind ? `[${w.kind}] ` : '';
+        add({
+            label: `${w.paused ? 'Resume' : 'Pause'} ${kindTag}${w.title}`,
+            hint: w.paused ? 'paused' : _elapsedStr(w.startedAt),
+            icon: w.paused ? 'play' : 'pause',
+        }, async () => {
+            const action = w.paused ? 'resume' : 'pause';
+            try {
+                await post(`/api/sessions/${state.sid}/workers/${wid}/${action}`, {});
+                w.paused = !w.paused;
+                _setWorkerRowState(wid, w.paused ? 'paused' : 'running');
+            } catch (err) {
+                appendMessage('system', `Worker ${action} failed: ${err.message}`);
+            }
+            _renderWorkerStrip();
+        });
+    }
+    for (const [wid, d] of _recentDeadWorkers) {
+        const kindTag = d.kind ? `[${d.kind}] ` : '';
+        add({
+            label: `Resume ${kindTag}${d.title}`,
+            hint: d.reason,
+            icon: 'refresh',
+        }, async () => {
+            try {
+                await post(`/api/sessions/${state.sid}/workers/${wid}/resume`, {});
+                _recentDeadWorkers.delete(wid);
+            } catch (err) {
+                appendMessage('system', `Worker resume failed: ${err.message}`);
+            }
+            _renderWorkerStrip();
+        });
+    }
+    for (const [, r] of _activeRlmRuns) {
+        add({
+            label: `Watch ${r.label}`,
+            hint: `it ${r.iterations}`,
+            icon: 'external',
+        }, () => { if (r.uiSid) selectSession(r.uiSid); });
+    }
+    if (!items.length) return;
+
+    const choice = await actionSheet({ title: 'Workers', items });
+    if (choice == null) return;
+    await actions[Number(choice)]?.();
+}
+
+/** The compact shape: "3 workers · 2 running · 1 paused ›" on one 44px line. */
+function _renderWorkerSummary(strip) {
+    if (!_stripSummaryBtn) {
+        const labelEl = el('span', { class: 'worker-strip-summary-label' });
+        const btn = el('button', { class: 'worker-strip-summary', type: 'button' }, [
+            labelEl,
+            icon('chevron-right', { size: 14 }),
+        ]);
+        btn.addEventListener('click', _revealWorkerCard);
+        _stripSummaryBtn = { btn, labelEl };
+    }
+    const { btn, labelEl } = _stripSummaryBtn;
+
+    // Same counts the chip row spells out, in the order the label already
+    // used: workers first, then the RLM runs and the finished tail.
+    let paused = 0;
+    for (const w of _activeWorkers.values()) if (w.paused) paused++;
+    const running = _activeWorkers.size - paused;
+    const parts = [];
+    if (_activeWorkers.size) parts.push(`${_activeWorkers.size} worker${_activeWorkers.size === 1 ? '' : 's'}`);
+    if (running) parts.push(`${running} running`);
+    if (paused) parts.push(`${paused} paused`);
+    if (_activeRlmRuns.size) parts.push(`${_activeRlmRuns.size} RLM`);
+    if (_recentDeadWorkers.size) parts.push(`${_recentDeadWorkers.size} finished`);
+
+    labelEl.textContent = parts.join(' · ');
+    btn.title = 'Show the workers in the transcript';
+    btn.setAttribute('aria-label', `${parts.join(', ')}. Show the workers in the transcript.`);
+    _reconcileChildren(strip, [btn]);
+}
+
 function _renderWorkerStrip() {
     const strip = document.getElementById('worker-strip');
     if (!strip) return;
@@ -2264,10 +2392,29 @@ function _renderWorkerStrip() {
         strip.hidden = true;
         clear(strip);
         _stripNodes.clear();
+        _stripSummaryBtn = null;
+        _stripMode = null;
         if (_workerTicker) { clearInterval(_workerTicker); _workerTicker = null; }
         return;
     }
     strip.hidden = false;
+
+    // Swapping shapes leaves nothing of the other behind: a chip node kept in
+    // _stripNodes across the flip would be re-inserted by the next pass, and
+    // the summary button would sit beside the chips it replaces.
+    const mode = isCompact() ? 'summary' : 'chips';
+    if (mode !== _stripMode) {
+        clear(strip);
+        _stripNodes.clear();
+        _stripSummaryBtn = null;
+        _stripMode = mode;
+    }
+    if (mode === 'summary') {
+        _renderWorkerSummary(strip);
+        _updateWorkerCard();
+        if (!_workerTicker) _workerTicker = setInterval(_renderWorkerStrip, 5000);
+        return;
+    }
 
     let labelEl = strip.querySelector('.worker-strip-label');
     if (!labelEl) labelEl = el('span', { class: 'worker-strip-label' });
