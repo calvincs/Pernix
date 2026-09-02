@@ -364,6 +364,10 @@ async function selectSession(sid) {
     _historyLimit = HISTORY_PAGE;  // fresh window per session
     _recentlyFinished.delete(sid);  // visiting clears the "done" attention tick
     _restoreDraft();
+    // The previous session's context reading is wrong the moment you switch,
+    // and loadContextInfo only lands after the transcript fetch — several
+    // hundred ms of "ctx: 84%" belonging to a session you already left.
+    _resetContextReadout();
     // Reset streaming state to prevent cross-session leakage
     _streamingEl = null;
     _collected = '';
@@ -477,8 +481,17 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
     clear(inner);
     _questionBubbles.clear();
     _lastMsgTs = 0;  // gap dividers restart per render
+    // An empty pane between clicking a session and its transcript arriving
+    // reads as "this session has nothing in it" — on a slow link that lie can
+    // last a second or more.
+    const loadingRow = el('div', { class: 'messages-loading' }, [
+        el('span', { class: 'messages-loading-dot', 'aria-hidden': 'true' }),
+        text('Loading conversation…'),
+    ]);
+    inner.appendChild(loadingRow);
     try {
         const data = await get(`/api/sessions/${sid}?limit=${_historyLimit}`);
+        loadingRow.remove();
         // A newer selectSession already cleared and re-rendered this
         // container; appending now would interleave two transcripts.
         if (mySeq !== _selectSeq) return;
@@ -608,8 +621,17 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
             scrollToBottom(true);
         }
     } catch (e) {
+        loadingRow.remove();
         appendMessage('system', `Error loading messages: ${e.message}`);
     }
+}
+
+function _resetContextReadout() {
+    const ctxEl = document.getElementById('status-ctx');
+    if (!ctxEl) return;
+    ctxEl.textContent = '';
+    ctxEl.title = '';
+    ctxEl.classList.remove('ctx-healthy', 'ctx-approaching', 'ctx-critical');
 }
 
 async function loadContextInfo(sid) {

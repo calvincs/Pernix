@@ -868,6 +868,26 @@
     margin: var(--sp-3) 0 0;
 }
 
+/* Waiting for a transcript to arrive. Without a row here the pane is blank,
+   which is indistinguishable from an empty session. */
+.messages-loading {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-4) 2px;
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+}
+.messages-loading-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+    animation: dot-pulse 1.2s ease-in-out infinite;
+}
+
 /* Message card */
 .message {
     margin-bottom: var(--sp-4);
