@@ -1233,3 +1233,94 @@
     color: var(--text);
     cursor: pointer;
 }
+
+
+/* ======================================================================
+   Action sheet (components/modals/sheet.js)
+   ----------------------------------------------------------------------
+   A centred card here; compact.css turns every .modal-card into a bottom
+   sheet flush with the foot of a narrow screen, grab handle and all, so
+   this needs no media query of its own. Rows are 48px because they are
+   the whole point of the pattern — one comfortable target per action
+   instead of three cramped ones crowding a list row.
+   ====================================================================== */
+.sheet-card {
+    width: min(420px, 100%);
+    max-width: 420px;
+    padding: var(--sp-2);
+}
+.sheet-title {
+    padding: var(--sp-3) var(--sp-3) var(--sp-2);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    /* The title says what the actions are ABOUT — a session name, a file
+       path. It gets one line; the actions are what you came for. */
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.sheet-items {
+    display: flex;
+    flex-direction: column;
+}
+.sheet-item {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    width: 100%;
+    min-height: 48px;
+    padding: var(--sp-2) var(--sp-3);
+    background: none;
+    border: none;
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: var(--text-md);
+    text-align: left;
+    cursor: pointer;
+    transition: var(--transition);
+}
+.sheet-item:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-bright);
+}
+.sheet-item:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: -2px;
+}
+.sheet-item > svg {
+    flex-shrink: 0;
+    color: var(--text-faint);
+}
+.sheet-item-label {
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+/* A shortcut or a count, kept quiet and out of the label's way. */
+.sheet-item-hint {
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+}
+.sheet-item--danger,
+.sheet-item--danger > svg {
+    color: var(--error);
+}
+.sheet-item--danger:hover:not(:disabled) {
+    background: var(--error-subtle);
+    color: var(--error);
+}
+/* Greyed rather than hidden: a list that changes shape between rows is a
+   list you have to re-read every time you open it. */
+.sheet-item:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.sheet-cancel {
+    width: 100%;
+    margin-top: var(--sp-2);
+}
