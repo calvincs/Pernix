@@ -59,11 +59,15 @@ Returns the new session object including `session_id`.
 
 ### List Sessions
 ```
-GET /api/sessions?limit=50&offset=0&archived=false
+GET /api/sessions?limit=50&offset=0&archived=false&exclude_types=canary,worker
 ```
 One page of sessions, most recent first. Alongside `items`/`count`/`spaces` the response carries `total` (every session in the population being listed) and `has_more` (`offset + limit < total`) — the pair is what lets a client offer the page *behind* the one it is showing instead of stopping at a recency horizon. `has_more` is measured against the requested window rather than the rows returned, because space sessions are unioned back in past that horizon and can make a page longer than `limit`.
 
 **Archived sessions are absent by default** — leaving this list is what archiving *is*. `?archived=1` returns the same shape over that set instead, and `total`/`has_more` then count only it. Both answers also carry `archived_count` (how many sessions are archived in total) so a client can offer "Archived (N)" without a second round trip, and `archived` (which population it just returned). The archived page does **not** union space sessions back in: an archived session has left its space group.
+
+**`exclude_types`** is a comma-separated list of session types to leave out of the page entirely: `normal`, `worker`, `cron`, `rlm`, `snooze`, `canary`. Unknown names are ignored rather than rejected, and the applied list comes back as `excluded_types`. The filter is applied in SQL *before* the `LIMIT` — including in the never-roll-off space union — so the page **refills** with what is left rather than merely getting shorter, and `total`/`has_more` count the same narrowed population. This is what keeps a machine-heavy instance usable: where the 500 most recently updated sessions are mostly canary self-checks, workers and cron runs, excluding those types is the difference between a third of the user's chats fitting on page one and all of them. It works on `?archived=1` too.
+
+Both answers also carry **`type_counts`** — how many *live* sessions wear each type, over the whole unfiltered, unarchived population, e.g. `{"normal": 310, "worker": 47, "cron": 33, "rlm": 23, "snooze": 14, "canary": 277}`. It is deliberately *not* narrowed by `exclude_types`: a client offering the filter has to keep naming what it is hiding, or the control that turns a type back on reads zero. The six known types are always present; a type this build does not recognise is reported under its own name.
 
 ### Get Session (with messages)
 ```
