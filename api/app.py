@@ -117,7 +117,10 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.debug("Token estimator warm-up failed (falls back on first use): %s", e)
 
-    asyncio.create_task(_warm_token_estimator())
+    # Held on app.state: a bare create_task keeps no strong reference, so
+    # the loop is free to garbage-collect it mid-await. The codebase forbids
+    # the pattern everywhere else (SessionManager._spawn_detached).
+    app.state.warm_estimator_task = asyncio.create_task(_warm_token_estimator())
 
     # 2.5 Model registry — populate from provider APIs
     from core.llm.client import get_llm_client
@@ -331,12 +334,28 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
-    # 3. Cancel any running agent tasks
+    # 3. Cancel any running agent tasks.
+    #
+    # The flag goes up FIRST. Cancelling a parent cascades to its workers,
+    # whose completion callbacks resume the parent and dispatch its pending
+    # queue — starting a fresh turn against an LLM client that is about to
+    # close, and leaving a half-written SCOUTING row for the next boot to
+    # report as an interrupted session.
+    _mgr.shutting_down = True
+    cancelled = []
     for sid in _mgr.active_session_ids():
         s = _mgr.get(sid)
         if s and s.task and not s.task.done():
             s.task.cancel()
+            cancelled.append(s.task)
 
+    # Wait for the cancellations to actually land rather than guessing at a
+    # fixed delay; bounded so a wedged task cannot hold up the shutdown.
+    if cancelled:
+        try:
+            await asyncio.wait_for(asyncio.gather(*cancelled, return_exceptions=True), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("%d agent task(s) did not stop within 5s", len(cancelled))
     # Brief pause to let SSE generators finish their current iteration
     await asyncio.sleep(0.5)
 
