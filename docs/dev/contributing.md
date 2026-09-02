@@ -70,6 +70,8 @@ tools/ui-gate/run.sh my-tag          # seven viewports, level m2
 
 It boots a throwaway instance, seeds it, drives phones and tablets with Playwright, and fails if the **desktop** layout moved by more than a pixel — which is the check that catches a rule filed in the wrong stylesheet. Needs Playwright and Chromium in the `.venv`; see [../../tools/ui-gate/README.md](../../tools/ui-gate/README.md).
 
+What it cannot check — the iOS keyboard, native text selection, rotation, VoiceOver's reading order — is a ten-minute hand pass: [../mobile-device-checklist.md](../mobile-device-checklist.md).
+
 ### Coverage
 
 `./check.sh` enforces ≥63%. Coverage **omits** `tests/`, the virtualenvs (`.venv/`, `venv/`), `data/`, `static/`, `docs/`, `tools/`, `run.py`, and `core/certs.py` (paths that are either themselves tests, runtime data, or thin entry/glue layers). `core/extensions/*` is deliberately **not** omitted — it holds some of the largest, most concurrent code in the repo, and the gate must see it.
