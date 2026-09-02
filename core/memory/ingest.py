@@ -370,20 +370,29 @@ def ingest_document_sync(
     Tries to use the running event loop; creates one if needed.
     """
 
-    try:
-        loop = asyncio.get_running_loop()
-        # We're inside an async context — schedule as a task
-        import concurrent.futures
+    # Run on the MAIN loop when there is one. asyncio.run() builds a second
+    # event loop, and ingest_document drives the shared httpx client and the
+    # LLM scheduler — objects created on the main loop, whose futures and
+    # connection pools are not loop-portable. A contended acquire could park
+    # a future on a loop that never resolves it (a 120s hang), and a reused
+    # keep-alive socket raises "attached to a different loop".
+    import core.events as _events
 
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            future = pool.submit(
-                asyncio.run,
-                ingest_document(text, source_name, min_section_length, use_llm),
+    main_loop = getattr(_events, "_main_loop", None)
+    if main_loop is not None and not main_loop.is_closed():
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is not main_loop:
+            fut = asyncio.run_coroutine_threadsafe(
+                ingest_document(text, source_name, min_section_length, use_llm), main_loop
             )
-            return future.result(timeout=120)
-    except RuntimeError:
-        # No running loop — safe to use asyncio.run
-        return asyncio.run(ingest_document(text, source_name, min_section_length, use_llm))
+            return fut.result(timeout=120)
+
+    # No main loop recorded (tests, CLI): a private loop is the only option,
+    # and there is no shared client to conflict with.
+    return asyncio.run(ingest_document(text, source_name, min_section_length, use_llm))
 
 
 def correction_preamble(kind: str, approved_by: str = "human", source_ref: str = "") -> str:
