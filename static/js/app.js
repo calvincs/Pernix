@@ -13,7 +13,9 @@ import { initBell, openBellPanel, closeBellPanel, refreshBell } from './componen
 import { initJobsIndicator } from './components/jobs-indicator.js';
 import {
     initSidebar, renderSessionList as renderSidebar, updateSessionActivity,
-    setSessionPaging, setSessionPagingBusy, openSessionSheet, setArchivedCount,
+    setSessionPaging, setSessionPagingBusy, openSessionSheet,
+    sessionsQuery,
+    setListMeta,
 } from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel, EXPLORER_GROUPS } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
@@ -527,7 +529,7 @@ function _knownSession(sid) {
 
 async function loadSessions() {
     try {
-        const data = await get(`/api/sessions?limit=${_sessionWindow}`);
+        const data = await get(`/api/sessions?limit=${_sessionWindow}${sessionsQuery()}`);
         state.sessions = data.items || [];
         state.spaces = data.spaces || [];
         // A restored session is back in the list, so the stale detail copy
@@ -538,7 +540,7 @@ async function loadSessions() {
             loaded: state.sessions.length,
             hasMore: !!data.has_more,
         });
-        setArchivedCount(data.archived_count || 0);
+        setListMeta(data);
         for (const s of state.sessions) {
             const busy = _BUSY_STATES.has(s.state_v2);
             if (_prevBusy.get(s.id) && !busy && s.id !== state.sid) {
@@ -570,7 +572,7 @@ async function loadOlderSessions() {
     setSessionPagingBusy(true);
     try {
         const offset = _sessionWindow;
-        const data = await get(`/api/sessions?limit=${SESSION_PAGE}&offset=${offset}`);
+        const data = await get(`/api/sessions?limit=${SESSION_PAGE}&offset=${offset}${sessionsQuery()}`);
         const known = new Set((state.sessions || []).map((s) => s.id));
         const fresh = (data.items || []).filter((s) => !known.has(s.id));
         state.sessions = [...(state.sessions || []), ...fresh];
