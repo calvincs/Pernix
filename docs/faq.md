@@ -32,7 +32,7 @@ There used to be a DuckDuckGo fallback; it was removed because it produced unrel
 
 That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `create_skill`) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
 
-Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Tools & safety → Security**.
+Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Tools & safety → Remembered Approvals**.
 
 ### How do I bypass the dangerous-tool gate for unattended cron jobs?
 
