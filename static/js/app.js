@@ -126,6 +126,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupInput();
     setupNewSession();
     setupFileDrop();
+    _setupScrollAffordances();
     initVoice({
         textarea: () => document.getElementById('msg-input'),
         addPendingFiles,
@@ -4942,6 +4943,54 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
 // Copy buttons for code blocks
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Scroll affordances (C3)
+// ---------------------------------------------------------------------------
+// A wide code block or a wide table is simply cut off at the right edge with
+// nothing to say so — on a phone the "Output $/M" and "Notes" columns of a
+// pricing table are gone, and the 4px scrollbar that would hint at them only
+// appears once you are already dragging. The class goes on whatever overflows
+// RIGHT NOW; the edge fade that reads it is CSS.
+//
+// Measuring scrollWidth forces layout, so every caller lands in one batched
+// frame, and a transcript with no box to measure (a detached page being built,
+// a hidden pane) is skipped rather than measured as zero.
+let _affordanceRaf = 0;
+
+function _markScrollAffordances() {
+    if (_affordanceRaf) return;
+    _affordanceRaf = requestAnimationFrame(() => {
+        _affordanceRaf = 0;
+        const scroll = document.getElementById('messages');
+        const inner = document.getElementById('messages-inner');
+        if (!scroll || !inner || !scroll.clientHeight) return;
+        for (const wrap of inner.querySelectorAll('.code-block-wrap')) {
+            const pre = wrap.querySelector('pre');
+            wrap.classList.toggle('is-scrollable', !!pre && pre.scrollWidth > pre.clientWidth + 2);
+        }
+        // Only a touch layout makes a table its own scroller (display:block +
+        // overflow-x); everywhere else scrollWidth === clientWidth and this
+        // marks nothing, which is right — there is nothing to scroll.
+        for (const table of inner.querySelectorAll('.message .content table')) {
+            table.classList.toggle('is-scrollable', table.scrollWidth > table.clientWidth + 2);
+        }
+    });
+}
+
+function _setupScrollAffordances() {
+    const scroll = document.getElementById('messages');
+    if (!scroll) return;
+    _markScrollAffordances();
+    // The transcript changes width for reasons that have nothing to do with a
+    // new message: the Explorer opening beside it, the sidebar collapsing, a
+    // rotation. A block that fitted a moment ago does not now.
+    if (typeof ResizeObserver === 'function') {
+        new ResizeObserver(_markScrollAffordances).observe(scroll);
+    }
+    // Crossing 900px can turn a table into a scroller and back.
+    window.addEventListener('pernix:tier-change', _markScrollAffordances);
+}
+
 // The copy button used to float over the top-right corner of the <pre>, which
 // is fine while it only appears on hover and fatal once it does not: on touch
 // it is always visible and 44px wide, so it sat on the first line of every
@@ -4988,6 +5037,10 @@ function addCopyButtons(container) {
         wrap.appendChild(head);
         wrap.appendChild(pre);
     });
+    // Every render of assistant content comes through here — a replayed
+    // transcript, a streaming re-render, a stabilised chunk — so this is the
+    // one place that has to ask whether anything overflows now. (C3)
+    _markScrollAffordances();
 }
 
 // ---------------------------------------------------------------------------
