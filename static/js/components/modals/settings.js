@@ -2468,13 +2468,18 @@ function buildSearchBar() {
 // what someone came to DO. Every field still appears exactly once — the
 // grouping is a `tab` key on each section, so a field cannot be listed twice
 // or dropped by an edit to one list. (S6)
+// `short` is the label the strip falls back to on a narrow window. Six
+// goal-named tabs are ~800px of text; a 900px-wide window gives the card 810
+// and the strip scrolled the last tab half off the edge. Each short form is
+// the first word of its full name, so the accessible name (which stays the
+// full label, always) still contains the visible text — WCAG 2.5.3.
 const SETTINGS_TABS = [
-    { key: 'providers',    label: 'Providers & models' },
-    { key: 'agent',        label: 'Agent behaviour' },
-    { key: 'autonomy',     label: 'Autonomy & idle work' },
-    { key: 'tools',        label: 'Tools & safety' },
-    { key: 'integrations', label: 'Integrations' },
-    { key: 'environment',  label: 'Environment & network' },
+    { key: 'providers',    label: 'Providers & models',   short: 'Providers' },
+    { key: 'agent',        label: 'Agent behaviour',      short: 'Agent' },
+    { key: 'autonomy',     label: 'Autonomy & idle work', short: 'Autonomy' },
+    { key: 'tools',        label: 'Tools & safety',       short: 'Tools' },
+    { key: 'integrations', label: 'Integrations',         short: 'Integrations' },
+    { key: 'environment',  label: 'Environment & network', short: 'Network' },
 ];
 
 // Deep links from elsewhere in the app (openSettings({tab:'security'}) in
@@ -2555,7 +2560,16 @@ function buildTabs(settings) {
             class: `tab-btn${first ? ' active' : ''}`,
             'data-tab': t.key,
             type: 'button',
-        }, [text(t.label)]));
+            // Both labels ship; CSS picks one by width. The accessible name
+            // and the tooltip stay the full one either way, so a narrow
+            // window never costs a screen reader (or a hovering mouse) the
+            // name the docs and the settings search use.
+            'aria-label': t.label,
+            title: t.label,
+        }, [
+            el('span', { class: 'tab-label-full' }, [text(t.label)]),
+            el('span', { class: 'tab-label-short', 'aria-hidden': 'true' }, [text(t.short)]),
+        ]));
         contents.push(el('div', {
             class: `tab-content${first ? ' active' : ''}`,
             'data-tab': t.key,
