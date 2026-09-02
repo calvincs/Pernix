@@ -252,19 +252,27 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
             ? savedCollapsed
             : (hasActive ? false : DEFAULT_COLLAPSED[label]);
 
-        const header = el('div', { class: 'session-group-header' + (collapsed ? ' collapsed' : '') }, [
-            el('span', { class: 'sg-arrow' }, [text('\u25BC')]),
+        const header = el('div', {
+            class: 'session-group-header' + (collapsed ? ' collapsed' : ''),
+            role: 'button',
+            tabindex: '0',
+            'aria-expanded': String(!collapsed),
+        }, [
+            el('span', { class: 'sg-arrow', 'aria-hidden': 'true' }, [text('\u25BC')]),
             text(label),
             el('span', { class: 'sg-count' }, [text(String(group.length))]),
         ]);
 
         const body = el('div', { class: 'session-group-body' + (collapsed ? ' collapsed' : '') });
 
-        header.addEventListener('click', () => {
+        const toggleGroup = () => {
             const isCollapsed = header.classList.toggle('collapsed');
             body.classList.toggle('collapsed', isCollapsed);
+            header.setAttribute('aria-expanded', String(!isCollapsed));
             _saveCollapsed(label, isCollapsed);
-        });
+        };
+        header.addEventListener('click', toggleGroup);
+        _activateOnKey(header, toggleGroup);
 
         for (const s of group) {
             _renderSessionWithWorkers(s, body, activeSid, childrenByParent, sidebarState);
@@ -305,14 +313,27 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
     const savedCollapsed = sidebarState.collapsed?.[collapseKey];
     const collapsed = savedCollapsed !== undefined ? savedCollapsed : (hasActive ? false : false);
 
+    // The disclosure control is an inner role=button, not the whole header:
+    // the header also holds three real buttons, and an interactive element
+    // inside a button is invalid.
+    const toggle = el('div', {
+        class: 'sg-toggle',
+        role: 'button',
+        tabindex: '0',
+        'aria-expanded': String(!collapsed),
+        'aria-label': `Space ${space.label}, ${group.length} session${group.length === 1 ? '' : 's'}`,
+    }, [
+        el('span', { class: 'sg-arrow', 'aria-hidden': 'true' }, [text('▼')]),
+        el('span', { class: 'space-dot', 'aria-hidden': 'true' }),
+        el('span', { class: 'space-label' }, [text(space.label)]),
+        el('span', { class: 'sg-count' }, [text(String(group.length))]),
+    ]);
+
     const header = el('div', {
         class: 'session-group-header space-group-header' + (collapsed ? ' collapsed' : ''),
         style: `--space-color: ${space.color}`,
     }, [
-        el('span', { class: 'sg-arrow' }, [text('▼')]),
-        el('span', { class: 'space-dot' }),
-        el('span', { class: 'space-label' }, [text(space.label)]),
-        el('span', { class: 'sg-count' }, [text(String(group.length))]),
+        toggle,
         el('button', {
             class: 'space-btn space-add-btn',
             title: `New session in ${space.label}`,
@@ -346,11 +367,14 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
 
     const body = el('div', { class: 'session-group-body' + (collapsed ? ' collapsed' : '') });
 
-    header.addEventListener('click', () => {
+    const toggleSpace = () => {
         const isCollapsed = header.classList.toggle('collapsed');
         body.classList.toggle('collapsed', isCollapsed);
+        toggle.setAttribute('aria-expanded', String(!isCollapsed));
         _saveCollapsed(collapseKey, isCollapsed);
-    });
+    };
+    toggle.addEventListener('click', toggleSpace);
+    _activateOnKey(toggle, toggleSpace);
 
     if (!group.length) {
         body.appendChild(el('div', { class: 'space-empty' }, [text('No sessions yet — use + to start one')]));
@@ -384,6 +408,21 @@ function _getTypeKey(session) {
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
+// A div that carries role="button" has to implement the key half of a button
+// itself. Rows and group headers cannot be real <button>s because they hold
+// their own action buttons (pin, rename, delete, the space gear) and nested
+// buttons are invalid HTML, so they get role=button + tabindex=0 and this.
+// Keys that started inside a nested control are left alone — those own their
+// own keyboard behaviour (the rename input, the meta buttons).
+function _activateOnKey(elem, fn) {
+    elem.addEventListener('keydown', (e) => {
+        if (e.target !== elem) return;
+        if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+        e.preventDefault();   // Space would scroll the list
+        fn(e);
+    });
+}
+
 function _renderSessionWithWorkers(session, container, activeSid, childrenByParent, sidebarState) {
     _renderSessionItem(session, container, activeSid, false);
 
@@ -402,19 +441,27 @@ function _renderSessionWithWorkers(session, container, activeSid, childrenByPare
     const parts = [];
     if (nWorkers) parts.push(`${nWorkers} worker${nWorkers > 1 ? 's' : ''}`);
     if (nRlm) parts.push(`${nRlm} RLM run${nRlm > 1 ? 's' : ''}`);
-    const summary = el('div', { class: 'worker-summary' + (collapsed ? ' collapsed' : '') }, [
-        el('span', { class: 'ws-arrow' }, [text('\u25BC')]),
+    const summary = el('div', {
+        class: 'worker-summary' + (collapsed ? ' collapsed' : ''),
+        role: 'button',
+        tabindex: '0',
+        'aria-expanded': String(!collapsed),
+    }, [
+        el('span', { class: 'ws-arrow', 'aria-hidden': 'true' }, [text('\u25BC')]),
         text(parts.join(' \u00B7 ')),
     ]);
 
     const group = el('div', { class: 'worker-group' + (collapsed ? ' collapsed' : '') });
 
-    summary.addEventListener('click', (e) => {
-        e.stopPropagation();
+    const toggleWorkers = (e) => {
+        if (e && e.stopPropagation) e.stopPropagation();
         const isCollapsed = summary.classList.toggle('collapsed');
         group.classList.toggle('collapsed', isCollapsed);
+        summary.setAttribute('aria-expanded', String(!isCollapsed));
         _saveParentCollapsed(session.id, isCollapsed);
-    });
+    };
+    summary.addEventListener('click', toggleWorkers);
+    _activateOnKey(summary, toggleWorkers);
 
     container.appendChild(summary);
     for (const w of children) {
@@ -561,7 +608,7 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
     const _sv = session.state_v2 || session.state;
     const isActive = !!_sv && !['idle', 'idle_ready', 'awaiting_user', 'error'].includes(_sv);
     const dotCls = `session-dot ${typeDef.cls}${isActive ? ' active-pulse' : ''}`;
-    titleChildren.push(el('span', { class: dotCls }));
+    titleChildren.push(el('span', { class: dotCls, 'aria-hidden': 'true' }));
     titleChildren.push(el('span', { class: 'session-title-text' }, [text(titleText)]));
 
     // Needs-attention badges: "?" = blocked waiting for your input,
@@ -591,10 +638,23 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
     const actTextEl = el('span', { class: 'session-activity-text' }, activityStr ? [text(activityStr)] : []);
     const actLine = el('div', { class: 'session-activity' }, [actTextEl]);
 
+    // The row is a control, not decoration: Tab reaches it, Enter/Space
+    // opens it. role=button rather than a real <button> because the row
+    // contains the pin/rename/move/delete buttons. The explicit name keeps
+    // the dot, the ticker text and those buttons out of what gets read.
+    const nameParts = [titleText];
+    if (typeKey !== 'chat') nameParts.push(typeDef.label);
+    if (session._attention === 'input') nameParts.push('waiting for your input');
+    else if (session._attention === 'done') nameParts.push('finished while you were away');
+
+    const select = () => { if (_onSelect) _onSelect(session.id); };
     const item = el('div', {
         class: classes.join(' '),
         'data-sid': session.id,
-        onClick: () => { if (_onSelect) _onSelect(session.id); },
+        role: 'button',
+        tabindex: '0',
+        'aria-label': nameParts.join(', '),
+        onClick: select,
     }, [
         el('div', { class: 'session-top' }, [
             el('span', { class: 'session-title' }, titleChildren),
@@ -602,6 +662,8 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
         ]),
         actLine,
     ]);
+
+    _activateOnKey(item, select);
 
     // Tooltip events (desktop only — suppressed on mobile)
     if (!isMobile()) {

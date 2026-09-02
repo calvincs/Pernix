@@ -3334,3 +3334,29 @@ mark.ts-mark.current {
     transition: var(--transition);
 }
 .sw-update-dismiss:hover { color: var(--text-bright); background: var(--bg-hover); }
+
+/* ---- Phase 2B: sidebar / bell / confirm ---- */
+
+/* A1/N2 — sidebar rows and group headers are controls now (role=button +
+   tabindex), so they need a focus ring of their own; a bare tabindex div only
+   gets the UA outline, which is invisible against --bg-raised. */
+.session-item:focus-visible,
+.session-group-header:focus-visible,
+.session-group-header .sg-toggle:focus-visible,
+.worker-summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    border-radius: var(--radius-sm);
+}
+
+/* A space header holds three real buttons, so the disclosure control is an
+   inner element rather than the header itself. It takes the row's leading
+   space; the action buttons keep the trailing edge. */
+.session-group-header .sg-toggle {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
