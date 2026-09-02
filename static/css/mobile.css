@@ -179,6 +179,13 @@
     max-width: 100%;
     min-height: 28px;
 }
+/* The breadcrumb and the title compete for one narrow row. The way back is
+   worth a tap target but not half the header, so it keeps the arrow and as
+   much of the parent's name as fits. */
+.session-header-parent {
+    max-width: 14ch;
+    min-height: 28px;
+}
 
 /* ------------------------------------------------------------------
    Scrollbar hiding (native indicators are better on mobile)
