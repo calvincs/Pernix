@@ -149,6 +149,6 @@ A single-shot lookup ("What's the weather in NYC?") doesn't need a worker. A res
 
 ## Inspecting a worker mid-flight
 
-The parent transcript grows one **Workers** card per fan-out, updated in place: a row per worker with its state and its pause/resume control. Above the composer, the worker strip carries a chip per live worker; below 900px that strip collapses to one line (`N workers · M RLM · K finished`) that taps through to the card. You can also click into a worker session in the sidebar — they nest under their parent with a `↳` — and watch it directly.
+The parent transcript grows one **Workers** card per fan-out, updated in place: a row per worker with its state and its pause/resume control. Above the composer, the worker strip carries a chip per live worker; below 900px that strip collapses to a single line counting how many are running, paused and finished, which taps through to the card. You can also click into a worker session in the sidebar — they nest under their parent with a `↳` — and watch it directly.
 
 Programmatically: each worker has its own session ID. Subscribe to `GET /api/sessions/{worker_id}/events` to stream that worker's events independently.
