@@ -1612,3 +1612,27 @@ body[data-touch] .ce-fallback {
     word-break: break-word;
     -webkit-text-size-adjust: 100%;
 }
+
+/* ---- TEMP (M2C): relocate to compact.css in M3 ---- */
+/* The space dialog's directive toolbar stacks below 900px (E3). Everything
+   it names is modals.css's, which M2C does not own; .space-dir-mode-cell is
+   a new element of the same family and belongs there with the rest, so it
+   travels with them rather than being left behind here. */
+body[data-compact] .space-dir-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--sp-2);
+}
+body[data-compact] .space-dir-action {
+    width: 100%;
+}
+.space-dir-mode-cell {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2);
+    flex: 1;
+    min-width: 0;
+}
+body[data-compact] .space-dir-mode-cell {
+    justify-content: space-between;
+}
