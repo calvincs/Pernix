@@ -1189,7 +1189,6 @@
 }
 
 /* Delete dialog */
-.space-delete-card { width: min(520px, 92vw); }
 .space-cascade-label {
     display: flex;
     align-items: center;
