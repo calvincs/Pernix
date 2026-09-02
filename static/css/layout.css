@@ -474,6 +474,75 @@ body.sidebar-resizing {
     color: var(--text-faint);
     font-style: italic;
 }
+
+/* Time buckets INSIDE a space. Deliberately not .session-group-header: these
+   sit one level down from the space they divide, so they are smaller, dimmer
+   and indented past the space dot, and they read as a subdivision of the
+   coloured group above rather than as a peer of the buckets below it. The
+   count is hidden while the bucket is open — an open bucket shows you its
+   rows, and a number over them is arithmetic nobody asked for. Folded, the
+   number is the only thing the header still owes the reader. */
+.space-bucket-header {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    /* Indented past the space dot above it, so the eye reads it as inside
+       the coloured group rather than as the next thing after it. */
+    padding: 6px var(--sp-3) 3px calc(var(--sp-3) + 10px);
+    /* A full-width disclosure row, and the gate's floor for something a
+       thumb has to hit. The existing group headers get an exemption from it
+       instead; a control this commit is adding can just clear it. */
+    box-sizing: border-box;
+    min-height: 28px;
+    /* --text-xxs is smaller than the space label (--text-xs) it sits under,
+       and it is the size touch.css already raises to its 11px floor — so
+       these headers follow the tier without a rule of their own over there. */
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    cursor: pointer;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    user-select: none;
+    opacity: 0.75;
+}
+.space-bucket-header:hover { color: var(--text-dim); opacity: 1; }
+.space-bucket-header .sg-arrow {
+    display: inline-flex;
+    align-items: center;
+    transition: transform var(--transition);
+}
+.space-bucket-header.collapsed .sg-arrow { transform: rotate(-90deg); }
+.space-bucket-header .sg-count {
+    margin-left: auto;
+    opacity: 0.6;
+    font-size: var(--text-xxs);
+}
+
+/* "Show all 47" — one row at the end of what a space is showing. Full width
+   and dashed so it reads as the edge of the group rather than as another
+   session in it. It is a real target rather than a caption, and the one
+   control this commit adds that a thumb has to find: 32px, on both tiers,
+   which is why it needs no exemption from the gate's 28px floor. */
+.space-show-all {
+    display: block;
+    box-sizing: border-box;
+    width: calc(100% - var(--sp-3) * 2);
+    min-height: 32px;
+    margin: 2px var(--sp-3) 6px;
+    padding: 4px 8px;
+    background: none;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-faint);
+    font-family: inherit;
+    font-size: var(--text-xxs);
+    cursor: pointer;
+    transition: color var(--transition), border-color var(--transition);
+}
+.space-show-all:hover {
+    color: var(--text-dim);
+    border-color: var(--text-faint);
+}
 .space-chip {
     display: inline-block;
     width: 7px;
@@ -3877,6 +3946,8 @@ mark.ts-mark.current {
 .session-item:focus-visible,
 .session-group-header:focus-visible,
 .session-group-header .sg-toggle:focus-visible,
+.space-bucket-header:focus-visible,
+.space-show-all:focus-visible,
 .worker-summary:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;

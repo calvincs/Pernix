@@ -42,6 +42,24 @@ function _legendTitle(def, isHidden) {
 // Types that nest under their parent session instead of the top-level list.
 const CHILD_TYPES = new Set(['worker', 'rlm']);
 
+// The time buckets, in the order they read. Module scope because a space
+// group buckets by exactly the same rule as the list below it — one place a
+// user learns "Older", not two that could drift into disagreeing about what
+// the word means.
+const GROUP_ORDER = ['Pinned', 'Today', 'Yesterday', 'This Week', 'This Month', 'Older'];
+const DEFAULT_COLLAPSED = {
+    Pinned: false, Today: false, Yesterday: false,
+    'This Week': true, 'This Month': true, Older: true,
+};
+
+// How many rows a space shows before it folds the rest behind "Show all".
+// Fifteen is where a space stops being a group you can read and becomes a
+// list you have to scroll: the largest space on the owner's box holds 47
+// sessions, and every one of them was in the DOM, above the time buckets, on
+// every render — six times a minute, for a group whose bottom half nobody had
+// looked at in a month.
+const SPACE_ROW_CAP = 15;
+
 // app.js asks for /api/sessions?limit=500. A full page means the tail was
 // silently cut off — and the sessions that fall off are exactly the old ones
 // a user goes looking for, so the list has to admit it is not everything.
@@ -657,8 +675,6 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     const ungrouped = topLevel.filter(s => !s.space_id || !knownSpaceIds.has(s.space_id));
 
     // Bucket by time group — pinned sessions get their own group on top.
-    const GROUP_ORDER = ['Pinned', 'Today', 'Yesterday', 'This Week', 'This Month', 'Older'];
-    const DEFAULT_COLLAPSED = { Pinned: false, Today: false, Yesterday: false, 'This Week': true, 'This Month': true, Older: true };
     const buckets = {};
     for (const g of GROUP_ORDER) buckets[g] = [];
     for (const s of ungrouped) buckets[s.pinned ? 'Pinned' : _timeGroup(s.updated_at)].push(s);
@@ -1004,15 +1020,137 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
     toggle.addEventListener('click', toggleSpace);
     _activateOnKey(toggle, toggleSpace);
 
-    if (!group.length) {
-        body.appendChild(el('div', { class: 'space-empty' }, [text('No sessions yet — use + to start one')]));
-    }
-    for (const s of group) {
-        _renderSessionWithWorkers(s, body, activeSid, childrenByParent, sidebarState);
-    }
+    _renderSpaceBody(space, group, body, activeSid, childrenByParent, sidebarState);
 
     list.appendChild(header);
     list.appendChild(body);
+}
+
+// ---------------------------------------------------------------------------
+// Inside a space: the same time buckets, and a folded tail
+// ---------------------------------------------------------------------------
+// A space group used to be one flat run, newest first, with no cap. That is
+// fine for the three-session space it was designed against and useless for a
+// forty-seven-session one: the group had no shape, the sessions the user
+// actually works in were interleaved with a year of finished ones, and every
+// row was in the DOM on every render.
+//
+// So a space buckets by the same _timeGroup rule as the list below it, and
+// shows at most SPACE_ROW_CAP rows until asked for the rest. Both the
+// per-bucket folds and the "show all" live in pernix:sidebar beside
+// parentCollapsed, so the shape a user arranges is the shape they come back to.
+
+/** Whether a bucket inside a space starts folded, before any saved choice. */
+function _spaceBucketDefault(label, size) {
+    if (label === 'Older') return true;              // a space's bottom is history
+    if (label === 'This Month') return size > SPACE_ROW_CAP;
+    return false;
+}
+
+function _renderSpaceBody(space, group, body, activeSid, childrenByParent, sidebarState) {
+    if (!group.length) {
+        body.appendChild(el('div', { class: 'space-empty' }, [text('No sessions yet — use + to start one')]));
+        return;
+    }
+
+    const buckets = {};
+    for (const label of GROUP_ORDER) buckets[label] = [];
+    for (const s of group) buckets[s.pinned ? 'Pinned' : _timeGroup(s.updated_at)].push(s);
+    const spanned = GROUP_ORDER.filter(label => buckets[label].length);
+
+    // A header that partitions nothing is noise. A space whose sessions all
+    // land in the same bucket renders exactly as it always did — flat, no
+    // sub-headers — which is most spaces, most of the time.
+    const bucketed = spanned.length > 1;
+
+    const showAll = !!sidebarState.spaceShowAll?.[space.id];
+    let budget = showAll ? Infinity : SPACE_ROW_CAP;
+
+    for (const label of spanned) {
+        if (budget <= 0) break;
+        const rows = buckets[label];
+        // "Show all" means the DEFAULTS stop folding things; a bucket the
+        // user collapsed by hand stays collapsed, because that was a choice
+        // about this bucket and not about the size of the space.
+        // "Show all" clears this space's folds as it turns on (see the
+        // control below), so under it a bucket is open unless the user has
+        // folded one back by hand since.
+        const saved = sidebarState.collapsed?.[`space:${space.id}:${label}`];
+        const collapsed = bucketed && (saved !== undefined
+            ? saved
+            : (!showAll && _spaceBucketDefault(label, group.length)));
+
+        if (!bucketed) {
+            for (const s of rows.slice(0, budget)) {
+                _renderSessionWithWorkers(s, body, activeSid, childrenByParent, sidebarState);
+            }
+            budget -= Math.min(rows.length, budget);
+            continue;
+        }
+
+        // A folded bucket renders its header and nothing else. The rows of
+        // the outer list stay in the DOM when their group collapses, but a
+        // space is where the thousand-session case actually bites — and a
+        // folded bucket that still built every row would spend the cap on
+        // rows nobody can see.
+        const visible = collapsed ? [] : rows.slice(0, budget);
+        budget -= visible.length;
+
+        const count = el('span', { class: 'sg-count' }, [text(String(rows.length))]);
+        count.hidden = !collapsed;   // the number is what a fold owes the reader
+        const sub = el('div', {
+            class: 'space-bucket-header' + (collapsed ? ' collapsed' : ''),
+            'data-group': `space:${space.id}:${label}`,
+            role: 'button',
+            tabindex: '0',
+            'aria-expanded': String(!collapsed),
+            'aria-label': `${label} in ${space.label}, ${rows.length} session${rows.length === 1 ? '' : 's'}`,
+        }, [
+            el('span', { class: 'sg-arrow', 'aria-hidden': 'true' }, [icon('chevron-down', { size: 8 })]),
+            el('span', { class: 'space-bucket-label' }, [text(label)]),
+            count,
+        ]);
+        const toggleBucket = () => {
+            _saveCollapsed(`space:${space.id}:${label}`, !collapsed);
+            _repaint();   // folded buckets hold no rows, so this materializes them
+        };
+        sub.addEventListener('click', toggleBucket);
+        _activateOnKey(sub, toggleBucket);
+        body.appendChild(sub);
+
+        for (const s of visible) {
+            _renderSessionWithWorkers(s, body, activeSid, childrenByParent, sidebarState);
+        }
+    }
+
+    if (group.length <= SPACE_ROW_CAP) return;
+    // One row, at the end of what is showing, that names the whole number.
+    // "Show all 47" is a promise about the space; the arrow headers above it
+    // are about one bucket each, and the two must not be confused — which is
+    // why the click clears this space's folds rather than negotiating with
+    // them. A button that says "show all 47" and returns 39 because Older was
+    // folded three weeks ago is a button that has lied.
+    const showAllRow = el('button', {
+        class: 'space-show-all',
+        type: 'button',
+        // _focusMark keys on data-sid or data-group; without one, the click
+        // that repaints the list drops keyboard focus back onto <body>.
+        'data-group': `space:${space.id}:show-all`,
+        'aria-expanded': String(showAll),
+        title: showAll
+            ? `Fold ${space.label} back to its most recent ${SPACE_ROW_CAP}`
+            : `Show all ${group.length} sessions in ${space.label}`,
+        onClick: (e) => {
+            e.stopPropagation();
+            _clearSpaceBucketFolds(space.id);
+            _saveSpaceShowAll(space.id, !showAll);
+            announce(showAll
+                ? `${space.label} folded back to its most recent sessions`
+                : `${space.label} showing all ${group.length} sessions`);
+            _repaint();
+        },
+    }, [text(showAll ? 'Show fewer' : `Show all ${group.length}`)]);
+    body.appendChild(showAllRow);
 }
 
 export function spaceById(id) {
@@ -2175,6 +2313,32 @@ function _saveParentCollapsed(orchId, isCollapsed) {
     const state = _loadState();
     if (!state.parentCollapsed) state.parentCollapsed = {};
     state.parentCollapsed[orchId] = isCollapsed;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+/** "Show all N" for one space — the same shape as parentCollapsed. */
+function _saveSpaceShowAll(spaceId, on) {
+    const state = _loadState();
+    if (!state.spaceShowAll) state.spaceShowAll = {};
+    state.spaceShowAll[spaceId] = !!on;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+/**
+ * Forget every per-bucket fold inside one space, so the defaults rule again.
+ *
+ * Both ends of "Show all" want this. Turning it on has to actually show all,
+ * not all-except-the-bucket-someone-folded in March; turning it off has to
+ * hand back the default shape rather than whatever was left over from the
+ * last time the space was open.
+ */
+function _clearSpaceBucketFolds(spaceId) {
+    const state = _loadState();
+    if (!state.collapsed) return;
+    const prefix = `space:${spaceId}:`;
+    for (const key of Object.keys(state.collapsed)) {
+        if (key.startsWith(prefix)) delete state.collapsed[key];
+    }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
