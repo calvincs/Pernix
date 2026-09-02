@@ -159,8 +159,12 @@ def _snapshot_memories(dest: Path) -> tuple[Path | None, int]:
 _SNAPSHOT_SCHEMES: tuple[tuple[str, re.Pattern[str]], ...] = (
     # Current: sessions-20260102-030405.db, plus _001 same-second collisions.
     ("stamped", re.compile(r"^sessions-\d{8}-\d{6}(?:_\d+)?\.db$")),
-    # Older: sessions.2026-01-02T03:04:05.123456+00:00.db
-    ("iso", re.compile(r"^sessions\.\d{4}-\d{2}-\d{2}[T_][0-9:.\-+T]*\.db$")),
+    # Older, in two spellings of the same ISO instant: the extended form
+    # sessions.2026-01-02T03:04:05.123456+00:00.db, and the compact
+    # basic form sessions.20260102T030405Z.db — which is what the oldest
+    # snapshots on a long-lived box actually wear, because a filename is a
+    # bad place for colons and an early version said so with strftime.
+    ("iso", re.compile(r"^sessions\.(?:\d{4}-\d{2}-\d{2}[T_][0-9:.\-+T]*|\d{8}T\d{6}Z)\.db$")),
     # Older still: sessions.db.20260102-030405
     ("suffixed", re.compile(r"^sessions\.db\.\d{8}-\d{6}$")),
 )
@@ -170,9 +174,9 @@ def snapshot_scheme(name: str) -> str | None:
     """Which naming scheme ``name`` belongs to, or None if it is not a snapshot.
 
     Anything else in the directory — ``settings-*.json`` dropped there by
-    hand, the ``memories-*`` corpus directories, the live database and its
-    ``-wal``/``-shm`` siblings — returns None and is never a rotation
-    candidate.
+    hand, the ``memories-*`` corpus directories, a hand-made
+    ``sessions.db.bak-*``, the live database and its ``-wal``/``-shm``
+    siblings — returns None and is never a rotation candidate.
     """
     for scheme, pattern in _SNAPSHOT_SCHEMES:
         if pattern.match(name):
