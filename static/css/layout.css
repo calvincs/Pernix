@@ -3422,3 +3422,19 @@ mark.ts-mark.current {
     text-wrap: pretty;
 }
 .confirm-body p:last-of-type { margin-bottom: 0; }
+
+/* F10 — urgency has to look like urgency. .notif-item lives in modals.css and
+   .jobs-indicator in jobs.css; both of these are new selectors, so nothing
+   there is overridden in place. The :hover companion is needed because
+   jobs.css loads after this file and its .jobs-indicator:hover would
+   otherwise repaint a failed job grey the moment you point at it. */
+.notif-item.urgent {
+    border-left: 2px solid var(--error);
+    padding-left: var(--sp-3);
+}
+.notif-item.urgent .notif-item-type {
+    color: var(--error);
+    font-weight: 600;
+}
+.jobs-indicator.has-error,
+.jobs-indicator.has-error:hover { color: var(--error); }
