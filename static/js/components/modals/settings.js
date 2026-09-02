@@ -1511,10 +1511,7 @@ function buildNetworkTab(settings) {
 // --- QR Code button + overlay ---
 
 function _buildQRButton() {
-    const btn = el('button', {
-        class: 'btn-secondary',
-        style: 'font-family:var(--mono); font-size:var(--text-sm); padding:0.4rem 0.8rem; cursor:pointer;',
-    }, [text('Show QR Code')]);
+    const btn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Show QR Code')]);
 
     btn.addEventListener('click', async () => {
         btn.disabled = true;
@@ -1560,8 +1557,8 @@ function _buildQRButton() {
             }, [text('Scan with your phone camera to open the app with auth')]);
 
             const closeBtn = el('button', {
-                class: 'btn-primary',
-                style: 'margin-top:1rem; padding:0.4rem 1.5rem;',
+                class: 'btn btn--primary settings-block-btn',
+                type: 'button',
             }, [text('Close')]);
 
             card.append(el('div', { class: 'modal-body' }, [title, qrContainer, hint, closeBtn]));
@@ -1631,24 +1628,16 @@ function _openTokenOverlay(token, { title, note }) {
     });
     field.addEventListener('focus', () => field.select());
 
-    const copyBtn = el('button', {
-        class: 'btn-secondary',
-        style: 'padding:0.4rem 0.8rem; cursor:pointer;',
-    }, [text('Copy')]);
+    const copyBtn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Copy')]);
     copyBtn.addEventListener('click', async () => {
         const ok = await _copyText(token, field);
         copyBtn.textContent = ok ? 'Copied' : 'Select and copy manually';
         setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
     });
 
-    const closeBtn = el('button', {
-        class: 'btn-primary',
-        style: 'padding:0.4rem 0.8rem; cursor:pointer;',
-    }, [text('Done')]);
+    const closeBtn = el('button', { class: 'btn btn--primary', type: 'button' }, [text('Done')]);
 
-    const row = el('div', {
-        style: 'display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1rem;',
-    }, [copyBtn, closeBtn]);
+    const row = el('div', { class: 'settings-btn-row' }, [copyBtn, closeBtn]);
 
     card.append(el('div', { class: 'modal-body' }, [
         el('h2', { style: 'font-size:var(--text-lg); margin-bottom:0.75rem;' }, [text(title)]),
@@ -1671,10 +1660,7 @@ function _openTokenOverlay(token, { title, note }) {
 }
 
 function _buildShowTokenButton() {
-    const btn = el('button', {
-        class: 'btn-secondary',
-        style: 'font-family:var(--mono); font-size:var(--text-sm); padding:0.4rem 0.8rem; cursor:pointer;',
-    }, [text('Show Token')]);
+    const btn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Show Token')]);
 
     btn.addEventListener('click', async () => {
         btn.disabled = true;
@@ -1705,11 +1691,7 @@ function _buildShowTokenButton() {
 // --- Regenerate token (destructive) ---
 
 function _buildRegenerateButton() {
-    const btn = el('button', {
-        class: 'btn-secondary',
-        style: 'font-family:var(--mono); font-size:var(--text-sm); padding:0.4rem 0.8rem;'
-             + 'cursor:pointer; border-color:var(--error, #e55); color:var(--error, #e55);',
-    }, [text('Regenerate Token')]);
+    const btn = el('button', { class: 'btn btn--danger', type: 'button' }, [text('Regenerate Token')]);
 
     btn.addEventListener('click', () => {
         const overlay = el('div', { class: 'modal-overlay' });
@@ -1725,15 +1707,9 @@ function _buildRegenerateButton() {
             + 'and any QR link or shared URL you handed out. They will each need the new '
             + 'token to get back in. This browser stays signed in.'
         )]);
-        const btnRow = el('div', { style: 'display:flex; gap:0.5rem; justify-content:flex-end;' });
-        const cancelBtn = el('button', {
-            class: 'btn-secondary', style: 'padding:0.4rem 0.8rem; cursor:pointer;',
-        }, [text('Cancel')]);
-        const confirmBtn = el('button', {
-            class: 'btn-primary',
-            style: 'padding:0.4rem 0.8rem; cursor:pointer;'
-                 + 'background:var(--error, #e55); border-color:var(--error, #e55);',
-        }, [text('Regenerate')]);
+        const btnRow = el('div', { class: 'settings-btn-row settings-btn-row--flush' });
+        const cancelBtn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Cancel')]);
+        const confirmBtn = el('button', { class: 'btn btn--danger', type: 'button' }, [text('Regenerate')]);
 
         btnRow.append(cancelBtn, confirmBtn);
         const cardBody = el('div', { class: 'modal-body' }, [title, body, btnRow]);
@@ -1808,7 +1784,8 @@ function _buildOriginsEditor(origins) {
                      + 'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
             }, [text(_corsOrigins[idx])]);
             const removeBtn = el('button', {
-                style: 'background:none; border:none; color:var(--error); cursor:pointer; font-size:var(--text-md); padding:0 4px;',
+                class: 'btn btn--danger btn--icon',
+                type: 'button',
                 title: 'Remove',
                 'aria-label': `Remove the allowed origin ${_corsOrigins[idx]}`,
             }, [text('\u00d7')]);
@@ -1834,10 +1811,7 @@ function _buildOriginsEditor(origins) {
                  + 'padding:0.3rem 0.5rem; background:var(--bg-surface); border:1px solid var(--border); '
                  + 'border-radius:var(--radius); color:var(--text); outline:none;',
         });
-        const addBtn = el('button', {
-            class: 'btn-secondary',
-            style: 'font-size:var(--text-xs); padding:0.3rem 0.6rem; cursor:pointer;',
-        }, [text('Add')]);
+        const addBtn = el('button', { class: 'btn btn--secondary btn--sm', type: 'button' }, [text('Add')]);
 
         function addOrigin() {
             const val = input.value.trim();
@@ -1883,7 +1857,7 @@ function buildNotificationsSection() {
     const children = [el('h3', {}, [text('Notifications'), buildHelpIcon('System notifications let the agent alert you even when this tab is not in focus. Click a notification to jump to the originating session.')]), row];
 
     if (perm === 'default') {
-        const btn = el('button', { class: 'btn btn-secondary', style: 'margin-top:0.5rem; font-size:var(--text-sm);' }, [text('Enable Notifications')]);
+        const btn = el('button', { class: 'btn btn--secondary settings-block-btn', type: 'button' }, [text('Enable Notifications')]);
         btn.addEventListener('click', async () => {
             const granted = await requestPermission();
             statusEl.textContent = granted ? 'Enabled' : 'Permission denied';
@@ -1928,10 +1902,7 @@ function buildSessionCleanupSection() {
         return { toDelete, candidates: candidates.length, keepDays, keepMin };
     }
 
-    const previewBtn = el('button', {
-        class: 'btn btn-secondary',
-        style: 'font-size:var(--text-sm);',
-    }, [text('Preview')]);
+    const previewBtn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Preview')]);
     previewBtn.addEventListener('click', async () => {
         previewBtn.disabled = true;
         try {
@@ -1948,10 +1919,7 @@ function buildSessionCleanupSection() {
         }
     });
 
-    const pruneBtn = el('button', {
-        class: 'btn btn-secondary',
-        style: 'font-size:var(--text-sm); color:var(--error); border-color:var(--error);',
-    }, [text('Prune now')]);
+    const pruneBtn = el('button', { class: 'btn btn--danger', type: 'button' }, [text('Prune now')]);
     pruneBtn.addEventListener('click', async () => {
         pruneBtn.disabled = true;
         previewBtn.disabled = true;
@@ -2064,10 +2032,7 @@ async function buildSecurityTab(settings) {
         let data = {};
         try { data = await get('/api/settings/tool-approvals'); } catch { /* ignore */ }
         const tools = Object.keys(data);
-        const clearBtn = el('button', {
-            class: 'btn btn-secondary',
-            style: 'font-size:var(--text-xs); padding:2px 8px;',
-        }, [text('Clear all')]);
+        const clearBtn = el('button', { class: 'btn btn--secondary btn--sm', type: 'button' }, [text('Clear all')]);
         clearBtn.disabled = tools.length === 0;
         clearBtn.addEventListener('click', async () => {
             // Unprompted, one click wiped every scope the user had ever

@@ -1002,7 +1002,7 @@ function renderViewer(container) {
     } else if (isMarkdown(file.name)) {
         // Markdown with raw toggle
         let showRaw = false;
-        const toggleBtn = el('button', { class: 'fp-btn', style: 'margin-bottom: 8px' }, [text('raw')]);
+        const toggleBtn = el('button', { class: 'fp-btn fp-viewer-toggle', type: 'button' }, [text('raw')]);
         const contentWrap = el('div', { class: 'fp-viewer-md' });
         contentWrap.appendChild(renderMarkdown(file.content));
 
@@ -1881,7 +1881,7 @@ function renderSkillViewer(container) {
             renderSkills();
         });
 
-        const applyBtn = el('button', { class: 'fp-btn fp-btn-primary' }, [text('apply')]);
+        const applyBtn = el('button', { class: 'fp-btn primary', type: 'button' }, [text('apply')]);
         applyBtn.title = 'Insert the suggested change into this skill\'s SKILL.md under the referenced section. Re-run the skill to validate the fix.';
         applyBtn.addEventListener('click', async () => {
             if (!confirm(`Apply this proposal to ${proposal.skill_name}'s SKILL.md?\n\nSection: ${proposal.section || '(new section)'}\n\nNothing re-runs automatically — invoke the skill again to validate the fix.`)) {

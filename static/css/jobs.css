@@ -162,6 +162,12 @@
 /* .jobs-btn is the .btn--secondary role (and .jobs-btn.danger the
    .btn--danger role); both live in buttons.css. */
 
+/* The one job button that is not in a row of its own kind. */
+.jobs-add-btn {
+    margin: var(--sp-3);
+    font-size: var(--text-sm);
+}
+
 /* ---------------------------------------------------------------------------
    Session link
 --------------------------------------------------------------------------- */
