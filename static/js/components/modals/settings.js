@@ -2943,8 +2943,33 @@ function _hasUnsavedChanges() {
     ));
 }
 
-export function closeSettings() {
-    if (_hasUnsavedChanges() && !confirm('Discard unsaved settings changes?')) return;
+// Async because the question is a real dialog now, and every caller — the ×,
+// Cancel, the backdrop, Escape — raises the intent and lets this finish it.
+// None of them reads the return value, so none of them needed changing.
+export async function closeSettings() {
+    if (_hasUnsavedChanges()) {
+        // window.confirm() was the last one left in the app: unstyled,
+        // unreadable on a phone, and blocking the event loop while an SSE
+        // stream runs behind it. (N6, and app.js's /clear for the reasoning.)
+        //
+        // Nothing re-enters here while the dialog is up: openOverlay() makes
+        // the settings modal inert behind it and only routes Escape to the
+        // topmost overlay, so the × cannot be clicked and Escape cancels the
+        // question rather than asking it again.
+        const discard = await confirmDanger({
+            title: 'Discard unsaved settings changes?',
+            body: [
+                'Nothing in Settings has been saved yet — every change since it opened, typed API keys included, is thrown away.',
+                'Keep editing and use Save to keep them.',
+            ],
+            verb: 'Discard',
+            cancelLabel: 'Keep editing',
+        });
+        // Cancel leaves the modal exactly as it was, edits and all. `_overlay`
+        // is re-checked because the await is a gap: something else may have
+        // torn the modal down while the question was on screen.
+        if (!discard || !_overlay) return;
+    }
     if (_closeOverlay) { _closeOverlay(); _closeOverlay = null; }
     if (_overlay) {
         document.body.removeChild(_overlay);
