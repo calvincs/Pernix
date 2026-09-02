@@ -1173,6 +1173,11 @@ async def run_agent(
     # Clear any prior turn's termination_reason — set freshly below at each exit path.
     session.termination_reason = None
 
+    # The model that actually answered the round being saved — reassigned per
+    # round from the stream outcome. Seeded here so the closure below can
+    # never read it before the first round has landed.
+    _stream_current_model = ""
+
     # Helper: save assistant/tool messages tagged with this turn's user msg id
     # so compile_context can render messages in logical-turn order even when
     # raw id ordering is jumbled by queued user messages arriving mid-turn.
@@ -1182,12 +1187,26 @@ async def run_agent(
         # block behind busy_timeout, all of which froze every session's SSE
         # when run on the event loop.
         meta = kwargs.pop("metadata", None)
+        try:
+            base = json.loads(meta) if meta else {}
+        except Exception:
+            base = {}
+        if not isinstance(base, dict):
+            base = {}
+        if role == "assistant":
+            # Which model produced this answer, and how long it took. Both
+            # already exist at this point and both used to be thrown away on
+            # replay: a reopened transcript could not say whether a reply came
+            # from the primary model or a failover, or what it cost in time.
+            # Metadata, not a column — no schema change.
+            if _stream_current_model:
+                base.setdefault("model", _stream_current_model)
+            latency = kwargs.get("latency_ms")
+            if latency is not None:
+                base.setdefault("latency_ms", int(latency))
         if _turn_user_msg_id is not None:
-            try:
-                base = json.loads(meta) if meta else {}
-            except Exception:
-                base = {}
             base.setdefault("parent_user_msg_id", _turn_user_msg_id)
+        if base:
             meta = json.dumps(base)
         return await asyncio.to_thread(db.add_message, session_id, role, content, metadata=meta, **kwargs)
 
@@ -1572,9 +1591,12 @@ async def run_agent(
                 continue
 
             # No tool calls — model has responded. Save and finish.
-            if collected_content:
-                await _save_turn_msg("assistant", collected_content)
+            # Measured BEFORE the save: this is the row the reader sees the
+            # answer in, so it is the row that has to carry what the answer
+            # cost. The tool-round save below already did this.
             _round_latency_ms = int((time.monotonic() - _round_started_at) * 1000)
+            if collected_content:
+                await _save_turn_msg("assistant", collected_content, latency_ms=_round_latency_ms)
             logger.info(
                 "agent.round session=%s round=%d model=%s latency_ms=%d tool_calls=0 content_chars=%d (final)",
                 session_id,

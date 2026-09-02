@@ -2743,6 +2743,24 @@
    sidebar attention/pin/rename, worker controls.
    =========================================================================== */
 
+/* Per-message provenance — "qwen3-27b · 4.2s" under an assistant answer.
+   Muted to the point of being scenery until you look for it: the reader
+   should be able to check which model wrote a reply without the transcript
+   turning into a telemetry readout. */
+.msg-chip {
+    margin-top: var(--sp-1);
+    padding-left: 2px;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    letter-spacing: 0.02em;
+    color: var(--text-faint);
+    user-select: text;
+}
+
+/* The meta row is the phone's handle for the chip (mobile.css folds it away).
+   On a fine pointer nothing is hidden, so it stays an ordinary label. */
+.role-label--toggle { cursor: default; }
+
 /* Message timestamps — revealed on hover so the transcript stays quiet */
 .msg-time {
     font-size: var(--text-xxs);
