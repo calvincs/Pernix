@@ -2216,6 +2216,21 @@ function handleEvent(event) {
         }
     }
 
+    else if (type === 'stream.reset') {
+        // The provider is about to re-stream this answer from the beginning
+        // (a retry, or the fallback model). Drop the partial we already
+        // rendered, or the viewer reads <partial><full answer> while the
+        // database stores only the second one.
+        if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+        _collected = '';
+        _bufferedDuringReload = '';
+        if (_streamingEl) {
+            const contentEl = _streamingEl.querySelector('.content');
+            if (contentEl) clear(contentEl);
+            _streamingEl._rawContent = '';
+        }
+    }
+
     else if (type === 'stream.fallback') {
         // Rate-limit / provider failover switched the model mid-stream.
         appendMessage('system', `LLM failover → ${event.model || 'fallback'}`);

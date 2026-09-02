@@ -29,7 +29,7 @@ let _lastSeq = 0;
 const EVENT_TYPES = [
     // Stream lifecycle
     'stream.token', 'stream.done', 'stream.error',
-    'stream.fallback', 'stream.retry', 'stream.length_continuation',
+    'stream.fallback', 'stream.retry', 'stream.reset', 'stream.length_continuation',
     'stream.budget_exhausted',
     // Tools / context / scout
     'tool.start', 'tool.call', 'tool.call.intercepted',
