@@ -1124,6 +1124,96 @@
 .message.assistant .content > :is(h1, h2, h3, h4, h5, h6):first-child,
 .fp-viewer-md > :is(h1, h2, h3, h4, h5, h6):first-child { margin-top: 0; }
 
+/* ---------------------------------------------------------------------------
+   Worker lifecycle card — one card per fan-out, in the transcript.
+   Deliberately the same visual family as a tool group: it is the same kind of
+   thing (a collapsed summary of machine work with a detail list under it), and
+   giving it a second look would only make the transcript louder.
+   --------------------------------------------------------------------------- */
+.worker-card {
+    margin: var(--sp-2) 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+    overflow: hidden;
+}
+.worker-card.has-error { border-color: var(--error); }
+.worker-card-header {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    cursor: pointer;
+    user-select: none;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-faint);
+    transition: color var(--transition);
+}
+.worker-card-header:hover { color: var(--accent-dim); }
+.worker-card-header:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+.worker-card.has-error .wc-label { color: var(--error); }
+.wc-toggle {
+    display: inline-flex;
+    transition: transform var(--transition);
+}
+.worker-card.expanded .wc-toggle { transform: rotate(90deg); }
+.wc-rows { display: none; }
+.worker-card.expanded .wc-rows { display: block; }
+.wc-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    border-top: 1px solid var(--border-subtle);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+}
+.wc-row-dot {
+    width: 6px;
+    height: 6px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--teal-dim);
+    --pulse-dip: 0.5;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
+}
+.wc-row.finished .wc-row-dot { background: var(--text-dim); animation: none; }
+.wc-row.failed .wc-row-dot { background: var(--error); animation: none; }
+.wc-row-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+}
+.wc-row-state {
+    flex: none;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+}
+.wc-row-state.failed { color: var(--error); }
+.wc-row-time {
+    flex: none;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    min-width: 4ch;
+    text-align: right;
+}
+.wc-row-actions {
+    flex: none;
+    display: flex;
+    gap: var(--sp-1);
+}
+
 /* Tool call groups */
 .tool-group {
     margin: var(--sp-2) 0;
