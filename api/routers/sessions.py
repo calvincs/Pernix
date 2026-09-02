@@ -611,6 +611,35 @@ async def get_session_state_log(
     return {"session_id": session_id, "count": len(entries), "entries": entries}
 
 
+@router.get("/api/sessions/{session_id}/turns")
+async def get_session_turns(session_id: str, before_turn: int = 0, limit: int = 20):
+    """Return one record per turn — everything the agent produced inside it.
+
+    The State timeline used to build this in the browser: fetch the whole
+    state log, fetch the whole transcript, and join them by hand into turn
+    groups. That made the client download every tool result in the session
+    to draw a header saying "13 tools, 4 errors". The join is the same one,
+    done here over a bounded window instead.
+
+    Each record carries the turn's phases (with the wall-clock time spent in
+    each), its tool calls (name, argument digest, latency, error flag), the
+    scout report it opened with, the reflect retry chain, the eval gate
+    attempts, compaction summaries, notices, and token totals. Nothing new
+    is captured — every field is read back from `session_state_log`,
+    `messages` and `token_usage`.
+
+    Newest turn first. `before_turn` pages backward from a turn id;
+    `has_more` says whether an older page exists. `limit` is clamped to
+    1..100. `/state-log` and the message endpoints are unchanged: this is an
+    additional view over the same rows, not a replacement."""
+    import asyncio as _asyncio
+
+    session = await _asyncio.to_thread(db.get_session, session_id)
+    if not session:
+        raise HTTPException(404, detail=f"Session {session_id} not found")
+    return await _asyncio.to_thread(db.get_turns, session_id, before_turn=before_turn, limit=limit)
+
+
 @router.post("/api/sessions/{session_id}/pause")
 async def http_pause_session(session_id: str):
     """Pause ANY session (not just workers) at its next pre-round checkpoint.
