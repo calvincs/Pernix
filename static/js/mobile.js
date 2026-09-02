@@ -1,5 +1,9 @@
 // Pernix — Touch and compact tiers: detection, sidebar drawer, swipe, keyboard.
 //
+// (openOverlay is not used here: the drawer is not a <div> dropped on top of
+// the page but a permanent part of the layout that slides. Only overlayDepth()
+// is borrowed, so Escape goes to whatever dialog is above it.)
+//
 // TWO QUESTIONS, TWO ANSWERS. They used to be one, and that is why a 1180px
 // iPad in landscape got the phone layout.
 //
@@ -21,6 +25,8 @@
 // its verdict in. The attribute never changes after boot, so it is read once —
 // which also means touch never flips OFF on a forced-touch device, so rotating
 // an iPad cannot tear the touch UI down.
+
+import { overlayDepth } from './a11y.js';
 
 const TOUCH_BP = 768;
 const COMPACT_BP = 899;
@@ -88,12 +94,16 @@ function _applyTouch() {
 function _applyCompact() {
     if (isCompact()) {
         _ensureScrim();
+        syncDrawerInert();
         return;
     }
     document.getElementById('sidebar')?.classList.remove('mobile-open');
     _removeScrim();
-    // The docked sidebar's own inert rule (collapsed, not closed) is app.js's;
-    // it re-runs on the same resize that got us here.
+    // Neither the drawer's inert nor its hold on #main means anything above
+    // 900px. The docked sidebar's own rule (collapsed, not closed) is app.js's,
+    // and it re-runs on the same resize that got us here.
+    document.getElementById('sidebar')?.removeAttribute('inert');
+    setMainInert('drawer', false);
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +145,7 @@ function _ensureScrim() {
     _scrim = document.createElement('div');
     _scrim.className = 'mobile-scrim';
     document.getElementById('app')?.appendChild(_scrim);
-    _scrim.addEventListener('click', () => closeSidebar());
+    _scrim.addEventListener('click', () => closeSidebar({ restoreFocus: true }));
     return _scrim;
 }
 
@@ -145,13 +155,84 @@ function _removeScrim() {
 }
 
 // ---------------------------------------------------------------------------
-// Sidebar drawer
+// #main inert — shared between the drawer and the Explorer
+//
+// Both cover the whole screen on compact, and either can open while the other
+// is closing. A plain toggle let whichever finished last decide: opening the
+// Explorer from the drawer un-inerted #main behind the Explorer. Counting the
+// reasons instead means #main comes back only when nothing is covering it.
 // ---------------------------------------------------------------------------
 
-export function closeSidebar() {
+const _mainInertReasons = new Set();
+
+/**
+ * @param {string} reason  who is covering #main ('drawer', 'explorer').
+ * @param {boolean} on
+ */
+export function setMainInert(reason, on) {
+    if (on) _mainInertReasons.add(reason);
+    else _mainInertReasons.delete(reason);
+    document.getElementById('main')?.toggleAttribute('inert', _mainInertReasons.size > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar drawer
+//
+// A closed drawer is off-canvas, not gone: without inert, Tab walked the whole
+// invisible session list and a screen reader read it out. An OPEN one is a
+// modal surface, so #main goes inert under it and focus moves inside. (E5)
+// ---------------------------------------------------------------------------
+
+/** The drawer's half of #sidebar[inert]. app.js owns the docked half
+ *  (collapsed, not closed) and delegates here below 900px so the two cannot
+ *  clobber each other on the resize that crosses the line. */
+export function syncDrawerInert() {
     const sidebar = document.getElementById('sidebar');
+    if (!sidebar || !isCompact()) return;
+    sidebar.toggleAttribute('inert', !sidebar.classList.contains('mobile-open'));
+}
+
+function _firstFocusable(root) {
+    return root.querySelector(
+        'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]),'
+        + ' select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])');
+}
+
+function openSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    sidebar.classList.add('mobile-open');
+    _ensureScrim().classList.add('visible');
+    // Un-inert BEFORE focusing: focus() on an inert subtree is a silent no-op.
+    sidebar.removeAttribute('inert');
+    setMainInert('drawer', true);
+
+    // Mutual exclusion: close file panel if open
+    const fp = document.getElementById('file-panel');
+    if (fp?.classList.contains('open')) {
+        document.getElementById('files-btn')?.click();
+    }
+
+    // The search field is what someone opening the session list came for, and
+    // it is the first thing a screen reader should land on.
+    (document.getElementById('session-search') || _firstFocusable(sidebar) || sidebar).focus();
+}
+
+/**
+ * @param {{restoreFocus?: boolean}} [opts] restoreFocus puts focus back on the
+ *        hamburger. True for a dismissal the user asked for (Escape, the
+ *        scrim, a swipe); false when the drawer closes as a side effect of
+ *        going somewhere else, which has its own idea of where focus belongs.
+ */
+export function closeSidebar({ restoreFocus = false } = {}) {
+    const sidebar = document.getElementById('sidebar');
+    const wasOpen = !!sidebar?.classList.contains('mobile-open');
     sidebar?.classList.remove('mobile-open');
     _scrim?.classList.remove('visible');
+    // Clear #main's inert first — the hamburger lives inside it on touch.
+    setMainInert('drawer', false);
+    syncDrawerInert();
+    if (wasOpen && restoreFocus) document.getElementById('sidebar-toggle')?.focus();
 }
 
 function _setupSidebarDrawer() {
@@ -164,16 +245,19 @@ function _setupSidebarDrawer() {
         if (!isCompact()) return;
         e.stopPropagation();
         const sidebar = document.getElementById('sidebar');
-        const isOpen = sidebar.classList.toggle('mobile-open');
-        _ensureScrim().classList.toggle('visible', isOpen);
+        if (sidebar?.classList.contains('mobile-open')) closeSidebar({ restoreFocus: true });
+        else openSidebar();
+    });
 
-        // Mutual exclusion: close file panel if open
-        if (isOpen) {
-            const fp = document.getElementById('file-panel');
-            if (fp?.classList.contains('open')) {
-                document.getElementById('files-btn')?.click();
-            }
-        }
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape' || e.defaultPrevented) return;
+        // A dialog on top of the drawer owns the key; openOverlay's own handler
+        // is scoped to the top of its stack and will have taken it already.
+        if (overlayDepth() > 0) return;
+        if (!isCompact()) return;
+        if (!document.getElementById('sidebar')?.classList.contains('mobile-open')) return;
+        e.preventDefault();
+        closeSidebar({ restoreFocus: true });
     });
 }
 
@@ -253,11 +337,10 @@ function _setupSwipeGesture() {
 
         if (!isOpen && dx > THRESHOLD && startX < EDGE_ZONE) {
             // Swipe right from edge -> open
-            sidebar.classList.add('mobile-open');
-            _ensureScrim().classList.add('visible');
+            openSidebar();
         } else if (isOpen && dx < -THRESHOLD) {
             // Swipe left -> close
-            closeSidebar();
+            closeSidebar({ restoreFocus: true });
         }
     }, { passive: true });
 }
