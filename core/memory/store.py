@@ -695,31 +695,48 @@ class MemoryStore:
             conn.close()
 
     def _write_locked(self, md_path: Path, data: str, on_written: Callable[[], None] | None = None) -> None:
-        """Replace a file's contents with the exclusive flock held across truncation.
+        """Replace a file's contents atomically, with writers excluded throughout.
 
-        open(path, "w") truncates at open time, so an flock taken on the next
-        line guards nothing: a concurrent reader landing between the truncation
-        and the write sees an empty memory file and reindex/parse treats it as
-        a file with no entries. Opening without O_TRUNC, locking, then
-        seek/truncate/write keeps the empty window entirely inside the lock.
+        The markdown IS the source of truth — the index is derived and can be
+        rebuilt from it, never the other way round. So the file must never be
+        observable in a half-written state. Writing in place (seek/truncate/
+        write) is not crash-safe however tightly it is locked: a kill or power
+        loss between the truncate and the completed write leaves the file empty
+        or partial, and the next health_check(fix=True) rebuilds the index from
+        the wreckage, which turns a recoverable interruption into permanent
+        data loss.
 
-        `on_written` runs before the lock is released, so an index update can
-        commit while no other writer can touch the markdown.
+        Write to a sibling temp file, fsync it, then os.replace() onto the
+        target: rename is atomic, so a reader sees either the whole old file
+        or the whole new one and never an empty one. That also retires the
+        flock-after-truncate hazard this method used to work around — readers
+        take no lock at all and no longer need one.
 
-        Caller holds self._lock — this is the file-level half only.
+        The flock on the target is now purely writer-writer exclusion, and it
+        is held across `on_written` so an index update commits while no other
+        writer can touch the markdown. It is advisory and, after the replace,
+        refers to the old inode — in-process writers are already serialized by
+        self._lock (the caller holds it), so the residual window is a second
+        OS process writing the same file during the index commit, which this
+        single-process deployment does not do.
         """
+        tmp_path = md_path.with_name(md_path.name + ".tmp")
         fd = os.open(md_path, os.O_RDWR | os.O_CREAT, 0o644)
-        with os.fdopen(fd, "r+", encoding="utf-8") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        with os.fdopen(fd, "r+", encoding="utf-8") as lock_handle:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             try:
-                f.seek(0)
-                f.truncate()
-                f.write(data)
-                f.flush()
+                with open(tmp_path, "w", encoding="utf-8") as tmp:
+                    tmp.write(data)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                os.replace(tmp_path, md_path)
                 if on_written is not None:
                     on_written()
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
             finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
     def rewrite_file(self, file_name: str, transform: Callable[[str], str | None]) -> bool:
         """Read a memory file, apply `transform` to its raw markdown, write it back.
