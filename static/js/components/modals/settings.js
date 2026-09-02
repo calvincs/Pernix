@@ -92,10 +92,10 @@ const SECTIONS = [
             { key: 'openrouter_cache_control', label: 'Anthropic Cache Breakpoints (via OpenRouter)', type: 'bool' },
             { key: 'openai_base_url', label: 'OpenAI URL (or any OpenAI-compatible server)', type: 'text' },
             { key: 'openai_max_concurrent', label: 'OpenAI Max Concurrent', type: 'number', min: 1, restart: RESTART_ROUTER },
-            { key: 'llm_session_timeout', label: 'Session LLM Timeout (s)', type: 'number', min: 0, restart: RESTART_ROUTER },
+            { key: 'llm_session_timeout', label: 'Session LLM Timeout (seconds)', type: 'number', min: 0, restart: RESTART_ROUTER },
             {
                 key: 'fallback_burn_alert_share',
-                label: 'Fallback-burn Alert Share (0–1)',
+                label: 'Fallback-burn Alert Share (0–1 fraction)',
                 type: 'number', min: 0, max: 1, step: 0.05,
                 hint: 'When the Backup model serves at least this share of the trailing 24h\'s tokens, a high-urgency notification fires (once/day) — the signature of a wedged primary provider silently billing everything to the paid tier. Watch-only; 0 disables.',
             },
@@ -115,12 +115,12 @@ const SECTIONS = [
         fields: [
             { key: 'context_auto', label: 'Auto (use model-reported limits)', type: 'bool' },
             { key: 'ollama_num_ctx_cap', label: 'Ollama Context Cap (tokens, 0 = model max)', type: 'number' },
-            { key: 'context_budget', label: 'Context Budget (manual/fallback)', type: 'number' },
-            { key: 'max_tokens', label: 'Max Output Tokens (ceiling)', type: 'number' },
-            { key: 'compaction_threshold', label: 'Compaction Threshold', type: 'number', step: 0.05 },
-            { key: 'compaction_keep_tokens', label: 'Compaction Keep Tokens', type: 'number' },
-            { key: 'context_critical_threshold', label: 'Critical Reset Threshold', type: 'number', step: 0.05 },
-            { key: 'view_prune_pressure', label: 'View Prune Pressure (fraction of budget)', type: 'number', step: 0.05 },
+            { key: 'context_budget', label: 'Context Budget (tokens, manual/fallback)', type: 'number' },
+            { key: 'max_tokens', label: 'Max Output Tokens (tokens, ceiling)', type: 'number' },
+            { key: 'compaction_threshold', label: 'Compaction Threshold (0–1 fraction)', type: 'number', step: 0.05 },
+            { key: 'compaction_keep_tokens', label: 'Compaction Keep Tokens (tokens)', type: 'number' },
+            { key: 'context_critical_threshold', label: 'Critical Reset Threshold (0–1 fraction)', type: 'number', step: 0.05 },
+            { key: 'view_prune_pressure', label: 'View Prune Pressure (0–1 fraction of budget)', type: 'number', step: 0.05 },
             { key: 'view_prune_keep_recent', label: 'View Prune Keep Recent (messages)', type: 'number' },
             { key: 'view_prune_min_chars', label: 'View Prune Min Chars', type: 'number' },
         ],
@@ -131,7 +131,7 @@ const SECTIONS = [
         fields: [
             { key: 'max_tool_rounds', label: 'Max Tool Rounds', type: 'number' },
             { key: 'scout_enabled', label: 'Scout Enabled', type: 'bool' },
-            { key: 'scout_timeout', label: 'Scout Timeout (s)', type: 'number' },
+            { key: 'scout_timeout', label: 'Scout Timeout (seconds)', type: 'number' },
             { key: 'forced_followup_enabled', label: 'Forced Follow-up Nudge', type: 'bool' },
             { key: 'forced_followup_max_per_turn', label: 'Max Forced Follow-ups / Turn', type: 'number', min: 0, max: 5 },
         ],
@@ -140,8 +140,8 @@ const SECTIONS = [
         title: 'Shell & Tools',
         description: 'Timeouts and security for tool execution. Strict shell security restricts commands to a built-in allowlist. Permissive mode allows any command. Size caps below: 0 = no cap. RLIMIT_FSIZE caps each bash subprocess\'s file writes; lift it for large model/video downloads.',
         fields: [
-            { key: 'tool_timeout', label: 'Tool Timeout (s)', type: 'number' },
-            { key: 'shell_timeout', label: 'Shell Timeout (s)', type: 'number' },
+            { key: 'tool_timeout', label: 'Tool Timeout (seconds)', type: 'number' },
+            { key: 'shell_timeout', label: 'Shell Timeout (seconds)', type: 'number' },
             { key: 'shell_security_mode', label: 'Shell Security', type: 'select', options: ['permissive', 'strict'], risk: 'security' },
             { key: 'shell_address_space_limit_bytes', label: 'Bash RLIMIT_AS (bytes, 0 = no cap)', type: 'number', min: 0 },
             { key: 'shell_fsize_limit_bytes', label: 'Bash RLIMIT_FSIZE (bytes, 0 = no cap)', type: 'number', min: 0 },
@@ -158,7 +158,7 @@ const SECTIONS = [
             { key: 'tavily_api_key', label: 'Tavily API Key', type: 'apikey', envKey: 'TAVILY_API_KEY' },
             { key: 'browser_enabled', label: 'Enable Browser (Playwright)', type: 'bool', restart: RESTART_TOOLS },
             { key: 'browser_headless', label: 'Headless Mode', type: 'bool' },
-            { key: 'browser_timeout', label: 'Page Load Timeout (s)', type: 'number', min: 5, max: 120 },
+            { key: 'browser_timeout', label: 'Page Load Timeout (seconds)', type: 'number', min: 5, max: 120 },
         ],
     },
     {
@@ -239,7 +239,7 @@ const SECTIONS = [
                 min: 1,
                 hint: 'One tick is 60s of maintenance loop, so 10 = a check roughly every 10 minutes.',
             },
-            { key: 'snooze_max_cycle_seconds', label: 'Cycle Time Limit (s)', type: 'number', min: 60 },
+            { key: 'snooze_max_cycle_seconds', label: 'Cycle Time Limit (seconds)', type: 'number', min: 60 },
         ],
     },
     {
@@ -260,7 +260,7 @@ const SECTIONS = [
             { key: 'rlm_max_subcalls', label: 'Max Sub-calls / Run', type: 'number' },
             { key: 'rlm_max_concurrent_subcalls', label: 'Sub-call Concurrency', type: 'number' },
             { key: 'rlm_max_depth', label: 'Max Recursion Depth', type: 'number' },
-            { key: 'rlm_timeout_seconds', label: 'Run Timeout (s)', type: 'number' },
+            { key: 'rlm_timeout_seconds', label: 'Run Timeout (seconds)', type: 'number' },
             { key: 'rlm_run_retention_days', label: 'Run Data Retention (days)', type: 'number' },
         ],
     },
@@ -273,12 +273,12 @@ const SECTIONS = [
               hint: 'A stdio server is arbitrary local code. Off = remote (url) servers only.' },
             { key: 'mcp_default_safety', label: 'Default Tool Safety', type: 'select', options: ['safe', 'caution', 'dangerous'],
               hint: 'Stamped on MCP tools unless the server config overrides it. Server-sent destructive hints always escalate to dangerous.' },
-            { key: 'mcp_call_timeout', label: 'Call Timeout (s)', type: 'number', min: 5 },
-            { key: 'mcp_connect_timeout', label: 'Connect Timeout (s)', type: 'number', min: 5 },
-            { key: 'mcp_idle_seconds', label: 'Suspend Idle stdio Servers After (s, 0 = never)', type: 'number', min: 0 },
+            { key: 'mcp_call_timeout', label: 'Call Timeout (seconds)', type: 'number', min: 5 },
+            { key: 'mcp_connect_timeout', label: 'Connect Timeout (seconds)', type: 'number', min: 5 },
+            { key: 'mcp_idle_seconds', label: 'Suspend Idle stdio Servers After (seconds, 0 = never)', type: 'number', min: 0 },
             { key: 'mcp_max_servers', label: 'Max Servers', type: 'number', min: 1 },
             { key: 'mcp_max_tools_per_server', label: 'Max Tools per Server', type: 'number', min: 1 },
-            { key: 'mcp_refresh_interval_s', label: 'Tool Re-check Interval (s, 0 = manual only)', type: 'number', min: 0 },
+            { key: 'mcp_refresh_interval_s', label: 'Tool Re-check Interval (seconds, 0 = manual only)', type: 'number', min: 0 },
         ],
     },
     {
@@ -305,7 +305,7 @@ const SECTIONS = [
             { key: 'reflect_defer_idle_s', label: 'Defer Delay (seconds)', type: 'number' },
             {
                 key: 'reflect_nonpass_confidence_floor',
-                label: 'Non-pass Confidence Floor (0–1)',
+                label: 'Non-pass Confidence Floor (0–1 fraction)',
                 type: 'number', min: 0, max: 1, step: 0.05,
                 hint: 'A retry/escalate verdict the grader itself rates below this confidence is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous", and ambiguity should not burn a retry or fire an escalation. Malformed grades stay conservative. 0 disables.',
             },
@@ -323,7 +323,7 @@ const SECTIONS = [
         description: 'Feature-level QA against acceptance criteria in the feature registry (data/registry.json). When auto-evaluate is enabled, runs after each task to score registered features. Browser screenshots provide visual verification evidence.',
         fields: [
             { key: 'eval_auto', label: 'Auto-Evaluate', type: 'bool' },
-            { key: 'eval_threshold', label: 'Pass Threshold', type: 'number', step: 0.1 },
+            { key: 'eval_threshold', label: 'Pass Threshold (0–1 fraction)', type: 'number', step: 0.1 },
             { key: 'eval_max_retries', label: 'Max Retries', type: 'number' },
             { key: 'eval_browser_verify', label: 'Browser Screenshots', type: 'bool' },
         ],
@@ -333,7 +333,7 @@ const SECTIONS = [
         description: 'Controls for multi-worker task decomposition. Max workers limits parallel sub-agents. Stall threshold detects stuck workers. Plan review timeout is how long you have to approve a generated plan before it auto-proceeds.',
         fields: [
             { key: 'max_concurrent_workers', label: 'Max Workers', type: 'number' },
-            { key: 'plan_review_timeout', label: 'Plan Review Timeout (s)', type: 'number' },
+            { key: 'plan_review_timeout', label: 'Plan Review Timeout (seconds)', type: 'number' },
         ],
     },
     {
@@ -371,7 +371,7 @@ const SECTIONS = [
                 type: 'number', min: 1, max: 20,
                 hint: 'A canary may testify against a batch only when this many trailing runs before the apply were all green.',
             },
-            { key: 'canary_regression_delta', label: 'Passive Drift Delta', type: 'number', step: 0.05 },
+            { key: 'canary_regression_delta', label: 'Passive Drift Delta (0–1 fraction)', type: 'number', step: 0.05 },
             {
                 key: 'canary_park_after_passes',
                 label: 'Park After Consecutive Passes',
@@ -406,7 +406,7 @@ const SECTIONS = [
             { key: 'adaptive_auto_rollback', label: 'Auto-rollback on Canary Regression', type: 'bool', risk: 'autonomy' },
             { key: 'adaptive_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number' },
             { key: 'adaptive_max_entries_per_kind', label: 'Max Entries / Kind', type: 'number' },
-            { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (h)', type: 'number' },
+            { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (hours)', type: 'number' },
             {
                 key: 'adaptive_usage_retire_days',
                 label: 'Retire Unused After (days)',
@@ -427,7 +427,7 @@ const SECTIONS = [
             },
             {
                 key: 'adaptive_harmful_retire_max_success',
-                label: 'Failure-dominated Retire — Success Floor (0–1)',
+                label: 'Failure-dominated Retire — Success Floor (0–1 fraction)',
                 type: 'number', min: 0, max: 1, step: 0.05,
                 hint: 'Success share below this = failure-dominated. Journaled soft-delete, one-click rollback, candor/user sources exempt.',
             },
@@ -453,8 +453,8 @@ const SECTIONS = [
         fields: [
             { key: 'telos_enabled', label: 'Telos Enabled', type: 'bool', restart: RESTART_TOOLS },
             { key: 'telos_schedule', label: 'Slow-loop Schedule (cron)', type: 'text' },
-            { key: 'telos_serendipity_budget', label: 'Serendipity Budget', type: 'number', step: 0.05 },
-            { key: 'telos_eig_floor', label: 'Gate EIG Floor', type: 'number', step: 0.05 },
+            { key: 'telos_serendipity_budget', label: 'Serendipity Budget (0–1 fraction)', type: 'number', step: 0.05 },
+            { key: 'telos_eig_floor', label: 'Gate EIG Floor (0–1 fraction)', type: 'number', step: 0.05 },
             { key: 'telos_hypotheses_per_question', label: 'Hypotheses / Question', type: 'number' },
         ],
     },
@@ -484,7 +484,7 @@ const SECTIONS = [
                     + 'never shown here. Type a new URL to replace it. Removing one entirely means editing '
                     + 'notify_webhook_url in data/settings.json — the API refuses to blank a URL field.',
             },
-            { key: 'notify_webhook_timeout', label: 'Webhook Timeout (s)', type: 'number', min: 1, max: 60 },
+            { key: 'notify_webhook_timeout', label: 'Webhook Timeout (seconds)', type: 'number', min: 1, max: 60 },
         ],
     },
 ];
@@ -505,6 +505,31 @@ const MODEL_SELECT_FIELDS = [
 // ---------------------------------------------------------------------------
 // Help tooltip
 // ---------------------------------------------------------------------------
+
+let _descUid = 0;
+
+// A section's description used to live ONLY inside the `?` tooltip, which is
+// hover-only — on a phone or tablet the entire explanation was unreachable.
+// It now also renders as a paragraph the user can open in place. Collapsed by
+// default so the 100+ controls stay scannable. (S6)
+function buildSectionDesc(description) {
+    const body = el('p', { class: 'settings-section-desc', id: `settings-desc-${++_descUid}` },
+        [text(description)]);
+    body.hidden = true;
+    const toggle = el('button', {
+        type: 'button',
+        class: 'settings-section-desc-toggle',
+        'aria-expanded': 'false',
+        'aria-controls': body.id,
+    }, [text('What\u2019s this?')]);
+    toggle.addEventListener('click', () => {
+        const opening = body.hidden;
+        body.hidden = !opening;
+        toggle.setAttribute('aria-expanded', String(opening));
+        toggle.textContent = opening ? 'Hide' : 'What\u2019s this?';
+    });
+    return el('div', { class: 'settings-section-desc-wrap' }, [toggle, body]);
+}
 
 function buildHelpIcon(tip) {
     const icon = el('span', { class: 'section-help', tabindex: '0' }, [text('?')]);
@@ -2193,6 +2218,7 @@ function buildTabs(settings) {
         if (section.description) heading.push(buildHelpIcon(section.description));
         return el('div', { class: 'settings-section' }, [
             el('h3', {}, heading),
+            ...(section.description ? [buildSectionDesc(section.description)] : []),
             ...fields,
         ]);
     });
