@@ -4,7 +4,7 @@ import { el, text, clear, renderMarkdown } from '../render.js';
 import { icon } from '../icons.js';
 import { hex, rgba, isLight } from '../theme.js';
 import { get, post, del, getAuthToken } from '../api.js';
-import { isMobile } from '../mobile.js';
+import { isCompact, isTouch } from '../mobile.js';
 import { notify } from '../feedback.js';
 import { openSettings } from './modals/settings.js';
 import { confirmDanger } from './modals/confirm.js';
@@ -494,7 +494,9 @@ export function toggleFilePanel() {
     _state.open = !_state.open;
     if (_state.open) {
         _panel.classList.add('open');
-        if (!isMobile()) _panel.style.width = _state.width + 'px';
+        // The stored width is a docked-column measurement; the compact tier
+        // makes the panel full-screen and has no use for it.
+        if (!isCompact()) _panel.style.width = _state.width + 'px';
         document.getElementById('files-btn')?.classList.add('active');
         loadTabData();
     } else {
@@ -510,7 +512,7 @@ export function openFilePanel(opts = {}) {
     if (!_state.open) {
         _state.open = true;
         _panel.classList.add('open');
-        if (!isMobile()) _panel.style.width = _state.width + 'px';
+        if (!isCompact()) _panel.style.width = _state.width + 'px';
         document.getElementById('files-btn')?.classList.add('active');
         _syncPanelInert();
     }
@@ -1025,7 +1027,7 @@ function _renderEntries(parent, entries) {
                 el('div', { class: 'fp-swipe-delete-bg' }, [text('Delete')]),
                 item,
             ]);
-            if (isMobile()) _attachSwipeDelete(item, entry.path, 'dir');
+            if (isTouch()) _attachSwipeDelete(item, entry.path, 'dir');
             parent.appendChild(dirWrap);
         } else {
             const displayName = _wsSearchQuery ? entry.path : entry.name;
@@ -1051,7 +1053,7 @@ function _renderEntries(parent, entries) {
                 el('div', { class: 'fp-swipe-delete-bg' }, [text('Delete')]),
                 item,
             ]);
-            if (isMobile()) _attachSwipeDelete(item, entry.path, 'file');
+            if (isTouch()) _attachSwipeDelete(item, entry.path, 'file');
             parent.appendChild(fileWrap);
         }
     }
@@ -1725,8 +1727,9 @@ function renderMemoryFiles(listEl) {
                 label: 'Start a conversation',
                 onClick: () => {
                     // On a phone the panel is a full-screen overlay, so the
-                    // composer it is sending you to is behind it.
-                    if (isMobile()) toggleFilePanel();
+                    // composer it is sending you to is behind it. Beside it at
+                    // >=900px, where closing would be the wrong favour.
+                    if (isCompact()) toggleFilePanel();
                     document.getElementById('msg-input')?.focus();
                 },
             },
@@ -2678,7 +2681,9 @@ function initResize(handle) {
     let startWidth = 0;
 
     handle.addEventListener('mousedown', (e) => {
-        if (isMobile()) return;
+        // Drag-to-resize is a mouse affordance; touch.css hides the handle at
+        // every width, so nothing on a finger device should arm it.
+        if (isTouch()) return;
         e.preventDefault();
         startX = e.clientX;
         startWidth = _panel.offsetWidth;

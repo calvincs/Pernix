@@ -17,7 +17,7 @@ import {
 } from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
-import { initMobile, isMobile, closeSidebar } from './mobile.js';
+import { initMobile, isCompact, isTouch, closeSidebar } from './mobile.js';
 import { initVoice, stopVoice } from './voice.js';
 import { announce, openOverlay } from './a11y.js';
 import { setTheme, isLight } from './theme.js';
@@ -139,22 +139,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     // A collapsed sidebar is width:0 + overflow:hidden, which hides it from
     // the eye but not from the keyboard: Tab still walked the whole invisible
     // session list, and a screen reader still read it. inert takes it out of
-    // both. Mobile's drawer is a separate mechanism (mobile.js owns
-    // .mobile-open) so it is deliberately left alone.
+    // both. The COMPACT drawer is a separate mechanism (mobile.js owns
+    // .mobile-open and its own inert) so it is deliberately left alone. Note
+    // this is a layout question, not a pointer one: a docked sidebar on a
+    // tablet collapses exactly as it does under a mouse.
     const syncSidebarInert = () => {
-        sidebar.toggleAttribute('inert', !isMobile() && sidebar.classList.contains('collapsed'));
+        sidebar.toggleAttribute('inert', !isCompact() && sidebar.classList.contains('collapsed'));
     };
     if (localStorage.getItem('pernix:sidebar-hidden') === '1') {
         sidebar.classList.add('collapsed');
     }
     syncSidebarInert();
-    // Narrowing a desktop window past the mobile breakpoint turns the same
+    // Narrowing a desktop window past the compact breakpoint turns the same
     // element into the drawer, which mobile.js opens with .mobile-open — a
-    // stale inert from the desktop state would leave that drawer visible but
+    // stale inert from the docked state would leave that drawer visible but
     // dead. Re-evaluated on resize because mobile.js owns the media query.
     window.addEventListener('resize', syncSidebarInert);
     sidebarToggle.addEventListener('click', () => {
-        if (isMobile()) return;
+        if (isCompact()) return;   // the drawer is mobile.js's to open
         sidebar.classList.toggle('collapsed');
         localStorage.setItem('pernix:sidebar-hidden', sidebar.classList.contains('collapsed') ? '1' : '0');
         syncSidebarInert();
@@ -362,7 +364,7 @@ function _handleGlobalEscape(e) {
 /** Back to the hero screen with no session selected — the state the app boots
  *  into, and the only thing the wordmark could sensibly mean. */
 function goHome() {
-    if (isMobile()) closeSidebar();
+    if (isCompact()) closeSidebar();
     _flushDraft();
     state.sid = null;
     _lastSeq = 0;           // seqs are per-session (see deleteSession)
@@ -623,7 +625,7 @@ let _selectSeq = 0;
 
 async function selectSession(sid) {
     const mySeq = ++_selectSeq;
-    if (isMobile()) closeSidebar();
+    if (isCompact()) closeSidebar();
     // Land any half-typed draft for the session we are LEAVING before state.sid
     // moves and _restoreDraft overwrites the textarea.
     _flushDraft();
@@ -1574,10 +1576,11 @@ function setupInput() {
         }
     });
     textarea.addEventListener('keydown', (e) => {
-        // On mobile, Enter inserts a newline — soft keyboards have no
+        // On touch, Enter inserts a newline — soft keyboards have no
         // Shift+Enter, so send-on-Enter made multi-line prompts impossible.
-        // The send button is the submit action there.
-        if (e.key === 'Enter' && !e.shiftKey && !isMobile()) {
+        // The send button is the submit action there. (A hardware keyboard on
+        // a tablet is left out in the cold by this; T5/D4 is where that lands.)
+        if (e.key === 'Enter' && !e.shiftKey && !isTouch()) {
             e.preventDefault();
             send();
             return;

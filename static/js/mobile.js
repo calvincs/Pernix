@@ -1,67 +1,94 @@
-// Pernix — Mobile support: detection, sidebar drawer, swipe gestures, keyboard handling
+// Pernix — Touch and compact tiers: detection, sidebar drawer, swipe, keyboard.
+//
+// TWO QUESTIONS, TWO ANSWERS. They used to be one, and that is why a 1180px
+// iPad in landscape got the phone layout.
+//
+//   isTouch()    is the pointer a finger? Decides target sizes, 16px inputs,
+//                hover-revealed controls, safe-area insets, where the
+//                hamburger lives, and the keyboard re-pin. Mirrors touch.css.
+//   isCompact()  is the viewport narrower than 900px? Decides the drawer, the
+//                scrim, the swipe gestures, the full-screen Explorer and the
+//                bottom sheets. Mirrors compact.css.
+//
+// A phone is both. A landscape iPad is touch but NOT compact: it docks the
+// sidebar and keeps the desktop shapes. A narrow desktop window is compact
+// but not touch.
+//
+// The touch query alone does NOT see an iPad: iPadOS desktop-class browsing
+// (the default in Safari and Chrome both) reports `hover: hover` and
+// `pointer: fine`. touch-boot.js does the detection that works there and
+// stamps <html data-touch-ui>; it is the single source of truth, and this ORs
+// its verdict in. The attribute never changes after boot, so it is read once —
+// which also means touch never flips OFF on a forced-touch device, so rotating
+// an iPad cannot tear the touch UI down.
 
-const MOBILE_BP = 768;
-// Narrow viewports OR touch-primary devices. This query alone does NOT see an
-// iPad: iPadOS desktop-class browsing (the default in Safari and Chrome both)
-// reports `hover: hover` and `pointer: fine`. touch-boot.js does the detection
-// that works there and stamps <html data-touch-ui>; it is the single source of
-// truth, and this ORs its verdict in. The attribute never changes after boot,
-// so it is read once.
-const mq = window.matchMedia(`(max-width: ${MOBILE_BP}px), (hover: none) and (pointer: coarse)`);
+const TOUCH_BP = 768;
+const COMPACT_BP = 899;
+
+const touchMq = window.matchMedia(`(max-width: ${TOUCH_BP}px), (hover: none) and (pointer: coarse)`);
+const compactMq = window.matchMedia(`(max-width: ${COMPACT_BP}px)`);
 const FORCED_TOUCH = document.documentElement.hasAttribute('data-touch-ui');
-const _touchUI = () => mq.matches || FORCED_TOUCH;
-let _mobile = _touchUI();
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-export function isMobile() { return _mobile; }
+/** Input modality: finger, not mouse. Gate for touch.css's concerns. */
+export function isTouch() { return touchMq.matches || FORCED_TOUCH; }
+
+/** Layout tier: narrower than the 900px tablet line. Gate for compact.css. */
+export function isCompact() { return compactMq.matches; }
+
+/**
+ * @deprecated Kept for one release so nothing breaks mid-refactor. Every
+ * caller should say which of the two it means: isCompact() for anything about
+ * the layout (drawer, sheets, full-screen panes), isTouch() for anything about
+ * the pointer (target sizes, hover, gestures, tooltips).
+ */
+export function isMobile() { return isCompact(); }
 
 export function initMobile() {
-    _apply(_touchUI());
-    mq.addEventListener('change', () => {
-        // On a forced-touch device the verdict never flips back to desktop —
-        // rotating an iPad must not tear down the drawer.
-        const on = _touchUI();
-        _apply(on);
-        if (on) {
-            _enterMobile();
-        } else {
-            _exitMobile();
-        }
-    });
+    _stamp();
+    // Two independent listeners: crossing 900px must not disturb the touch
+    // verdict, and a device that becomes touch (it can only ever become one,
+    // see FORCED_TOUCH) must not disturb the layout tier.
+    touchMq.addEventListener('change', () => { _stamp(); _applyTouch(); });
+    compactMq.addEventListener('change', () => { _stamp(); _applyCompact(); });
+
     _createScrim();
     _setupSidebarDrawer();
     _setupSwipeGesture();
     _setupFilePanelSwipe();
     _setupKeyboardHandler();
 
-    // Initial mobile setup if already at mobile width
-    if (_mobile) _enterMobile();
+    _applyTouch();
+    _applyCompact();
 }
 
 // ---------------------------------------------------------------------------
-// Mobile detection
+// Tier detection
 // ---------------------------------------------------------------------------
 
-function _apply(matches) {
-    _mobile = matches;
-    if (matches) document.body.setAttribute('data-mobile', '');
-    else document.body.removeAttribute('data-mobile');
+function _stamp() {
+    document.body.toggleAttribute('data-touch', isTouch());
+    document.body.toggleAttribute('data-compact', isCompact());
 }
 
-function _enterMobile() {
-    _moveToggleIntoHeader();
+// The hamburger belongs in the status bar wherever the pointer is a finger —
+// on a tablet too, where it collapses the docked sidebar instead of opening a
+// drawer. The floating desktop position is only for a mouse.
+function _applyTouch() {
+    if (isTouch()) _moveToggleIntoHeader();
+    else _restoreToggleFromHeader();
 }
 
-function _exitMobile() {
-    _restoreToggleFromHeader();
-    // Close sidebar/scrim on transition to desktop
+// Leaving the compact tier turns the drawer back into a docked sidebar; the
+// open state and its scrim mean nothing there and would leave a dead overlay.
+function _applyCompact() {
+    if (isCompact()) return;
     const sidebar = document.getElementById('sidebar');
-    const scrim = document.querySelector('.mobile-scrim');
     sidebar?.classList.remove('mobile-open');
-    scrim?.classList.remove('visible');
+    _scrim?.classList.remove('visible');
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +143,9 @@ function _setupSidebarDrawer() {
     if (!toggle) return;
 
     toggle.addEventListener('click', (e) => {
-        if (!_mobile) return; // let desktop handler proceed
+        // Only the compact tier has a drawer. On a docked sidebar — desktop or
+        // wide touch — app.js's handler collapses it instead.
+        if (!isCompact()) return;
         e.stopPropagation();
         const sidebar = document.getElementById('sidebar');
         const isOpen = sidebar.classList.toggle('mobile-open');
@@ -157,7 +186,7 @@ function _setupSwipeGesture() {
     const THRESHOLD = 60;
 
     document.addEventListener('touchstart', (e) => {
-        if (!_mobile) return;
+        if (!isCompact()) return;
         const touch = e.touches[0];
         startX = touch.clientX;
         startY = touch.clientY;
@@ -177,7 +206,7 @@ function _setupSwipeGesture() {
     }, { passive: true });
 
     document.addEventListener('touchmove', (e) => {
-        if (!tracking || !_mobile) return;
+        if (!tracking || !isCompact()) return;
         const touch = e.touches[0];
         const dx = touch.clientX - startX;
         const dy = touch.clientY - startY;
@@ -196,7 +225,7 @@ function _setupSwipeGesture() {
     }, { passive: false });
 
     document.addEventListener('touchend', (e) => {
-        if (!tracking || !_mobile) { tracking = false; return; }
+        if (!tracking || !isCompact()) { tracking = false; return; }
         const touch = e.changedTouches[0];
         const dx = touch.clientX - startX;
         tracking = false;
@@ -230,7 +259,7 @@ function _setupFilePanelSwipe() {
     const THRESHOLD = 60;
 
     document.addEventListener('touchstart', (e) => {
-        if (!_mobile) return;
+        if (!isCompact()) return;
         const touch = e.touches[0];
         startX = touch.clientX;
         startY = touch.clientY;
@@ -250,7 +279,7 @@ function _setupFilePanelSwipe() {
     }, { passive: true });
 
     document.addEventListener('touchmove', (e) => {
-        if (!tracking || !_mobile) return;
+        if (!tracking || !isCompact()) return;
         const touch = e.touches[0];
         const dx = touch.clientX - startX;
         const dy = touch.clientY - startY;
@@ -267,7 +296,7 @@ function _setupFilePanelSwipe() {
     }, { passive: false });
 
     document.addEventListener('touchend', (e) => {
-        if (!tracking || !_mobile) { tracking = false; return; }
+        if (!tracking || !isCompact()) { tracking = false; return; }
         const touch = e.changedTouches[0];
         const dx = touch.clientX - startX;
         tracking = false;
@@ -314,7 +343,7 @@ function _setupKeyboardHandler() {
     // keyboard for a reader who was at the bottom. Re-pin only in that case,
     // so someone scrolled back in history keeps their place.
     window.visualViewport.addEventListener('resize', () => {
-        if (!_mobile || !pinned) return;
+        if (!isTouch() || !pinned) return;
         requestAnimationFrame(() => {
             messages.scrollTop = messages.scrollHeight;
         });
