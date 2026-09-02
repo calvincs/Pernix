@@ -36,7 +36,7 @@ sure the port is free afterwards.
 
 | | Default | What it does |
 |---|---|---|
-| `LEVEL` | `m2` | `m1` asserts the foundation only: the tier stamps, which stylesheet loaded, `inert` while the drawer or the Explorer covers the screen, the measured bottom stack, the model menu staying on screen, and the desktop baseline. `m2` adds everything else: the row sheets, the plain touch editor, the one-line worker strip, the 28px target floor, the 16px input floor and the landscape header hide. Can also be given as the second positional argument: `run.sh my-tag m1`. |
+| `LEVEL` | `m2` | `m1` asserts the foundation only: the tier stamps, which stylesheet loaded, `inert` while the drawer or the Explorer covers the screen, the measured bottom stack, the model menu staying on screen, and the desktop baseline. `m2` adds everything else: the row sheets, the plain touch editor, the one-line worker strip, the 28px target floor, the 16px input floor, the landscape header hide, and the desktop sidebar's resize handle (which must be absent on every touch viewport). Can also be given as the second positional argument: `run.sh my-tag m1`. |
 | `PORT` | `8790` | Where the throwaway instance listens. Change it to run two gates at once, or if 8790 is taken. |
 | `REPO` | the checkout this script lives in | Which checkout to test. Useful from a worktree, or to point a gate at a branch you have checked out elsewhere. |
 

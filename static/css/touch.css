@@ -761,6 +761,12 @@ body[data-touch] .space-group-header .space-menu-btn {
 .fp-resize-handle {
     display: none;
 }
+/* The sidebar's edge handle is the same affordance and goes the same way: a
+   6px strip is not something a finger can aim at, on a phone or on a docked
+   1180px tablet. sidebar.js refuses to arm that drag on touch too. */
+#sidebar-resizer {
+    display: none;
+}
 .fp-tab-btn {
     min-height: 44px;
     padding: 12px var(--sp-3);
