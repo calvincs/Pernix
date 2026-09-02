@@ -2427,7 +2427,7 @@ async function buildSecurityTab(settings) {
 // ---------------------------------------------------------------------------
 // Search / filter
 //
-// With 100+ controls spread over five tabs, "where is that setting" is the
+// With 100+ controls spread over six tabs, "where is that setting" is the
 // dominant cost of this modal. Typing a query drops the tab boundary and
 // filters every section at once; clearing it restores the tab you were on.
 // ---------------------------------------------------------------------------
@@ -2679,9 +2679,10 @@ function buildTabs(settings) {
 // Modal lifecycle
 // ---------------------------------------------------------------------------
 
-// /api/settings failing made the gear icon do nothing at all — no modal, no
-// message, no way to try again, and no way to tell a dead server from a dead
-// button. Render the shell with the reason and a Retry instead. (F2)
+// /api/settings failing made the status bar's Settings button do nothing at
+// all — no modal, no message, no way to try again, and no way to tell a dead
+// server from a dead button. Render the shell with the reason and a Retry
+// instead. (F2)
 function _openLoadFailure(message, opts) {
     const retryBtn = el('button', { class: 'btn btn-primary' }, [text('Retry')]);
     const card = el('div', { class: 'modal-card' }, [
