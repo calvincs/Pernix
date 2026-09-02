@@ -1988,7 +1988,7 @@ async function buildSecurityTab(settings) {
     // Run Dangerously — read-only status badge (only settable via --dangerous at startup)
     const isEnabled = !!settings.auto_approve_dangerous;
     const statusBadge = el('span', {
-        style: 'font-size:var(--text-xs); font-weight:700; padding:2px 10px; border-radius:3px; '
+        style: 'font-size:var(--text-xs); font-weight:500; padding:2px 10px; border-radius:3px; '
              + (isEnabled
                  ? 'background:color-mix(in srgb,var(--error,#c25450) 15%,var(--bg)); color:var(--error,#c25450); border:1px solid var(--error,#c25450);'
                  : 'background:var(--bg-surface); color:var(--text-faint); border:1px solid var(--border);'),

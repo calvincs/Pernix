@@ -185,7 +185,7 @@
     opacity: 1;
     color: var(--error);
     font-size: var(--text-xxs);
-    font-weight: 600;
+    font-weight: 500;
 }
 
 .session-id-badge {
@@ -1307,7 +1307,7 @@
     padding: 1px 6px;
     border-radius: 3px;
     font-size: 9px;
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0.06em;
 }
 .reflect-pass { background: var(--success-subtle); color: var(--success); }
@@ -1345,7 +1345,7 @@
 .message.system .content h5,
 .message.system .content h6 {
     font-size: 1em;
-    font-weight: 600;
+    font-weight: 500;
     font-style: normal;
     margin: 0.6em 0 0.2em;
     color: var(--text);
@@ -1377,8 +1377,8 @@
     padding: 2px 6px;
     text-align: left;
 }
-.message.system .content th { color: var(--text); font-weight: 600; }
-.message.system .content strong { color: var(--text); }
+.message.system .content th { color: var(--text); font-weight: 500; }
+.message.system .content strong { color: var(--text); font-weight: 500; }
 
 /* Command result cards */
 .cmd-card {
@@ -1429,7 +1429,7 @@
     padding: 1px 8px;
     border-radius: 9px;
     font-size: var(--text-xxs);
-    font-weight: 600;
+    font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
@@ -1531,7 +1531,7 @@
 .model-divider-pill .model-divider-arrow {
     color: var(--warning);
     margin: 0 2px;
-    font-weight: 600;
+    font-weight: 500;
 }
 .model-divider-pill.model-divider-override {
     color: var(--accent, #4ea1ff);
@@ -1544,12 +1544,12 @@
     display: inline-block;
     margin: 0 2px;
     color: var(--warning);
-    font-weight: 700;
+    font-weight: 500;
     animation: statusPulse 1.6s ease-in-out infinite;
 }
 #status-bar .model .model-override-temp {
     color: var(--accent, #4ea1ff);
-    font-weight: 600;
+    font-weight: 500;
 }
 @keyframes statusPulse {
     0%, 100% { filter: brightness(1); }
@@ -1567,7 +1567,7 @@
 
 #status-bar .ctx.ctx-critical {
     color: var(--error);
-    font-weight: 600;
+    font-weight: 500;
 }
 
 #status-bar .info {
@@ -1610,7 +1610,7 @@
     padding: 1px 8px;
     border-radius: 10px;
     font-size: var(--text-xxs);
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0.3px;
     text-transform: uppercase;
     border: 1px solid transparent;
@@ -1694,7 +1694,7 @@
 .tl-turn-meta::before { content: '·'; margin: 0 5px; opacity: 0.5; }
 .tl-turn-term {
     font-size: var(--text-xxs);
-    font-weight: 600;
+    font-weight: 500;
     padding: 1px 5px;
     border-radius: 3px;
     margin-left: 6px;
@@ -1757,7 +1757,7 @@
 .tl-tally-turn-label {
     font-size: var(--text-xxs);
     color: var(--accent-dim);
-    font-weight: 600;
+    font-weight: 500;
     min-width: 28px;
 }
 .tl-tally-chip {
@@ -1779,7 +1779,7 @@
 
 /* Timeline tab — turn headers + tool rows */
 .timeline-turn-header {
-    font-weight: 600;
+    font-weight: 500;
     color: var(--accent-dim);
     padding: var(--sp-2) var(--sp-2) 4px;
     border-bottom: 1px solid var(--border);
@@ -1843,7 +1843,7 @@
     gap: 6px;
     align-items: center;
 }
-.timeline-row .tl-turn { color: var(--text-faint); font-weight: 600; }
+.timeline-row .tl-turn { color: var(--text-faint); font-weight: 500; }
 .timeline-row .tl-states { color: var(--text); }
 .timeline-row .tl-reason { color: var(--accent-dim); font-style: italic; font-size: var(--text-xxs); }
 .timeline-row .tl-elapsed { color: var(--text-dim); text-align: right; }
@@ -2420,7 +2420,7 @@
 .auth-logo {
     font-family: var(--mono);
     font-size: 2rem;
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0.15em;
     color: var(--accent);
 }
@@ -2461,7 +2461,7 @@
     border-radius: var(--radius);
     font-family: var(--mono);
     font-size: var(--text-md);
-    font-weight: 600;
+    font-weight: 500;
     cursor: pointer;
     transition: opacity var(--transition);
 }
@@ -2548,7 +2548,7 @@
 }
 
 .offline-title {
-    font-weight: 600;
+    font-weight: 500;
     color: var(--fg);
 }
 
@@ -2799,7 +2799,7 @@ mark.ts-mark.current {
 .session-attn {
     flex: none;
     font-size: var(--text-xxs);
-    font-weight: 700;
+    font-weight: 500;
     border-radius: 8px;
     padding: 0 5px;
     margin-left: var(--sp-1);
