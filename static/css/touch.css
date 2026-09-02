@@ -198,7 +198,7 @@
 }
 .session-header-title {
     max-width: 100%;
-    min-height: 28px;
+    min-height: 32px;
 }
 /* The breadcrumb and the title compete for one narrow row. The way back is
    worth a tap target but not half the header, so it keeps the arrow and as
@@ -285,6 +285,16 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    /* T2: the model switcher is the second-most-tapped control in the bar
+       and it was a 19px-tall line of text — the height of the type and
+       nothing else. Symmetric padding grows the box around the same
+       baseline, so it centres in the row without moving. NOT display:flex:
+       a flex container has no anonymous block box for text-overflow to
+       clip, and the ellipsis above is what keeps a long model id from
+       shoving the settings gear off a 360px row. */
+    min-height: 32px;
+    padding-top: 7px;
+    padding-bottom: 7px;
 }
 /* Status text — instead of hiding it (mobile is exactly where
    minutes-long turns feel longest), float it as a transient strip
@@ -389,7 +399,7 @@
 /* State badge is tappable (opens timeline modal) — give it a real
    touch target instead of the 18px-tall span inherited from desktop. */
 #state-badge {
-    min-height: 28px;
+    min-height: 32px;
     display: inline-flex;
     align-items: center;
     padding: 2px 10px;
@@ -447,6 +457,67 @@
 #sidebar-legend {
     gap: var(--sp-1);
     row-gap: var(--sp-1);
+}
+
+/* ------------------------------------------------------------------
+   T2 — the 28px floor, for the controls the sweeps above missed
+
+   Everything here measured under 28x28 with a finger on it. They are
+   scattered across four stylesheets and have nothing in common except
+   that each was sized for a mouse: a 24px icon button, a badge with 1px
+   of padding, a text button whose box is exactly its type. The floor is
+   28px because that is what the acceptance gate asserts; where the
+   control is a primary action in its row it gets 32 or 36.
+   ------------------------------------------------------------------ */
+
+/* The "move to space" chevron on a session row (layout.css: 24x24). The
+   three siblings next to it are already 32x36 above. */
+.session-space-move {
+    min-width: 32px;
+    min-height: 32px;
+}
+
+/* Worker strip chips: 16px tall, because their padding is 1px and their
+   type is 11px. Provisional — M2B rebuilds the strip as one line — but a
+   floor here is harmless once it does. */
+.worker-chip {
+    min-height: 28px;
+    padding: var(--sp-1) var(--sp-2);
+}
+.worker-chip-ctl {
+    min-width: 28px;
+    min-height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 var(--sp-1);
+}
+
+/* Settings: the in-place section description toggle (18px tall) — the one
+   affordance on touch that reveals what a section is FOR, since the `?`
+   tooltip next to it is hover-only. */
+.settings-section-desc-toggle {
+    min-height: 32px;
+    padding: var(--sp-1) var(--sp-2);
+    margin-left: calc(-1 * var(--sp-2));
+}
+
+/* The `?` mark itself keeps its 14px painted disc — the heading row it
+   sits in is 11px uppercase text and a 28px circle would dominate it —
+   and grows only its hit area, via the pseudo-element modals.css already
+   uses for exactly this (it was inset -5px, a 24x24 target). */
+.section-help::after {
+    inset: -7px;
+}
+
+/* Timeline modal toolbar and the Self-checks toolbar: --xs-size buttons,
+   1-2px of vertical padding, 24px boxes. */
+.tl-copy-btn,
+.tl-filter-btn,
+.adaptive-btn {
+    min-height: 36px;
+    padding-top: var(--sp-1);
+    padding-bottom: var(--sp-1);
 }
 
 /* ------------------------------------------------------------------
