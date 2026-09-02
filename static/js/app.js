@@ -15,7 +15,7 @@ import { initFilePanel, toggleFilePanel, openFilePanel } from './components/file
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
 import { initMobile, isMobile, closeSidebar } from './mobile.js';
 import { initVoice, stopVoice } from './voice.js';
-import { openOverlay } from './a11y.js';
+import { announce, openOverlay } from './a11y.js';
 import { notify } from './feedback.js';
 
 // ---------------------------------------------------------------------------
@@ -702,87 +702,92 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
             }
         }
 
-        for (const m of messages) {
-            if (m.role === 'compaction') continue;
-            if (m.role === 'scout') {
-                // Render persisted scout report
-                closeToolGroup();
-                try {
-                    const scoutData = JSON.parse(m.content);
-                    renderScoutReport(scoutData);
-                } catch { /* skip malformed scout data */ }
-                continue;
+        _replayingTranscript = true;
+        try {
+            for (const m of messages) {
+                if (m.role === 'compaction') continue;
+                if (m.role === 'scout') {
+                    // Render persisted scout report
+                    closeToolGroup();
+                    try {
+                        const scoutData = JSON.parse(m.content);
+                        renderScoutReport(scoutData);
+                    } catch { /* skip malformed scout data */ }
+                    continue;
+                }
+                if (m.role === 'reflect') {
+                    closeToolGroup();
+                    try {
+                        const reflectData = JSON.parse(m.content);
+                        renderReflectCard(reflectData);
+                    } catch { /* skip malformed reflect data */ }
+                    continue;
+                }
+                if (m.role === 'model_divider') {
+                    // Persisted mid-turn model switch — replay the pill divider.
+                    closeToolGroup();
+                    try {
+                        const info = m.metadata ? JSON.parse(m.metadata) : {};
+                        renderModelDivider(info);
+                    } catch { /* skip malformed divider metadata */ }
+                    continue;
+                }
+                if (m.role === 'eval') {
+                    closeToolGroup();
+                    try {
+                        const evalData = JSON.parse(m.content);
+                        // Two different producers share role='eval': the feature
+                        // judge ({results, all_passed}) and the deterministic gate
+                        // runner ({kind:'gate', attempt, gates}). Dispatch on the
+                        // row's own kind — handing a gate row to renderEvalCard
+                        // rendered it as a red "fail — eval — 0/0 passed", because
+                        // it finds no `results` array and no `all_passed`. Every
+                        // gate row on the reference deployment was a PASS shown as
+                        // a failure.
+                        if (evalData && evalData.kind === 'gate') {
+                            renderGateCard(evalData);
+                        } else {
+                            renderEvalCard(evalData);
+                        }
+                    } catch { /* skip malformed eval data */ }
+                    continue;
+                }
+                // A tool-round assistant row carries the tool_calls and no text.
+                // Rendering it appended a bare "ASSISTANT" bubble with nothing in
+                // it AND closed the open tool group, so one round of five tools
+                // replayed as five one-item groups with an empty bubble between
+                // each. The live path folds these away; this is that fold.
+                if (m.role === 'assistant' && !(m.content || '').trim()) continue;
+                if (m.role === 'tool') {
+                    const content = m.content || '';
+                    const preview = content.slice(0, 300);
+                    const info = toolNameMap[m.tool_call_id] || null;
+                    const toolName = (info && info.name) || m.tool_call_id || '';
+                    const meta = _parseRowMetadata(m.metadata);
+                    const latency = meta.latency_ms ?? m.latency_ms ?? 0;
+                    appendToolToGroup(
+                        toolName, preview, content, content.length > 300,
+                        !!meta.was_error, Number(latency) || 0, info ? info.args : null,
+                    );
+                } else if (m.role === 'user' && (m.content || '').startsWith('[User answered your question]')) {
+                    closeToolGroup();
+                    renderAnsweredQuestion(m.content);
+                } else if (m.role === 'user' && (m.content || '').startsWith('[User dismissed your question')) {
+                    closeToolGroup();
+                    renderDismissedQuestion(m.content);
+                } else if (m.role === 'notice') {
+                    // Persisted notices (cancellations, reflect-skipped, queue-dropped, etc.)
+                    // render with system-message styling so they're visible but unobtrusive,
+                    // matching how the live SSE handlers display the same events.
+                    closeToolGroup();
+                    appendMessage('system', m.content || '', { createdAt: m.created_at });
+                } else {
+                    closeToolGroup();
+                    appendMessage(m.role, m.content, { createdAt: m.created_at, messageId: m.id });
+                }
             }
-            if (m.role === 'reflect') {
-                closeToolGroup();
-                try {
-                    const reflectData = JSON.parse(m.content);
-                    renderReflectCard(reflectData);
-                } catch { /* skip malformed reflect data */ }
-                continue;
-            }
-            if (m.role === 'model_divider') {
-                // Persisted mid-turn model switch — replay the pill divider.
-                closeToolGroup();
-                try {
-                    const info = m.metadata ? JSON.parse(m.metadata) : {};
-                    renderModelDivider(info);
-                } catch { /* skip malformed divider metadata */ }
-                continue;
-            }
-            if (m.role === 'eval') {
-                closeToolGroup();
-                try {
-                    const evalData = JSON.parse(m.content);
-                    // Two different producers share role='eval': the feature
-                    // judge ({results, all_passed}) and the deterministic gate
-                    // runner ({kind:'gate', attempt, gates}). Dispatch on the
-                    // row's own kind — handing a gate row to renderEvalCard
-                    // rendered it as a red "fail — eval — 0/0 passed", because
-                    // it finds no `results` array and no `all_passed`. Every
-                    // gate row on the reference deployment was a PASS shown as
-                    // a failure.
-                    if (evalData && evalData.kind === 'gate') {
-                        renderGateCard(evalData);
-                    } else {
-                        renderEvalCard(evalData);
-                    }
-                } catch { /* skip malformed eval data */ }
-                continue;
-            }
-            // A tool-round assistant row carries the tool_calls and no text.
-            // Rendering it appended a bare "ASSISTANT" bubble with nothing in
-            // it AND closed the open tool group, so one round of five tools
-            // replayed as five one-item groups with an empty bubble between
-            // each. The live path folds these away; this is that fold.
-            if (m.role === 'assistant' && !(m.content || '').trim()) continue;
-            if (m.role === 'tool') {
-                const content = m.content || '';
-                const preview = content.slice(0, 300);
-                const info = toolNameMap[m.tool_call_id] || null;
-                const toolName = (info && info.name) || m.tool_call_id || '';
-                const meta = _parseRowMetadata(m.metadata);
-                const latency = meta.latency_ms ?? m.latency_ms ?? 0;
-                appendToolToGroup(
-                    toolName, preview, content, content.length > 300,
-                    !!meta.was_error, Number(latency) || 0, info ? info.args : null,
-                );
-            } else if (m.role === 'user' && (m.content || '').startsWith('[User answered your question]')) {
-                closeToolGroup();
-                renderAnsweredQuestion(m.content);
-            } else if (m.role === 'user' && (m.content || '').startsWith('[User dismissed your question')) {
-                closeToolGroup();
-                renderDismissedQuestion(m.content);
-            } else if (m.role === 'notice') {
-                // Persisted notices (cancellations, reflect-skipped, queue-dropped, etc.)
-                // render with system-message styling so they're visible but unobtrusive,
-                // matching how the live SSE handlers display the same events.
-                closeToolGroup();
-                appendMessage('system', m.content || '', { createdAt: m.created_at });
-            } else {
-                closeToolGroup();
-                appendMessage(m.role, m.content, { createdAt: m.created_at, messageId: m.id });
-            }
+        } finally {
+            _replayingTranscript = false;
         }
         closeToolGroup();
         _markPendingQueued(sid);
@@ -1692,6 +1697,47 @@ function formatSize(bytes) {
 }
 
 // ---------------------------------------------------------------------------
+// Screen-reader announcements
+// ---------------------------------------------------------------------------
+// The transcript is role=region, not role=log, precisely so a streaming
+// answer is not narrated token by token. That leaves everything else silent
+// too: a turn finishing, an error, a worker dying, the session going idle —
+// all of it arrived as text in a region nobody is told changed. These are the
+// events worth interrupting for, coalesced so a burst is one sentence.
+
+let _systemAnnounceTimer = null;
+let _systemAnnounceQueue = [];
+// Set while loadMessages replays a transcript: forty persisted system lines
+// are history, not news.
+let _replayingTranscript = false;
+
+function _announceSystem(body) {
+    if (_replayingTranscript) return;
+    const line = String(body || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+    if (!line) return;
+    _systemAnnounceQueue.push(line);
+    clearTimeout(_systemAnnounceTimer);
+    _systemAnnounceTimer = setTimeout(() => {
+        _systemAnnounceTimer = null;
+        const lines = _systemAnnounceQueue;
+        _systemAnnounceQueue = [];
+        if (!lines.length) return;
+        announce(lines.length === 1
+            ? lines[0]
+            : `${lines[lines.length - 1]} (and ${lines.length - 1} more)`);
+    }, 500);
+}
+
+let _stateAnnounceTimer = null;
+function _announceState(to) {
+    clearTimeout(_stateAnnounceTimer);
+    _stateAnnounceTimer = setTimeout(() => {
+        _stateAnnounceTimer = null;
+        announce(`Session ${_STATE_LABELS[to] || to}`);
+    }, 700);
+}
+
+// ---------------------------------------------------------------------------
 // Event handling
 // ---------------------------------------------------------------------------
 
@@ -2215,6 +2261,7 @@ function handleEvent(event) {
         }
         _collected = '';
         _streamingEl = null;
+        announce('Pernix finished responding');
         // Agent finished generating — re-enable input (post-hooks still running)
         state.streaming = false;
         _showSendButton();
@@ -2233,6 +2280,9 @@ function handleEvent(event) {
         // is a rate-limit, which the harness is already retrying by itself.
         const retryHint = /rate-limiting/.test(streamMsg) ? '' : ' · /retry to resend';
         appendMessage('system', `Error: ${streamMsg}${retryHint}`);
+        // Assertive: the turn is over and the user is waiting on a reply that
+        // is not coming.
+        announce(`Error: ${streamMsg}`, { assertive: true });
         _collected = '';
         _streamingEl = null;
         state.streaming = false;
@@ -2526,6 +2576,7 @@ function handleEvent(event) {
 
     else if (type === 'session.state_changed') {
         _renderStateBadge(event);
+        _announceState(event.to || 'idle_ready');
         const idleStates = ['idle_ready', 'awaiting_user', 'awaiting_workers'];
         const isNowIdle = idleStates.includes(event.to || '');
         if (isNowIdle && state.streaming) {
@@ -3254,6 +3305,9 @@ function appendMessage(role, content, meta = {}) {
         processFileRefs(contentEl);
     } else if (role === 'system' && content) {
         contentEl.appendChild(renderMarkdown(content));
+        // Deliberately only for 'system'. The assistant bubble is the
+        // streaming one; announcing it would narrate the answer twice.
+        _announceSystem(content);
     } else if (content) {
         contentEl.appendChild(text(content));
     }
