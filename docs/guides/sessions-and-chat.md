@@ -59,6 +59,8 @@ Not every session in the sidebar is a chat you started. Each carries a colored d
 
 Click a legend entry to hide or show that type — useful when scheduled runs start to crowd out your own threads. Each entry's tooltip names the internal term the settings and docs use. The filter persists across reloads.
 
+On a desktop browser you can drag the sidebar's right edge to make it wider or narrower — 200 to 520 pixels, and never more than 45% of the window. Double-click the edge to go back to the default width; with the edge focused, the arrow keys resize it too. The width is remembered by this browser, the same way the collapsed state is (the toggle at the top of the chat pane hides the sidebar altogether). Phones and tablets keep their own sidebar sizes. A row's own controls — copy id, pin, rename, move to space, delete — overlay the right end of the row on hover or keyboard focus rather than sitting beside the title, so the extra width all goes to the title. (On touch there is no hover: the row carries one always-visible `⋯` instead.)
+
 Finding things:
 
 - The sidebar **search box** is full-text over all message content — it finds any past conversation, not just titles.
