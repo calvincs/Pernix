@@ -899,11 +899,6 @@
     margin-right: auto;
 }
 
-.btn-sm {
-    font-size: var(--text-xs);
-    padding: var(--sp-1) var(--sp-3);
-}
-
 /* Question item accent border */
 .notif-question {
     border-left: 3px solid var(--accent);
