@@ -1,7 +1,7 @@
 // Pernix — Sidebar component: session list with grouping, dots, tooltips, legend
 import { el, text, clear } from '../render.js';
 import { icon } from '../icons.js';
-import { isMobile } from '../mobile.js';
+import { isTouch } from '../mobile.js';
 import { get, post, patch } from '../api.js';
 import { openSpaceModal, openSpaceDeleteDialog } from './modals/spaces.js';
 import { confirmDanger } from './modals/confirm.js';
@@ -861,8 +861,10 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
 
     _activateOnKey(item, select);
 
-    // Tooltip events (desktop only — suppressed on mobile)
-    if (!isMobile()) {
+    // Tooltip events. A hover tooltip needs a hover, and touch.css hides
+    // #session-tooltip outright — so this is a pointer question, not a width
+    // one: a wide tablet must not attach them either.
+    if (!isTouch()) {
         item.addEventListener('mouseenter', (e) => _showTooltip(e, session, typeDef));
         item.addEventListener('mouseleave', () => _hideTooltip());
         item.addEventListener('mousemove', (e) => _positionTooltip(e));
