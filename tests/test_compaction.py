@@ -374,7 +374,7 @@ _DB_GUARDED_PATHS = ("sessions/hooks.py", "core/context/compaction.py", "core/ag
 # ratchet, not an amnesty: the count may drop, never grow. Concentrated in
 # sessions/manager.py (7, mostly notice/divider writes in _finalize_turn and
 # transcript reads in _finalize_worker) and api/routers/chat.py (3).
-_KNOWN_ON_LOOP_DB_CALLS = 13
+_KNOWN_ON_LOOP_DB_CALLS = 11
 
 
 def test_no_new_on_loop_db_calls_are_introduced():
