@@ -487,6 +487,30 @@ const SECTIONS = [
         ],
     },
     {
+        // `name` is how buildStorageTab finds this one again: it is the only
+        // declarative section on the tab that has to land in a particular
+        // place (directly under the sessions ledger whose Archived row it
+        // explains) and that grows two buttons of its own.
+        name: 'archive',
+        title: 'Archive',
+        tab: 'storage',
+        description: 'Archiving is the third answer to a finished conversation, between leaving it in the sidebar and deleting it. An archived chat leaves the list and its space group, keeps every message, stays searchable, and comes back on one click — nothing is lost, so the idle sweep can be generous. Deleting an archived chat is the opposite, and off by default: it is you asking to lose the transcript.',
+        fields: [
+            {
+                key: 'session_archive_idle_days',
+                label: 'Archive chats idle for (days)',
+                type: 'number',
+                hint: '0 never archives. Pinned chats are never archived; chats in a space are archived, never deleted.',
+            },
+            {
+                key: 'session_delete_archived_days',
+                label: 'Delete archived chats after (days)',
+                type: 'number',
+                hint: '0 keeps archived chats forever. Deleting removes their messages; archiving does not.',
+            },
+        ],
+    },
+    {
         // "Backup schedule", not "Backups": the Storage tab's own Backups
         // ledger sits directly above it, and two headings reading "Backups"
         // on one screen read as a rendering bug.
@@ -2485,20 +2509,202 @@ function _buildSessionsLedger(sessions) {
     rows.push(_ledgerRow('Pinned', String(sessions.pinned ?? 0)));
     rows.push(_ledgerRow('In spaces', String(sessions.in_spaces ?? 0)));
     // null means the schema has no archive column yet — not zero archived.
-    if (sessions.archived != null) rows.push(_ledgerRow('Archived', String(sessions.archived)));
+    // A count, not a link: the archive is a place in the sidebar, and a row
+    // that navigates out of Settings from inside a ledger is a trap.
+    if (sessions.archived != null) {
+        rows.push(_ledgerRow('Archived', String(sessions.archived), {
+            hint: 'Out of the sidebar with every message kept — still counted above under their kind',
+        }));
+    }
 
     return el('div', { class: 'settings-section' }, [
         el('h3', {}, [
             text('Sessions'),
             buildHelpIcon(
-                'Every row in the sessions table, by kind. Pinned sessions and sessions filed in a '
-                + 'space are counted again here — they are flags on a session, not kinds of their own. '
+                'Every row in the sessions table, by kind. Pinned, archived and in-a-space are '
+                + 'counted again here — they are flags on a session, not kinds of their own. '
                 + 'Automation sessions (workers, scheduled runs, canaries, idle work) each have their '
                 + 'own retention and are never touched by the cleanup below.'
             ),
         ]),
         ...rows,
     ]);
+}
+
+// The Archive block: the two knobs, and a way to try each of them.
+//
+// Both settings are ordinary declarative fields — they are saved by the same
+// Save button as everything else on the page — so what this adds is the part a
+// settings form cannot do. A retention horizon is a number whose only
+// interesting property is which of *your* conversations it catches, and the
+// form can only tell you it is between 0 and 3650. Each knob gets a button
+// that runs the sweep the setting schedules, against the value in the box
+// right now rather than the one on disk: typing 60 and pressing it answers
+// "what does 60 do here?" before 60 is committed to anything.
+//
+// The value is read out of the input at click time for exactly that reason.
+// Reading the saved setting instead would make the button answer a question
+// about a number the user has already stopped looking at.
+function _archiveDays(section, key) {
+    const input = section.querySelector(`#setting-${key}`);
+    const n = parseInt((input && input.value) || '', 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function _days(n) {
+    return `${n} day${n === 1 ? '' : 's'}`;
+}
+
+function _chats(n) {
+    return `${n} chat${n === 1 ? '' : 's'}`;
+}
+
+/** Up to five titles under a preview sentence. The count says how much; the
+ *  titles are what tells you the horizon is wrong before you agree to it. */
+function _sampleTitles(sample, total) {
+    const shown = (sample || []).slice(0, 5);
+    if (!shown.length) return [];
+    const nodes = [el('ul', {
+        style: 'margin:0.35rem 0 0; padding-left:1.1rem; list-style:disc;',
+    }, shown.map(s => el('li', {}, [text(s.title || 'Untitled')])))];
+    if (total > shown.length) {
+        nodes.push(el('div', { style: 'color:var(--text-faint);' }, [
+            text(`…and ${total - shown.length} more.`),
+        ]));
+    }
+    return nodes;
+}
+
+// Called once, not per render: the declarative section is a single node that
+// every refresh re-appends, so appending the controls inside `render` would
+// stack a second pair of buttons under it every time an action finished.
+// Returns the flash applier the ledger's refresh uses to put an action's
+// result back on screen after the rebuild that action triggered.
+function _wireArchiveBlock(section, onDone) {
+    const status = _statusLine();
+
+    function _preview(message, sample, total) {
+        clear(status);
+        status.hidden = false;
+        status.style.color = 'var(--text-dim)';
+        status.appendChild(el('div', { style: 'color:var(--text);' }, [text(message)]));
+        for (const node of _sampleTitles(sample, total)) status.appendChild(node);
+    }
+
+    const archiveBtn = el('button', {
+        class: 'btn btn--secondary settings-block-btn', type: 'button',
+    }, [icon('archive', { size: 12 }), text('Archive idle chats now')]);
+
+    archiveBtn.addEventListener('click', async () => {
+        const days = _archiveDays(section, 'session_archive_idle_days');
+        archiveBtn.disabled = true;
+        try {
+            if (!days) {
+                _say(status, 'Set a number of days above first — 0 means never archive.');
+                return;
+            }
+            // Ask the endpoint that does the archiving what it would archive.
+            // The dry run computes exactly the set the real call then takes,
+            // so the number in the dialog is a promise and not an estimate.
+            const plan = await post('/api/sessions/archive-idle', { days, dry_run: true });
+            const n = plan.count || 0;
+            if (!n) {
+                _say(status, `Nothing to archive — no chat has been idle for more than ${_days(days)}.`);
+                return;
+            }
+            _preview(`${_chats(n)} idle for more than ${_days(days)} would be archived.`, plan.sample, n);
+            const go = await confirmDanger({
+                title: `Archive ${_chats(n)}?`,
+                body: [
+                    `Every chat untouched for more than ${_days(days)} leaves the sidebar. `
+                    + 'Pinned chats stay; chats in a space are archived too.',
+                    'Nothing is deleted. They keep every message, stay searchable, and come '
+                    + 'back on one click from Archived in the sidebar.',
+                ],
+                verb: `Archive ${n}`,
+                cancelLabel: 'Leave them',
+            });
+            if (!go) {
+                _say(status, 'Cancelled — nothing was archived.');
+                return;
+            }
+            const result = await post('/api/sessions/archive-idle', { days, dry_run: false });
+            notify('success', `Archived ${_chats(result.count || 0)}`);
+            onDone({
+                archive: {
+                    text: `Archived ${_chats(result.count || 0)} idle for more than ${_days(days)}. `
+                        + 'Nothing was deleted — they are under Archived in the sidebar.',
+                    tone: 'success',
+                },
+            });
+        } catch (e) {
+            _say(status, `Could not archive: ${e.message || e}`, 'error');
+            notify('error', 'Could not archive the idle chats');
+        } finally {
+            archiveBtn.disabled = false;
+        }
+    });
+
+    const pruneBtn = el('button', {
+        class: 'btn btn--danger settings-block-btn', type: 'button',
+    }, [icon('trash', { size: 12 }), text('Delete archived chats older than…')]);
+
+    pruneBtn.addEventListener('click', async () => {
+        const days = _archiveDays(section, 'session_delete_archived_days');
+        pruneBtn.disabled = true;
+        try {
+            if (!days) {
+                _say(status, 'Set a number of days above first — 0 keeps archived chats forever.');
+                return;
+            }
+            const plan = await post('/api/storage/prune-archived', { days, dry_run: true });
+            const n = plan.count || 0;
+            if (!n) {
+                _say(status, `Nothing to delete — no chat has been in the archive for more than ${_days(days)}.`);
+                return;
+            }
+            _preview(`${_chats(n)} archived more than ${_days(days)} ago would be deleted.`, plan.sample, n);
+            const go = await confirmDanger({
+                title: `Delete ${_chats(n)}?`,
+                body: [
+                    `Every chat that has been in the archive for more than ${_days(days)} is `
+                    + 'removed from the database.',
+                    'Their messages go with them, and so does anything their workers wrote. '
+                    + 'This is the one control here that loses transcripts, and there is no undo.',
+                ],
+                verb: `Delete ${n}`,
+                cancelLabel: 'Keep them',
+            });
+            if (!go) {
+                _say(status, 'Cancelled — nothing was deleted.');
+                return;
+            }
+            const result = await post('/api/storage/prune-archived', { days, dry_run: false });
+            notify('success', `Deleted ${_chats(result.count || 0)}`);
+            onDone({
+                archive: {
+                    text: `Deleted ${_chats(result.count || 0)} that had been archived for more than ${_days(days)}.`,
+                    tone: 'success',
+                },
+            });
+        } catch (e) {
+            _say(status, `Could not delete: ${e.message || e}`, 'error');
+            notify('error', 'Could not delete the archived chats');
+        } finally {
+            pruneBtn.disabled = false;
+        }
+    });
+
+    // Appended to the declarative section itself rather than wrapped around
+    // it: the fields keep their ids, their reset buttons and their place in
+    // the Save flow, and the buttons read the inputs sitting directly above
+    // them. Re-rendering the ledger re-appends the same node, so an edit the
+    // user has not saved yet survives an action that refreshes the numbers.
+    section.append(el('div', {
+        style: 'display:flex; flex-wrap:wrap; gap:0.5rem;',
+    }, [archiveBtn, pruneBtn]), status);
+
+    return (flash) => { if (flash) _say(status, flash.text, flash.tone); };
 }
 
 function _buildDatabaseLedger(database, onDone, flash) {
@@ -2695,11 +2901,21 @@ function _buildBackupsLedger(backups, onDone, flash, which = 'primary') {
     return el('div', { class: 'settings-section' }, children);
 }
 
+// Counters whose name does not derive a readable row on its own. The archive
+// pair is here because one of them does not end in `_pruned` at all —
+// archiving deletes nothing — and because "Archived sessions", which the
+// generic rule would produce for the other, names a population rather than
+// the thing that happened to it.
+const SWEEP_LABELS = {
+    sessions_archived: 'Chats archived',
+    archived_sessions_pruned: 'Archived chats deleted',
+};
+
 function _buildSweepsLedger(sweeps) {
     const rows = Object.entries(sweeps)
-        .filter(([key, value]) => key.endsWith('_pruned') && value)
+        .filter(([key, value]) => value && (SWEEP_LABELS[key] || key.endsWith('_pruned')))
         .map(([key, value]) => _ledgerRow(
-            _typeLabel(key.replace(/_pruned$/, '').replace(/_/g, ' ')),
+            SWEEP_LABELS[key] || _typeLabel(key.replace(/_pruned$/, '').replace(/_/g, ' ')),
             String(value),
         ));
     if (!rows.length) return null;
@@ -2708,20 +2924,21 @@ function _buildSweepsLedger(sweeps) {
         el('h3', {}, [
             text('Swept automatically'),
             buildHelpIcon(
-                'What the idle-time retention sweeps have removed since the server started. '
+                'What the idle-time retention sweeps have done since the server started. '
                 + 'These run on their own; the counters are here so the manual controls above are '
-                + 'read against what is already happening, not instead of it.'
+                + 'read against what is already happening, not instead of it. Archiving is the one '
+                + 'row here that deletes nothing.'
             ),
         ]),
         ...rows,
     ]);
 }
 
-// `settingSections` are this tab's declarative sections (the backup schedule),
-// passed in rather than concatenated by the caller so they can land between
-// the backups ledger they configure and the cleanup controls below it.
-// Re-appending the same nodes on a refresh is deliberate: they keep their ids
-// and any edit the user has not saved yet.
+// `settingSections` are this tab's declarative sections (the archive knobs and
+// the backup schedule), passed in rather than concatenated by the caller so
+// they can land beside the numbers they configure rather than after all of
+// them. Re-appending the same nodes on a refresh is deliberate: they keep
+// their ids and any edit the user has not saved yet.
 function buildStorageTab(settingSections = []) {
     // Built async into a host, the way the Security tab is: the tab bodies are
     // assembled synchronously when the modal opens, and this one needs a
@@ -2730,10 +2947,18 @@ function buildStorageTab(settingSections = []) {
         el('div', { class: 'settings-tab-loading' }, [text('Loading…')]),
     ]);
 
+    // The archive knobs go directly under the sessions ledger, because the
+    // Archived row there is the number they move; everything else on this tab
+    // is placed by the block it belongs to. Wired once — `render` re-appends
+    // the same node, and wiring inside it would stack the buttons.
+    const archiveSection = settingSections.find(s => s.dataset && s.dataset.section === 'archive') || null;
+    const otherSections = settingSections.filter(s => s !== archiveSection);
+    const applyArchiveFlash = archiveSection ? _wireArchiveBlock(archiveSection, f => render(f)) : null;
+
     // `flash` is how an action's own result survives the refresh it triggers:
-    // rotating or compacting changes the numbers, so the ledger has to be
-    // rebuilt, and rebuilding it would otherwise throw away the sentence
-    // saying what just happened.
+    // archiving, rotating and compacting all change the numbers, so the ledger
+    // has to be rebuilt, and rebuilding it would otherwise throw away the
+    // sentence saying what just happened.
     async function render(flash) {
         let data;
         try {
@@ -2750,6 +2975,10 @@ function buildStorageTab(settingSections = []) {
         }
         clear(host);
         host.appendChild(_buildSessionsLedger(data.sessions || {}));
+        if (archiveSection) {
+            host.appendChild(archiveSection);
+            applyArchiveFlash(flash?.archive);
+        }
         host.appendChild(_buildDatabaseLedger(data.database || {}, render, flash?.database));
         host.appendChild(_buildBackupsLedger(data.backups || {}, render, flash?.backups));
         // Null on every instance that has never run a version old enough to
@@ -2758,7 +2987,7 @@ function buildStorageTab(settingSections = []) {
         if (data.legacy_backups) {
             host.appendChild(_buildBackupsLedger(data.legacy_backups, render, flash?.legacyBackups, 'legacy'));
         }
-        for (const section of settingSections) host.appendChild(section);
+        for (const section of otherSections) host.appendChild(section);
         const sweeps = data.sweeps ? _buildSweepsLedger(data.sweeps) : null;
         if (sweeps) host.appendChild(sweeps);
         host.appendChild(buildSessionCleanupSection());
@@ -3044,7 +3273,10 @@ function _buildSettingsSection(section, settings) {
     const fields = section.fields.map(f => buildField(f, settings[f.key]));
     const heading = [text(section.title)];
     if (section.description) heading.push(buildHelpIcon(section.description));
-    return el('div', { class: 'settings-section' }, [
+    // `data-section` is a handle for a tab that has to place one of its
+    // sections somewhere specific — matching on the rendered heading text
+    // would tie the layout to a label the next rename breaks.
+    return el('div', { class: 'settings-section', ...(section.name ? { 'data-section': section.name } : {}) }, [
         // `term` carries the internal name of a section the UI renamed for
         // humans, so searching for "Telos" or "Candor" still lands. (N9)
         el('h3', section.term ? { title: section.term } : {}, heading),

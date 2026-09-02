@@ -466,6 +466,29 @@ nothing about the file size. Then the backup directory: how many snapshots,
 how much they weigh, the retention count, when the last one was taken, and any
 snapshots past the keep count named individually.
 
+**Archive.** Directly under the sessions ledger, because the *Archived* row is
+the number it moves. Archiving is the third answer to a finished conversation,
+between leaving it in the sidebar and deleting it: the chat leaves the list and
+its space group, keeps every message, stays searchable, and comes back on one
+click — see
+[Sessions and chat](guides/sessions-and-chat.md#archiving-instead-of-deleting).
+
+| Setting | Default | Description |
+|---|---|---|
+| `session_archive_idle_days` | `30` | Days a plain chat can go untouched before the idle sweep archives it. `0` never archives. Pinned chats are exempt; chats in a space are **not** — the rule that spares them from every delete sweep is about never losing a transcript, and archiving loses nothing. Range 0–3650. |
+| `session_delete_archived_days` | `0` | Days a chat can sit in the archive before it is hard-deleted, messages and all. `0` — the default — keeps archived chats forever, deliberately: the archive is what *not deleting* means, so putting a horizon on it is you opting back in to losing transcripts. Range 0–3650. |
+
+Each knob has a button beside it that runs the sweep it schedules, against the
+value **in the box right now** rather than the one on disk — so typing `60` and
+pressing the button answers "what does 60 catch here?" before 60 is saved to
+anything. **Archive idle chats now** previews with a dry run (`N chats idle for
+more than D days would be archived`, plus the first few titles) and then asks;
+**Delete archived chats older than…** does the same and says in the
+confirmation that the messages go too and there is no undo. Both re-read the
+ledger afterwards, so the *Archived* count and the session total move on
+screen. The buttons are for trying a horizon and for catching up a box that has
+never swept; leaving the knobs set is what makes it happen on its own.
+
 **Compact database** rebuilds the file so the reclaimable space goes back to
 the disk (`PRAGMA optimize`, then `VACUUM`, then a WAL checkpoint so the main
 file actually shrinks rather than waiting for the next one). It is refused
@@ -509,9 +532,10 @@ re-runs that preview and names the number in the confirmation before deleting.
 
 | Endpoint | What it does |
 |---|---|
-| `GET /api/storage` | The whole ledger: `sessions` (total, by type, pinned, in spaces, archived), `database` (path, bytes, WAL bytes, page size, `reclaimable_bytes`), `backups` (dir, count, bytes, keep, last backup, `beyond_keep`), `legacy_backups` (the same shape for `data/.backups`, or `null` when there is no such directory) and `sweeps` (what the idle-time retention sweeps have pruned). `archived` is `null` — not `0` — while the schema has no `archived_at` column. |
+| `GET /api/storage` | The whole ledger: `sessions` (total, by type, pinned, in spaces, archived), `database` (path, bytes, WAL bytes, page size, `reclaimable_bytes`), `backups` (dir, count, bytes, keep, last backup, `beyond_keep`), `legacy_backups` (the same shape for `data/.backups`, or `null` when there is no such directory) and `sweeps` (what the idle-time retention sweeps have done since boot: every `*_pruned` counter, plus `sessions_archived`, which belongs there despite deleting nothing because it is the sweep that moves the `archived` count above). `archived` is `null` — not `0` — while the schema has no `archived_at` column. |
 | `POST /api/storage/backups/rotate` | Body `{"dry_run": true}` (the default) lists what rotation would remove; `{"dry_run": false}` removes it. `{"dir": "legacy"}` sweeps `data/.backups` instead of the primary directory — **404** when it does not exist, **400** for any other value. Returns `dir`, `removed`, `bytes_freed` and `kept`. |
 | `POST /api/storage/optimize` | `PRAGMA optimize` + `VACUUM` + WAL checkpoint. Returns `bytes_before` / `bytes_after`. Answers **409** while a turn is running. |
+| `POST /api/storage/prune-archived` | Hard-deletes every session that has been in the archive for more than `days` — the manual hand on the `session_delete_archived_days` sweep. Body `{"days": N, "dry_run": true}`; `dry_run` defaults to **true**, like rotation and for a harder version of the same reason, and the dry run selects exactly the set the real call then deletes. `days` is optional (it falls back to the setting, which is `0` — never) and must be a non-negative integer, else **400**; `0` is a no-op. Returns `{count, ids, sample, days, dry_run}`. Archiving in the other direction is `POST /api/sessions/archive-idle` — see [api.md](api.md). |
 
 Same authentication as every other endpoint: a Bearer token in network mode.
 
