@@ -11,7 +11,10 @@ import { openSettings } from './components/modals/settings.js';
 import { openTimeline, appendTimelineRow, appendTimelineToolRow, appendTimelineToolStart, isTimelineOpen } from './components/modals/timeline.js';
 import { initBell, openBellPanel, closeBellPanel, refreshBell } from './components/notification-bell.js';
 import { initJobsIndicator } from './components/jobs-indicator.js';
-import { initSidebar, renderSessionList as renderSidebar, updateSessionActivity } from './components/sidebar.js';
+import {
+    initSidebar, renderSessionList as renderSidebar, updateSessionActivity,
+    setSessionPaging, setSessionPagingBusy,
+} from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
 import { initMobile, isMobile, closeSidebar } from './mobile.js';
@@ -286,6 +289,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         renderSidebar(state.sessions, state.sid, state.spaces);
     });
 
+    // The sidebar's list-end button asks for the page behind the loaded ones.
+    window.addEventListener('pernix:load-older-sessions', () => loadOlderSessions());
+
     // Poll — guarded by isOnline() inside the functions / api layer.
     // Skipped while the tab is hidden: the enriched session list runs
     // full-table aggregates server-side, and a backgrounded phone tab was
@@ -451,11 +457,25 @@ const _BUSY_STATES = new Set([
 const _prevBusy = new Map();        // session id → was busy at last poll
 const _recentlyFinished = new Set(); // session ids with an unvisited finished turn
 
+// One page of the session list is 500 rows (SESSION_PAGE_LIMIT in
+// sidebar.js). "Load older sessions" widens the window rather than holding an
+// offset the poll would immediately blow away: the ten-second refresh has to
+// come back with everything already on screen, or a page loaded by hand would
+// vanish a heartbeat later.
+const SESSION_PAGE = 500;
+let _sessionWindow = SESSION_PAGE;
+let _loadingOlderSessions = false;
+
 async function loadSessions() {
     try {
-        const data = await get('/api/sessions?limit=500');
+        const data = await get(`/api/sessions?limit=${_sessionWindow}`);
         state.sessions = data.items || [];
         state.spaces = data.spaces || [];
+        setSessionPaging({
+            total: data.total || state.sessions.length,
+            loaded: state.sessions.length,
+            hasMore: !!data.has_more,
+        });
         for (const s of state.sessions) {
             const busy = _BUSY_STATES.has(s.state_v2);
             if (_prevBusy.get(s.id) && !busy && s.id !== state.sid) {
@@ -470,6 +490,43 @@ async function loadSessions() {
         _renderSessionHeader();   // titles are generated a beat after the first turn
     } catch (e) {
         if (!e.offline) console.warn('Failed to load sessions:', e);
+    }
+}
+
+/**
+ * Fetch the page behind the loaded ones and append it.
+ *
+ * The offset fetch is what lands on screen straight away; widening the window
+ * is what makes the next ten-second poll come back with those rows still in
+ * it. Doing only one of the two either costs a full re-fetch of everything
+ * already loaded, or shows rows that disappear again on the next tick.
+ */
+async function loadOlderSessions() {
+    if (_loadingOlderSessions) return;
+    _loadingOlderSessions = true;
+    setSessionPagingBusy(true);
+    try {
+        const offset = _sessionWindow;
+        const data = await get(`/api/sessions?limit=${SESSION_PAGE}&offset=${offset}`);
+        const known = new Set((state.sessions || []).map((s) => s.id));
+        const fresh = (data.items || []).filter((s) => !known.has(s.id));
+        state.sessions = [...(state.sessions || []), ...fresh];
+        _sessionWindow = offset + SESSION_PAGE;
+        setSessionPaging({
+            total: data.total || state.sessions.length,
+            loaded: state.sessions.length,
+            hasMore: !!data.has_more,
+        });
+        renderSidebar(state.sessions, state.sid, state.spaces);
+        announce(fresh.length
+            ? `${fresh.length} older sessions loaded`
+            : 'No more sessions to load');
+    } catch (e) {
+        if (!e.offline) console.warn('Failed to load older sessions:', e);
+        notify('error', `Couldn't load older sessions — ${humanizeError(e)}`);
+    } finally {
+        _loadingOlderSessions = false;
+        setSessionPagingBusy(false);
     }
 }
 
