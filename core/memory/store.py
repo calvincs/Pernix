@@ -804,6 +804,30 @@ class MemoryStore:
             self._write_locked(md_path, new_raw)
         return True
 
+    def write_file(self, name: str, content: str) -> None:
+        """Replace a memory file's markdown wholesale, then re-index it.
+
+        The editor's save path. `rewrite_file` is read-modify-write and
+        answers False when the transform is a no-op, so a caller replacing
+        the whole file had to pair it with `_reindex_commit` — reaching past
+        the public surface into a package-internal to keep the FTS rows from
+        describing text the file no longer contains. That pairing also left
+        the index commit *outside* the flock, and re-indexed a file the
+        rewrite had decided not to touch.
+
+        One call now does both, under the same lock and the same temp-file +
+        rename discipline every other writer uses, with the index commit
+        riding `on_written` so it lands while no other writer can reach the
+        markdown — exactly how `update_entry` and `delete_entry` do it. The
+        file is created (header + DB row) if it does not exist yet, so the
+        re-index always has a row to update its entry count on.
+        """
+        name = self._validate_name(name)
+        self._ensure_file(name)
+        md_path = self._dir / f"{name}.md"
+        with self._lock:
+            self._write_locked(md_path, content, on_written=lambda: self._reindex_commit(name, content))
+
     def update_entry(self, file_name: str, epoch: int, new_content: str) -> str:
         """Replace the content of an existing entry (identified by epoch).
 

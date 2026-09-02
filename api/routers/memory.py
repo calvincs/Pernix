@@ -144,15 +144,12 @@ async def write_memory_file(name: str, body: dict):
 
     stem = path.stem
 
-    def _write() -> None:
-        # rewrite_file is the store's public atomic read-modify-write (temp
-        # file + fsync + rename, writers excluded). The FTS index is derived
-        # from the markdown and has to follow it, or the file a user just
-        # edited keeps matching searches on text it no longer contains.
-        store.rewrite_file(stem, lambda _raw: content)
-        store._reindex_commit(stem, content)
-
-    await asyncio.to_thread(_write)
+    # write_file is the store's public whole-file save: temp file + fsync +
+    # rename, writers excluded, and the FTS re-index committed inside the same
+    # lock. The index is derived from the markdown and has to follow it, or the
+    # file a user just edited keeps matching searches on text it no longer
+    # contains.
+    await asyncio.to_thread(store.write_file, stem, content)
     return {"saved": True, "name": stem, "bytes": len(content), "mtime": _mtime_of(path)}
 
 
