@@ -76,7 +76,7 @@ Click **Save**. You're done with setup.
 
 ## 5. Send your first message
 
-Click **New session** in the sidebar. Type something:
+Click **+ new** in the sidebar. Type something:
 
 > *"What time is it, and who am I according to your memory? If we haven't met, just say so."*
 
