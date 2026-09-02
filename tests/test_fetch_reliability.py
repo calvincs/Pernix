@@ -146,13 +146,25 @@ def test_record_fetch_skips_none_domain(bridge):
 
 
 class _FakeResp:
+    """Stands in for a streamed httpx response (http_get uses client.stream)."""
+
     def __init__(self, text: str):
         self.text = text
         self.is_redirect = False
         self.headers: dict = {}
+        self.encoding = "utf-8"
 
     def raise_for_status(self):
         pass
+
+    def iter_bytes(self):
+        yield self.text.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
 
 
 class _FakeClient:
@@ -168,6 +180,9 @@ class _FakeClient:
         return False
 
     def get(self, url):
+        return _FakeResp(self.page)
+
+    def stream(self, method, url):
         return _FakeResp(self.page)
 
 
@@ -216,7 +231,7 @@ def test_http_get_records_http_error_as_failure(bridge, offline_http, monkeypatc
     bridge.prediction = None
 
     class _ErrClient(_FakeClient):
-        def get(self, url):
+        def stream(self, method, url):
             raise RuntimeError("boom 503")
 
     monkeypatch.setattr("httpx.Client", _ErrClient)
