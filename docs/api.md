@@ -873,7 +873,7 @@ are rejected with a 400.
 
 ## Voice
 
-Speech-to-text for the chat mic button — engines and their privacy labels are configured in Settings → Voice Input.
+Speech-to-text for the chat mic button — engines and their privacy labels are configured in Settings → Integrations → Voice Input.
 
 ```
 GET  /api/voice/status        Availability of the configured engine
