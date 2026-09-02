@@ -3371,3 +3371,32 @@ mark.ts-mark.current {
 }
 .search-meta .session-attn { margin-left: var(--sp-1); }
 .search-empty { text-wrap: pretty; }
+
+/* N4/F11 — empty states carry the next action, and the way to make the first
+   space once the Spaces header is no longer rendered unconditionally. */
+.sidebar-empty {
+    padding: var(--sp-4) var(--sp-3);
+    color: var(--text-faint);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    text-wrap: pretty;
+}
+.spaces-create-row {
+    padding: var(--sp-2) var(--sp-3) var(--sp-3);
+}
+.spaces-create-btn {
+    min-height: 24px;
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    font: inherit;
+    font-size: var(--text-xxs);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: var(--transition);
+}
+.spaces-create-btn:hover,
+.spaces-create-btn:focus-visible { color: var(--text-dim); }
+.bell-empty { text-wrap: pretty; line-height: 1.5; }

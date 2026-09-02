@@ -286,17 +286,23 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
             (bySpace[s.space_id] = bySpace[s.space_id] || []).push(s);
         }
     }
-    list.appendChild(el('div', { class: 'spaces-header', 'data-group': 'spaces' }, [
-        el('span', { class: 'spaces-header-label' }, [text('Spaces')]),
-        el('button', {
-            class: 'space-btn spaces-new-btn',
-            title: 'New space',
-            'aria-label': 'New space',
-            onClick: (e) => { e.stopPropagation(); openSpaceModal(null); },
-        }, [text('+')]),
-    ]));
-    for (const space of _spaces) {
-        _renderSpaceGroup(space, bySpace[space.id] || [], list, activeSid, childrenByParent, sidebarState);
+    // On a fresh install this header sat above nothing at all, so the very
+    // first thing a new user saw was an empty section for a feature they had
+    // no sessions to use yet. It appears with the first space; the way to
+    // make that first space is the row at the bottom of the list.
+    if (_spaces.length) {
+        list.appendChild(el('div', { class: 'spaces-header', 'data-group': 'spaces' }, [
+            el('span', { class: 'spaces-header-label' }, [text('Spaces')]),
+            el('button', {
+                class: 'space-btn spaces-new-btn',
+                title: 'New space',
+                'aria-label': 'New space',
+                onClick: (e) => { e.stopPropagation(); openSpaceModal(null); },
+            }, [text('+')]),
+        ]));
+        for (const space of _spaces) {
+            _renderSpaceGroup(space, bySpace[space.id] || [], list, activeSid, childrenByParent, sidebarState);
+        }
     }
     // Sessions pointing at a deleted/unknown space fall back to the buckets.
     const knownSpaceIds = new Set(_spaces.map(sp => sp.id));
@@ -374,6 +380,31 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
                 _renderSessionItem(w, list, activeSid, true);
             }
         }
+    }
+
+    // Empty states. "Nothing here" is only useful with the next action
+    // attached to it — and the two ways of ending up with an empty list want
+    // different next actions.
+    if (!list.querySelector('.session-item')) {
+        list.appendChild(el('div', { class: 'sidebar-empty' }, [text(
+            sessions.length
+                ? 'Every session type is hidden — turn one back on in the legend below.'
+                : 'No sessions yet — press + new or just start typing.'
+        )]));
+    }
+
+    // With no spaces there is no Spaces header, so this is the only way to
+    // make the first one. It stays off the true first run (no sessions):
+    // there is nothing to organize yet.
+    if (!_spaces.length && sessions.length) {
+        list.appendChild(el('div', { class: 'spaces-create-row', 'data-group': 'spaces' }, [
+            el('button', {
+                class: 'spaces-create-btn',
+                type: 'button',
+                title: 'Group long-lived sessions into a named, colored space',
+                onClick: () => openSpaceModal(null),
+            }, [text('+ New space')]),
+        ]));
     }
 
     list.scrollTop = scrollTop;
@@ -940,11 +971,24 @@ function _toggleType(typeKey) {
     document.dispatchEvent(new CustomEvent('sidebar:filter-changed'));
 }
 
+// A legend is a key to what is on screen. Listing all six types on a fresh
+// install taught a new user six words for things they have never seen, and
+// four of them are machinery they never create by hand. Only types that are
+// actually present get a row — 'chat' always stays, because it is the one
+// the user makes themselves and the filter has to remain reachable.
 function _updateLegendCounts(counts) {
+    let total = 0;
     for (const key of Object.keys(SESSION_TYPES)) {
+        const n = counts[key] || 0;
+        total += n;
         const span = document.querySelector(`.legend-count[data-count-type="${key}"]`);
-        if (span) span.textContent = String(counts[key] || 0);
+        if (span) span.textContent = String(n);
+        const item = document.querySelector(`.legend-item[data-type="${key}"]`);
+        if (item) item.hidden = n === 0 && key !== 'chat';
     }
+    // Nothing at all: the legend is a key to an empty list.
+    const legend = document.getElementById('sidebar-legend');
+    if (legend) legend.hidden = total === 0;
 }
 
 // ---------------------------------------------------------------------------
