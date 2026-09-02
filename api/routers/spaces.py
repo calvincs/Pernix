@@ -106,7 +106,13 @@ async def delete_space(space_id: str, cascade: bool = False):
         session_ids = await _asyncio.to_thread(db.list_space_session_ids, space_id)
         for sid in session_ids:
             try:
-                await _asyncio.to_thread(manager.delete_session, sid)
+                # delete_session_async, not to_thread(delete_session): the
+                # first half of a delete is loop-affine (Task.cancel, the
+                # process sweep, popping the in-memory session) and running
+                # it on a worker thread let the DB row go while the turn was
+                # still running against it. The async form keeps that half on
+                # the loop and only threads the DB/filesystem work.
+                await manager.delete_session_async(sid)
             except Exception as e:
                 logger.warning("cascade: session %s delete failed: %s", sid[:12], e)
         result["sessions_deleted"] = len(session_ids)
@@ -132,9 +138,11 @@ async def delete_space(space_id: str, cascade: bool = False):
         try:
             from core.extensions.scheduling import jobs_for_space, remove_scheduled_job
 
-            names = jobs_for_space(space_id)
+            names = await _asyncio.to_thread(jobs_for_space, space_id)
+            # remove_scheduled_job rewrites cron_jobs.json under a threading
+            # lock shared with tool threads — a file write on the loop.
             for name in names:
-                remove_scheduled_job(name)
+                await _asyncio.to_thread(remove_scheduled_job, name)
             result["jobs_removed"] = len(names)
         except Exception as e:
             logger.warning("cascade: job removal failed: %s", e)
@@ -151,7 +159,7 @@ async def delete_space(space_id: str, cascade: bool = False):
         try:
             from core.extensions.scheduling import unbind_space_jobs
 
-            result["jobs_unbound"] = unbind_space_jobs(space_id)
+            result["jobs_unbound"] = await _asyncio.to_thread(unbind_space_jobs, space_id)
         except Exception as e:
             logger.warning("detach: job unbind failed: %s", e)
 
@@ -197,6 +205,7 @@ def _default_directive_content(fname: str) -> str:
 
 
 def _resolve_directive(space_id: str, name: str) -> tuple[dict, str]:
+    """Sync: callers dispatch it via to_thread (it reads the DB)."""
     space = db.get_space(space_id)
     if not space:
         raise HTTPException(404, detail=f"Space {space_id} not found")
@@ -215,12 +224,16 @@ async def get_directives(space_id: str):
     files = {}
     for key, fname in _DIRECTIVE_FILES.items():
         override_path = agent_dir / fname
-        override = None
-        if override_path.exists():
+
+        def _read_override(path=override_path):
+            if not path.exists():
+                return None
             try:
-                override = override_path.read_text(encoding="utf-8")
+                return path.read_text(encoding="utf-8")
             except OSError:
-                override = ""
+                return ""
+
+        override = await _asyncio.to_thread(_read_override)
         files[key] = {
             "default": await _asyncio.to_thread(_default_directive_content, fname),
             "override": override,
@@ -230,23 +243,26 @@ async def get_directives(space_id: str):
 
 @router.put("/api/spaces/{space_id}/directives/{name}")
 async def put_directive(space_id: str, name: str, body: dict = {}):
-    space, fname = _resolve_directive(space_id, name)
+    space, fname = await _asyncio.to_thread(_resolve_directive, space_id, name)
     content = body.get("content")
     if not isinstance(content, str) or not content.strip():
         raise HTTPException(400, detail="content must be a non-empty string")
     if len(content.encode("utf-8")) > _MAX_DIRECTIVE_BYTES:
         raise HTTPException(400, detail=f"content exceeds {_MAX_DIRECTIVE_BYTES} bytes")
     agent_dir = spaces_lib.space_agent_dir(space)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / fname).write_text(content, encoding="utf-8")
+
+    def _write():
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        (agent_dir / fname).write_text(content, encoding="utf-8")
+
+    await _asyncio.to_thread(_write)
     return {"space_id": space_id, "file": name.upper(), "override": True}
 
 
 @router.delete("/api/spaces/{space_id}/directives/{name}")
 async def delete_directive(space_id: str, name: str):
     """Revert to default: remove the override file."""
-    space, fname = _resolve_directive(space_id, name)
+    space, fname = await _asyncio.to_thread(_resolve_directive, space_id, name)
     path = spaces_lib.space_agent_dir(space) / fname
-    if path.exists():
-        path.unlink()
+    await _asyncio.to_thread(path.unlink, True)
     return {"space_id": space_id, "file": name.upper(), "override": False}
