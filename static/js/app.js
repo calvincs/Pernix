@@ -600,10 +600,28 @@ function _composerHint() {
 // "…for a new lin". The second binding is a discovery, not an instruction:
 // it belongs in the tooltip and the accessible description, where it has as
 // much room as it needs. _composerHint() still carries both.
+// Below this the placeholder is the name alone. At 360px "Message Pernix —
+// tap send" wraps, so an EMPTY composer is two lines tall on the smallest
+// phone in the matrix — the widest thing on the screen saying the least. The
+// binding it drops is not lost: _composerHint() carries it in the title and
+// in aria-description, which have as much room as they need. (P7)
+const _NARROW_COMPOSER_PX = 400;
+
 function _composerPlaceholder() {
+    if (window.innerWidth < _NARROW_COMPOSER_PX) return 'Message Pernix';
     return _isCoarsePointer()
         ? 'Message Pernix — tap send'
         : 'Message Pernix… Enter to send';
+}
+
+/** Re-read the width-dependent placeholder. Cheap, and a no-op on a session
+ *  that is read-only: there the placeholder is saying why. */
+function _refreshComposerText() {
+    const t = document.getElementById('msg-input');
+    if (!t || t.disabled) return;
+    t.placeholder = _composerPlaceholder();
+    t.title = _composerHint();
+    t.setAttribute('aria-description', t.title);
 }
 
 function _setComposerReadOnly(readonly, reason) {
@@ -1623,6 +1641,15 @@ function setupInput() {
     // header away while it is set is compact-only. (P5)
     textarea.addEventListener('focus', () => document.body.classList.add('composer-focused'));
     textarea.addEventListener('blur', () => document.body.classList.remove('composer-focused'));
+
+    // A rotation, or a desktop window dragged narrow, crosses the width the
+    // placeholder depends on (P7). Debounced: a drag fires this dozens of
+    // times a second and the answer changes at exactly one width.
+    let phTimer = null;
+    window.addEventListener('resize', () => {
+        clearTimeout(phTimer);
+        phTimer = setTimeout(_refreshComposerText, 150);
+    });
 
     textarea.placeholder = _composerPlaceholder();
     textarea.title = _composerHint();
