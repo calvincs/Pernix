@@ -439,6 +439,28 @@ async function selectSession(sid) {
 const HISTORY_PAGE = 200;   // messages rendered initially; grows on demand
 let _historyLimit = HISTORY_PAGE;
 
+/** A persisted row's `metadata` column — a JSON string, or already an object
+ *  on paths that hand it over parsed. Never throws; a malformed value is the
+ *  same as no metadata. */
+function _parseRowMetadata(raw) {
+    if (!raw) return {};
+    if (typeof raw === 'object') return raw;
+    try { return JSON.parse(raw) || {}; } catch { return {}; }
+}
+
+/** Arguments off one persisted tool_call entry. Providers put them at
+ *  `arguments` (object or JSON string) or `function.arguments` (a string,
+ *  which is what the OpenAI wire format uses). */
+function _parseToolArgs(tc) {
+    const raw = tc.arguments ?? (tc.function || {}).arguments;
+    if (raw == null) return null;
+    if (typeof raw === 'object') return raw;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch { return null; }
+}
+
 async function loadMessages(sid, { keepScroll = false } = {}) {
     const mySeq = _selectSeq;
     const inner = _messagesInner();
@@ -469,7 +491,11 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
             }}, [text(`Load earlier messages (${remaining} more)`)]);
             inner.appendChild(loadBtn);
         }
-        // Build tool_call_id → tool_name map from assistant messages
+        // Build tool_call_id → {name, args} map from assistant messages.
+        // The ARGUMENTS matter as much as the name: appendToolToGroup builds
+        // its one-line summary ("$ ls -la", the file path) from them, so a
+        // replayed transcript without them fell back to the raw output tail
+        // and read nothing like the live view of the same turn.
         const toolNameMap = {};
         for (const m of messages) {
             if (m.role === 'assistant' && m.tool_calls) {
@@ -479,7 +505,7 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
                         const id = tc.id || '';
                         // Handle both formats: {name: "..."} and {function: {name: "..."}}
                         const name = tc.name || (tc.function || {}).name || '';
-                        if (id && name) toolNameMap[id] = name;
+                        if (id && name) toolNameMap[id] = { name, args: _parseToolArgs(tc) };
                     }
                 } catch { /* skip malformed tool_calls */ }
             }
@@ -533,11 +559,23 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
                 } catch { /* skip malformed eval data */ }
                 continue;
             }
+            // A tool-round assistant row carries the tool_calls and no text.
+            // Rendering it appended a bare "ASSISTANT" bubble with nothing in
+            // it AND closed the open tool group, so one round of five tools
+            // replayed as five one-item groups with an empty bubble between
+            // each. The live path folds these away; this is that fold.
+            if (m.role === 'assistant' && !(m.content || '').trim()) continue;
             if (m.role === 'tool') {
                 const content = m.content || '';
                 const preview = content.slice(0, 300);
-                const toolName = toolNameMap[m.tool_call_id] || m.tool_call_id || '';
-                appendToolToGroup(toolName, preview, content, content.length > 300);
+                const info = toolNameMap[m.tool_call_id] || null;
+                const toolName = (info && info.name) || m.tool_call_id || '';
+                const meta = _parseRowMetadata(m.metadata);
+                const latency = meta.latency_ms ?? m.latency_ms ?? 0;
+                appendToolToGroup(
+                    toolName, preview, content, content.length > 300,
+                    !!meta.was_error, Number(latency) || 0, info ? info.args : null,
+                );
             } else if (m.role === 'user' && (m.content || '').startsWith('[User answered your question]')) {
                 closeToolGroup();
                 renderAnsweredQuestion(m.content);
