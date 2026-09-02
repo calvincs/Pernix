@@ -65,6 +65,7 @@ export function initMobile() {
     _setupSwipeGesture();
     _setupFilePanelSwipe();
     _setupKeyboardHandler();
+    _setupVisualViewport();
     _setupBottomStack();
 
     _applyTouch();
@@ -465,6 +466,62 @@ function _setupKeyboardHandler() {
             messages.scrollTop = messages.scrollHeight;
         });
     });
+}
+
+// ---------------------------------------------------------------------------
+// The shell is sized from the VISUAL viewport on touch
+//
+// touch.css pins #app to `height: 100dvh; overflow: hidden`, which is right
+// everywhere except the one place it matters most: iOS ignores
+// `interactive-widget=resizes-content` and does not shrink dvh when the
+// on-screen keyboard opens. The shell keeps its full height, the keyboard
+// covers the bottom of it, and the composer you are typing into is underneath
+// — a known failure on iOS 15 through 18 that no headless browser reproduces.
+//
+// window.visualViewport is the measurement that does know about the keyboard.
+// Its offsetTop matters too: a position:fixed shell is laid out against the
+// LAYOUT viewport, so after a pinch-zoom scroll it drifts off the visible one
+// unless it is offset back.
+// ---------------------------------------------------------------------------
+
+// The visual viewport jitters by a pixel while a page settles — address-bar
+// animations, rubber-banding, a caret moving. Rewriting the shell's height for
+// those relayouts the whole app for nothing anyone can see.
+const VV_JITTER_PX = 2;
+
+function _setupVisualViewport() {
+    const root = document.documentElement;
+    const vv = window.visualViewport;
+    let lastH = -1;
+    let lastTop = -1;
+
+    const apply = (height, top) => {
+        if (lastH < 0 || Math.abs(height - lastH) >= VV_JITTER_PX) {
+            lastH = height;
+            root.style.setProperty('--vvh', `${Math.round(height)}px`);
+        }
+        if (lastTop < 0 || Math.abs(top - lastTop) >= VV_JITTER_PX) {
+            lastTop = top;
+            root.style.setProperty('--vv-top', `${Math.round(top)}px`);
+        }
+    };
+
+    const sync = () => {
+        // Only touch.css reads these, and only a finger brings up a keyboard.
+        if (!isTouch()) return;
+        if (vv) apply(vv.height, vv.offsetTop);
+        else apply(window.innerHeight, 0);
+    };
+
+    sync();
+    if (vv) {
+        vv.addEventListener('resize', sync);
+        vv.addEventListener('scroll', sync);
+    } else {
+        // No visual viewport: innerHeight is the best available answer, and it
+        // at least keeps the shell honest across a rotation.
+        window.addEventListener('resize', sync);
+    }
 }
 
 // ---------------------------------------------------------------------------
