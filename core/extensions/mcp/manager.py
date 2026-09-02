@@ -443,6 +443,25 @@ class MCPConnection:
             )
 
 
+def _normalize_input_schema(schema) -> dict:
+    """Coerce a server-supplied JSON Schema into the shape the registry expects.
+
+    `inputSchema` is whatever the remote server sent. A missing schema, a
+    null `properties`, or a list where an object belongs all reached the
+    tool index unchecked and raised there — taking every builtin tool's
+    index entry with them.
+    """
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    normalized = dict(schema)
+    normalized.setdefault("type", "object")
+    if not isinstance(normalized.get("properties"), dict):
+        normalized["properties"] = {}
+    if "required" in normalized and not isinstance(normalized["required"], list):
+        normalized.pop("required")
+    return normalized
+
+
 class MCPManager:
     """Owns every configured connection. Lives on the main event loop."""
 
@@ -648,7 +667,7 @@ class MCPManager:
                 name=pname,
                 func=make_tool_fn(self, cfg.name, tool.name),
                 description=build_description(cfg.name, tool),
-                parameters=tool.input_schema or {"type": "object", "properties": {}},
+                parameters=_normalize_input_schema(tool.input_schema),
                 category=f"mcp:{cfg.name}",
                 tags=[cfg.name, "mcp"],
                 # Registered ceiling sits above the bridge's own timeout so
