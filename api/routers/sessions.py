@@ -35,7 +35,7 @@ async def create_session(body: dict = {}):
 
 
 @router.get("/api/sessions")
-async def list_sessions(limit: int = 50, offset: int = 0):
+async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False):
     """One page of sessions, newest first, plus how many there are in total.
 
     `total`/`has_more` are what let the sidebar offer the page behind this one
@@ -47,21 +47,30 @@ async def list_sessions(limit: int = 50, offset: int = 0):
     returned — list_sessions_enriched unions space sessions back in past the
     recency cut, so the response can be longer than `limit` while the page
     itself is still exactly `limit` deep.
+
+    Archived sessions are absent by default: leaving the list is what
+    archiving IS. `archived=1` returns the same shape over that set instead,
+    and `total`/`has_more` then count only it. `archived_count` rides on
+    both answers so the sidebar can offer "Archived (N)" without a second
+    round trip — and, when it is zero, say nothing at all.
     """
     import asyncio as _asyncio
 
     from sessions.policy import annotate_read_only
 
-    rows = await _asyncio.to_thread(db.list_sessions_enriched, limit, offset)
+    rows = await _asyncio.to_thread(db.list_sessions_enriched, limit, offset, archived=archived)
     sessions = [annotate_read_only(s) for s in rows]
     spaces = await _asyncio.to_thread(db.list_spaces)
-    total = await _asyncio.to_thread(db.count_sessions)
+    total = await _asyncio.to_thread(db.count_sessions, archived=archived)
+    archived_count = total if archived else await _asyncio.to_thread(db.count_sessions, archived=True)
     return {
         "items": sessions,
         "count": len(sessions),
         "spaces": spaces,
         "total": total,
         "has_more": (offset + limit) < total,
+        "archived": archived,
+        "archived_count": archived_count,
     }
 
 
@@ -69,7 +78,11 @@ async def list_sessions(limit: int = 50, offset: int = 0):
 async def search_sessions(q: str = "", limit: int = 20):
     """Full-text search across all session messages (FTS5). Groups hits by
     session for the sidebar search box. The index has existed all along —
-    this endpoint finally exposes it to the user."""
+    this endpoint finally exposes it to the user.
+
+    Archived sessions are deliberately still findable here — search is the
+    promise that archiving hides a conversation without losing it — so each
+    hit carries `archived` and the sidebar marks those rows."""
     if len(q.strip()) < 2:
         return {"results": []}
     import asyncio as _asyncio
@@ -85,6 +98,7 @@ async def search_sessions(q: str = "", limit: int = 20):
                 "title": h["session_title"],
                 "session_type": h["session_type"],
                 "space_id": h.get("session_space_id"),
+                "archived": bool(h.get("session_archived")),
                 "updated_at": h["session_updated_at"],
                 "snippet": h["content"],
                 "matches": 1,
@@ -180,6 +194,11 @@ async def get_session(session_id: str, limit: int | None = None, before_id: int 
     `has_more` answers "is there anything behind the page I just got" —
     computed from the oldest row returned, so it stays correct on both the
     first page and every page after it.
+
+    The row carries `archived_at` (NULL when live) alongside `read_only` /
+    `read_only_reason`: this is how the client knows to show Restore rather
+    than just a disabled composer, and it is the only lookup that finds a
+    session the sidebar list no longer contains.
     """
     import asyncio as _asyncio
 
@@ -438,13 +457,27 @@ async def patch_session(session_id: str, body: dict = {}):
     Accepted keys (absent keys are left unchanged):
       * title          — rename; must be a non-empty string.
       * pinned         — bool; pinned sessions sort to the top of the sidebar.
+      * space_id       — move to a space (validated id) or, with null/"",
+                         remove from one.
+      * archived       — bool; true stamps archived_at with now, false
+                         clears it. An archived session leaves the sidebar
+                         and its space group, keeps every message, stays
+                         searchable, and opens read-only with a Restore
+                         control. Delete remains a separate, explicit act.
       * model_override — model id string sets a persistent per-session
                          override; "" or null clears it. Lives on the
                          in-memory session (not persisted across restart),
                          and unlike agent-initiated switch_model it is NOT
                          reverted at turn end.
+
+    Nothing here bumps updated_at (set_session_meta's contract): recency
+    ordering is what the sidebar's buckets and the idle horizon are computed
+    from, so archiving must not reshuffle the list and restoring must put a
+    session back exactly where it was.
     """
     import asyncio as _asyncio
+
+    from sessions.policy import annotate_read_only
 
     if not await _asyncio.to_thread(db.get_session, session_id):
         raise HTTPException(404, detail=f"Session {session_id} not found")
@@ -464,6 +497,31 @@ async def patch_session(session_id: str, body: dict = {}):
         pinned = bool(body["pinned"])
         await _asyncio.to_thread(db.set_session_meta, session_id, pinned=pinned)
         result["pinned"] = pinned
+
+    if "archived" in body:
+        archived = bool(body["archived"])
+        await _asyncio.to_thread(db.set_session_meta, session_id, archived=archived)
+        result["archived"] = archived
+        # Same shape as the title update: the sidebar repaints from its own
+        # optimistic state, and this is what tells the OTHER tab (and the
+        # session that is open in it) that the composer has just changed
+        # sides.
+        row = await _asyncio.to_thread(db.get_session, session_id) or {}
+        verdict = annotate_read_only(dict(row))
+        get_manager().emit(
+            session_id,
+            {
+                "type": "session.archived",
+                "archived": archived,
+                "archived_at": verdict.get("archived_at"),
+                # The client must not re-derive "is this read-only" a third
+                # time: a session can be read-only for reasons archiving does
+                # not own (dream journals, RLM views), and sessions.policy is
+                # the one place that rule lives.
+                "read_only": verdict.get("read_only"),
+                "read_only_reason": verdict.get("read_only_reason"),
+            },
+        )
 
     if "space_id" in body:
         # Move to space (validated id) or remove from space (null/"").
@@ -603,6 +661,42 @@ def _non_negative_int(value, name: str) -> int:
     if n < 0:
         raise HTTPException(400, detail=f"{name} must be a non-negative integer")
     return n
+
+
+@router.post("/api/sessions/archive-idle")
+async def archive_idle(body: dict = {}):
+    """Archive ordinary chats idle for more than `days` — or say what it would.
+
+    Body: ``{days: <session_archive_idle_days>, space_id: null, dry_run:
+    false}``. `space_id` narrows the sweep to one space, which is what the
+    space header's "Archive idle sessions..." asks for; omit it to sweep
+    everything.
+
+    Nothing is deleted and nothing is lost: the sessions leave the sidebar
+    and their space group, keep every message, stay searchable, and come
+    back with one PATCH. Pinned chats are exempt.
+
+    A dry run computes exactly the same set as the real one, so the count in
+    the confirmation dialog is a promise this endpoint keeps. Returns
+    ``{count, ids, sample, days, dry_run}``.
+    """
+    import asyncio as _asyncio
+
+    from config import settings as _settings
+    from core import retention
+
+    body = body or {}
+    raw_days = body.get("days", None)
+    days = _non_negative_int(raw_days if raw_days is not None else _settings.session_archive_idle_days, "days")
+    space_id = body.get("space_id") or None
+    if space_id and not await _asyncio.to_thread(db.get_space, space_id):
+        raise HTTPException(404, detail=f"Space {space_id} not found")
+    return await _asyncio.to_thread(
+        retention.archive_idle_sessions,
+        days,
+        dry_run=bool(body.get("dry_run", False)),
+        space_id=space_id,
+    )
 
 
 @router.post("/api/sessions/purge")

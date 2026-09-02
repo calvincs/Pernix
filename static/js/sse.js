@@ -43,6 +43,9 @@ const EVENT_TYPES = [
     'session.message_combine_skipped',
     'session.queue_dropped', 'session.queue_full',
     'session.queue_removed',
+    // Archive/restore from another tab (or a Storage-tab sweep): the
+    // composer is the half that cannot wait for the next list poll.
+    'session.archived',
     // Goals (budget checkpoints + auto-continuation)
     'goal.budget_exceeded', 'goal.continuation',
     // Injected mid-turn messages
