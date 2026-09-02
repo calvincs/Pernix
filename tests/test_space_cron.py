@@ -67,12 +67,19 @@ def test_ensure_dispatch_session_creates_in_space(monkeypatch):
             created.update(title=title, session_type=session_type, space_id=space_id)
             return "newsid"
 
+        def get(self, sid):
+            # "pinned" still exists; anything else has been deleted.
+            return object() if sid == "pinned" else None
+
     monkeypatch.setattr("sessions.manager.get_manager", lambda: _Mgr())
     out = sched._ensure_dispatch_session(None, title="Cron: j1", space_id="sp1")
     assert out == "newsid"
     assert created == {"title": "Cron: j1", "session_type": "cron", "space_id": "sp1"}
-    # Pinned session ids are reused verbatim, space or not.
+    # A pinned session that still exists is reused verbatim, space or not.
     assert sched._ensure_dispatch_session("pinned", title="x", space_id="sp1") == "pinned"
+    # One the user has since deleted falls back to a fresh run session rather
+    # than raising on every tick forever.
+    assert sched._ensure_dispatch_session("deleted", title="x", space_id="sp1") == "newsid"
 
 
 def test_schedule_job_inherits_caller_space(monkeypatch, tmp_path):

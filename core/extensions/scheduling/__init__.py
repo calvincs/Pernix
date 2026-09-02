@@ -636,10 +636,21 @@ def _ensure_dispatch_session(session_id: str | None, title: str = "", space_id: 
     workspace home and shared kernel. Still titled "Cron: …" — the 7-day
     machine-run sweep applies in spaces too, by decision.
     """
+    from db import models as _db
     from sessions.manager import get_manager
 
     if session_id:
-        return session_id
+        # A pinned session the user has since deleted used to be returned
+        # anyway: manager.prompt then raised on every tick, which meant an
+        # error cron_run row and a high-urgency notification every time the
+        # job fired — 96 a day for a */15 job, forever, with no way to
+        # notice except the noise. Fall back to a fresh run session.
+        if get_manager().get(session_id) is not None or _db.get_session(session_id) is not None:
+            return session_id
+        logger.warning(
+            "Scheduled job's session %s no longer exists — running in a fresh session instead",
+            session_id[:12],
+        )
     return get_manager().create_session(title=title, session_type="cron", space_id=space_id)
 
 
@@ -684,6 +695,9 @@ async def _dispatch_prompt(
     from sessions.manager import get_manager
 
     manager = get_manager()
+    # A session created for this dispatch is throwaway: nothing else will
+    # ever run in it, so its overrides need no clearing.
+    _created_fresh = not session_id
     session_id = _ensure_dispatch_session(session_id, title)
     session = manager.get(session_id)
     if session and model:
@@ -719,13 +733,29 @@ async def _dispatch_prompt(
             except Exception:
                 pass  # _run_agent_safe owns its errors; the wait is best-effort
     finally:
-        # Clear the model override and tool allow-list for reused sessions
+        # Clear the model override and tool allow-list for reused sessions.
+        #
+        # Bound to the TURN, never to the timer above. When the shielded wait
+        # times out (an orchestrating job legitimately running past
+        # cron_dispatch_timeout) the turn is still going: clearing here handed
+        # it the full tool surface mid-run and let its next LLM call fall back
+        # to the default model, which violates the never-auto-switch rule. A
+        # fresh session is thrown away after the run, so it needs no clearing
+        # at all; a reused one gets a done-callback on its own task.
         session = manager.get(session_id)
-        if session:
-            if model:
-                session.model_override = None
-            if allowed_tools:
-                session.tool_allowlist = None
+        if session and (model or allowed_tools) and not _created_fresh:
+
+            def _clear(_task=None, _s=session):
+                if model:
+                    _s.model_override = None
+                if allowed_tools:
+                    _s.tool_allowlist = None
+
+            task = getattr(session, "task", None)
+            if task is not None and not task.done():
+                task.add_done_callback(_clear)
+            else:
+                _clear()
     return session_id
 
 
