@@ -712,9 +712,9 @@ body.fp-resizing #main { pointer-events: none; }
 }
 .fp-skill-pending-badge {
     font-size: var(--text-xxs);
-    color: var(--warning, #e8a020);
-    background: rgba(232, 160, 32, 0.12);
-    border: 1px solid rgba(232, 160, 32, 0.35);
+    color: var(--warning);
+    background: var(--warning-bg);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--warning-bg));
     padding: 1px 6px;
     border-radius: 3px;
     font-weight: 500;
@@ -775,7 +775,7 @@ body.fp-resizing #main { pointer-events: none; }
     font-variant-numeric: tabular-nums;
 }
 .fp-perf-line.fp-perf-warn {
-    color: var(--warning, #e8a020);
+    color: var(--warning);
 }
 .fp-tool-safety {
     appearance: none;
@@ -1201,13 +1201,13 @@ body.fp-resizing #main { pointer-events: none; }
     color: var(--text-dim); margin-right: 4px;
 }
 .adaptive-badge.ok { background: color-mix(in srgb, var(--teal) 18%, var(--bg)); color: var(--teal); }
-.adaptive-badge.warn { background: color-mix(in srgb, var(--warning, #c9a35a) 18%, var(--bg)); color: var(--warning, #c9a35a); }
+.adaptive-badge.warn { background: var(--warning-bg); color: var(--warning); }
 .adaptive-badge.off { opacity: 0.6; }
 .adaptive-card {
     border: 1px solid var(--border); border-radius: var(--radius);
     padding: 8px 10px; margin: 6px 0; font-size: 0.9em;
 }
-.adaptive-card.suspect { border-color: color-mix(in srgb, var(--warning, #c9a35a) 60%, var(--border)); }
+.adaptive-card.suspect { border-color: color-mix(in srgb, var(--warning) 60%, var(--border)); }
 .adaptive-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
 .adaptive-card-actions { margin-top: 6px; display: flex; gap: 6px; }
 .adaptive-btn {
@@ -1232,7 +1232,7 @@ body.fp-resizing #main { pointer-events: none; }
     font-family: var(--mono); overflow-wrap: anywhere;
 }
 .adaptive-entry-content, .adaptive-edit-line { color: var(--text-dim); margin-top: 4px; white-space: pre-wrap; }
-.adaptive-flag-reason { color: var(--warning, #c9a35a); margin-top: 4px; font-size: 0.85em; }
+.adaptive-flag-reason { color: var(--warning); margin-top: 4px; font-size: 0.85em; }
 .adaptive-empty { color: var(--text-dim); font-style: italic; margin: 4px 0; }
 .adaptive-event-row { border-bottom: 1px dashed var(--border); padding: 4px 0; font-size: 0.85em; }
 .adaptive-event-head { cursor: pointer; }

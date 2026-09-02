@@ -52,6 +52,39 @@
     --rlm-subtle: rgba(192, 108, 140, 0.10);
     --canary: #c9a35a;
     --canary-subtle: rgba(201, 163, 90, 0.10);
+    /* The three live literal fallbacks (#e8a020, #c9a35a, #d4a142) were three
+       different ambers for one meaning. 8.51:1 on --bg. */
+    --warning: #e0a03a;
+    --warning-bg: color-mix(in srgb, var(--warning) 16%, var(--bg));
+    --warning-subtle: rgba(224, 160, 58, 0.10);
+
+    /* Session-state palette — one fg/bg pair per state of the v2 state
+       machine, so the status badge, the timeline rows, the Mermaid diagram
+       and the dwell bars all say the same colour for the same state instead
+       of each carrying its own hand-picked hex. Derived from the semantic
+       tokens above via color-mix so a palette change propagates. Every pair
+       clears 5.5:1; timeline.js reads these same custom properties with
+       getComputedStyle rather than duplicating the values. */
+    --state-idle_ready-fg: color-mix(in srgb, var(--success) 75%, var(--text-bright));
+    --state-idle_ready-bg: color-mix(in srgb, var(--success) 16%, var(--bg));
+    --state-scouting-fg: color-mix(in srgb, var(--info) 80%, var(--text-bright));
+    --state-scouting-bg: color-mix(in srgb, var(--info) 16%, var(--bg));
+    --state-processing-fg: color-mix(in srgb, var(--info) 55%, var(--text-bright));
+    --state-processing-bg: color-mix(in srgb, var(--info) 20%, var(--bg));
+    --state-compacting-fg: color-mix(in srgb, var(--warning) 80%, var(--text-bright));
+    --state-compacting-bg: color-mix(in srgb, var(--warning) 18%, var(--bg));
+    --state-pause_requested-fg: color-mix(in srgb, var(--warning) 55%, var(--text-bright));
+    --state-pause_requested-bg: color-mix(in srgb, var(--warning) 18%, var(--bg));
+    --state-paused-fg: color-mix(in srgb, var(--accent) 90%, var(--text-bright));
+    --state-paused-bg: color-mix(in srgb, var(--accent) 14%, var(--bg));
+    --state-cancelling-fg: color-mix(in srgb, var(--error) 62%, var(--text-bright));
+    --state-cancelling-bg: color-mix(in srgb, var(--error) 20%, var(--bg));
+    --state-finalizing-fg: color-mix(in srgb, var(--dream) 58%, var(--text-bright));
+    --state-finalizing-bg: color-mix(in srgb, var(--dream) 20%, var(--bg));
+    --state-awaiting_user-fg: color-mix(in srgb, var(--dream) 85%, var(--text-bright));
+    --state-awaiting_user-bg: color-mix(in srgb, var(--dream) 16%, var(--bg));
+    --state-awaiting_workers-fg: color-mix(in srgb, var(--teal) 75%, var(--text-bright));
+    --state-awaiting_workers-bg: color-mix(in srgb, var(--teal) 16%, var(--bg));
 
     /* Typography */
     --mono: 'DM Mono', 'SF Mono', 'Fira Code', monospace;
