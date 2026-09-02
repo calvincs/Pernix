@@ -84,7 +84,12 @@ window.addEventListener('pernix:offline', () => {
 });
 window.addEventListener('pernix:online', () => {
     if (_sessionId && _onEvent && !_source) {
-        connectSSE(_sessionId, _onEvent);
+        const handler = _onEvent;
+        connectSSE(_sessionId, handler);
+        // connectSSE opens a brand-new source, so its own "first open" is
+        // not a reconnect from EventSource's point of view — but it is one
+        // for us: we were disconnected and may have missed a whole turn.
+        handler({ type: 'sse.reconnected' });
     }
 });
 
@@ -110,12 +115,24 @@ function _attachListeners(source, handler) {
                 _connectionState = 'connected';
                 _updateHealthIndicator('connected');
             }
+            let data;
             try {
-                const data = JSON.parse(e.data);
-                if (typeof data.seq === 'number' && data.seq > _lastSeq) _lastSeq = data.seq;
-                handler({ type, ...data });
+                data = JSON.parse(e.data);
             } catch {
-                handler({ type, raw: e.data });
+                // Unparseable frame: hand the raw text over once and stop.
+                try { handler({ type, raw: e.data }); } catch (err) { console.error('SSE handler failed', type, err); }
+                return;
+            }
+            if (typeof data.seq === 'number' && data.seq > _lastSeq) _lastSeq = data.seq;
+            try {
+                handler({ type, ...data });
+            } catch (err) {
+                // Do NOT re-dispatch as {type, raw}. That carried no seq, so
+                // it bypassed the dedup and ran the same branch a second
+                // time — duplicating whatever the first pass had already
+                // applied before it threw — and the second throw escaped
+                // the listener entirely.
+                console.error('SSE handler failed', type, err);
             }
         });
     });
@@ -132,12 +149,21 @@ export function connectSSE(sessionId, onEvent) {
     _consecutiveErrors = 0;
     _source = new EventSource(`/api/sessions/${sessionId}/events`);
 
+    let _opened = false;
     _source.onopen = () => {
         _connectionState = 'connected';
         _lastEventTime = Date.now();
         _consecutiveErrors = 0;
         _updateHealthIndicator('connected');
         console.debug('SSE connected');
+        // Every reopen after the first is a reconnect, whether EventSource
+        // did it natively or the pernix:online handler rebuilt the source.
+        // Only the stale-watchdog path used to announce one, so a mid-turn
+        // server restart or an offline→online bounce left the app with a
+        // stale event cursor: every post-restart event failed the dedup and
+        // the stop button never cleared.
+        if (_opened) onEvent({ type: 'sse.reconnected' });
+        _opened = true;
     };
 
     _source.onerror = () => {
