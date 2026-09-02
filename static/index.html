@@ -7,8 +7,12 @@
     <link rel="icon" type="image/png" href="/static/img/favicon.png">
     <link rel="apple-touch-icon" href="/static/img/app-icon-192.png">
     <!-- Matches the mobile header (--bg-raised) and manifest.json theme_color;
-         the meta tag is what the browser chrome actually reads. -->
-    <meta name="theme-color" content="#151515">
+         the meta tag is what the browser chrome actually reads. One per
+         scheme, so "follow the system" is right with no script running at
+         all; theme-boot.js rewrites both when the user has picked a theme
+         explicitly. data-scheme is how it knows which is which. -->
+    <meta name="theme-color" content="#151515" media="(prefers-color-scheme: dark)" data-scheme="dark">
+    <meta name="theme-color" content="#f4f0e6" media="(prefers-color-scheme: light)" data-scheme="light">
     <link rel="manifest" href="/static/manifest.json">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -73,6 +77,9 @@
          A separate file rather than inline: the CSP above is `script-src
          'self'` with no 'unsafe-inline'. -->
     <script src="/static/js/touch-boot.js"></script>
+    <!-- Same reasoning, for the same reason it cannot be inline: applies an
+         explicit Dark/Light choice before the first paint. -->
+    <script src="/static/js/theme-boot.js"></script>
 </head>
 <body>
     <!-- First focusable thing on the page. Keyboard users otherwise tab through

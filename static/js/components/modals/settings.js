@@ -3,6 +3,7 @@
 import { el, text, clear, setSanitizedSvg } from '../../render.js';
 import { del, get, post, setAuthToken } from '../../api.js';
 import { getPermission, requestPermission } from '../../notifications.js';
+import { getTheme, setTheme } from '../../theme.js';
 import { runVoiceTest } from '../../voice.js';
 import { announce, openOverlay } from '../../a11y.js';
 import { notify } from '../../feedback.js';
@@ -1841,6 +1842,43 @@ function _buildOriginsEditor(origins) {
     return container;
 }
 
+function buildAppearanceSection() {
+    // Browser-local, not a server setting: it belongs to this device, not to
+    // the agent. Stored in localStorage and applied by theme.js.
+    const select = el('select', {
+        id: 'setting-appearance',
+        'aria-label': 'Appearance',
+    }, [
+        el('option', { value: 'system' }, [text('System')]),
+        el('option', { value: 'dark' }, [text('Dark')]),
+        el('option', { value: 'light' }, [text('Light')]),
+    ]);
+    select.value = getTheme();
+    select.addEventListener('change', () => {
+        setTheme(select.value);
+        announce(`Appearance set to ${select.options[select.selectedIndex].text}`);
+    });
+
+    const row = el('div', { class: 'setting-row', 'data-key': 'appearance' }, [
+        el('div', { class: 'setting-label-cell' }, [
+            el('span', { class: 'setting-label-line' }, [
+                el('label', { for: 'setting-appearance' }, [text('Appearance')]),
+            ]),
+        ]),
+        select,
+    ]);
+
+    return el('div', { class: 'settings-section' }, [
+        el('h3', {}, [
+            text('Appearance'),
+            buildHelpIcon('Dark is the default. System follows the operating system\'s '
+                + 'light/dark setting. This preference lives in this browser only — it is '
+                + 'not synced to the server or to your other devices.'),
+        ]),
+        row,
+    ]);
+}
+
 function buildNotificationsSection() {
     const perm = getPermission();
     const statusText = { granted: 'Enabled', denied: 'Blocked by browser', default: 'Not enabled', unsupported: 'Not supported' }[perm] || perm;
@@ -2218,6 +2256,7 @@ function buildTabs(settings) {
             ...fields,
         ]);
     });
+    generalSections.push(buildAppearanceSection());
     generalSections.push(buildNotificationsSection());
     generalSections.push(buildSessionCleanupSection());
     const generalContent = el('div', { class: 'tab-content active', 'data-tab': 'general' }, generalSections);
