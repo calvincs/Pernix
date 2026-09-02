@@ -336,7 +336,20 @@ function _syncPanelInert() {
     _panel?.toggleAttribute('inert', !_state.open);
 }
 
+// One question in one place. Every path that throws away an in-progress edit
+// — closing the panel, switching tabs, opening another file, Back/Cancel in
+// either editor — asks through this, and a confirmed discard clears the flag
+// so the beforeunload handler stops prompting for changes the user already
+// agreed to lose. (S1)
+function guardDirty() {
+    if (!_state.dirty) return true;
+    if (!confirm('Discard unsaved changes?')) return false;
+    _state.dirty = false;
+    return true;
+}
+
 export function toggleFilePanel() {
+    if (_state.open && !guardDirty()) return;
     _state.open = !_state.open;
     if (_state.open) {
         _panel.classList.add('open');
@@ -365,6 +378,7 @@ export function openFilePanel(opts = {}) {
         renderTabs();
     }
     if (opts.file) {
+        if (!guardDirty()) return;
         viewFile(opts.file, 'workspace');
     }
     loadTabData();
@@ -441,6 +455,7 @@ function renderTabs() {
             'data-tab': t.key,
         }, [text(t.label)]);
         btn.addEventListener('click', () => {
+            if (t.key !== _state.tab && !guardDirty()) return;
             if (_state.tab === 'jobs' && t.key !== 'jobs') clearElapsedTimers();
             _state.tab = t.key;
             _state.viewMode = 'tree';
@@ -936,7 +951,7 @@ function renderEditor(container) {
     // Toolbar
     const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back' }, [text('\u2190')]);
     backBtn.addEventListener('click', () => {
-        if (_state.dirty && !confirm('Discard unsaved changes?')) return;
+        if (!guardDirty()) return;
         disposeActiveEditor();
         _state.viewMode = 'viewer';
         _state.dirty = false;
@@ -948,7 +963,7 @@ function renderEditor(container) {
 
     const cancelBtn = el('button', { class: 'fp-btn' }, [text('cancel')]);
     cancelBtn.addEventListener('click', () => {
-        if (_state.dirty && !confirm('Discard unsaved changes?')) return;
+        if (!guardDirty()) return;
         disposeActiveEditor();
         _state.viewMode = 'viewer';
         _state.dirty = false;
@@ -1708,7 +1723,7 @@ function renderSkillEditor(container) {
     // Toolbar
     const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back' }, [text('\u2190')]);
     backBtn.addEventListener('click', () => {
-        if (_state.dirty && !confirm('Discard unsaved changes?')) return;
+        if (!guardDirty()) return;
         disposeActiveEditor();
         _state.viewMode = 'viewer';
         _state.dirty = false;
@@ -1720,7 +1735,7 @@ function renderSkillEditor(container) {
 
     const cancelBtn = el('button', { class: 'fp-btn' }, [text('cancel')]);
     cancelBtn.addEventListener('click', () => {
-        if (_state.dirty && !confirm('Discard unsaved changes?')) return;
+        if (!guardDirty()) return;
         disposeActiveEditor();
         _state.viewMode = 'viewer';
         _state.dirty = false;
