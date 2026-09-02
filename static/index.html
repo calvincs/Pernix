@@ -153,7 +153,12 @@
                             <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
                         </svg>
                     </button>
-                    <textarea id="msg-input" placeholder="Message Pernix..." rows="1"></textarea>
+                    <!-- The placeholder is not a label: it disappears the moment
+                         you type, and several screen readers never read it at
+                         all. The one control the whole app exists for was
+                         announced as "edit text, blank". -->
+                    <textarea id="msg-input" placeholder="Message Pernix..." rows="1"
+                              aria-label="Message Pernix"></textarea>
                     <!-- Hidden until /api/voice/status says a mode is configured (Settings → Voice Input) -->
                     <button id="voice-btn" type="button" title="Voice input — tap to toggle, hold to talk (Ctrl+Shift+M)" aria-label="Voice input" hidden>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
