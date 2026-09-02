@@ -1023,18 +1023,12 @@ async function send() {
     // All events arrive via the persistent SSE connection.
     // POST /api/chat just accepts the message and returns JSON.
     try {
-        const chatHeaders = { 'Content-Type': 'application/json' };
-        const _tk = getAuthToken();
-        if (_tk) chatHeaders['Authorization'] = `Bearer ${_tk}`;
-        const resp = await fetch('/api/chat', {
-            method: 'POST',
-            headers: chatHeaders,
-            body: JSON.stringify({ session_id: state.sid, message: finalMessage }),
-        });
-        if (!resp.ok) {
-            const err = await resp.json().catch(() => ({}));
-            throw new Error(err.detail || resp.statusText);
-        }
+        // Through the shared client, not a bare fetch: api() is what routes
+        // a 401 to the login screen and what trips the offline detector on a
+        // network failure. A hand-rolled fetch here surfaced an expired
+        // session as an inline "failed to send" that no amount of retrying
+        // could fix.
+        await post('/api/chat', { session_id: state.sid, message: finalMessage });
     } catch (e) {
         appendMessage('system', `Error: ${e.message}`);
         // The optimistic bubble was never persisted — mark it so it doesn't
@@ -2587,6 +2581,14 @@ async function _cancelSession() {
         if (_tc) cancelHeaders['Authorization'] = `Bearer ${_tc}`;
         const resp = await fetch(`/api/sessions/${state.sid}/cancel`, { method: 'POST', headers: cancelHeaders });
         if (!resp.ok) {
+            // This path keeps its own fetch because it branches on the
+            // status (404 = nothing running), which api() flattens into an
+            // Error. It still has to hand a 401 to the login flow, or an
+            // expired session reads as "cancel failed" forever.
+            if (resp.status === 401) {
+                window.dispatchEvent(new CustomEvent('pernix:auth-required'));
+                return;
+            }
             // 404 = session not in memory (nothing running) — silently fall
             // through to a state sync. Other failures get surfaced; either
             // way, don't leave the button stuck in stop-mode for up to 45s
