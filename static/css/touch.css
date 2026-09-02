@@ -76,9 +76,39 @@
 /* Per-message actions (copy/retry/edit) and timestamps. */
 .message .msg-actions {
     opacity: 1;
+    /* C1: 36px targets need room between them, and the row is anchored to
+       the top of the message rather than 2px above it — see the meta-row
+       rule below for why. */
+    top: 0;
+    gap: var(--sp-1);
 }
 .message .msg-time {
     opacity: 0.55;
+}
+/* C1 — the action buttons are the desktop's 24x24 hover chrome, which a
+   thumb cannot hit. 36x36 with the SAME 12px glyph: only the box grows.
+   The desktop's filled --bg-surface plate was legible chrome at 24px; at
+   36px a pair of them next to every message is the loudest thing on the
+   screen, so the fill goes and a --border-subtle outline is all that is
+   left to say "this is a button". */
+.message .msg-action-btn {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 0;
+    background: none;
+    border-color: var(--border-subtle);
+    color: var(--text-faint);
+}
+/* The action row is absolutely positioned over the meta line (role + time),
+   which is ~21px tall. At 36px the buttons would hang 15px into the first
+   line of the message — over the user bubble's top border, over the
+   assistant's first line of prose. The meta line grows to hold them
+   instead, and its own text centres in the taller row. */
+.message .role-label {
+    display: flex;
+    align-items: center;
+    min-height: 36px;
+    margin-bottom: 0;
 }
 
 /* The model/latency chip is a per-answer footnote. On a narrow screen a
