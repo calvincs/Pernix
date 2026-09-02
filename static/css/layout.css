@@ -2500,6 +2500,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    /* A pending-attachment chip carries a file NAME, and the thing that
+       identifies it is the end of that name — "screenshot-2026-09-01…" told
+       the user nothing about which of five screenshots it was, and a long
+       extension (.component.test.tsx) vanished entirely. Head-truncate
+       instead, the same way file-panel.css does for paths (V10). */
+    direction: rtl;
+    text-align: left;
+    unicode-bidi: plaintext;
 }
 .file-chip-size {
     color: var(--text-faint);
