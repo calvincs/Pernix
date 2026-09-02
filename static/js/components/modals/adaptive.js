@@ -143,7 +143,7 @@ export async function renderAdaptiveTab(container) {
             // Release valve: a soft delete frees the per-kind cap that
             // producers can only ever fill. Journaled, so it rolls back.
             const rm = await actionBtn('Delete', async () => {
-                if (!confirm(`Delete adaptive entry "${e.title}"? It is journaled and can be rolled back.`)) return;
+                if (!confirm(`Delete the adaptive entry "${e.title}" \u2014 it is journaled, so this can be rolled back.`)) return;
                 await del(`/api/adaptive/entries/${encodeURIComponent(e.id)}`);
             }, refresh);
             // Usage badge: the per-entry usefulness signal. Zero-use is the
@@ -182,7 +182,7 @@ export async function renderAdaptiveTab(container) {
         const btns = el('div', { class: 'adaptive-card-actions' });
         if (b.status === 'applied' || b.status === 'suspect') {
             btns.appendChild(await actionBtn('Roll back', async () => {
-                if (!confirm(`Roll back batch ${b.batch_id}? Entries restore to their pre-batch snapshots.`)) return;
+                if (!confirm(`Roll back batch ${b.batch_id} \u2014 its entries restore to their pre-batch snapshots, and this is itself journaled.`)) return;
                 await post('/api/adaptive/rollback', { batch_id: b.batch_id });
             }, refresh));
         }

@@ -1196,7 +1196,7 @@ async function saveFile(container, { force = false } = {}) {
 
 async function deleteEntry(path, type = 'file') {
     const label = type === 'dir' ? `folder "${path}" and all its contents` : path;
-    if (!confirm(`Delete ${label}?`)) return;
+    if (!confirm(`Delete ${label} \u2014 this cannot be undone.`)) return;
     try {
         await del(`/workspace/${path.split('/').map(encodeURIComponent).join('/')}`);
         if (_state.currentFile?.path === path ||
@@ -2039,7 +2039,7 @@ async function toggleSkill(name, enabled) {
 }
 
 async function deleteSkill(name) {
-    if (!confirm(`Delete skill "${name}"? This cannot be undone.`)) return;
+    if (!confirm(`Delete the skill "${name}" and all of its files \u2014 this cannot be undone.`)) return;
     try {
         await del(`/api/skills/${encodeURIComponent(name)}`);
         if (_state.currentFile?.path === name) {
@@ -2659,7 +2659,7 @@ function _buildMcpServerItem(s) {
     const delBtn = el('button', { class: 'fp-icon-btn', title: 'Remove server' }, [text('×')]);
     delBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (!confirm(`Remove MCP server '${s.name}' and unregister its tools?`)) return;
+        if (!confirm(`Remove the MCP server "${s.name}" and unregister its tools \u2014 this cannot be undone.`)) return;
         try { await del(`/api/mcp/servers/${encodeURIComponent(s.name)}`); }
         catch (err) { notify('error', `Could not remove ${s.name}: ${err.message || err}`); }
         await loadMcp();

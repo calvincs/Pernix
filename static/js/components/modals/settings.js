@@ -1,7 +1,7 @@
 // Pernix — Settings modal with tabs
 
 import { el, text, clear, setSanitizedSvg } from '../../render.js';
-import { get, post, setAuthToken } from '../../api.js';
+import { del, get, post, setAuthToken } from '../../api.js';
 import { getPermission, requestPermission } from '../../notifications.js';
 import { runVoiceTest } from '../../voice.js';
 import { announce, openOverlay } from '../../a11y.js';
@@ -1951,8 +1951,8 @@ function buildSessionCleanupSection() {
                 return;
             }
             if (!confirm(
-                `Permanently delete ${toDelete} session(s) and all of their messages?\n\n`
-                + `This cascades to any worker sessions and cannot be undone.`
+                `Permanently delete ${toDelete} session(s) and all of their messages `
+                + '— this cannot be undone. It cascades to any worker sessions.'
             )) {
                 statusEl.textContent = 'Cancelled.';
                 statusEl.style.color = 'var(--text-dim)';
@@ -2052,12 +2052,31 @@ async function buildSecurityTab(settings) {
         let data = {};
         try { data = await get('/api/settings/tool-approvals'); } catch { /* ignore */ }
         const tools = Object.keys(data);
-        const clearBtn = el('button', { class: 'btn btn-secondary', style: 'font-size:var(--text-xs); padding:2px 8px;' }, [text('Clear all')]);
+        const clearBtn = el('button', {
+            class: 'btn btn-secondary',
+            style: 'font-size:var(--text-xs); padding:2px 8px;',
+        }, [text('Clear all')]);
+        clearBtn.disabled = tools.length === 0;
         clearBtn.addEventListener('click', async () => {
+            // Unprompted, one click wiped every scope the user had ever
+            // approved and said nothing either way — including when the
+            // request failed, because the bare fetch() carried no auth header
+            // and its rejection was swallowed. (S10)
+            const scopeCount = tools.reduce((n, t) => n + (data[t] || []).length, 0);
+            if (!confirm(
+                `Clear every remembered approval (${scopeCount} scope${scopeCount === 1 ? '' : 's'} `
+                + `across ${tools.length} tool${tools.length === 1 ? '' : 's'}) — this cannot be undone. `
+                + 'The agent will ask again the next time it needs each of them.'
+            )) return;
+            clearBtn.disabled = true;
             try {
-                await fetch('/api/settings/tool-approvals', { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
-                renderScopes();
-            } catch { /* ignore */ }
+                await del('/api/settings/tool-approvals');
+                notify('success', 'Remembered approvals cleared');
+                await renderScopes();
+            } catch (e) {
+                clearBtn.disabled = false;
+                notify('error', `Could not clear the remembered approvals: ${e.message || e}`);
+            }
         });
         scopesContainer.appendChild(el('div', { class: 'settings-section' }, [
             el('h3', {}, [

@@ -308,7 +308,7 @@ function _buildJobRow(job, models, spaces = []) {
                 el('button', {
                     class: 'jobs-btn danger',
                     onClick: async () => {
-                        if (confirm(`Remove job "${job.name}"?`)) {
+                        if (confirm(`Delete the scheduled job "${job.name}" \u2014 this cannot be undone. Its run history is kept.`)) {
                             await del(`/api/jobs/${encodeURIComponent(job.name)}`);
                             _refreshPanel();
                         }
@@ -633,7 +633,7 @@ export async function buildHistoryTab() {
                     return;
                 }
                 const target = filter || 'all';
-                if (!confirm(`Clear ${target} run history?`)) return;
+                if (!confirm(`Delete the ${target} run history \u2014 this cannot be undone.`)) return;
                 try {
                     const qs = filter ? `?job_name=${encodeURIComponent(filter)}` : '';
                     await del(`/api/jobs/runs${qs}`);
