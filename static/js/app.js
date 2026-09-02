@@ -31,8 +31,15 @@ let _scoutContainer = null;
 // Message container helpers (inner for content, outer for scroll)
 // ---------------------------------------------------------------------------
 
+// While an earlier page is being built it is rendered into a detached
+// fragment, so the visible transcript is never cleared and never re-rendered.
+// Every append/render helper in this file reaches its container through
+// _messagesInner(), so pointing that at the fragment is the whole trick. Set
+// and cleared synchronously inside _replayMessages — nothing can interleave.
+let _renderTarget = null;
+
 function _messagesInner() {
-    return document.getElementById('messages-inner');
+    return _renderTarget || document.getElementById('messages-inner');
 }
 
 function _messagesScroll() {
@@ -534,7 +541,7 @@ async function selectSession(sid) {
     // moves and _restoreDraft overwrites the textarea.
     _flushDraft();
     state.sid = sid;
-    _historyLimit = HISTORY_PAGE;  // fresh window per session
+    _expandedKeys = new Set();     // open tool rows are remembered per session
     _recentlyFinished.delete(sid);  // visiting clears the "done" attention tick
     _restoreDraft();
     // The previous session's context reading is wrong the moment you switch,
@@ -620,8 +627,50 @@ async function selectSession(sid) {
 
 }
 
-const HISTORY_PAGE = 200;   // messages rendered initially; grows on demand
-let _historyLimit = HISTORY_PAGE;
+const HISTORY_PAGE = 200;   // messages fetched and rendered per page
+
+// The transcript pages BACKWARDS: the newest page first, then older pages
+// prepended above it. `_oldestMsgId` is the cursor handed to the next fetch,
+// `_historyHasMore` whether anything is left behind it. Growing a limit and
+// re-fetching (what "load earlier" used to do) threw away and rebuilt every
+// message already on screen — the reader's scroll position, their open tool
+// rows and several thousand nodes, to show two hundred new ones.
+let _oldestMsgId = null;
+let _historyHasMore = false;
+let _historyTotal = 0;
+let _historyLoaded = 0;
+
+// Tool rows and tool groups the reader has opened. Keyed by something that
+// survives a re-render: the tool_call_id where there is one (a live row has
+// one before it has a database id, and the persisted row carries the same
+// value), else the message id. Re-armed per session in selectSession.
+let _expandedKeys = new Set();
+
+/** Stable identity for one tool row across live render, replay and reload. */
+function _toolItemKey(callId, msgId) {
+    if (callId) return `tc:${callId}`;
+    if (msgId != null && msgId !== '') return `msg:${msgId}`;
+    return '';
+}
+
+/** Record one disclosure's state so the next render can put it back. A bare
+ *  key means "open"; the same key behind '!' means "the reader closed this".
+ *  Both are needed: absence has to keep meaning "no opinion, use the default",
+ *  or a hand-collapsed group springs open on every reload. */
+function _rememberExpanded(key, expanded) {
+    if (!key) return;
+    _expandedKeys.delete(key);
+    _expandedKeys.delete(`!${key}`);
+    _expandedKeys.add(expanded ? key : `!${key}`);
+}
+
+/** true / false / null, where null is "never touched — use the default". */
+function _recallExpanded(key) {
+    if (!key) return null;
+    if (_expandedKeys.has(key)) return true;
+    if (_expandedKeys.has(`!${key}`)) return false;
+    return null;
+}
 
 /** A persisted row's `metadata` column — a JSON string, or already an object
  *  on paths that hand it over parsed. Never throws; a malformed value is the
@@ -645,16 +694,251 @@ function _parseToolArgs(tc) {
     } catch { return null; }
 }
 
+/** tool_call_id → {name, args} for one page of rows. The ARGUMENTS matter as
+ *  much as the name: appendToolToGroup builds its one-line summary ("$ ls -la",
+ *  the file path) from them, so a replayed transcript without them fell back to
+ *  the raw output tail and read nothing like the live view of the same turn. */
+function _toolCallIndex(messages) {
+    const map = {};
+    for (const m of messages) {
+        if (m.role !== 'assistant' || !m.tool_calls) continue;
+        try {
+            const tcs = typeof m.tool_calls === 'string' ? JSON.parse(m.tool_calls) : m.tool_calls;
+            for (const tc of (Array.isArray(tcs) ? tcs : [])) {
+                const id = tc.id || '';
+                // Handle both formats: {name: "..."} and {function: {name: "..."}}
+                const name = tc.name || (tc.function || {}).name || '';
+                if (id && name) map[id] = { name, args: _parseToolArgs(tc) };
+            }
+        } catch { /* skip malformed tool_calls */ }
+    }
+    return map;
+}
+
+/**
+ * Render one page of persisted rows.
+ *
+ * With `container`, the page is built into that detached node instead of the
+ * live transcript, and every piece of cross-message render state (the open
+ * tool group, the gap-divider clock) is saved and put back afterwards. That
+ * is what lets an earlier page be assembled without touching — or even
+ * reading — the messages already on screen.
+ */
+function _replayMessages(messages, { container = null } = {}) {
+    const prevTarget = _renderTarget;
+    const prevGroup = _toolGroup;
+    const prevCount = _toolGroupCount;
+    const prevErrors = _toolGroupErrors;
+    const prevLatency = _toolGroupLatency;
+    const prevRunning = _toolGroupRunning;
+    const prevTs = _lastMsgTs;
+    if (container) {
+        _renderTarget = container;
+        _toolGroup = null;
+        _toolGroupCount = 0;
+        _toolGroupErrors = 0;
+        _toolGroupLatency = 0;
+        _toolGroupRunning = 0;
+        _lastMsgTs = 0;
+    }
+    const toolNameMap = _toolCallIndex(messages);
+    _replayingTranscript = true;
+    try {
+        for (const m of messages) {
+            if (m.role === 'compaction') continue;
+            if (m.role === 'scout') {
+                // Render persisted scout report
+                closeToolGroup();
+                try {
+                    const scoutData = JSON.parse(m.content);
+                    renderScoutReport(scoutData);
+                } catch { /* skip malformed scout data */ }
+                continue;
+            }
+            if (m.role === 'reflect') {
+                closeToolGroup();
+                try {
+                    const reflectData = JSON.parse(m.content);
+                    renderReflectCard(reflectData);
+                } catch { /* skip malformed reflect data */ }
+                continue;
+            }
+            if (m.role === 'model_divider') {
+                // Persisted mid-turn model switch — replay the pill divider.
+                closeToolGroup();
+                try {
+                    const info = m.metadata ? JSON.parse(m.metadata) : {};
+                    renderModelDivider(info);
+                } catch { /* skip malformed divider metadata */ }
+                continue;
+            }
+            if (m.role === 'eval') {
+                closeToolGroup();
+                try {
+                    const evalData = JSON.parse(m.content);
+                    // Two different producers share role='eval': the feature
+                    // judge ({results, all_passed}) and the deterministic gate
+                    // runner ({kind:'gate', attempt, gates}). Dispatch on the
+                    // row's own kind — handing a gate row to renderEvalCard
+                    // rendered it as a red "fail — eval — 0/0 passed", because
+                    // it finds no `results` array and no `all_passed`. Every
+                    // gate row on the reference deployment was a PASS shown as
+                    // a failure.
+                    if (evalData && evalData.kind === 'gate') {
+                        renderGateCard(evalData);
+                    } else {
+                        renderEvalCard(evalData);
+                    }
+                } catch { /* skip malformed eval data */ }
+                continue;
+            }
+            // A tool-round assistant row carries the tool_calls and no text.
+            // Rendering it appended a bare "ASSISTANT" bubble with nothing in
+            // it AND closed the open tool group, so one round of five tools
+            // replayed as five one-item groups with an empty bubble between
+            // each. The live path folds these away; this is that fold.
+            if (m.role === 'assistant' && !(m.content || '').trim()) continue;
+            if (m.role === 'tool') {
+                const content = m.content || '';
+                const preview = content.slice(0, 300);
+                const info = toolNameMap[m.tool_call_id] || null;
+                const toolName = (info && info.name) || m.tool_call_id || '';
+                const meta = _parseRowMetadata(m.metadata);
+                const latency = meta.latency_ms ?? m.latency_ms ?? 0;
+                appendToolToGroup(
+                    toolName, preview, content, content.length > 300,
+                    !!meta.was_error, Number(latency) || 0, info ? info.args : null,
+                    false, null, _toolItemKey(m.tool_call_id, m.id),
+                );
+            } else if (m.role === 'user' && (m.content || '').startsWith('[User answered your question]')) {
+                closeToolGroup();
+                renderAnsweredQuestion(m.content);
+            } else if (m.role === 'user' && (m.content || '').startsWith('[User dismissed your question')) {
+                closeToolGroup();
+                renderDismissedQuestion(m.content);
+            } else if (m.role === 'notice') {
+                // Persisted notices (cancellations, reflect-skipped, queue-dropped, etc.)
+                // render with system-message styling so they're visible but unobtrusive,
+                // matching how the live SSE handlers display the same events.
+                closeToolGroup();
+                appendMessage('system', m.content || '', { createdAt: m.created_at });
+            } else {
+                closeToolGroup();
+                appendMessage(m.role, m.content, { createdAt: m.created_at, messageId: m.id });
+            }
+        }
+        closeToolGroup();
+    } finally {
+        _replayingTranscript = false;
+        if (container) {
+            _renderTarget = prevTarget;
+            _toolGroup = prevGroup;
+            _toolGroupCount = prevCount;
+            _toolGroupErrors = prevErrors;
+            _toolGroupLatency = prevLatency;
+            _toolGroupRunning = prevRunning;
+            _lastMsgTs = prevTs;
+        }
+    }
+}
+
+/** The "load earlier" control lives at the very top of the transcript and is
+ *  updated in place — it is the one node a prepend must not push down. */
+function _renderLoadEarlier(sid) {
+    const inner = document.getElementById('messages-inner');
+    if (!inner) return null;
+    let btn = inner.querySelector('.load-earlier-btn');
+    if (!_historyHasMore) {
+        if (btn) btn.remove();
+        return null;
+    }
+    const remaining = Math.max(0, _historyTotal - _historyLoaded);
+    const label = remaining
+        ? `Load earlier messages (${remaining} more)`
+        : 'Load earlier messages';
+    if (!btn) {
+        // The stylesheet only carries this control's placement — its skin is
+        // the shared secondary button, which it was never actually given.
+        btn = el('button', { class: 'btn btn--secondary load-earlier-btn', type: 'button' }, [text(label)]);
+        btn.addEventListener('click', () => _loadEarlier(sid, btn));
+        inner.insertBefore(btn, inner.firstChild);
+    } else {
+        btn.disabled = false;
+        btn.textContent = label;
+    }
+    return btn;
+}
+
+/**
+ * Fetch the page BEHIND what is on screen and prepend it.
+ *
+ * Nothing already rendered is touched: the fetch asks only for rows older
+ * than the current cursor, the page is built detached, and the reader's place
+ * is held by measuring one node that was already visible and putting it back
+ * where it was.
+ */
+async function _loadEarlier(sid, btn) {
+    if (!_historyHasMore || _oldestMsgId == null) return;
+    const inner = document.getElementById('messages-inner');
+    const scroll = _messagesScroll();
+    if (!inner || !btn) return;
+    btn.disabled = true;
+    btn.textContent = 'Loading…';
+    let data;
+    try {
+        data = await get(`/api/sessions/${sid}?limit=${HISTORY_PAGE}&before_id=${_oldestMsgId}`);
+    } catch (e) {
+        // A dead fetch must leave the button usable — this is the only way
+        // back to the rest of the conversation.
+        btn.disabled = false;
+        btn.textContent = `Couldn't load earlier messages (${humanizeError(e)}) — retry`;
+        return;
+    }
+    // The reader switched sessions while the page was in flight; that
+    // transcript is gone and this page belongs to nothing.
+    if (sid !== state.sid || !btn.isConnected) return;
+    const messages = data.messages || [];
+    if (!messages.length) {
+        _historyHasMore = false;
+        btn.remove();
+        return;
+    }
+    // Distance-from-top of the first node that was already on screen. After
+    // the prepend it has to sit exactly where it sat before.
+    const anchor = btn.nextElementSibling;
+    const beforeTop = anchor ? anchor.getBoundingClientRect().top : 0;
+
+    const frag = document.createDocumentFragment();
+    _replayMessages(messages, { container: frag });
+    inner.insertBefore(frag, btn.nextSibling);
+
+    _oldestMsgId = messages[0].id ?? _oldestMsgId;
+    _historyLoaded += messages.length;
+    if (typeof data.total_messages === 'number') _historyTotal = data.total_messages;
+    _historyHasMore = !!data.has_more;
+    _renderLoadEarlier(sid);
+
+    if (anchor && scroll) {
+        scroll.scrollTop += anchor.getBoundingClientRect().top - beforeTop;
+    }
+    _updateScrollPin();
+    announce(`${messages.length} earlier messages loaded`);
+}
+
 async function loadMessages(sid, { keepScroll = false } = {}) {
     const mySeq = _selectSeq;
     const inner = _messagesInner();
     const scroll = _messagesScroll();
-    // Anchor to distance-from-bottom so "load earlier" re-renders keep the
-    // reader's place instead of dumping them at the end of the transcript.
+    // Anchor to distance-from-bottom so a soft reload keeps the reader's
+    // place instead of dumping them at the end of the transcript.
     const prevBottomDist = keepScroll ? (scroll.scrollHeight - scroll.scrollTop) : null;
     clear(inner);
     _questionBubbles.clear();
     _lastMsgTs = 0;  // gap dividers restart per render
+    _oldestMsgId = null;
+    _historyHasMore = false;
+    _historyTotal = 0;
+    _historyLoaded = 0;
     // An empty pane between clicking a session and its transcript arriving
     // reads as "this session has nothing in it" — on a slow link that lie can
     // last a second or more.
@@ -664,7 +948,7 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
     ]);
     inner.appendChild(loadingRow);
     try {
-        const data = await get(`/api/sessions/${sid}?limit=${_historyLimit}`);
+        const data = await get(`/api/sessions/${sid}?limit=${HISTORY_PAGE}`);
         loadingRow.remove();
         // A newer selectSession already cleared and re-rendered this
         // container; appending now would interleave two transcripts.
@@ -674,124 +958,12 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
             showEmptyState();
             return;
         }
-        if (data.has_more) {
-            const remaining = (data.total_messages || 0) - messages.length;
-            const loadBtn = el('button', { class: 'load-earlier-btn', onClick: async () => {
-                loadBtn.disabled = true;
-                loadBtn.textContent = 'Loading…';
-                _historyLimit += HISTORY_PAGE;
-                await loadMessages(sid, { keepScroll: true });
-            }}, [text(`Load earlier messages (${remaining} more)`)]);
-            inner.appendChild(loadBtn);
-        }
-        // Build tool_call_id → {name, args} map from assistant messages.
-        // The ARGUMENTS matter as much as the name: appendToolToGroup builds
-        // its one-line summary ("$ ls -la", the file path) from them, so a
-        // replayed transcript without them fell back to the raw output tail
-        // and read nothing like the live view of the same turn.
-        const toolNameMap = {};
-        for (const m of messages) {
-            if (m.role === 'assistant' && m.tool_calls) {
-                try {
-                    const tcs = typeof m.tool_calls === 'string' ? JSON.parse(m.tool_calls) : m.tool_calls;
-                    for (const tc of (Array.isArray(tcs) ? tcs : [])) {
-                        const id = tc.id || '';
-                        // Handle both formats: {name: "..."} and {function: {name: "..."}}
-                        const name = tc.name || (tc.function || {}).name || '';
-                        if (id && name) toolNameMap[id] = { name, args: _parseToolArgs(tc) };
-                    }
-                } catch { /* skip malformed tool_calls */ }
-            }
-        }
-
-        _replayingTranscript = true;
-        try {
-            for (const m of messages) {
-                if (m.role === 'compaction') continue;
-                if (m.role === 'scout') {
-                    // Render persisted scout report
-                    closeToolGroup();
-                    try {
-                        const scoutData = JSON.parse(m.content);
-                        renderScoutReport(scoutData);
-                    } catch { /* skip malformed scout data */ }
-                    continue;
-                }
-                if (m.role === 'reflect') {
-                    closeToolGroup();
-                    try {
-                        const reflectData = JSON.parse(m.content);
-                        renderReflectCard(reflectData);
-                    } catch { /* skip malformed reflect data */ }
-                    continue;
-                }
-                if (m.role === 'model_divider') {
-                    // Persisted mid-turn model switch — replay the pill divider.
-                    closeToolGroup();
-                    try {
-                        const info = m.metadata ? JSON.parse(m.metadata) : {};
-                        renderModelDivider(info);
-                    } catch { /* skip malformed divider metadata */ }
-                    continue;
-                }
-                if (m.role === 'eval') {
-                    closeToolGroup();
-                    try {
-                        const evalData = JSON.parse(m.content);
-                        // Two different producers share role='eval': the feature
-                        // judge ({results, all_passed}) and the deterministic gate
-                        // runner ({kind:'gate', attempt, gates}). Dispatch on the
-                        // row's own kind — handing a gate row to renderEvalCard
-                        // rendered it as a red "fail — eval — 0/0 passed", because
-                        // it finds no `results` array and no `all_passed`. Every
-                        // gate row on the reference deployment was a PASS shown as
-                        // a failure.
-                        if (evalData && evalData.kind === 'gate') {
-                            renderGateCard(evalData);
-                        } else {
-                            renderEvalCard(evalData);
-                        }
-                    } catch { /* skip malformed eval data */ }
-                    continue;
-                }
-                // A tool-round assistant row carries the tool_calls and no text.
-                // Rendering it appended a bare "ASSISTANT" bubble with nothing in
-                // it AND closed the open tool group, so one round of five tools
-                // replayed as five one-item groups with an empty bubble between
-                // each. The live path folds these away; this is that fold.
-                if (m.role === 'assistant' && !(m.content || '').trim()) continue;
-                if (m.role === 'tool') {
-                    const content = m.content || '';
-                    const preview = content.slice(0, 300);
-                    const info = toolNameMap[m.tool_call_id] || null;
-                    const toolName = (info && info.name) || m.tool_call_id || '';
-                    const meta = _parseRowMetadata(m.metadata);
-                    const latency = meta.latency_ms ?? m.latency_ms ?? 0;
-                    appendToolToGroup(
-                        toolName, preview, content, content.length > 300,
-                        !!meta.was_error, Number(latency) || 0, info ? info.args : null,
-                    );
-                } else if (m.role === 'user' && (m.content || '').startsWith('[User answered your question]')) {
-                    closeToolGroup();
-                    renderAnsweredQuestion(m.content);
-                } else if (m.role === 'user' && (m.content || '').startsWith('[User dismissed your question')) {
-                    closeToolGroup();
-                    renderDismissedQuestion(m.content);
-                } else if (m.role === 'notice') {
-                    // Persisted notices (cancellations, reflect-skipped, queue-dropped, etc.)
-                    // render with system-message styling so they're visible but unobtrusive,
-                    // matching how the live SSE handlers display the same events.
-                    closeToolGroup();
-                    appendMessage('system', m.content || '', { createdAt: m.created_at });
-                } else {
-                    closeToolGroup();
-                    appendMessage(m.role, m.content, { createdAt: m.created_at, messageId: m.id });
-                }
-            }
-        } finally {
-            _replayingTranscript = false;
-        }
-        closeToolGroup();
+        _oldestMsgId = messages[0].id ?? null;
+        _historyTotal = data.total_messages || messages.length;
+        _historyLoaded = messages.length;
+        _historyHasMore = !!data.has_more && _oldestMsgId != null;
+        _renderLoadEarlier(sid);
+        _replayMessages(messages);
         _markPendingQueued(sid);
         if (prevBottomDist !== null) {
             scroll.scrollTop = scroll.scrollHeight - prevBottomDist;
@@ -2338,7 +2510,13 @@ function handleEvent(event) {
         const full = event.full_result || event.result || '';
         const isTruncated = event.truncated || full.length > 300;
         const runningEl = _takeRunningTool(event.name, event.call_id || event.tool_call_id);
-        appendToolToGroup(event.name, preview, full, isTruncated, event.was_error, event.latency_ms, event.arguments, !!event.truncated, runningEl);
+        appendToolToGroup(
+            event.name, preview, full, isTruncated, event.was_error, event.latency_ms,
+            event.arguments, !!event.truncated, runningEl,
+            // Same key the persisted row will replay under, so a row opened
+            // live is still open after the next reload.
+            _toolItemKey(event.call_id || event.tool_call_id, null),
+        );
         if (isTimelineOpen()) {
             appendTimelineToolRow({
                 name: event.name,
@@ -3672,7 +3850,9 @@ function ensureToolGroup() {
         const group = header.closest('.tool-group');
         if (!group) return true;
         group.classList.toggle('collapsed');
-        return !group.classList.contains('collapsed');
+        const expanded = !group.classList.contains('collapsed');
+        _rememberExpanded(group.dataset.groupKey || '', expanded);
+        return expanded;
     });
     _toolGroup = el('div', { class: 'tool-group' }, [
         header,
@@ -3686,11 +3866,19 @@ function ensureToolGroup() {
 function closeToolGroup() {
     if (!_toolGroup) return;
     // A round that contains a failure is never folded away: auto-collapsing
-    // it is exactly how a red row goes unread.
-    if (_toolGroupCount > 2 && _toolGroupErrors === 0) {
+    // it is exactly how a red row goes unread. Neither is a round the reader
+    // opened by hand — a soft reload used to shut every one of them, and the
+    // reader had no way of knowing which had been open a second earlier.
+    const groupKey = _toolGroup.dataset.groupKey || '';
+    const remembered = _recallExpanded(groupKey);
+    const collapse = remembered === null
+        ? (_toolGroupCount > 2 && _toolGroupErrors === 0)
+        : remembered === false;
+    if (collapse) {
         _toolGroup.classList.add('collapsed');
         _syncDisclosure(_toolGroup.querySelector('.tool-group-header'), false);
     }
+    _rememberExpanded(groupKey, !collapse);
     _clearRunningTools();
     _toolGroup = null;
     _toolGroupCount = 0;
@@ -3698,9 +3886,14 @@ function closeToolGroup() {
     _toolGroupLatency = 0;
 }
 
-function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = false, latencyMs = 0, args = null, serverTruncated = false, replaceEl = null) {
+function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = false, latencyMs = 0, args = null, serverTruncated = false, replaceEl = null, itemKey = '') {
     const group = ensureToolGroup();
     const items = group.querySelector('.tool-group-items');
+    // A group has no identity of its own, so it derives one from its first
+    // row — the one row that cannot move out from under it on a re-render.
+    // The 'grp:' prefix keeps it out of the row's own namespace: without it,
+    // opening the group also marked its first row open.
+    if (itemKey && !group.dataset.groupKey) group.dataset.groupKey = `grp:${itemKey}`;
     _toolGroupCount++;
     if (wasError) _toolGroupErrors++;
     _toolGroupLatency += Number(latencyMs) || 0;
@@ -3810,26 +4003,33 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
 
     // --- Assemble item ---
     const isBrowse = name === 'browse_web' && !wasError;
+    // A row the reader opened stays open across a re-render or a soft reload.
+    const startExpanded = _recallExpanded(itemKey) === true;
     const itemEl = el('div', {
-        class: `tool-item${wasError ? ' error' : ''}${isBrowse ? ' browse' : ''}`
+        class: `tool-item${wasError ? ' error' : ''}${isBrowse ? ' browse' : ''}${startExpanded ? ' expanded' : ''}`
     }, [headRowEl, bodyEl]);
+
+    const revealToggle = () => {
+        if (toggleRevealed) return;
+        requestAnimationFrame(() => {
+            if (isTruncated || contentEl.scrollHeight > contentEl.clientHeight + 2) {
+                contentEl.classList.add('overflows');
+                toggleBtn.classList.remove('tool-toggle--hidden');
+                toggleRevealed = true;
+            }
+        });
+    };
 
     // Header toggles item expansion; the show-more button appears after the
     // first open if the content actually overflows.
-    _makeDisclosure(headerEl, false, () => {
+    _makeDisclosure(headerEl, startExpanded, () => {
         itemEl.classList.toggle('expanded');
         const nowExpanded = itemEl.classList.contains('expanded');
-        if (nowExpanded && !toggleRevealed) {
-            requestAnimationFrame(() => {
-                if (isTruncated || contentEl.scrollHeight > contentEl.clientHeight + 2) {
-                    contentEl.classList.add('overflows');
-                    toggleBtn.classList.remove('tool-toggle--hidden');
-                    toggleRevealed = true;
-                }
-            });
-        }
+        _rememberExpanded(itemKey, nowExpanded);
+        if (nowExpanded) revealToggle();
         return nowExpanded;
     });
+    if (startExpanded) revealToggle();
 
     // Replace the live placeholder in place when there is one, so a finished
     // row does not jump to the bottom of the group the moment it lands.
