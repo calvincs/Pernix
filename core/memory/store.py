@@ -120,6 +120,24 @@ def _entry_body(section: str) -> str:
     return "\n".join(line for line in section.splitlines() if not line.startswith("<!-- @merged_")).strip()
 
 
+def _notify_oversized_file(md_path) -> None:
+    """Tell the user when a memory file is too large to index."""
+    try:
+        from db import models as _db
+
+        _db.add_notification(
+            title="A memory file is too large to index",
+            body=(
+                f"{md_path.name} is over the 50MB reindex cap, so its entries are absent from "
+                "search until it is split or compacted."
+            ),
+            urgency="normal",
+            dedup_key=f"memory-oversized:{md_path.name}",
+        )
+    except Exception as e:
+        logger.debug("Could not raise the oversized-memory notification: %s", e)
+
+
 def _bucket_matches(file_name: str, space_prefix: str | None) -> bool:
     """Whether a candidate file is in the bucket the caller is writing to.
 
@@ -1382,10 +1400,30 @@ class MemoryStore:
             total = 0
             for md_path in sorted(self._dir.glob("*.md")):
                 if md_path.stat().st_size > 50 * 1024 * 1024:  # 50MB safety cap
+                    # Silently dropping a whole file from search is exactly
+                    # the kind of thing nobody notices until they go looking
+                    # for a memory that used to be there.
                     logger.warning("Skipping oversized memory file during reindex: %s", md_path.name)
+                    _notify_oversized_file(md_path)
                     continue
                 file_name = md_path.stem
-                text = md_path.read_text()
+                # A hand-created file whose stem is not a valid memory name
+                # ("my notes.md") was indexed anyway — and then every sweep
+                # that called read_file(name) on it raised ValueError, which
+                # (before the ladder was guarded) ended the whole snooze
+                # cycle. Skip it here so the index only ever names files the
+                # store can actually open.
+                if not _NAME_RE.match(file_name):
+                    logger.warning("Skipping memory file with an unusable name: %s", md_path.name)
+                    continue
+                try:
+                    # errors="replace": one stray non-UTF-8 byte from a hand
+                    # edit used to raise UnicodeDecodeError here and take the
+                    # whole reindex with it.
+                    text = md_path.read_text(encoding="utf-8", errors="replace")
+                except OSError as e:
+                    logger.warning("Skipping unreadable memory file %s: %s", md_path.name, e)
+                    continue
                 entries = parse_entries_from_markdown(file_name, text)
 
                 # Register file
@@ -1518,7 +1556,14 @@ class MemoryStore:
             md_count = 0
             collisions = 0
             for md_path in self._dir.glob("*.md"):
-                entries = parse_entries_from_markdown(md_path.stem, md_path.read_text())
+                if not _NAME_RE.match(md_path.stem):
+                    continue  # not indexable (see reindex) — not a drift signal either
+                try:
+                    raw = md_path.read_text(encoding="utf-8", errors="replace")
+                except OSError as e:
+                    logger.warning("Skipping unreadable memory file %s: %s", md_path.name, e)
+                    continue
+                entries = parse_entries_from_markdown(md_path.stem, raw)
                 md_count += len(entries)
                 epochs = [e.epoch for e in entries]
                 collisions += len(epochs) - len(set(epochs))
