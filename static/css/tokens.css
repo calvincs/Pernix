@@ -33,30 +33,32 @@
     /* Accent */
     --accent: #d4a843;
     --accent-dim: #9a7a30;
-    --accent-subtle: rgba(212, 168, 67, 0.10);
-    --accent-glow: rgba(212, 168, 67, 0.06);
+    /* Washes derive from the accent so a theme swap reaches them; mixing
+       with `transparent` is premultiplied, so this is exactly an alpha. */
+    --accent-subtle: color-mix(in srgb, var(--accent) 10%, transparent);
+    --accent-glow: color-mix(in srgb, var(--accent) 6%, transparent);
 
     /* Semantic */
     --error: #d0605c;  /* 5.06:1 on --bg */
-    --error-subtle: rgba(208, 96, 92, 0.10);
+    --error-subtle: color-mix(in srgb, var(--error) 10%, transparent);
     --success: #5a9a4a;
-    --success-subtle: rgba(90, 154, 74, 0.10);
+    --success-subtle: color-mix(in srgb, var(--success) 10%, transparent);
     --info: #5a8ab4;
-    --info-subtle: rgba(90, 138, 180, 0.10);
+    --info-subtle: color-mix(in srgb, var(--info) 10%, transparent);
     --teal: #5a9a8a;
     --teal-dim: #3d6b60;
-    --teal-subtle: rgba(90, 154, 138, 0.10);
+    --teal-subtle: color-mix(in srgb, var(--teal) 10%, transparent);
     --dream: #9a7fd1;
-    --dream-subtle: rgba(154, 127, 209, 0.10);
+    --dream-subtle: color-mix(in srgb, var(--dream) 10%, transparent);
     --rlm: #c06c8c;
-    --rlm-subtle: rgba(192, 108, 140, 0.10);
+    --rlm-subtle: color-mix(in srgb, var(--rlm) 10%, transparent);
     --canary: #c9a35a;
-    --canary-subtle: rgba(201, 163, 90, 0.10);
+    --canary-subtle: color-mix(in srgb, var(--canary) 10%, transparent);
     /* The three live literal fallbacks (#e8a020, #c9a35a, #d4a142) were three
        different ambers for one meaning. 8.51:1 on --bg. */
     --warning: #e0a03a;
     --warning-bg: color-mix(in srgb, var(--warning) 16%, var(--bg));
-    --warning-subtle: rgba(224, 160, 58, 0.10);
+    --warning-subtle: color-mix(in srgb, var(--warning) 10%, transparent);
 
     /* Session-state palette — one fg/bg pair per state of the v2 state
        machine, so the status badge, the timeline rows, the Mermaid diagram
@@ -123,10 +125,13 @@
     --sp-6: 24px;
     --sp-8: 32px;
 
-    /* Shadows */
+    /* Shadows. --scrim is the wash behind a modal or a drawer; every
+       overlay in the app had its own rgba(0,0,0,.5-.65) literal, none of
+       which works on paper. */
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
     --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+    --scrim: rgba(0, 0, 0, 0.6);
 
     /* ------------------------------------------------------------------
        Aliases for names the CSS and JS already referenced but that were
@@ -165,6 +170,121 @@
     --safe-bottom: env(safe-area-inset-bottom, 0px);
     --safe-left: env(safe-area-inset-left, 0px);
     --safe-right: env(safe-area-inset-right, 0px);
+}
+
+/* ======================================================================
+   Light theme. The product is dark-first, so dark is the bare :root above
+   and this is the override — applied when the OS asks for light and the
+   user has not explicitly chosen dark, or when the user has explicitly
+   chosen light (Settings -> General -> Appearance, stored in
+   localStorage `pernix_theme`, written onto <html data-theme>).
+
+   The block is written out twice on purpose: a media query cannot share a
+   selector list with a rule outside it, and the alternative — a second tier
+   of --lt-* tokens — costs the same number of lines and hides the values one
+   indirection further away. Keep the two copies identical.
+
+   Only the base tokens are re-declared. Everything derived — the ten
+   --state-*-fg/-bg pairs, --warning-bg, every -subtle wash and every alias —
+   is written with color-mix()/var() over these, and custom properties resolve
+   at use, so all of it follows automatically.
+   ====================================================================== */
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+    /* Warm paper, not white — #fff under a gold accent reads clinical and
+       the app's whole identity is warm. */
+    color-scheme: light;
+
+    --bg: #faf7f0;
+    --bg-raised: #f4f0e6;
+    --bg-surface: #ece7da;
+    --bg-hover: #e6e0d1;
+    --bg-active: #ddd6c4;
+
+    --border: #d9d2c1;
+    --border-subtle: #e8e2d4;
+    --border-focus: #b0a892;
+
+    /* Ink. Every one of these clears 4.5:1 on --bg (measured, not guessed):
+       text 15.0, text-bright 17.8, text-dim 7.1, text-faint 5.8. */
+    --text: #24211a;
+    --text-dim: #5a5344;
+    --text-faint: #67604f;
+    --text-bright: #12100b;
+    --line-faint: #b3ab96;
+
+    /* The same gold, darkened until it holds on paper — #d4a843 measures
+       1.8:1 here, which is a decorative wash, not a colour you can read.
+       #8a6410 is 5.0:1. */
+    --accent: #8a6410;
+    --accent-dim: #6b4d0a;
+
+    /* Semantics, all >= 5.8:1 on paper. */
+    --error: #a32620;
+    --success: #2d6b22;
+    --info: #1d5a8a;
+    --teal: #1a6656;
+    --teal-dim: #12463a;
+    --dream: #5c3ba3;
+    --rlm: #992f5e;
+    --canary: #7d5a12;
+    --warning: #7d5500;
+
+    /* Paper takes a far lighter shadow than a black page does; the dark
+       theme's 0.3-0.6 alphas read as smudges here. */
+    --shadow-sm: 0 1px 2px rgba(60, 50, 30, 0.10);
+    --shadow-md: 0 4px 12px rgba(60, 50, 30, 0.14);
+    --shadow-lg: 0 8px 24px rgba(60, 50, 30, 0.18);
+    --scrim: rgba(60, 50, 30, 0.35);
+    }
+}
+
+:root[data-theme="light"] {
+    /* Warm paper, not white — #fff under a gold accent reads clinical and
+       the app's whole identity is warm. */
+    color-scheme: light;
+
+    --bg: #faf7f0;
+    --bg-raised: #f4f0e6;
+    --bg-surface: #ece7da;
+    --bg-hover: #e6e0d1;
+    --bg-active: #ddd6c4;
+
+    --border: #d9d2c1;
+    --border-subtle: #e8e2d4;
+    --border-focus: #b0a892;
+
+    /* Ink. Every one of these clears 4.5:1 on --bg (measured, not guessed):
+       text 15.0, text-bright 17.8, text-dim 7.1, text-faint 5.8. */
+    --text: #24211a;
+    --text-dim: #5a5344;
+    --text-faint: #67604f;
+    --text-bright: #12100b;
+    --line-faint: #b3ab96;
+
+    /* The same gold, darkened until it holds on paper — #d4a843 measures
+       1.8:1 here, which is a decorative wash, not a colour you can read.
+       #8a6410 is 5.0:1. */
+    --accent: #8a6410;
+    --accent-dim: #6b4d0a;
+
+    /* Semantics, all >= 5.8:1 on paper. */
+    --error: #a32620;
+    --success: #2d6b22;
+    --info: #1d5a8a;
+    --teal: #1a6656;
+    --teal-dim: #12463a;
+    --dream: #5c3ba3;
+    --rlm: #992f5e;
+    --canary: #7d5a12;
+    --warning: #7d5500;
+
+    /* Paper takes a far lighter shadow than a black page does; the dark
+       theme's 0.3-0.6 alphas read as smudges here. */
+    --shadow-sm: 0 1px 2px rgba(60, 50, 30, 0.10);
+    --shadow-md: 0 4px 12px rgba(60, 50, 30, 0.14);
+    --shadow-lg: 0 8px 24px rgba(60, 50, 30, 0.18);
+    --scrim: rgba(60, 50, 30, 0.35);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
