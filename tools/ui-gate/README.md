@@ -97,6 +97,19 @@ moved the desktop, and say in the message what moved and why.
 | `tab-air-l` | 1180×820 | **wide touch** |
 | `ipad-desk` | 1024×768, Mac UA, no `is_mobile` | **wide touch**, and the one that only passes because `touch-boot.js` recognises it — it is an iPad claiming to be a Mac, exactly as iPadOS desktop mode does |
 | desktop | 1280×800, mouse | the baseline comparison |
+| `state-graph` | 1280×800, mouse, reduced motion | one m1 check on the State timeline's Graph tab, in its own context because it seeds `session_state_log` rows for the graph to draw |
+
+### The state-graph pass
+
+`readColor()` in `static/js/theme.js` resolves a `--token` by setting `color:
+var(--token)` on a probe span and reading the computed value back, and it has
+twice been handed something it did not expect — a `color(srgb 0.8 0.84 0.86)`
+from a `color-mix()` token, and an interpolated `oklab(…)` from the `.01ms`
+transition the reduced-motion block puts on `*`. Both painted every node, node
+label and time-in-state bar in the State timeline black. The check asks for
+reduced motion so one pass covers both, and asserts that no `--state-*` token
+reads as black, that no node box is within a hair of `#000`, and that every
+node label clears 3:1 against its own box.
 
 ## Files
 
