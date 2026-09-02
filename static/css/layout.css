@@ -119,6 +119,12 @@
     gap: 0;
     position: relative;
     margin-bottom: 2px;
+    /* What the action overlay paints itself with: the row's own background,
+       flattened. --bg-hover is already opaque; --accent-subtle is a 10% wash
+       over the sidebar, so the active row states the same colour with the
+       sidebar mixed in rather than layering the wash a second time. A theme
+       swap reaches both, because both are tokens. */
+    --row-veil: var(--bg-hover);
 }
 .session-top {
     display: flex;
@@ -133,7 +139,11 @@
     flex: 1;
     min-width: 0;
 }
-.session-item:hover {
+.session-item:hover,
+/* Tabbing to a row is the keyboard's hover: it is what brings the action
+   overlay out, so the row has to light up under it or the overlay appears
+   to float over nothing. */
+.session-item:focus-within {
     background: var(--bg-hover);
     color: var(--text);
 }
@@ -142,6 +152,7 @@
     color: var(--accent);
     border-left: 2px solid var(--accent);
     padding-left: calc(var(--sp-3) - 2px);
+    --row-veil: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
 }
 
 .session-meta {
@@ -149,6 +160,62 @@
     align-items: center;
     gap: var(--sp-1);
     flex-shrink: 0;
+}
+/* The five 24px buttons used to set this line's height. They are an overlay
+   now and no longer in flow, so the height they were incidentally holding
+   has to be stated or the row loses 3px and the whole list re-flows. Keyed
+   on the overlay's presence rather than on the tier: a touch row has no
+   .session-actions and its line is sized by its own 44px control. */
+.session-item:has(.session-actions) .session-meta {
+    min-height: 24px;
+}
+
+/* The row's actions, over the title's tail rather than beside it.
+   Absolutely positioned against .session-item, so five 24px targets cost the
+   title nothing until a pointer or the keyboard asks for them. The gradient
+   is the seam: the overlay fades in from transparent over its first 20px so
+   it reads as sitting ON the title rather than butting into it. */
+.session-actions {
+    position: absolute;
+    top: var(--sp-2);
+    right: var(--sp-3);
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    padding-left: 20px;
+    opacity: 0;
+    transition: opacity var(--transition);
+    background: linear-gradient(to right, transparent, var(--row-veil) 20px);
+    /* The strip is a backdrop, not a target: the fade and the gaps between
+       the icons pass their clicks down to the row, so a near miss opens the
+       session instead of doing nothing. Only the buttons take a click, and
+       only once they are visible — an invisible control that is still
+       clickable is the bug the touch tier was built to fix. */
+    pointer-events: none;
+}
+.session-actions > * {
+    pointer-events: none;
+}
+.session-item:hover .session-actions,
+.session-item:focus-within .session-actions {
+    opacity: 1;
+}
+.session-item:hover .session-actions > *,
+.session-item:focus-within .session-actions > * {
+    pointer-events: auto;
+}
+/* An open inline rename owns the line the overlay lies on, and focusing its
+   input is itself a :focus-within. */
+.session-item.renaming .session-actions { display: none; }
+
+/* Pinned is a state, so it stays in the line: the toggle that changes it
+   lives in the overlay and is invisible at rest like its neighbours. */
+.session-pinned-mark {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    color: var(--accent);
 }
 
 .session-time {
