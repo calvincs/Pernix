@@ -63,7 +63,7 @@ Open **<http://localhost:8090>** in your browser.
 
 ## 4. Pick your models
 
-In the UI, click the gear icon → **Settings**. The two settings you must set:
+In the UI, click **Settings** in the status bar at the bottom of the window — the cog next to **Explorer**. The two settings you must set:
 
 | Setting | What to put |
 |---|---|

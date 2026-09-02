@@ -101,7 +101,7 @@ Navigate to **http://localhost:8090** in your browser. The web UI will load.
 
 Before you can have a conversation, you need to tell Pernix which model to use:
 
-1. Click the gear icon in the sidebar → **Settings**
+1. Click **Settings** in the status bar at the bottom of the window — the cog next to **Explorer**
 2. Set **`llm_model`** to a model you have available:
    - For Ollama: the name of a model you've already pulled (e.g. `qwen3:32b`, `qwen2.5-coder:32b`, or `qwen3:8b` if you have less VRAM). Older models like Llama 3.2 work but tend to be weaker at tool use and multi-step reasoning — agentic workloads do much better on current Qwen 3.x or comparable frontier-tier local models
    - For OpenRouter: the full model ID (e.g. `anthropic/claude-sonnet-4.6`, `x-ai/grok-4.1-fast`, or any current frontier model from your account)

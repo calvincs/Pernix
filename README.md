@@ -103,7 +103,7 @@ Open **http://localhost:8090** in your browser.
 
 ### First Configuration
 
-1. Click the gear icon → **Settings**
+1. Click **Settings** in the status bar at the bottom of the window (the cog next to **Explorer**)
 2. Set **`llm_model`** — the name of your Ollama model (e.g. `qwen3:32b`) or an OpenRouter model ID (e.g. `anthropic/claude-sonnet-4.6`, `x-ai/grok-4.1-fast`)
 3. Optionally set **`background_model`** — a fast, cheap model for scout planning, auto-titling, and idle work. Something like `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter, works well. Leave it empty and everything runs on `llm_model`
 4. Click **Save**
