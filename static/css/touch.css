@@ -413,6 +413,16 @@ body[data-compact].composer-focused #session-header {
     position: fixed;
     left: var(--sp-3);
     right: var(--sp-3);
+    /* Both of these are the desktop row's, and both survive the move to a
+       floating strip: `max-width: 300px` because it is a length, and
+       `margin-left: auto` because a fixed box with left, right and a
+       constrained width hands the slack to its auto margin. Together they
+       pinned the strip to the right of a 390px phone, 66px narrower and
+       66px offset from the .notice directly above it — two strips that are
+       supposed to be one stack. The reset has to be explicit; nothing in
+       `position: fixed` clears either. */
+    max-width: none;
+    margin-left: 0;
     bottom: calc(var(--bottom-stack, 76px) + var(--sp-2));
     background: var(--bg-raised);
     border: 1px solid var(--border-subtle);
