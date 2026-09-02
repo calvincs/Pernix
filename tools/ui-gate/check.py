@@ -451,11 +451,17 @@ def desktop_layout(browser):
     pg.click("#sidebar-toggle")
     time.sleep(0.4)
 
-    # S2 — the space header's three controls are an overlay on this tier, not
-    # three boxes in the line. In flow they reserved 48px of a 253px row
-    # whether or not anyone was pointing at the header, and the seeded long
-    # label read at 122px. Asserted on the mouse tier only: the touch header
-    # keeps "+" and one 44px overflow button, both in the line by design.
+    # S2 — the space header's controls are an overlay on this tier, not boxes
+    # in the line. In flow they reserved 48px of a 253px row whether or not
+    # anyone was pointing at the header, and the seeded long label read at
+    # 122px. Asserted on the mouse tier only: the touch header keeps "+" and
+    # one 44px overflow button, both in the line by design.
+    #
+    # The count is deliberately not pinned — the overlay is out of flow, so
+    # what it costs the label is zero however many controls it holds (v34
+    # added "archive idle sessions" and the label stayed at 188px). What is
+    # pinned is that every one of them is a 24px target and none of them is
+    # reachable until the header is pointed at.
     if LEVEL == "m2":
         sh = pg.evaluate("""() => { const h=[...document.querySelectorAll('.space-group-header')]
                   .find(x => (x.querySelector('.space-label')||{}).textContent?.startsWith('Research lab'));
@@ -474,7 +480,8 @@ def desktop_layout(browser):
             bool(sh)
             and sh.get("op") == "0"
             and sh.get("pe") == "none"
-            and sh.get("targets") == ["24x24"] * 3
+            and len(sh.get("targets") or []) >= 3
+            and all(t == "24x24" for t in sh.get("targets") or [])
             and sh.get("labelW", 0) >= 180,
             sh,
             "m2",

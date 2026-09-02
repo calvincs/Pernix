@@ -13,7 +13,7 @@ import { initBell, openBellPanel, closeBellPanel, refreshBell } from './componen
 import { initJobsIndicator } from './components/jobs-indicator.js';
 import {
     initSidebar, renderSessionList as renderSidebar, updateSessionActivity,
-    setSessionPaging, setSessionPagingBusy, openSessionSheet,
+    setSessionPaging, setSessionPagingBusy, openSessionSheet, setArchivedCount,
 } from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel, EXPLORER_GROUPS } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
@@ -512,16 +512,33 @@ const SESSION_PAGE = 500;
 let _sessionWindow = SESSION_PAGE;
 let _loadingOlderSessions = false;
 
+// Sessions the list does not contain. An archived session has left
+// /api/sessions by design, and a session reached through search can sit past
+// the loaded window — both still have to open, name themselves in the header
+// and know whether they accept messages. The detail endpoint is the only
+// lookup that finds them; this is where its answer is kept.
+const _offListSessions = new Map();
+
+/** The session payload for `sid`, from the list or from a detail fetch. */
+function _knownSession(sid) {
+    if (!sid) return null;
+    return (state.sessions || []).find((x) => x.id === sid) || _offListSessions.get(sid) || null;
+}
+
 async function loadSessions() {
     try {
         const data = await get(`/api/sessions?limit=${_sessionWindow}`);
         state.sessions = data.items || [];
         state.spaces = data.spaces || [];
+        // A restored session is back in the list, so the stale detail copy
+        // that stood in for it while it was archived has to go.
+        for (const s of state.sessions) _offListSessions.delete(s.id);
         setSessionPaging({
             total: data.total || state.sessions.length,
             loaded: state.sessions.length,
             hasMore: !!data.has_more,
         });
+        setArchivedCount(data.archived_count || 0);
         for (const s of state.sessions) {
             const busy = _BUSY_STATES.has(s.state_v2);
             if (_prevBusy.get(s.id) && !busy && s.id !== state.sid) {
@@ -684,7 +701,7 @@ function _refreshComposerText() {
     t.setAttribute('aria-description', t.title);
 }
 
-function _setComposerReadOnly(readonly, reason) {
+function _setComposerReadOnly(readonly, reason, restoreSid = null) {
     const input = document.getElementById('msg-input');
     const btn = document.getElementById('send-btn');
     if (!input || !btn) return;
@@ -702,6 +719,71 @@ function _setComposerReadOnly(readonly, reason) {
         : _composerPlaceholder();
     input.title = readonly ? (reason || 'This session is read-only') : _composerHint();
     input.setAttribute('aria-description', input.title);
+    _syncRestoreControl(restoreSid);
+}
+
+/**
+ * The Restore control above the composer.
+ *
+ * Every other read-only reason is permanent for the life of the session — a
+ * dream journal never becomes chattable — so a disabled textarea and a
+ * sentence were the whole story. Archiving is the first one the user can
+ * leave, and a placeholder that says "restore it to continue" without
+ * offering the verb is an instruction with no control attached.
+ *
+ * @param {string|null} sid  the archived session, or null to remove it
+ */
+function _syncRestoreControl(sid) {
+    const existing = document.getElementById('composer-restore');
+    if (!sid) {
+        if (existing) existing.remove();
+        return;
+    }
+    if (existing && existing.dataset.sid === sid) return;
+    if (existing) existing.remove();
+    const wrapper = document.getElementById('input-wrapper');
+    if (!wrapper) return;
+
+    const btn = el('button', {
+        id: 'composer-restore-btn',
+        class: 'btn btn--sm',
+        type: 'button',
+    }, [icon('unarchive', { size: 13 }), text('Restore')]);
+    btn.addEventListener('click', () => _restoreSession(sid));
+
+    const bar = el('div', { id: 'composer-restore', class: 'composer-restore' }, [
+        el('span', { class: 'composer-restore-text' }, [
+            text('This chat is archived. Every message is still here.'),
+        ]),
+        btn,
+    ]);
+    bar.dataset.sid = sid;
+    wrapper.insertBefore(bar, wrapper.firstChild);
+}
+
+/** Un-archive the open session and hand the composer straight back. */
+async function _restoreSession(sid) {
+    const btn = document.getElementById('composer-restore-btn');
+    if (btn) btn.disabled = true;
+    try {
+        await patch(`/api/sessions/${sid}`, { archived: false });
+        const sess = _knownSession(sid);
+        if (sess) {
+            sess.archived_at = null;
+            sess.read_only = false;
+            sess.read_only_reason = null;
+        }
+        // No reload: the composer comes back on the same page the user is
+        // already reading.
+        _setComposerReadOnly(false);
+        announce('Session restored');
+        notify('success', 'Restored — this chat is back in the sidebar.');
+        await loadSessions();
+        document.getElementById('msg-input')?.focus();
+    } catch (e) {
+        if (btn) btn.disabled = false;
+        notify('error', `Couldn't restore this session — ${humanizeError(e)}`);
+    }
 }
 
 // Monotonic token for session switches. Every await in selectSession (and
@@ -742,7 +824,20 @@ async function selectSession(sid) {
     // RLM run views have no transcript — the chat area renders the live
     // trace viewer instead, and the composer stays off (the server enforces
     // the same read-only policy via sessions.policy).
-    const _sess = (state.sessions || []).find(s => s.id === sid);
+    let _sess = _knownSession(sid);
+    if (!_sess) {
+        // Archived, or past the loaded window: the list cannot answer, so
+        // ask the endpoint that can. limit=1 because only the row is wanted
+        // — loadMessages fetches the transcript a few lines below.
+        try {
+            _sess = await get(`/api/sessions/${sid}?limit=1`);
+            if (mySeq !== _selectSeq) return;
+            _offListSessions.set(sid, _sess);
+            _renderSessionHeader();   // the header had nothing to name until now
+        } catch {
+            if (mySeq !== _selectSeq) return;   // loadMessages reports the real failure
+        }
+    }
     if (_sess?.session_type === 'rlm') {
         disconnectSSE();
         _activeWorkers.clear();
@@ -768,8 +863,10 @@ async function selectSession(sid) {
     if (mySeq !== _selectSeq) return;
     _seedWorkerStrip(sid);
 
-    // Read-only sessions (dream journals): policy rides on the session payload.
-    _setComposerReadOnly(!!_sess?.read_only, _sess?.read_only_reason);
+    // Read-only sessions (dream journals, RLM views, archived chats): the
+    // policy rides on the session payload. Archived is the one the user can
+    // leave, so it is the one that gets a control.
+    _setComposerReadOnly(!!_sess?.read_only, _sess?.read_only_reason, _sess?.archived_at ? sid : null);
 
     // Fetch session status to get event_seq and streaming state BEFORE connecting SSE
     state.streaming = false;
@@ -1258,7 +1355,7 @@ function _renderSessionHeader() {
     if (!header) return;
     const titleBtn = document.getElementById('session-header-title');
     const chip = document.getElementById('session-header-space');
-    const sess = (state.sessions || []).find((x) => x.id === state.sid);
+    const sess = _knownSession(state.sid);
     if (!state.sid || !sess || !titleBtn) {
         header.hidden = true;
         return;
@@ -1336,7 +1433,7 @@ function _renderParentBreadcrumb(header, sess) {
 function _syncHeaderTitleAffordance() {
     const titleBtn = document.getElementById('session-header-title');
     if (!titleBtn) return;
-    const sess = (state.sessions || []).find((x) => x.id === state.sid);
+    const sess = _knownSession(state.sid);
     const title = (sess && sess.title) || 'New session';
     if (isCompact()) {
         titleBtn.title = `${title} — session actions`;
@@ -1358,7 +1455,7 @@ function _startHeaderRename() {
     const header = document.getElementById('session-header');
     const titleBtn = document.getElementById('session-header-title');
     if (!header || !titleBtn || !titleBtn.isConnected) return;
-    const sess = (state.sessions || []).find((x) => x.id === state.sid);
+    const sess = _knownSession(state.sid);
     const current = (sess && sess.title) || '';
 
     const input = el('input', {
@@ -3470,13 +3567,31 @@ function handleEvent(event) {
 
     else if (type === 'session.title') {
         // Update title and subtitle in session list immediately
-        const s = state.sessions.find(s => s.id === state.sid);
+        const s = _knownSession(state.sid);
         if (s && event.title) {
             s.title = event.title;
             if (event.subtitle) s.subtitle = event.subtitle;
             renderSidebar(state.sessions, state.sid, state.spaces);
             _renderSessionHeader();
         }
+    }
+
+    else if (type === 'session.archived') {
+        // Another tab, or a Storage-tab sweep, filed this session away (or
+        // brought it back). The list catches up on its own poll; the
+        // composer is the half that cannot wait for it.
+        const s = _knownSession(state.sid);
+        if (s) {
+            s.archived_at = event.archived_at || null;
+            s.read_only = !!event.read_only;
+            s.read_only_reason = event.read_only_reason || null;
+        }
+        _setComposerReadOnly(
+            !!event.read_only,
+            event.read_only_reason,
+            event.archived ? state.sid : null,
+        );
+        loadSessions();
     }
 
     else if (type === 'session.queued') {
@@ -4042,7 +4157,7 @@ function _isRlmView() {
     // no SSE stream and /status carries no event_seq for them, so the seq
     // reconciler would misread them as "server restarted" and a soft reload
     // would wipe the viewer mid-watch. The viewer polls its own endpoint.
-    return (state.sessions || []).find(s => s.id === state.sid)?.session_type === 'rlm';
+    return _knownSession(state.sid)?.session_type === 'rlm';
 }
 
 // Transient status-bar note that clears itself. Used for recoveries the user
@@ -5904,7 +6019,7 @@ async function exportTranscript() {
     try {
         const data = await get(`/api/sessions/${state.sid}?limit=100000`);
         const messages = data.messages || [];
-        const sess = (state.sessions || []).find(s => s.id === state.sid);
+        const sess = _knownSession(state.sid);
         const title = (sess?.title || 'Pernix session').trim();
 
         const lines = [`# ${title}`, ''];

@@ -92,6 +92,22 @@ const PATHS = {
 
     refresh: ['M20 12a8 8 0 1 1-2.4-5.7', 'M20.5 4v5h-5'],
 
+    // A box with its lid on: archiving files a session away rather than
+    // ending it. The pair differ only in what is inside the box — nothing
+    // (a line, the label on the lid) or an arrow coming back out — so the
+    // two states of one control read as one control.
+    archive: [
+        { t: 'rect', x: 3.5, y: 4.5, width: 17, height: 4, rx: 1.2 },
+        'M5.5 8.5v10a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-10',
+        'M10 12.5h4',
+    ],
+    unarchive: [
+        { t: 'rect', x: 3.5, y: 4.5, width: 17, height: 4, rx: 1.2 },
+        'M5.5 8.5v10a1.5 1.5 0 0 0 1.5 1.5h10a1.5 1.5 0 0 0 1.5-1.5v-10',
+        'M12 18v-6',
+        'M9.5 14.5L12 12l2.5 2.5',
+    ],
+
     pause: ['M9.5 5v14', 'M14.5 5v14'],
     play: ['M7.5 4.8L19 12 7.5 19.2z'],
     // Filled, because a hollow square next to a filled send arrow reads as

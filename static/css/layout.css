@@ -952,6 +952,91 @@ body.sidebar-resizing {
     font-size: var(--text-xs);
 }
 
+/* ---------------------------------------------------------------------------
+   Archive (v34) — the state between "in my sidebar" and "gone"
+
+   Deleting used to be the only way to clear a chat off the list, so a sidebar
+   with a year in it forced a choice between clutter and losing the
+   transcript. Everything here is deliberately quiet: an archived session is
+   not an alert, it is a session that has stopped asking for attention.
+   --------------------------------------------------------------------------- */
+
+/* The row's sixth overlay control, sized like its five neighbours. The strip
+   is absolutely positioned, so a new button in it does not move the row. */
+.session-archive {
+    background: none;
+    border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-faint);
+    cursor: pointer;
+    padding: 0 2px;
+    line-height: 1;
+}
+.session-archive:hover { color: var(--text-bright); }
+
+/* The legend's Archived entry is a place, not a session type, so its dot is
+   the one with no colour of its own — a ring rather than a filled dot. */
+.legend-dot.archived {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--text-faint);
+}
+.legend-item.archived:not(.dimmed) .legend-dot.archived {
+    box-shadow: inset 0 0 0 1.5px var(--text);
+}
+
+/* The group sits at the foot of the list and says so by being quieter than
+   the time buckets above it, and so do its rows. Not disabled-looking —
+   every one of them is a whole conversation one click from coming back. */
+.archived-group-header { color: var(--text-faint); }
+.session-item.archived-row .session-title-text { color: var(--text-dim); }
+
+/* Search keeps finding archived sessions — that is the whole promise — so
+   the hit carries the one word that explains why it is not in the list. */
+.archived-chip {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 0 4px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.03em;
+    vertical-align: 1px;
+}
+
+/* The way out of the one read-only state a user CAN leave. Every other
+   reason is permanent for the life of the session, so a disabled textarea
+   and a sentence were the whole story; this one needs the verb attached.
+   Above the input bar rather than in it — a live control inside a dead row
+   reads as a bug. */
+.composer-restore {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-raised);
+}
+.composer-restore-text {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+}
+#composer-restore-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+}
+
 /* Optimistic user bubble whose POST was rejected — not actually sent */
 .message.rejected {
     opacity: 0.55;
