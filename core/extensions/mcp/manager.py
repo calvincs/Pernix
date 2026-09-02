@@ -454,11 +454,18 @@ class MCPManager:
 
     async def shutdown(self) -> None:
         """Close every connection (kills stdio children). Tools stay registered;
-        their calls fail with a clear error until the next start()."""
+        their calls fail with a clear error until the next start().
+
+        The connection objects are dropped: start() re-reads the file and
+        spawns fresh ones, whose tools land on the same names (diffed by
+        server in register_server_tools), so an mcp_enabled off→on cycle
+        replaces the tools in place instead of duplicating them.
+        """
         self.started = False
         conns = list(self.connections.values())
         if conns:
             await asyncio.gather(*(c.close() for c in conns), return_exceptions=True)
+        self.connections.clear()
         logger.info("MCP manager stopped")
 
     def _spawn(self, cfg: MCPServerConfig) -> MCPConnection:
@@ -481,7 +488,12 @@ class MCPManager:
         if existing is None and len(self.connections) >= settings.mcp_max_servers:
             raise ValueError(f"Server cap reached ({settings.mcp_max_servers}); remove one or raise mcp_max_servers")
         if existing is not None:
+            # Same shape as reload_server: the old connection's tools go with
+            # it. Leaving them registered while the new connection registered
+            # its own set duplicated every tool under a hash suffix (observed
+            # 2026-09-01 on every UI "Save changes").
             await existing.close()
+            self._unregister_tools(existing)
         self._persist()  # snapshot current set first so a crash keeps the file coherent
         conn = self._spawn(cfg)
         self._persist()
@@ -591,7 +603,14 @@ class MCPManager:
             )
             mcp_tools = mcp_tools[:cap]
 
-        taken = {t.name for t in registry.all_tools()} - set(conn.registered)
+        # Diff by SERVER, not by connection object: a fresh connection (edit,
+        # reload, mcp_enabled off→on) must reclaim the names its predecessor
+        # registered rather than treat them as taken and mint suffixed
+        # duplicates — and whatever it does not re-register is stale.
+        category = f"mcp:{cfg.name}"
+        all_names = {t.name for t in registry.all_tools()}
+        mine = {t.name for t in registry.all_tools() if t.source == "mcp" and t.category == category}
+        taken = all_names - mine
         new_map: dict[str, str] = {}
         for tool in mcp_tools:
             pname = pernix_tool_name(cfg.name, tool.name, taken)
@@ -617,7 +636,7 @@ class MCPManager:
                 # accidental double-posts to external services.
                 idempotent=getattr(annotations, "idempotent_hint", None) is not False,
             )
-        removed = set(conn.registered) - set(new_map)
+        removed = (mine | set(conn.registered)) - set(new_map)
         for name in removed:
             registry.unregister(name)
         conn.registered = new_map
