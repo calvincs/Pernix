@@ -1529,7 +1529,7 @@
     white-space: nowrap;
 }
 .model-divider-pill .model-divider-arrow {
-    color: var(--amber, #d4a142);
+    color: var(--warning);
     margin: 0 2px;
     font-weight: 600;
 }
@@ -1543,7 +1543,7 @@
 #status-bar .model .model-override-shuffle {
     display: inline-block;
     margin: 0 2px;
-    color: var(--amber, #d4a142);
+    color: var(--warning);
     font-weight: 700;
     animation: statusPulse 1.6s ease-in-out infinite;
 }
@@ -1562,11 +1562,11 @@
 }
 
 #status-bar .ctx.ctx-approaching {
-    color: var(--amber, #d4a142);
+    color: var(--warning);
 }
 
 #status-bar .ctx.ctx-critical {
-    color: var(--red, #d06060);
+    color: var(--error);
     font-weight: 600;
 }
 
@@ -1617,15 +1617,16 @@
     white-space: nowrap;
     transition: background 120ms ease, color 120ms ease;
 }
-.state-badge.idle_ready         { background: #1f3a1f; color: #7fd07f; border-color: #2d5e2d; }
-.state-badge.scouting           { background: #1e3a4f; color: #6db5e8; border-color: #2d567d; }
-.state-badge.processing         { background: #1e3a4f; color: #7ec4f0; border-color: #2d567d; animation: statusPulse 1.5s ease-in-out infinite; }
-.state-badge.compacting         { background: #4a3a1a; color: #e8c06d; border-color: #7d5e2d; animation: statusPulse 1.5s ease-in-out infinite; }
-.state-badge.pause_requested    { background: #4a3a1a; color: #f0c87e; border-color: #7d5e2d; }
-.state-badge.paused             { background: #3a2f1a; color: #ccaa55; border-color: #5e4d2d; }
-.state-badge.cancelling         { background: #4a1f1a; color: #e88080; border-color: #7d2d2d; animation: statusPulse 1s ease-in-out infinite; }
-.state-badge.finalizing         { background: #3a2a4a; color: #c89ae8; border-color: #5d4a7d; animation: statusPulse 1.5s ease-in-out infinite; }
-.state-badge.awaiting_user      { background: #2a1a4a; color: #9a80e8; border-color: #4a3a7d; }
+.state-badge.idle_ready         { background: var(--state-idle_ready-bg); color: var(--state-idle_ready-fg); border-color: color-mix(in srgb, var(--state-idle_ready-fg) 40%, var(--state-idle_ready-bg)); }
+.state-badge.scouting           { background: var(--state-scouting-bg); color: var(--state-scouting-fg); border-color: color-mix(in srgb, var(--state-scouting-fg) 40%, var(--state-scouting-bg)); }
+.state-badge.processing         { background: var(--state-processing-bg); color: var(--state-processing-fg); border-color: color-mix(in srgb, var(--state-processing-fg) 40%, var(--state-processing-bg)); animation: statusPulse 1.5s ease-in-out infinite; }
+.state-badge.compacting         { background: var(--state-compacting-bg); color: var(--state-compacting-fg); border-color: color-mix(in srgb, var(--state-compacting-fg) 40%, var(--state-compacting-bg)); animation: statusPulse 1.5s ease-in-out infinite; }
+.state-badge.pause_requested    { background: var(--state-pause_requested-bg); color: var(--state-pause_requested-fg); border-color: color-mix(in srgb, var(--state-pause_requested-fg) 40%, var(--state-pause_requested-bg)); }
+.state-badge.paused             { background: var(--state-paused-bg); color: var(--state-paused-fg); border-color: color-mix(in srgb, var(--state-paused-fg) 40%, var(--state-paused-bg)); }
+.state-badge.cancelling         { background: var(--state-cancelling-bg); color: var(--state-cancelling-fg); border-color: color-mix(in srgb, var(--state-cancelling-fg) 40%, var(--state-cancelling-bg)); animation: statusPulse 1s ease-in-out infinite; }
+.state-badge.finalizing         { background: var(--state-finalizing-bg); color: var(--state-finalizing-fg); border-color: color-mix(in srgb, var(--state-finalizing-fg) 40%, var(--state-finalizing-bg)); animation: statusPulse 1.5s ease-in-out infinite; }
+.state-badge.awaiting_user      { background: var(--state-awaiting_user-bg); color: var(--state-awaiting_user-fg); border-color: color-mix(in srgb, var(--state-awaiting_user-fg) 40%, var(--state-awaiting_user-bg)); }
+.state-badge.awaiting_workers   { background: var(--state-awaiting_workers-bg); color: var(--state-awaiting_workers-fg); border-color: color-mix(in srgb, var(--state-awaiting_workers-fg) 40%, var(--state-awaiting_workers-bg)); }
 
 /* State badge is clickable — opens the timeline modal. */
 #state-badge { cursor: pointer; }
@@ -1679,9 +1680,9 @@
     margin-top: var(--sp-2);
 }
 .timeline-graph-caption:empty { display: none; }
-.tl-caption-current { color: #7ec4f0; }
+.tl-caption-current { color: var(--state-processing-fg); }
 .tl-caption-term { color: var(--text); }
-.tl-caption-warn { color: #e88080; }
+.tl-caption-warn { color: var(--state-cancelling-fg); }
 .tl-caption-stat { color: var(--text-faint); }
 
 /* Turn header enrichment — secondary meta chips after the turn number */
@@ -1699,12 +1700,12 @@
     margin-left: 6px;
     vertical-align: middle;
 }
-.tl-turn-term-complete { color: #7ec4f0; background: rgba(126,196,240,0.12); }
+.tl-turn-term-complete { color: var(--state-processing-fg); background: var(--state-processing-bg); }
 .tl-turn-term-error,
-.tl-turn-term-scout-error { color: #e88080; background: rgba(232,128,128,0.12); }
-.tl-turn-term-cancelled { color: var(--text-faint); background: rgba(128,128,128,0.1); }
+.tl-turn-term-scout-error { color: var(--state-cancelling-fg); background: var(--state-cancelling-bg); }
+.tl-turn-term-cancelled { color: var(--text-faint); background: color-mix(in srgb, var(--line-faint) 40%, transparent); }
 .tl-turn-term-round-ceiling,
-.tl-turn-term-budget-exhausted { color: #d4a843; background: rgba(212,168,67,0.12); }
+.tl-turn-term-budget-exhausted { color: var(--state-paused-fg); background: var(--state-paused-bg); }
 .tl-turn-parent {
     font-size: var(--text-xxs);
     color: var(--accent-dim);
@@ -1727,10 +1728,10 @@
     line-height: 1.6;
     white-space: nowrap;
 }
-.tl-badge-compact { background: rgba(90,138,90,0.15); color: #7aaa7a; border: 1px solid rgba(90,138,90,0.25); }
-.tl-badge-retry   { background: rgba(212,168,67,0.15); color: #d4a843; border: 1px solid rgba(212,168,67,0.25); }
-.tl-badge-await   { background: rgba(126,166,200,0.15); color: #7ea6c8; border: 1px solid rgba(126,166,200,0.25); }
-.tl-badge-pause   { background: rgba(160,120,200,0.15); color: #a078c8; border: 1px solid rgba(160,120,200,0.25); }
+.tl-badge-compact { background: var(--state-compacting-bg); color: var(--state-compacting-fg); border: 1px solid color-mix(in srgb, var(--state-compacting-fg) 35%, var(--state-compacting-bg)); }
+.tl-badge-retry   { background: var(--accent-subtle); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+.tl-badge-await   { background: var(--state-awaiting_user-bg); color: var(--state-awaiting_user-fg); border: 1px solid color-mix(in srgb, var(--state-awaiting_user-fg) 35%, var(--state-awaiting_user-bg)); }
+.tl-badge-pause   { background: var(--state-paused-bg); color: var(--state-paused-fg); border: 1px solid color-mix(in srgb, var(--state-paused-fg) 35%, var(--state-paused-bg)); }
 
 /* Tool call tally — shown in graph tab between diagram and caption */
 .tl-tool-tally {
@@ -1763,17 +1764,17 @@
     display: inline-block;
     font-size: var(--text-xxs);
     font-family: var(--font-mono, monospace);
-    background: rgba(126, 196, 240, 0.08);
-    border: 1px solid rgba(126, 196, 240, 0.2);
+    background: var(--state-processing-bg);
+    border: 1px solid color-mix(in srgb, var(--state-processing-fg) 30%, var(--state-processing-bg));
     color: var(--text-dim);
     border-radius: 3px;
     padding: 1px 6px;
     white-space: nowrap;
 }
 .tl-tally-chip.error {
-    background: rgba(232, 128, 128, 0.10);
-    border-color: rgba(232, 128, 128, 0.30);
-    color: #e88080;
+    background: var(--state-cancelling-bg);
+    border-color: color-mix(in srgb, var(--state-cancelling-fg) 40%, var(--state-cancelling-bg));
+    color: var(--state-cancelling-fg);
 }
 
 /* Timeline tab — turn headers + tool rows */
@@ -1814,7 +1815,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--accent, #4a9eff);
+    background: var(--accent);
     animation: dot-pulse 1.2s ease-in-out infinite;
     flex-shrink: 0;
 }
@@ -1846,7 +1847,7 @@
 .timeline-row .tl-states { color: var(--text); }
 .timeline-row .tl-reason { color: var(--accent-dim); font-style: italic; font-size: var(--text-xxs); }
 .timeline-row .tl-elapsed { color: var(--text-dim); text-align: right; }
-.timeline-row.invariant-violation { background: #4a1f1a22; }
+.timeline-row.invariant-violation { background: var(--state-cancelling-bg); }
 .timeline-row > span { min-width: 0; overflow-wrap: anywhere; }
 
 /* Wall-clock time column (state rows + tool row headers) */
@@ -1892,9 +1893,9 @@
 }
 .tl-filter-btn:hover { color: var(--text-bright); }
 .tl-filter-btn.active {
-    background: rgba(126, 196, 240, 0.12);
-    border-color: rgba(126, 196, 240, 0.4);
-    color: #7ec4f0;
+    background: var(--state-processing-bg);
+    border-color: color-mix(in srgb, var(--state-processing-fg) 45%, var(--state-processing-bg));
+    color: var(--state-processing-fg);
 }
 .tl-filter-input {
     flex: 1;
@@ -1911,13 +1912,13 @@
     font-size: var(--text-xxs);
     padding: 2px 8px;
     border-radius: 3px;
-    border: 1px solid rgba(232, 128, 128, 0.3);
+    border: 1px solid color-mix(in srgb, var(--state-cancelling-fg) 40%, transparent);
     background: transparent;
-    color: #e88080;
+    color: var(--state-cancelling-fg);
     cursor: pointer;
     white-space: nowrap;
 }
-.tl-next-error:hover { background: rgba(232, 128, 128, 0.1); }
+.tl-next-error:hover { background: var(--state-cancelling-bg); }
 
 /* Collapsible turn groups */
 .tl-turn-group .timeline-turn-header { cursor: pointer; user-select: none; }
@@ -1930,15 +1931,15 @@
 }
 .tl-turn-group.collapsed .tl-turn-chevron { transform: rotate(-90deg); }
 .tl-turn-group.collapsed .tl-turn-body { display: none; }
-.tl-turn-errors { color: #e88080; }
+.tl-turn-errors { color: var(--state-cancelling-fg); }
 
 /* Error-row flash on "next error" jump */
 .tl-flash { animation: tl-flash-anim 1.2s ease; }
 @keyframes tl-flash-anim {
-    0%, 40% { background: rgba(232, 128, 128, 0.25); }
+    0%, 40% { background: color-mix(in srgb, var(--state-cancelling-fg) 25%, transparent); }
     100% { background: transparent; }
 }
-.timeline-row.tl-error { background: #4a1f1a22; }
+.timeline-row.tl-error { background: var(--state-cancelling-bg); }
 
 /* Truncation notice + backward pagination */
 .tl-load-older {

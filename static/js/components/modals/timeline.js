@@ -627,11 +627,14 @@ function _buildMermaidSource(rows) {
         wait:  ['awaiting_user', 'awaiting_workers', 'paused', 'pause_requested'],
         end:   ['finalizing', 'cancelling'],
     };
+    // One state = one colour everywhere. The Mermaid classDefs, the dwell bars
+    // and the .state-badge in the status bar all read the same --state-*
+    // tokens (tokens.css) instead of each carrying its own hand-picked hex.
     const phaseStyles = {
-        work:  'fill:#162116,stroke:#4a7a4a,color:#bbb',
-        scout: 'fill:#13202b,stroke:#3f6c92,color:#bbb',
-        wait:  'fill:#231f10,stroke:#7a6a30,color:#bbb',
-        end:   'fill:#231616,stroke:#6a3838,color:#bbb',
+        work:  _mermaidStyle('processing'),
+        scout: _mermaidStyle('scouting'),
+        wait:  _mermaidStyle('paused'),
+        end:   _mermaidStyle('cancelling'),
     };
     for (const [phaseName, stateList] of Object.entries(phaseGroups)) {
         const present = stateList.filter(s => nodes.has(s));
@@ -642,7 +645,7 @@ function _buildMermaidSource(rows) {
 
     // Highlight current state (applied after phase hints — wins on any overlap).
     if (current) {
-        lines.push('    classDef current fill:#1e3a4f,stroke:#7ec4f0,color:#fff,stroke-width:2px');
+        lines.push(`    classDef current ${_mermaidStyle('processing')},stroke-width:2px`);
         lines.push(`    class ${current} current`);
     }
 
@@ -652,7 +655,7 @@ function _buildMermaidSource(rows) {
         if (edge.invariant) violationTargets.add(key.split('||')[1]);
     }
     if (violationTargets.size) {
-        lines.push('    classDef violation fill:#4a1f1a,stroke:#e88080,color:#fff');
+        lines.push(`    classDef violation ${_mermaidStyle('cancelling')}`);
         lines.push(`    class ${[...violationTargets].join(',')} violation`);
     }
 
@@ -675,20 +678,48 @@ function _edgeLabel(edge) {
     return short.replace(/[:;"\n]/g, ' ').trim();
 }
 
+// ---------------------------------------------------------------------------
+// State colours — single source of truth is the --state-<name>-{fg,bg} pairs
+// in tokens.css. Mermaid classDefs are comma-separated, so a raw
+// `color-mix(in srgb, …)` token stream (what getPropertyValue hands back for
+// an unregistered custom property) would break the parser. Resolve it to a
+// plain #rrggbb through a probe element, whose `color` IS a real colour
+// property and therefore computes color-mix() for us.
+// ---------------------------------------------------------------------------
+const _STATE_COLOR_CACHE = new Map();
+
+function _stateColor(state, part) {
+    const key = `${state}|${part}`;
+    if (_STATE_COLOR_CACHE.has(key)) return _STATE_COLOR_CACHE.get(key);
+    const raw = getComputedStyle(document.documentElement)
+        .getPropertyValue(`--state-${state}-${part}`).trim();
+    let out = part === 'bg' ? '#1a1a1a' : '#999999';
+    if (raw) {
+        const probe = document.createElement('span');
+        probe.style.cssText = 'position:absolute;left:-9999px;width:0;height:0';
+        probe.style.color = raw;
+        document.body.appendChild(probe);
+        const resolved = getComputedStyle(probe).color;
+        probe.remove();
+        const m = resolved.match(/-?[\d.]+/g);
+        if (m && m.length >= 3) {
+            out = '#' + m.slice(0, 3)
+                .map(v => Math.max(0, Math.min(255, Math.round(parseFloat(v))))
+                    .toString(16).padStart(2, '0'))
+                .join('');
+        }
+    }
+    _STATE_COLOR_CACHE.set(key, out);
+    return out;
+}
+
+// `fill:…,stroke:…,color:…` for one Mermaid classDef.
+function _mermaidStyle(state) {
+    return `fill:${_stateColor(state, 'bg')},stroke:${_stateColor(state, 'fg')},color:${_stateColor(state, 'fg')}`;
+}
+
 // Per-state dwell-time breakdown — elapsed_ms on a transition row is the time
 // spent in from_state, so summing by from_state answers "where did the time go".
-const _DWELL_COLORS = {
-    processing: '#4a7a4a',
-    compacting: '#6a9a6a',
-    scouting: '#5b9bd5',
-    finalizing: '#6a3838',
-    cancelling: '#8a4838',
-    awaiting_user: '#7a6a30',
-    awaiting_workers: '#9a8540',
-    paused: '#7058a0',
-    pause_requested: '#584888',
-    idle_ready: '#555555',
-};
 
 function _buildDwellEl(stateLog) {
     const byState = new Map();
@@ -705,7 +736,7 @@ function _buildDwellEl(stateLog) {
         const pct = (ms / total) * 100;
         return el('div', {
             class: 'tl-dwell-seg',
-            style: `width:${Math.max(pct, 1.5)}%;background:${_DWELL_COLORS[name] || '#666'}`,
+            style: `width:${Math.max(pct, 1.5)}%;background:${_stateColor(name, 'fg')}`,
             title: `${name}: ${_fmtMs(ms)} (${pct.toFixed(0)}%)`,
         });
     });
@@ -713,7 +744,7 @@ function _buildDwellEl(stateLog) {
     const chips = sorted.map(([name, ms]) => {
         const pct = ((ms / total) * 100).toFixed(0);
         return el('span', { class: 'tl-dwell-chip' }, [
-            el('span', { class: 'tl-dwell-dot', style: `background:${_DWELL_COLORS[name] || '#666'}` }),
+            el('span', { class: 'tl-dwell-dot', style: `background:${_stateColor(name, 'fg')}` }),
             text(`${name} ${_fmtMs(ms)} (${pct}%)`),
         ]);
     });
