@@ -184,6 +184,17 @@ function _renderItems() {
         Object.keys(savedInputs).length > 0
     ) return;
 
+    // A button IS allowed to be focused across the wipe — but the node it
+    // lives on is about to be replaced, so remember which one it was. The
+    // panel rebuilds every five seconds; without this, Tab lands the user
+    // back at the top of the document on every poll.
+    const mark = (focused && container.contains(focused))
+        ? {
+            key: focused.closest('[data-key]')?.getAttribute('data-key') || null,
+            act: focused.getAttribute('data-act') || null,
+        }
+        : null;
+
     container.innerHTML = '';
 
     if (_items.length === 0) {
@@ -202,6 +213,12 @@ function _renderItems() {
         const ta = row.querySelector('.question-answer');
         if (ta && savedInputs[row.dataset.qid]) ta.value = savedInputs[row.dataset.qid];
     });
+
+    if (mark && mark.key && mark.act) {
+        const host = container.querySelector(`[data-key="${mark.key}"]`);
+        const btn = host && host.querySelector(`[data-act="${mark.act}"]`);
+        if (btn) btn.focus({ preventScroll: true });
+    }
 }
 
 /**
@@ -214,6 +231,7 @@ function _sessionChip(sessionId) {
     return el('a', {
         class: 'notif-session-link',
         href: '#',
+        'data-act': 'open',
         title: 'Open this session',
         'aria-label': `Open session ${sessionId}`,
         onClick: (e) => {
@@ -233,7 +251,11 @@ function _renderQuestion(q) {
     });
     const statusEl = el('span', { class: 'notif-status', role: 'status' });
 
-    const row = el('div', { class: 'notif-item notif-question', 'data-qid': q.id }, [
+    const row = el('div', {
+        class: 'notif-item notif-question',
+        'data-qid': q.id,
+        'data-key': `q:${q.id}`,
+    }, [
         el('div', { class: 'notif-item-header' }, [
             el('span', { class: 'notif-item-type' }, [text(q.session_title ? `Question from: ${q.session_title}` : 'Agent Question')]),
             el('span', { class: 'notif-item-meta' }, [
@@ -249,10 +271,11 @@ function _renderQuestion(q) {
                 statusEl,
                 el('button', {
                     class: 'btn btn-secondary btn-sm',
+                    'data-act': 'dismiss',
                     'aria-label': 'Dismiss this question',
                     onClick: () => _dismissQuestion(q.id),
                 }, [text('Dismiss')]),
-                el('button', { class: 'btn btn-primary btn-sm', 'aria-label': 'Send your answer', onClick: async () => {
+                el('button', { class: 'btn btn-primary btn-sm', 'data-act': 'send', 'aria-label': 'Send your answer', onClick: async () => {
                     const answer = answerInput.value.trim();
                     if (!answer) { statusEl.textContent = 'Type an answer'; return; }
                     try {
@@ -268,7 +291,10 @@ function _renderQuestion(q) {
 }
 
 function _renderNotification(n) {
-    return el('div', { class: 'notif-item notif-notification' }, [
+    return el('div', {
+        class: 'notif-item notif-notification',
+        'data-key': `n:${n.id}`,
+    }, [
         el('div', { class: 'notif-item-header' }, [
             el('span', { class: 'notif-item-type' }, [text(n.title || 'Notification')]),
             el('span', { class: 'notif-item-meta' }, [
@@ -281,6 +307,7 @@ function _renderNotification(n) {
             el('div', { class: 'notif-item-buttons' }, [
                 el('button', {
                     class: 'btn btn-secondary btn-sm',
+                    'data-act': 'dismiss',
                     'aria-label': `Dismiss notification: ${n.title || 'Notification'}`,
                     onClick: () => _dismissNotification(n.id),
                 }, [text('Dismiss')]),
