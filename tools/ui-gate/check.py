@@ -373,9 +373,7 @@ def run_vp(browser, name, w, h, opts):
         # that has never existed anywhere, so the filter passed everything and
         # the check clicked whatever sorted first — opening a FOLDER, and then
         # finding no editor, whenever the throwaway workspace had one.
-        pg.evaluate(
-            "() => { const f=document.querySelector('.fp-tree-item.file'); f && f.click(); }"
-        )
+        pg.evaluate("() => { const f=document.querySelector('.fp-tree-item.file'); f && f.click(); }")
         time.sleep(0.9)
         pg.evaluate(
             "() => { const b=[...document.querySelectorAll('#file-panel button')].find(x=>x.textContent.trim()==='edit'); b && b.click(); }"
@@ -462,26 +460,33 @@ def sidebar_resizer(browser):
     pernix:sidebar-width — a stored width would move every box the baseline
     records if the two shared a browser profile.
     """
-    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark",
-                              reduced_motion="reduce")
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
     pg.on("console", lambda m: console_errors.append(f"[resizer] {m.text}") if m.type == "error" else None)
     pg.on("pageerror", lambda e: console_errors.append(f"[resizer] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
 
-    h = pg.evaluate(
-        """() => { const e=document.getElementById('sidebar-resizer'); if(!e) return null;
+    h = pg.evaluate("""() => { const e=document.getElementById('sidebar-resizer'); if(!e) return null;
         const r=e.getBoundingClientRect();
         return {role:e.getAttribute('role'), orient:e.getAttribute('aria-orientation'),
                 now:e.getAttribute('aria-valuenow'), min:e.getAttribute('aria-valuemin'),
                 l:Math.round(r.left), w:Math.round(r.width),
-                cursor:getComputedStyle(e).cursor}; }"""
+                cursor:getComputedStyle(e).cursor}; }""")
+    check(
+        "resizer",
+        "m2: handle is a labelled vertical separator",
+        h and h["role"] == "separator" and h["orient"] == "vertical" and h["cursor"] == "col-resize",
+        h,
+        "m2",
     )
-    check("resizer", "m2: handle is a labelled vertical separator",
-          h and h["role"] == "separator" and h["orient"] == "vertical" and h["cursor"] == "col-resize", h, "m2")
-    check("resizer", "m2: handle sits on the sidebar's seam at the default width",
-          h and h["w"] == 6 and h["l"] == 267 and h["now"] == "270" and h["min"] == "200", h, "m2")
+    check(
+        "resizer",
+        "m2: handle sits on the sidebar's seam at the default width",
+        h and h["w"] == 6 and h["l"] == 267 and h["now"] == "270" and h["min"] == "200",
+        h,
+        "m2",
+    )
 
     width = "() => Math.round(document.getElementById('sidebar').getBoundingClientRect().width)"
     pg.mouse.move(270, 400)
@@ -506,8 +511,13 @@ def sidebar_resizer(browser):
         "() => [Math.round(document.getElementById('sidebar').getBoundingClientRect().width),"
         " localStorage.getItem('pernix:sidebar-width')]"
     )
-    check("resizer", "m2: double-click restores 270 and drops the stored width",
-          reset[0] == 270 and reset[1] is None, reset, "m2")
+    check(
+        "resizer",
+        "m2: double-click restores 270 and drops the stored width",
+        reset[0] == 270 and reset[1] is None,
+        reset,
+        "m2",
+    )
     ctx.close()
 
 
