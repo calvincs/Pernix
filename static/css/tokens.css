@@ -216,6 +216,56 @@ body {
     }
 }
 
+/* ======================================================================
+   Accessibility utilities
+   ====================================================================== */
+/* In the accessibility tree, out of the layout. Used by the skip link, the
+   live regions in index.html (a11y.js writes to them) and any label that
+   should be spoken but not drawn. `clip-path: inset(50%)` is the modern
+   half; `clip` stays for older WebKit. */
+.visually-hidden {
+    position: absolute !important;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* Same treatment until focused, then a real, visible control. */
+.skip-link {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 3000;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    background: var(--bg-raised);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    text-decoration: none;
+}
+.skip-link:focus {
+    width: auto;
+    height: auto;
+    margin: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    overflow: visible;
+    clip: auto;
+    clip-path: none;
+}
+
 /* Selection */
 ::selection {
     background: var(--accent-subtle);

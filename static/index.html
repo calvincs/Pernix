@@ -72,9 +72,13 @@
     <script src="/static/js/touch-boot.js"></script>
 </head>
 <body>
+    <!-- First focusable thing on the page. Keyboard users otherwise tab through
+         the whole session list, the legend and the status bar before reaching
+         the one control they came for. Visually hidden until focused. -->
+    <a class="skip-link" href="#msg-input">Skip to composer</a>
     <div id="app">
         <!-- Sidebar -->
-        <div id="sidebar">
+        <nav id="sidebar" aria-label="Sessions">
             <header>
                 <a class="brand" href="#" aria-label="Pernix">
                     <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
@@ -86,17 +90,23 @@
                         <path d="M2.2 12 Q 9.6 9.6 12 2.2" fill="none" stroke="currentColor" stroke-width="0.45" opacity="0.55"></path>
                         <path d="M12 9.5 L14.5 12 L12 14.5 L9.5 12 Z" fill="none" stroke="currentColor" stroke-width="0.55" opacity="0.7"></path>
                     </svg>
-                    <span class="brand-word">Pernix</span>
+                    <!-- The page's one h1. Styled exactly as the span it
+                         replaced; it exists so the document has a top-level
+                         heading at all. -->
+                    <h1 class="brand-word">Pernix</h1>
                 </a>
                 <button id="new-session-btn">+ new</button>
             </header>
             <div id="session-list"></div>
-        </div>
+        </nav>
 
         <!-- Main -->
-        <div id="main">
+        <main id="main">
             <button id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">&#9776;</button>
-            <div id="messages">
+            <!-- role=region, not role=log: a log region turns every appended
+                 node into an automatic announcement, so during a streaming
+                 turn a screen reader narrates the model token by token. -->
+            <div id="messages" role="region" aria-label="Conversation">
                 <div class="messages-inner" id="messages-inner"></div>
             </div>
             <button id="jump-to-bottom" title="Jump to latest" aria-label="Jump to latest">&#8595;</button>
@@ -147,7 +157,7 @@
                     </button>
                 </div>
             </div>
-        </div>
+        </main>
 
         <!-- File panel -->
         <div id="file-panel"></div>
