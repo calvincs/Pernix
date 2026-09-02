@@ -69,6 +69,76 @@ async function _ping() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Error copy
+// ---------------------------------------------------------------------------
+// Every error the user sees used to be whatever string happened to be on the
+// exception — a FastAPI 422 rendered as "[object Object]", a provider 429 as
+// a raw JSON blob, a dead server as "Failed to fetch". None of them say what
+// to do next, which is the only thing an error message is for.
+
+export const OFFLINE_MESSAGE =
+    "Can't reach the server — your message was not sent; the text is kept.";
+
+const RATE_LIMIT_RE = /rate[_\s-]?limit|too many requests|\b429\b/i;
+const PROVIDER_AUTH_RE =
+    /api[_\s-]?key|invalid_api_key|authentication_error|incorrect api key|no auth credentials|\bforbidden\b/i;
+const CONTEXT_FULL_RE =
+    /context\s*(?:window\s*)?(?:is\s*)?full|maximum context length|context_length_exceeded|prompt is too long|reduce the length of the messages/i;
+const NETWORK_RE = /failed to fetch|networkerror|load failed|connection refused|err_connection/i;
+
+/** FastAPI hands a 422 back as a LIST of {loc, msg, type}; String() on that
+ *  is "[object Object]". Flatten it to something readable. */
+function _detailText(detail) {
+    if (Array.isArray(detail)) {
+        return detail.map((d) => {
+            if (typeof d === 'string') return d;
+            if (!d || typeof d !== 'object') return String(d);
+            const where = Array.isArray(d.loc) ? d.loc.filter((p) => p !== 'body').join('.') : '';
+            const msg = d.msg || d.message || d.type || 'invalid value';
+            return where ? `${where}: ${msg}` : msg;
+        }).filter(Boolean).join('; ');
+    }
+    if (detail && typeof detail === 'object') {
+        return detail.msg || detail.message || detail.detail || detail.error || '';
+    }
+    return detail == null ? '' : String(detail);
+}
+
+/**
+ * One actionable line for an error, whatever shape it arrived in: an Error,
+ * an OfflineError, a parsed FastAPI body, or a bare provider string.
+ *
+ * @param {Error|string|object} err
+ * @returns {string}
+ */
+export function humanizeError(err) {
+    if (!err) return 'Something went wrong.';
+    if (err.offline === true || err.name === 'OfflineError') return OFFLINE_MESSAGE;
+
+    const status = err.status ?? err.statusCode ?? null;
+    const text = String(
+        typeof err === 'string'
+            ? err
+            : (_detailText(err.detail) || err.message || _detailText(err.error) || _detailText(err)),
+    ).trim();
+
+    if (NETWORK_RE.test(text)) return OFFLINE_MESSAGE;
+    // Context first: a full context often arrives WITH a provider status code,
+    // and "compact or start a new session" is the only advice that helps.
+    if (CONTEXT_FULL_RE.test(text)) return 'Context is full — send /compact or start a new session.';
+    if (status === 429 || RATE_LIMIT_RE.test(text)) return 'The model provider is rate-limiting; retrying…';
+    // Our own 401 (an expired access token) is handled by the login overlay and
+    // must keep its own wording; this branch is for the model provider's.
+    if ((status === 401 || status === 403 || /\b40[13]\b/.test(text)) && PROVIDER_AUTH_RE.test(text)) {
+        return 'API key rejected — check Settings → Models.';
+    }
+    if (PROVIDER_AUTH_RE.test(text) && /reject|invalid|unauthor/i.test(text)) {
+        return 'API key rejected — check Settings → Models.';
+    }
+    return text || 'Something went wrong.';
+}
+
 export function setAuthToken(token) {
     _authToken = token;
     localStorage.setItem('pernix_auth_token', token);
@@ -116,8 +186,16 @@ export async function api(method, path, body = null) {
         throw new Error('Authentication required');
     }
     if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: resp.statusText }));
-        throw new Error(err.detail || err.error || resp.statusText);
+        const body = await resp.json().catch(() => ({ error: resp.statusText }));
+        const e = new Error(humanizeError({
+            status: resp.status,
+            detail: body.detail,
+            message: body.error || resp.statusText,
+        }));
+        // The raw parts stay on the error for callers that branch on them.
+        e.status = resp.status;
+        e.detail = body.detail;
+        throw e;
     }
     return resp;
 }

@@ -1,7 +1,7 @@
 // Pernix — Main application entry point
 
 import { state, subscribe } from './store.js';
-import { get, post, del, patch, getAuthToken, setAuthToken } from './api.js';
+import { get, post, del, patch, getAuthToken, setAuthToken, humanizeError } from './api.js';
 import { connectSSE, disconnectSSE } from './sse.js';
 import { getPermission, requestPermission, connectGlobalNotifications, registerServiceWorker, subscribePush } from './notifications.js';
 import { el, text, clear, initMarked, renderMarkdown } from './render.js';
@@ -1484,6 +1484,17 @@ const _DEAD_WORKER_MAX_AGE_MS = 60 * 60 * 1000;  // showing week-old corpses is 
 const _activeRlmRuns = new Map();
 let _workerTicker = null;
 
+/** The readable name of a worker: whatever the event carried, else the strip's
+ *  own record, else the session list, else a short id. */
+function _workerLabel(workerId, eventTitle) {
+    if (eventTitle) return eventTitle;
+    const known = _activeWorkers.get(workerId) || _recentDeadWorkers.get(workerId);
+    if (known && known.title) return known.title;
+    const sess = (state.sessions || []).find((x) => x.id === workerId);
+    if (sess && sess.title) return sess.title;
+    return String(workerId || '').slice(0, 8);
+}
+
 function _addDeadWorker(wid, entry) {
     _recentDeadWorkers.delete(wid);  // re-insert = move to newest position
     _recentDeadWorkers.set(wid, entry);
@@ -1905,7 +1916,11 @@ function handleEvent(event) {
     else if (type === 'stream.error') {
         if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
         _dropEmptyStreamingBubble();
-        appendMessage('system', `Error: ${event.error || 'Unknown error'}`);
+        const streamMsg = humanizeError(event.error || 'Unknown error');
+        // A stream.error ends the turn, so say how to get back: the exception
+        // is a rate-limit, which the harness is already retrying by itself.
+        const retryHint = /rate-limiting/.test(streamMsg) ? '' : ' · /retry to resend';
+        appendMessage('system', `Error: ${streamMsg}${retryHint}`);
         _collected = '';
         _streamingEl = null;
         state.streaming = false;
@@ -2124,12 +2139,15 @@ function handleEvent(event) {
 
     else if (type === 'worker.done') {
         const reason = event.termination_reason ? ` (${event.termination_reason})` : '';
-        const err = event.error ? ` error: ${event.error}` : '';
-        appendMessage('system', `Worker done: ${event.worker_id}${reason}${err}`);
+        const err = event.error ? ` error: ${humanizeError(event.error)}` : '';
+        // A raw uuid told the reader nothing about which of five parallel
+        // workers had just finished. The strip and the session list both know
+        // its title.
+        appendMessage('system', `Worker done: ${_workerLabel(event.worker_id, event.title)}${reason}${err}`);
         const prev = _activeWorkers.get(event.worker_id);
         _activeWorkers.delete(event.worker_id);
         _addDeadWorker(event.worker_id, {
-            title: (prev && prev.title) || event.worker_id.slice(0, 8),
+            title: _workerLabel(event.worker_id, event.title),
             kind: (prev && prev.kind) || '',
             reason: event.termination_reason || (event.error ? 'error' : 'done'),
             endedAt: Date.now(),
