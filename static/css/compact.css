@@ -101,9 +101,8 @@
     width: 100% !important;
     z-index: 400;
 }
-.fp-resize-handle {
-    display: none;
-}
+/* .fp-resize-handle is hidden in touch.css instead: a 4px col-resize strip is
+   a mouse affordance at EVERY width, so hiding it is a pointer question. */
 .fp-header {
     padding-top: calc(var(--sp-3) + var(--safe-top));
 }
