@@ -256,6 +256,12 @@ body.fp-resizing #main { pointer-events: none; }
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
+    /* Search results put the full relative path in this cell, so the same
+       head-truncation applies — otherwise every deep hit renders as the same
+       leading directory with the filename cut off. (V10) */
+    direction: rtl;
+    text-align: left;
+    unicode-bidi: plaintext;
 }
 
 .fp-tree-count {
@@ -339,6 +345,12 @@ body.fp-resizing #main { pointer-events: none; }
 }
 .fp-toolbar-back:hover { color: var(--accent); }
 
+/* Truncate from the HEAD, not the tail. A path ellipsised the usual way keeps
+   "data/workspace/projects/rep…" and throws away the one part that identifies
+   the file. An rtl inline direction moves the ellipsis to the start; the
+   paragraph itself stays logically LTR (unicode-bidi: plaintext picks its
+   direction from the first strong character), so the text is not reordered,
+   and text-align keeps it against the left edge. (V10) */
 .fp-toolbar-path {
     font-size: var(--text-xs);
     color: var(--text-dim);
@@ -346,6 +358,9 @@ body.fp-resizing #main { pointer-events: none; }
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+    unicode-bidi: plaintext;
 }
 
 .fp-toolbar-actions {
@@ -632,6 +647,11 @@ body.fp-resizing #main { pointer-events: none; }
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    /* Same head-truncation as .fp-toolbar-path: the deepest crumb is the one
+       that says where you are, so it is the one that must survive. (V10) */
+    direction: rtl;
+    text-align: left;
+    unicode-bidi: plaintext;
 }
 .fp-breadcrumb-part {
     color: var(--text-dim);
