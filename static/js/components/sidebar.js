@@ -122,6 +122,16 @@ async function _runSearch(q) {
     }
 }
 
+// The activity ticker is an infinite marquee. Under prefers-reduced-motion
+// the global rule in tokens.css collapses its duration to .01ms, which would
+// leave the text parked at translateX(-100%) — off-screen — instead of
+// stopping it. So don't start it at all: .session-activity is already
+// overflow:hidden with a fade mask, so the line simply truncates.
+// Queried per call, not cached: the OS setting can change while the app runs.
+function _reducedMotion() {
+    return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+}
+
 export function updateSessionActivity(sessionId, activityText) {
     if (activityText) {
         _activity.set(sessionId, activityText);
@@ -136,7 +146,7 @@ export function updateSessionActivity(sessionId, activityText) {
 
     // Update text and check overflow for scrolling
     actEl.textContent = activityText || '';
-    if (activityText) {
+    if (activityText && !_reducedMotion()) {
         requestAnimationFrame(() => {
             if (actEl.scrollWidth > actEl.parentElement.clientWidth) {
                 const duration = Math.max(8, actEl.scrollWidth / 25);
@@ -603,7 +613,7 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
     container.appendChild(item);
 
     // Scroll only live activity text (not idle previews which look like stuck status)
-    if (liveActivity) {
+    if (liveActivity && !_reducedMotion()) {
         requestAnimationFrame(() => {
             if (actTextEl.scrollWidth > actTextEl.parentElement.clientWidth) {
                 const duration = Math.max(8, actTextEl.scrollWidth / 25);
