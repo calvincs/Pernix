@@ -1730,6 +1730,26 @@ function _clearToolStatus() {
 let _injectedMessages = [];  // queued message DOM elements awaiting agent pickup
 const _questionBubbles = new Map();  // question_id → DOM element for live Q&A bubbles
 
+/**
+ * Drop the streaming bubble if nothing was ever written into it.
+ *
+ * appendMessage('assistant', '') opens an empty card the moment a turn
+ * starts. Only tool.call and send()'s catch used to clean it up, so every
+ * OTHER way a turn can end — an LLM error, an exhausted budget, a cancel, a
+ * reflect that gave up, or a turn that completed with no text at all — left
+ * a headed-but-empty "ASSISTANT" card in the transcript that no reload would
+ * ever reproduce. A bubble that already holds text is left alone: that is a
+ * partial answer, and it is the caller's job to finalize it.
+ */
+function _dropEmptyStreamingBubble() {
+    if (!_streamingEl) return;
+    if (_collected) return;
+    const contentEl = _streamingEl.querySelector('.content');
+    if (contentEl && contentEl.textContent.trim()) return;
+    _streamingEl.remove();
+    _streamingEl = null;
+}
+
 function handleEvent(event) {
     // Guard: reject events from other sessions
     if (event.session_id && event.session_id !== state.sid) return;
@@ -1824,6 +1844,7 @@ function handleEvent(event) {
 
     else if (type === 'stream.error') {
         if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+        _dropEmptyStreamingBubble();
         appendMessage('system', `Error: ${event.error || 'Unknown error'}`);
         _collected = '';
         _streamingEl = null;
@@ -2210,12 +2231,14 @@ function handleEvent(event) {
         if (state.sid) updateSessionActivity(state.sid, `reflect: retry #${event.attempt}`);
     }
     else if (type === 'reflect.exhausted') {
+        _dropEmptyStreamingBubble();
         appendMessage('system', `Reflect: max retries reached. ${event.reasoning || ''}`);
         updateStatus('');
         state.streaming = false;
         _showSendButton();
     }
     else if (type === 'reflect.escalate') {
+        _dropEmptyStreamingBubble();
         appendMessage('system', `Reflect: needs clarification \u2014 ${event.missing || event.reasoning || ''}`);
         updateStatus('');
         state.streaming = false;
@@ -2225,6 +2248,7 @@ function handleEvent(event) {
         // Cross-retry breaker: reflect asked for another retry, but the last
         // two attempts failed identically. Retrying is refused rather than
         // burning the remaining budget on the same failure.
+        _dropEmptyStreamingBubble();
         appendMessage('system',
             `Reflect: retry stopped \u2014 the same failure repeated across `
             + `${event.attempts || '?'} attempt(s). ${event.reasoning || ''}`);
@@ -2298,9 +2322,10 @@ function handleEvent(event) {
     }
 
     else if (type === 'stream.budget_exhausted') {
+        if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+        _dropEmptyStreamingBubble();
         appendMessage('system', `LLM budget exhausted: ${event.message || 'no further retries'}`);
         updateStatus('');
-        if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
         _collected = '';
         _streamingEl = null;
         state.streaming = false;
@@ -2385,6 +2410,7 @@ function handleEvent(event) {
 
     else if (type === 'turn.complete') {
         // Safety net: ensure button is always reset when turn finishes
+        _dropEmptyStreamingBubble();
         if (state.streaming) {
             state.streaming = false;
             _showSendButton();
@@ -2406,6 +2432,8 @@ function handleEvent(event) {
     }
 
     else if (type === 'session.cancelled') {
+        if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+        _dropEmptyStreamingBubble();
         appendMessage('system', 'Session cancelled by user.');
         updateStatus('');
         state.streaming = false;
