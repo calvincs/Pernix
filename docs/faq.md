@@ -119,7 +119,7 @@ If you've enabled Dream (Settings → Autonomy & idle work → Dream (Introspect
 
 ### Where do the agent's file outputs land?
 
-`data/workspace/`. Subdirectories are organized by project. The file panel in the UI shows the tree; the REST API at `GET /api/workspace` lists it; `GET /workspace/{path}` downloads any file.
+`data/workspace/`. Subdirectories are organized by project. The Explorer's Files → Workspace tab shows the tree; the REST API at `GET /api/workspace` lists it; `GET /workspace/{path}` downloads any file.
 
 The agent can only write inside `data/workspace/` — protected paths like `.env`, `SOUL.md`, and `data/sessions.db` are blocked.
 

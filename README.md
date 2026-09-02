@@ -172,9 +172,9 @@ Pernix ships with a full progressive web app (PWA) at the root URL. Key panels:
 | **Session sidebar** | Create, switch between, and manage sessions — full-text search, and a legend to filter by type (chat, cron, worker, Dream) |
 | **Chat** | Real-time conversation with streamed responses and tool call visibility |
 | **Settings** | Configure all server settings without restarting |
-| **File explorer** | Browse, upload, and open files in the workspace |
-| **Jobs** | Cron jobs, live snooze activity, and recent RLM runs |
-| **Timeline** | Step-by-step view of the state machine and every tool call in a turn — including in-flight tool calls as they run |
+| **Explorer** | One panel with a group strip and a tab strip: Files (Workspace), Knowledge (Memory), Capabilities (Skills, Tools, Servers (MCP)), Automation (Jobs), Self-tuning (Learning, Self-checks, Goals) |
+| **Jobs** | Explorer → Automation → Jobs: scheduled jobs, live snooze activity, and recent RLM runs |
+| **State timeline** | Step-by-step view of the state machine and every tool call in a turn — including in-flight tool calls as they run; opened from the state badge in the status bar |
 | **Notifications bell** | Alert when the agent is waiting for your input |
 
 The UI works on mobile when accessed via network mode. It can also be installed as a PWA for a native-app-like experience.
