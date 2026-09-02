@@ -5,6 +5,22 @@
 
 import { el, text, clear } from '../../render.js';
 import { del, get, post } from '../../api.js';
+import { resultLine, tabGlossary } from './telos.js';
+
+// Every action here ends in a refresh() that rebuilds the whole tab, so an
+// inline line written before it would be wiped a frame later. Park the message
+// and render it at the top of the next pass instead of firing an alert(). (S11)
+let _pendingNotice = null;
+
+export function setActionNotice(message, isError = false) {
+    _pendingNotice = message ? { message, isError } : null;
+}
+
+export function takeActionNotice() {
+    const notice = _pendingNotice;
+    _pendingNotice = null;
+    return notice ? resultLine(notice.message, notice.isError) : null;
+}
 
 function relTime(isoStr) {
     if (!isoStr) return '';
@@ -34,7 +50,7 @@ export async function actionBtn(label, fn, refresh) {
         try {
             await fn();
         } catch (e) {
-            alert(`Action failed: ${e.message || e}`);
+            setActionNotice(`Action failed: ${e.message || e}`, true);
         }
         await refresh();
     });
@@ -58,12 +74,25 @@ export async function renderAdaptiveTab(container) {
         return;
     }
 
+    container.appendChild(tabGlossary(
+        'Rules the agent writes about itself — routing hints and prompt notes it '
+        + 'may apply on its own, everything else waiting for your approval, and a '
+        + 'one-click rollback for all of it.',
+    ));
+
     const head = el('div', { class: 'adaptive-head' }, [
         badge(entriesRes.enabled ? 'enabled' : 'disabled', entriesRes.enabled ? 'ok' : 'off'),
         badge(entriesRes.auto_apply ? 'auto-apply on' : 'auto-apply off', entriesRes.auto_apply ? 'ok' : 'warn'),
-        el('button', { class: 'adaptive-btn', onClick: refresh }, [text('↻ Refresh')]),
+        el('button', {
+            class: 'adaptive-btn',
+            title: 'Reload entries, proposals, batches and the journal',
+            'aria-label': 'Refresh the Adaptive tab',
+            onClick: refresh,
+        }, [text('↻ Refresh')]),
     ]);
     container.appendChild(head);
+    const notice = takeActionNotice();
+    if (notice) container.appendChild(notice);
 
     // --- Pending proposals (approve = apply) ---
     const proposals = proposalsRes.proposals || [];
@@ -116,23 +145,33 @@ export async function renderAdaptiveTab(container) {
             placeholder: 'the instruction — what to do and when',
             style: { width: '100%', minHeight: '80px' },
         });
+        // The form stays open on failure, so its result belongs IN the form —
+        // where the text the user has to fix still is. (S11)
+        const formResult = el('div');
         const save = el('button', { class: 'adaptive-btn' }, [text('Create')]);
         save.addEventListener('click', async () => {
             save.disabled = true;
+            clear(formResult);
             try {
                 await post('/api/adaptive/entries', { kind: kindSel.value, title: titleIn.value, content: contentIn.value });
+                setActionNotice(`Entry "${titleIn.value}" created`);
                 await refresh();
             } catch (err) {
-                alert(`Create failed: ${err.message || err}`);
+                formResult.appendChild(resultLine(`Create failed: ${err.message || err}`, true));
                 save.disabled = false;
             }
         });
         const cancel = el('button', { class: 'adaptive-btn' }, [text('Cancel')]);
-        cancel.addEventListener('click', refresh);
+        cancel.addEventListener('click', () => {
+            const typed = titleIn.value.trim() || contentIn.value.trim();
+            if (typed && !confirm('Discard this unsaved entry?')) return;
+            refresh();
+        });
         formSlot.appendChild(el('div', { class: 'adaptive-card' }, [
             el('div', { class: 'adaptive-card-head' }, [text('New adaptive entry (yours — applies immediately, journaled)')]),
             kindSel, titleIn, contentIn,
             el('div', { class: 'adaptive-card-actions' }, [save, cancel]),
+            formResult,
         ]));
     });
     const byKind = {};
