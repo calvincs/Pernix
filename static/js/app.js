@@ -1543,10 +1543,10 @@ const SLASH_COMMANDS = {
         // skills, memory, or attachments.
         const caps = [
             ['Attach files', 'paperclip button, drag & drop, or paste a copied screenshot/file — images and audio go to the model'],
-            ['Voice input', 'mic button dictates or records for the model — enable an engine in Settings → Voice Input'],
-            ['Ctrl+Shift+M', 'tap to toggle the mic, hold for push-to-talk (mic button works the same); Esc cancels'],
-            ['Schedule jobs', 'ask in chat ("every morning at 9, …") or Explorer 📁 → Jobs'],
-            ['Skills', 'domain expertise packages the agent loads on demand — Explorer 📁 → Skills'],
+            ['Voice input', 'mic button dictates or records for the model — enable an engine in Settings → Integrations → Voice Input'],
+            ['Ctrl/Cmd+Shift+M', 'tap to toggle the mic, hold for push-to-talk (mic button works the same); Esc cancels'],
+            ['Schedule jobs', 'ask in chat ("every morning at 9, …") or Explorer → Automation → Jobs'],
+            ['Skills', 'domain expertise packages the agent loads on demand — Explorer → Capabilities → Skills'],
             ['Memory', 'the agent remembers across sessions; just ask it to remember/recall things'],
             ['Workers', 'the agent can fan work out to parallel sub-agents for big tasks'],
             ['Search sessions', 'search box at the top of the sidebar finds any past conversation'],
