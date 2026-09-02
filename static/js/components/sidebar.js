@@ -5,6 +5,7 @@ import { isTouch } from '../mobile.js';
 import { get, post, patch } from '../api.js';
 import { openSpaceModal, openSpaceDeleteDialog } from './modals/spaces.js';
 import { confirmDanger } from './modals/confirm.js';
+import { actionSheet } from './modals/sheet.js';
 import { notify } from '../feedback.js';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,11 @@ let _spaces = [];  // last /api/sessions payload's spaces list
 
 // Live activity text per session (cleared on idle)
 const _activity = new Map(); // sessionId → string
+
+// The last payload, keyed by id. openSessionSheet() takes an id — the
+// session header knows which session it is showing, not which object the
+// sidebar last rendered — and this is where it resolves one.
+const _sessionsById = new Map();
 
 // Sessions the user has deleted but that the server still has, because the
 // undo window has not closed yet. They are filtered out of every render, so
@@ -250,7 +256,7 @@ export function updateSessionActivity(sessionId, activityText) {
 const FOCUS_CONTROLS = [
     'session-id-badge', 'session-pin', 'session-rename', 'session-space-move',
     'session-delete', 'sg-toggle', 'spaces-new-btn', 'space-add-btn',
-    'space-gear-btn', 'space-del-btn',
+    'space-gear-btn', 'space-del-btn', 'session-menu-btn', 'space-menu-btn',
 ];
 
 function _focusMark(list) {
@@ -285,6 +291,8 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     // concerned. Filtering before the guard's fingerprint is what makes the
     // set part of it — the payload itself has not changed.
     sessions = (sessions || []).filter(s => !_deferredDeletes.has(s.id));
+    _sessionsById.clear();
+    for (const s of sessions) _sessionsById.set(s.id, s);
     // The guard must see spaces too: a label/color edit with an unchanged
     // session list would otherwise never repaint.
     const json = JSON.stringify(sessions) + '|' + JSON.stringify(spaces) + '|' + activeSid;
@@ -460,6 +468,18 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
 // Space groups (v33) — one collapsible group per space, above the buckets
 // ---------------------------------------------------------------------------
 
+async function _openSpaceSheet(space) {
+    const pick = await actionSheet({
+        title: space.label,
+        items: [
+            { id: 'settings', label: 'Space settings', icon: 'settings' },
+            { id: 'delete', label: 'Delete space', icon: 'trash', danger: true },
+        ],
+    });
+    if (pick === 'settings') openSpaceModal(space);
+    else if (pick === 'delete') openSpaceDeleteDialog(space);
+}
+
 function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, sidebarState) {
     // Pinned first, then recency (the never-roll-off union can append stale
     // sessions out of order — sort locally instead of trusting API order).
@@ -490,47 +510,61 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
         el('span', { class: 'sg-count' }, [text(String(group.length))]),
     ]);
 
+    const addBtn = el('button', {
+        class: 'space-btn space-add-btn',
+        title: `New session in ${space.label}`,
+        'aria-label': `New session in ${space.label}`,
+        onClick: async (e) => {
+            e.stopPropagation();
+            try {
+                const r = await post('/api/sessions', { title: 'New session', space_id: space.id });
+                _lastJson = '';
+                window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
+                if (r.session_id) _select(r.session_id);
+            } catch (err) {
+                notify('error', `Could not start a session in “${space.label}” — ${_reason(err)}.`);
+            }
+        },
+    }, [text('+')]);
+
+    // "+" is the one thing a space header is for often enough to keep as its
+    // own target; settings and delete are rare and destructive, so on touch
+    // they move behind the same overflow control the rows use. (P1)
+    const controls = isTouch()
+        ? [el('button', {
+            class: 'space-btn space-menu-btn',
+            type: 'button',
+            title: `Actions for ${space.label}`,
+            'aria-label': `Actions for the space ${space.label}`,
+            'aria-haspopup': 'dialog',
+            onClick: (e) => { e.stopPropagation(); _openSpaceSheet(space); },
+        }, [icon('more', { size: 18 })])]
+        : [
+            el('button', {
+                class: 'space-btn space-gear-btn',
+                title: `Space settings — ${space.label}`,
+                'aria-label': `Space settings — ${space.label}`,
+                onClick: (e) => {
+                    e.stopPropagation();
+                    openSpaceModal(space);
+                },
+            }, [icon('settings', { size: 12 })]),
+            el('button', {
+                class: 'space-btn space-del-btn',
+                title: `Delete space ${space.label}`,
+                'aria-label': `Delete space ${space.label}`,
+                onClick: (e) => {
+                    e.stopPropagation();
+                    openSpaceDeleteDialog(space);
+                },
+            }, [icon('x', { size: 12 })]),
+        ];
+
     const header = el('div', {
         class: 'session-group-header space-group-header' + (collapsed ? ' collapsed' : ''),
         'data-group': 'space:' + space.id,
         style: `--space-color: ${space.color}`,
-    }, [
-        toggle,
-        el('button', {
-            class: 'space-btn space-add-btn',
-            title: `New session in ${space.label}`,
-            'aria-label': `New session in ${space.label}`,
-            onClick: async (e) => {
-                e.stopPropagation();
-                try {
-                    const r = await post('/api/sessions', { title: 'New session', space_id: space.id });
-                    _lastJson = '';
-                    window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
-                    if (r.session_id) _select(r.session_id);
-                } catch (err) {
-                    notify('error', `Could not start a session in “${space.label}” — ${_reason(err)}.`);
-                }
-            },
-        }, [text('+')]),
-        el('button', {
-            class: 'space-btn space-gear-btn',
-            title: `Space settings — ${space.label}`,
-            'aria-label': `Space settings — ${space.label}`,
-            onClick: (e) => {
-                e.stopPropagation();
-                openSpaceModal(space);
-            },
-        }, [icon('settings', { size: 12 })]),
-        el('button', {
-            class: 'space-btn space-del-btn',
-            title: `Delete space ${space.label}`,
-            'aria-label': `Delete space ${space.label}`,
-            onClick: (e) => {
-                e.stopPropagation();
-                openSpaceDeleteDialog(space);
-            },
-        }, [icon('x', { size: 12 })]),
-    ]);
+    }, [toggle, addBtn, ...controls]);
 
     const body = el('div', { class: 'session-group-body' + (collapsed ? ' collapsed' : '') });
 
@@ -675,11 +709,11 @@ function _attentionBadge(session) {
     return null;
 }
 
-function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) {
-    const typeKey = _getTypeKey(session);
-    const typeDef = SESSION_TYPES[typeKey];
-
-    // Build title text
+// The row's title, cleaned of the prefixes the dot already says. Split out
+// of _renderSessionItem so the action sheet names itself exactly the way the
+// row does — a sheet headed "Cron: nightly sweep" over a row that reads
+// "nightly sweep" looks like it belongs to something else.
+function _displayTitle(session, typeKey = _getTypeKey(session)) {
     let titleText = session.title || 'New session';
     // Strip thinking model garbage from title display
     if (/^(Thinking Process|<think|Thought Process)/i.test(titleText)) {
@@ -701,89 +735,39 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
             ? titleText
             : `Dream ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
     }
+    return titleText;
+}
 
-    const meta = [];
+// ---------------------------------------------------------------------------
+// What a session row can do — ONE definition
+//
+// The desktop's four hover buttons and the touch overflow sheet are two ways
+// of reaching the same five actions. Both call these, so there is no second
+// copy of "pin optimistically, then put the pin back if the PATCH failed" to
+// drift out of step with the first. (P1)
+// ---------------------------------------------------------------------------
 
-    // Time
-    if (session.updated_at) {
-        meta.push(el('span', { class: 'session-time' }, [text(_relativeTime(session.updated_at))]));
-    }
-
-    // Session ID badge — hover shows full id, click copies to clipboard
-    meta.push(el('button', {
-        class: 'session-id-badge',
-        title: session.id,
-        'aria-label': `Copy session id ${session.id}`,
-        onClick: (e) => {
-            e.stopPropagation();
-            _copySessionId(e.currentTarget, session.id);
-        },
-    }, [text('#')]));
-
-    // Pin toggle — pinned sessions live in their own group at the top.
-    if (!isWorker) {
-        meta.push(el('button', {
-            class: `session-pin${session.pinned ? ' pinned' : ''}`,
-            title: session.pinned ? 'Unpin session' : 'Pin session to top',
-            'aria-label': session.pinned ? `Unpin ${titleText}` : `Pin ${titleText} to top`,
-            'aria-pressed': String(!!session.pinned),
-            onClick: async (e) => {
-                e.stopPropagation();
-                const was = session.pinned;
-                const next = !session.pinned;
-                // Optimistic: a pin that waits on a round trip before the row
-                // moves reads as a click that did not register.
-                session.pinned = next ? 1 : 0;
+function _sessionActions(session, titleText) {
+    return {
+        async togglePin() {
+            const was = session.pinned;
+            const next = !session.pinned;
+            // Optimistic: a pin that waits on a round trip before the row
+            // moves reads as a click that did not register.
+            session.pinned = next ? 1 : 0;
+            _repaint();
+            try {
+                await patch(`/api/sessions/${session.id}`, { pinned: next });
+            } catch (err) {
+                session.pinned = was;
                 _repaint();
-                try {
-                    await patch(`/api/sessions/${session.id}`, { pinned: next });
-                } catch (err) {
-                    session.pinned = was;
-                    _repaint();
-                    notify('error', `Could not ${next ? 'pin' : 'unpin'} “${titleText}” — ${_reason(err)}.`);
-                }
-            },
-        }, [icon(session.pinned ? 'pin-filled' : 'pin', { size: 12 })]));
-
-        // Rename — swaps the title for an inline editor.
-        meta.push(el('button', {
-            class: 'session-rename',
-            title: 'Rename session',
-            'aria-label': `Rename ${titleText}`,
-            onClick: (e) => {
-                e.stopPropagation();
-                _startRename(session);
-            },
-        }, [icon('edit', { size: 12 })]));
-
-        // Move to space — dropdown of spaces (+ "No space"). Only rendered
-        // when at least one space exists; membership changes never bump
-        // recency (set_session_meta contract).
-        if (_spaces.length) {
-            meta.push(el('button', {
-                class: 'session-space-move',
-                title: session.space_id ? 'Move to another space' : 'Move to space',
-                'aria-label': session.space_id
-                    ? `Move ${titleText} to another space`
-                    : `Move ${titleText} to a space`,
-                onClick: (e) => {
-                    e.stopPropagation();
-                    _openMoveMenu(session, e.currentTarget);
-                },
-            }, [icon('move', { size: 12 })]));
-        }
-    }
-
-    // Delete button. The \u00d7 is always visible on touch devices and sits
-    // next to the copy-id button, so a stray tap must not destroy a
-    // conversation: it asks first, naming what it is about to delete, and
-    // then leaves five seconds to take it back.
-    meta.push(el('button', {
-        class: 'session-delete',
-        title: 'Delete session',
-        'aria-label': `Delete ${titleText}`,
-        onClick: async (e) => {
-            e.stopPropagation();
+                notify('error', `Could not ${next ? 'pin' : 'unpin'} “${titleText}” — ${_reason(err)}.`);
+            }
+        },
+        rename() { _startRename(session); },
+        move(anchor) { _openMoveMenu(session, anchor); },
+        copyId(btn) { return _copySessionId(btn, session.id); },
+        async remove() {
             const n = session.message_count;
             const what = n == null ? '' : ` and its ${n} message${n === 1 ? '' : 's'}`;
             const ok = await confirmDanger({
@@ -797,7 +781,156 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
             });
             if (ok) _deleteWithUndo(session.id, titleText);
         },
-    }, [text('\u00d7')]));
+    };
+}
+
+// The move dropdown is a hover-anchored list of 22px rows: fine under a
+// mouse, unusable under a thumb. On touch the same choice is a second sheet
+// — same spaces, same PATCH, same failure message, just a list you can hit.
+// A leading space cannot collide with a real space id.
+const NO_SPACE = ' none';
+
+async function _moveSheet(session, titleText) {
+    const items = _spaces.map(sp => ({
+        id: sp.id,
+        label: sp.label,
+        icon: 'folder',
+        disabled: (session.space_id || null) === sp.id,
+        hint: (session.space_id || null) === sp.id ? 'current' : undefined,
+    }));
+    if (session.space_id) {
+        items.push({ id: NO_SPACE, label: 'Remove from space', icon: 'x' });
+    }
+    const pick = await actionSheet({ title: `Move “${titleText}” to…`, items });
+    if (pick == null) return;
+    await _moveSessionToSpace(session, pick === NO_SPACE ? null : pick);
+}
+
+/**
+ * Open a session's overflow sheet by id. Exported so the session header's
+ * title can offer the same actions the row does, rather than growing its own
+ * second set of controls.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<void>} resolves once the chosen action has been started.
+ */
+export function openSessionSheet(sessionId) {
+    const session = _sessionsById.get(sessionId);
+    if (!session) return Promise.resolve();
+    return _openSessionSheet(session);
+}
+
+async function _openSessionSheet(session, { anchor = null } = {}) {
+    const typeKey = _getTypeKey(session);
+    const titleText = _displayTitle(session, typeKey);
+    // Workers and RLM runs belong to their parent: they have no pin, no
+    // rename and no space of their own on the desktop row either.
+    const isChild = CHILD_TYPES.has(session.session_type);
+    const act = _sessionActions(session, titleText);
+
+    const items = [];
+    if (!isChild) {
+        items.push({ id: 'pin', label: session.pinned ? 'Unpin' : 'Pin to top', icon: 'pin' });
+        items.push({ id: 'rename', label: 'Rename', icon: 'edit' });
+        if (_spaces.length) items.push({ id: 'move', label: 'Move to space…', icon: 'move' });
+    }
+    items.push({ id: 'copy', label: 'Copy session id', icon: 'copy' });
+    items.push({ id: 'delete', label: 'Delete', icon: 'trash', danger: true });
+
+    switch (await actionSheet({ title: titleText, items })) {
+        case 'pin': return act.togglePin();
+        case 'rename': return act.rename();
+        case 'move': return _moveSheet(session, titleText);
+        case 'copy': return act.copyId(anchor);
+        case 'delete': return act.remove();
+        default: return undefined;   // cancel, Escape, backdrop
+    }
+}
+
+function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) {
+    const typeKey = _getTypeKey(session);
+    const typeDef = SESSION_TYPES[typeKey];
+    const titleText = _displayTitle(session, typeKey);
+    const act = _sessionActions(session, titleText);
+
+    const meta = [];
+
+    // Time
+    if (session.updated_at) {
+        meta.push(el('span', { class: 'session-time' }, [text(_relativeTime(session.updated_at))]));
+    }
+
+    // On a finger device the four hover-revealed controls become ONE 44px
+    // overflow button. Four 24px targets in a 280px drawer left the title —
+    // the only thing that tells two rows apart — about seventy pixels, and
+    // three of the four were invisible until a hover that never comes. (P1)
+    let menuBtn = null;
+    if (isTouch()) {
+        menuBtn = el('button', {
+            class: 'session-menu-btn',
+            type: 'button',
+            title: 'Actions',
+            'aria-label': `Actions for ${titleText}`,
+            'aria-haspopup': 'dialog',
+            onClick: (e) => {
+                e.stopPropagation();
+                _openSessionSheet(session, { anchor: e.currentTarget });
+            },
+        }, [icon('more', { size: 18 })]);
+    } else {
+        // Session ID badge — hover shows full id, click copies to clipboard
+        meta.push(el('button', {
+            class: 'session-id-badge',
+            title: session.id,
+            'aria-label': `Copy session id ${session.id}`,
+            onClick: (e) => {
+                e.stopPropagation();
+                act.copyId(e.currentTarget);
+            },
+        }, [text('#')]));
+
+        // Pin toggle — pinned sessions live in their own group at the top.
+        if (!isWorker) {
+            meta.push(el('button', {
+                class: `session-pin${session.pinned ? ' pinned' : ''}`,
+                title: session.pinned ? 'Unpin session' : 'Pin session to top',
+                'aria-label': session.pinned ? `Unpin ${titleText}` : `Pin ${titleText} to top`,
+                'aria-pressed': String(!!session.pinned),
+                onClick: (e) => { e.stopPropagation(); act.togglePin(); },
+            }, [icon(session.pinned ? 'pin-filled' : 'pin', { size: 12 })]));
+
+            // Rename — swaps the title for an inline editor.
+            meta.push(el('button', {
+                class: 'session-rename',
+                title: 'Rename session',
+                'aria-label': `Rename ${titleText}`,
+                onClick: (e) => { e.stopPropagation(); act.rename(); },
+            }, [icon('edit', { size: 12 })]));
+
+            // Move to space — dropdown of spaces (+ "No space"). Only rendered
+            // when at least one space exists; membership changes never bump
+            // recency (set_session_meta contract).
+            if (_spaces.length) {
+                meta.push(el('button', {
+                    class: 'session-space-move',
+                    title: session.space_id ? 'Move to another space' : 'Move to space',
+                    'aria-label': session.space_id
+                        ? `Move ${titleText} to another space`
+                        : `Move ${titleText} to a space`,
+                    onClick: (e) => { e.stopPropagation(); act.move(e.currentTarget); },
+                }, [icon('move', { size: 12 })]));
+            }
+        }
+
+        // Delete button. It asks first, naming what it is about to delete,
+        // and then leaves five seconds to take it back.
+        meta.push(el('button', {
+            class: 'session-delete',
+            title: 'Delete session',
+            'aria-label': `Delete ${titleText}`,
+            onClick: (e) => { e.stopPropagation(); act.remove(); },
+        }, [text('×')]));
+    }
 
     const classes = ['session-item'];
     if (session.id === activeSid) classes.push('active');
@@ -858,6 +991,12 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
         ]),
         actLine,
     ]);
+
+    // Outside .session-top on purpose: a 44px square inside the title's flex
+    // row would eat the title's width on the very line that needs it, and a
+    // two-line row wants the control centred against both lines rather than
+    // baseline-aligned with the first. It is positioned against the row.
+    if (menuBtn) item.appendChild(menuBtn);
 
     _activateOnKey(item, select);
 
@@ -949,20 +1088,25 @@ function _reason(err) {
 // Move-to-space dropdown — one floating menu at a time; click-away closes.
 // ---------------------------------------------------------------------------
 
+// The move itself, shared by the dropdown and the touch sheet.
+async function _moveSessionToSpace(session, spaceId) {
+    if ((spaceId || null) === (session.space_id || null)) return;
+    try {
+        await patch(`/api/sessions/${session.id}`, { space_id: spaceId });
+        _lastJson = '';
+        window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
+    } catch (err) {
+        const to = spaceId ? (spaceById(spaceId)?.label || 'that space') : 'no space';
+        notify('error', `Could not move “${session.title || 'this session'}” to ${to} — ${_reason(err)}.`);
+    }
+}
+
 function _openMoveMenu(session, anchor) {
     document.querySelector('.space-move-menu')?.remove();
     const menu = el('div', { class: 'space-move-menu' });
     const choose = async (spaceId) => {
         menu.remove();
-        if ((spaceId || null) === (session.space_id || null)) return;
-        try {
-            await patch(`/api/sessions/${session.id}`, { space_id: spaceId });
-            _lastJson = '';
-            window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
-        } catch (err) {
-            const to = spaceId ? (spaceById(spaceId)?.label || 'that space') : 'no space';
-            notify('error', `Could not move “${session.title || 'this session'}” to ${to} — ${_reason(err)}.`);
-        }
+        await _moveSessionToSpace(session, spaceId);
     };
     for (const sp of _spaces) {
         menu.appendChild(el('div', {
@@ -1128,6 +1272,9 @@ function _updateLegendCounts(counts) {
 // Copy session id
 // ---------------------------------------------------------------------------
 
+// `btn` is the badge to flash — null when the copy came from the action
+// sheet, which has already closed by the time the clipboard write lands. The
+// toast is the confirmation there.
 async function _copySessionId(btn, sessionId) {
     try {
         await navigator.clipboard.writeText(sessionId);
@@ -1141,6 +1288,10 @@ async function _copySessionId(btn, sessionId) {
         ta.select();
         try { document.execCommand('copy'); } catch {}
         document.body.removeChild(ta);
+    }
+    if (!btn || !btn.isConnected) {
+        notify('info', 'Session id copied.');
+        return;
     }
     btn.classList.add('copied');
     setTimeout(() => btn.classList.remove('copied'), 900);
