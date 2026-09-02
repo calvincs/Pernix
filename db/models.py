@@ -2191,16 +2191,26 @@ def delete_old_dream_hypotheses(cutoff_iso: str, statuses: tuple[str, ...]) -> i
 
 def list_cron_sessions_before(max_age_days: int = 7) -> list[dict]:
     """Cron sessions the pruner would delete — the single criteria
-    definition, shared with retention's distill-before-delete digest."""
+    definition, shared with retention's distill-before-delete digest.
+
+    Keyed on session_type = 'cron', the column the scheduler stamps on every
+    session it creates — never on the title. The title is a display string
+    the user and the LLM titler both control: the old `title LIKE 'Cron: %'`
+    sweep cascade-deleted a normal session someone had renamed "Cron: …"
+    after seven idle days, while the scheduler's own "Job test: …" sessions
+    (also type cron) never matched and accumulated forever. Workers spawned
+    by a cron run are type 'worker' and go with their parent via
+    delete_session's cascade, so no parent clause is needed.
+    """
     from datetime import datetime, timedelta, timezone
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
     with connect_sessions() as conn:
         # pinned exclusion: a user who pins a cron session is saying "keep
-        # this run" — the title-based sweep must not eat it (pre-v33 gap).
+        # this run" — the sweep must not eat it.
         rows = conn.execute(
             "SELECT id, title, updated_at FROM sessions "
-            "WHERE title LIKE 'Cron: %' AND updated_at < ? AND COALESCE(pinned, 0) = 0",
+            "WHERE session_type = 'cron' AND updated_at < ? AND COALESCE(pinned, 0) = 0",
             (cutoff,),
         ).fetchall()
         return [dict(r) for r in rows]
