@@ -37,7 +37,7 @@ curl -b "pernix_auth=<your-token>" https://host:8090/api/sessions
 curl "https://host:8090/api/sessions?token=<your-token>"
 ```
 
-Retrieve your token from the Settings UI or from `GET /api/settings/auth-token`. Rotate it with `POST /api/settings/auth-token/regenerate`. In network mode both require a valid Bearer token like every other endpoint — the old localhost-only restriction on them was deliberately removed.
+Retrieve your token from Settings → Environment & network → Remote Access (**Show Token**) or from `GET /api/settings/auth-token`. Rotate it with `POST /api/settings/auth-token/regenerate`. In network mode both require a valid Bearer token like every other endpoint — the old localhost-only restriction on them was deliberately removed.
 
 ---
 

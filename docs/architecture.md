@@ -152,7 +152,7 @@ IDLE_READY → SCOUTING → PROCESSING → FINALIZING → SCOUTING → PROCESSIN
                                Reflect said "retry"
 ```
 
-The retry has the same `turn_id` as the original attempt but `retry_index = 1`. Both runs are visible in the timeline UI.
+The retry has the same `turn_id` as the original attempt but `retry_index = 1`. Both runs are visible in the **State timeline**, which the state badge in the status bar opens.
 
 ### A turn that needs more info
 
@@ -270,7 +270,7 @@ Compaction algorithm (high level): keep the most recent ~51K tokens verbatim, re
 
 This means:
 
-- The UI always shows full history
+- The UI can show the whole history — it opens on the last 200 messages and pages older ones in with **Load earlier messages**
 - You can scroll back through everything
 - Compaction is repeatable — if a turn fails, the next turn can re-compact from scratch
 
