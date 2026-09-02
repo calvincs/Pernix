@@ -413,41 +413,7 @@
     cursor: pointer;
 }
 
-/* Buttons */
-.btn {
-    font-family: var(--mono);
-    font-size: var(--text-sm);
-    padding: var(--sp-2) var(--sp-4);
-    border-radius: var(--radius);
-    cursor: pointer;
-    transition: var(--transition);
-    font-weight: 500;
-}
-
-.btn-primary {
-    background: var(--accent);
-    color: var(--bg);
-    border: none;
-}
-.btn-primary:hover { background: var(--text-bright); }
-
-.btn-secondary {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-}
-.btn-secondary:hover {
-    border-color: var(--text);
-    color: var(--text);
-}
-.btn-secondary.active {
-    background: var(--accent);
-    color: var(--bg);
-    border-color: var(--accent);
-}
-.btn-secondary.active:hover {
-    color: var(--bg);
-}
+/* Buttons — the base, the roles and the sizes all live in buttons.css. */
 
 .save-status {
     font-size: var(--text-xs);
@@ -459,13 +425,6 @@
 .save-status.status-warn { color: var(--accent); }
 .save-status.status-error { color: var(--error); }
 .save-status.status-muted { color: var(--text-dim); }
-
-.btn-danger {
-    background: var(--error);
-    color: var(--bg);
-    border: none;
-}
-.btn-danger:hover { background: var(--error); filter: brightness(1.15); }
 
 /* Tabs */
 .tab-bar {
@@ -571,10 +530,6 @@
     transition: border-color var(--transition);
 }
 .or-model-input:focus { border-color: var(--accent-dim); }
-.btn-sm {
-    padding: var(--sp-1) var(--sp-3);
-    font-size: var(--text-xs);
-}
 .or-empty {
     font-size: var(--text-xs);
     color: var(--text-faint);
@@ -686,42 +641,16 @@
     gap: var(--sp-2);
     margin-top: var(--sp-1);
 }
+/* Only the geometry is local: these three share the width of the row and are
+   a full-size target, not a toolbar chip. Their colours are the .btn--success
+   / .btn--danger / .btn--secondary roles in buttons.css. */
 .q-yes-btn,
 .q-no-btn,
 .q-other-btn {
     flex: 1;
     padding: var(--sp-3) var(--sp-2);
     font-size: var(--text-md);
-    font-weight: 500;
     border-radius: var(--radius);
-    border: 1px solid var(--border);
-    cursor: pointer;
-    transition: var(--transition);
-    font-family: var(--mono);
-}
-.q-yes-btn {
-    background: var(--success-subtle);
-    color: var(--success);
-    border-color: var(--success);
-}
-.q-yes-btn:hover {
-    background: color-mix(in srgb, var(--success) 22%, var(--bg));
-}
-.q-no-btn {
-    background: var(--error-subtle);
-    color: var(--error);
-    border-color: var(--error);
-}
-.q-no-btn:hover {
-    background: color-mix(in srgb, var(--error) 22%, var(--bg));
-}
-.q-other-btn {
-    background: var(--bg-hover);
-    color: var(--text-dim);
-}
-.q-other-btn:hover {
-    color: var(--text-bright);
-    background: var(--bg-raised);
 }
 .question-other-area {
     margin-top: var(--sp-3);

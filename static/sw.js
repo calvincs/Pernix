@@ -24,6 +24,7 @@ const CACHE_VERSION = 'pernix-shell-__BUILD__';
 const SHELL_ASSETS = [
     '/',
     '/static/css/tokens.css',
+    '/static/css/buttons.css',
     '/static/css/layout.css',
     '/static/css/modals.css',
     '/static/css/jobs.css',

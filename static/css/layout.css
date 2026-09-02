@@ -751,21 +751,12 @@
 }
 
 /* Load-earlier control (paginated history) */
+/* Centred on its own line, on the raised surface; the rest is
+   .btn--secondary. */
 .load-earlier-btn {
-    display: block;
+    display: flex;
     margin: 0 auto var(--sp-4);
     background: var(--bg-raised);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-    padding: var(--sp-1) var(--sp-3);
-    border-radius: var(--radius);
-    cursor: pointer;
-    transition: var(--transition);
-}
-.load-earlier-btn:hover {
-    color: var(--accent);
-    border-color: var(--accent);
 }
 
 /* Jump-to-bottom — appears when the user scrolls up during a live turn */
@@ -1796,24 +1787,10 @@
     flex-shrink: 0;
 }
 
+/* .btn--ghost, at icon size, with room for an optional text label. */
 .status-btn {
-    background: none;
-    border: none;
-    min-width: 24px;
-    min-height: 24px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-faint);
-    cursor: pointer;
-    font-size: var(--text-md);
     padding: 2px var(--sp-2);
-    transition: var(--transition);
     border-radius: var(--radius);
-}
-.status-btn:hover {
-    color: var(--accent);
-    background: var(--accent-glow);
 }
 
 /* State badge — visible indicator of the v2 state-machine state.
@@ -2100,16 +2077,6 @@
     border-bottom: 1px solid var(--border-subtle);
     margin-bottom: 4px;
 }
-.tl-filter-btn {
-    font-size: var(--text-xxs);
-    padding: 2px 8px;
-    border-radius: 3px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-}
-.tl-filter-btn:hover { color: var(--text-bright); }
 .tl-filter-btn.active {
     background: var(--state-processing-bg);
     border-color: color-mix(in srgb, var(--state-processing-fg) 45%, var(--state-processing-bg));
@@ -2169,16 +2136,6 @@
     color: var(--text-faint);
     font-size: var(--text-xxs);
 }
-.tl-load-older button {
-    font-size: var(--text-xxs);
-    padding: 1px 8px;
-    border-radius: 3px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-}
-.tl-load-older button:hover:not(:disabled) { color: var(--text-bright); }
 
 /* Per-state dwell-time breakdown (graph tab) */
 .tl-dwell {
@@ -2219,19 +2176,11 @@
 }
 
 /* Copy JSON export button in the modal header */
+/* Only its place in the header row is local; the look is .btn--secondary. */
 #timeline-modal .tl-copy-btn {
-    font-size: var(--text-xxs);
-    padding: 2px 8px;
     margin-left: auto;
     margin-right: var(--sp-2);
-    border-radius: 3px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    white-space: nowrap;
 }
-#timeline-modal .tl-copy-btn:hover { color: var(--text-bright); }
 
 /* Browser status indicator */
 #browser-status {
@@ -2681,24 +2630,14 @@
     color: var(--text-faint);
 }
 
+/* .btn--primary, full width, at the type size of the form it submits. */
 .auth-btn {
     width: 100%;
     padding: var(--sp-3);
-    background: var(--accent);
-    color: var(--bg);
-    border: none;
     border-radius: var(--radius);
-    font-family: var(--mono);
     font-size: var(--text-md);
-    font-weight: 500;
-    cursor: pointer;
-    transition: opacity var(--transition);
 }
-.auth-btn:hover { opacity: 0.9; }
-.auth-btn:disabled {
-    opacity: 0.5;
-    cursor: wait;
-}
+.auth-btn:disabled { cursor: wait; }
 
 .auth-hint {
     font-family: var(--mono);
@@ -2838,15 +2777,8 @@
 .message:focus-within .msg-actions { opacity: 1; }
 .msg-action-btn {
     background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: 3px;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: var(--text-xs);
-    line-height: 1.4;
-    padding: 1px 6px;
+    border-color: var(--border-subtle);
 }
-.msg-action-btn:hover { color: var(--text-bright); border-color: var(--border); }
 
 /* Queued-message remove button */
 .queued-remove {

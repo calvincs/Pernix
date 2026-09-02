@@ -142,22 +142,7 @@ body.fp-resizing #main { pointer-events: none; }
     display: flex;
     gap: var(--sp-1);
 }
-.fp-icon-btn {
-    background: none;
-    border: 1px solid transparent;
-    color: var(--text-faint);
-    cursor: pointer;
-    font-size: var(--text-sm);
-    padding: 2px 6px;
-    border-radius: 3px;
-    transition: var(--transition);
-    font-family: var(--mono);
-}
-.fp-icon-btn:hover {
-    color: var(--accent);
-    border-color: var(--border);
-    background: var(--bg-hover);
-}
+/* .fp-icon-btn is .btn--ghost + .btn--icon; see buttons.css. */
 .fp-ws-sort {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -368,55 +353,8 @@ body.fp-resizing #main { pointer-events: none; }
     gap: var(--sp-1);
 }
 
-.fp-btn {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    font-family: var(--mono);
-    font-size: 10px;
-    padding: 2px 8px;
-    border-radius: 3px;
-    cursor: pointer;
-    transition: var(--transition);
-}
-.fp-btn:hover {
-    color: var(--accent);
-    border-color: var(--accent);
-    background: var(--accent-glow);
-}
-.fp-btn.primary {
-    border-color: var(--accent-dim);
-    color: var(--accent);
-}
-.fp-btn.primary:hover {
-    background: var(--accent-subtle);
-}
-
-/* Save button states */
-.fp-btn.save-btn {
-    border-color: var(--border);
-    color: var(--text-faint);
-    opacity: 0.5;
-    cursor: default;
-    transition: all var(--transition);
-}
-.fp-btn.save-btn.dirty {
-    opacity: 1;
-    border-color: var(--accent);
-    color: var(--bg);
-    background: var(--accent);
-    cursor: pointer;
-}
-.fp-btn.save-btn.dirty:hover {
-    background: var(--accent-dim);
-    border-color: var(--accent-dim);
-}
-
-.fp-btn.danger:hover {
-    color: var(--error);
-    border-color: var(--error);
-    background: var(--error-subtle);
-}
+/* .fp-btn / .fp-btn.primary / .fp-btn.danger / .fp-btn.save-btn are the
+   .btn--secondary, .btn--primary and .btn--danger roles in buttons.css. */
 
 /* Viewer content */
 .fp-viewer {
@@ -988,19 +926,7 @@ body.fp-resizing #main { pointer-events: none; }
     color: var(--text-faint);
     font-style: italic;
 }
-.fp-btn-xs {
-    font-size: 10px;
-    padding: 1px 8px;
-    flex-shrink: 0;
-}
-.fp-btn-danger {
-    color: var(--error, #e06c75);
-    border-color: var(--error, #e06c75);
-}
-.fp-btn-danger:hover {
-    background: var(--error, #e06c75);
-    color: var(--bg);
-}
+.fp-btn-xs { flex-shrink: 0; }
 .fp-proposal-callout {
     margin-bottom: var(--sp-3);
     border: 1px solid var(--accent-dim);
@@ -1300,11 +1226,6 @@ body.fp-resizing #main { pointer-events: none; }
 .adaptive-card.suspect { border-color: color-mix(in srgb, var(--warning) 60%, var(--border)); }
 .adaptive-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
 .adaptive-card-actions { margin-top: 6px; display: flex; gap: 6px; }
-.adaptive-btn {
-    padding: 2px 10px; border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--bg); color: var(--text); cursor: pointer; font-size: 0.85em;
-}
-.adaptive-btn:hover { border-color: var(--accent); }
 /* Entry rows — the Telos tab's row vocabulary (and the read-only rows on the
    Adaptive tab). Same card treatment as .adaptive-card; kept as its own name
    because entries are informational and carry no action row. Without these
@@ -1408,19 +1329,6 @@ body.fp-resizing #main { pointer-events: none; }
     display: flex;
     gap: var(--sp-2);
 }
-.fp-mcp-add-btn {
-    background: var(--border);
-    border: none;
-    color: var(--text-dim);
-    font-family: var(--mono);
-    font-size: var(--text-xs);
-    padding: 3px 10px;
-    border-radius: var(--radius);
-    cursor: pointer;
-    transition: var(--transition);
-}
-.fp-mcp-add-btn:hover { background: var(--accent); color: var(--bg); }
-.fp-mcp-add-btn.primary { background: var(--accent-dim); color: var(--bg); }
 .fp-mcp-add-result {
     font-size: var(--text-xs);
     color: var(--text-dim);
@@ -1441,10 +1349,6 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-mcp-add-input:focus {
     outline: none;
     border-color: var(--accent-dim);
-}
-.fp-mcp-add-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
 }
 .fp-mcp-error {
     font-size: 11px;
