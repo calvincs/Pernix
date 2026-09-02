@@ -367,8 +367,14 @@ def run_vp(browser, name, w, h, opts):
     if LEVEL == "m2":
         pg.evaluate("() => document.getElementById('fp-group-files')?.click()")
         time.sleep(0.5)
+        # `.fp-tree-item.file` is what file-panel.js actually paints on a file
+        # row (a folder and the ".." row get `.dir`, an upload in flight gets
+        # `.fp-upload-row`). This used to filter on `.fp-tree-dir`, a class
+        # that has never existed anywhere, so the filter passed everything and
+        # the check clicked whatever sorted first — opening a FOLDER, and then
+        # finding no editor, whenever the throwaway workspace had one.
         pg.evaluate(
-            "() => { const f=[...document.querySelectorAll('.fp-tree-item')].find(e=>!e.classList.contains('fp-tree-dir')); f && f.click(); }"
+            "() => { const f=document.querySelector('.fp-tree-item.file'); f && f.click(); }"
         )
         time.sleep(0.9)
         pg.evaluate(
