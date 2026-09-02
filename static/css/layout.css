@@ -631,6 +631,40 @@
     outline: 2px solid var(--accent-dim);
     outline-offset: 1px;
 }
+/* "← Parent: <title>" on a worker or an RLM trace view. Quiet enough to read
+   as a breadcrumb rather than as a second title, and first in the row so the
+   way back is where the eye starts. */
+.session-header-parent {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    max-width: 28ch;
+    overflow: hidden;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding: 2px var(--sp-1);
+    cursor: pointer;
+    transition: var(--transition);
+}
+.session-header-parent > span {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.session-header-parent:hover {
+    color: var(--accent);
+    border-color: var(--border-subtle);
+}
+.session-header-parent:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: 1px;
+}
+
 #session-header-rename {
     flex: 1 1 320px;
     min-width: 0;

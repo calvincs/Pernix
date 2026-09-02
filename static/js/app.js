@@ -1105,9 +1105,51 @@ function _renderSessionHeader() {
             chip.textContent = '';
         }
     }
+    _renderParentBreadcrumb(header, sess);
     // The tab title is the other half of wayfinding: five Pernix tabs all
     // called "Pernix" are indistinguishable in a browser's tab strip.
     document.title = `${title} · Pernix`;
+}
+
+/**
+ * "← Parent: <title>" for a worker or an RLM trace view.
+ *
+ * A child session opened from a chip or a notification is a transcript with
+ * no context: it says what it is doing but not what it is FOR, and the only
+ * way back was to find its parent in the sidebar by eye. Both kinds carry
+ * parent_session_id on their payload; this is that field made clickable.
+ */
+function _renderParentBreadcrumb(header, sess) {
+    const isChild = sess.session_type === 'worker' || sess.session_type === 'rlm';
+    const pid = isChild ? (sess.parent_session_id || '') : '';
+    let crumb = document.getElementById('session-header-parent');
+    if (!pid) {
+        if (crumb) crumb.remove();
+        return;
+    }
+    const parent = (state.sessions || []).find((x) => x.id === pid);
+    // A parent past the loaded window still gets a working link — the label
+    // is the only thing that degrades.
+    const parentTitle = (parent && parent.title) || 'parent session';
+    if (!crumb) {
+        crumb = el('button', {
+            id: 'session-header-parent',
+            class: 'session-header-parent',
+            type: 'button',
+        });
+        crumb.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const target = crumb.dataset.parent;
+            if (target) selectSession(target);
+        });
+        header.insertBefore(crumb, header.firstChild);
+    }
+    crumb.dataset.parent = pid;
+    clear(crumb);
+    crumb.appendChild(icon('arrow-left', { size: 11 }));
+    crumb.appendChild(el('span', {}, [text(`Parent: ${parentTitle}`)]));
+    crumb.title = `Open the parent session — ${parentTitle}`;
+    crumb.setAttribute('aria-label', `Open the parent session: ${parentTitle}`);
 }
 
 /**
