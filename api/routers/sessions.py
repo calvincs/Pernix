@@ -173,8 +173,13 @@ async def get_session_status(session_id: str):
         session = await _asyncio.to_thread(db.get_session, session_id)
         if not session:
             raise HTTPException(404, detail=f"Session {session_id} not found")
-        return {"session_id": session_id, "status": "idle", "in_memory": False}
-    return status
+        # event_seq is stated as null rather than omitted: the client used
+        # to read a missing value as 0, which looks exactly like "the server
+        # restarted and its counter reset" and triggered a spurious
+        # transcript reload plus a scroll jump every time someone came back
+        # to a tab whose idle session had simply been reaped from memory.
+        return {"session_id": session_id, "status": "idle", "in_memory": False, "event_seq": None}
+    return {**status, "in_memory": True}
 
 
 @router.get("/api/sessions/{session_id}/events")
