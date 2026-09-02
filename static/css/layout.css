@@ -1331,6 +1331,22 @@
 }
 .file-view-btn.inline { margin-left: var(--sp-2); }
 
+/* A tool row whose call wrote a file carries a "view" button beside the
+   disclosure header rather than inside it — nothing interactive may nest in
+   a role="button". The header keeps all the flexible width. (A1) */
+.tool-item-headrow {
+    display: flex;
+    align-items: center;
+}
+.tool-item-headrow .tool-item-header {
+    flex: 1;
+    min-width: 0;
+}
+.tool-item-headrow .file-view-btn {
+    flex-shrink: 0;
+    margin-right: var(--sp-3);
+}
+
 .message.assistant .content code.file-path-link {
     cursor: pointer;
     text-decoration: underline;
