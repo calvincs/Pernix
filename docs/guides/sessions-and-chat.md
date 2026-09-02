@@ -82,7 +82,7 @@ When [Dream introspection](../internals/dream.md) is enabled, each day of dreami
 
 When the agent kicks off an [RLM run](../internals/rlm.md) (`rlm_process` over an input too large to read inline), the run appears in three places:
 
-- A **live chip** in the activity strip of the launching session — `RLM · it 7/20 · 6 calls · 4m10s` — pulsing while the run works, alongside any worker chips. The parent transcript also gets start/finish lines.
+- A **live chip** in the worker strip above the launching session's composer — `RLM · it 7/20 · 6 calls · 4m10s` — pulsing while the run works, alongside any worker chips. Below 900px the strip is one summary line instead, counting the runs. The parent transcript also gets start/finish lines.
 - A nested **RLM session** in the sidebar under its parent (same collapsible group as workers), with a pulsing dot while running.
 - Clicking either opens the **trace viewer** in place of the chat: the root model's per-iteration reasoning, each REPL cell (collapsible, with code and stdout/stderr), every sub-LLM call with latency, live iteration/sub-call/elapsed progress against the run's caps, and the final answer once the run ends. The view tails the trace live and doubles as the permanent record afterward.
 
