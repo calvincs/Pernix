@@ -59,7 +59,7 @@ export function initMobile() {
     // verdict, and a device that becomes touch (it can only ever become one,
     // see FORCED_TOUCH) must not disturb the layout tier.
     touchMq.addEventListener('change', () => { _stamp(); _applyTouch(); });
-    compactMq.addEventListener('change', () => { _stamp(); _applyCompact(); });
+    compactMq.addEventListener('change', () => { _stamp(); _applyCompact(); _announceTier(); });
 
     _setupSidebarDrawer();
     _setupSwipeGesture();
@@ -104,6 +104,15 @@ function _applyCompact() {
     // and it re-runs on the same resize that got us here.
     document.getElementById('sidebar')?.removeAttribute('inert');
     setMainInert('drawer', false);
+}
+
+// Announced after every tier flip, in both directions. file-panel.js listens:
+// an Explorer that was a full-screen overlay a moment ago is a sibling column
+// now, and its hold on #main has to be given back.
+function _announceTier() {
+    window.dispatchEvent(new CustomEvent('pernix:tier-change', {
+        detail: { compact: isCompact(), touch: isTouch() },
+    }));
 }
 
 // ---------------------------------------------------------------------------
