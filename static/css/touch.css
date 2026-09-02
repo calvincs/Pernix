@@ -248,7 +248,14 @@
 }
 /* Status text — instead of hiding it (mobile is exactly where
    minutes-long turns feel longest), float it as a transient strip
-   above the input bar whenever there is something to say. */
+   above the input bar whenever there is something to say.
+
+   --bottom-stack is the measured height of the composer plus the worker
+   strip, written by mobile.js's ResizeObserver. The 76px fallback is the
+   old hard-coded literal: it is what an empty composer happens to be, and
+   what this used to assume of every composer. No --safe-bottom here — the
+   composer's own padding already carries the inset, and adding it again
+   would float the strip a home-indicator's height too high. (P4) */
 #status-bar .info:empty {
     display: none;
 }
@@ -257,7 +264,7 @@
     position: fixed;
     left: var(--sp-3);
     right: var(--sp-3);
-    bottom: calc(76px + var(--safe-bottom));
+    bottom: calc(var(--bottom-stack, 76px) + var(--sp-2));
     background: var(--bg-raised);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius);
@@ -280,7 +287,7 @@
     position: fixed;
     left: var(--sp-3);
     right: var(--sp-3);
-    bottom: calc(76px + var(--safe-bottom));
+    bottom: calc(var(--bottom-stack, 76px) + var(--sp-2));
     max-width: none;
     background: var(--bg-raised);
     border: 1px solid var(--border-subtle);
@@ -294,8 +301,9 @@
     z-index: 45;
     pointer-events: none;
 }
+/* One strip's height above the other. */
 #status-bar .info:not(:empty) ~ .notice:not(:empty) {
-    bottom: calc(108px + var(--safe-bottom));
+    bottom: calc(var(--bottom-stack, 76px) + var(--sp-2) + 32px);
 }
 
 #status-bar .ctx {
@@ -539,11 +547,13 @@
     justify-content: center;
 }
 /* 32px circle is below the touch floor, and its fixed 110px offset was
-   tuned against the taller desktop composer. */
+   tuned against the taller desktop composer — then 96px was tuned against an
+   empty one. It rides the measured stack now, so it clears a long draft and
+   the worker strip instead of covering them. */
 #jump-to-bottom {
     width: 40px;
     height: 40px;
-    bottom: calc(96px + var(--safe-bottom));
+    bottom: calc(var(--bottom-stack, 76px) + var(--sp-2));
 }
 .tool-group-header {
     min-height: 44px;
@@ -890,7 +900,7 @@
 .toast-region {
     left: max(var(--sp-3), var(--safe-left));
     right: max(var(--sp-3), var(--safe-right));
-    bottom: calc(76px + var(--safe-bottom));
+    bottom: calc(var(--bottom-stack, 76px) + var(--sp-2));
     align-items: stretch;
 }
 .toast {
@@ -917,7 +927,7 @@
     right: max(var(--sp-3), var(--safe-right));
     max-width: none;
     transform: none;
-    bottom: calc(76px + var(--safe-bottom));
+    bottom: calc(var(--bottom-stack, 76px) + var(--sp-2));
 }
 
 /* ---- Phase 2B: sidebar / bell / confirm ---- */
