@@ -796,27 +796,31 @@ async def _execute_cron_job(meta: dict):
     # sent, so a crash anywhere past this point surfaces as an 'uncertain' run
     # at next startup — reported, never replayed.
     fire_time = datetime.now(timezone.utc).isoformat()
-    run_id = db.add_cron_run(name, session_id, status="claimed", fire_time=fire_time)
+    # Off-loop: this callable runs ON the event loop, and every DB write
+    # plus _save_jobs (a file write under a threading lock shared with
+    # tool threads) stalled every SSE stream for its duration, on every
+    # fire.
+    run_id = await asyncio.to_thread(db.add_cron_run, name, session_id, status="claimed", fire_time=fire_time)
     meta["last_fired_at"] = fire_time  # meta is the live APScheduler job's dict
     try:
-        _save_jobs()
+        await asyncio.to_thread(_save_jobs)
     except Exception as e:  # persistence best-effort; the DB claim is the record
         logger.warning("Failed to persist last_fired_at for '%s': %s", name, e)
 
     bus.emit({"type": "job.started", "job_name": name, "session_id": session_id, "run_id": run_id})
 
     try:
-        db.update_cron_run(run_id, "running")
+        await asyncio.to_thread(db.update_cron_run, run_id, "running")
         # Bind the session id BEFORE dispatch: a timeout/error must still
         # reference the session that holds the partial transcript. The
         # back-fill matters for fresh-session jobs — the claim row above was
         # written before this session existed.
         session_id = _ensure_dispatch_session(session_id, title=f"Cron: {name}", space_id=meta.get("space_id"))
-        db.update_cron_run(run_id, "running", session_id=session_id)
+        await asyncio.to_thread(db.update_cron_run, run_id, "running", session_id=session_id)
         await _dispatch_prompt(session_id, prompt, model=model, allowed_tools=meta.get("allowed_tools"))
 
         duration_ms = int((time.time() - start_time) * 1000)
-        db.update_cron_run(run_id, "completed")
+        await asyncio.to_thread(db.update_cron_run, run_id, "completed")
         bus.emit(
             {
                 "type": "job.completed",
@@ -830,7 +834,7 @@ async def _execute_cron_job(meta: dict):
         logger.error("Cron job '%s' failed: %s", name, e)
         # session_id is whatever resolution reached before the failure —
         # back-fill it when we have one so the error row links its transcript.
-        db.update_cron_run(run_id, "error", str(e), session_id=session_id)
+        await asyncio.to_thread(db.update_cron_run, run_id, "error", str(e), session_id=session_id)
         bus.emit({"type": "job.error", "job_name": name, "session_id": session_id, "error": str(e)})
         # Notify user about the failure via push/webhook
         _notify_job_failure(manager, bus, name, session_id, str(e))
