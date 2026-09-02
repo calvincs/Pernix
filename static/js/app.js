@@ -2608,6 +2608,19 @@ function _showNotice(msg, ms = 6000) {
     }, ms);
 }
 
+/** True when the transcript ends on a user message that is not queued and
+ *  was not rejected — i.e. one the agent never answered. */
+function _lastMessageIsUnanswered() {
+    const inner = _messagesInner();
+    if (!inner) return false;
+    const msgs = inner.querySelectorAll('.message');
+    const last = msgs[msgs.length - 1];
+    if (!last) return false;
+    return last.classList.contains('user')
+        && !last.classList.contains('queued')
+        && !last.classList.contains('rejected');
+}
+
 async function _softReload() {
     if (!state.sid || _isRlmView()) return;
     if (_reloading) return;  // a second gap during the fetch is the same reload
@@ -2652,6 +2665,14 @@ async function _softReload() {
         } else {
             _showSendButton();
             updateStatus('');
+            // A soft reload means events were dropped. If the transcript now
+            // ends on the user's own message and the server is idle with an
+            // empty queue, nothing is coming — the turn died inside the gap.
+            // Saying nothing here is what made a lost turn look like an agent
+            // that had simply ignored you.
+            if (!status.pending_messages && _lastMessageIsUnanswered()) {
+                appendMessage('system', 'Your last message was not answered — /retry to resend.');
+            }
         }
     } catch {}
     _bufferedDuringReload = '';

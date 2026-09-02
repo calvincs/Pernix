@@ -25,7 +25,11 @@ export function isOnline() { return _online; }
 
 export class OfflineError extends Error {
     constructor() {
-        super('offline');
+        // The message is the copy the user reads: several call sites render
+        // `e.message` straight into the transcript, where a bare "offline"
+        // answered neither "did my message go?" nor "do I have to retype it?".
+        // (OFFLINE_MESSAGE is defined below; this body runs long after.)
+        super(OFFLINE_MESSAGE);
         this.name = 'OfflineError';
         this.offline = true;
     }
