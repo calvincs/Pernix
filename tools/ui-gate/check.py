@@ -449,6 +449,35 @@ def desktop_layout(browser):
     grab("collapsed")
     pg.click("#sidebar-toggle")
     time.sleep(0.4)
+
+    # S2 — the space header's three controls are an overlay on this tier, not
+    # three boxes in the line. In flow they reserved 48px of a 253px row
+    # whether or not anyone was pointing at the header, and the seeded long
+    # label read at 122px. Asserted on the mouse tier only: the touch header
+    # keeps "+" and one 44px overflow button, both in the line by design.
+    if LEVEL == "m2":
+        sh = pg.evaluate("""() => { const h=[...document.querySelectorAll('.space-group-header')]
+                  .find(x => (x.querySelector('.space-label')||{}).textContent?.startsWith('Research lab'));
+                if(!h) return null;
+                const a=h.querySelector('.space-actions'), l=h.querySelector('.space-label');
+                if(!a || !l) return {overlay: !!a, label: !!l};
+                const cs=getComputedStyle(a);
+                return {overlay:true, op:cs.opacity, pe:cs.pointerEvents,
+                        labelW: Math.round(l.getBoundingClientRect().width),
+                        targets: [...a.querySelectorAll('.space-btn')].map(b => {
+                            const r=b.getBoundingClientRect();
+                            return Math.round(r.width)+'x'+Math.round(r.height); })}; }""")
+        check(
+            "desktop",
+            "m2: space header actions overlay hidden at rest, long label >=180px",
+            bool(sh)
+            and sh.get("op") == "0"
+            and sh.get("pe") == "none"
+            and sh.get("targets") == ["24x24"] * 3
+            and sh.get("labelW", 0) >= 180,
+            sh,
+            "m2",
+        )
     ctx.close()
     return out
 

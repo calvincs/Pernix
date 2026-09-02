@@ -656,6 +656,13 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
     // "+" is the one thing a space header is for often enough to keep as its
     // own target; settings and delete are rare and destructive, so on touch
     // they move behind the same overflow control the rows use. (P1)
+    //
+    // The mouse header keeps all three, and on this tier they come out of the
+    // line: in flow they reserved 48px whether or not anyone was pointing at
+    // the header, which left a 253px row's label 122 pixels — seventeen
+    // characters of a space's name. They go in a .space-actions overlay,
+    // revealed on hover or focus over the label's tail, exactly as the
+    // session rows below them do it. (S2)
     const controls = isTouch()
         ? [el('button', {
             class: 'space-btn space-menu-btn',
@@ -686,11 +693,18 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
             }, [icon('x', { size: 12 })]),
         ];
 
+    // Touch keeps its two controls in the line — they are 44px and 36px and
+    // meant to be seen. The mouse tier's three go in the overlay together,
+    // "+" included: it was 12x11 in the line and it is a 24px target in the
+    // strip, for the moment it is actually aimed at, and out of the label's
+    // way the rest of the time.
     const header = el('div', {
         class: 'session-group-header space-group-header' + (collapsed ? ' collapsed' : ''),
         'data-group': 'space:' + space.id,
         style: `--space-color: ${space.color}`,
-    }, [toggle, addBtn, ...controls]);
+    }, isTouch()
+        ? [toggle, addBtn, ...controls]
+        : [toggle, el('div', { class: 'space-actions' }, [addBtn, ...controls])]);
 
     const body = el('div', { class: 'session-group-body' + (collapsed ? ' collapsed' : '') });
 

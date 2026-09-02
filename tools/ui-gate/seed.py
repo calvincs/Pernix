@@ -144,4 +144,22 @@ for t in (
     )
     db.add_message(sid, "user", f"about {t}")
     time.sleep(0.005)
+
+# --- a second space, whose label is longer than the header is wide ------------
+# The space header's own truncation case. Created last so it sorts after
+# "Pernix" (create_space takes MAX(sort_order) + 1), which leaves every box the
+# desktop baseline records where it was: the first .session-item in the DOM
+# still belongs to the Pernix group above it.
+if space_id:
+    try:
+        lab_id = db.create_space(
+            label="Research lab — long-running literature review and notes",
+            color="#4f9d8c",
+            slug="research-lab",
+        )["id"]
+        lab_sid = db.create_session(title="Survey the retrieval papers", space_id=lab_id)
+        db.add_message(lab_sid, "user", "Start with the 2024 survey and work backwards.")
+    except Exception as e:  # noqa: BLE001
+        print("long-label space skipped:", e, file=sys.stderr)
+
 print(json.dumps({"main": main, "long": long_sid, "parent": parent_sid}))
