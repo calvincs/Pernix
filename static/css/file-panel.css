@@ -465,15 +465,16 @@ body.fp-resizing #main { pointer-events: none; }
     font-style: italic;
     margin: 0.75em 0;
 }
-.fp-viewer-md h1, .fp-viewer-md h2, .fp-viewer-md h3 {
+/* Family and colour only — size, weight and rhythm come from the shared
+   prose heading scale in layout.css. The weight is re-clamped to 500 here
+   because this surface is mono and DM Mono has no 600 (V6). h4-h6 used to
+   fall through to the UA defaults and rendered smaller than body text. */
+.fp-viewer-md h1, .fp-viewer-md h2, .fp-viewer-md h3,
+.fp-viewer-md h4, .fp-viewer-md h5, .fp-viewer-md h6 {
     font-family: var(--mono);
     color: var(--text-bright);
-    margin: 1em 0 0.5em;
     font-weight: 500;
 }
-.fp-viewer-md h1 { font-size: var(--text-lg); }
-.fp-viewer-md h2 { font-size: var(--text-md); }
-.fp-viewer-md h3 { font-size: var(--text-sm); }
 .fp-viewer-md ul, .fp-viewer-md ol {
     margin: 0.5em 0 0.75em 1.5em;
 }

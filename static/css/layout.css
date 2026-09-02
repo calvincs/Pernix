@@ -894,6 +894,11 @@
     line-height: 1.65;
     color: var(--text);
     padding: var(--sp-2) 0;
+    /* Measure. --chat-max-w sizes the whole column (code blocks, tables and
+       tool cards all want the room); prose does not — past ~75 characters the
+       eye loses the line it is returning to. Deliberately NOT --chat-max-w:
+       narrowing that would shrink the code blocks with it. */
+    max-width: 72ch;
     /* Prose wraps rather than widening the column. Without this a single
        long token (a URL, a file path) makes the whole transcript scroll
        sideways — every message shifts, not just the offending line. */
@@ -984,6 +989,37 @@
     color: var(--text-bright);
     font-weight: 500;
 }
+
+/* ======================================================================
+   Shared prose heading scale (V2)
+   ----------------------------------------------------------------------
+   Markdown headings render in two surfaces — assistant messages and the
+   Explorer's markdown viewer — and neither had a full scale. The assistant
+   bubble had no heading rules at all, so an h1 came out at the UA's 2em
+   (32px) next to 16px body prose, and h4-h6 came out SMALLER than the text
+   around them. One ratio set and one vertical rhythm for both; each surface
+   keeps the family it already chose (serif here, mono in the file viewer,
+   which re-clamps the weight to 500 because DM Mono has no 600).
+
+   System messages are deliberately excluded: they are a flat 11px italic
+   aside where every heading level is 1em on purpose, not a prose surface.
+   ====================================================================== */
+.message.assistant .content :is(h1, h2, h3, h4, h5, h6),
+.fp-viewer-md :is(h1, h2, h3, h4, h5, h6) {
+    font-weight: 600;
+    line-height: 1.25;
+    margin: 1.2em 0 .4em;
+}
+.message.assistant .content h1,
+.fp-viewer-md h1 { font-size: 1.35em; }
+.message.assistant .content h2,
+.fp-viewer-md h2 { font-size: 1.2em; }
+.message.assistant .content h3,
+.fp-viewer-md h3 { font-size: 1.05em; }
+.message.assistant .content :is(h4, h5, h6),
+.fp-viewer-md :is(h4, h5, h6) { font-size: 1em; }
+.message.assistant .content > :is(h1, h2, h3, h4, h5, h6):first-child,
+.fp-viewer-md > :is(h1, h2, h3, h4, h5, h6):first-child { margin-top: 0; }
 
 /* Tool call groups */
 .tool-group {
