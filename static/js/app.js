@@ -210,6 +210,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.addEventListener('keydown', (e) => {
         const mod = e.ctrlKey || e.metaKey;
         if (!mod) return;
+        // openOverlay() makes the background inert, but inert does not cover a
+        // handler bound to `document` — so these two fired straight through an
+        // open Settings or bell dialog, stacking a second focus trap on top of
+        // the first with no way back except Escape twice.
+        if (_modalOverlayOpen()) return;
         if (e.key === 'f' && state.sid) {
             e.preventDefault();
             openTranscriptSearch();
@@ -279,6 +284,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         loadHealth();
     });
 });
+
+/** True when a modal overlay is on screen. The session palette is excluded so
+ *  Ctrl+K still toggles it shut — it is the thing the shortcut owns. */
+function _modalOverlayOpen() {
+    const nodes = document.querySelectorAll('.modal-overlay, .auth-overlay, [role="dialog"]');
+    for (const node of nodes) {
+        if (_paletteEl && (node === _paletteEl || _paletteEl.contains(node))) continue;
+        return true;
+    }
+    return false;
+}
 
 function _showOfflineOverlay() {
     // A banner, not a modal — the old full-screen overlay blocked reading
