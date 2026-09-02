@@ -110,6 +110,13 @@ def list_sessions_enriched(limit: int = 50, offset: int = 0) -> list[dict]:
             (limit, offset),
         ).fetchall()
         result = [dict(r) for r in rows]
+        # _ENRICHED_SELECT GROUP BYs all of messages and token_usage and runs
+        # a ROW_NUMBER() over every user message before the outer LIMIT, so
+        # running it twice doubles the disk and CPU of every sidebar refresh.
+        # With no spaces configured the second pass can only return rows the
+        # first already has.
+        if not conn.execute("SELECT 1 FROM spaces LIMIT 1").fetchone():
+            return result
         seen = {r["id"] for r in result}
         extra = conn.execute(
             _ENRICHED_SELECT + "WHERE s.space_id IS NOT NULL ORDER BY s.updated_at DESC",
@@ -1962,6 +1969,13 @@ def adaptive_add_proposal(
       how a review queue should triage.
     """
     with connect_sessions() as conn:
+        # BEGIN IMMEDIATE: the dedupe probe and both cap counts below are
+        # read-then-write. In autocommit they ran outside the INSERT's own
+        # transaction, so a producer on an executor thread and the snooze
+        # drain on the loop could both pass the same check and land a
+        # duplicate proposal (or overshoot the cap). Same fix v26 applied to
+        # create_goal.
+        conn.execute("BEGIN IMMEDIATE")
         dup = conn.execute(
             "SELECT id FROM adaptive_proposals WHERE status = 'pending' AND producer = ? AND payload_json = ? "
             "ORDER BY id LIMIT 1",
