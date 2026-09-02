@@ -84,7 +84,11 @@ export async function openTimeline() {
     });
     const tabBar = el('div', { class: 'tab-bar' }, _tabBtns);
 
-    const copyBtn = el('button', { class: 'tl-copy-btn', title: 'Copy state log + tool calls as JSON' }, [text('Copy JSON')]);
+    const copyBtn = el('button', {
+        class: 'tl-copy-btn',
+        title: 'Copy state log + tool calls as JSON',
+        'aria-label': 'Copy the state log and tool calls as JSON',
+    }, [text('Copy JSON')]);
     copyBtn.addEventListener('click', () => _copyExport(copyBtn));
 
     const modalBody = el('div', { class: 'modal-body timeline-modal-content' }, [graphPane, listPane]);
@@ -97,7 +101,12 @@ export async function openTimeline() {
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text('State timeline')]),
             copyBtn,
-            el('button', { class: 'modal-close', onClick: closeTimeline }, [text('×')]),
+            el('button', {
+                class: 'modal-close',
+                title: 'Close',
+                'aria-label': 'Close the state timeline',
+                onClick: closeTimeline,
+            }, [text('×')]),
         ]),
         tabBar,
         modalBody,

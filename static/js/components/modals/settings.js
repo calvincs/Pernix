@@ -1176,6 +1176,7 @@ function buildOllamaSection() {
     const listEl = el('div', { class: 'or-model-list', id: 'ollama-model-list' });
     const refreshBtn = el('button', {
         class: 'ollama-refresh', id: 'ollama-refresh-btn', title: 'Refresh model list',
+        'aria-label': 'Refresh the Ollama model list',
     }, [text('\u21bb')]);
     refreshBtn.addEventListener('click', refreshOllamaModels);
 
@@ -1262,7 +1263,9 @@ function renderModelList(listEl) {
             infoText = 'not found';
         }
 
-        const removeBtn = el('button', { class: 'or-remove' }, [text('\u00d7')]);
+        const removeBtn = el('button', {
+            class: 'or-remove', title: 'Remove', 'aria-label': `Remove the model ${m.id}`,
+        }, [text('\u00d7')]);
         removeBtn.addEventListener('click', () => {
             _models.splice(idx, 1);
             renderModelList(listEl);
@@ -1799,6 +1802,7 @@ function _buildOriginsEditor(origins) {
             const removeBtn = el('button', {
                 style: 'background:none; border:none; color:var(--error); cursor:pointer; font-size:var(--text-md); padding:0 4px;',
                 title: 'Remove',
+                'aria-label': `Remove the allowed origin ${_corsOrigins[idx]}`,
             }, [text('\u00d7')]);
             removeBtn.addEventListener('click', () => {
                 _corsOrigins.splice(idx, 1);
@@ -2369,7 +2373,12 @@ export async function openSettings(opts = {}) {
     const card = el('div', { class: 'modal-card' }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text('Settings')]),
-            el('button', { class: 'modal-close', onClick: closeSettings }, [text('\u00d7')]),
+            el('button', {
+                class: 'modal-close',
+                title: 'Close',
+                'aria-label': 'Close settings',
+                onClick: closeSettings,
+            }, [text('\u00d7')]),
         ]),
         tabBar,
         buildSearchBar(),
