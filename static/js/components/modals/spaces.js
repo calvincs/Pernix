@@ -26,7 +26,16 @@ function _notifyChanged() {
 // Create / edit modal
 // ---------------------------------------------------------------------------
 
+let _openSpaceModal = null;  // the live instance, so re-entry can close it properly
+
 export function openSpaceModal(space) {
+    // close(), not .remove(): the previous modal owns a document keydown
+    // listener and (in the directives tab) Monaco instances, and tearing its
+    // node out of the DOM left both behind.
+    if (_openSpaceModal) {
+        try { _openSpaceModal(); } catch {}
+        _openSpaceModal = null;
+    }
     document.querySelector('.space-modal-overlay')?.remove();
     const isEdit = !!space;
     let color = space?.color || SWATCHES[0];
@@ -91,9 +100,17 @@ export function openSpaceModal(space) {
 
     const close = () => {
         for (const d of disposers) { try { d(); } catch { /* disposed */ } }
+        for (const st of Object.values(dirState)) {
+            if (st && st.editor && st.editor.dispose) {
+                try { st.editor.dispose(); } catch { /* already gone */ }
+            }
+            if (st) st.editor = null;
+        }
         overlay.remove();
         document.removeEventListener('keydown', onEsc);
+        if (_openSpaceModal === close) _openSpaceModal = null;
     };
+    _openSpaceModal = close;
     const onEsc = (e) => { if (e.key === 'Escape') close(); };
 
     const save = async () => {
@@ -261,6 +278,14 @@ function _buildDirectivesSection(space, dirState, disposers, onSave) {
             pane.appendChild(host);
             const seed = st.editor ? st.editor.getValue() : (info.override != null ? info.override : info.default);
             updateSize(seed);
+            // Dispose the previous instance first. Switching SOUL -> RULES ->
+            // SOUL re-rendered the pane and built a new Monaco each time,
+            // leaving the old models and their listeners alive for as long as
+            // the modal stayed open.
+            if (st.editor && st.editor.dispose) {
+                try { st.editor.dispose(); } catch {}
+                st.editor = null;
+            }
             createCodeEditor(host, seed, 'markdown', (v) => { st.dirty = true; updateSize(v); }).then(inst => {
                 st.editor = inst;
                 inst.addSaveCommand(() => onSave());
