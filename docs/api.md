@@ -476,7 +476,14 @@ Sets a per-session model override (does not change global settings).
 ```
 GET /api/health
 ```
-Returns `{"status": "healthy", ...}` with the release version, active session count, and current primary model.
+Returns `{"status": "healthy", ...}` with the release version, build id, current primary model, maintenance stats, and two session counts:
+
+| Key | Meaning |
+|---|---|
+| `sessions_active` | Sessions doing work right now — a turn running, scouting, compacting, finalizing, or holding a background task. Canary sessions are never counted. |
+| `sessions_loaded` | Sessions held in memory, busy or not. A session stays loaded for about 30 minutes after its last turn before the reaper drops it, so this is a memory figure, not a load figure. |
+
+`sessions_active` is always ≤ `sessions_loaded`. Watch the first for load and the second for footprint; a large gap just means recent conversations have not been reaped yet.
 
 ### Detailed Diagnostics *(localhost-only)*
 ```

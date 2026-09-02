@@ -24,7 +24,12 @@ async def health():
         "model": settings.llm_model or "(not set)",
         "version": APP_VERSION,
         "build": BUILD_ID,
-        "sessions_active": manager.active_count(),
+        # Work in flight, not sessions in memory. A session stays loaded for
+        # up to half an hour after its last turn, so active_count() answered
+        # "nine active" on a box where nothing was running. Both numbers are
+        # published because both are real: one is load, the other is memory.
+        "sessions_active": manager.busy_count(),
+        "sessions_loaded": manager.active_count(),
         "maintenance": maint.get_stats(),
     }
 

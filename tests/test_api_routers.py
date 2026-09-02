@@ -32,7 +32,12 @@ async def test_health_endpoint():
     assert "status" in data
     assert data["status"] == "healthy"
     assert "version" in data
+    # Two different numbers: work in flight, and sessions held in memory.
+    # A loaded session is idle for up to half an hour before it is reaped,
+    # so sessions_active must never be the loaded count.
     assert "sessions_active" in data
+    assert "sessions_loaded" in data
+    assert data["sessions_active"] <= data["sessions_loaded"]
 
 
 async def test_health_detailed_localhost():
