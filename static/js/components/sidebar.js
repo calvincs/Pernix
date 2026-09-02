@@ -20,6 +20,11 @@ const SESSION_TYPES = {
 // Types that nest under their parent session instead of the top-level list.
 const CHILD_TYPES = new Set(['worker', 'rlm']);
 
+// app.js asks for /api/sessions?limit=500. A full page means the tail was
+// silently cut off — and the sessions that fall off are exactly the old ones
+// a user goes looking for, so the list has to admit it is not everything.
+const SESSION_PAGE_LIMIT = 500;
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -370,6 +375,12 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
 
         list.appendChild(header);
         list.appendChild(body);
+    }
+
+    if (sessions.length >= SESSION_PAGE_LIMIT) {
+        list.appendChild(el('div', { class: 'sidebar-truncated' }, [
+            text(`Showing the ${SESSION_PAGE_LIMIT} most recent · search to find older sessions.`),
+        ]));
     }
 
     // Orphaned children (parent filtered out or missing)
