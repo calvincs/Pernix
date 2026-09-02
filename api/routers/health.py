@@ -153,6 +153,17 @@ _SETTING_BOUNDS = {
     "forced_followup_max_per_turn": (0, 5),
     "llm_max_concurrent": (1, 20),
     "openrouter_max_concurrent": (1, 20),
+    # Same family, previously unbounded: 0 built a scheduler that never
+    # granted a permit, so every request on that provider queued forever.
+    "openai_max_concurrent": (1, 20),
+    # Divisor for the maintenance tick (0 raised ZeroDivisionError every
+    # tick and silently stopped snooze).
+    "snooze_interval_ticks": (1, 1440),
+    "snooze_max_cycle_seconds": (30, 7200),
+    # 0 means "unlimited" here, so the floor is 0 rather than 1.
+    "llm_session_timeout": (0, 86400),
+    "cron_dispatch_timeout": (60, 86400),
+    "reflect_defer_idle_s": (0, 86400),
     "max_concurrent_workers": (1, 20),
     "max_fetch_size": (1024, 10_000_000),
     "browser_timeout": (5, 120),

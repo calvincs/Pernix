@@ -836,7 +836,44 @@ class Settings:
             except (ValueError, TypeError) as e:
                 logger.warning("Failed to coerce setting %s=%r: %s", key, value, e)
 
+        instance._clamp_unsafe_values()
         return instance
+
+    # Settings whose value is used as a divisor, a semaphore size or a
+    # timeout budget: a zero or negative one does not degrade, it breaks a
+    # loop. snooze_interval_ticks = 0 raised ZeroDivisionError on every
+    # maintenance tick — swallowed by the tick handler, so snooze simply
+    # never ran again and the log filled with tracebacks.
+    _MIN_SAFE_VALUES = {
+        "snooze_interval_ticks": 1,
+        "snooze_max_cycle_seconds": 1,
+        "llm_max_concurrent": 1,
+        "openai_max_concurrent": 1,
+        "openrouter_max_concurrent": 1,
+        "max_concurrent_workers": 1,
+        "max_pending_messages": 1,
+        "max_tool_rounds": 1,
+        "cron_dispatch_timeout": 1,
+        "mcp_call_timeout": 1,
+        "mcp_connect_timeout": 1,
+        "mcp_max_servers": 1,
+    }
+
+    def _clamp_unsafe_values(self) -> None:
+        """Raise any of the above back to its floor, loudly.
+
+        Type coercion alone is not validation: a hand-edited settings.json
+        (or an older API write) can put a 0 in a field the code divides by
+        or sizes a scheduler from.
+        """
+        for name, floor in self._MIN_SAFE_VALUES.items():
+            try:
+                value = int(getattr(self, name))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if value < floor:
+                logger.warning("Setting %s=%r is below the safe minimum; using %d", name, value, floor)
+                setattr(self, name, floor)
 
 
 def load_env() -> None:
