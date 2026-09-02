@@ -322,6 +322,27 @@ body[data-compact].composer-focused #session-header {
     background: var(--border);
     border-radius: 2px;
 }
+/* C3 — the 4px thumb above is the affordance for a mouse. A thumb that
+   thin, drawn only while the block is actually being scrolled, is not one
+   for a finger: on a phone a wide code block or table simply looks like a
+   block that has been cut off. A soft right edge reads as "this
+   continues" at a glance and costs no chrome.
+
+   app.js (M2B) adds `is-scrollable` only when the content really does
+   overflow, so a block that fits is never softened — that is the whole
+   signal. The mask is anchored to the border box, not to the content, so
+   it stays pinned at the right edge while the code scrolls under it.
+
+   On the code block the mask goes on the <pre>, NOT on the wrapper: the
+   wrapper also holds the copy button, absolutely positioned at exactly
+   the top-right corner the fade covers, and touch.css has just finished
+   making that button permanently visible. Masking the wrapper would fade
+   it back out. */
+.code-block-wrap.is-scrollable > pre,
+.message .content table.is-scrollable {
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
+}
 
 #messages,
 .fp-tree,
