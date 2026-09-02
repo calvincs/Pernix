@@ -61,13 +61,15 @@ Returns the new session object including `session_id`.
 ```
 GET /api/sessions?limit=50&offset=0
 ```
-Returns a paginated list of sessions, most recent first.
+One page of sessions, most recent first. Alongside `items`/`count`/`spaces` the response carries `total` (every session in the database) and `has_more` (`offset + limit < total`) — the pair is what lets a client offer the page *behind* the one it is showing instead of stopping at a recency horizon. `has_more` is measured against the requested window rather than the rows returned, because space sessions are unioned back in past that horizon and can make a page longer than `limit`.
 
 ### Get Session (with messages)
 ```
-GET /api/sessions/{session_id}
+GET /api/sessions/{session_id}?limit=200&before_id=<message_id>
 ```
-Returns the full session object including all messages. Pass `?limit=N` to get only the newest N plus `total_messages` / `has_more`.
+Returns the full session object including its messages, oldest first. Pass `?limit=N` to get only the newest N plus `total_messages` (the session's whole count) and `has_more`.
+
+`before_id` pages further back: the newest `limit` messages **older** than that message id, and nothing the client already holds — which is what makes "load earlier" a prepend rather than a re-render of the whole transcript. A `before_id` with no `limit` gets the default page size (200) instead of the whole transcript. `has_more` is computed from the oldest row returned, so it stays correct on the first page and every page after it.
 
 ### Get Session Status
 ```
@@ -319,13 +321,26 @@ Returns a list of all memory files with entry counts and sizes.
 ```
 GET /api/memory/files/{filename}
 ```
-Returns `{"name", "content"}` as JSON.
+Returns `{"name", "content", "mtime"}` as JSON. `mtime` is the markdown file's modification time — hand it straight back as `base_mtime` on the next save to get conflict detection.
+
+### Write a Memory File
+```
+PUT /api/memory/files/{filename}
+Content-Type: application/json
+
+{ "content": "<full markdown>", "base_mtime": 1756800000.123456 }
+```
+Replaces the file's markdown and re-indexes it, so search stops matching text the file no longer contains. `content` is required and must be a string (max 5 MB, else 413); the file must already exist (404 otherwise).
+
+`base_mtime` is optional. Send the value the GET returned and a save that would overwrite someone else's change — the agent, a maintenance sweep — is refused with `409 {"detail": "changed_on_disk", "mtime": <current>}` instead of silently winning. Omit it and the write is last-writer-wins, which is what every non-editor caller gets. Returns `{"saved": true, "name", "bytes", "mtime"}`; the returned `mtime` is the next save's `base_mtime`.
 
 ### Search Memory
 ```
-GET /api/memory/search?q=your+query&limit=5&after=<epoch>
+GET /api/memory/search?q=your+query&limit=10&offset=0&after=<epoch>&space=<slug>
 ```
-Full-text search across all memory entries — BM25, or hybrid BM25 + vector when `embedding_model` is set. `limit` defaults to 5; `after` filters to entries newer than the given epoch. Returns entries with relevance scores.
+Full-text search across all memory entries — BM25, or hybrid BM25 + vector when `embedding_model` is set. `limit` defaults to 10 and is clamped to 100; `offset` pages the ranked results; `after` filters to entries newer than the given epoch; `space` (a slug) prioritizes that space's `pernix.space.<slug>.*` files.
+
+Returns `results` (entries with relevance scores) plus `offset`, `limit`, `returned` (rows in this page) and `has_more` (whether a further page exists). There is deliberately no exact `total`: the hybrid ranker fuses two result sets and stops at a scan cap, so any count would be contradicted by the next query. The flag is the honest answer.
 
 ### Memory Maintenance
 ```
@@ -351,14 +366,18 @@ GET /workspace/{path}
 ```
 Serves the file with auto-detected content type. Works for HTML, images, JSON, text, etc. Useful for opening agent-generated HTML files in the browser.
 
+The response carries an **`X-File-Mtime`** header — the file's modification time in seconds to six decimal places, exposed to browsers via `Access-Control-Expose-Headers`. An editor keeps that value and hands it back as `base_mtime` on save; that is the whole conflict-detection contract.
+
 ### Write a File
 ```
 PUT /workspace/{path}
 Content-Type: application/json
 
-{ "content": "<file contents>" }
+{ "content": "<file contents>", "base_mtime": 1756800000.123456 }
 ```
-The body is JSON with a `content` field (a raw text body is a 422). Creates parent directories automatically.
+The body is JSON with a `content` field (a raw text body is a 422). Creates parent directories automatically. Returns `{"saved": true, "path", "bytes", "mtime"}`.
+
+`base_mtime` is optional and opt-in: send the `X-File-Mtime` value from the GET and a write whose base is stale returns `409 {"detail": "changed_on_disk", "mtime": <current>}` — the file is left alone and the client can diff or reload. Omit it and the write is last-writer-wins, so agent tools, `curl`, and older clients are unaffected. The same contract, byte for byte, backs `PUT /api/memory/files/{name}` and `PUT /api/skills/{name}`.
 
 ### Delete a File
 ```
@@ -371,8 +390,9 @@ POST /api/upload
 Content-Type: multipart/form-data
 
 file=@localfile.pdf
+path=reports/2026          # optional
 ```
-Max 250MB. Filenames are sanitized. Blocked extensions: `.exe`, `.sh`, `.php`, `.bat`, `.dll`, `.msi`, `.scr`, `.cmd`, `.com`. Returns the saved path.
+Max 250MB. `path` is an optional form field naming a directory relative to the workspace root — the folder the Explorer is currently showing. It is created if missing and goes through the same traversal check as every other workspace route; omitted, the upload lands at the root. Filenames are sanitized. Blocked extensions: `.exe`, `.sh`, `.php`, `.bat`, `.dll`, `.msi`, `.scr`, `.cmd`, `.com`. Returns the saved path.
 
 ### List Data Files
 ```
@@ -479,6 +499,26 @@ Content-Type: application/json
 ```
 Updates one or more settings. Partial updates are supported — only the provided keys are changed.
 
+### Settings Schema
+```
+GET /api/settings/schema
+```
+The machine-readable half of the settings surface: every non-redacted settings field with the type, default, and bounds the settings API actually enforces, so a client never has to hardcode them. Returns `{"fields": {<key>: <record>}, "count": N}` with one record per key:
+
+| Key | Meaning |
+|---|---|
+| `key` | The setting name (same as the map key) |
+| `type` | `bool`, `int`, `float`, `str`, `list`, or `dict` — derived from the declared default |
+| `default` | The shipped default value |
+| `min` / `max` | The bounds `POST /api/settings` clamps to, or `null` when the field is unbounded |
+| `step` | Suggested increment: `1` for ints, `0.05` for floats bounded to 0–1, `0.01` for other floats, `null` otherwise |
+| `unit` | Display unit inferred from the key (`seconds`, `minutes`, `hours`, `days`, …), or `null` |
+| `restart` | `true` when changing the field requires a server restart |
+| `locked` | `true` when the field cannot be changed through the API at all |
+| `risk` / `hint` | Always `null` — the client owns this copy; the fields exist so the merged record has one shape |
+
+Redacted fields (API keys and other secrets) are absent entirely.
+
 ### Set API Keys
 ```
 POST /api/settings/apikey
@@ -538,7 +578,7 @@ Returns metadata for all installed skills (name, description, tags, version, ena
 ```
 GET /api/skills/{name}
 ```
-Returns the full SKILL.md content.
+Returns the skill's metadata, rendered `instructions`, the raw `raw_content` of its SKILL.md, its `resources`, and `mtime` — the value to send back as `base_mtime` when saving.
 
 ### Skill Improvement Proposals
 
@@ -562,10 +602,11 @@ post-turn reflect, `refine` for the authoring pass).
 ### Update a Skill
 ```
 PUT /api/skills/{name}
-Content-Type: text/plain
+Content-Type: application/json
 
-<full SKILL.md content>
+{ "content": "<full SKILL.md content>", "base_mtime": 1756800000.123456 }
 ```
+Writes `content` verbatim to the skill's `SKILL.md` and rescans the registry. `base_mtime` is optional and behaves exactly as it does on `PUT /workspace/{path}`: send the `mtime` from `GET /api/skills/{name}` and a stale save is refused with `409 {"detail": "changed_on_disk", "mtime": <current>}`; omit it for last-writer-wins. Returns `{"ok": true, "mtime": <new>}`.
 
 ### Enable / Disable a Skill
 ```
@@ -640,11 +681,20 @@ DELETE /api/jobs/{name}       Delete a job
 PUT    /api/jobs/{name}       Update a job
 POST   /api/jobs/{name}/pause Pause a job
 POST   /api/jobs/{name}/resume Resume a paused job
+POST   /api/jobs/{name}/run   Fire the job once, now
+POST   /api/jobs/{name}/validate   Re-validate the stored spec
+POST   /api/jobs/{name}/test  Dry-run the prompt once in a throwaway workspace
 GET    /api/jobs/runs?limit=&offset=&job_name=   Paginated run history ({items, total, limit, offset})
 DELETE /api/jobs/runs         Clear run history
 GET    /api/jobs/status       Current scheduler status
 GET    /api/jobs/events       SSE stream of job events
 ```
+
+**Run now.** `POST /api/jobs/{name}/run` fires the job through the scheduler's own dispatch, so a manual run *is* a run: same `cron_runs` row, same `job.started` / `job.completed` events, same entry in History. It does not touch the schedule — the missed-run grid is unaffected, and a paused job can still be run this way (that is the point of a manual trigger). Returns `{"status": "run_started", "name"}` immediately; the outcome arrives on `/api/jobs/events` like every other run's.
+
+**Validate.** `POST /api/jobs/{name}/validate` re-checks a stored job's spec — cron expression parses, prompt is non-trivial, every entry in `allowed_tools` exists (hard errors); an unknown model is a warning. The result is persisted on the job and returned as `{"name", "validation"}`, which is what drives the valid / invalid / unvalidated badges in the jobs panel. Creating or editing a job validates it automatically; this endpoint is for re-checking one whose world may have changed underneath it (a renamed tool, a removed model).
+
+**Test.** `POST /api/jobs/{name}/test` dry-runs the prompt once in a throwaway temp workspace under the job's own model and allow-list, writes **no** `cron_runs` row, and keeps the transcript as a `Job test: <name>` session. See [guides/scheduling-cron.md](guides/scheduling-cron.md).
 
 ---
 
