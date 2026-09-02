@@ -3,6 +3,8 @@ import { el, text, clear } from '../render.js';
 import { isMobile } from '../mobile.js';
 import { get, post, patch } from '../api.js';
 import { openSpaceModal, openSpaceDeleteDialog } from './modals/spaces.js';
+import { confirmDanger } from './modals/confirm.js';
+import { notify } from '../feedback.js';
 
 // ---------------------------------------------------------------------------
 // Session type definitions
@@ -38,6 +40,12 @@ let _spaces = [];  // last /api/sessions payload's spaces list
 
 // Live activity text per session (cleared on idle)
 const _activity = new Map(); // sessionId → string
+
+// Sessions the user has deleted but that the server still has, because the
+// undo window has not closed yet. They are filtered out of every render, so
+// the row goes the instant the user confirms while the API call waits.
+const _deferredDeletes = new Set();
+const UNDO_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -246,6 +254,10 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     _spaces = spaces || [];
     _activeSid = activeSid;
     if (_searchActive) { _refreshSearchRows(sessions, activeSid); return; }
+    // Sessions inside their undo window are gone as far as the list is
+    // concerned. Filtering before the guard's fingerprint is what makes the
+    // set part of it — the payload itself has not changed.
+    sessions = (sessions || []).filter(s => !_deferredDeletes.has(s.id));
     // The guard must see spaces too: a label/color edit with an unchanged
     // session list would otherwise never repaint.
     const json = JSON.stringify(sessions) + '|' + JSON.stringify(spaces) + '|' + activeSid;
@@ -260,7 +272,6 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     const sidebarState = _loadState();
     const hidden = sidebarState.hiddenTypes || {};
 
-    sessions = sessions || [];
     // Separate top-level from child sessions (workers, RLM runs), apply type filter
     const allTopLevel = sessions.filter(s => !CHILD_TYPES.has(s.session_type));
     const allChildren = sessions.filter(s => CHILD_TYPES.has(s.session_type));
@@ -723,27 +734,28 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
         }
     }
 
-    // Delete button \u2014 two-tap confirm: the \u00d7 is always visible on touch
-    // devices and sits next to the copy-id button, so a single stray tap
-    // must not permanently destroy a conversation (there is no undo).
+    // Delete button. The \u00d7 is always visible on touch devices and sits
+    // next to the copy-id button, so a stray tap must not destroy a
+    // conversation: it asks first, naming what it is about to delete, and
+    // then leaves five seconds to take it back.
     meta.push(el('button', {
         class: 'session-delete',
         title: 'Delete session',
         'aria-label': `Delete ${titleText}`,
-        onClick: (e) => {
+        onClick: async (e) => {
             e.stopPropagation();
-            const btn = e.currentTarget;
-            if (!btn.classList.contains('confirm')) {
-                btn.classList.add('confirm');
-                btn.textContent = 'sure?';
-                btn._disarmTimer = setTimeout(() => {
-                    btn.classList.remove('confirm');
-                    btn.textContent = '\u00d7';
-                }, 3000);
-                return;
-            }
-            clearTimeout(btn._disarmTimer);
-            if (_onDelete) _onDelete(session.id);
+            const n = session.message_count;
+            const what = n == null ? '' : ` and its ${n} message${n === 1 ? '' : 's'}`;
+            const ok = await confirmDanger({
+                title: 'Delete this session?',
+                body: [
+                    `“${titleText}”${what} will be removed.`,
+                    'You get five seconds to undo. After that it cannot be undone.',
+                ],
+                verb: 'Delete',
+                cancelLabel: 'Keep',
+            });
+            if (ok) _deleteWithUndo(session.id, titleText);
         },
     }, [text('\u00d7')]));
 
@@ -832,6 +844,55 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
             }
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// Delete with an undo window
+//
+// The row goes the moment the user confirms — waiting on a round trip to see
+// your own decision land is what makes a delete feel unsafe — but the API
+// call does not. It fires when the undo toast goes away, so Undo is a real
+// reprieve rather than a delete followed by a recreate that would lose the
+// conversation anyway. _onDelete is app.js's deleteSession; the callback and
+// its contract are untouched, only its timing.
+// ---------------------------------------------------------------------------
+
+function _deleteWithUndo(sessionId, titleText) {
+    _deferredDeletes.add(sessionId);
+    _repaint();
+
+    let undone = false;
+    const restore = () => {
+        undone = true;
+        clearTimeout(timer);
+        _deferredDeletes.delete(sessionId);
+        _repaint();
+    };
+    const dismiss = notify('info', `Deleted “${titleText}”`, {
+        action: restore,
+        actionLabel: 'Undo',
+        ttl: UNDO_MS,
+    });
+
+    const timer = setTimeout(() => {
+        if (undone) return;
+        // Take the toast away with it: a toast whose timer the user paused by
+        // hovering must not keep offering an Undo that no longer exists.
+        dismiss();
+        Promise.resolve(_onDelete ? _onDelete(sessionId) : null)
+            .catch(() => { /* app.js reports its own failures */ })
+            .finally(() => {
+                // Whatever happened, stop hiding it: either the server no
+                // longer has it, or the delete failed and it is still there.
+                _deferredDeletes.delete(sessionId);
+                _repaint();
+            });
+    }, UNDO_MS);
+}
+
+function _repaint() {
+    _lastJson = '';
+    window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
 }
 
 // ---------------------------------------------------------------------------

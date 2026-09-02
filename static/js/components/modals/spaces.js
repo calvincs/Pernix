@@ -9,6 +9,8 @@ import { el, text, clear } from '../../render.js';
 import { get, post, del, patch, apiJson } from '../../api.js';
 import { createCodeEditor } from '../file-panel.js';
 import { openOverlay } from '../../a11y.js';
+import { notify } from '../../feedback.js';
+import { confirmDanger } from './confirm.js';
 
 const SWATCHES = ['#7c9cff', '#ff8a65', '#4db6ac', '#ba68c8', '#ffd54f', '#81c784', '#f06292', '#90a4ae'];
 const DIRECTIVES = ['SOUL', 'RULES', 'SESSIONS'];
@@ -328,59 +330,28 @@ function _buildDirectivesSection(space, dirState, disposers, onSave) {
 // Delete dialog — cascade checkbox OFF by default (detach & keep)
 // ---------------------------------------------------------------------------
 
-export function openSpaceDeleteDialog(space) {
-    document.querySelector('.space-delete-overlay')?.remove();
+export async function openSpaceDeleteDialog(space) {
     const cascadeBox = el('input', { type: 'checkbox', id: 'space-cascade-box' });
-    const status = el('span', { class: 'save-status status-muted', role: 'status' });
-
-    let closeOverlay = null;   // set once the overlay is in the DOM
-    const close = () => {
-        if (closeOverlay) { closeOverlay(); closeOverlay = null; }
-        overlay.remove();
-    };
-
-    const doDelete = async () => {
-        status.textContent = 'Deleting…';
-        try {
-            await del(`/api/spaces/${space.id}?cascade=${cascadeBox.checked}`);
-            _notifyChanged();
-            close();
-        } catch (e) {
-            status.className = 'save-status status-error';
-            status.textContent = `Delete failed: ${e.message || e}`;
-        }
-    };
-
-    const card = el('div', { class: 'modal-card space-delete-card' }, [
-        el('div', { class: 'modal-header' }, [
-            el('h2', {}, [text(`Delete space “${space.label}”?`)]),
-            el('button', {
-                class: 'modal-close',
-                title: 'Cancel',
-                'aria-label': 'Cancel',
-                onClick: close,
-            }, [text('×')]),
+    const ok = await confirmDanger({
+        title: `Delete space “${space.label}”?`,
+        body: 'By default the space is removed but everything in it is kept: its sessions '
+            + 'return to the session list, memory files and the workspace folder stay, and '
+            + 'bound scheduled jobs keep running unbound.',
+        verb: 'Delete space',
+        cancelLabel: 'Cancel',
+        extra: el('label', { class: 'space-cascade-label', for: 'space-cascade-box' }, [
+            cascadeBox,
+            text(' Also delete its sessions, memory files, workspace folder, and jobs'),
         ]),
-        el('div', { class: 'modal-body' }, [
-            el('p', {}, [text(
-                'By default the space is removed but everything in it is kept: its sessions ' +
-                'return to the session list, memory files and the workspace folder stay, and ' +
-                'bound scheduled jobs keep running unbound.'
-            )]),
-            el('label', { class: 'space-cascade-label', for: 'space-cascade-box' }, [
-                cascadeBox,
-                text(' Also delete its sessions, memory files, workspace folder, and jobs'),
-            ]),
-        ]),
-        el('div', { class: 'modal-footer' }, [
-            status,
-            el('button', { class: 'btn btn-secondary', onClick: close }, [text('Cancel')]),
-            el('button', { class: 'btn btn-danger', onClick: doDelete }, [text('Delete space')]),
-        ]),
-    ]);
+    });
+    if (!ok) return;
 
-    const overlay = el('div', { class: 'modal-overlay space-delete-overlay' }, [card]);
-    _armBackdropClose(overlay, close);
-    document.body.appendChild(overlay);
-    closeOverlay = openOverlay(card, { onClose: close });
+    try {
+        await del(`/api/spaces/${space.id}?cascade=${cascadeBox.checked}`);
+        _notifyChanged();
+    } catch (e) {
+        // The dialog is gone by now, so the failure has to find the user
+        // wherever they are looking.
+        notify('error', `Could not delete “${space.label}”: ${e.message || e}`);
+    }
 }

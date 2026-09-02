@@ -3411,3 +3411,14 @@ mark.ts-mark.current {
     line-height: 1.5;
     text-wrap: pretty;
 }
+
+/* N6/F9 — the shared confirm dialog. Everything else it needs (.modal-card,
+   .modal-header, .modal-footer, .btn) is already shared; only the width and
+   the body rhythm are its own. */
+.confirm-card { width: min(520px, 92vw); }
+.confirm-body p {
+    margin: 0 0 var(--sp-2);
+    line-height: 1.55;
+    text-wrap: pretty;
+}
+.confirm-body p:last-of-type { margin-bottom: 0; }
