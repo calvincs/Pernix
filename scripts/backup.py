@@ -69,6 +69,23 @@ def backups_dir() -> Path:
     return Path(settings.db_path).resolve().parent / "backups"
 
 
+def legacy_backups_dir() -> Path:
+    """The directory backups lived in before the rename: ``data/.backups``.
+
+    Nothing here ever writes to it, and yet it is not history. A boot-time
+    path that predates the rename still drops a ``sessions-<stamp>.db`` and a
+    ``settings-<stamp>.json`` into it every time the container starts, so on a
+    box that has been redeployed for a year it holds more than the live
+    directory does — 2.7 GB against 1.3 GB — under a retention count that has
+    never once been applied to it.
+
+    Only meaningful when it exists: an instance that has never run an older
+    version has no such directory, and callers report nothing rather than an
+    empty ledger for a path that will never appear.
+    """
+    return backups_dir().parent / ".backups"
+
+
 def resolve_keep(keep: int | None = None) -> int:
     """Clamp the retention count into KEEP_MIN..KEEP_MAX."""
     raw = settings.backup_keep_count if keep is None else keep
@@ -228,13 +245,20 @@ def snapshots_beyond_keep(keep: int, snapshots: list[dict] | None = None) -> lis
     return snapshots[keep:]
 
 
-def rotate(keep: int, dry_run: bool = False) -> dict:
+def rotate(keep: int, dry_run: bool = False, root: Path | str | None = None) -> dict:
     """Keep the newest ``keep`` snapshots across every scheme; drop the rest.
 
     Returns what was (or would be) removed, the bytes it frees, and how many
     snapshots are left standing.
+
+    ``root`` defaults to :func:`backups_dir`. It is a parameter because there
+    is a second directory on a long-lived box — :func:`legacy_backups_dir` —
+    and each is retained on its own: ``keep`` means "the newest ``keep`` in
+    this directory", never a budget shared across both. Pooling them would
+    make deleting a live snapshot the consequence of a deploy having written
+    a legacy one.
     """
-    snapshots = list_snapshots()
+    snapshots = list_snapshots(root)
     stale = snapshots_beyond_keep(keep, snapshots)
     removed: list[str] = []
     freed = 0
@@ -323,7 +347,13 @@ def run_backup(keep: int | None = None) -> dict:
     # Snapshots rotate scheme-aware (every name this script ever wrote);
     # corpora by their single glob. Two calls, because the DB family is the
     # only one with a history of renames.
-    removed = rotate(resolved)["removed"]
+    #
+    # `root` is named rather than defaulted: the scheduled backup writes to,
+    # and sweeps, exactly the directory it just wrote into. The legacy
+    # directory is rotated only when an operator asks for it, because a
+    # scheduled job quietly deleting from a directory this script does not
+    # write to is a surprise nobody consented to.
+    removed = rotate(resolved, root=root)["removed"]
     removed += _rotate(root, f"{_MEMORIES_PREFIX}-*", resolved)
 
     return {
