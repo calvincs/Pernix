@@ -45,14 +45,6 @@ export function isTouch() { return touchMq.matches || FORCED_TOUCH; }
 /** Layout tier: narrower than the 900px tablet line. Gate for compact.css. */
 export function isCompact() { return compactMq.matches; }
 
-/**
- * @deprecated Kept for one release so nothing breaks mid-refactor. Every
- * caller should say which of the two it means: isCompact() for anything about
- * the layout (drawer, sheets, full-screen panes), isTouch() for anything about
- * the pointer (target sizes, hover, gestures, tooltips).
- */
-export function isMobile() { return isCompact(); }
-
 export function initMobile() {
     _stamp();
     // Two independent listeners: crossing 900px must not disturb the touch
