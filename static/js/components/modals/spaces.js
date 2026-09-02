@@ -8,6 +8,7 @@
 import { el, text, clear } from '../../render.js';
 import { get, post, del, patch, apiJson } from '../../api.js';
 import { createCodeEditor } from '../file-panel.js';
+import { openOverlay } from '../../a11y.js';
 
 const SWATCHES = ['#7c9cff', '#ff8a65', '#4db6ac', '#ba68c8', '#ffd54f', '#81c784', '#f06292', '#90a4ae'];
 const DIRECTIVES = ['SOUL', 'RULES', 'SESSIONS'];
@@ -92,13 +93,15 @@ export function openSpaceModal(space) {
         ]));
     }
 
-    const status = el('span', { class: 'save-status status-muted' });
+    const status = el('span', { class: 'save-status status-muted', role: 'status' });
     const setStatus = (msg, kind = 'muted') => {
         status.textContent = msg;
         status.className = `save-status status-${kind}`;
     };
 
+    let closeOverlay = null;   // set once the overlay is in the DOM
     const close = () => {
+        if (closeOverlay) { closeOverlay(); closeOverlay = null; }
         for (const d of disposers) { try { d(); } catch { /* disposed */ } }
         for (const st of Object.values(dirState)) {
             if (st && st.editor && st.editor.dispose) {
@@ -107,11 +110,9 @@ export function openSpaceModal(space) {
             if (st) st.editor = null;
         }
         overlay.remove();
-        document.removeEventListener('keydown', onEsc);
         if (_openSpaceModal === close) _openSpaceModal = null;
     };
     _openSpaceModal = close;
-    const onEsc = (e) => { if (e.key === 'Escape') close(); };
 
     const save = async () => {
         const label = labelInput.value.trim();
@@ -165,8 +166,7 @@ export function openSpaceModal(space) {
     const overlay = el('div', { class: 'modal-overlay space-modal-overlay' }, [card]);
     _armBackdropClose(overlay, close);
     document.body.appendChild(overlay);
-    document.addEventListener('keydown', onEsc);
-    labelInput.focus();
+    closeOverlay = openOverlay(card, { onClose: close, initialFocus: labelInput });
 }
 
 // Backdrop close that only fires when the press STARTED on the backdrop.
@@ -317,10 +317,13 @@ function _buildDirectivesSection(space, dirState, disposers, onSave) {
 export function openSpaceDeleteDialog(space) {
     document.querySelector('.space-delete-overlay')?.remove();
     const cascadeBox = el('input', { type: 'checkbox', id: 'space-cascade-box' });
-    const status = el('span', { class: 'save-status status-muted' });
+    const status = el('span', { class: 'save-status status-muted', role: 'status' });
 
-    const close = () => { overlay.remove(); document.removeEventListener('keydown', onEsc); };
-    const onEsc = (e) => { if (e.key === 'Escape') close(); };
+    let closeOverlay = null;   // set once the overlay is in the DOM
+    const close = () => {
+        if (closeOverlay) { closeOverlay(); closeOverlay = null; }
+        overlay.remove();
+    };
 
     const doDelete = async () => {
         status.textContent = 'Deleting…';
@@ -360,5 +363,5 @@ export function openSpaceDeleteDialog(space) {
     const overlay = el('div', { class: 'modal-overlay space-delete-overlay' }, [card]);
     _armBackdropClose(overlay, close);
     document.body.appendChild(overlay);
-    document.addEventListener('keydown', onEsc);
+    closeOverlay = openOverlay(card, { onClose: close });
 }

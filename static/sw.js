@@ -43,6 +43,7 @@ const SHELL_ASSETS = [
     '/static/js/mobile.js',
     '/static/js/sigil.js',
     '/static/js/notifications.js',
+    '/static/js/a11y.js',
     '/static/js/components/sidebar.js',
     '/static/js/components/file-panel.js',
     '/static/js/components/jobs-indicator.js',

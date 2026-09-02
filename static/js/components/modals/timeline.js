@@ -21,6 +21,7 @@
 import { el, text, setSanitizedSvg } from '../../render.js';
 import { get } from '../../api.js';
 import { state } from '../../store.js';
+import { openOverlay } from '../../a11y.js';
 
 // Vendored rather than CDN-loaded: the page ships a `script-src 'self'` CSP
 // (see index.html) and has to work offline on a LAN. Mermaid 10's ESM build
@@ -32,6 +33,7 @@ const PAGE_LIMIT = 500;
 const GAP_MS = 30_000; // idle gap worth flagging between adjacent rows
 
 let _overlay = null;
+let _closeOverlay = null;  // teardown from a11y.js openOverlay()
 let _mermaid = null;
 let _mermaidPromise = null;
 let _data = { stateLog: [], messages: [], liveTools: [], hasOlder: false };
@@ -106,7 +108,7 @@ export async function openTimeline() {
         if (e.target === _overlay) closeTimeline();
     });
     document.body.append(_overlay);
-    document.addEventListener('keydown', _onEsc);
+    _closeOverlay = openOverlay(card, { onClose: _onEsc });
 
     await _load();
     _renderTimeline();
@@ -114,6 +116,7 @@ export async function openTimeline() {
 }
 
 export function closeTimeline() {
+    if (_closeOverlay) { _closeOverlay(); _closeOverlay = null; }
     if (_overlay) {
         _overlay.remove();
         _overlay = null;
@@ -131,7 +134,6 @@ export function closeTimeline() {
     _filterBtns = [];
     _tabBtns = [];
     _panes = [];
-    document.removeEventListener('keydown', _onEsc);
 }
 
 export function isTimelineOpen() {
@@ -1178,8 +1180,8 @@ async function _copyExport(btn) {
     }
 }
 
-function _onEsc(e) {
-    if (e.key !== 'Escape') return;
+// Called by openOverlay() on Escape.
+function _onEsc() {
     // Esc inside the filter input clears it instead of closing the modal.
     if (_filterInput && document.activeElement === _filterInput) {
         if (_filterInput.value) {

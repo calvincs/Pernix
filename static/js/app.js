@@ -15,6 +15,7 @@ import { initFilePanel, toggleFilePanel, openFilePanel } from './components/file
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
 import { initMobile, isMobile, closeSidebar } from './mobile.js';
 import { initVoice, stopVoice } from './voice.js';
+import { openOverlay } from './a11y.js';
 
 // ---------------------------------------------------------------------------
 // File uploads state
@@ -2748,7 +2749,7 @@ function appendQuestionBubble(questionId, questionText, context) {
         placeholder: 'Type your answer…',
         rows: '2',
     });
-    const inlineStatus = el('span', { class: 'q-inline-status' });
+    const inlineStatus = el('span', { class: 'q-inline-status', role: 'status' });
     const inlineSend = el('button', { class: 'btn btn-primary q-inline-send', onClick: async () => {
         const answer = inlineInput.value.trim();
         if (!answer) return;
@@ -3596,6 +3597,7 @@ function closeTranscriptSearch() {
 // ---------------------------------------------------------------------------
 
 let _paletteEl = null;
+let _closePaletteOverlay = null;   // teardown from a11y.js openOverlay()
 
 function openSessionPalette() {
     if (_paletteEl) { closeSessionPalette(); return; }
@@ -3606,6 +3608,10 @@ function openSessionPalette() {
     _paletteEl = el('div', { class: 'palette-overlay' }, [card]);
     _paletteEl.addEventListener('click', (e) => { if (e.target === _paletteEl) closeSessionPalette(); });
     document.body.appendChild(_paletteEl);
+    // The palette has no heading of its own — name it from the input's own
+    // placeholder text rather than inventing a visible title.
+    card.setAttribute('aria-label', 'Jump to session');
+    _closePaletteOverlay = openOverlay(card, { initialFocus: input });
 
     let items = [];
     let selected = 0;
@@ -3671,6 +3677,7 @@ function openSessionPalette() {
 }
 
 function closeSessionPalette() {
+    if (_closePaletteOverlay) { _closePaletteOverlay(); _closePaletteOverlay = null; }
     if (_paletteEl) {
         _paletteEl.remove();
         _paletteEl = null;
@@ -3859,7 +3866,7 @@ function _showLoginScreen() {
             <div class="auth-hint">Find this token in the server console output —
                 or on a logged-in desktop browser, open Settings &rarr; Network and
                 scan the QR code to sign this device in automatically.</div>
-            <div class="auth-error" style="display:none"></div>
+            <div class="auth-error" role="alert" style="display:none"></div>
         </div>
     `;
     document.body.appendChild(overlay);
@@ -3867,6 +3874,13 @@ function _showLoginScreen() {
     const input = overlay.querySelector('.auth-input');
     const btn = overlay.querySelector('.auth-btn');
     const errorEl = overlay.querySelector('.auth-error');
+
+    // No onClose: there is nothing behind this screen to go back to, so
+    // Escape must not dismiss it. The trap keeps Tab on the three controls
+    // that exist instead of walking the app underneath.
+    const card = overlay.querySelector('.auth-card');
+    card.setAttribute('aria-label', 'Sign in to Pernix');
+    openOverlay(card, { initialFocus: input });
 
     async function submit() {
         const token = input.value.trim();
