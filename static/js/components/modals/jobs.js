@@ -253,12 +253,12 @@ function _buildJobRow(job, models, spaces = []) {
         const validBadge = !v
             ? el('span', { style: { color: 'var(--text-faint)' }, title: 'Saved before spec validation existed — edit or validate to check it' }, [text('unvalidated')])
             : v.ok
-                ? el('span', { style: { color: 'var(--ok, #4a8)' }, title: (v.warnings || []).join('\n') || 'spec valid' }, [text((v.warnings || []).length ? 'valid ⚠' : 'valid')])
-                : el('span', { style: { color: 'var(--danger, #c66)' }, title: (v.errors || []).join('\n') }, [text('invalid')]);
+                ? el('span', { style: { color: 'var(--ok)' }, title: (v.warnings || []).join('\n') || 'spec valid' }, [text((v.warnings || []).length ? 'valid ⚠' : 'valid')])
+                : el('span', { style: { color: 'var(--danger)' }, title: (v.errors || []).join('\n') }, [text('invalid')]);
         const lt = job.last_test;
         const testBadge = lt
             ? el('span', {
-                style: { color: lt.ok ? 'var(--ok, #4a8)' : 'var(--danger, #c66)' },
+                style: { color: lt.ok ? 'var(--ok)' : 'var(--danger)' },
                 title: lt.error || `tested ${lt.at || ''} (${lt.duration_s || 0}s)`,
             }, [text(lt.ok ? 'test ✓' : 'test ✗')])
             : null;

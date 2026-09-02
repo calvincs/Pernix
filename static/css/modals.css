@@ -3,7 +3,7 @@
 .modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.65);
+    background: var(--scrim);
     backdrop-filter: blur(2px);
     display: flex;
     align-items: center;
@@ -206,7 +206,7 @@
     letter-spacing: normal;
     line-height: 1.5;
     z-index: 1100;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-md);
     pointer-events: none;
 }
 .section-help-wrap:hover .section-help-tip,
@@ -507,7 +507,7 @@
     text-align: center;
     flex-shrink: 0;
 }
-.or-status.valid { color: #5a9a4a; }
+.or-status.valid { color: var(--success); }
 .or-status.invalid { color: var(--error); }
 .or-status.checking {
     color: var(--accent-dim);
@@ -724,7 +724,7 @@
 .question-bubble .q-inline-form { display: flex; flex-direction: column; gap: var(--sp-2); }
 .question-bubble .q-inline-input {
     width: 100%;
-    background: var(--bg, #1e1e1e);
+    background: var(--bg);
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -903,15 +903,15 @@
 
 /* ── Security tab — warning block ──────────────────────────── */
 .security-warning-block {
-    background: color-mix(in srgb, var(--error, #c25450) 8%, var(--bg));
-    border: 1px solid var(--error, #c25450);
+    background: color-mix(in srgb, var(--error) 8%, var(--bg));
+    border: 1px solid var(--error);
     border-radius: var(--radius);
     padding: var(--sp-3);
     margin-bottom: var(--sp-4);
 }
 .security-warning-title {
     font-weight: 500;
-    color: var(--error, #c25450);
+    color: var(--error);
     margin-bottom: var(--sp-2);
     font-size: var(--text-sm);
     letter-spacing: 0.02em;
@@ -971,7 +971,7 @@
 .notif-session-link {
     font-family: var(--font-mono, monospace);
     font-size: 0.72rem;
-    color: var(--accent, #7aa2f7);
+    color: var(--accent);
     cursor: pointer;
     text-decoration: none;
     opacity: 0.85;

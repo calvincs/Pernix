@@ -59,7 +59,7 @@
     width: 20px;
     height: 20px;
     color: var(--accent);
-    filter: drop-shadow(0 0 3px rgba(212, 168, 67, 0.35));
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 35%, transparent));
     animation: brandBreathe 11.4s ease-in-out infinite;
     flex-shrink: 0;
     display: block;  /* drops baseline gap from inline default */
@@ -211,7 +211,7 @@
 .session-id-badge:focus-visible { opacity: 1 !important; color: var(--accent); }
 .session-id-badge.copied {
     opacity: 1 !important;
-    color: var(--success, #4ade80);
+    color: var(--success);
 }
 .session-id-badge.copied::after {
     content: ' copied';
@@ -341,7 +341,7 @@
     background: var(--bg-raised, var(--bg));
     border: 1px solid var(--border);
     border-radius: 6px;
-    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-lg);
     padding: 4px;
 }
 .space-move-item {
@@ -354,7 +354,7 @@
     color: var(--text-dim);
     cursor: pointer;
 }
-.space-move-item:hover { background: var(--bg-hover, rgba(255, 255, 255, 0.06)); color: var(--text); }
+.space-move-item:hover { background: var(--bg-hover); color: var(--text); }
 .space-move-item.current { opacity: 0.5; cursor: default; }
 
 /* Session type dots */
@@ -684,7 +684,7 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--teal-dim, #4a8);
+    background: var(--teal-dim);
     margin-right: 4px;
     --pulse-dip: 0.5;
     animation: pulse var(--pulse-fast) ease-in-out infinite;
@@ -842,13 +842,15 @@
     line-height: 1.12;
     letter-spacing: -0.02em;
     color: var(--text-bright);
-    text-shadow: 0 0 60px rgba(212, 168, 67, 0.18);
+    text-shadow: 0 0 60px color-mix(in srgb, var(--accent) 18%, transparent);
     margin: 0;
 }
 .empty-state-title-line {
-    /* Vertical gold gradient on the wordmark — copied verbatim from the website. */
+    /* Vertical gold gradient on the wordmark. Token-driven so it survives a
+       theme swap — on paper --accent-tint is a DARKER gold than --accent, so
+       the whole wordmark stays above the 3:1 large-text floor. */
     display: inline-block;
-    background: linear-gradient(180deg, #ece1c4 0%, #d4a843 80%, #8a6720 100%);
+    background: linear-gradient(180deg, var(--accent-tint) 0%, var(--accent) 80%, var(--accent-dim) 100%);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
@@ -1506,7 +1508,7 @@
     font-size: 10px;
     color: var(--text-faint);
     border: 1px solid var(--border-subtle);
-    background: rgba(255,255,255,0.02);
+    background: var(--bg-surface);
 }
 
 /* System messages */
@@ -1722,7 +1724,7 @@
     font-size: var(--text-xxs);
     letter-spacing: 0.02em;
     border: 1px solid var(--border-subtle);
-    background: var(--bg-surface, rgba(255,255,255,0.02));
+    background: var(--bg-surface);
     color: var(--text-faint);
     white-space: nowrap;
 }
@@ -1732,11 +1734,11 @@
     font-weight: 500;
 }
 .model-divider-pill.model-divider-override {
-    color: var(--accent, #4ea1ff);
-    border-color: rgba(78,161,255,0.3);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 .model-divider-pill.model-divider-restore {
-    color: var(--accent-dim, #88a);
+    color: var(--accent-dim);
 }
 #status-bar .model .model-override-shuffle {
     display: inline-block;
@@ -1747,7 +1749,7 @@
     animation: pulse var(--pulse-slow) ease-in-out infinite;
 }
 #status-bar .model .model-override-temp {
-    color: var(--accent, #4ea1ff);
+    color: var(--accent);
     font-weight: 500;
 }
 #status-bar .ctx {
@@ -1999,7 +2001,7 @@
 .timeline-tool-row {
     margin: 2px 0;
     border-radius: var(--radius);
-    background: var(--bg-subtle, rgba(255,255,255,0.02));
+    background: var(--bg-subtle);
 }
 .timeline-tool-row .tool-item-body {
     display: none;
@@ -2009,7 +2011,7 @@
 .timeline-tool-row.expanded .tool-item-body { display: block; }
 /* In-flight (tool.start) row — upgraded in place when the result arrives. */
 .timeline-tool-row.running {
-    background: var(--bg-subtle, rgba(255, 255, 255, 0.04));
+    background: var(--bg-subtle);
     opacity: 0.85;
 }
 .tool-item-running-dot {
@@ -2081,7 +2083,7 @@
     position: sticky;
     top: 0;
     z-index: 2;
-    background: var(--bg-panel, var(--bg, #16161a));
+    background: var(--bg-panel);
     border-bottom: 1px solid var(--border-subtle);
     margin-bottom: 4px;
 }
@@ -2196,7 +2198,7 @@
     align-items: center;
     gap: var(--sp-1);
     font-size: var(--text-xxs);
-    color: var(--info, #5b9bd5);
+    color: var(--info);
     max-width: 240px;
     white-space: nowrap;
     overflow: hidden;
@@ -2227,7 +2229,7 @@
 }
 
 /* Browse tool card enrichment */
-.tool-item.browse { border-left: 2px solid var(--info, #5b9bd5); }
+.tool-item.browse { border-left: 2px solid var(--info); }
 .tool-browse-header {
     display: flex;
     align-items: center;
@@ -2272,11 +2274,11 @@
     padding: var(--sp-2);
     transition: border-color var(--transition), box-shadow var(--transition);
     position: relative;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    box-shadow: var(--shadow-sm);
 }
 #input-bar:focus-within {
     border-color: var(--accent-dim);
-    box-shadow: 0 0 0 1px var(--accent-dim), 0 2px 8px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 0 0 1px var(--accent-dim), var(--shadow-md);
 }
 
 #attach-btn {
@@ -2294,7 +2296,7 @@
     transition: background var(--transition), color var(--transition), transform var(--transition-fast);
 }
 #attach-btn:hover {
-    background: var(--bg-soft, rgba(255, 255, 255, 0.05));
+    background: var(--bg-soft);
     color: var(--text-bright);
 }
 #attach-btn:active { transform: scale(0.92); }
@@ -2335,7 +2337,7 @@
     transition: background var(--transition), color var(--transition), transform var(--transition-fast);
 }
 #voice-btn:hover {
-    background: var(--bg-soft, rgba(255, 255, 255, 0.05));
+    background: var(--bg-soft);
     color: var(--text-bright);
 }
 #voice-btn:active { transform: scale(0.92); }
@@ -2348,12 +2350,12 @@
     height: 18px;
 }
 #voice-btn.recording {
-    color: var(--error, #e55);
-    background: rgba(229, 85, 85, 0.12);
+    color: var(--error);
+    background: color-mix(in srgb, var(--error) 12%, transparent);
     animation: voice-pulse 1.6s ease-in-out infinite;
 }
 @keyframes voice-pulse {
-    50% { box-shadow: 0 0 0 6px rgba(229, 85, 85, 0.18); }
+    50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--error) 18%, transparent); }
 }
 #voice-btn.busy {
     color: var(--accent);
@@ -2409,8 +2411,8 @@
     animation: none;
 }
 @keyframes stopPulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(194, 84, 80, 0.3); }
-    50% { box-shadow: 0 0 0 6px rgba(194, 84, 80, 0); }
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--error) 30%, transparent); }
+    50% { box-shadow: 0 0 0 6px transparent; }
 }
 
 /* SSE health indicator */
@@ -2524,7 +2526,7 @@
     content: 'Drop files anywhere';
     position: fixed;
     inset: 0;
-    background: rgba(14, 14, 14, 0.85);
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
     border: 2px dashed var(--accent);
     display: flex;
     align-items: center;
@@ -2673,7 +2675,7 @@
     justify-content: center;
     gap: var(--sp-2);
     background: var(--bg-raised);
-    border-bottom: 1px solid var(--error, #e55);
+    border-bottom: 1px solid var(--error);
     color: var(--text-dim);
     font-size: var(--text-xs);
     padding: var(--sp-2) var(--sp-3);
@@ -2689,7 +2691,7 @@
     position: fixed;
     inset: 0;
     z-index: 2500;
-    background: rgba(0, 0, 0, 0.55);
+    background: var(--scrim);
     backdrop-filter: blur(4px);
     display: flex;
     align-items: center;
@@ -2817,7 +2819,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 4px 6px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-md);
 }
 #transcript-search input {
     background: transparent;
@@ -2847,13 +2849,13 @@
 #transcript-search .ts-nav:hover,
 #transcript-search .ts-close:hover { color: var(--text-bright); }
 mark.ts-mark {
-    background: rgba(212, 168, 67, 0.35);
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
     color: inherit;
     border-radius: 2px;
 }
 mark.ts-mark.current {
-    background: rgba(212, 168, 67, 0.8);
-    color: #111;
+    background: var(--accent);
+    color: var(--bg);
 }
 
 /* Ctrl+K session switcher palette */
@@ -2861,7 +2863,7 @@ mark.ts-mark.current {
     position: fixed;
     inset: 0;
     z-index: 200;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--scrim);
     display: flex;
     justify-content: center;
     align-items: flex-start;
@@ -2872,7 +2874,7 @@ mark.ts-mark.current {
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
 }
 .palette-card input {
@@ -2927,7 +2929,7 @@ mark.ts-mark.current {
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow-lg);
     padding: var(--sp-2) 0;
 }
 .model-menu-header {
@@ -2983,16 +2985,16 @@ mark.ts-mark.current {
     line-height: 1.5;
 }
 .session-attn.attn-input {
-    color: #d4a843;
-    background: rgba(212, 168, 67, 0.15);
-    border: 1px solid rgba(212, 168, 67, 0.35);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     --pulse-dip: 0.45;
     animation: pulse var(--pulse-slow) ease-in-out infinite;
 }
 .session-attn.attn-done {
-    color: #7aaa7a;
-    background: rgba(90, 138, 90, 0.15);
-    border: 1px solid rgba(90, 138, 90, 0.3);
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
 }
 /* Sidebar pin + rename buttons — hover-revealed like the delete button */
 .session-pin,
@@ -3029,7 +3031,7 @@ mark.ts-mark.current {
 .session-rename-input {
     flex: 1;
     min-width: 0;
-    background: var(--bg-deep, #0a0a0a);
+    background: var(--bg-deep);
     border: 1px solid var(--border);
     border-radius: 3px;
     color: var(--text-bright);

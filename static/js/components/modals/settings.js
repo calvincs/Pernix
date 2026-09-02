@@ -586,8 +586,8 @@ function _wireNetworkSection() {
     const warning = el('div', {
         id: 'network-warning',
         style: `display: ${networkToggle.checked ? '' : 'none'}; `
-             + 'background: var(--surface-hover, #2a1a1a); '
-             + 'border-left: 3px solid var(--error, #e55); '
+             + 'background: var(--surface-hover); '
+             + 'border-left: 3px solid var(--error); '
              + 'padding: 0.6rem 0.8rem; margin-bottom: 0.8rem; '
              + 'border-radius: 4px; font-size: 0.85rem; line-height: 1.4;',
     }, [
@@ -652,8 +652,8 @@ function _updateVoiceVisibility() {
     if (disc) {
         disc.textContent = _VOICE_DISCLAIMERS[mode] || '';
         const warn = mode === 'web_speech';
-        disc.style.borderLeftColor = warn ? 'var(--error, #e55)' : 'var(--accent-dim, #888)';
-        disc.style.background = warn ? 'var(--surface-hover, #2a1a1a)' : 'var(--bg-soft, rgba(255,255,255,0.04))';
+        disc.style.borderLeftColor = warn ? 'var(--error)' : 'var(--accent-dim)';
+        disc.style.background = warn ? 'var(--surface-hover)' : 'var(--bg-soft)';
     }
 
     const note = document.getElementById('voice-fallback-note');
@@ -688,15 +688,15 @@ function _wireVoiceSection() {
     if (!section) return;
 
     const boxStyle =
-        'border-left: 3px solid var(--accent-dim, #888); '
-        + 'background: var(--bg-soft, rgba(255,255,255,0.04)); '
+        'border-left: 3px solid var(--accent-dim); '
+        + 'background: var(--bg-soft); '
         + 'padding: 0.6rem 0.8rem; margin: 0.5rem 0 0.8rem; '
         + 'border-radius: 4px; font-size: 0.85rem; line-height: 1.4;';
 
     const disclaimer = el('div', { id: 'voice-disclaimer', style: boxStyle });
     const statusLine = el('div', {
         id: 'voice-status-line',
-        style: 'display: none; color: var(--error, #e55); font-size: 0.85rem; margin: 0 0 0.6rem;',
+        style: 'display: none; color: var(--error); font-size: 0.85rem; margin: 0 0 0.6rem;',
     });
     // Disclaimer sits directly under the engine selector, where the choice is made
     const modeRow = modeSelect.closest('.setting-row');
@@ -709,7 +709,7 @@ function _wireVoiceSection() {
     if (fallbackRow) {
         fallbackRow.after(el('div', {
             id: 'voice-fallback-note',
-            style: boxStyle + 'border-left-color: var(--error, #e55);',
+            style: boxStyle + 'border-left-color: var(--error);',
         }, [
             text('When the engine above is unavailable (whisper missing, model can’t hear audio), '
                 + 'dictation falls back to your browser vendor’s speech service — your voice audio leaves '
@@ -766,7 +766,7 @@ async function _runVoiceTestClick(btn, resultEl) {
                 : phase === 'transcribing' ? 'Transcribing…'
                 : 'Checking…';
         });
-        resultEl.style.color = res.ok ? 'var(--accent)' : 'var(--error, #e55)';
+        resultEl.style.color = res.ok ? 'var(--accent)' : 'var(--error)';
         resultEl.textContent = res.ok
             ? (res.text ? `✓ Heard: “${res.text}”` : `✓ ${res.detail}`)
             : `✗ ${res.error}`;
@@ -1747,7 +1747,7 @@ function _buildRegenerateButton() {
                     errEl = el('div', {
                         class: 'revoke-error',
                         role: 'alert',
-                        style: 'color:var(--error, #e55); font-family:var(--mono);'
+                        style: 'color:var(--error); font-family:var(--mono);'
                              + 'font-size:var(--text-xs); margin-top:0.75rem;',
                     });
                     // Inside the body, so it inherits the same padding as
@@ -1844,7 +1844,7 @@ function _buildOriginsEditor(origins) {
 function buildNotificationsSection() {
     const perm = getPermission();
     const statusText = { granted: 'Enabled', denied: 'Blocked by browser', default: 'Not enabled', unsupported: 'Not supported' }[perm] || perm;
-    const statusColor = perm === 'granted' ? 'var(--success, #4c8)' : perm === 'denied' ? 'var(--error, #e55)' : 'var(--text-dim)';
+    const statusColor = perm === 'granted' ? 'var(--success)' : perm === 'denied' ? 'var(--error)' : 'var(--text-dim)';
 
     const statusEl = el('span', { style: `color:${statusColor}; font-size:var(--text-sm);` }, [text(statusText)]);
     const row = el('div', { class: 'setting-row', 'data-key': 'browser_notifications' }, [
@@ -1861,7 +1861,7 @@ function buildNotificationsSection() {
         btn.addEventListener('click', async () => {
             const granted = await requestPermission();
             statusEl.textContent = granted ? 'Enabled' : 'Permission denied';
-            statusEl.style.color = granted ? 'var(--success, #4c8)' : 'var(--error, #e55)';
+            statusEl.style.color = granted ? 'var(--success)' : 'var(--error)';
             if (granted) btn.remove();
         });
         children.push(btn);
@@ -2000,7 +2000,7 @@ async function buildSecurityTab(settings) {
     const statusBadge = el('span', {
         style: 'font-size:var(--text-xs); font-weight:500; padding:2px 10px; border-radius:3px; '
              + (isEnabled
-                 ? 'background:color-mix(in srgb,var(--error,#c25450) 15%,var(--bg)); color:var(--error,#c25450); border:1px solid var(--error,#c25450);'
+                 ? 'background:color-mix(in srgb,var(--error) 15%,var(--bg)); color:var(--error); border:1px solid var(--error);'
                  : 'background:var(--bg-surface); color:var(--text-faint); border:1px solid var(--border);'),
     }, [text(isEnabled ? 'ENABLED' : 'DISABLED')]);
     const toggleSection = el('div', { class: 'settings-section' }, [
