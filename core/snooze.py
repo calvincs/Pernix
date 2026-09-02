@@ -551,6 +551,20 @@ class SnoozeRunner:
             _announce(bus, "cleanup_canary_runs", "Pruning old canary runs and sessions")
             await self._rung("cleanup_canary_runs", self._cleanup_canary_runs())
 
+        # Activity 12e: Session archive sweeps (no LLM). Archiving ordinary
+        # chats idle past the horizon is the one retention sweep that loses
+        # nothing — the transcript stays whole and searchable and one PATCH
+        # brings it back — so it runs unguarded by any of the delete side's
+        # caution. The prune behind it DOES delete, and is off by default.
+        # Two rungs rather than one: a failure in either must not cost the
+        # other its cycle.
+        if not self._is_cancelled() and settings.session_archive_idle_days > 0:
+            _announce(bus, "archive_idle_sessions", "Archiving chats idle past the horizon")
+            await self._rung("archive_idle_sessions", self._archive_idle_sessions())
+        if not self._is_cancelled() and settings.session_delete_archived_days > 0:
+            _announce(bus, "prune_archived_sessions", "Deleting sessions long past archiving")
+            await self._rung("prune_archived_sessions", self._prune_archived_sessions())
+
         # Activity 12d: Canary suite auto-maintenance (no LLM). Promotes
         # vetted auto-admitted canaries, tags flapping ones flaky, retires
         # long-green ones to quarantine, purges the quarantine. The Goodhart
@@ -747,6 +761,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                    WHERE s.snooze_reviewed_at IS NOT NULL
                      AND {db.SQL_SESSION_IS_IDLE}
                      AND s.updated_at < ?
+                     AND s.archived_at IS NULL
                      AND s.session_type != 'worker'
                      AND (
                          SELECT COUNT(*) FROM messages m
@@ -1389,6 +1404,22 @@ Output valid JSON only. No markdown fences. /no_think"""
         await retention.nudge_stale_canaries()
         self._bump("worker_sessions_pruned", await retention.prune_worker_sessions())
         self._bump("dream_hypotheses_pruned", await asyncio.to_thread(retention.prune_dream_hypotheses))
+
+    async def _archive_idle_sessions(self) -> None:
+        """Activity 12e — ordinary chats idle past session_archive_idle_days
+        leave the sidebar. Nothing is deleted; see core/retention.py."""
+        from core import retention
+
+        result = await asyncio.to_thread(retention.archive_idle_sessions)
+        self._bump("sessions_archived", int(result.get("count") or 0))
+
+    async def _prune_archived_sessions(self) -> None:
+        """Activity 12e — sessions archived longer than
+        session_delete_archived_days are deleted for real. Off by default."""
+        from core import retention
+
+        result = await asyncio.to_thread(retention.prune_archived_sessions)
+        self._bump("archived_sessions_pruned", int(result.get("count") or 0))
 
     async def _canary_maintain(self) -> None:
         """Activity 12d — one canary auto-maintenance sweep. Never raises."""
