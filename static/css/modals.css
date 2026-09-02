@@ -89,6 +89,20 @@
     gap: var(--sp-2);
 }
 
+/* The shell rendered when /api/settings could not be read at all. */
+.settings-load-error {
+    border-left: 3px solid var(--warning);
+    background: var(--warning-bg);
+    border-radius: var(--radius-sm);
+    padding: var(--sp-3) var(--sp-4);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+}
+.settings-load-error p {
+    margin-top: var(--sp-2);
+    color: var(--text-dim);
+}
+
 /* Settings sections */
 .settings-section {
     margin-bottom: var(--sp-5);
