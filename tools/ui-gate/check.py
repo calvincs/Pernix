@@ -706,6 +706,144 @@ def sidebar_resizer(browser):
     ctx.close()
 
 
+# ---------------------------------------------------------------------------
+# The sidebar at a thousand sessions
+# ---------------------------------------------------------------------------
+
+SPACE_PROBE = r"""(label) => {
+  const h = [...document.querySelectorAll('.space-group-header')]
+      .find(x => (x.querySelector('.space-label')||{}).textContent === label);
+  if (!h) return null;
+  const body = h.nextElementSibling;
+  const sa = body.querySelector('.space-show-all');
+  return {
+    buckets: [...body.querySelectorAll('.space-bucket-header')].map(b => ({
+        label: b.querySelector('.space-bucket-label').textContent,
+        collapsed: b.classList.contains('collapsed'),
+        count: b.querySelector('.sg-count').hidden ? null : b.querySelector('.sg-count').textContent,
+        h: Math.round(b.getBoundingClientRect().height)})),
+    rows: body.querySelectorAll('.session-item').length,
+    showAll: sa ? sa.textContent : null,
+    showAllH: sa ? Math.round(sa.getBoundingClientRect().height) : 0,
+    headerCount: (h.querySelector('.sg-count')||{}).textContent}; }"""
+
+CLICK_SHOW_ALL = r"""(label) => {
+  const h = [...document.querySelectorAll('.space-group-header')]
+      .find(x => (x.querySelector('.space-label')||{}).textContent === label);
+  h.nextElementSibling.querySelector('.space-show-all').click(); }"""
+
+LEGEND_STATE = r"""async () => {
+  const m = await import('/static/js/components/sidebar.js');
+  const entry = document.querySelector('.legend-item[data-type="canary"]');
+  return {hidden: m.getHiddenTypes(), query: m.sessionsQuery(),
+          canaryRows: document.querySelectorAll('.session-item .session-dot.canary').length,
+          rows: document.querySelectorAll('.session-item').length,
+          count: (entry.querySelector('.legend-count')||{}).textContent,
+          entryHidden: entry.hidden}; }"""
+
+
+def sidebar_scale(browser):
+    """m2: what keeps the sidebar readable once there are a thousand sessions.
+
+    Its own context, after the baseline pass, because everything here writes
+    pernix:sidebar — the hidden types, the per-space folds, the "show all".
+
+    showArchived is seeded before the first paint for a reason. app.js builds
+    the main list's URL and this commit does not own that file, so the request
+    that proves the exclusion reaches the SERVER is the one sidebar.js makes
+    itself: the archive's fetch, which takes the same sessionsQuery(). When
+    app.js's own fetch carries it too —
+
+        const data = await get(`/api/sessions?limit=${_sessionWindow}${sessionsQuery()}`);
+
+    — the same assertion covers the main list without changing a line here.
+    """
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
+    ctx.add_init_script(
+        "try { localStorage.setItem('pernix:sidebar', JSON.stringify({showArchived: true})); } catch (e) {}"
+    )
+    pg = ctx.new_page()
+    pg.on("console", lambda m: console_errors.append(f"[scale] {m.text}") if m.type == "error" else None)
+    pg.on("pageerror", lambda e: console_errors.append(f"[scale] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.8)
+
+    # --- a space groups its sessions by time, and folds the long tail
+    rest = pg.evaluate(SPACE_PROBE, "Scale")
+    labels = [b["label"] for b in (rest or {}).get("buckets", [])]
+    older = next((b for b in (rest or {}).get("buckets", []) if b["label"] == "Older"), None)
+    check(
+        "sidebar-scale",
+        "m2: a 20-session space buckets by time, Older folded, Show all 20 at the end",
+        bool(rest)
+        and labels == ["Today", "Yesterday", "This Week", "This Month", "Older"]
+        and bool(older)
+        and older["collapsed"]
+        and older["count"] == "4"
+        and rest["showAll"] == "Show all 20"
+        and rest["headerCount"] == "20"
+        and all(b["h"] >= 28 for b in rest["buckets"])
+        and rest["showAllH"] >= 28,
+        rest,
+        "m2",
+    )
+    # The point of the fold: a space builds a readable number of rows, not one
+    # per session. 47 of them in the DOM six times a minute is what this cost.
+    check(
+        "sidebar-scale",
+        "m2: at rest the space holds at most 15 rows",
+        bool(rest) and 0 < rest["rows"] <= 15,
+        rest,
+        "m2",
+    )
+    pg.evaluate(CLICK_SHOW_ALL, "Scale")
+    time.sleep(0.7)
+    shown = pg.evaluate(SPACE_PROBE, "Scale")
+    check(
+        "sidebar-scale",
+        "m2: Show all unfolds every bucket and every one of the 20",
+        bool(shown)
+        and shown["rows"] == 20
+        and shown["showAll"] == "Show fewer"
+        and not any(b["collapsed"] for b in shown["buckets"]),
+        shown,
+        "m2",
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-space-expanded.png")
+    pg.evaluate(CLICK_SHOW_ALL, "Scale")  # back to at-rest for the legend pass
+    time.sleep(0.6)
+
+    # --- hiding a type in the legend leaves it out of the request
+    reqs = []
+    pg.on("request", lambda r: reqs.append(r.url) if "/api/sessions?" in r.url else None)
+    pg.evaluate("() => document.querySelector('.legend-item[data-type=\"canary\"]').click()")
+    time.sleep(1.6)
+    leg = pg.evaluate(LEGEND_STATE)
+    carried = [u for u in reqs if "exclude_types=canary" in u]
+    check(
+        "sidebar-scale",
+        "m2: hiding Self-check leaves canaries off the page and out of the request",
+        leg["hidden"] == ["canary"]
+        and leg["query"] == "&exclude_types=canary"
+        and leg["canaryRows"] == 0
+        and leg["rows"] > 0
+        and bool(carried),
+        {**leg, "carried": carried[:2], "requests": reqs[:4]},
+        "m2",
+    )
+    # A count that fell to zero when the type was switched off would erase the
+    # only control that switches it back on.
+    check(
+        "sidebar-scale",
+        "m2: the legend keeps naming the type it is hiding",
+        leg["count"] == "30" and not leg["entryHidden"],
+        leg,
+        "m2",
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-legend-filtered.png")
+    ctx.close()
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch()
     for name, w, h, opts in VPS:
@@ -752,6 +890,10 @@ with sync_playwright() as p:
             sidebar_resizer(browser)
         except Exception as e:
             check("resizer", "m2: resizer pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
+        try:
+            sidebar_scale(browser)
+        except Exception as e:
+            check("sidebar-scale", "m2: scale pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
     browser.close()
 
 check("all", "no console errors", len(console_errors) == 0, console_errors[:6])

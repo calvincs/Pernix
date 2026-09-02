@@ -6,9 +6,11 @@ Run with cwd = the smoke appdir.  seed.py <repo>
 import json
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, sys.argv[1])
 from db import models as db  # noqa: E402
+from db.database import connect_sessions  # noqa: E402
 
 CODE = """```python
 def reconcile(ledger: dict[str, list[Entry]], *, tolerance: float = 0.005) -> ReconcileReport:
@@ -137,10 +139,15 @@ for t in (
     "Snooze: curiosity drive",
     "Short one",
 ):
+    # "normal", not "chat": 'chat' is the legend's word for this type and
+    # 'normal' is the column's, and POST /api/sessions coerces anything else
+    # away — so a seeded 'chat' was a session_type no real instance can hold,
+    # and it showed up as a type of its own the moment the list endpoint
+    # started reporting type_counts.
     sid = db.create_session(
         title=t,
         space_id=space_id if t.startswith("Rewrite") else None,
-        session_type="cron" if t.startswith("Cron") else ("snooze" if t.startswith("Snooze") else "chat"),
+        session_type="cron" if t.startswith("Cron") else ("snooze" if t.startswith("Snooze") else "normal"),
     )
     db.add_message(sid, "user", f"about {t}")
     time.sleep(0.005)
@@ -162,4 +169,43 @@ if space_id:
     except Exception as e:  # noqa: BLE001
         print("long-label space skipped:", e, file=sys.stderr)
 
-print(json.dumps({"main": main, "long": long_sid, "parent": parent_sid}))
+# --- a third space, deep enough to need shape --------------------------------
+# Twenty sessions across every time bucket. The first two spaces hold one
+# session each and so render flat, exactly as they always did — which is what
+# keeps the desktop baseline's first .session-item inside the Pernix group at
+# the top. This one is created last, so it sorts last, and it is the only
+# place bucket headers and "Show all 20" appear.
+#
+# updated_at is written straight into the throwaway's sqlite: create_session
+# and add_message both stamp it with now, and the ages are the whole point.
+SPREAD = [("Today", 0.0), ("Yesterday", 1.0), ("This Week", 3.0), ("This Month", 15.0), ("Older", 60.0)]
+
+
+def _age(sid, days):
+    when = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with connect_sessions() as conn:
+        conn.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (when, sid))
+
+
+scale_id = None
+if space_id:
+    try:
+        scale_id = db.create_space(label="Scale", color="#b06ab3", slug="scale")["id"]
+        for bucket, days in SPREAD:
+            for i in range(4):
+                sid = db.create_session(title=f"{bucket} thread {i + 1}", space_id=scale_id)
+                db.add_message(sid, "user", f"A session that last moved {days:g} days ago.")
+                _age(sid, days + i * 0.01)
+    except Exception as e:  # noqa: BLE001
+        print("scale space skipped:", e, file=sys.stderr)
+
+# --- canary runs, enough of them to crowd a page -----------------------------
+# The composition problem in miniature: on the owner's box 277 of the 500
+# newest sessions are self-checks. Every one of these is OLDER than the rows
+# the desktop baseline measures, so they land in buckets below the ones it
+# records and move nothing above them.
+for i in range(30):
+    cid = db.create_session(title=f"Canary: file-create #{i + 1}", session_type="canary")
+    _age(cid, 2.0 + i * 0.5)
+
+print(json.dumps({"main": main, "long": long_sid, "parent": parent_sid, "scale": scale_id}))
