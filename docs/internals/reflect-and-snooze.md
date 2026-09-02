@@ -210,7 +210,7 @@ This is the slow feedback loop. You won't see it move the needle on a single tur
 
 ## Observability
 
-- **Reflect activity** is emitted as `reflect.start` / `reflect.done` SSE events (the verdict rides on `reflect.done`), plus `reflect.skipped`, `reflect.retry`, `reflect.escalate`, `reflect.exhausted`, `reflect.budget_exhausted`, `reflect.circuit_breaker`, `reflect.deferred_scheduled` and `reflect.deferred` markers. The UI's timeline drawer shows them inline with the turn.
+- **Reflect activity** is emitted as `reflect.start` / `reflect.done` SSE events (the verdict rides on `reflect.done`), plus `reflect.skipped`, `reflect.retry`, `reflect.escalate`, `reflect.exhausted`, `reflect.budget_exhausted`, `reflect.circuit_breaker`, `reflect.deferred_scheduled` and `reflect.deferred` markers. The UI's **State timeline** shows them inline with the turn.
 - **Snooze cycle output** is logged to `data/logs/pernix.log`. Each cycle records what it ran and how long it took.
 - **`POST /api/memory/maintenance`** runs the memory-index health check and returns the result inline.
 
