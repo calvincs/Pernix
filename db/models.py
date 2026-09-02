@@ -65,6 +65,15 @@ def list_sessions(limit: int = 50, offset: int = 0) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def count_sessions() -> int:
+    """How many sessions exist at all — what the sidebar's page is a slice of.
+    Without it the list could only say "showing the most recent N" and leave
+    the reader to guess whether anything was behind it."""
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()
+        return int(row["c"]) if row else 0
+
+
 _ENRICHED_SELECT = """SELECT
     s.*,
     COALESCE(mc.message_count, 0) AS message_count,

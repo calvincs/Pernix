@@ -148,6 +148,43 @@ async def test_list_sessions_with_data():
     assert data["count"] >= 1
 
 
+async def test_list_sessions_reports_total_and_has_more():
+    """The sidebar can only offer 'load older' if the page admits it is one."""
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    for i in range(12):
+        db.create_session(title=f"S{i}")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        page1 = (await client.get("/api/sessions?limit=5&offset=0")).json()
+        page2 = (await client.get("/api/sessions?limit=5&offset=5")).json()
+        page3 = (await client.get("/api/sessions?limit=5&offset=10")).json()
+    assert page1["total"] == 12
+    assert page1["count"] == 5
+    assert page1["has_more"] is True
+    assert page2["has_more"] is True
+    # The last page has fewer rows than the window and nothing behind it.
+    assert page3["count"] == 2
+    assert page3["has_more"] is False
+    # Pages do not overlap: three pages cover all twelve, once each.
+    ids = [s["id"] for p in (page1, page2, page3) for s in p["items"]]
+    assert len(ids) == 12
+    assert len(set(ids)) == 12
+
+
+async def test_list_sessions_has_more_false_when_everything_fits():
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    db.create_session(title="Only one")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        data = (await client.get("/api/sessions?limit=500")).json()
+    assert data["total"] == 1
+    assert data["has_more"] is False
+
+
 async def test_get_session_not_found():
     from api.routers import sessions
 

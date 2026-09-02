@@ -36,6 +36,18 @@ async def create_session(body: dict = {}):
 
 @router.get("/api/sessions")
 async def list_sessions(limit: int = 50, offset: int = 0):
+    """One page of sessions, newest first, plus how many there are in total.
+
+    `total`/`has_more` are what let the sidebar offer the page behind this one
+    instead of a dead "showing the 500 most recent" note: sessions past the
+    horizon used to be reachable only by full-text search, which is no help
+    when what you remember is the session, not a phrase inside it.
+
+    `has_more` is measured against the requested window, not the rows
+    returned — list_sessions_enriched unions space sessions back in past the
+    recency cut, so the response can be longer than `limit` while the page
+    itself is still exactly `limit` deep.
+    """
     import asyncio as _asyncio
 
     from sessions.policy import annotate_read_only
@@ -43,7 +55,14 @@ async def list_sessions(limit: int = 50, offset: int = 0):
     rows = await _asyncio.to_thread(db.list_sessions_enriched, limit, offset)
     sessions = [annotate_read_only(s) for s in rows]
     spaces = await _asyncio.to_thread(db.list_spaces)
-    return {"items": sessions, "count": len(sessions), "spaces": spaces}
+    total = await _asyncio.to_thread(db.count_sessions)
+    return {
+        "items": sessions,
+        "count": len(sessions),
+        "spaces": spaces,
+        "total": total,
+        "has_more": (offset + limit) < total,
+    }
 
 
 @router.get("/api/sessions/search")

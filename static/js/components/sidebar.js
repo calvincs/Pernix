@@ -403,11 +403,7 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
         list.appendChild(body);
     }
 
-    if (sessions.length >= SESSION_PAGE_LIMIT) {
-        list.appendChild(el('div', { class: 'sidebar-truncated' }, [
-            text(`Showing the ${SESSION_PAGE_LIMIT} most recent · search to find older sessions.`),
-        ]));
-    }
+    _renderListEnd(list, sessions.length);
 
     // Orphaned children (parent filtered out or missing)
     const renderedParents = new Set(topLevel.map(s => s.id));
@@ -1375,4 +1371,56 @@ function _saveParentCollapsed(orchId, isCollapsed) {
     if (!state.parentCollapsed) state.parentCollapsed = {};
     state.parentCollapsed[orchId] = isCollapsed;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+// ---------------------------------------------------------------------------
+// List end — the horizon, and the way past it
+// ---------------------------------------------------------------------------
+// The footer used to be a dead end: "Showing the 500 most recent · search to
+// find older sessions." Search is no help when what you remember is the
+// session rather than a phrase inside it, so everything past the horizon was
+// effectively gone. app.js now knows the true total (the list endpoint reports
+// it) and can fetch the next page on demand; this is the control that asks.
+
+let _paging = { total: 0, loaded: 0, hasMore: false, loading: false };
+
+/** Told by app.js after every /api/sessions response. */
+export function setSessionPaging({ total = 0, loaded = 0, hasMore = false } = {}) {
+    _paging = { ..._paging, total, loaded, hasMore };
+}
+
+/** Called by app.js while a page is in flight, so the button can say so. */
+export function setSessionPagingBusy(busy) {
+    _paging.loading = !!busy;
+    const btn = document.getElementById('sidebar-load-older');
+    if (btn) {
+        btn.disabled = !!busy;
+        btn.textContent = busy ? 'Loading…' : _loadOlderLabel();
+    }
+}
+
+function _loadOlderLabel() {
+    const remaining = Math.max(0, _paging.total - _paging.loaded);
+    return remaining ? `Load older sessions (${remaining} more)` : 'Load older sessions';
+}
+
+function _renderListEnd(list, shownCount) {
+    // Nothing behind the horizon and nothing was cut: say nothing.
+    if (!_paging.hasMore && shownCount < SESSION_PAGE_LIMIT) return;
+    if (!_paging.hasMore) {
+        list.appendChild(el('div', { class: 'sidebar-truncated' }, [
+            text(`All ${_paging.total || shownCount} sessions loaded.`),
+        ]));
+        return;
+    }
+    const btn = el('button', {
+        id: 'sidebar-load-older',
+        class: 'btn btn--ghost btn--sm sidebar-load-older',
+        type: 'button',
+    }, [text(_paging.loading ? 'Loading…' : _loadOlderLabel())]);
+    btn.disabled = _paging.loading;
+    btn.addEventListener('click', () => {
+        window.dispatchEvent(new CustomEvent('pernix:load-older-sessions'));
+    });
+    list.appendChild(btn);
 }
