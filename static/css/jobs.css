@@ -159,28 +159,8 @@
    Action buttons
 --------------------------------------------------------------------------- */
 
-.jobs-btn {
-    padding: 2px var(--sp-2);
-    font-size: var(--text-xs);
-    font-family: var(--mono);
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 3px;
-    color: var(--text-dim);
-    cursor: pointer;
-    transition: all var(--transition);
-}
-
-.jobs-btn:hover {
-    color: var(--text-bright);
-    border-color: var(--border-focus);
-    background: var(--bg-surface);
-}
-
-.jobs-btn.danger:hover {
-    color: var(--error);
-    border-color: var(--error);
-}
+/* .jobs-btn is the .btn--secondary role (and .jobs-btn.danger the
+   .btn--danger role); both live in buttons.css. */
 
 /* ---------------------------------------------------------------------------
    Session link
