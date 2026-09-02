@@ -1564,3 +1564,27 @@ body[data-touch] .space-group-header .space-menu-btn {
     min-width: 44px;
     min-height: 44px;
 }
+
+/* The plain-textarea editor is the ONLY editor on touch (E1). .ce-fallback is
+   shared by the workspace, skill, memory, canary and space-directive editors,
+   so one rule covers all of them — and body[data-touch] outranks each host's
+   own .<host> .ce-fallback sizing. 16px is not a taste: below it iOS zooms
+   the page on focus and never zooms back out. */
+body[data-touch] .fp-editor-host,
+body[data-touch] .adaptive-editor-host,
+body[data-touch] .jobs-editor-host,
+body[data-touch] .space-dir-editor {
+    min-height: max(200px, 50dvh);
+    overflow: auto;
+}
+body[data-touch] .ce-fallback {
+    width: 100%;
+    min-height: max(200px, 50dvh);
+    font-size: 16px;
+    line-height: 1.5;
+    /* Long lines wrap instead of demanding a horizontal scroll nobody can
+       aim at, and iOS is told not to "helpfully" inflate the text itself. */
+    white-space: pre-wrap;
+    word-break: break-word;
+    -webkit-text-size-adjust: 100%;
+}

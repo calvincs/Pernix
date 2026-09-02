@@ -104,8 +104,20 @@ function loadMonaco() {
  * Create a code editor inside `host`. Uses Monaco if available, falls back to textarea.
  * Returns { getValue, focus, dispose } — always synchronous after resolve.
  * `lang` is the EXT_LANG value (e.g. 'python', 'javascript').
+ *
+ * On touch there is no attempt at Monaco at all (E1). It is not that it
+ * fails — it loads, and then it is the wrong editor: it swallows the caret
+ * so the OS keyboard has nothing to follow, it renders 13px text that iOS
+ * zooms the page for, its own scroller fights the panel's, and none of the
+ * chrome it pays for (minimap, folding, multi-cursor, the command palette)
+ * can be reached with a thumb. The textarea is the SAME contract, keeps the
+ * system keyboard, its autocorrect and its selection handles, and is what a
+ * phone can actually edit a file in. Every editor on the surface goes
+ * through here, so the skill, memory, canary and space-directive editors
+ * come along.
  */
 async function createCodeEditor(host, content, lang, onChange) {
+    if (isTouch()) return createFallbackEditor(host, content, onChange);
     try {
         const monaco = await loadMonaco();
         return createMonacoEditor(host, monaco, content, lang, onChange);
