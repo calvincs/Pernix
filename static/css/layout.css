@@ -3186,3 +3186,98 @@ mark.ts-mark.current {
     margin-bottom: var(--sp-1);
 }
 .rlm-child-row:hover { color: var(--rlm); border-color: var(--rlm); }
+
+
+/* ======================================================================
+   Toasts (feedback.js) — F3
+   ----------------------------------------------------------------------
+   One stacked region for every transient message in the app. Bottom-right
+   on desktop; mobile.css moves it above the composer. Tokens only.
+   ====================================================================== */
+.toast-region {
+    position: fixed;
+    right: var(--sp-4);
+    bottom: var(--sp-4);
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--sp-2);
+    /* The region spans a corner but must not swallow clicks between toasts. */
+    pointer-events: none;
+}
+.toast {
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sp-2);
+    max-width: min(92vw, 380px);
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--info);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    line-height: 1.45;
+    animation: toastIn 0.18s ease;
+}
+.toast-info    { border-left-color: var(--info); }
+.toast-success { border-left-color: var(--success); }
+.toast-warning { border-left-color: var(--warning); }
+.toast-error   { border-left-color: var(--error); }
+
+.toast-text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.toast-action {
+    flex-shrink: 0;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 var(--sp-2);
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: var(--transition);
+}
+.toast-action:hover {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+}
+.toast-dismiss {
+    flex-shrink: 0;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    font-size: var(--text-md);
+    line-height: 1;
+    cursor: pointer;
+    transition: var(--transition);
+}
+.toast-dismiss:hover { color: var(--text-bright); background: var(--bg-hover); }
+
+@keyframes toastIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+}
+/* The global reduce block already collapses the duration; state it outright
+   so a toast never slides for a user who asked for no motion. */
+@media (prefers-reduced-motion: reduce) {
+    .toast { animation: none; }
+}

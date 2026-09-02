@@ -5,22 +5,7 @@ import { get, post, setAuthToken } from '../../api.js';
 import { getPermission, requestPermission } from '../../notifications.js';
 import { runVoiceTest } from '../../voice.js';
 import { announce, openOverlay } from '../../a11y.js';
-
-function _showToast(message, type = 'info') {
-    const colors = { success: 'var(--success)', error: 'var(--error)', info: 'var(--text-dim)' };
-    // Wraps rather than clipping, and clears the iOS home indicator — a
-    // nowrap toast ran off the side of a phone screen.
-    const toast = el('div', {
-        style: `position:fixed; bottom:max(1.5rem, calc(env(safe-area-inset-bottom, 0px) + 0.75rem));`
-             + `left:50%; transform:translateX(-50%); max-width:min(92vw, 420px);`
-             + `background:var(--bg-surface); border:1px solid ${colors[type] || colors.info};`
-             + `color:${colors[type] || colors.info}; font-family:var(--mono); font-size:var(--text-sm);`
-             + `padding:0.6rem 1.2rem; border-radius:var(--radius); z-index:9999; text-align:center;`
-             + `box-shadow:var(--shadow-md); pointer-events:none; line-height:1.4;`,
-    }, [text(message)]);
-    document.body.append(toast);
-    setTimeout(() => toast.remove(), 3500);
-}
+import { notify } from '../../feedback.js';
 
 let _overlay = null;
 let _closeOverlay = null;  // teardown from a11y.js openOverlay()
@@ -1650,7 +1635,7 @@ function _buildShowTokenButton() {
         try {
             const data = await get('/api/settings/auth-token');
             if (!data.token) {
-                _showToast('No access token is set — enable Network mode first.', 'error');
+                notify('error', 'No access token is set — enable Network mode first.');
                 return;
             }
             _openTokenOverlay(data.token, {
@@ -1659,7 +1644,7 @@ function _buildShowTokenButton() {
                     + 'has full access to this agent — treat it like a password.',
             });
         } catch (e) {
-            _showToast(`Could not read the token: ${e.message}`, 'error');
+            notify('error', `Could not read the token: ${e.message}`);
         } finally {
             btn.disabled = false;
             btn.textContent = label;
@@ -1938,11 +1923,11 @@ function buildSessionCleanupSection() {
             });
             statusEl.textContent = `Pruned ${result.purged} session(s).`;
             statusEl.style.color = 'var(--success)';
-            _showToast(`Pruned ${result.purged} session(s)`, 'success');
+            notify('success', `Pruned ${result.purged} session(s)`);
         } catch (e) {
             statusEl.textContent = `Prune failed: ${e.message || e}`;
             statusEl.style.color = 'var(--error)';
-            _showToast('Prune failed', 'error');
+            notify('error', 'Prune failed');
         } finally {
             pruneBtn.disabled = false;
             previewBtn.disabled = false;

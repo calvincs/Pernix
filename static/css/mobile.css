@@ -1044,3 +1044,17 @@
         display: none;
     }
 }
+
+
+/* ------------------------------------------------------------------
+   Toasts — above the composer, clear of the home indicator
+   ------------------------------------------------------------------ */
+.toast-region {
+    left: max(var(--sp-3), var(--safe-left));
+    right: max(var(--sp-3), var(--safe-right));
+    bottom: calc(76px + var(--safe-bottom));
+    align-items: stretch;
+}
+.toast {
+    max-width: 100%;
+}
