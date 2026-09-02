@@ -12,7 +12,7 @@
     flex-direction: column;
     flex-shrink: 0;
     position: relative;
-    transition: width 0.2s ease;
+    transition: width var(--transition);
 }
 #file-panel.open {
     width: 360px;
@@ -28,7 +28,7 @@
     cursor: col-resize;
     z-index: 10;
     background: transparent;
-    transition: background 0.15s;
+    transition: background var(--transition);
 }
 .fp-resize-handle:hover,
 .fp-resize-handle.dragging {
@@ -215,7 +215,7 @@ body.fp-resizing #main { pointer-events: none; }
     font-size: var(--text-xs);
     color: var(--text-dim);
     background: var(--bg-raised);
-    transition: background 0.1s, color 0.1s, transform 0.15s ease;
+    transition: background var(--transition-fast), color var(--transition-fast), transform var(--transition);
     white-space: nowrap;
     overflow: hidden;
     position: relative;
@@ -235,7 +235,7 @@ body.fp-resizing #main { pointer-events: none; }
     width: 10px;
     text-align: center;
     flex-shrink: 0;
-    transition: transform 0.15s;
+    transition: transform var(--transition);
     color: var(--text-faint);
 }
 .fp-tree-item.dir.collapsed .fp-tree-chevron {
@@ -296,7 +296,7 @@ body.fp-resizing #main { pointer-events: none; }
     display: flex;
     gap: 2px;
     opacity: 0;
-    transition: opacity 0.1s;
+    transition: opacity var(--transition-fast);
     position: absolute;
     right: var(--sp-2);
     top: 50%;
@@ -679,7 +679,7 @@ body.fp-resizing #main { pointer-events: none; }
     user-select: none;
 }
 .fp-col-h { flex-shrink: 0; white-space: nowrap; }
-.fp-col-h.sortable { cursor: pointer; transition: color 0.1s; }
+.fp-col-h.sortable { cursor: pointer; transition: color var(--transition-fast); }
 .fp-col-h.sortable:hover { color: var(--text-dim); }
 .fp-col-h.active { color: var(--text); }
 .fp-col-h.col-h-icon  { width: 14px; }
@@ -697,7 +697,7 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-memory-item {
     padding: var(--sp-2) var(--sp-3);
     cursor: pointer;
-    transition: background 0.1s;
+    transition: background var(--transition-fast);
     border-bottom: 1px solid var(--border-subtle);
 }
 .fp-memory-item:hover { background: var(--bg-hover); }
@@ -727,7 +727,7 @@ body.fp-resizing #main { pointer-events: none; }
     padding: var(--sp-2) var(--sp-3);
     cursor: pointer;
     border-bottom: 1px solid var(--border-subtle);
-    transition: background 0.1s;
+    transition: background var(--transition-fast);
 }
 .fp-search-result:hover { background: var(--bg-hover); }
 
@@ -1173,7 +1173,7 @@ body.fp-resizing #main { pointer-events: none; }
     opacity: 0.8;
     overflow: hidden;
     max-height: 0;
-    transition: max-height 0.2s ease, margin-top 0.15s ease;
+    transition: max-height var(--transition), margin-top var(--transition);
     margin-top: 0;
 }
 .fp-tab-desc-full.open {
@@ -1191,7 +1191,7 @@ body.fp-resizing #main { pointer-events: none; }
     background: color-mix(in srgb, var(--error, #c25450) 10%, var(--bg));
     border-radius: var(--radius);
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background var(--transition);
 }
 .fp-danger-mode-banner:hover {
     background: color-mix(in srgb, var(--error, #c25450) 18%, var(--bg));

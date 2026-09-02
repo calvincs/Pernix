@@ -375,11 +375,7 @@
 .session-dot.snooze { background: var(--dream); }
 .session-dot.rlm    { background: var(--rlm); }
 .session-dot.canary { background: var(--canary); }
-.session-dot.active-pulse { animation: dot-pulse 1.2s ease-in-out infinite; }
-@keyframes dot-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.2; }
-}
+.session-dot.active-pulse { --pulse-dip: 0.2; animation: pulse var(--pulse-fast) ease-in-out infinite; }
 
 /* Session activity ticker */
 .session-activity {
@@ -686,7 +682,8 @@
     border-radius: 50%;
     background: var(--teal-dim, #4a8);
     margin-right: 4px;
-    animation: browserPulse 1.5s ease-in-out infinite;
+    --pulse-dip: 0.5;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
 }
 .worker-chip-dot.rlm { background: var(--rlm); }
 .worker-chip.rlm-chip:hover { color: var(--rlm); border-color: var(--rlm); }
@@ -699,7 +696,7 @@
     height: 2px;
     width: 0;
     background: var(--accent);
-    transition: width 0.2s ease;
+    transition: width var(--transition);
 }
 .file-chip.uploading { opacity: 0.85; }
 
@@ -930,7 +927,8 @@
     border-radius: 50%;
     background: var(--accent);
     flex-shrink: 0;
-    animation: dot-pulse 1.2s ease-in-out infinite;
+    --pulse-dip: 0.2;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
 }
 
 /* Message card */
@@ -1004,11 +1002,9 @@
     color: var(--text-faint);
     letter-spacing: 0.18em;
     font-family: var(--mono);
-    animation: assistantWaiting 1.4s ease-in-out infinite;
-}
-@keyframes assistantWaiting {
-    0%, 100% { opacity: 0.3; }
-    50%      { opacity: 0.95; }
+    --pulse-peak: 0.3;
+    --pulse-dip: 0.95;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
 }
 
 .message.assistant .content p { margin-bottom: 0.75em; }
@@ -1147,7 +1143,7 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-faint);
-    transition: color 0.15s;
+    transition: color var(--transition);
 }
 .tool-group-header:hover { color: var(--accent-dim); }
 /* Every disclosure header in the app is a <div role="button">, so the only
@@ -1170,7 +1166,7 @@
 .tool-group.has-error .tool-group-header { color: var(--error); }
 .tg-toggle {
     font-size: 8px;
-    transition: transform 0.2s;
+    transition: transform var(--transition);
 }
 .tool-group.collapsed .tg-toggle { transform: rotate(-90deg); }
 .tool-group.collapsed .tool-group-items { display: none; }
@@ -1182,7 +1178,7 @@
 /* Tool items — three-tier progressive disclosure */
 .tool-item {
     border-bottom: 1px solid var(--border);
-    transition: background 0.15s;
+    transition: background var(--transition);
 }
 .tool-item:last-child { border-bottom: none; }
 .tool-item:hover { background: var(--bg-hover); }
@@ -1204,7 +1200,7 @@
 .tool-item-chevron {
     font-size: 8px;
     color: var(--text-faint);
-    transition: transform 0.2s;
+    transition: transform var(--transition);
     flex-shrink: 0;
 }
 .tool-item.expanded .tool-item-chevron {
@@ -1381,7 +1377,7 @@
     padding: 2px 8px;
     border-radius: 3px;
     opacity: 0;
-    transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+    transition: opacity var(--transition), color var(--transition), border-color var(--transition);
 }
 .code-block-wrap:hover .copy-btn,
 .code-block-wrap:focus-within .copy-btn,
@@ -1432,12 +1428,12 @@
     align-items: center;
     gap: var(--sp-1);
     user-select: none;
-    transition: color 0.15s;
+    transition: color var(--transition);
 }
 .scout-activity-header:hover { color: var(--accent-dim); }
 .scout-toggle {
     font-size: 8px;
-    transition: transform 0.2s;
+    transition: transform var(--transition);
 }
 .scout-activity.scout-collapsed .scout-toggle { transform: rotate(-90deg); }
 .scout-activity.scout-collapsed .scout-body { display: none; }
@@ -1487,7 +1483,7 @@
     align-items: center;
     gap: var(--sp-1);
     user-select: none;
-    transition: color 0.15s;
+    transition: color var(--transition);
 }
 .reflect-header:hover { color: var(--accent-dim); }
 .reflect-activity.scout-collapsed .scout-toggle { transform: rotate(-90deg); }
@@ -1748,20 +1744,16 @@
     margin: 0 2px;
     color: var(--warning);
     font-weight: 500;
-    animation: statusPulse 1.6s ease-in-out infinite;
+    --pulse-dip: 0.55;
+    animation: pulse var(--pulse-slow) ease-in-out infinite;
 }
 #status-bar .model .model-override-temp {
     color: var(--accent, #4ea1ff);
     font-weight: 500;
 }
-@keyframes statusPulse {
-    0%, 100% { filter: brightness(1); }
-    50% { filter: brightness(0.6); }
-}
-
 #status-bar .ctx {
     color: var(--text-faint);
-    transition: color 120ms ease;
+    transition: color var(--transition-fast);
 }
 
 #status-bar .ctx.ctx-approaching {
@@ -1836,16 +1828,16 @@
     text-transform: uppercase;
     border: 1px solid transparent;
     white-space: nowrap;
-    transition: background 120ms ease, color 120ms ease;
+    transition: background var(--transition-fast), color var(--transition-fast);
 }
 .state-badge.idle_ready         { background: var(--state-idle_ready-bg); color: var(--state-idle_ready-fg); border-color: color-mix(in srgb, var(--state-idle_ready-fg) 40%, var(--state-idle_ready-bg)); }
 .state-badge.scouting           { background: var(--state-scouting-bg); color: var(--state-scouting-fg); border-color: color-mix(in srgb, var(--state-scouting-fg) 40%, var(--state-scouting-bg)); }
-.state-badge.processing         { background: var(--state-processing-bg); color: var(--state-processing-fg); border-color: color-mix(in srgb, var(--state-processing-fg) 40%, var(--state-processing-bg)); animation: statusPulse 1.5s ease-in-out infinite; }
-.state-badge.compacting         { background: var(--state-compacting-bg); color: var(--state-compacting-fg); border-color: color-mix(in srgb, var(--state-compacting-fg) 40%, var(--state-compacting-bg)); animation: statusPulse 1.5s ease-in-out infinite; }
+.state-badge.processing         { background: var(--state-processing-bg); color: var(--state-processing-fg); border-color: color-mix(in srgb, var(--state-processing-fg) 40%, var(--state-processing-bg)); --pulse-dip: 0.55; animation: pulse var(--pulse-fast) ease-in-out infinite; }
+.state-badge.compacting         { background: var(--state-compacting-bg); color: var(--state-compacting-fg); border-color: color-mix(in srgb, var(--state-compacting-fg) 40%, var(--state-compacting-bg)); --pulse-dip: 0.55; animation: pulse var(--pulse-fast) ease-in-out infinite; }
 .state-badge.pause_requested    { background: var(--state-pause_requested-bg); color: var(--state-pause_requested-fg); border-color: color-mix(in srgb, var(--state-pause_requested-fg) 40%, var(--state-pause_requested-bg)); }
 .state-badge.paused             { background: var(--state-paused-bg); color: var(--state-paused-fg); border-color: color-mix(in srgb, var(--state-paused-fg) 40%, var(--state-paused-bg)); }
-.state-badge.cancelling         { background: var(--state-cancelling-bg); color: var(--state-cancelling-fg); border-color: color-mix(in srgb, var(--state-cancelling-fg) 40%, var(--state-cancelling-bg)); animation: statusPulse 1s ease-in-out infinite; }
-.state-badge.finalizing         { background: var(--state-finalizing-bg); color: var(--state-finalizing-fg); border-color: color-mix(in srgb, var(--state-finalizing-fg) 40%, var(--state-finalizing-bg)); animation: statusPulse 1.5s ease-in-out infinite; }
+.state-badge.cancelling         { background: var(--state-cancelling-bg); color: var(--state-cancelling-fg); border-color: color-mix(in srgb, var(--state-cancelling-fg) 40%, var(--state-cancelling-bg)); --pulse-dip: 0.55; animation: pulse var(--pulse-fast) ease-in-out infinite; }
+.state-badge.finalizing         { background: var(--state-finalizing-bg); color: var(--state-finalizing-fg); border-color: color-mix(in srgb, var(--state-finalizing-fg) 40%, var(--state-finalizing-bg)); --pulse-dip: 0.55; animation: pulse var(--pulse-fast) ease-in-out infinite; }
 .state-badge.awaiting_user      { background: var(--state-awaiting_user-bg); color: var(--state-awaiting_user-fg); border-color: color-mix(in srgb, var(--state-awaiting_user-fg) 40%, var(--state-awaiting_user-bg)); }
 .state-badge.awaiting_workers   { background: var(--state-awaiting_workers-bg); color: var(--state-awaiting_workers-fg); border-color: color-mix(in srgb, var(--state-awaiting_workers-fg) 40%, var(--state-awaiting_workers-bg)); }
 
@@ -2041,7 +2033,8 @@
     height: 8px;
     border-radius: 50%;
     background: var(--accent);
-    animation: dot-pulse 1.2s ease-in-out infinite;
+    --pulse-dip: 0.2;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
     flex-shrink: 0;
 }
 .timeline-tool-row .tool-item-args {
@@ -2152,7 +2145,7 @@
     display: inline-block;
     margin-right: 5px;
     font-size: var(--text-xxs);
-    transition: transform 0.12s ease;
+    transition: transform var(--transition-fast);
 }
 .tl-turn-group.collapsed .tl-turn-chevron { transform: rotate(-90deg); }
 .tl-turn-group.collapsed .tl-turn-body { display: none; }
@@ -2253,12 +2246,9 @@
     text-overflow: ellipsis;
 }
 #browser-status.active { display: inline-flex; }
-@keyframes browserPulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
 #browser-status.active .browser-icon {
-    animation: browserPulse 1.5s ease-in-out infinite;
+    --pulse-dip: 0.5;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
 }
 
 /* Tool activity indicator (non-browse tools) */
@@ -2275,7 +2265,8 @@
 }
 #tool-status.active { display: inline-flex; }
 #tool-status.active .tool-icon {
-    animation: browserPulse 1.5s ease-in-out infinite;
+    --pulse-dip: 0.5;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
 }
 
 /* Browse tool card enrichment */
@@ -2343,7 +2334,7 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: background var(--transition), color var(--transition), transform 0.1s ease;
+    transition: background var(--transition), color var(--transition), transform var(--transition-fast);
 }
 #attach-btn:hover {
     background: var(--bg-soft, rgba(255, 255, 255, 0.05));
@@ -2384,7 +2375,7 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: background var(--transition), color var(--transition), transform 0.1s ease;
+    transition: background var(--transition), color var(--transition), transform var(--transition-fast);
 }
 #voice-btn:hover {
     background: var(--bg-soft, rgba(255, 255, 255, 0.05));
@@ -2443,7 +2434,7 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: background var(--transition), transform 0.1s ease, box-shadow var(--transition);
+    transition: background var(--transition), transform var(--transition-fast), box-shadow var(--transition);
 }
 #send-btn:hover {
     background: var(--text-bright);
@@ -2475,12 +2466,8 @@
     transition: background 0.3s;
 }
 .sse-health.connected { background: var(--success); }
-.sse-health.reconnecting { background: var(--accent); animation: sse-pulse 1s infinite; }
+.sse-health.reconnecting { background: var(--accent); --pulse-dip: 0.3; animation: pulse var(--pulse-fast) infinite; }
 .sse-health.disconnected { background: var(--error); }
-@keyframes sse-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
-}
 #send-btn svg {
     width: 16px;
     height: 16px;
@@ -2815,7 +2802,7 @@
     letter-spacing: 0;
     margin-left: var(--sp-2);
     opacity: 0;
-    transition: opacity 0.15s ease;
+    transition: opacity var(--transition);
 }
 .message:hover .msg-time { opacity: 1; }
 /* Hover-to-reveal is not a gesture a touch device has, so on one the
@@ -2845,7 +2832,7 @@
     display: flex;
     gap: 2px;
     opacity: 0;
-    transition: opacity 0.15s ease;
+    transition: opacity var(--transition);
 }
 .message:hover .msg-actions,
 .message:focus-within .msg-actions { opacity: 1; }
@@ -3059,18 +3046,14 @@ mark.ts-mark.current {
     color: #d4a843;
     background: rgba(212, 168, 67, 0.15);
     border: 1px solid rgba(212, 168, 67, 0.35);
-    animation: attnPulse 2s ease-in-out infinite;
+    --pulse-dip: 0.45;
+    animation: pulse var(--pulse-slow) ease-in-out infinite;
 }
 .session-attn.attn-done {
     color: #7aaa7a;
     background: rgba(90, 138, 90, 0.15);
     border: 1px solid rgba(90, 138, 90, 0.3);
 }
-@keyframes attnPulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.45; }
-}
-
 /* Sidebar pin + rename buttons — hover-revealed like the delete button */
 .session-pin,
 .session-rename {
@@ -3230,7 +3213,8 @@ mark.ts-mark.current {
     height: 8px;
     border-radius: 50%;
     background: var(--rlm);
-    animation: dot-pulse 1.2s ease-in-out infinite;
+    --pulse-dip: 0.2;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
 }
 .rlm-run-error {
     color: var(--error);
