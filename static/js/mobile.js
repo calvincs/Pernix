@@ -264,6 +264,10 @@ function _setupSwipeGesture() {
 
 // ---------------------------------------------------------------------------
 // Swipe gestures — file panel (right edge)
+//
+// Touch, not compact: the Explorer is a full-screen overlay below 900px and a
+// docked column above it, but on a finger device the edge swipe is how you
+// reach it either way. Nothing here is armed under a mouse.
 // ---------------------------------------------------------------------------
 
 function _setupFilePanelSwipe() {
@@ -275,7 +279,7 @@ function _setupFilePanelSwipe() {
     const THRESHOLD = 60;
 
     document.addEventListener('touchstart', (e) => {
-        if (!isCompact()) return;
+        if (!isTouch()) return;
         const touch = e.touches[0];
         startX = touch.clientX;
         startY = touch.clientY;
@@ -295,7 +299,7 @@ function _setupFilePanelSwipe() {
     }, { passive: true });
 
     document.addEventListener('touchmove', (e) => {
-        if (!tracking || !isCompact()) return;
+        if (!tracking || !isTouch()) return;
         const touch = e.touches[0];
         const dx = touch.clientX - startX;
         const dy = touch.clientY - startY;
@@ -306,13 +310,17 @@ function _setupFilePanelSwipe() {
             }
         }
 
-        if (direction === 'horizontal') {
+        // With the panel open this handler tracks a swipe that started
+        // anywhere, so on a tablet — where the transcript is still on screen
+        // beside it — the same guard the drawer swipe uses has to apply, or a
+        // wide code block could no longer be scrolled sideways.
+        if (direction === 'horizontal' && !_insideScrollableCode(e.target)) {
             e.preventDefault();
         }
     }, { passive: false });
 
     document.addEventListener('touchend', (e) => {
-        if (!tracking || !isCompact()) { tracking = false; return; }
+        if (!tracking || !isTouch()) { tracking = false; return; }
         const touch = e.changedTouches[0];
         const dx = touch.clientX - startX;
         tracking = false;

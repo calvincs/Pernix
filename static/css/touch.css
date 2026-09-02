@@ -401,6 +401,15 @@
     row-gap: var(--sp-1);
 }
 
+/* ------------------------------------------------------------------
+   Explorer — control sizes, and the drag handle that cannot exist here
+   ------------------------------------------------------------------ */
+/* A 4px col-resize strip is a mouse affordance at every width. Hidden on
+   touch rather than only on compact, and file-panel.js refuses to arm the
+   drag on touch for the same reason. */
+.fp-resize-handle {
+    display: none;
+}
 .fp-tab-btn {
     min-height: 44px;
     padding: 12px var(--sp-3);
@@ -485,6 +494,28 @@
 }
 .fp-skill-item {
     padding: var(--sp-3);
+}
+
+/* ------------------------------------------------------------------
+   Wide touch — the Explorer is a column BESIDE the chat, not a lid over
+   it. compact.css owns the full-screen overlay and is gone above 899px,
+   so all that is left to do here is size the docked panel: wide enough
+   to read a file in, never so wide that the conversation you opened it
+   from disappears. (This @media NARROWS the link gate, which is the only
+   kind of @media allowed in this file — see the header.)
+
+   file-panel.js writes the stored desktop width inline, and an inline
+   `width` beats a stylesheet one; min/max-width beat both, so those are
+   the limits that actually hold. The cap is whichever is tighter: the
+   clamp, or whatever leaves #messages 400px to live in.
+   ------------------------------------------------------------------ */
+@media (min-width: 900px) {
+    #file-panel.open {
+        width: clamp(360px, 42%, 560px);
+        min-width: 360px;
+        max-width: min(clamp(360px, 42%, 560px),
+                       max(360px, calc(100% - var(--sidebar-w) - 400px)));
+    }
 }
 
 .message {
