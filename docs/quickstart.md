@@ -89,7 +89,7 @@ Watch the timeline panel — you'll see scout plan the turn, then the main agent
 A few good directions to explore:
 
 - **Skills.** Teach the agent reusable procedures by dropping skill packages into `data/skills/` — or ask the agent to write one for you. Once installed, invoke one by asking in plain language — *"use the linkedin-post-formatter skill to write me a post about ..."* — or just describe the task and scout surfaces a matching skill automatically. See [guides/using-skills.md](guides/using-skills.md).
-- **Workspace.** Anything the agent writes lands in `data/workspace/`. The file panel in the UI shows the tree. See [guides/workspace-and-files.md](guides/workspace-and-files.md).
+- **Workspace.** Anything the agent writes lands in `data/workspace/`. The Explorer's Files → Workspace tab shows the tree. See [guides/workspace-and-files.md](guides/workspace-and-files.md).
 - **Memory.** Tell the agent something it should remember about you. Across new sessions, ask if it remembers. See [guides/memory-and-recall.md](guides/memory-and-recall.md).
 - **Schedule a recurring agent.** Ask it to "run every weekday at 8 AM and email me a news brief" — it'll set up a cron job. See [guides/scheduling-cron.md](guides/scheduling-cron.md).
 - **Spawn a worker.** For multi-part research, ask the agent to split work across parallel sub-agents. See [guides/workers.md](guides/workers.md).
