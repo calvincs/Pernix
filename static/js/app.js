@@ -2428,6 +2428,7 @@ function handleEvent(event) {
     else if (type === 'turn.complete') {
         // Safety net: ensure button is always reset when turn finishes
         _dropEmptyStreamingBubble();
+        _setStopPending(false);
         if (state.streaming) {
             state.streaming = false;
             _showSendButton();
@@ -2451,6 +2452,7 @@ function handleEvent(event) {
     else if (type === 'session.cancelled') {
         if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
         _dropEmptyStreamingBubble();
+        _setStopPending(false);
         appendMessage('system', 'Session cancelled by user.');
         updateStatus('');
         state.streaming = false;
@@ -2506,6 +2508,10 @@ async function _syncStreamingState() {
             _showSendButton();
             updateStatus('');
         }
+        // The server is the authority on whether a cancel has landed: a stop
+        // press against a turn that had already finished gets its button back
+        // here rather than staying disabled until the next event.
+        if (!serverActive) _setStopPending(false);
     } catch { /* ignore — next health check will retry */ }
 }
 
@@ -2645,9 +2651,28 @@ document.addEventListener('visibilitychange', () => {
 // Stop / Send button toggle
 // ---------------------------------------------------------------------------
 
+// True between pressing stop and the server confirming the turn is over.
+// Cancelling is cooperative — the agent finishes its current step first — so
+// there is a real window in which the button used to look untouched and
+// people pressed it again and again with no sign the first press landed.
+let _stopPending = false;
+
+function _setStopPending(pending) {
+    _stopPending = pending;
+    const btn = document.getElementById('send-btn');
+    if (btn) btn.disabled = pending || !!document.getElementById('msg-input')?.disabled;
+    if (pending) {
+        updateStatus('Stopping…');
+        _applyStateBadge('cancelling', 'stop pressed');
+    } else {
+        const infoEl = document.getElementById('status-info');
+        if (infoEl && infoEl.textContent === 'Stopping…') infoEl.textContent = '';
+    }
+}
+
 function _showStopButton() {
     const btn = document.getElementById('send-btn');
-    btn.disabled = false;
+    btn.disabled = _stopPending;
     btn.title = 'Stop generation';
     btn.classList.add('stop-mode');
     btn.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
@@ -2659,6 +2684,8 @@ function _showStopButton() {
 
 function _showSendButton() {
     const btn = document.getElementById('send-btn');
+    // Back in send mode: whatever the stop press was waiting for has happened.
+    _stopPending = false;
     // A read-only session keeps its send button off through stop/send churn —
     // the composer input is the source of truth (_setComposerReadOnly).
     btn.disabled = !!document.getElementById('msg-input')?.disabled;
@@ -2674,6 +2701,8 @@ function _showSendButton() {
 
 async function _cancelSession() {
     if (!state.sid) return;
+    if (_stopPending) return;   // a second press is not a second cancel
+    _setStopPending(true);
     try {
         const cancelHeaders = {};
         const _tc = getAuthToken();
@@ -2685,6 +2714,7 @@ async function _cancelSession() {
             // Error. It still has to hand a 401 to the login flow, or an
             // expired session reads as "cancel failed" forever.
             if (resp.status === 401) {
+                _setStopPending(false);
                 window.dispatchEvent(new CustomEvent('pernix:auth-required'));
                 return;
             }
