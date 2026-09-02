@@ -15,7 +15,7 @@ import {
     initSidebar, renderSessionList as renderSidebar, updateSessionActivity,
     setSessionPaging, setSessionPagingBusy, openSessionSheet,
 } from './components/sidebar.js';
-import { initFilePanel, toggleFilePanel, openFilePanel } from './components/file-panel.js';
+import { initFilePanel, toggleFilePanel, openFilePanel, EXPLORER_GROUPS } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
 import { initMobile, isCompact, isTouch, closeSidebar, syncDrawerInert } from './mobile.js';
 import { initVoice, stopVoice } from './voice.js';
@@ -5599,21 +5599,43 @@ function closeTranscriptSearch() {
 let _paletteEl = null;
 let _closePaletteOverlay = null;   // teardown from a11y.js openOverlay()
 
-// The Explorer's tabs, as things you can ask for by name. The KEYS are the
-// ones openFilePanel has always taken and must not change; the labels are how
-// the Explorer names them now, with the older name kept as a search alias so
-// muscle memory ("memory", "skills", "jobs") still finds the right pane.
-const PALETTE_EXPLORER_TABS = [
-    { key: 'workspace', label: 'Files', alias: 'workspace files' },
-    { key: 'memory', label: 'Knowledge', alias: 'memory notes recall' },
-    { key: 'skills', label: 'Capabilities', alias: 'skills' },
-    { key: 'tools', label: 'Tools', alias: 'capabilities' },
-    { key: 'mcp', label: 'MCP', alias: 'servers capabilities' },
-    { key: 'jobs', label: 'Automation', alias: 'jobs cron schedule' },
-    { key: 'adaptive', label: 'Self-tuning', alias: 'adaptive learning' },
-    { key: 'canary', label: 'Canary', alias: 'self-tuning tests' },
-    { key: 'telos', label: 'Telos', alias: 'self-tuning goals purpose' },
-];
+// The Explorer's panes, as things you can ask for by name.
+//
+// This used to be a hand-copied list, and it drifted the way hand-copied
+// lists do: it mixed group names with tab names ("Capabilities" for the
+// Skills tab, "Automation" for Jobs) and offered three panes under the
+// internal names the Explorer stopped showing when the interface pass
+// renamed them — MCP is Servers, Canary is Self-checks, Telos is Goals,
+// Adaptive is Learning. It is derived from the Explorer's own group/tab
+// table now: one entry per real tab, named the way the panel names it.
+//
+// The words those panes used to answer to are still how people look for
+// them, so each entry carries them as aliases. The tab KEY rides along
+// automatically, which is what keeps "canary", "telos", "mcp" and
+// "adaptive" — the names the docs, the settings and the agent's own logs
+// still use — landing on the pane that was renamed.
+const PALETTE_TAB_ALIASES = {
+    workspace: 'browse upload',
+    memory: 'notes recall remember',
+    jobs: 'cron schedule',
+    canary: 'tests',
+    telos: 'purpose',
+};
+
+function _paletteExplorerTabs() {
+    const out = [];
+    for (const group of EXPLORER_GROUPS) {
+        for (const tab of group.tabs) {
+            out.push({
+                key: tab.key,
+                title: `Open Explorer → ${group.label} → ${tab.label}`,
+                alias: [tab.key, tab.term, group.label, PALETTE_TAB_ALIASES[tab.key]]
+                    .filter(Boolean).join(' '),
+            });
+        }
+    }
+    return out;
+}
 
 /** The legend's hidden-type map, read straight from the sidebar's own store —
  *  a type switched off in the legend is switched off here too. */
@@ -5664,9 +5686,9 @@ function _paletteVerbs() {
             },
         });
     }
-    for (const tab of PALETTE_EXPLORER_TABS) {
+    for (const tab of _paletteExplorerTabs()) {
         verbs.push({
-            title: `Open Explorer → ${tab.label}`,
+            title: tab.title,
             hint: 'explorer',
             alias: tab.alias,
             run: () => openFilePanel({ tab: tab.key }),

@@ -218,7 +218,11 @@ const DEFAULT_WIDTH = 360;
 // settings still use ride along in each tab's title. (S7)
 // ---------------------------------------------------------------------------
 
-const EXPLORER_GROUPS = [
+// Exported because the Ctrl+K palette offers these same nine panes by name.
+// It derives its labels from this table rather than keeping a second copy:
+// the first copy drifted within one release, and a palette entry that names a
+// tab the Explorer no longer has is worse than no entry at all.
+export const EXPLORER_GROUPS = [
     {
         key: 'files', label: 'Files', icon: 'folder',
         tabs: [{ key: 'workspace', label: 'Workspace' }],
