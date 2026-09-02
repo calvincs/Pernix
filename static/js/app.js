@@ -366,6 +366,8 @@ async function selectSession(sid) {
     _collected = '';
     _toolGroup = null;
     _toolGroupCount = 0;
+    _toolGroupErrors = 0;
+    _toolGroupLatency = 0;
     if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
     closeRlmViewer();
     renderSidebar(state.sessions, state.sid, state.spaces);
@@ -1342,6 +1344,8 @@ let _streamingEl = null;
 let _collected = '';
 let _toolGroup = null;
 let _toolGroupCount = 0;
+let _toolGroupErrors = 0;      // failures in the OPEN group (drives the header)
+let _toolGroupLatency = 0;     // summed ms in the open group
 let _parseTimer = null;
 let _activityTimer = null;
 let _lastSeq = 0;  // track last processed event seq for dedup on SSE reconnect
@@ -1885,7 +1889,7 @@ function handleEvent(event) {
         const preview = (event.result || '').slice(0, 300);
         const full = event.full_result || event.result || '';
         const isTruncated = event.truncated || full.length > 300;
-        appendToolToGroup(event.name, preview, full, isTruncated, event.was_error, event.latency_ms, event.arguments);
+        appendToolToGroup(event.name, preview, full, isTruncated, event.was_error, event.latency_ms, event.arguments, !!event.truncated);
         if (isTimelineOpen()) {
             appendTimelineToolRow({
                 name: event.name,
@@ -2990,6 +2994,32 @@ function appendCommandCard(title, rows, customBody) {
 // Tool call grouping
 // ---------------------------------------------------------------------------
 
+/** ms → the shortest honest reading of it. A tool chip that says "44500ms"
+ *  makes the reader do the division; the header summing a whole round would
+ *  be worse still. */
+function _humanizeMs(ms) {
+    const n = Number(ms) || 0;
+    if (n < 1000) return `${Math.round(n)}ms`;
+    if (n < 10000) return `${(n / 1000).toFixed(1)}s`;
+    if (n < 60000) return `${Math.round(n / 1000)}s`;
+    const mins = Math.floor(n / 60000);
+    const secs = Math.round((n % 60000) / 1000);
+    return secs ? `${mins}m ${secs}s` : `${mins}m`;
+}
+
+/** "5 tool calls · 1 failed · 48s" — the header is the only thing visible
+ *  when a group is collapsed, so it has to carry the two facts a reader
+ *  actually needs: did anything fail, and how long did the round cost. */
+function _updateToolGroupHeader(group) {
+    const label = group.querySelector('.tg-label');
+    if (!label) return;
+    const parts = [_toolGroupCount === 1 ? '1 tool call' : `${_toolGroupCount} tool calls`];
+    if (_toolGroupErrors) parts.push(`${_toolGroupErrors} failed`);
+    if (_toolGroupLatency) parts.push(_humanizeMs(_toolGroupLatency));
+    label.textContent = parts.join(' · ');
+    group.classList.toggle('has-error', _toolGroupErrors > 0);
+}
+
 function ensureToolGroup() {
     if (_toolGroup) return _toolGroup;
     const inner = _messagesInner();
@@ -2998,6 +3028,8 @@ function ensureToolGroup() {
     if (emptyEl) emptyEl.remove();
 
     _toolGroupCount = 0;
+    _toolGroupErrors = 0;
+    _toolGroupLatency = 0;
     const header = el('div', { class: 'tool-group-header' }, [
         el('span', { class: 'tg-toggle' }, [text('\u25BC')]),
         el('span', { class: 'tg-label' }, [text('0 tool calls')]),
@@ -3017,21 +3049,24 @@ function ensureToolGroup() {
 
 function closeToolGroup() {
     if (!_toolGroup) return;
-    if (_toolGroupCount > 2) {
+    // A round that contains a failure is never folded away: auto-collapsing
+    // it is exactly how a red row goes unread.
+    if (_toolGroupCount > 2 && _toolGroupErrors === 0) {
         _toolGroup.classList.add('collapsed');
     }
     _toolGroup = null;
     _toolGroupCount = 0;
+    _toolGroupErrors = 0;
+    _toolGroupLatency = 0;
 }
 
-function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = false, latencyMs = 0, args = null) {
+function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = false, latencyMs = 0, args = null, serverTruncated = false) {
     const group = ensureToolGroup();
     const items = group.querySelector('.tool-group-items');
     _toolGroupCount++;
-
-    // Update header count
-    const label = group.querySelector('.tg-label');
-    label.textContent = _toolGroupCount === 1 ? '1 tool call' : `${_toolGroupCount} tool calls`;
+    if (wasError) _toolGroupErrors++;
+    _toolGroupLatency += Number(latencyMs) || 0;
+    _updateToolGroupHeader(group);
 
     // --- Compact header row (always visible) ---
     const chevron = el('span', { class: 'tool-item-chevron' }, [text('\u25B6')]);
@@ -3039,15 +3074,13 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
     const nameChildren = [text(name)];
     if (latencyMs) {
         const latencyClass = latencyMs < 500 ? 'fast' : latencyMs < 2000 ? 'medium' : 'slow';
-        nameChildren.push(el('span', { class: `tool-latency ${latencyClass}` }, [text(`${latencyMs}ms`)]));
+        nameChildren.push(el('span', { class: `tool-latency ${latencyClass}` }, [text(_humanizeMs(latencyMs))]));
     }
     const nameEl = el('div', { class: 'tool-item-name' }, nameChildren);
 
     // Inline summary — single-line preview of args or output
     let summaryText = '';
-    if (wasError) {
-        summaryText = '(error)';
-    } else if (args && typeof args === 'object') {
+    if (args && typeof args === 'object') {
         if (name === 'bash' && args.command) {
             summaryText = '$ ' + args.command;
         } else if (args.path) {
@@ -3062,6 +3095,10 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
     if (!summaryText && preview) {
         summaryText = preview.slice(0, 80).replace(/\n/g, ' ');
     }
+    // A failure used to REPLACE the summary with a bare "(error)" — throwing
+    // away the one thing that says which call failed. Keep the args and mark
+    // them instead.
+    if (wasError) summaryText = summaryText ? `${summaryText} — error` : 'error';
     const summaryEl = el('span', { class: 'tool-item-summary' }, [text(summaryText)]);
 
     const headerChildren = [chevron, nameEl, summaryEl];
@@ -3118,7 +3155,11 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
     // Expand toggle — always created; revealed after expansion if content overflows
     let fullyExpanded = false;
     let toggleRevealed = false;
-    const toggleBtn = el('button', { class: 'tool-toggle tool-toggle--hidden' }, [text('show more')]);
+    // The server truncates oversized tool output before it ever reaches the
+    // client, so "show more" would otherwise promise a full result that does
+    // not exist on this side. Say which kind of more it is.
+    const truncNote = serverTruncated ? ' (truncated)' : '';
+    const toggleBtn = el('button', { class: 'tool-toggle tool-toggle--hidden' }, [text('show more' + truncNote)]);
     toggleBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         fullyExpanded = !fullyExpanded;
@@ -3127,7 +3168,7 @@ function appendToolToGroup(name, preview, fullResult, isTruncated, wasError = fa
             contentEl.appendChild(text(fullyExpanded ? fullResult : preview));
         }
         contentEl.classList.toggle('fully-expanded', fullyExpanded);
-        toggleBtn.textContent = fullyExpanded ? 'show less' : 'show more';
+        toggleBtn.textContent = (fullyExpanded ? 'show less' : 'show more') + truncNote;
     });
     bodyChildren.push(toggleBtn);
 

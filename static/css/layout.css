@@ -1067,6 +1067,10 @@
     transition: color 0.15s;
 }
 .tool-group-header:hover { color: var(--accent-dim); }
+/* A round that failed says so on the one line that stays visible when the
+   group is collapsed. (The group with a failure is never auto-collapsed —
+   see closeToolGroup — but the user can still fold it by hand.) */
+.tool-group.has-error .tool-group-header { color: var(--error); }
 .tg-toggle {
     font-size: 8px;
     transition: transform 0.2s;
