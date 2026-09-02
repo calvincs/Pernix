@@ -268,6 +268,10 @@ function _buildDirectivesSection(space, dirState, disposers, onSave) {
             const modeLabel = st.revert && st.hadOverride
                 ? 'Override will be removed on Save — showing the default:'
                 : 'Using the default (read-only):';
+            // One row on a wide card, two on a narrow one (E3): the sentence
+            // and the button both want the full width below 900px, and
+            // "Customize for this space" is far too long to sit beside a
+            // sentence in a 360px dialog.
             pane.appendChild(el('div', { class: 'space-dir-toolbar' }, [
                 el('span', { class: 'space-dir-mode' }, [text(modeLabel)]),
                 el('button', {
@@ -287,10 +291,15 @@ function _buildDirectivesSection(space, dirState, disposers, onSave) {
                 sizeInfo.classList.toggle('over', bytes > MAX_DIRECTIVE_BYTES);
             };
             pane.appendChild(el('div', { class: 'space-dir-toolbar' }, [
-                el('span', { class: 'space-dir-mode' }, [
-                    text(st.hadOverride ? 'Space override (editable)' : 'New override — seeded from the default'),
+                // The label and its byte counter stay one unit when the row
+                // stacks — a size chip on a line of its own reads as a
+                // heading for whatever follows it.
+                el('div', { class: 'space-dir-mode-cell' }, [
+                    el('span', { class: 'space-dir-mode' }, [
+                        text(st.hadOverride ? 'Space override (editable)' : 'New override — seeded from the default'),
+                    ]),
+                    sizeInfo,
                 ]),
-                sizeInfo,
                 el('button', {
                     class: 'btn btn-secondary space-dir-action',
                     title: 'Discard this override and go back to the default file',
