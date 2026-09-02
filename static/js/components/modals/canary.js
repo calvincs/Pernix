@@ -194,7 +194,7 @@ export async function renderCanaryTab(container) {
         btns.appendChild(await actionBtn('Reviewed ✓', () => post(`/api/canary/${encodeURIComponent(c.name)}/reviewed`), refresh));
         const delBtn = el('button', { class: 'adaptive-btn' }, [text('Retire')]);
         delBtn.addEventListener('click', async () => {
-            if (!confirm(`Retire canary '${c.name}'? It sits in .retired/ for a grace window and can be moved back.`)) return;
+            if (!confirm(`Retire the canary "${c.name}" \u2014 it moves to .retired/ for a grace window, so this can be rolled back.`)) return;
             delBtn.disabled = true;
             try { await del(`/api/canary/${encodeURIComponent(c.name)}`); } catch (e) { alert(`Retire failed: ${e.message || e}`); }
             await refresh();
