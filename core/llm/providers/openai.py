@@ -321,8 +321,21 @@ class OpenAIProvider:
                             else str(chunk_error)
                         )
                         logger.error("OpenAI stream error in chunk: %s", err_msg)
-                        reason = classify_http_error(400, err_msg)
-                        if reason == FailoverReason.CONTEXT_OVERFLOW:
+                        # The provider's own code outranks a guess from the
+                        # message: a 200 body carrying {"code": 502} was
+                        # classified as HTTP 400 (non-retryable), so the
+                        # ladder skipped its backoff entirely, and a 429 was
+                        # never recognised as a rate limit. Naming the code in
+                        # the text is also what the retry markers key on.
+                        err_code = chunk_error.get("code") if isinstance(chunk_error, dict) else None
+                        status = err_code if isinstance(err_code, int) else 400
+                        if err_code is not None:
+                            err_msg = f"OpenAI {err_code}: {err_msg}"
+                        reason = classify_http_error(status, err_msg, code=err_code)
+                        if reason == FailoverReason.CONTEXT_OVERFLOW or not emitted_output:
+                            # Nothing has reached the caller yet, so this is
+                            # still a clean failover rather than a truncated
+                            # answer mid-flight.
                             raise FailoverError(reason, err_msg)
                         yield StreamEvent(type=StreamEventType.ERROR, error=err_msg)
                         break

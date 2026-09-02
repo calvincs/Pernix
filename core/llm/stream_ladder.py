@@ -321,6 +321,11 @@ async def stream_with_failover(
                 wait,
                 err,
             )
+            # Tell the UI to drop whatever partial text it has already
+            # rendered: the retry re-streams the answer from the beginning,
+            # and without this the viewer saw <partial><full answer> while
+            # the database stored only the second one.
+            emit({"type": "stream.reset", "discard_partial": True, "reason": "retry"})
             emit({"type": "stream.retry", "attempt": retries, "wait": wait, "error": err})
             await asyncio.sleep(wait)
             continue
@@ -352,6 +357,7 @@ async def stream_with_failover(
                 fallback,
                 err,
             )
+            emit({"type": "stream.reset", "discard_partial": True, "reason": "fallback"})
             emit({"type": "stream.fallback", "model": fallback})
             fb_provider = client.resolve_provider(fallback)
             if fb_provider in OPENAI_FORMAT_PROVIDERS:
@@ -372,9 +378,14 @@ def _merge_tool_call_deltas(collected: list[dict], deltas) -> None:
     """Fold streamed tool-call fragments into `collected`, merging by id."""
     for tc in deltas:
         existing = next((c for c in collected if c["id"] == tc.id and tc.id), None)
-        if existing:
-            if tc.name:
-                existing["name"] = tc.name
+        # A fragment with its own name is a NEW call, not a continuation:
+        # merging on id alone let an id collision (Ollama's per-chunk
+        # numbering) silently overwrite one call with another and glue their
+        # argument bodies together. A true delta carries only more arguments.
+        if existing and not tc.name:
+            existing["arguments"] += tc.arguments
+        elif existing and tc.name and not existing["name"]:
+            existing["name"] = tc.name
             existing["arguments"] += tc.arguments
         else:
             collected.append({"id": tc.id, "name": tc.name, "arguments": tc.arguments})
