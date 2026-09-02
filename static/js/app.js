@@ -17,6 +17,7 @@ import { initMobile, isMobile, closeSidebar } from './mobile.js';
 import { initVoice, stopVoice } from './voice.js';
 import { announce, openOverlay } from './a11y.js';
 import { notify } from './feedback.js';
+import { confirmDanger } from './components/modals/confirm.js';
 
 // ---------------------------------------------------------------------------
 // File uploads state
@@ -1037,7 +1038,18 @@ const SLASH_COMMANDS = {
     '/clear': async () => {
         if (!state.sid) return appendMessage('system', 'No active session');
         // Destructive and un-undoable — require an explicit second step.
-        if (!window.confirm('Clear all messages in this session? This cannot be undone.')) return;
+        // window.confirm() is unstyled, unreadable on a phone, and blocks the
+        // event loop mid-stream; the shared dialog is none of those. (N6)
+        const ok = await confirmDanger({
+            title: 'Clear this conversation?',
+            body: [
+                'Every message in this session is deleted from the database.',
+                'The session itself stays; only its transcript goes. This cannot be undone.',
+            ],
+            verb: 'Clear',
+            cancelLabel: 'Keep',
+        });
+        if (!ok) return;
         await post(`/api/sessions/${state.sid}/clear`);
         loadMessages(state.sid);
     },
