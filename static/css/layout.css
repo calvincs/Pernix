@@ -3360,3 +3360,14 @@ mark.ts-mark.current {
     gap: 6px;
     cursor: pointer;
 }
+
+/* N8 — the search result count, so the list reads as "some of them", not all. */
+.search-count {
+    padding: 6px var(--sp-3) 4px;
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.search-meta .session-attn { margin-left: var(--sp-1); }
+.search-empty { text-wrap: pretty; }

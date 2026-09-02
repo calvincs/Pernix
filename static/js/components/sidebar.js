@@ -54,6 +54,7 @@ export function initSidebar(onSelect, onDelete) {
 
 let _searchActive = false;
 let _searchTimer = null;
+let _activeSid = null;   // search rendering runs outside renderSessionList
 
 function _createSearchBox() {
     const sidebar = document.getElementById('sidebar');
@@ -81,6 +82,11 @@ function _createSearchBox() {
     });
 }
 
+// The endpoint caps at 20 message hits, so a full page of results means
+// there are probably more behind it — say so rather than implying the list
+// is everything.
+const SEARCH_LIMIT = 20;
+
 async function _runSearch(q) {
     _searchActive = true;
     const list = document.getElementById('session-list');
@@ -91,9 +97,16 @@ async function _runSearch(q) {
         clear(list);
         const results = data.results || [];
         if (results.length === 0) {
-            list.appendChild(el('div', { class: 'search-empty' }, [text('No matching sessions')]));
+            list.appendChild(el('div', { class: 'search-empty' }, [
+                text(`Nothing matches “${q}”. Search reads message text, not just titles — try a phrase from the conversation.`),
+            ]));
             return;
         }
+        const n = results.length;
+        list.appendChild(el('div', { class: 'search-count', role: 'status' }, [
+            text(`${n} session${n === 1 ? '' : 's'} match${n === 1 ? 'es' : ''}`
+                + (n >= SEARCH_LIMIT ? ' (top 20)' : '')),
+        ]));
         for (const r of results) {
             const sp = r.space_id ? spaceById(r.space_id) : null;
             const titleKids = [];
@@ -102,23 +115,54 @@ async function _runSearch(q) {
                     class: 'space-chip',
                     style: `--space-color: ${sp.color}`,
                     title: `Space: ${sp.label}`,
+                    'aria-hidden': 'true',
                 }));
             }
             titleKids.push(text(r.title || 'untitled'));
-            list.appendChild(el('div', {
-                class: 'session-item search-hit',
-                onClick: () => { if (_onSelect) _onSelect(r.session_id); },
+            const open = () => { if (_onSelect) _onSelect(r.session_id); };
+            const hit = el('div', {
+                class: 'session-item search-hit' + (r.session_id === _activeSid ? ' active' : ''),
+                'data-sid': r.session_id,
+                role: 'button',
+                tabindex: '0',
+                'aria-label': `${r.title || 'untitled'}, ${r.matches} match${r.matches === 1 ? '' : 'es'}`,
+                onClick: open,
             }, [
                 el('div', { class: 'session-title' }, titleKids),
                 el('div', { class: 'search-snippet' }, [text(r.snippet || '')]),
                 el('div', { class: 'search-meta' }, [
-                    text(`${r.matches} match${r.matches === 1 ? '' : 'es'}${r.updated_at ? ' · ' + r.updated_at : ''}`),
+                    text(`${r.matches} match${r.matches === 1 ? '' : 'es'}`
+                        + (r.updated_at ? ' · ' + _relativeTime(r.updated_at) : '')),
                 ]),
-            ]));
+            ]);
+            _activateOnKey(hit, open);
+            list.appendChild(hit);
         }
     } catch {
         clear(list);
-        list.appendChild(el('div', { class: 'search-empty' }, [text('Search failed')]));
+        list.appendChild(el('div', { class: 'search-empty' }, [text('Search failed — check the connection and try again.')]));
+    }
+}
+
+// Search owns the list until it is cleared, but the sessions behind those
+// rows keep moving: one of them becomes the active session, another finishes
+// a turn. Repaint just those two things in place rather than freezing the
+// panel until the user empties the search box.
+function _refreshSearchRows(sessions, activeSid) {
+    const list = document.getElementById('session-list');
+    if (!list) return;
+    const byId = new Map((sessions || []).map(s => [s.id, s]));
+    for (const hit of list.querySelectorAll('.search-hit[data-sid]')) {
+        const sid = hit.getAttribute('data-sid');
+        hit.classList.toggle('active', sid === activeSid);
+        const session = byId.get(sid);
+        if (!session) continue;
+        const meta = hit.querySelector('.search-meta');
+        if (!meta) continue;
+        const stale = meta.querySelector('.session-attn');
+        if (stale) stale.remove();
+        const attn = _attentionBadge(session);
+        if (attn) meta.appendChild(attn);
     }
 }
 
@@ -194,8 +238,9 @@ function _restoreFocus(list, mark) {
 }
 
 export function renderSessionList(sessions, activeSid, spaces = []) {
-    if (_searchActive) return;  // search results own the list until cleared
     _spaces = spaces || [];
+    _activeSid = activeSid;
+    if (_searchActive) { _refreshSearchRows(sessions, activeSid); return; }
     // The guard must see spaces too: a label/color edit with an unchanged
     // session list would otherwise never repaint.
     const json = JSON.stringify(sessions) + '|' + JSON.stringify(spaces) + '|' + activeSid;
@@ -523,6 +568,26 @@ function _renderSessionWithWorkers(session, container, activeSid, childrenByPare
     container.appendChild(group);
 }
 
+// Needs-attention badge: "?" = blocked waiting for your input, "✓" = a
+// background turn finished since you last looked. Shared by the session rows
+// and the search hits so a search does not hide the one signal that says a
+// session wants you.
+function _attentionBadge(session) {
+    if (session._attention === 'input') {
+        return el('span', {
+            class: 'session-attn attn-input',
+            title: 'Waiting for your input',
+        }, [text('?')]);
+    }
+    if (session._attention === 'done') {
+        return el('span', {
+            class: 'session-attn attn-done',
+            title: 'Finished while you were away',
+        }, [text('✓')]);
+    }
+    return null;
+}
+
 function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) {
     const typeKey = _getTypeKey(session);
     const typeDef = SESSION_TYPES[typeKey];
@@ -663,19 +728,8 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
     titleChildren.push(el('span', { class: dotCls, 'aria-hidden': 'true' }));
     titleChildren.push(el('span', { class: 'session-title-text' }, [text(titleText)]));
 
-    // Needs-attention badges: "?" = blocked waiting for your input,
-    // "✓" = a background turn finished since you last looked.
-    if (session._attention === 'input') {
-        titleChildren.push(el('span', {
-            class: 'session-attn attn-input',
-            title: 'Waiting for your input',
-        }, [text('?')]));
-    } else if (session._attention === 'done') {
-        titleChildren.push(el('span', {
-            class: 'session-attn attn-done',
-            title: 'Finished while you were away',
-        }, [text('✓')]));
-    }
+    const attn = _attentionBadge(session);
+    if (attn) titleChildren.push(attn);
 
     // Activity ticker line: live activity when processing, subtitle/preview when idle
     let liveActivity = _activity.get(session.id);
