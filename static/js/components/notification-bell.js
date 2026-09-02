@@ -1,6 +1,7 @@
 // Pernix — Unified notification bell: questions + notifications in one panel
 
 import { el, text } from '../render.js';
+import { icon } from '../icons.js';
 import { get, post } from '../api.js';
 import { getPermission, requestPermission } from '../notifications.js';
 import { announce, openOverlay } from '../a11y.js';
@@ -101,7 +102,7 @@ export function openBellPanel() {
                 title: 'Close notifications',
                 'aria-label': 'Close notifications',
                 onClick: closeBellPanel,
-            }, [text('\u00d7')]),
+            }, [icon('x', { size: 14 })]),
         ]),
         el('div', { class: 'modal-body' }, banner ? [banner, itemsContainer] : [itemsContainer]),
     ]);

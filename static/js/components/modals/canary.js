@@ -4,6 +4,7 @@
 // a flagged batch cites canary regressions; this is where you read them.
 
 import { el, text, clear } from '../../render.js';
+import { icon } from '../../icons.js';
 import { get, post, put, del, patch } from '../../api.js';
 import { actionBtn, setActionNotice, takeActionNotice } from './adaptive.js';
 import { makeDisclosure, resultLine, tabGlossary } from './telos.js';
@@ -168,7 +169,7 @@ export async function renderCanaryTab(container) {
             'aria-label': 'Refresh the Canary tab',
             // Refresh rebuilds the tab, which throws away an open editor.
             onClick: () => { if (guardEditor()) refresh(); },
-        }, [text('↻ Refresh')]),
+        }, [icon('refresh', { size: 12 }), text('Refresh')]),
     ]);
     if (suite.enabled) {
         head.appendChild(await actionBtn('▶ Run all (incl. parked)', () => post('/api/canary/run', { name: '*' }), refresh));

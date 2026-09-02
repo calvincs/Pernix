@@ -1,6 +1,7 @@
 // Pernix — Jobs status bar indicator + SSE subscription
 
 import { el, text } from '../render.js';
+import { icon } from '../icons.js';
 import { get, isOnline } from '../api.js';
 
 let _el = null;
@@ -21,7 +22,7 @@ let _hasError = false;
 export function initJobsIndicator(container, { onOpenPanel }) {
     _openPanel = onOpenPanel;
 
-    _iconEl = el('span', { class: 'jobs-indicator-icon' }, ['\u23F1']);  // stopwatch
+    _iconEl = el('span', { class: 'jobs-indicator-icon' }, [icon('clock', { size: 13 })]);
     _countEl = el('span', { class: 'jobs-indicator-count' });
 
     // A <span> with a click handler: no tab stop, no role, and a title
@@ -66,6 +67,14 @@ async function _refresh() {
     }
 }
 
+// The glyphs this replaced (⏱ and ◐) were emoji-presentation characters:
+// they rendered in full colour, at emoji size, in a monochrome status bar.
+function _setIcon(name) {
+    if (_iconEl.firstChild && _iconEl.firstChild.classList?.contains(`pxi-${name}`)) return;
+    while (_iconEl.firstChild) _iconEl.removeChild(_iconEl.firstChild);
+    _iconEl.appendChild(icon(name, { size: 13 }));
+}
+
 function _render() {
     const running = _status.running_jobs || 0;
     const scheduled = _status.scheduled_count || 0;
@@ -89,17 +98,17 @@ function _render() {
     _el.style.display = '';
 
     if (running > 0) {
-        _iconEl.textContent = '\u23F1';  // stopwatch
+        _setIcon('clock');
         _countEl.textContent = String(running);
         _el.title = `${running} job${running > 1 ? 's' : ''} running`;
     } else if (snoozing) {
-        _iconEl.textContent = '\u25D0';  // circle half
+        _setIcon('moon');
         _countEl.textContent = 'snooze';
         _el.title = _status.snooze?.detail
             ? `Snooze: ${_status.snooze.detail}`
             : 'Snooze cycle active';
     } else {
-        _iconEl.textContent = '\u23F1';
+        _setIcon('clock');
         _countEl.textContent = String(scheduled);
         _el.title = `${scheduled} job${scheduled > 1 ? 's' : ''} scheduled`;
     }

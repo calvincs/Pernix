@@ -9,6 +9,7 @@
 // path serves as the permanent inspection view.
 
 import { el, text, clear, renderMarkdown } from '../render.js';
+import { icon } from '../icons.js';
 import { get } from '../api.js';
 
 const POLL_MS = 2000;
@@ -137,7 +138,7 @@ function _renderHeader() {
                 const stack = v.stack.slice(0, -1);
                 _openRun(v.root, parent, stack);
             },
-        }, [text('←')]));
+        }, [icon('arrow-left', { size: 12 })]));
     }
     titleRow.appendChild(el('span', { class: `rlm-status-badge ${_statusCls(d.status)}` }, [text(d.status)]));
     titleRow.appendChild(el('span', { class: 'rlm-run-id' }, [text(`RLM run ${d.run_id}`)]));

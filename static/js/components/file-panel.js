@@ -1,6 +1,7 @@
 // Pernix — Explorer panel (workspace, memory, skills, jobs)
 
 import { el, text, clear, renderMarkdown } from '../render.js';
+import { icon } from '../icons.js';
 import { get, post, del, getAuthToken } from '../api.js';
 import { isMobile } from '../mobile.js';
 import { notify } from '../feedback.js';
@@ -614,7 +615,7 @@ function renderWorkspace() {
         'aria-label': _wsCurrentPath
             ? `Upload a file into ${_wsCurrentPath}`
             : 'Upload a file into the workspace root',
-    }, [text('\u2191')]);
+    }, [icon('arrow-up')]);
     uploadBtn.addEventListener('click', triggerUpload);
 
     const fileCount = _wsEntries.filter(e => e.type === 'file').length;
@@ -696,7 +697,7 @@ function _renderUploadRows(parent) {
     for (const up of _wsUploads) {
         const isErr = up.state === 'error';
         const row = el('div', { class: `fp-tree-item fp-upload-row${isErr ? ' error' : ''}` }, [
-            el('span', { class: 'fp-tree-icon' }, [text(isErr ? '\u26A0' : '\u2191')]),
+            el('span', { class: 'fp-tree-icon' }, [icon(isErr ? 'warning' : 'arrow-up', { size: 12 })]),
             el('span', { class: 'fp-tree-name' }, [text(up.name)]),
             el('span', { class: 'fp-tree-count' }),
             el('span', { class: 'fp-tree-meta' }, [text(isErr ? up.detail : 'uploading\u2026')]),
@@ -718,16 +719,19 @@ function _renderUploadRows(parent) {
     }
 }
 
-const _WS_SORT_INDICATOR = { name: '↑', size: '↓', date: '↓' };
+// Which way each column sorts when it is the active one. Icons, not arrow
+// glyphs: ↑/↓ sit on a different baseline from the label in DM Mono.
+const _WS_SORT_INDICATOR = { name: 'arrow-up', size: 'arrow-down', date: 'arrow-down' };
 
 function _buildColumnHeaders() {
     const sortBy = _state.wsSortBy;
 
     function makeCol(label, key, colClass) {
         const isActive = key && sortBy === key;
-        const indicator = isActive ? ` ${_WS_SORT_INDICATOR[key] || '↑'}` : '';
         const classes = ['fp-col-h', colClass, key ? 'sortable' : '', isActive ? 'active' : ''].filter(Boolean).join(' ');
-        const span = el('span', { class: classes }, [text(label + indicator)]);
+        const kids = [text(label)];
+        if (isActive) kids.push(icon(_WS_SORT_INDICATOR[key] || 'arrow-up', { size: 10 }));
+        const span = el('span', { class: classes }, kids);
         if (key) {
             _makeActivatable(span, `Sort by ${label.toLowerCase()}`, () => {
                 _state.wsSortBy = key;
@@ -753,7 +757,7 @@ function _buildBreadcrumb() {
     const bar = el('div', { class: 'fp-breadcrumb' });
 
     // Root link
-    const rootLink = el('span', { class: `fp-breadcrumb-part${parts.length === 0 ? ' active' : ''}` }, [text('\u2302')]);
+    const rootLink = el('span', { class: `fp-breadcrumb-part${parts.length === 0 ? ' active' : ''}` }, [icon('home', { size: 12, label: 'Workspace root' })]);
     if (parts.length > 0) {
         rootLink.style.cursor = 'pointer';
         _makeActivatable(rootLink, 'Go to the workspace root', () => loadWorkspace({ path: '' }));
@@ -798,7 +802,7 @@ function _renderEntries(parent, entries) {
     // "Go up" entry when not at root and not searching
     if (!_wsSearchQuery && _wsParent !== null) {
         const upItem = el('div', { class: 'fp-tree-item dir' }, [
-            el('span', { class: 'fp-tree-icon' }, [text('\u2190')]),
+            el('span', { class: 'fp-tree-icon' }, [icon('arrow-left', { size: 12 })]),
             el('span', { class: 'fp-tree-name' }, [text('..')]),
         ]);
         _makeActivatable(upItem, 'Go up one folder', () => loadWorkspace({ path: _wsParent }));
@@ -926,7 +930,7 @@ function renderViewer(container) {
     // Toolbar
     const backBtn = el('button', {
         class: 'fp-toolbar-back', title: 'Back to tree', 'aria-label': 'Back to the file tree',
-    }, [text('\u2190')]);
+    }, [icon('arrow-left')]);
     backBtn.addEventListener('click', () => {
         if (file.type === 'image' && file.content.startsWith('blob:')) {
             URL.revokeObjectURL(file.content);
@@ -1107,7 +1111,7 @@ function renderEditor(container) {
     // Toolbar
     const backBtn = el('button', {
         class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the file, discarding unsaved changes',
-    }, [text('\u2190')]);
+    }, [icon('arrow-left')]);
     backBtn.addEventListener('click', () => {
         if (!guardDirty()) return;
         disposeActiveEditor();
@@ -1825,7 +1829,7 @@ function renderSkillViewer(container) {
     // Toolbar
     const backBtn = el('button', {
         class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the skills list',
-    }, [text('\u2190')]);
+    }, [icon('arrow-left')]);
     backBtn.addEventListener('click', () => {
         _state.viewMode = 'tree';
         _state.currentFile = null;
@@ -1962,7 +1966,7 @@ function renderSkillEditor(container) {
     // Toolbar
     const backBtn = el('button', {
         class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the skill, discarding unsaved changes',
-    }, [text('\u2190')]);
+    }, [icon('arrow-left')]);
     backBtn.addEventListener('click', () => {
         if (!guardDirty()) return;
         disposeActiveEditor();
@@ -2210,7 +2214,7 @@ async function renderJobs() {
     // maintenance, RLM run cleanup, and the other idle-time activities.
     if (_lastSnoozeActivity && _lastSnoozeActivity.detail) {
         container.appendChild(el('div', { class: 'fp-snooze-activity' }, [
-            el('span', { class: 'fp-snooze-activity-icon' }, [text('◐')]),
+            el('span', { class: 'fp-snooze-activity-icon' }, [icon('moon', { size: 12 })]),
             text(` Snooze: ${_lastSnoozeActivity.detail}`),
         ]));
     }
@@ -2251,7 +2255,7 @@ async function renderJobs() {
 
     const refreshBtn = el('button', {
         class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the jobs list',
-    }, [text('↻')]);
+    }, [icon('refresh')]);
     refreshBtn.addEventListener('click', () => loadJobs());
 
     const subTabRow = el('div', { class: 'fp-jobs-header-row' }, [subTabBar, refreshBtn]);
@@ -2363,7 +2367,7 @@ function renderTools() {
     // Header
     const refreshBtn = el('button', {
         class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the tools list',
-    }, [text('↻')]);
+    }, [icon('refresh')]);
     refreshBtn.addEventListener('click', loadTools);
 
     const sortSelect = el('select', {
@@ -2410,7 +2414,7 @@ function renderTools() {
         const helpBtn = el('button', { class: 'fp-danger-banner-help', 'aria-label': 'More info' }, [text('?')]);
         const banner = el('div', { class: 'fp-danger-mode-banner' }, [
             el('div', { class: 'fp-danger-banner-inner' }, [
-                el('span', { class: 'fp-danger-banner-icon' }, [text('⚠')]),
+                el('span', { class: 'fp-danger-banner-icon' }, [icon('warning', { size: 15 })]),
                 el('span', { class: 'fp-danger-banner-text' }, [
                     text('Run Dangerously mode is enabled — all tool approvals are bypassed'),
                 ]),
@@ -2641,11 +2645,11 @@ function renderMcp() {
 
     const refreshBtn = el('button', {
         class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the MCP server list',
-    }, [text('↻')]);
+    }, [icon('refresh')]);
     refreshBtn.addEventListener('click', loadMcp);
     const addBtn = el('button', {
         class: 'fp-icon-btn', title: 'Add server', 'aria-label': 'Add an MCP server',
-    }, [text('+')]);
+    }, [icon('plus')]);
     addBtn.addEventListener('click', () => {
         if (_mcpShowAdd && _mcpEditTarget === null) {
             _mcpShowAdd = false;                    // toggle a plain add form closed
@@ -2686,7 +2690,7 @@ function renderMcp() {
     if (_mcpData && _mcpData.mcp_enabled === false) {
         const banner = el('div', { class: 'fp-danger-mode-banner' }, [
             el('div', { class: 'fp-danger-banner-inner' }, [
-                el('span', { class: 'fp-danger-banner-icon' }, [text('◌')]),
+                el('span', { class: 'fp-danger-banner-icon' }, [icon('ban', { size: 15 })]),
                 el('span', { class: 'fp-danger-banner-text' }, [
                     text('MCP is disabled — servers will not connect. Click to open Settings.'),
                 ]),
@@ -2737,7 +2741,7 @@ function _buildMcpServerItem(s) {
     const editBtn = el('button', {
         class: 'fp-icon-btn', title: 'Edit server config',
         'aria-label': `Edit the config for ${s.name}`,
-    }, [text('✎')]);
+    }, [icon('edit')]);
     editBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         const cfg = _mcpData?.configs?.[s.name];
@@ -2752,7 +2756,7 @@ function _buildMcpServerItem(s) {
     const reloadBtn = el('button', {
         class: 'fp-icon-btn', title: 'Reconnect + re-discover tools',
         'aria-label': `Reconnect ${s.name} and re-discover its tools`,
-    }, [text('↻')]);
+    }, [icon('refresh')]);
     reloadBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (_mcpBusy) return;
@@ -2767,7 +2771,7 @@ function _buildMcpServerItem(s) {
     const delBtn = el('button', {
         class: 'fp-icon-btn', title: 'Remove server',
         'aria-label': `Remove the MCP server ${s.name}`,
-    }, [text('×')]);
+    }, [icon('x')]);
     delBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!confirm(`Remove the MCP server "${s.name}" and unregister its tools \u2014 this cannot be undone.`)) return;

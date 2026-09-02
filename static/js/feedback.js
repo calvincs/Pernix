@@ -10,6 +10,7 @@
 // uses tokens only — no literals here.
 
 import { el, text } from './render.js';
+import { icon } from './icons.js';
 import { announce } from './a11y.js';
 
 const LEVELS = new Set(['info', 'success', 'warning', 'error']);
@@ -70,7 +71,7 @@ export function notify(level, message, { action, actionLabel, ttl } = {}) {
         type: 'button',
         'aria-label': 'Dismiss',
         onClick: dismiss,
-    }, [text('×')]));
+    }, [icon('x', { size: 12 })]));
 
     const card = el('div', {
         class: `toast toast-${kind}`,

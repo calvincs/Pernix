@@ -4,6 +4,7 @@
 // slow-loop trigger and alarm acknowledgement.
 
 import { el, text, clear } from '../../render.js';
+import { icon } from '../../icons.js';
 import { get, post } from '../../api.js';
 
 function relTime(isoStr) {
@@ -101,7 +102,7 @@ export async function renderTelosTab(container) {
             title: 'Reload the Telos state',
             'aria-label': 'Refresh the Telos tab',
             onClick: refresh,
-        }, [text('↻ Refresh')]),
+        }, [icon('refresh', { size: 12 }), text('Refresh')]),
     ]);
     if (overview.enabled) {
         head.appendChild(badge(`slow loops ${overview.schedule}`));
@@ -109,7 +110,7 @@ export async function renderTelosTab(container) {
             class: 'adaptive-btn',
             title: 'Run the slow loops now instead of waiting for the schedule',
             'aria-label': 'Run the Telos slow loops now',
-        }, [text('▶ Run slow loops')]);
+        }, [icon('play', { size: 12 }), text('Run slow loops')]);
         runBtn.addEventListener('click', async () => {
             runBtn.disabled = true;
             clear(resultSlot);
