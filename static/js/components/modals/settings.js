@@ -1530,9 +1530,13 @@ function _buildQRButton() {
 
             // Build overlay
             const overlay = el('div', { class: 'modal-overlay' });
+            // The padding lives on an inner .modal-body, not inline on the
+            // card: an inline `padding` beats mobile.css's bottom-sheet
+            // safe-area inset, so the last row of these dialogs sat under the
+            // home indicator on a phone. (V12)
             const card = el('div', {
                 class: 'modal-card',
-                style: 'max-width:360px; text-align:center; padding:1.5rem;',
+                style: 'max-width:360px; text-align:center;',
             });
 
             const title = el('h2', { style: 'margin-bottom:0.5rem; font-size:var(--text-lg);' }, [text('Scan to Connect')]);
@@ -1560,7 +1564,7 @@ function _buildQRButton() {
                 style: 'margin-top:1rem; padding:0.4rem 1.5rem;',
             }, [text('Close')]);
 
-            card.append(title, qrContainer, hint, closeBtn);
+            card.append(el('div', { class: 'modal-body' }, [title, qrContainer, hint, closeBtn]));
             overlay.append(card);
             document.body.append(overlay);
 
@@ -1613,7 +1617,7 @@ function _openTokenOverlay(token, { title, note }) {
     const overlay = el('div', { class: 'modal-overlay' });
     // Wide enough for a 43-char urlsafe token at 16px mono. Narrower and the
     // value scrolls out of sight, which defeats the point of showing it.
-    const card = el('div', { class: 'modal-card', style: 'max-width:520px; padding:1.5rem;' });
+    const card = el('div', { class: 'modal-card', style: 'max-width:520px;' });
 
     const field = el('input', {
         type: 'text',
@@ -1646,7 +1650,7 @@ function _openTokenOverlay(token, { title, note }) {
         style: 'display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1rem;',
     }, [copyBtn, closeBtn]);
 
-    card.append(
+    card.append(el('div', { class: 'modal-body' }, [
         el('h2', { style: 'font-size:var(--text-lg); margin-bottom:0.75rem;' }, [text(title)]),
         el('p', {
             style: 'font-family:var(--mono); font-size:var(--text-sm); color:var(--text-dim);'
@@ -1654,7 +1658,7 @@ function _openTokenOverlay(token, { title, note }) {
         }, [text(note)]),
         field,
         row,
-    );
+    ]));
     overlay.append(card);
     document.body.append(overlay);
 
@@ -1709,7 +1713,7 @@ function _buildRegenerateButton() {
 
     btn.addEventListener('click', () => {
         const overlay = el('div', { class: 'modal-overlay' });
-        const card = el('div', { class: 'modal-card', style: 'max-width:380px; padding:1.5rem;' });
+        const card = el('div', { class: 'modal-card', style: 'max-width:380px;' });
         const title = el('h2', {
             style: 'font-size:var(--text-lg); margin-bottom:0.75rem;',
         }, [text('Regenerate access token?')]);
@@ -1732,7 +1736,8 @@ function _buildRegenerateButton() {
         }, [text('Regenerate')]);
 
         btnRow.append(cancelBtn, confirmBtn);
-        card.append(title, body, btnRow);
+        const cardBody = el('div', { class: 'modal-body' }, [title, body, btnRow]);
+        card.append(cardBody);
         overlay.append(card);
         document.body.append(overlay);
 
@@ -1765,10 +1770,13 @@ function _buildRegenerateButton() {
                 if (!errEl) {
                     errEl = el('div', {
                         class: 'revoke-error',
+                        role: 'alert',
                         style: 'color:var(--error, #e55); font-family:var(--mono);'
                              + 'font-size:var(--text-xs); margin-top:0.75rem;',
                     });
-                    card.append(errEl);
+                    // Inside the body, so it inherits the same padding as
+                    // everything else in the dialog.
+                    cardBody.append(errEl);
                 }
                 errEl.textContent = `Error: ${e.message}`;
             }

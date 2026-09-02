@@ -23,6 +23,11 @@
     flex-direction: column;
     animation: slideUp 0.2s ease;
     box-shadow: var(--shadow-lg);
+    /* max-height without an overflow rule silently CLIPS: a card whose content
+       does not happen to live inside a scrolling .modal-body (the QR, token
+       and regenerate dialogs) simply lost whatever ran past 80vh, buttons
+       included. (V12) */
+    overflow: auto;
 }
 
 .modal-header {
