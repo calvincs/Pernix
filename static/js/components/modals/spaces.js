@@ -54,14 +54,23 @@ export function openSpaceModal(space) {
     });
 
     const colorRow = el('div', { class: 'space-color-row' });
-    const customColor = el('input', { type: 'color', class: 'space-color-custom', value: color, title: 'Custom color' });
+    const customColor = el('input', {
+        type: 'color',
+        class: 'space-color-custom',
+        value: color,
+        title: 'Custom color',
+        'aria-label': 'Custom color',
+    });
     const paintSwatches = () => {
         clear(colorRow);
         for (const c of SWATCHES) {
             colorRow.appendChild(el('button', {
                 class: 'space-swatch' + (c === color ? ' selected' : ''),
+                type: 'button',
                 style: `background:${c}`,
                 title: c,
+                'aria-label': `Color ${c}`,
+                'aria-pressed': String(c === color),
                 onClick: (e) => { e.preventDefault(); color = c; customColor.value = c; paintSwatches(); },
             }));
         }
@@ -153,7 +162,12 @@ export function openSpaceModal(space) {
     const card = el('div', { class: 'modal-card space-modal-card' + (isEdit ? '' : ' compact') }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text(isEdit ? `Space — ${space.label}` : 'New space')]),
-            el('button', { class: 'modal-close', onClick: close }, [text('×')]),
+            el('button', {
+                class: 'modal-close',
+                title: 'Close',
+                'aria-label': 'Close',
+                onClick: close,
+            }, [text('×')]),
         ]),
         body,
         el('div', { class: 'modal-footer' }, [
@@ -340,7 +354,12 @@ export function openSpaceDeleteDialog(space) {
     const card = el('div', { class: 'modal-card space-delete-card' }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text(`Delete space “${space.label}”?`)]),
-            el('button', { class: 'modal-close', onClick: close }, [text('×')]),
+            el('button', {
+                class: 'modal-close',
+                title: 'Cancel',
+                'aria-label': 'Cancel',
+                onClick: close,
+            }, [text('×')]),
         ]),
         el('div', { class: 'modal-body' }, [
             el('p', {}, [text(

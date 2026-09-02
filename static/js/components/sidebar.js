@@ -209,6 +209,7 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
         el('button', {
             class: 'space-btn spaces-new-btn',
             title: 'New space',
+            'aria-label': 'New space',
             onClick: (e) => { e.stopPropagation(); openSpaceModal(null); },
         }, [text('+')]),
     ]));
@@ -337,6 +338,7 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
         el('button', {
             class: 'space-btn space-add-btn',
             title: `New session in ${space.label}`,
+            'aria-label': `New session in ${space.label}`,
             onClick: async (e) => {
                 e.stopPropagation();
                 try {
@@ -350,6 +352,7 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
         el('button', {
             class: 'space-btn space-gear-btn',
             title: `Space settings — ${space.label}`,
+            'aria-label': `Space settings — ${space.label}`,
             onClick: (e) => {
                 e.stopPropagation();
                 openSpaceModal(space);
@@ -358,6 +361,7 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
         el('button', {
             class: 'space-btn space-del-btn',
             title: `Delete space ${space.label}`,
+            'aria-label': `Delete space ${space.label}`,
             onClick: (e) => {
                 e.stopPropagation();
                 openSpaceDeleteDialog(space);
@@ -483,88 +487,6 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
     const typeKey = _getTypeKey(session);
     const typeDef = SESSION_TYPES[typeKey];
 
-    const meta = [];
-
-    // Time
-    if (session.updated_at) {
-        meta.push(el('span', { class: 'session-time' }, [text(_relativeTime(session.updated_at))]));
-    }
-
-    // Session ID badge — hover shows full id, click copies to clipboard
-    meta.push(el('button', {
-        class: 'session-id-badge',
-        title: session.id,
-        onClick: (e) => {
-            e.stopPropagation();
-            _copySessionId(e.currentTarget, session.id);
-        },
-    }, [text('#')]));
-
-    // Pin toggle — pinned sessions live in their own group at the top.
-    if (!isWorker) {
-        meta.push(el('button', {
-            class: `session-pin${session.pinned ? ' pinned' : ''}`,
-            title: session.pinned ? 'Unpin session' : 'Pin session to top',
-            onClick: async (e) => {
-                e.stopPropagation();
-                const next = !session.pinned;
-                try {
-                    await patch(`/api/sessions/${session.id}`, { pinned: next });
-                    session.pinned = next ? 1 : 0;
-                    _lastJson = '';  // force re-render with new grouping
-                    window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
-                } catch { /* leave as-is on failure */ }
-            },
-        }, [text('⚲')]));
-
-        // Rename — swaps the title for an inline editor.
-        meta.push(el('button', {
-            class: 'session-rename',
-            title: 'Rename session',
-            onClick: (e) => {
-                e.stopPropagation();
-                _startRename(session);
-            },
-        }, [text('✎')]));
-
-        // Move to space — dropdown of spaces (+ "No space"). Only rendered
-        // when at least one space exists; membership changes never bump
-        // recency (set_session_meta contract).
-        if (_spaces.length) {
-            meta.push(el('button', {
-                class: 'session-space-move',
-                title: session.space_id ? 'Move to another space' : 'Move to space',
-                onClick: (e) => {
-                    e.stopPropagation();
-                    _openMoveMenu(session, e.currentTarget);
-                },
-            }, [text('▣')]));
-        }
-    }
-
-    // Delete button \u2014 two-tap confirm: the \u00d7 is always visible on touch
-    // devices and sits next to the copy-id button, so a single stray tap
-    // must not permanently destroy a conversation (there is no undo).
-    meta.push(el('button', {
-        class: 'session-delete',
-        title: 'Delete session',
-        onClick: (e) => {
-            e.stopPropagation();
-            const btn = e.currentTarget;
-            if (!btn.classList.contains('confirm')) {
-                btn.classList.add('confirm');
-                btn.textContent = 'sure?';
-                btn._disarmTimer = setTimeout(() => {
-                    btn.classList.remove('confirm');
-                    btn.textContent = '\u00d7';
-                }, 3000);
-                return;
-            }
-            clearTimeout(btn._disarmTimer);
-            if (_onDelete) _onDelete(session.id);
-        },
-    }, [text('\u00d7')]));
-
     // Build title text
     let titleText = session.title || 'New session';
     // Strip thinking model garbage from title display
@@ -587,6 +509,96 @@ function _renderSessionItem(session, container, activeSid, isWorker, depth = 1) 
             ? titleText
             : `Dream ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
     }
+
+    const meta = [];
+
+    // Time
+    if (session.updated_at) {
+        meta.push(el('span', { class: 'session-time' }, [text(_relativeTime(session.updated_at))]));
+    }
+
+    // Session ID badge — hover shows full id, click copies to clipboard
+    meta.push(el('button', {
+        class: 'session-id-badge',
+        title: session.id,
+        'aria-label': `Copy session id ${session.id}`,
+        onClick: (e) => {
+            e.stopPropagation();
+            _copySessionId(e.currentTarget, session.id);
+        },
+    }, [text('#')]));
+
+    // Pin toggle — pinned sessions live in their own group at the top.
+    if (!isWorker) {
+        meta.push(el('button', {
+            class: `session-pin${session.pinned ? ' pinned' : ''}`,
+            title: session.pinned ? 'Unpin session' : 'Pin session to top',
+            'aria-label': session.pinned ? `Unpin ${titleText}` : `Pin ${titleText} to top`,
+            'aria-pressed': String(!!session.pinned),
+            onClick: async (e) => {
+                e.stopPropagation();
+                const next = !session.pinned;
+                try {
+                    await patch(`/api/sessions/${session.id}`, { pinned: next });
+                    session.pinned = next ? 1 : 0;
+                    _lastJson = '';  // force re-render with new grouping
+                    window.dispatchEvent(new CustomEvent('pernix:sidebar-refresh'));
+                } catch { /* leave as-is on failure */ }
+            },
+        }, [text('⚲')]));
+
+        // Rename — swaps the title for an inline editor.
+        meta.push(el('button', {
+            class: 'session-rename',
+            title: 'Rename session',
+            'aria-label': `Rename ${titleText}`,
+            onClick: (e) => {
+                e.stopPropagation();
+                _startRename(session);
+            },
+        }, [text('✎')]));
+
+        // Move to space — dropdown of spaces (+ "No space"). Only rendered
+        // when at least one space exists; membership changes never bump
+        // recency (set_session_meta contract).
+        if (_spaces.length) {
+            meta.push(el('button', {
+                class: 'session-space-move',
+                title: session.space_id ? 'Move to another space' : 'Move to space',
+                'aria-label': session.space_id
+                    ? `Move ${titleText} to another space`
+                    : `Move ${titleText} to a space`,
+                onClick: (e) => {
+                    e.stopPropagation();
+                    _openMoveMenu(session, e.currentTarget);
+                },
+            }, [text('▣')]));
+        }
+    }
+
+    // Delete button \u2014 two-tap confirm: the \u00d7 is always visible on touch
+    // devices and sits next to the copy-id button, so a single stray tap
+    // must not permanently destroy a conversation (there is no undo).
+    meta.push(el('button', {
+        class: 'session-delete',
+        title: 'Delete session',
+        'aria-label': `Delete ${titleText}`,
+        onClick: (e) => {
+            e.stopPropagation();
+            const btn = e.currentTarget;
+            if (!btn.classList.contains('confirm')) {
+                btn.classList.add('confirm');
+                btn.textContent = 'sure?';
+                btn._disarmTimer = setTimeout(() => {
+                    btn.classList.remove('confirm');
+                    btn.textContent = '\u00d7';
+                }, 3000);
+                return;
+            }
+            clearTimeout(btn._disarmTimer);
+            if (_onDelete) _onDelete(session.id);
+        },
+    }, [text('\u00d7')]));
 
     const classes = ['session-item'];
     if (session.id === activeSid) classes.push('active');
