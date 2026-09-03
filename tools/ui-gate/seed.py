@@ -208,4 +208,365 @@ for i in range(30):
     cid = db.create_session(title=f"Canary: file-create #{i + 1}", session_type="canary")
     _age(cid, 2.0 + i * 0.5)
 
-print(json.dumps({"main": main, "long": long_sid, "parent": parent_sid, "scale": scale_id}))
+
+# --- the State timeline's own session -----------------------------------------
+# session_state_log is the one table the seed above never touched, so the
+# timeline modal had nothing to draw: the Graph tab said "No state transitions
+# yet" and the Lane tab would have had no turns. The colour check used to write
+# its own arc straight into sqlite from check.py; it lives here now, beside
+# every other shape the gate seeds, and it is a whole story rather than one
+# turn's transitions — three turns with the messages `db.get_turns` parses back
+# into a scout report, a reflect chain, an eval gate, a compaction and a notice
+# (tests/test_session_turns.py is the reference for those shapes).
+#
+# Its OWN session, deliberately. The lane needs matching messages, and the
+# desktop baseline pins the height of the main session's transcript — adding
+# eleven rows to it would move .messages-inner and fail a check that is not
+# about the timeline at all.
+#
+# Created last so it sorts after everything else. Space groups render above the
+# time buckets, so the first .session-item in the DOM stays where the baseline
+# recorded it, inside the Pernix group.
+TIMELINE_TITLE = "State timeline — three turns"
+TL_BASE = int(time.time() * 1000) - 45 * 60 * 1000  # 45 minutes ago
+SEC = 1000
+
+
+def _tl_iso(ms):
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat()
+
+
+def tl_msg(sid, role, ms, content="", **kw):
+    """Insert a message on the fixture's clock. add_message stamps `now`, and
+    /turns joins messages to turns by time window — so an un-restamped row
+    lands in whichever turn happens to be open at seed time, i.e. none."""
+    mid = db.add_message(sid, role, content, **kw)
+    with connect_sessions() as conn:
+        conn.execute("UPDATE messages SET created_at = ? WHERE id = ?", (_tl_iso(ms), mid))
+    return mid
+
+
+def tl_usage(sid, ms, prompt, completion, model="qwen3-27b", cost=None):
+    db.add_token_usage(
+        sid,
+        model=model,
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=prompt + completion,
+        cost_estimate=cost,
+    )
+    # token_usage.created_at is SQLite's CURRENT_TIMESTAMP shape (naive UTC,
+    # second resolution), not the ISO stamp messages carry.
+    stamp = datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT MAX(id) AS m FROM token_usage WHERE session_id = ?", (sid,)).fetchone()
+        conn.execute("UPDATE token_usage SET created_at = ? WHERE id = ?", (stamp, row["m"]))
+
+
+def tl_round(sid, ms, calls, results):
+    """One agent round: the assistant row carrying the calls (its timestamp is
+    where the lane draws the ticks), then a tool row per result.
+    calls = [(id, name, args)]; results = [(id, content, latency_ms, error)]."""
+    tl_msg(
+        sid,
+        "assistant",
+        ms,
+        "",
+        tool_calls=json.dumps([{"id": cid, "name": name, "arguments": json.dumps(args)} for cid, name, args in calls]),
+        latency_ms=900,
+        metadata=json.dumps({"model": "qwen3-27b", "latency_ms": 900}),
+    )
+    for cid, content, latency, err in results:
+        tl_msg(
+            sid,
+            "tool",
+            ms + 1,
+            content,
+            tool_call_id=cid,
+            latency_ms=latency,
+            metadata=json.dumps({"was_error": err, "latency_ms": latency}),
+        )
+
+
+def tl_log(sid, turn, frm, to, reason, ms, **kw):
+    db.add_state_log(sid, turn_id=turn, from_state=frm, to_state=to, reason=reason, timestamp_ms=ms, **kw)
+
+
+tl_sid = db.create_session(title=TIMELINE_TITLE)
+
+# ---- turn 1: one reflect retry. Phases 10/30/5/10/40/5 of 100s.
+t1 = TL_BASE
+tl_msg(tl_sid, "user", t1 - 2, "Reconcile the ledger and tell me what drifted.")
+tl_log(tl_sid, 1, "idle_ready", "scouting", "prompt-arrived", t1, elapsed_ms=71_000)
+tl_msg(
+    tl_sid,
+    "scout",
+    t1 + 2 * SEC,
+    json.dumps(
+        {
+            "type": "scout.done",
+            "approach": "Read the ledger, then reconcile it account by account.",
+            "tools": ["file_read", "bash"],
+            "tool_rationale": "One read for the ledger, one shell call for the reconcile script.",
+            "memory": "The tolerance was raised to 0.005 in March.",
+            "model": "qwen3-27b",
+            "scout_model": "qwen3-8b",
+            "latency_ms": 1900,
+            "from_cache": False,
+            "from_fallback": False,
+            "reused_prior": False,
+        }
+    ),
+)
+tl_log(tl_sid, 1, "scouting", "processing", "scout-done", t1 + 10 * SEC, elapsed_ms=10 * SEC)
+tl_round(
+    tl_sid,
+    t1 + 18 * SEC,
+    [("tl_a", "file_read", {"path": "ledger.json"}), ("tl_b", "bash", {"command": "python reconcile.py"})],
+    [("tl_a", '{"accounts": 412}', 38, False), ("tl_b", "Error: reconcile.py: no such file", 12, True)],
+)
+tl_usage(tl_sid, t1 + 20 * SEC, 1800, 240)
+tl_log(
+    tl_sid,
+    1,
+    "processing",
+    "finalizing",
+    "loop-complete",
+    t1 + 40 * SEC,
+    elapsed_ms=30 * SEC,
+    termination_reason="complete",
+)
+tl_msg(
+    tl_sid,
+    "reflect",
+    t1 + 42 * SEC,
+    json.dumps(
+        {
+            "verdict": "retry",
+            "reasoning": "The reconcile script was never found and the failure was not investigated.",
+            "diagnostic": "Gave up on the missing file instead of looking for it.",
+            "what_worked": "The ledger read.",
+        }
+    ),
+)
+tl_log(
+    tl_sid,
+    1,
+    "finalizing",
+    "scouting",
+    "reflect-retry",
+    t1 + 45 * SEC,
+    elapsed_ms=5 * SEC,
+    retry_index=1,
+    reflect_count=1,
+)
+tl_msg(
+    tl_sid,
+    "scout",
+    t1 + 47 * SEC,
+    json.dumps({"type": "scout.done", "approach": "Find the script first.", "tools": ["bash"], "reused_prior": True}),
+)
+tl_log(
+    tl_sid,
+    1,
+    "scouting",
+    "processing",
+    "scout-done",
+    t1 + 55 * SEC,
+    elapsed_ms=10 * SEC,
+    retry_index=1,
+    reflect_count=1,
+)
+tl_round(
+    tl_sid,
+    t1 + 60 * SEC,
+    [("tl_c", "bash", {"command": "find . -name reconcile.py"})],
+    [("tl_c", "./tools/reconcile.py", 24, False)],
+)
+tl_usage(tl_sid, t1 + 62 * SEC, 2400, 310)
+tl_log(
+    tl_sid,
+    1,
+    "processing",
+    "finalizing",
+    "loop-complete",
+    t1 + 95 * SEC,
+    elapsed_ms=40 * SEC,
+    retry_index=1,
+    reflect_count=1,
+    termination_reason="complete",
+)
+tl_msg(
+    tl_sid,
+    "reflect",
+    t1 + 97 * SEC,
+    json.dumps({"verdict": "pass", "reasoning": "Found it and ran it.", "diagnostic": "", "what_worked": "The retry."}),
+)
+tl_log(
+    tl_sid,
+    1,
+    "finalizing",
+    "idle_ready",
+    "turn-complete",
+    t1 + 100 * SEC,
+    elapsed_ms=5 * SEC,
+    retry_index=1,
+    reflect_count=1,
+)
+
+# ---- turn 2: a compaction round trip. Phases 10/25/20/40/5 of 120s.
+t2 = TL_BASE + 300 * SEC
+tl_msg(tl_sid, "user", t2 - 2, "Now do the same for the archive.")
+tl_log(tl_sid, 2, "idle_ready", "scouting", "prompt-arrived", t2, elapsed_ms=200 * SEC)
+tl_msg(
+    tl_sid,
+    "scout",
+    t2 + 2 * SEC,
+    json.dumps(
+        {
+            "type": "scout.done",
+            "approach": "Walk the archive year by year rather than loading it whole.",
+            "tools": ["bash"],
+            "tool_rationale": "The archive is too large to read inline.",
+            "model": "qwen3-27b",
+            "scout_model": "qwen3-8b",
+            "latency_ms": 2400,
+            "from_cache": True,
+        }
+    ),
+)
+tl_log(tl_sid, 2, "scouting", "processing", "scout-done", t2 + 12 * SEC, elapsed_ms=12 * SEC)
+tl_round(
+    tl_sid,
+    t2 + 20 * SEC,
+    [("tl_d", "bash", {"command": "ls archive/"})],
+    [("tl_d", "2019\n2020\n2021\n2022\n2023", 31, False)],
+)
+tl_usage(tl_sid, t2 + 22 * SEC, 5200, 420, cost=0.0182)
+tl_log(
+    tl_sid, 2, "processing", "compacting", "compact-proactive", t2 + 42 * SEC, elapsed_ms=30 * SEC, compaction_count=1
+)
+tl_msg(
+    tl_sid,
+    "compaction",
+    t2 + 50 * SEC,
+    '```json\n{"goal": "Reconcile the archive", "progress": ["listed five years"],'
+    ' "next": "reconcile 2019"}\n```\n\nA prose recap the model adds after the fence.',
+    metadata=json.dumps({"compacted_up_to": 42, "original_count": 190}),
+)
+tl_log(tl_sid, 2, "compacting", "processing", "compact-done", t2 + 66 * SEC, elapsed_ms=24 * SEC, compaction_count=1)
+tl_usage(tl_sid, t2 + 70 * SEC, 900, 60, cost=0.0031)
+tl_log(
+    tl_sid,
+    2,
+    "processing",
+    "finalizing",
+    "loop-complete",
+    t2 + 114 * SEC,
+    elapsed_ms=48 * SEC,
+    compaction_count=1,
+    termination_reason="complete",
+)
+tl_msg(tl_sid, "notice", t2 + 116 * SEC, "💭 [contradiction] 2021 reconciles twice with different totals")
+tl_log(tl_sid, 2, "finalizing", "idle_ready", "turn-complete", t2 + 120 * SEC, elapsed_ms=6 * SEC, compaction_count=1)
+
+# ---- turn 3, the newest: a plain turn with a verdict and a gate.
+# Phases 10/70/20 of 80s. Its story is what the gate's Story checks read.
+t3 = TL_BASE + 600 * SEC
+tl_msg(tl_sid, "user", t3 - 2, "Run the tests before you call it done.")
+tl_log(tl_sid, 3, "idle_ready", "scouting", "prompt-arrived", t3, elapsed_ms=180 * SEC)
+tl_msg(
+    tl_sid,
+    "scout",
+    t3 + 2 * SEC,
+    json.dumps(
+        {
+            "type": "scout.done",
+            "approach": "Run the suite, read the one failure, fix it and re-run.",
+            "tools": ["bash", "file_read", "file_write"],
+            "tool_rationale": "The gate is a shell command; the fix is a two-line edit.",
+            "memory": "",
+            "model": "qwen3-27b",
+            "scout_model": "qwen3-8b",
+            "latency_ms": 2100,
+            "from_cache": False,
+            "from_fallback": True,
+            "reused_prior": False,
+        }
+    ),
+)
+tl_log(tl_sid, 3, "scouting", "processing", "scout-done", t3 + 8 * SEC, elapsed_ms=8 * SEC)
+tl_round(
+    tl_sid,
+    t3 + 16 * SEC,
+    [("tl_e", "bash", {"command": "pytest -q"}), ("tl_f", "file_read", {"path": "tools/reconcile.py"})],
+    [("tl_e", "1 failed, 212 passed", 4100, True), ("tl_f", "def reconcile(...):", 18, False)],
+)
+tl_round(
+    tl_sid,
+    t3 + 40 * SEC,
+    [("tl_g", "file_write", {"path": "tools/reconcile.py", "content": "…"})],
+    [("tl_g", "written", 22, False)],
+)
+tl_usage(tl_sid, t3 + 44 * SEC, 620, 180)
+tl_log(
+    tl_sid,
+    3,
+    "processing",
+    "finalizing",
+    "loop-complete",
+    t3 + 64 * SEC,
+    elapsed_ms=56 * SEC,
+    reflect_count=1,
+    eval_count=1,
+    termination_reason="complete",
+)
+tl_msg(
+    tl_sid,
+    "eval",
+    t3 + 66 * SEC,
+    json.dumps(
+        {
+            "kind": "gate",
+            "attempt": 1,
+            "gates": [
+                {
+                    "kind": "gate",
+                    "name": "tests",
+                    "command": "pytest -q tools/",
+                    "passed": True,
+                    "exit_code": 0,
+                    "output_tail": "213 passed in 4.10s",
+                    "reused": False,
+                    "error": "",
+                }
+            ],
+        }
+    ),
+)
+tl_msg(
+    tl_sid,
+    "reflect",
+    t3 + 70 * SEC,
+    json.dumps(
+        {
+            "verdict": "pass",
+            "reasoning": "The suite is green and the fix is the one the failure asked for.",
+            "diagnostic": "",
+            "what_worked": "Reading the failure before editing.",
+        }
+    ),
+)
+tl_log(
+    tl_sid,
+    3,
+    "finalizing",
+    "idle_ready",
+    "turn-complete",
+    t3 + 80 * SEC,
+    elapsed_ms=16 * SEC,
+    reflect_count=1,
+    eval_count=1,
+)
+
+print(json.dumps({"main": main, "long": long_sid, "parent": parent_sid, "scale": scale_id, "timeline": tl_sid}))
