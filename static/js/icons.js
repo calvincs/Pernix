@@ -151,6 +151,14 @@ const PATHS = {
     // Snooze / idle-time maintenance.
     moon: ['M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1z'],
 
+    // Something the machine noticed at idle and is offering, not doing: the
+    // space suggestions in the sidebar and their review sheet. Two stars, so
+    // it reads as "an idea" rather than as the four-point "new" plus sign.
+    sparkle: [
+        'M11 3.5l1.7 4.3 4.3 1.7-4.3 1.7L11 15.5 9.3 11.2 5 9.5l4.3-1.7z',
+        'M18 14.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z',
+    ],
+
     // --- the three the composer already had, moved here verbatim ---
     attach: [
         'M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19'

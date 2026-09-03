@@ -238,6 +238,15 @@ body[data-compact] .worker-strip-summary:focus-visible > svg {
 .modal-card.settings-card {
     max-width: 100%;
 }
+/* Same trap, same fix: layout.css sizes the suggestion sheet with
+   `.modal-card.sugg-sheet-card`, two classes to the bottom-sheet rule's one,
+   so without this it would float as a 680px card over the transcript instead
+   of rising from the bottom edge like every other sheet. */
+.modal-card.sugg-sheet-card {
+    width: 100%;
+    max-width: 100%;
+    max-height: 92dvh;
+}
 
 .modal-footer {
     padding-bottom: max(var(--sp-3), var(--safe-bottom));

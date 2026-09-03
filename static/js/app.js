@@ -16,6 +16,7 @@ import {
     setSessionPaging, setSessionPagingBusy, openSessionSheet,
     sessionsQuery,
     setListMeta,
+    refreshSuggestions,
 } from './components/sidebar.js';
 import { initFilePanel, toggleFilePanel, openFilePanel, EXPLORER_GROUPS } from './components/file-panel.js';
 import { openRlmViewer, closeRlmViewer } from './components/rlm-viewer.js';
@@ -529,7 +530,15 @@ function _knownSession(sid) {
 
 async function loadSessions() {
     try {
-        const data = await get(`/api/sessions?limit=${_sessionWindow}${sessionsQuery()}`);
+        // In parallel, not in series: the suggestion rows are painted by the
+        // same renderSidebar call below, and refreshSuggestions never throws,
+        // so a poll costs one round trip rather than two. Every path that
+        // refreshes the list — the ten-second poll, `pernix:sessions-changed`
+        // after an accept or a decline — comes through here.
+        const [data] = await Promise.all([
+            get(`/api/sessions?limit=${_sessionWindow}${sessionsQuery()}`),
+            refreshSuggestions(),
+        ]);
         state.sessions = data.items || [];
         state.spaces = data.spaces || [];
         // A restored session is back in the list, so the stale detail copy
