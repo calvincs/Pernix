@@ -199,6 +199,83 @@ if space_id:
     except Exception as e:  # noqa: BLE001
         print("scale space skipped:", e, file=sys.stderr)
 
+# --- two pending space suggestions -------------------------------------------
+# Seeded straight through the db helper the scan itself calls, so the gate
+# exercises the client against exactly the rows a real scan writes without
+# needing a model. Both kinds are here because they render differently, open
+# different sheets and end in different buttons.
+#
+# The members are LOOSE sessions (no space_id): a suggestion is an offer to
+# file chats that are not filed. Their created_at is spread over five calendar
+# days — the real gate needs 3+ distinct days before it will offer a group at
+# all, and a fixture that could not have survived that gate would be lying.
+# updated_at is left at `now`, so they sit in Today and the accepted space
+# renders them all without a folded bucket.
+FACT_TITLES = [
+    "Check the claim about the 2019 outage against the incident log",
+    "Is the 40% figure in the vendor deck actually from their own data?",
+    "Verify the three citations in the draft post",
+    "Which of these two conflicting changelogs is the real one?",
+    "Trace the quote back to whoever first wrote it",
+]
+MOVE_TITLES = [
+    "Why did the box restart itself on Tuesday?",
+    "Trim the image so the build stops timing out",
+    "Read the compose file and tell me what binds to 8000",
+]
+
+
+def _age_created(sid, days):
+    when = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with connect_sessions() as conn:
+        conn.execute("UPDATE sessions SET created_at = ? WHERE id = ?", (when, sid))
+
+
+fact_ids = []
+for i, t in enumerate(FACT_TITLES):
+    sid = db.create_session(title=t)
+    db.add_message(sid, "user", f"about {t}")
+    _age_created(sid, 4 - i)
+    fact_ids.append(sid)
+
+move_ids = []
+for i, t in enumerate(MOVE_TITLES):
+    sid = db.create_session(title=t)
+    db.add_message(sid, "user", f"about {t}")
+    _age_created(sid, 5 - i)
+    move_ids.append(sid)
+
+if space_id:
+    try:
+        # The move first, so the newest row — the one the list endpoint puts
+        # at the top — is the "Fact checking" one the accept path drives.
+        db.add_space_suggestion(
+            "existing",
+            "pernix-deploys",
+            "Pernix deploys",
+            "#c9a227",
+            "Three loose chats are about the same box the Pernix space already tracks.",
+            move_ids,
+            existing_space_id=space_id,
+        )
+        time.sleep(0.01)
+        db.add_space_suggestion(
+            "new",
+            "fact-checking",
+            "Fact checking",
+            "#4db6ac",
+            "Five chats over five days all check a claim against a source.",
+            fact_ids,
+            directives={
+                "RULES": {
+                    "addition": "## Fact checking\n- Separate the claim, the evidence and the verdict.",
+                    "rationale": "Fact checks need a fixed shape.",
+                }
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        print("space suggestions skipped:", e, file=sys.stderr)
+
 # --- canary runs, enough of them to crowd a page -----------------------------
 # The composition problem in miniature: on the owner's box 277 of the 500
 # newest sessions are self-checks. Every one of these is OLDER than the rows
