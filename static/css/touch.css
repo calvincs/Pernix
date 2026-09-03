@@ -1404,3 +1404,30 @@ body[data-touch] .ce-fallback {
     white-space: normal;
     overflow-wrap: anywhere;
 }
+
+/* ------------------------------------------------------------------
+   Space suggestions (v35)
+
+   The sidebar row is a tap target like every other row in the drawer,
+   so it takes the same 44px floor. The directive box is the plain
+   textarea the sheet uses in place of Monaco: below 16px iOS zooms the
+   page on focus and never zooms back out, and .ce-fallback's rule
+   above does not reach it — this editor is not a code editor.
+   ------------------------------------------------------------------ */
+.space-suggest-row {
+    min-height: 44px;
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--text-sm);
+}
+.sugg-member { min-height: 44px; }
+.sugg-member-box,
+.sugg-dir-default-box {
+    width: 20px;
+    height: 20px;
+}
+.sugg-dir-skip { min-height: 44px; }
+.sugg-dir-text {
+    min-height: max(200px, 40dvh);
+    font-size: 16px;
+    -webkit-text-size-adjust: 100%;
+}

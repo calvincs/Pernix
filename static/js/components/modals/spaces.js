@@ -384,3 +384,325 @@ export async function openSpaceDeleteDialog(space) {
         notify('error', `Could not delete “${space.label}”: ${e.message || e}`);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The review sheet for a suggested space (v35)
+//
+// The sidebar row is an offer; this is where it becomes a decision. Nothing
+// the scan proposed is real until a button here is pressed, so every part of
+// the proposal is editable first: the name, the colour, which chats come
+// along, and the text of any directive file the draft would write.
+//
+// It is a modal card like the space editor rather than a panel, and the
+// directive box is a plain <textarea>: the sheet has to work under a thumb on
+// a phone, and Monaco does not.
+// ---------------------------------------------------------------------------
+
+let _openSuggestionSheet = null;   // the live instance, so re-entry closes it
+
+function _memberDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/** "5 sessions" / "1 session" — the count reads in three places in this sheet. */
+function _sessions(n) {
+    return `${n} session${n === 1 ? '' : 's'}`;
+}
+
+export async function openSuggestionSheet(id) {
+    if (_openSuggestionSheet) {
+        try { _openSuggestionSheet(); } catch { /* already gone */ }
+        _openSuggestionSheet = null;
+    }
+    let row;
+    try {
+        row = await get(`/api/space-suggestions/${id}`);
+    } catch (e) {
+        // The row can be gone by the time it is clicked — another tab
+        // accepted it, or it expired between two polls.
+        notify('error', `Could not open that suggestion — ${e.message || e}`);
+        _notifyChanged();
+        return;
+    }
+
+    const isExisting = row.kind === 'existing';
+    const target = row.existing_space || null;
+    const members = row.sessions || [];
+    const drafts = row.directives || {};
+    const draftNames = Object.keys(drafts);
+    let color = row.color || SWATCHES[0];
+
+    // --- name and colour: a move has neither, the target space owns both.
+    const labelInput = el('input', {
+        class: 'space-label-input',
+        type: 'text',
+        placeholder: 'Space name',
+        value: row.label || '',
+        maxlength: '120',
+    });
+    const labelError = el('div', { class: 'sugg-label-error', role: 'alert' });
+    labelError.hidden = true;
+    const colorRow = el('div', { class: 'space-color-row' });
+    const paintSwatches = () => {
+        clear(colorRow);
+        for (const c of SWATCHES) {
+            colorRow.appendChild(el('button', {
+                class: 'space-swatch' + (c === color ? ' selected' : ''),
+                type: 'button',
+                style: `background:${c}`,
+                title: c,
+                'aria-label': `Color ${c}`,
+                'aria-pressed': String(c === color),
+                onClick: (e) => { e.preventDefault(); color = c; paintSwatches(); },
+            }));
+        }
+    };
+    paintSwatches();
+
+    // --- the members. Every box starts ticked: the proposal IS the group,
+    // and unticking is how a chat is left out of it.
+    const boxes = new Map();   // session id -> its checkbox
+    const memberList = el('div', { class: 'sugg-members' }, members.map(s => {
+        const box = el('input', { type: 'checkbox', class: 'sugg-member-box' });
+        box.checked = true;
+        boxes.set(s.id, box);
+        return el('label', { class: 'sugg-member' }, [
+            box,
+            el('span', { class: 'sugg-member-text' }, [
+                el('span', { class: 'sugg-member-title' }, [text(s.title || 'Untitled')]),
+                s.subtitle ? el('span', { class: 'sugg-member-sub' }, [text(s.subtitle)]) : null,
+            ]),
+            el('span', { class: 'sugg-member-date' }, [text(_memberDate(s.updated_at))]),
+        ]);
+    }));
+
+    const chosen = () => [...boxes.entries()].filter(([, b]) => b.checked).map(([sid]) => sid);
+
+    const body = el('div', { class: 'modal-body sugg-sheet-body' }, [
+        el('p', { class: 'sugg-why' }, [text(row.why || '')]),
+    ]);
+    if (!isExisting) {
+        body.appendChild(el('div', { class: 'space-form-grid sugg-name-grid' }, [
+            el('div', { class: 'space-form-name' }, [
+                el('label', { class: 'space-field-label' }, [text('Name')]),
+                labelInput,
+                labelError,
+            ]),
+            el('div', { class: 'space-form-color' }, [
+                el('label', { class: 'space-field-label' }, [text('Color')]),
+                colorRow,
+            ]),
+        ]));
+    }
+    body.appendChild(el('div', { class: 'sugg-section' }, [
+        el('label', { class: 'space-field-label' }, [
+            text(isExisting
+                ? 'Chats to move — untick to leave one where it is'
+                : 'Chats to file here — untick to leave one where it is'),
+        ]),
+        memberList,
+    ]));
+    if (draftNames.length) body.appendChild(_buildDraftSection(drafts, draftNames));
+
+    const status = el('span', { class: 'save-status status-muted', role: 'status' });
+    const setStatus = (msg, kind = 'muted') => {
+        status.textContent = msg;
+        status.className = `save-status status-${kind}`;
+    };
+
+    let closeOverlay = null;
+    const close = () => {
+        if (closeOverlay) { closeOverlay(); closeOverlay = null; }
+        overlay.remove();
+        if (_openSuggestionSheet === close) _openSuggestionSheet = null;
+    };
+    _openSuggestionSheet = close;
+
+    // --- the three buttons. Only the primary writes anything.
+    const primary = el('button', { class: 'btn btn--primary sugg-accept' }, [text('Create space')]);
+    const paintPrimary = () => {
+        const n = chosen().length;
+        primary.textContent = isExisting ? `Move ${_sessions(n)}` : 'Create space';
+        primary.disabled = n === 0;
+    };
+    for (const box of boxes.values()) box.addEventListener('change', paintPrimary);
+    paintPrimary();
+
+    const accept = async () => {
+        const sessionIds = chosen();
+        if (!sessionIds.length) { setStatus('Tick at least one chat', 'error'); return; }
+        const payload = { session_ids: sessionIds };
+        if (!isExisting) {
+            const label = labelInput.value.trim();
+            if (!label) { setStatus('Name is required', 'error'); return; }
+            payload.label = label;
+            payload.color = color;
+        }
+        const files = _draftPayload(drafts, draftNames);
+        if (Object.keys(files).length) payload.directives = files;
+
+        primary.disabled = true;
+        labelError.hidden = true;
+        setStatus(isExisting ? 'Moving…' : 'Creating…');
+        try {
+            const r = await post(`/api/space-suggestions/${row.id}/accept`, payload);
+            notify('success', isExisting
+                ? `Moved ${_sessions(r.moved || 0)} into ${target ? target.label : 'the space'}`
+                : `Created “${(r.space && r.space.label) || payload.label}” — ${_sessions(r.moved || 0)} filed`);
+            _notifyChanged();
+            close();
+        } catch (e) {
+            primary.disabled = false;
+            // A slug collision is the one failure the user can fix in place:
+            // the name is theirs to change, so say so beside the input and
+            // leave everything else they have chosen alone.
+            if (e.status === 409 && !isExisting) {
+                labelError.textContent = String(e.detail || e.message || 'That name is taken');
+                labelError.hidden = false;
+                labelInput.focus();
+                labelInput.select();
+                setStatus('Pick another name', 'error');
+                return;
+            }
+            setStatus(`Could not ${isExisting ? 'move' : 'create'}: ${e.message || e}`, 'error');
+        }
+    };
+    primary.addEventListener('click', accept);
+
+    const reject = async () => {
+        try {
+            await post(`/api/space-suggestions/${row.id}/reject`, {});
+            notify('info', `Won’t suggest “${row.label}” again — clear it under `
+                + 'Settings → Autonomy & idle work to re-arm it.');
+            _notifyChanged();
+            close();
+        } catch (e) {
+            setStatus(`Could not decline: ${e.message || e}`, 'error');
+        }
+    };
+
+    const card = el('div', { class: 'modal-card sugg-sheet-card' }, [
+        el('div', { class: 'modal-header' }, [
+            el('h2', {}, [
+                icon('sparkle', { size: 14 }),
+                text(isExisting
+                    ? `Move these into ${target ? target.label : 'the space'}?`
+                    : 'Make this a space?'),
+            ]),
+            el('button', {
+                class: 'modal-close',
+                title: 'Close',
+                'aria-label': 'Close',
+                onClick: close,
+            }, [icon('x', { size: 14 })]),
+        ]),
+        body,
+        el('div', { class: 'modal-footer sugg-sheet-footer' }, [
+            status,
+            // No confirm dialog in front of it: declining moves nothing and
+            // deletes nothing, and the settings pane can put it back.
+            el('button', { class: 'btn btn--danger sugg-reject', onClick: reject }, [text('Don’t suggest this')]),
+            el('button', { class: 'btn btn--secondary', onClick: close }, [text('Not now')]),
+            primary,
+        ]),
+    ]);
+
+    const overlay = el('div', { class: 'modal-overlay sugg-sheet-overlay' }, [card]);
+    _armBackdropClose(overlay, close);
+    document.body.appendChild(overlay);
+    closeOverlay = openOverlay(card, {
+        onClose: close,
+        initialFocus: isExisting ? primary : labelInput,
+    });
+    announce(isExisting
+        ? `Move ${_sessions(members.length)} into ${target ? target.label : 'a space'}? ${row.why || ''}`
+        : `Make ${row.label} a space? ${row.why || ''}`);
+}
+
+// A tab per DRAFTED file only — the sheet is not a directive editor, it is a
+// review of what the scan wrote. Each pane shows why the addition exists, the
+// current default read-only, and the file as it would be written: the default
+// with the addition appended. An addition is never a replacement.
+function _buildDraftSection(drafts, names) {
+    const section = el('div', { class: 'sugg-section sugg-drafts' });
+    section.appendChild(el('label', { class: 'space-field-label' }, [
+        text('Standing instructions this space would get'),
+    ]));
+
+    const tabBar = el('div', { class: 'tab-bar sugg-dir-tabbar' });
+    const pane = el('div', { class: 'sugg-dir-pane' });
+    section.appendChild(tabBar);
+    section.appendChild(pane);
+
+    let active = names[0];
+    const render = () => {
+        clear(tabBar);
+        for (const name of names) {
+            tabBar.appendChild(el('button', {
+                class: 'tab-btn' + (name === active ? ' active' : ''),
+                type: 'button',
+                title: `${name}.md — a drafted addition`,
+                onClick: () => { active = name; render(); },
+            }, [icon('sparkle', { size: 10 }), text(name)]));
+        }
+        clear(pane);
+        const entry = drafts[active] || {};
+        // Built once per file and kept: a user who edits RULES, looks at
+        // SOUL and comes back must find their edit, not the draft again.
+        if (!entry._node) entry._node = _buildDraftPane(active, entry);
+        pane.appendChild(entry._node);
+    };
+    render();
+    return section;
+}
+
+function _buildDraftPane(name, entry) {
+    const def = entry.default || '';
+    const addition = (entry.addition || '').trim();
+    const area = el('textarea', {
+        class: 'sugg-dir-text',
+        spellcheck: 'false',
+        'aria-label': `${name}.md as it would be written`,
+    });
+    area.value = addition ? `${def.replace(/\s+$/, '')}\n\n${addition}\n` : def;
+    entry._area = area;
+
+    const useDefault = el('input', { type: 'checkbox', class: 'sugg-dir-default-box' });
+    entry._useDefault = useDefault;
+    useDefault.addEventListener('change', () => {
+        area.disabled = useDefault.checked;
+        area.classList.toggle('disabled', useDefault.checked);
+    });
+
+    return el('div', { class: 'sugg-dir-body' }, [
+        el('div', { class: 'sugg-dir-why' }, [text(entry.rationale || '')]),
+        el('details', { class: 'sugg-dir-fold' }, [
+            el('summary', {}, [text(`The current ${name}.md default`)]),
+            el('pre', { class: 'sugg-dir-default' }, [text(def || '(the default file is empty)')]),
+        ]),
+        area,
+        el('label', { class: 'sugg-dir-skip' }, [
+            useDefault,
+            text(' Use the default instead'),
+        ]),
+        el('div', { class: 'sugg-dir-hint' }, [
+            text(`Written to the new space as ${name}.md. Ticking the box writes no file at all, `
+                + 'so the space keeps falling back to the default.'),
+        ]),
+    ]);
+}
+
+/** {RULES: "<full file content>"} for every draft the user kept. */
+function _draftPayload(drafts, names) {
+    const out = {};
+    for (const name of names) {
+        const entry = drafts[name] || {};
+        if (!entry._area || (entry._useDefault && entry._useDefault.checked)) continue;
+        const content = entry._area.value;
+        if (content.trim()) out[name] = content;
+    }
+    return out;
+}

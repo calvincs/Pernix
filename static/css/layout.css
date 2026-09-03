@@ -403,6 +403,54 @@ body.sidebar-resizing {
 }
 .sessions-header .sessions-header-label { flex: 1; }
 
+/* A pending space suggestion (v35) — an offer, filed with the spaces it is
+   about rather than with the sessions below it, and never a .session-item.
+   The accent tint and the coloured left edge are the whole point: a row that
+   looked like a session row would read as a chat the user does not remember
+   starting, which is the opposite of what it is. */
+.space-suggest-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    margin: 3px var(--sp-2) 5px;
+    padding: 4px var(--sp-2);
+    border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+    border-left: 2px solid var(--space-color, var(--accent));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    user-select: none;
+    transition: background var(--transition), color var(--transition);
+}
+.space-suggest-row:hover {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--text);
+}
+.space-suggest-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+.space-suggest-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--accent);
+}
+.space-suggest-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.space-suggest-meta {
+    flex-shrink: 0;
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+}
+
 .space-group-header .space-label {
     color: var(--text-dim);
     text-transform: none;
@@ -4573,3 +4621,173 @@ mark.ts-mark.current {
 }
 .jobs-indicator.has-error,
 .jobs-indicator.has-error:hover { color: var(--error); }
+
+/* ----------------------------------------------------------------------
+   The suggestion review sheet (v35)
+   ----------------------------------------------------------------------
+   Reuses the shared .modal-* chrome, plus the space modal's name/colour
+   pieces. The card selectors are compound (.modal-card.sugg-sheet-card)
+   because modals.css loads AFTER this file, so a bare .sugg-sheet-card
+   would lose every property .modal-card also sets.
+
+   It is a normal centred card on every tier — no resize, no Monaco. The
+   directive box is a plain textarea for the same reason the workspace
+   editor is one on touch: a thumb cannot drive a code editor. */
+.modal-card.sugg-sheet-card {
+    width: min(680px, 94vw);
+    max-width: 94vw;
+    max-height: 88vh;
+}
+.sugg-sheet-card .modal-header h2 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.sugg-sheet-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-4);
+    overflow-y: auto;
+}
+.sugg-why {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--text-sm);
+    line-height: 1.55;
+    text-wrap: pretty;
+}
+.sugg-section { display: flex; flex-direction: column; }
+.sugg-label-error {
+    margin-top: 4px;
+    color: var(--error);
+    font-size: var(--text-xxs);
+    line-height: 1.4;
+}
+
+/* The member checklist. Bounded height because a suggestion can hold ten
+   chats and the footer's buttons must never leave the card. */
+.sugg-members {
+    display: flex;
+    flex-direction: column;
+    max-height: 34vh;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+}
+.sugg-member {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: 6px var(--sp-3);
+    border-bottom: 1px solid var(--line-faint);
+    cursor: pointer;
+    min-height: 34px;
+}
+.sugg-member:last-child { border-bottom: none; }
+.sugg-member:hover { background: var(--bg-hover); }
+.sugg-member-box { flex-shrink: 0; }
+.sugg-member-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.sugg-member-title {
+    color: var(--text);
+    font-size: var(--text-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sugg-member-sub {
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sugg-member-date {
+    flex-shrink: 0;
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+}
+
+/* One tab per drafted file. The default is folded away by default — it is
+   context for the addition, not the thing being decided. */
+.sugg-dir-tabbar { padding: 0; }
+.sugg-dir-pane {
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    padding: var(--sp-3);
+}
+.sugg-dir-why {
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    margin-bottom: var(--sp-2);
+    text-wrap: pretty;
+}
+.sugg-dir-fold { margin-bottom: var(--sp-2); }
+.sugg-dir-fold > summary {
+    cursor: pointer;
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+    padding: 4px 0;
+}
+.sugg-dir-fold > summary:hover { color: var(--text-dim); }
+.sugg-dir-default {
+    max-height: 220px;
+    overflow: auto;
+    margin: var(--sp-2) 0 0;
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-faint);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+.sugg-dir-text {
+    width: 100%;
+    min-height: 200px;
+    resize: vertical;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    padding: var(--sp-3);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+    outline: none;
+    white-space: pre-wrap;
+}
+.sugg-dir-text:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+.sugg-dir-text.disabled { opacity: 0.45; }
+.sugg-dir-skip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: var(--sp-2);
+    min-height: 28px;
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    cursor: pointer;
+}
+.sugg-dir-hint {
+    margin-top: 4px;
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+    line-height: 1.5;
+    text-wrap: pretty;
+}
+
+/* Three buttons and a status line will not sit on one 360px row. */
+.sugg-sheet-footer { flex-wrap: wrap; }

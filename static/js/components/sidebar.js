@@ -4,7 +4,7 @@ import { icon } from '../icons.js';
 import { isTouch, isCompact } from '../mobile.js';
 import { announce } from '../a11y.js';
 import { get, post, patch } from '../api.js';
-import { openSpaceModal, openSpaceDeleteDialog } from './modals/spaces.js';
+import { openSpaceModal, openSpaceDeleteDialog, openSuggestionSheet } from './modals/spaces.js';
 import { confirmDanger } from './modals/confirm.js';
 import { actionSheet } from './modals/sheet.js';
 import { notify } from '../feedback.js';
@@ -75,6 +75,11 @@ let _onDelete = null;
 let _tooltipTimer = null;
 let _lastJson = '';
 let _spaces = [];  // last /api/sessions payload's spaces list
+
+// Pending space suggestions (v35). Their own fetch, not part of the sessions
+// payload: they are a different table, they are usually empty, and a list
+// that is one poll stale would offer a space the user has already accepted.
+let _suggestions = [];
 
 // Live activity text per session (cleared on idle)
 const _activity = new Map(); // sessionId → string
@@ -180,6 +185,25 @@ export function setListMeta(data) {
 export function setTypeCounts(counts) {
     _typeCounts = counts && typeof counts === 'object' ? counts : null;
     _updateLegendCounts();
+}
+
+/**
+ * Re-read the pending space suggestions. app.js calls it alongside every
+ * session-list load, which is also every `pernix:sessions-changed` — so an
+ * accepted or declined suggestion loses its row on the same tick the sheet
+ * closes rather than on some later poll.
+ *
+ * It never throws and never logs: the endpoint is 404 on an instance that has
+ * not migrated yet, and a sidebar that cannot draw a suggestion should draw
+ * no suggestion, not an error every ten seconds.
+ */
+export async function refreshSuggestions() {
+    try {
+        const data = await get('/api/space-suggestions?status=pending');
+        _suggestions = Array.isArray(data?.suggestions) ? data.suggestions : [];
+    } catch {
+        _suggestions = [];
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -563,9 +587,16 @@ function _focusMark(list) {
     const active = document.activeElement;
     if (!active || !list.contains(active) || !active.closest) return null;
     const control = FOCUS_CONTROLS.find(c => active.classList.contains(c)) || null;
-    const host = active.closest('[data-sid]') || active.closest('[data-group]');
+    // data-suggestion-id before data-group: every suggestion row carries
+    // data-group="suggested", so keying on the group would hand focus back to
+    // the first of them whichever one the user was actually on.
+    const host = active.closest('[data-sid]')
+        || active.closest('[data-suggestion-id]')
+        || active.closest('[data-group]');
     if (!host) return null;
-    const attr = host.hasAttribute('data-sid') ? 'data-sid' : 'data-group';
+    const attr = host.hasAttribute('data-sid') ? 'data-sid'
+        : host.hasAttribute('data-suggestion-id') ? 'data-suggestion-id'
+            : 'data-group';
     return { key: `[${attr}="${host.getAttribute(attr)}"]`, control };
 }
 
@@ -605,7 +636,11 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
     // session list would otherwise never repaint.
     const json = JSON.stringify(sessions) + '|' + JSON.stringify(spaces) + '|' + activeSid
         + '|' + (_showArchived() ? _archived.map(s => s.id).join(',') : 'off')
-        + '|' + _archivedLoading + _archivedFailed;
+        + '|' + _archivedLoading + _archivedFailed
+        // Declining a suggestion changes no session and no space, so without
+        // the suggestions in the fingerprint the row it just removed would
+        // stay on screen until something else happened to move.
+        + '|' + _suggestions.map(s => s.id).join(',');
     if (json === _lastJson) return;
     _lastJson = json;
 
@@ -670,6 +705,12 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
             _renderSpaceGroup(space, bySpace[space.id] || [], list, activeSid, childrenByParent, sidebarState);
         }
     }
+    // Pending suggestions belong with the spaces, not with the sessions: they
+    // are an offer to make one or to fill one. So they sit under the last
+    // space group — or at the very top on an instance that has no spaces yet,
+    // which is exactly the instance a first suggestion is aimed at — and
+    // above the Sessions heading that starts the ordinary list.
+    _renderSuggestionRows(list);
     // Sessions pointing at a deleted/unknown space fall back to the buckets.
     const knownSpaceIds = new Set(_spaces.map(sp => sp.id));
     const ungrouped = topLevel.filter(s => !s.space_id || !knownSpaceIds.has(s.space_id));
@@ -910,6 +951,50 @@ async function _archiveIdleInSpace(space) {
         if (_showArchived()) _loadArchived();
     } catch (err) {
         notify('error', `Could not archive idle sessions in “${space.label}” — ${_reason(err)}.`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pending space suggestions (v35)
+// ---------------------------------------------------------------------------
+// Deliberately NOT a .session-item. A suggestion is not a session: clicking it
+// opens a decision, not a conversation, and every rule the list has about
+// rows — the active border, the type dot, the pin, the overflow sheet, the
+// desktop baseline's "first .session-item" — is about sessions. It gets the
+// row affordances it does need (hover, focus ring, Enter/Space) and an
+// accent-tinted ground so it reads as belonging to the spaces above it.
+
+function _renderSuggestionRows(list) {
+    for (const s of _suggestions) {
+        const n = (s.session_ids || []).length;
+        const targetLabel = s.existing_space ? s.existing_space.label : 'a space';
+        const isExisting = s.kind === 'existing';
+        // The count moves into the sentence for a move ("3 chats belong in
+        // Pernix") — repeating it on the right would say the same number
+        // twice, so that end says what the row is FOR instead.
+        const label = isExisting ? `${n} chats belong in ${targetLabel}` : `Suggested · ${s.label}`;
+        const meta = isExisting ? 'review' : `${n} session${n === 1 ? '' : 's'}`;
+        const aria = isExisting
+            ? `Suggestion: move ${n} chats into the space ${targetLabel}. Review it.`
+            : `Suggestion: make a space called ${s.label} from ${n} sessions. Review it.`;
+        const open = () => openSuggestionSheet(s.id);
+        const row = el('div', {
+            class: 'space-suggest-row',
+            'data-group': 'suggested',
+            'data-suggestion-id': s.id,
+            role: 'button',
+            tabindex: '0',
+            'aria-label': aria,
+            title: s.why || aria,
+            style: `--space-color: ${s.color || 'var(--accent)'}`,
+        }, [
+            el('span', { class: 'space-suggest-icon', 'aria-hidden': 'true' }, [icon('sparkle', { size: 12 })]),
+            el('span', { class: 'space-suggest-text' }, [text(label)]),
+            el('span', { class: 'space-suggest-meta' }, [text(meta)]),
+        ]);
+        row.addEventListener('click', open);
+        _activateOnKey(row, open);
+        list.appendChild(row);
     }
 }
 
