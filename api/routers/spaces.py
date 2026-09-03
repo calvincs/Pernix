@@ -266,3 +266,267 @@ async def delete_directive(space_id: str, name: str):
     path = spaces_lib.space_agent_dir(space) / fname
     await _asyncio.to_thread(path.unlink, True)
     return {"space_id": space_id, "file": name.upper(), "override": False}
+
+
+# ---------------------------------------------------------------------------
+# Space suggestions (v35) — proposals the user accepts or declines
+# ---------------------------------------------------------------------------
+#
+# A distinct prefix, deliberately: /api/spaces/{space_id} is already declared
+# above and would swallow /api/spaces/suggestions as a space id.
+
+_SUGGESTION_STATUSES = ("pending", "accepted", "rejected", "expired")
+# pending is refused for the bulk clear: it is the one status the user has
+# not decided yet, and "clear all" is a tidying gesture, not a decision.
+_CLEARABLE_STATUSES = ("accepted", "rejected", "expired")
+
+
+def _resolve_members(row: dict) -> list[dict]:
+    """The suggestion's sessions as the review sheet needs them.
+
+    Ids whose session was deleted since the scan drop out — a suggestion is
+    a proposal, not a reference the sessions table has to keep whole.
+    """
+    out = []
+    for sid in row.get("session_ids") or []:
+        session = db.get_session(sid)
+        if not session:
+            continue
+        out.append(
+            {
+                "id": session["id"],
+                "title": session.get("title") or "",
+                "subtitle": session.get("subtitle") or "",
+                "updated_at": session.get("updated_at"),
+                "space_id": session.get("space_id"),
+            }
+        )
+    return out
+
+
+def _enrich_suggestion(row: dict) -> dict:
+    """Sync: callers dispatch it via to_thread (it reads the DB)."""
+    out = dict(row)
+    out["sessions"] = _resolve_members(row)
+    space = db.get_space(row["existing_space_id"]) if row.get("existing_space_id") else None
+    out["existing_space"] = {"id": space["id"], "label": space["label"], "color": space["color"]} if space else None
+    return out
+
+
+def _validate_directive_payload(raw) -> dict[str, str]:
+    """Body directives are FULL file contents the user may have edited in
+    the sheet, so they get put_directive's validation — they land in exactly
+    the same files. Returns {filename: content}."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HTTPException(400, detail="directives must be an object of {name: content}")
+    out: dict[str, str] = {}
+    for name, content in raw.items():
+        key = str(name).upper()
+        fname = _DIRECTIVE_FILES.get(key)
+        if not fname:
+            raise HTTPException(400, detail=f"unknown directive {name!r}; use one of {sorted(_DIRECTIVE_FILES)}")
+        if not isinstance(content, str) or not content.strip():
+            raise HTTPException(400, detail=f"{key} content must be a non-empty string")
+        if len(content.encode("utf-8")) > _MAX_DIRECTIVE_BYTES:
+            raise HTTPException(400, detail=f"{key} content exceeds {_MAX_DIRECTIVE_BYTES} bytes")
+        out[fname] = content
+    return out
+
+
+def _write_directives(space: dict, files: dict[str, str]) -> None:
+    agent_dir = spaces_lib.space_agent_dir(space)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    for fname, content in files.items():
+        (agent_dir / fname).write_text(content, encoding="utf-8")
+
+
+def _apply_live_space(session_id: str, space_id: str) -> None:
+    """Mirror a move onto the in-memory session, exactly as the session
+    PATCH does — the same helper, not a copy of it. Without this a loaded
+    session keeps its old workspace home and kernel until a restart."""
+    try:
+        from sessions.manager import _apply_space_fields, get_manager
+
+        live = get_manager().get(session_id)
+        if live is None:
+            return
+        live.space_id = None
+        live.workspace_home = None
+        _apply_space_fields(live, space_id)
+    except Exception as e:
+        logger.warning("live space update failed for %s: %s", session_id[:12], e)
+
+
+@router.get("/api/space-suggestions")
+async def list_space_suggestions(status: str = "pending"):
+    status = (status or "pending").strip().lower()
+    if status != "all" and status not in _SUGGESTION_STATUSES:
+        raise HTTPException(400, detail=f"status must be one of {sorted((*_SUGGESTION_STATUSES, 'all'))}")
+
+    def _load():
+        rows = db.list_space_suggestions(None if status == "all" else status)
+        return [_enrich_suggestion(r) for r in rows]
+
+    return {"suggestions": await _asyncio.to_thread(_load), "status": status}
+
+
+@router.post("/api/space-suggestions/scan")
+async def scan_space_suggestions(body: dict = {}):
+    """Run a scan now. dry_run (the default) proposes without storing, so
+    the settings pane can show what a scan would find before committing."""
+    from core import space_suggest
+
+    if space_suggest.scan_running():
+        raise HTTPException(409, detail="a space-suggestion scan is already running")
+    dry_run = body.get("dry_run", True)
+    return await space_suggest.scan(force=True, dry_run=bool(dry_run))
+
+
+@router.get("/api/space-suggestions/{suggestion_id}")
+async def get_space_suggestion(suggestion_id: str):
+    def _load():
+        row = db.get_space_suggestion(suggestion_id)
+        if not row:
+            return None
+        out = _enrich_suggestion(row)
+        drafts = out.get("directives") or {}
+        enriched: dict = {}
+        for name, entry in drafts.items():
+            key = str(name).upper()
+            fname = _DIRECTIVE_FILES.get(key)
+            if not fname or not isinstance(entry, dict):
+                continue
+            # The sheet shows the default read-only next to the draft: the
+            # addition is APPENDED to it, so the reader has to see both.
+            enriched[key] = {**entry, "default": _default_directive_content(fname)}
+        out["directives"] = enriched or None
+        return out
+
+    row = await _asyncio.to_thread(_load)
+    if row is None:
+        raise HTTPException(404, detail=f"Suggestion {suggestion_id} not found")
+    return row
+
+
+@router.post("/api/space-suggestions/{suggestion_id}/accept")
+async def accept_space_suggestion(suggestion_id: str, body: dict = {}):
+    """The click that makes a suggestion real: create the space (or reuse
+    the named one), write whichever directive files the sheet sent, and move
+    the chosen members. A move that fails is reported, not rolled back —
+    half a filing is better than an error that undoes the space too."""
+    row = await _asyncio.to_thread(db.get_space_suggestion, suggestion_id)
+    if not row:
+        raise HTTPException(404, detail=f"Suggestion {suggestion_id} not found")
+    if row["status"] != "pending":
+        raise HTTPException(409, detail=f"suggestion {suggestion_id} is {row['status']}, not pending")
+
+    directives = _validate_directive_payload(body.get("directives"))
+
+    if row["kind"] == "existing":
+        target = row.get("existing_space_id") or ""
+        space = await _asyncio.to_thread(db.get_space, target)
+        if not space:
+            # The space was deleted between the scan and the click. The
+            # suggestion can never be accepted now, so retire it.
+            await _asyncio.to_thread(db.set_space_suggestion_status, suggestion_id, "expired")
+            raise HTTPException(409, detail=f"Space {target} no longer exists; the suggestion has been expired")
+    else:
+        label = str(body.get("label") or row["label"]).strip()[:120]
+        if not label:
+            raise HTTPException(400, detail="label is required")
+        color = _validate_color(str(body.get("color") or row["color"]))
+        try:
+            slug = spaces_lib.slugify(label)
+        except ValueError as e:
+            raise HTTPException(400, detail=str(e)) from e
+        if await _asyncio.to_thread(db.get_space_by_slug, slug):
+            # The detail names the slug so the sheet can ask for another name.
+            raise HTTPException(409, detail=f"a space with slug '{slug}' already exists")
+        space = await _asyncio.to_thread(db.create_space, label, color, slug)
+        spaces_lib.invalidate_space_cache()
+        target = space["id"]
+        try:
+            spaces_lib.space_workspace_home(space).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning("workspace home creation failed for space %s: %s", slug, e)
+        # Only a brand-new space gets directive files written: an existing
+        # space may already carry hand-edited overrides, and an accept must
+        # never silently replace them.
+        if directives:
+            await _asyncio.to_thread(_write_directives, space, directives)
+
+    members = list(row.get("session_ids") or [])
+    requested = body.get("session_ids")
+    # Ids outside the suggestion's members are ignored — the body chooses
+    # which members to move, it does not extend the proposal.
+    wanted = [str(s) for s in requested if str(s) in members] if isinstance(requested, list) else members
+
+    moved = 0
+    failed: list[str] = []
+    for sid in wanted:
+        if not await _asyncio.to_thread(db.get_session, sid):
+            failed.append(sid)
+            continue
+        try:
+            # set_session_meta, not update_session: filing a chat must not
+            # change its recency, or every accepted suggestion would drag
+            # its members to the top of Today.
+            await _asyncio.to_thread(db.set_session_meta, sid, space_id=target)
+        except Exception as e:
+            logger.warning("suggestion %s: moving session %s failed: %s", suggestion_id[:8], sid[:12], e)
+            failed.append(sid)
+            continue
+        moved += 1
+        _apply_live_space(sid, target)
+
+    await _asyncio.to_thread(db.set_space_suggestion_status, suggestion_id, "accepted", space_id=target)
+    spaces_lib.invalidate_space_cache()
+    logger.info(
+        "Accepted space suggestion %s (%s) into space %s: %d moved, %d failed",
+        suggestion_id,
+        row["topic_key"],
+        target,
+        moved,
+        len(failed),
+    )
+    return {
+        "status": "accepted",
+        "space": await _asyncio.to_thread(db.get_space, target),
+        "moved": moved,
+        "failed": failed,
+    }
+
+
+@router.post("/api/space-suggestions/{suggestion_id}/reject")
+async def reject_space_suggestion(suggestion_id: str):
+    """Decline. The row stays: the topic is what suppresses the same
+    grouping next month, and the user can clear it to re-arm it."""
+    row = await _asyncio.to_thread(db.get_space_suggestion, suggestion_id)
+    if not row:
+        raise HTTPException(404, detail=f"Suggestion {suggestion_id} not found")
+    if row["status"] != "pending":
+        raise HTTPException(409, detail=f"suggestion {suggestion_id} is {row['status']}, not pending")
+    await _asyncio.to_thread(db.set_space_suggestion_status, suggestion_id, "rejected")
+    return {"status": "rejected"}
+
+
+@router.delete("/api/space-suggestions")
+async def clear_space_suggestions(status: str = "rejected"):
+    status = (status or "").strip().lower()
+    if status == "pending":
+        raise HTTPException(400, detail="pending suggestions are cleared by accepting or declining them")
+    if status not in _CLEARABLE_STATUSES:
+        raise HTTPException(400, detail=f"status must be one of {sorted(_CLEARABLE_STATUSES)}")
+    cleared = await _asyncio.to_thread(db.delete_space_suggestions_by_status, status)
+    return {"cleared": cleared, "status": status}
+
+
+@router.delete("/api/space-suggestions/{suggestion_id}")
+async def delete_space_suggestion(suggestion_id: str):
+    """Forget one row whatever its status. Clearing a declined topic re-arms
+    it: the scan may propose that grouping again."""
+    if not await _asyncio.to_thread(db.delete_space_suggestion, suggestion_id):
+        raise HTTPException(404, detail=f"Suggestion {suggestion_id} not found")
+    return {"cleared": 1}
