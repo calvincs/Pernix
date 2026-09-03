@@ -718,7 +718,11 @@ def list_space_suggest_candidates(cutoff_iso: str) -> list[dict]:
     Archived sessions are INCLUDED on purpose — a habit that has already
     rolled off the sidebar is exactly the kind worth giving a home. Sessions
     still called 'New session' with no subtitle are skipped: nothing has
-    named them yet, so the model would be clustering on nothing.
+    named them yet, so the model would be clustering on nothing. One user
+    message is enough otherwise: the quick one-shot asks ("summarize this
+    video") are exactly the shape a recurring habit takes, and the box's
+    loose YouTube sessions were mostly that shape when a two-message floor
+    hid them from the scan.
     """
     with connect_sessions() as conn:
         rows = conn.execute(
@@ -745,7 +749,7 @@ def list_space_suggest_candidates(cutoff_iso: str) -> list[dict]:
                  AND (SELECT COUNT(*) FROM messages m
                        WHERE m.session_id = s.id
                          AND m.role = 'user'
-                         AND m.content != '') >= 2
+                         AND m.content != '') >= 1
                ORDER BY s.created_at""",
             (cutoff_iso,),
         ).fetchall()
