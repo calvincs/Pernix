@@ -159,26 +159,44 @@ def repair_unanswered_tool_calls(messages: list[dict]) -> list[dict]:
     turn until compaction happens to fold the row; with an Ollama fallback
     configured the turn silently ran there instead. The stub is inserted
     after any results the round did record, so ordering stays intact.
+
+    Answers are matched by tool_call_id across the whole list, never by
+    adjacency. A tool that writes a message row of its own while it runs
+    (view_image stamps a synthetic user note) lands that row BETWEEN the
+    assistant row and its own tool result, because the note is persisted
+    first and gets the lower id. An adjacency scan read the note as the end
+    of the round, called a tool that HAD returned unanswered, and stubbed
+    it — and the stub carried no `id`, which the compiler dereferenced
+    (KeyError: 'id') before the round's first LLM call. The row order lives
+    in the DB, so every later turn in that session died the same way.
     """
+    answered = {m.get("tool_call_id") for m in messages if m.get("role") == "tool" and m.get("tool_call_id")}
     out: list[dict] = []
     i, n = 0, len(messages)
     while i < n:
         msg = messages[i]
         out.append(msg)
+        i += 1
         if msg.get("role") != "assistant" or not msg.get("tool_calls"):
-            i += 1
             continue
-        ids = _tool_call_ids(msg)
-        answered: set[str] = set()
-        j = i + 1
-        while j < n and messages[j].get("role") == "tool":
-            out.append(messages[j])
-            answered.add(messages[j].get("tool_call_id", ""))
-            j += 1
-        for tcid in ids:
-            if tcid not in answered:
-                out.append({"role": "tool", "tool_call_id": tcid, "content": ABORTED_CALL_STUB})
-        i = j
+        missing = [tcid for tcid in _tool_call_ids(msg) if tcid not in answered]
+        if not missing:
+            continue
+        # Keep whatever results this round did record ahead of the stubs.
+        while i < n and messages[i].get("role") == "tool":
+            out.append(messages[i])
+            i += 1
+        for tcid in missing:
+            # Carry the assistant's id: a stub has no row of its own, and
+            # the compiler stamps `_db_id` from this key for trim notices.
+            out.append(
+                {
+                    "id": msg.get("id"),
+                    "role": "tool",
+                    "tool_call_id": tcid,
+                    "content": ABORTED_CALL_STUB,
+                }
+            )
     return out
 
 
