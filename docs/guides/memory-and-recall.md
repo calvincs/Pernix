@@ -49,6 +49,12 @@ The mechanics stay true to the store's design:
 - **Degrades gracefully.** If Ollama or the embedding model is unavailable, search falls back to lexical with a logged warning.
 - **The vectors are a rebuildable sidecar** in `data/memories/_index.db`, like the FTS index — the markdown files remain the only source of truth. Changing the embedding model marks all vectors stale; they re-embed in the background.
 
+### Federated reads with `deep_recall`
+
+`deep_recall` doesn't stop at the memory store. Alongside its LLM-synthesized answer (or the raw fallback if that call fails) it appends a short, provenance-tagged **"related in other stores"** section pulled from wherever else Pernix keeps knowledge: active adaptive rules, Telos claims (when [Telos](../internals/telos.md) is enabled), matching skills, and raw session transcripts the curated memory store never saw. Each source is best-effort — one that's off or broken just contributes nothing, never an error — so you get one read surface instead of having to know which of six stores might hold the answer.
+
+If the session belongs to a [space](spaces.md), both `recall` and `deep_recall` also resolve that space and surface its `pernix.space.<slug>.*` entries first — ordering only, never an inflated score, so the same search from outside the space still finds them on merit.
+
 ### Wiki-links
 
 Entry content can reference other memory with wiki-link syntax:
@@ -118,7 +124,7 @@ curl -X POST http://localhost:8090/api/memory/maintenance
 
 Three ways:
 
-1. **In the UI:** Explorer → **Knowledge → Memory**. The filter box narrows the file list by name, description or keyword; the search box above it searches *entries* across every file, ten at a time with a **Load more** at the bottom. Each result is labelled **strong / good / weak** rather than showing a raw relevance number — hover the label for the score and the scale it belongs to. Click a file to read it, or use the pencil to open it in the editor: memory files are plain markdown and save through the same conflict-aware path as the workspace (if the agent rewrote the file while you were typing, you are offered Reload or Overwrite rather than losing one of the two versions).
+1. **In the UI:** Explorer → **Knowledge → Memory**. The filter box narrows the file list by name, description or keyword; the search box above it searches *entries* across every file, ten at a time with a **Load more** at the bottom. Each result is labelled **strong / good / weak** rather than showing a raw relevance number — hover the label for the score and the scale it belongs to. Click a file to read it, or use the pencil to open it in the editor: memory files are plain markdown and save through the same conflict-aware path as the workspace (if the agent rewrote the file while you were typing, you are offered Reload or Overwrite rather than losing one of the two versions). That path is `PUT /api/memory/files/{name}` — send the `mtime` the matching `GET` handed you back as `base_mtime`, and a stale one gets a 409 with the current `mtime` instead of silently overwriting.
 
 2. **REST:**
 

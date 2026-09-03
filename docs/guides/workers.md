@@ -149,6 +149,6 @@ A single-shot lookup ("What's the weather in NYC?") doesn't need a worker. A res
 
 ## Inspecting a worker mid-flight
 
-The parent transcript grows one **Workers** card per fan-out, updated in place: a row per worker with its state and its pause/resume control. Above the composer, the worker strip carries a chip per live worker; below 900px that strip collapses to a single line counting how many are running, paused and finished, which taps through to the card. You can also click into a worker session in the sidebar — they nest under their parent with a `↳` — and watch it directly.
+The parent transcript grows one **Workers** card per fan-out, updated in place: a row per worker with its state and a control that reads pause/resume while it runs and **revive** once it has stopped. Above the composer, the worker strip carries a chip per live worker, plus up to 4 dimmed chips for recently-finished workers (kind and termination reason) with their own **↻ revive** button; below 900px that strip collapses to a single line counting how many are running, paused and finished, which taps through to the card. You can also click into a worker session in the sidebar — they nest under their parent with a `↳` — and watch it directly. Opening a worker's own chat shows a "← Parent: *title*" breadcrumb above the transcript so it's never unclear which session it belongs to.
 
 Programmatically: each worker has its own session ID. Subscribe to `GET /api/sessions/{worker_id}/events` to stream that worker's events independently.
