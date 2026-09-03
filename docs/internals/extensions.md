@@ -16,7 +16,7 @@ If a setting that gates an extension changes (e.g., turning `browser_enabled`, `
 
 ---
 
-## The twelve extensions
+## The thirteen extensions
 
 ### `web`
 
@@ -176,6 +176,19 @@ Operational-memory add-on (off by default): calibrated reliability tracking with
 
 Recursive long-input processing (off by default): analyzes inputs far beyond the context window in a sandboxed child REPL with brokered, budgeted sub-LLM calls. Same restart-gated registration pattern as candor; the `rlm_*` caps apply hot, and there are no RLM-specific model settings — the root uses Primary, sub-calls use Background. Run residue at `data/workspace/rlm/<run_id>/` (purged by snooze retention); audit rows in the `rlm_runs` table (migration v18). Architecture and security posture: [rlm.md](rlm.md).
 
+### `mcp`
+
+`core/extensions/mcp/__init__.py`
+
+| Tool | Safety | Gated on |
+|---|---|---|
+| `mcp_list_servers` | safe | `mcp_enabled` |
+| `mcp_add_server` | dangerous | `mcp_enabled` |
+| `mcp_remove_server` | dangerous | `mcp_enabled` |
+| `mcp_reload_server` | caution | `mcp_enabled` |
+
+Native MCP (Model Context Protocol) client (on by default, inert with zero servers configured): the manager (`core/extensions/mcp/manager.py`) connects each server listed in `data/mcp_servers.json` — stdio subprocess, Streamable HTTP, or legacy SSE — and registers its tools as `mcp_<server>_<tool>` with `source="mcp"`, so scout curation, the dangerous-tool gate, health metrics and post-mortems apply unchanged. `register()` is a hard off-switch at startup for the four management tools above (restart to add/remove them after flipping `mcp_enabled`), but every call path re-checks `mcp_enabled` live, so a hot toggle-off degrades to a clear error rather than a stale registration. `mcp_stdio_enabled` (default `true`) is the supply-chain valve — set it `false` for remote-only mode (Streamable HTTP / SSE servers only, no local subprocesses). Canary sessions are denied MCP tools outright. See [../mcp.md](../mcp.md).
+
 ### `telos`
 
 `core/extensions/telos/__init__.py`
@@ -184,10 +197,8 @@ Recursive long-input processing (off by default): analyzes inputs far beyond the
 |---|---|---|
 | `telos_status` | safe | `telos_enabled` |
 | `telos_ask` | safe | `telos_enabled` |
-| `telos_goal_add` | safe | `telos_enabled` |
-| `telos_goal_complete` | safe | `telos_enabled` |
 
-The teleological layer's agent surface (off by default): read the drive state, mint Questions, grow the goal DAG, complete completable goals (which runs the Hevel discharge audit). Deliberately absent: trace-ledger writes, root re-expression, alarm clearing — see [telos.md](telos.md). Same restart-gated registration pattern as candor; the engine itself (snooze Activity 16, daily cron, post-task hook) gates hot on `telos_enabled`.
+The teleological layer's agent surface (off by default): read the drive state, and mint Questions into the fast loop. `telos_goal_add` / `telos_goal_complete` are gone — the v3.1 goal-DAG carve removed the machinery that consumed goals (ordo/binding/hevel/reconcile/discharge) along with the tree, which only ever held its root node; see [telos.md](telos.md). Deliberately absent: trace-ledger writes, root re-expression, alarm clearing. Same restart-gated registration pattern as candor; the engine itself (snooze Activity 16, daily cron, post-task hook) gates hot on `telos_enabled`.
 
 ---
 

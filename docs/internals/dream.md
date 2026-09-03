@@ -44,6 +44,16 @@ One step per snooze cycle, one bounded background-model call:
    typed hypotheses, each required to cite evidence refs from the pack.
    Refs are pinned by content hash — if consolidation later moves or rewrites
    an entry, the hypothesis expires rather than guessing.
+
+   A second, targeted mint path bypasses the model call: Snooze watermarks
+   every enabled skill's `SKILL.md` + scripts with a sha256 hash
+   (`snooze_state['skill_content_hash:{name}']`), and when one changes — a
+   veto-window auto-apply, an in-session agent edit, or a human edit on disk
+   — memory entries that mention the skill are cited directly into
+   `memory_stale` hypotheses (hash-guarded refs, capped at 6 per skill,
+   deduped against what's already pending, one changed skill per cycle), so
+   claims like "the script lacks a CPU flag" get re-judged by the validator
+   below instead of contradicting the now-fixed skill for months.
 3. **Validate** (pending hypotheses, oldest first) — the check matches the kind:
    - *Tool patterns* are re-checked against Candor's numbers directly, no LLM.
    - *Contradictions / stale memory* get one LLM judge call over the
