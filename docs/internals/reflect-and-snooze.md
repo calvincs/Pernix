@@ -142,6 +142,7 @@ Each cycle walks an ordered ladder of activities. `core/snooze.py` owns the life
 | 1 | Catch-up distillation | Review sessions that ended without a turn digest (max 1 LLM call). |
 | 2 | User insight extraction | Pull recurring preferences and facts into `user.profile.md`. |
 | 2c | Skill requirements install | Hash-triggered: a skill whose `requirements.txt` changed gets its packages installed into the workspace venv (one skill per cycle, no LLM), then the registry rescans so the health flag clears. |
+| 2d | Space suggestions | When `space_suggest_enabled`: at most once per `space_suggest_scan_interval_hours` and only after ten new ordinary sessions, one background-model call groups the last `space_suggest_window_days` of chats by kind of work; clusters pass a code gate (size and spread floors, no conversational clusters, declined-topic suppression, two per scan, five pending) and land as pending `space_suggestions` rows plus a bell notification. Never creates a space itself (`core/space_suggest.py`). |
 | 3 | Memory deduplication | Every `snooze_dedup_interval_days` (default 7) per file: find near-duplicate entries; merge them. |
 | 3b | Cross-file consolidation | Every `snooze_consolidation_interval_hours` (default 24): cluster related entries into the same file using `snooze_consolidation_cluster_threshold` (default 0.55). |
 | 3c | Entry re-routing | Move entries filed in the wrong memory file. |
