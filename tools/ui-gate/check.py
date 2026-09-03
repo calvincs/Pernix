@@ -612,8 +612,9 @@ def desktop_layout(browser):
         # Desktop only — the same title-box measurement the m2 drawer check
         # above uses, aimed at a row inside a space instead of the drawer's
         # first row. The space's own +10px indent has to come out of the
-        # title's ceiling, not out of the space's identity, so this is pinned
-        # lower (180px) than the drawer's 140px rather than left unpinned.
+        # title's ceiling, not out of the space's identity, so it is pinned
+        # at 180px (a desktop sidebar is wider than a drawer, hence more than
+        # the drawer's 140px) rather than left unpinned.
         tw = pg.evaluate(
             "() => { const it=document.querySelector('.space-group-body .session-item:not(.worker)'); if(!it) return -1; const t=it.querySelector('.session-title-text, .session-title'); if(!t) return -2; let box=t; while(box && getComputedStyle(box).overflow==='visible' && box!==it) box=box.parentElement; return Math.round(box.getBoundingClientRect().width); }"
         )
