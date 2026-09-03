@@ -4791,3 +4791,64 @@ mark.ts-mark.current {
 
 /* Three buttons and a status line will not sit on one 360px row. */
 .sugg-sheet-footer { flex-wrap: wrap; }
+
+/* ----------------------------------------------------------------------
+   Settings → Autonomy & idle work → Space suggestions
+   ----------------------------------------------------------------------
+   The dry-run result and the declined list, hung off the declarative
+   section by _wireSpaceSuggestBlock. Here rather than in modals.css so the
+   whole feature's CSS reads in one place. */
+.sugg-note {
+    margin-top: var(--sp-2);
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+    text-wrap: pretty;
+}
+.sugg-prop {
+    margin-top: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--bg-surface);
+}
+.sugg-prop-head {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+}
+.sugg-prop-label { color: var(--text-bright); font-size: var(--text-sm); }
+.sugg-prop-kind,
+.sugg-prop-count,
+.sugg-prop-files { color: var(--text-faint); font-size: var(--text-xxs); }
+.sugg-prop-count { margin-left: auto; }
+.sugg-prop-why {
+    margin-top: 2px;
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    text-wrap: pretty;
+}
+.sugg-prop-files { margin-top: 2px; }
+
+.sugg-declined { margin-top: var(--sp-4); }
+.sugg-declined-title {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0 0 var(--sp-1);
+}
+.sugg-declined-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    padding: var(--sp-2) 0;
+    border-bottom: 1px solid var(--line-faint);
+}
+.sugg-declined-label { flex: 1; min-width: 0; color: var(--text); font-size: var(--text-sm); }
+.sugg-declined-meta { color: var(--text-faint); font-size: var(--text-xxs); }
+.sugg-declined-all { margin-top: var(--sp-2); }
