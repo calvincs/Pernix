@@ -126,11 +126,15 @@ def test_candidates_carry_the_fields_the_prompt_line_needs():
 def test_candidates_include_archived_and_exclude_the_unnameable():
     kept = _mk(title="Verify a stat", days_ago=1)
     archived = _mk(title="Old verifying", days_ago=20, archived=True)
+    # One question is still a data point: the quick "summarize this video"
+    # asks are exactly the shape a habit takes, so a single user message
+    # qualifies as long as the session got a title.
+    one_liner = _mk(title="One-liner", days_ago=1, user_msgs=1)
     _mk(title="New session", subtitle="", days_ago=1)  # never got a title
-    _mk(title="One-liner", days_ago=1, user_msgs=1)  # a single question
+    _mk(title="Empty", days_ago=1, user_msgs=0)  # nothing was ever asked
     _mk(title="Too old", days_ago=90)
     ids = {r["id"] for r in ss.collect_candidates(30)}
-    assert ids == {kept, archived}
+    assert ids == {kept, archived, one_liner}
 
 
 def test_candidate_task_type_is_the_scout_majority():
@@ -330,6 +334,19 @@ def test_rule_not_chatter_drops_conversational_majorities_and_stoplist_names():
     assert ss.rule_not_chatter(_cluster(worky), by_id) is True
     assert ss.rule_not_chatter(_cluster(worky, label="General Chat", topic_key="general-chat"), by_id) is False
     assert ss.rule_not_chatter(_cluster(worky, label="Daily Check-In", topic_key="daily-check-in"), by_id) is False
+
+
+def test_rule_not_chatter_ignores_a_sparse_conversational_minority():
+    """The scout labels few turns on a real box, so two conversational
+    labels among many unlabelled sessions are not a verdict on the cluster."""
+    chatty = [_mk(title=f"hi {i}", task_type="conversational", days_ago=i + 1) for i in range(2)]
+    unlabelled = [_mk(title=f"puzzle {i}", task_type="", days_ago=i + 1) for i in range(6)]
+    by_id = {r["id"]: r for r in ss.collect_candidates(30)}
+    assert ss.rule_not_chatter(_cluster(chatty + unlabelled), by_id) is True
+    # But a real conversational majority of the whole cluster still fails.
+    more_chatty = [_mk(title=f"yo {i}", task_type="conversational", days_ago=i + 1) for i in range(5)]
+    by_id = {r["id"]: r for r in ss.collect_candidates(30)}
+    assert ss.rule_not_chatter(_cluster(chatty + more_chatty + unlabelled), by_id) is False
 
 
 def test_rule_not_declined_binds_by_topic_key_and_by_overlap():
