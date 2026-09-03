@@ -208,6 +208,72 @@ def space_seam_checks(pg, name):
     )
 
 
+# ---------------------------------------------------------------------------
+# Space suggestions — the sidebar rows (v35)
+# ---------------------------------------------------------------------------
+# seed.py leaves two pending suggestions: a new "Fact checking" space over five
+# loose chats with a RULES draft, and a move of three loose chats into the
+# seeded "Pernix" space. Both are read-only here — the pass that accepts and
+# declines them runs last, once, because it rewrites the seeded database.
+
+SUGGEST_ROWS_JS = r"""() => {
+  const rows = [...document.querySelectorAll('.space-suggest-row')].map(r => {
+      const b = r.getBoundingClientRect();
+      return {
+          text: ((r.querySelector('.space-suggest-text') || {}).textContent || '').trim(),
+          meta: ((r.querySelector('.space-suggest-meta') || {}).textContent || '').trim(),
+          id: r.getAttribute('data-suggestion-id') || '',
+          group: r.getAttribute('data-group') || '',
+          role: r.getAttribute('role') || '',
+          tab: r.getAttribute('tabindex') || '',
+          session: r.classList.contains('session-item'),
+          top: Math.round(b.top),
+          h: Math.round(b.height),
+      };
+  });
+  const open = [...document.querySelectorAll('.space-group-body:not(.collapsed)')];
+  const heading = document.querySelector('.sessions-header');
+  return {
+      rows,
+      spaceBottom: open.length
+          ? Math.round(Math.max(...open.map(b => b.getBoundingClientRect().bottom))) : null,
+      headingTop: heading ? Math.round(heading.getBoundingClientRect().top) : null,
+  };
+}"""
+
+
+def suggestion_row_checks(pg, name):
+    r = pg.evaluate(SUGGEST_ROWS_JS)
+    rows = r.get("rows") or []
+    check(
+        name,
+        "m2: both suggestions render as rows of their own, newest first",
+        len(rows) == 2
+        and rows[0]["text"] == "Suggested · Fact checking"
+        and rows[0]["meta"] == "5 sessions"
+        and rows[1]["text"] == "3 chats belong in Pernix"
+        and rows[1]["meta"] == "review"
+        and all(
+            x["group"] == "suggested" and x["role"] == "button" and x["tab"] == "0" and x["id"] and not x["session"]
+            for x in rows
+        )
+        and all(x["h"] >= 28 for x in rows),
+        rows,
+        "m2",
+    )
+    check(
+        name,
+        "m2: suggestions sit under the last space and above the Sessions heading",
+        len(rows) == 2
+        and r.get("spaceBottom") is not None
+        and r.get("headingTop") is not None
+        and all(x["top"] >= r["spaceBottom"] - 1 for x in rows)
+        and all(x["top"] < r["headingTop"] for x in rows),
+        r,
+        "m2",
+    )
+
+
 def run_vp(browser, name, w, h, opts):
     ctx = browser.new_context(viewport={"width": w, "height": h}, device_scale_factor=2, color_scheme="dark", **opts)
     pg = ctx.new_page()
@@ -306,6 +372,11 @@ def run_vp(browser, name, w, h, opts):
                 "m2",
             )
             space_seam_checks(pg, name)
+            # One phone is enough for the drawer's copy of this: the rows are
+            # the same DOM at every compact width and the pass that acts on
+            # them runs once, at the end, on the desktop tier.
+            if name == "phone":
+                suggestion_row_checks(pg, name)
         shot("drawer")
         pg.keyboard.press("Escape")
         time.sleep(0.4)
@@ -608,6 +679,7 @@ def desktop_layout(browser):
             "m2",
         )
         space_seam_checks(pg, "desktop")
+        suggestion_row_checks(pg, "desktop")
 
         # Desktop only — the same title-box measurement the m2 drawer check
         # above uses, aimed at a row inside a space instead of the drawer's
@@ -1245,6 +1317,207 @@ def sidebar_scale(browser):
     ctx.close()
 
 
+# ---------------------------------------------------------------------------
+# Space suggestions — the review sheet, the accept and the decline
+# ---------------------------------------------------------------------------
+# This pass REWRITES the seeded database: accepting creates a space and moves
+# five chats into it, declining marks a topic refused. run.sh boots one server
+# and seeds once per run, so it goes last and runs exactly once — anything
+# asserted after it would be asserting against a fixture this changed.
+
+OPEN_SUGGESTION_JS = r"""(needle) => {
+  const r = [...document.querySelectorAll('.space-suggest-row')]
+      .find(x => ((x.querySelector('.space-suggest-text') || {}).textContent || '').includes(needle));
+  if (!r) return false;
+  r.click();
+  return true;
+}"""
+
+SHEET_JS = r"""() => {
+  const card = document.querySelector('.sugg-sheet-card');
+  if (!card) return null;
+  const boxes = [...card.querySelectorAll('.sugg-member-box')];
+  const area = card.querySelector('.sugg-dir-text');
+  const pre = card.querySelector('.sugg-dir-default');
+  const primary = card.querySelector('.sugg-accept');
+  return {
+      title: ((card.querySelector('.modal-header h2') || {}).textContent || '').trim(),
+      why: ((card.querySelector('.sugg-why') || {}).textContent || '').trim(),
+      members: boxes.length,
+      checked: boxes.filter(b => b.checked).length,
+      tabs: [...card.querySelectorAll('.sugg-dir-tabbar .tab-btn')].map(b => b.textContent.trim()),
+      primary: primary ? primary.textContent.trim() : '',
+      buttons: [...card.querySelectorAll('.modal-footer button')].map(b => b.textContent.trim()),
+      skip: ((card.querySelector('.sugg-dir-skip') || {}).textContent || '').trim(),
+      defaultHead: pre ? pre.textContent.slice(0, 60) : '',
+      areaHead: area ? area.value.slice(0, 60) : '',
+      areaTail: area ? area.value.trim().slice(-51) : '',
+      nameFields: card.querySelectorAll('.space-label-input').length,
+  };
+}"""
+
+AFTER_ACCEPT_JS = r"""() => {
+  const h = [...document.querySelectorAll('.space-group-header')]
+      .find(x => ((x.querySelector('.space-label') || {}).textContent || '') === 'Fact checking');
+  const body = h ? h.nextElementSibling : null;
+  return {
+      space: !!h,
+      count: h ? ((h.querySelector('.sg-count') || {}).textContent || '') : '',
+      rows: body ? body.querySelectorAll('.session-item').length : 0,
+      titles: body
+          ? [...body.querySelectorAll('.session-title-text')].map(t => t.textContent.trim()) : [],
+      suggestions: [...document.querySelectorAll('.space-suggest-row')]
+          .map(r => ((r.querySelector('.space-suggest-text') || {}).textContent || '').trim()),
+      sheet: !!document.querySelector('.sugg-sheet-card'),
+  };
+}"""
+
+DECLINED_JS = r"""() => {
+  const host = document.querySelector('.sugg-declined');
+  if (!host) return null;
+  return {
+      visible: !!host.offsetParent,
+      rows: [...host.querySelectorAll('.sugg-declined-row')].map(r => ({
+          label: ((r.querySelector('.sugg-declined-label') || {}).textContent || '').trim(),
+          meta: ((r.querySelector('.sugg-declined-meta') || {}).textContent || '').trim(),
+      })),
+      notes: [...host.querySelectorAll('.sugg-note')].map(n => n.textContent.trim()),
+      clearAll: !!host.querySelector('.sugg-declined-all button'),
+  };
+}"""
+
+CLEAR_DECLINED_JS = r"""(label) => {
+  const row = [...document.querySelectorAll('.sugg-declined-row')]
+      .find(r => ((r.querySelector('.sugg-declined-label') || {}).textContent || '').includes(label));
+  if (!row) return false;
+  row.querySelector('button').click();
+  return true;
+}"""
+
+
+def space_suggestions_flow(browser):
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
+    pg = ctx.new_page()
+    pg.on("console", lambda m: console_errors.append(f"[suggest] {m.text}") if m.type == "error" else None)
+    pg.on("pageerror", lambda e: console_errors.append(f"[suggest] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(2.0)
+
+    # --- the new-space sheet
+    opened = pg.evaluate(OPEN_SUGGESTION_JS, "Fact checking")
+    time.sleep(1.0)
+    sheet = pg.evaluate(SHEET_JS) if opened else None
+    pg.screenshot(path=f"{shots}/{tag}-desktop-suggest-sheet.png")
+    check(
+        "suggestions",
+        "m2: the sheet offers five ticked chats, a name and the three buttons",
+        bool(sheet)
+        and sheet["title"] == "Make this a space?"
+        and sheet["members"] == 5
+        and sheet["checked"] == 5
+        and sheet["nameFields"] == 1
+        and sheet["primary"] == "Create space"
+        and "Not now" in sheet["buttons"]
+        and "Don’t suggest this" in sheet["buttons"]
+        and bool(sheet["why"]),
+        sheet,
+        "m2",
+    )
+    check(
+        "suggestions",
+        "m2: the RULES tab holds the default with the drafted section appended",
+        bool(sheet)
+        and sheet["tabs"] == ["RULES"]
+        and len(sheet["defaultHead"]) > 20
+        and sheet["areaHead"] == sheet["defaultHead"]
+        and sheet["areaTail"] == "- Separate the claim, the evidence and the verdict."
+        and sheet["skip"] == "Use the default instead",
+        sheet,
+        "m2",
+    )
+
+    # --- accepting it: the space appears with those five chats, the row goes
+    pg.evaluate("() => document.querySelector('.sugg-accept').click()")
+    time.sleep(2.5)
+    after = pg.evaluate(AFTER_ACCEPT_JS)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-suggest-accepted.png")
+    check(
+        "suggestions",
+        "m2: accepting builds the space, files the five chats and drops the row",
+        after["space"]
+        and after["count"] == "5"
+        and after["rows"] == 5
+        and any("Verify the three citations" in t for t in after["titles"])
+        and not after["sheet"]
+        and after["suggestions"] == ["3 chats belong in Pernix"],
+        after,
+        "m2",
+    )
+
+    # --- the move sheet, then declining it
+    pg.evaluate(OPEN_SUGGESTION_JS, "belong in Pernix")
+    time.sleep(1.0)
+    move = pg.evaluate(SHEET_JS)
+    check(
+        "suggestions",
+        "m2: a move names its target, has no name field and counts what it would move",
+        bool(move)
+        and move["title"] == "Move these into Pernix?"
+        and move["members"] == 3
+        and move["checked"] == 3
+        and move["nameFields"] == 0
+        and move["tabs"] == []
+        and move["primary"] == "Move 3 sessions",
+        move,
+        "m2",
+    )
+    pg.evaluate("() => document.querySelector('.sugg-reject').click()")
+    time.sleep(2.0)
+    gone = pg.evaluate(
+        "() => ({rows: document.querySelectorAll('.space-suggest-row').length,"
+        " sheet: !!document.querySelector('.sugg-sheet-card')})"
+    )
+    check(
+        "suggestions",
+        "m2: declining closes the sheet and takes the row off the list",
+        gone["rows"] == 0 and not gone["sheet"],
+        gone,
+        "m2",
+    )
+
+    # --- and the declined topic is listed, with the control that re-arms it
+    pg.click("#settings-btn")
+    time.sleep(1.2)
+    pg.evaluate("() => document.querySelector('.tab-btn[data-tab=\"autonomy\"]').click()")
+    time.sleep(1.0)
+    dec = pg.evaluate(DECLINED_JS)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-suggest-declined.png")
+    check(
+        "suggestions",
+        "m2: Autonomy & idle work lists the declined topic and says it can come back",
+        bool(dec)
+        and dec["visible"]
+        and len(dec["rows"]) == 1
+        and dec["rows"][0]["label"] == "Pernix deploys → Pernix"
+        and "3 chats" in dec["rows"][0]["meta"]
+        and dec["clearAll"]
+        and "Cleared topics can be suggested again." in dec["notes"],
+        dec,
+        "m2",
+    )
+    pg.evaluate(CLEAR_DECLINED_JS, "Pernix deploys")
+    time.sleep(1.2)
+    cleared = pg.evaluate(DECLINED_JS)
+    check(
+        "suggestions",
+        "m2: Clear empties the declined list",
+        bool(cleared) and cleared["rows"] == [] and "Nothing declined." in cleared["notes"],
+        cleared,
+        "m2",
+    )
+    ctx.close()
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch()
     for name, w, h, opts in VPS:
@@ -1312,6 +1585,13 @@ with sync_playwright() as p:
             sidebar_scale(browser)
         except Exception as e:
             check("sidebar-scale", "m2: scale pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
+        # LAST, and once: this one accepts a suggestion and declines the other,
+        # which creates a space, moves five chats and marks a topic refused.
+        # Every read-only check above has already run against the seeded state.
+        try:
+            space_suggestions_flow(browser)
+        except Exception as e:
+            check("suggestions", "m2: suggestion pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
     browser.close()
 
 check("all", "no console errors", len(console_errors) == 0, console_errors[:6])
