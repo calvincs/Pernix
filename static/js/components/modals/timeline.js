@@ -65,7 +65,24 @@ let _selectedTurn = null;
 let _laneListEl = null;
 let _storyEl = null;
 let _laneRefreshTimer = null;   // pending debounced refetch of the newest page
+let _laneSettleTimer = null;    // the one extra refetch after a turn ends
 let _laneLoadToken = 0;         // newest lane fetch wins
+
+// The turn the session is running right now, as the lane draws it. It is the
+// SAME object that sits in _turns, so ticking the clock and repainting the row
+// are one operation, and a refetch MERGES the server's record into it rather
+// than replacing it — see _mergeLiveTurn for why that has to be keyed.
+let _liveTurn = null;
+let _liveTimer = null;          // the modal's one clock, 1Hz
+let _onVisibility = null;       // …stopped while the page is hidden
+// The Act card's live rows, keyed the way the merge keys them, so the row a
+// tool.start opens is the row its tool.call finishes.
+let _actRows = new Map();
+// tool name → how many tool.call events this turn has announced for it. The
+// fallback in _completeLiveCall needs it: a refetch landing between a call's
+// start and its result replaces the client's row with the server's, and
+// without this the result would then open a second one.
+let _liveCompleted = new Map();
 
 // In-flight tool rows: appended on tool.start, upgraded in place on tool.call.
 // Without these, a multi-minute tool run (rlm_process, bash, spawn_worker)
@@ -93,6 +110,9 @@ export async function openTimeline() {
     _turns = [];
     _turnsHasOlder = false;
     _selectedTurn = null;
+    _liveTurn = null;
+    _actRows = new Map();
+    _liveCompleted = new Map();
 
     _laneListEl = el('div', { class: 'tl-lane-list', id: 'timeline-lane' });
     _storyEl = el('div', { class: 'tl-story', id: 'timeline-story' });
@@ -159,6 +179,15 @@ export async function openTimeline() {
     document.body.append(_overlay);
     _closeOverlay = openOverlay(card, { onClose: _onEsc });
 
+    // A 1Hz repaint of a bar nobody can see is a phone's battery. The clock
+    // stops with the page and picks the elapsed back up from the wall on the
+    // way in, so a backgrounded tab costs nothing and loses nothing.
+    _onVisibility = () => {
+        if (document.hidden) _stopLiveClock();
+        else if (_liveTurn && _liveTurn.running) { _tickLiveTurn(); _startLiveClock(); }
+    };
+    document.addEventListener('visibilitychange', _onVisibility);
+
     await _load();
     _renderTimeline();
     _renderLane();
@@ -180,6 +209,15 @@ export function closeTimeline() {
         clearTimeout(_laneRefreshTimer);
         _laneRefreshTimer = null;
     }
+    if (_laneSettleTimer) {
+        clearTimeout(_laneSettleTimer);
+        _laneSettleTimer = null;
+    }
+    _stopLiveClock();
+    if (_onVisibility) {
+        document.removeEventListener('visibilitychange', _onVisibility);
+        _onVisibility = null;
+    }
     // Invalidate a lane fetch still in flight, so it cannot render into a
     // modal that is already gone.
     _laneLoadToken++;
@@ -193,6 +231,9 @@ export function closeTimeline() {
     _storyEl = null;
     _turns = [];
     _selectedTurn = null;
+    _liveTurn = null;
+    _actRows = new Map();
+    _liveCompleted = new Map();
 }
 
 export function isTimelineOpen() {
@@ -225,8 +266,10 @@ function _timelineActive() {
     return !!pane && pane.classList.contains('active');
 }
 
-// Live-append from _renderStateBadge. Appends a state row to the Timeline
-// tab (if currently rendered) and redraws the map.
+// Live-append from _renderStateBadge: a state change, which every tab has
+// something to say about. The Timeline gets a row, the map relights and
+// flashes the edge just taken, and the lane ends the phase that finished and
+// opens the next one in place — none of which waits for a request.
 export function appendTimelineRow(row) {
     const ts = Date.now();
     const data = {
@@ -243,14 +286,30 @@ export function appendTimelineRow(row) {
     };
     _data.stateLog.push(data);
     _appendLiveEntry({ kind: 'state', ts, turn: data.turn_id, data });
-    _refreshMapIfVisible();
+
+    // This is the event the map is about, so it redraws now rather than on the
+    // tool debounce — and that pending debounce is dropped, because a redraw
+    // 250ms from now would take the flash off mid-animation.
+    const pane = _mapPane();
+    if (pane) {
+        if (_mapRefreshTimer) { clearTimeout(_mapRefreshTimer); _mapRefreshTimer = null; }
+        _renderMap(pane, {
+            flash: row.from_state && row.to_state ? `${row.from_state}||${row.to_state}` : null,
+        });
+    }
+
+    _advanceLiveTurn(row, ts);
+    // Everything the client cannot know — the scout report the Plan card
+    // shows, the reflect chain and gates behind Verify, the token bill — is
+    // still the server's. On scouting → processing this is what fills Plan;
+    // at the end of the turn, _endLiveTurn adds a second, later pass.
     _scheduleLaneRefresh();
 }
 
 // Live-append from the tool.start SSE handler in app.js: a "running" row
 // that appendTimelineToolRow upgrades in place when the result arrives.
 export function appendTimelineToolStart(tool) {
-    if (!_bodyEl) return;
+    const ts = Date.now();
     const entry = {
         name: tool.name || 'tool',
         args: tool.args || null,
@@ -258,10 +317,15 @@ export function appendTimelineToolStart(tool) {
         latency_ms: null,
         was_error: false,
         running: true,
-        ts: Date.now(),
+        ts,
     };
-    const rowEl = _appendLiveEntry({ kind: 'tool', ts: entry.ts, turn: null, data: entry });
-    if (rowEl) _pendingToolRows.push({ name: entry.name, startTs: entry.ts, el: rowEl });
+    if (_bodyEl) {
+        const rowEl = _appendLiveEntry({ kind: 'tool', ts, turn: null, data: entry });
+        if (rowEl) _pendingToolRows.push({ name: entry.name, startTs: ts, el: rowEl });
+    }
+    // …and a tick on the running bar, placed by the clock the bar is drawn
+    // against, plus a row in the Act card if that is the turn on screen.
+    _addLiveCall(tool, ts);
     _scheduleLaneRefresh();
 }
 
@@ -284,13 +348,12 @@ export function appendTimelineToolRow(tool) {
         const pending = _pendingToolRows.splice(idx, 1)[0];
         entry.ts = pending.startTs; // keep the row anchored where the run began
         pending.el.replaceWith(_buildToolRow(entry, entry.ts));
-        _data.liveTools.push(entry);
-        _refreshMapIfVisible();
-        _scheduleLaneRefresh();
-        return;
+    } else {
+        _appendLiveEntry({ kind: 'tool', ts: entry.ts, turn: null, data: entry });
     }
     _data.liveTools.push(entry);
-    _appendLiveEntry({ kind: 'tool', ts: entry.ts, turn: null, data: entry });
+    // The tick this call opened turns done — in --error if it was.
+    _completeLiveCall(tool);
     _refreshMapIfVisible();
     _scheduleLaneRefresh();
 }
@@ -368,8 +431,10 @@ async function _load() {
     };
     _turns = _turnsOldestFirst(turnRes);
     _turnsHasOlder = !!(turnRes && turnRes.has_more);
-    // The newest turn is the one anybody opening the timeline came to read.
+    // The newest turn is the one anybody opening the timeline came to read —
+    // and, if the session is mid-turn, the one the clock will tick.
     _selectedTurn = _turns.length ? _turns[_turns.length - 1].turn_id : null;
+    _liveTurn = _turns.length ? _adoptLiveTurn(_turns[_turns.length - 1]) : null;
     _pendingToolRows = [];
 }
 
@@ -420,35 +485,61 @@ function _selectedTurnRecord() {
 // is a server-side read model, so what it needs is the page again — once,
 // after the burst, not once per event.
 const LANE_REFRESH_DEBOUNCE_MS = 700;
+// Reflect verdicts, eval gates and notices are written after the transition
+// that parks the machine, so the debounce above can win the race to an empty
+// Verify card. One more pass, once.
+const LANE_SETTLE_MS = 2000;
 
 function _scheduleLaneRefresh() {
     if (!_overlay || !state.sid) return;
     if (_laneRefreshTimer) clearTimeout(_laneRefreshTimer);
-    _laneRefreshTimer = setTimeout(async () => {
+    _laneRefreshTimer = setTimeout(() => {
         _laneRefreshTimer = null;
-        const token = ++_laneLoadToken;
-        let res;
-        try {
-            res = await get(`/api/sessions/${state.sid}/turns?limit=${TURN_PAGE_LIMIT}`);
-        } catch (e) {
-            console.error('Failed to refresh the turn lane:', e);
-            return;
-        }
-        // The modal may have closed, or a newer refresh started, while this
-        // one was in flight.
-        if (token !== _laneLoadToken || !_laneListEl) return;
-        const head = _turnsOldestFirst(res);
-        if (!head.length) return;
-        // Older pages the reader already asked for stay; only the window the
-        // refetch covers is replaced.
-        const older = _turns.filter(t => t.turn_id < head[0].turn_id);
-        _turns = older.concat(head);
-        if (!older.length) _turnsHasOlder = !!res.has_more;
-        if (!_turns.some(t => t.turn_id === _selectedTurn)) {
-            _selectedTurn = _turns[_turns.length - 1].turn_id;
-        }
-        _renderLane();
+        _refetchLanePage();
     }, LANE_REFRESH_DEBOUNCE_MS);
+}
+
+async function _refetchLanePage() {
+    if (!_overlay || !state.sid) return;
+    const token = ++_laneLoadToken;
+    let res;
+    try {
+        res = await get(`/api/sessions/${state.sid}/turns?limit=${TURN_PAGE_LIMIT}`);
+    } catch (e) {
+        console.error('Failed to refresh the turn lane:', e);
+        return;
+    }
+    // The modal may have closed, or a newer refresh started, while this one
+    // was in flight.
+    if (token !== _laneLoadToken || !_laneListEl) return;
+    const head = _turnsOldestFirst(res);
+    if (!head.length) return;
+
+    // The running record is the one the clock has been drawing. Merge the
+    // server's copy INTO it rather than over it, so a tick or an Act row added
+    // while the request was in flight survives — and, because both are keyed,
+    // survives exactly once.
+    if (_liveTurn) {
+        const at = head.findIndex(t => t.turn_id === _liveTurn.turn_id);
+        if (at !== -1) head[at] = _liveTurn = _mergeLiveTurn(head[at], _liveTurn);
+        else if (_liveTurn.turn_id > head[head.length - 1].turn_id) head.push(_liveTurn);
+    }
+    // A turn that opened while nothing was being tracked — the modal was
+    // opened between turns, or the run started in another tab.
+    const newest = head[head.length - 1];
+    if (newest.running && (!_liveTurn || _liveTurn.turn_id !== newest.turn_id)) {
+        _liveTurn = _adoptLiveTurn(newest);
+    }
+
+    // Older pages the reader already asked for stay; only the window the
+    // refetch covers is replaced.
+    const older = _turns.filter(t => t.turn_id < head[0].turn_id);
+    _turns = older.concat(head);
+    if (!older.length) _turnsHasOlder = !!res.has_more;
+    if (!_turns.some(t => t.turn_id === _selectedTurn)) {
+        _selectedTurn = _turns[_turns.length - 1].turn_id;
+    }
+    _renderLane();
 }
 
 async function _loadOlderTurns(btn) {
@@ -489,6 +580,10 @@ function _renderLane() {
     for (const turn of _turns) _laneListEl.appendChild(_buildLaneRow(turn));
     _syncLaneSelection();
     _renderStory();
+    // One clock for the modal, started and stopped by whether there is
+    // anything for it to move.
+    if (_liveTurn && _liveTurn.running) _startLiveClock();
+    else _stopLiveClock();
 }
 
 function _buildLaneRow(turn) {
@@ -588,11 +683,15 @@ function _buildLaneBar(turn) {
         const at = _isoToMs(call.started_at);
         if (!at || !startMs || !total) continue;
         const pct = Math.min(100, Math.max(0, ((at - startMs) / total) * 100));
+        // A call still running gets a tick where it started, drawn hollow
+        // until its result arrives — otherwise a four-minute call is a gap.
         bar.appendChild(el('div', {
-            class: `tl-lane-tick${call.was_error ? ' error' : ''}`,
+            class: `tl-lane-tick${call.was_error ? ' error' : ''}${call.running ? ' pending' : ''}`,
             style: `left:${pct.toFixed(4)}%`,
-            title: `${call.name || 'tool'} · ${_fmtMs(call.latency_ms) || '—'}`
-                + (call.was_error ? ' · error' : ''),
+            title: call.running
+                ? `${call.name || 'tool'} · running…`
+                : `${call.name || 'tool'} · ${_fmtMs(call.latency_ms) || '—'}`
+                    + (call.was_error ? ' · error' : ''),
         }));
     }
 
@@ -640,6 +739,9 @@ function _showStoryFor(turnId) {
 function _renderStory() {
     if (!_storyEl) return;
     _storyEl.innerHTML = '';
+    // The Act rows a live call can still be upgraded in place through belong
+    // to the story on screen; a re-render replaces every one of them.
+    _actRows = new Map();
     const turn = _selectedTurnRecord();
     if (!turn) return;
 
@@ -757,11 +859,20 @@ function _actCard(turn) {
     // that went wrong, and it is rarely the first one made.
     const calls = (turn.tool_calls || []).slice()
         .sort((a, b) => (b.was_error ? 1 : 0) - (a.was_error ? 1 : 0));
-    if (!calls.length) {
-        parts.push(_storyEmpty('No tool calls in this turn.'));
-    } else {
-        parts.push(el('div', { class: 'tl-act-list' }, calls.map(_buildActRow)));
+    // The list is built even when it is empty, because a live call arriving a
+    // second from now needs somewhere to land. The notice above it is what
+    // goes away when one does.
+    if (!calls.length) parts.push(el('div', { class: 'tl-story-empty tl-act-empty' }, [text('No tool calls in this turn.')]));
+    const list = el('div', { class: 'tl-act-list' });
+    for (const call of calls) {
+        const rowEl = _buildActRow(call);
+        list.appendChild(rowEl);
+        // Only a call the client added itself carries a key, and only those
+        // can still be upgraded in place — a call the server has a row for is
+        // already finished.
+        if (call._key) _actRows.set(call._key, rowEl);
     }
+    parts.push(list);
 
     const tokens = turn.tokens || {};
     const meta = [];
@@ -787,12 +898,16 @@ function _buildActRow(call) {
         el('span', { class: 'tl-act-name' }, [text(call.name || 'tool')]),
         el('span', { class: 'tl-act-args' }, [text(call.args_summary || '')]),
     ];
-    if (call.latency_ms != null) {
+    if (call.running) {
+        head.push(el('span', { class: 'tool-item-running-dot' }));
+    } else if (call.latency_ms != null) {
         const cls = call.latency_ms < 500 ? 'fast' : call.latency_ms < 2000 ? 'medium' : 'slow';
         head.push(el('span', { class: `tool-latency ${cls}` }, [text(`${call.latency_ms}ms`)]));
     }
     if (call.was_error) head.push(el('span', { class: 'tl-chip tl-chip-fail' }, [text('error')]));
-    return el('div', { class: `tl-act-row${call.was_error ? ' error' : ''}` }, head);
+    return el('div', {
+        class: `tl-act-row${call.was_error ? ' error' : ''}${call.running ? ' running' : ''}`,
+    }, head);
 }
 
 // --- Verify ------------------------------------------------------------
@@ -900,6 +1015,353 @@ function _fmtNum(n) {
 function _fmtStamp(iso) {
     const ms = _isoToMs(iso);
     return ms ? _fmtClock(ms) : '';
+}
+
+// ---------------------------------------------------------------------------
+// Live — what moves while a turn runs, and what still has to come from the
+// server
+//
+// The lane is a server-side read model, so the honest thing to do with a live
+// event would be to refetch. That is also the wrong thing forty times a turn:
+// a bar that only moves when a request comes back is a bar that does not move,
+// and the one question a running turn asks — is it still going, and on what —
+// is answered by the client's own clock.
+//
+// So _liveTurn is a turn record the client keeps up to date itself. It is the
+// same object that sits in _turns, so ticking it and repainting the row are
+// one operation. What the client CANNOT know — the scout report behind the
+// Plan card, the reflect chain and gates behind Verify, the token bill — still
+// comes from the debounced refetch, and that refetch replaces the running
+// record wholesale. Everything the client added in the meantime is therefore
+// keyed and merged rather than concatenated: by call_id where app.js has one,
+// otherwise by the call's ordinal among same-named calls in its turn, which is
+// what the server's own ordering agrees with.
+// ---------------------------------------------------------------------------
+
+// The transitions that open a NEW turn rather than continuing one — the same
+// three in sessions/state_v2.py's _NEW_TURN_REASONS. A reflect-retry loops
+// back through scouting inside the turn it is retrying, which is exactly why
+// this is keyed on the reason and not on from_state.
+const NEW_TURN_REASONS = new Set(['prompt-arrived', 'answer-received', 'workers-complete']);
+
+const LIVE_TICK_MS = 1000;
+
+function _startLiveClock() {
+    if (_liveTimer || document.hidden || !_overlay) return;
+    _liveTimer = setInterval(_tickLiveTurn, LIVE_TICK_MS);
+}
+
+function _stopLiveClock() {
+    if (!_liveTimer) return;
+    clearInterval(_liveTimer);
+    _liveTimer = null;
+}
+
+// The open phase and the turn both grow against the wall clock, not against a
+// count of ticks — so a tab that was hidden for four minutes comes back with
+// four minutes on it rather than one second.
+function _tickLiveTurn() {
+    if (!_liveTurn || !_liveTurn.running) { _stopLiveClock(); return; }
+    const now = Date.now();
+    _liveTurn.elapsed_ms = Math.max(0, now - _liveTurn._startMs);
+    const open = _liveTurn.phases[_liveTurn.phases.length - 1];
+    if (open && open.ended_at == null) open.elapsed_ms = Math.max(0, now - open._startMs);
+    _paintLiveRow();
+}
+
+// Redraw just the running row: its bar (segments and ticks alike are a pure
+// function of the record) and its duration. Everything else on the row is
+// unchanged, so nothing else is touched.
+function _paintLiveRow() {
+    if (!_liveTurn || !_laneListEl) return;
+    const row = _laneListEl.querySelector(`.tl-lane-row[data-turn="${_liveTurn.turn_id}"]`);
+    if (!row) return;
+    row.classList.toggle('running', !!_liveTurn.running);
+    const bar = row.querySelector('.tl-lane-bar');
+    if (bar) bar.replaceWith(_buildLaneBar(_liveTurn));
+    const elapsed = row.querySelector('.tl-lane-elapsed');
+    if (elapsed) {
+        elapsed.textContent = _liveTurn.running
+            ? `${_fmtMs(_liveTurn.elapsed_ms) || '0ms'}…`
+            : (_fmtMs(_liveTurn.elapsed_ms) || '—');
+    }
+    row.setAttribute('aria-label', _laneRowLabel(_liveTurn));
+}
+
+function _openPhase(stateName, ts, reason) {
+    if (!_liveTurn) return;
+    _liveTurn.phases.push({
+        state: stateName,
+        started_at: new Date(ts).toISOString(),
+        ended_at: null,
+        elapsed_ms: 0,
+        reason_in: reason || null,
+        reason_out: null,
+        _startMs: ts,
+    });
+}
+
+function _closePhase(ts, reason) {
+    if (!_liveTurn) return;
+    const open = _liveTurn.phases[_liveTurn.phases.length - 1];
+    if (!open || open.ended_at != null) return;
+    open.ended_at = new Date(ts).toISOString();
+    open.elapsed_ms = Math.max(0, ts - open._startMs);
+    open.reason_out = reason || null;
+}
+
+function _startLiveTurn(row, ts) {
+    if (_liveTurn && _liveTurn.running) {
+        // No closing transition reached us for the previous turn — a
+        // reconnect, or a queued prompt draining straight into the next one.
+        _closePhase(ts, row.reason);
+        _endLiveTurn(ts, null);
+    }
+    const prev = _turns.length ? _turns[_turns.length - 1] : null;
+    // The selection follows the live turn only if it was already pinned to
+    // what was newest. A reader who walked back to turn 3 stays on turn 3.
+    const follow = !prev || _selectedTurn === prev.turn_id;
+    const turnId = row.turn_id != null ? row.turn_id : ((prev ? prev.turn_id : 0) + 1);
+
+    _liveTurn = {
+        turn_id: turnId,
+        parent_turn_id: null,
+        retry_index: row.retry_index || 0,
+        running: true,
+        started_at: new Date(ts).toISOString(),
+        ended_at: null,
+        elapsed_ms: 0,
+        termination_reason: null,
+        phases: [],
+        tool_calls: [],
+        scout: null,
+        reflect: [],
+        eval: [],
+        compactions: [],
+        notices: [],
+        tokens: {},
+        invariant_violations: [],
+        _startMs: ts,
+    };
+    _liveCompleted = new Map();
+    _openPhase(row.to_state, ts, row.reason);
+    _turns = _turns.filter(t => t.turn_id !== turnId).concat([_liveTurn]);
+    if (follow) _selectedTurn = turnId;
+    _renderLane();
+}
+
+function _endLiveTurn(ts, row) {
+    if (!_liveTurn) return;
+    _liveTurn.running = false;
+    _liveTurn.ended_at = new Date(ts).toISOString();
+    _liveTurn.elapsed_ms = Math.max(0, ts - _liveTurn._startMs);
+    if (row && row.termination_reason) _liveTurn.termination_reason = row.termination_reason;
+    for (const c of _liveTurn.tool_calls) c.running = false;
+    _paintLiveRow();
+    _stopLiveClock();
+    // Verify and Remembers are written AFTER the transition that parks the
+    // machine, so the ordinary debounce is a race against the reflect and eval
+    // rows landing. One more pass, late enough to have lost it.
+    if (_laneSettleTimer) clearTimeout(_laneSettleTimer);
+    _laneSettleTimer = setTimeout(() => { _laneSettleTimer = null; _refetchLanePage(); }, LANE_SETTLE_MS);
+}
+
+// A state change, from the client's side: close the phase that just ended,
+// open the one that just started, or shut the turn.
+function _advanceLiveTurn(row, ts) {
+    if (!row.to_state) return;
+    if (NEW_TURN_REASONS.has(row.reason || '')) {
+        _startLiveTurn(row, ts);
+        return;
+    }
+    // Nothing to advance: the modal was opened between turns, and the next
+    // refetch is what will pick the running turn up.
+    if (!_liveTurn || !_liveTurn.running) return;
+    _closePhase(ts, row.reason);
+    if (RESTING_STATES.has(row.to_state)) {
+        _endLiveTurn(ts, row);
+        return;
+    }
+    _openPhase(row.to_state, ts, row.reason);
+    _tickLiveTurn();
+}
+
+// The argument digest the /turns record calls args_summary, for a call the
+// server has not written a row for yet.
+function _argsDigest(args) {
+    if (!args || typeof args !== 'object') return '';
+    let out;
+    if (args.command) out = `$ ${args.command}`;
+    else if (args.path) out = String(args.path);
+    else out = Object.entries(args).map(([k, v]) => `${k}: ${String(v).slice(0, 40)}`).join(', ');
+    return String(out).replace(/\s+/g, ' ').slice(0, 120);
+}
+
+function _liveCallKey(name, n) {
+    return `ord:${name}#${n}`;
+}
+
+// Every key one tool call answers to, given its ordinal among same-named calls
+// in its turn. The ordinal is the one that does the work, because app.js's
+// tool.start/tool.call payloads do not carry the call id through to here; the
+// id and the message id are checked first anyway, so the day they do, this
+// gets stricter rather than different.
+//
+// Both sides of a merge are keyed the SAME way, which is the whole point. Key
+// only the client's side and the first merge is right and every one after it
+// is wrong: the record it produced becomes the "live" side of the next merge,
+// its calls have no client-side key, and the server's own rows get appended a
+// second time, a third time, once per refetch for the rest of the turn.
+function _callKeys(call, ordinal) {
+    const out = [_liveCallKey(call.name || 'tool', ordinal)];
+    if (call.call_id) out.push(`id:${call.call_id}`);
+    if (call.message_id != null) out.push(`mid:${call.message_id}`);
+    return out;
+}
+
+function _recordToolKeys(turn) {
+    const keys = new Set();
+    const seen = new Map();
+    for (const c of turn.tool_calls || []) {
+        const name = c.name || 'tool';
+        const n = seen.get(name) || 0;
+        seen.set(name, n + 1);
+        for (const k of _callKeys(c, n)) keys.add(k);
+    }
+    return keys;
+}
+
+// A tick at "now" on the running row, and a row in the Act card if the story
+// on screen is this turn's.
+function _addLiveCall(tool, ts) {
+    if (!_liveTurn || !_liveTurn.running) return null;
+    const name = tool.name || 'tool';
+    const id = tool.call_id || tool.tool_call_id || null;
+    const call = {
+        name,
+        args_summary: _argsDigest(tool.args),
+        call_id: id,
+        message_id: null,
+        latency_ms: null,
+        was_error: false,
+        running: true,
+        started_at: new Date(ts).toISOString(),
+        _key: _liveCallKey(name, _liveTurn.tool_calls.filter(c => (c.name || 'tool') === name).length),
+    };
+    _liveTurn.tool_calls.push(call);
+    _paintLiveRow();
+    _appendActRow(call);
+    return call;
+}
+
+function _completeLiveCall(tool) {
+    if (!_liveTurn) return;
+    const name = tool.name || 'tool';
+    const id = tool.call_id || tool.tool_call_id || null;
+    const announced = (_liveCompleted.get(name) || 0) + 1;
+    _liveCompleted.set(name, announced);
+    let call = id ? _liveTurn.tool_calls.find(c => c.call_id === id) : null;
+    // Parallel calls of the same name complete FIFO, which is the same
+    // assumption the Timeline tab's in-flight rows make.
+    if (!call) call = _liveTurn.tool_calls.find(c => c.running && (c.name || 'tool') === name);
+    if (!call) {
+        // Either no tool.start reached us — a reconnect mid-call, or a tool
+        // that only announces itself on completion, in which case the tick
+        // belongs at now rather than nowhere — or a refetch has already
+        // brought this call back from the server, in which case adding one
+        // would be the duplicate the whole merge exists to avoid.
+        const have = _liveTurn.tool_calls.filter(c => (c.name || 'tool') === name && !c.running).length;
+        if (have >= announced) return;
+        call = _addLiveCall(tool, Date.now());
+        if (!call) return;
+    }
+    call.running = false;
+    call.latency_ms = tool.latency_ms || null;
+    call.was_error = !!tool.was_error || _isErrorContent(tool.content);
+    if (id && !call.call_id) call.call_id = id;
+    if (!call.args_summary) call.args_summary = _argsDigest(tool.args);
+    _paintLiveRow();
+    _completeActRow(call);
+}
+
+// --- the Act card, in place ---------------------------------------------
+
+function _actList() {
+    if (!_storyEl || !_liveTurn || _selectedTurn !== _liveTurn.turn_id) return null;
+    return _storyEl.querySelector('.tl-act-list');
+}
+
+function _appendActRow(call) {
+    const list = _actList();
+    if (!list) return;
+    const empty = _storyEl.querySelector('.tl-act-empty');
+    if (empty) empty.remove();
+    const rowEl = _buildActRow(call);
+    list.appendChild(rowEl);
+    if (call._key) _actRows.set(call._key, rowEl);
+}
+
+function _completeActRow(call) {
+    if (!call._key) return;
+    const prev = _actRows.get(call._key);
+    if (!prev || !prev.isConnected) { _appendActRow(call); return; }
+    const next = _buildActRow(call);
+    prev.replaceWith(next);
+    _actRows.set(call._key, next);
+}
+
+// --- adopting and merging the server's record ---------------------------
+
+// A record the server says is still open becomes the object the clock ticks.
+// Its phases carry started_at but no _startMs, so give them one.
+function _adoptLiveTurn(turn) {
+    if (!turn || !turn.running) return null;
+    _liveCompleted = new Map();
+    turn._startMs = _isoToMs(turn.started_at) || Date.now();
+    for (const p of turn.phases || []) p._startMs = _isoToMs(p.started_at) || turn._startMs;
+    return turn;
+}
+
+// The server's record wins on everything it knows about; what it has not
+// caught up with yet is carried across. A phase is carried if it started after
+// the record's last one did; a tool call is carried only when neither its id
+// nor its ordinal within the turn is already in the record, which is what
+// keeps a tick and an Act row from appearing twice across a refetch.
+function _mergeLiveTurn(srv, live) {
+    srv._startMs = _isoToMs(srv.started_at) || live._startMs;
+    for (const p of srv.phases || []) p._startMs = _isoToMs(p.started_at) || srv._startMs;
+
+    // Both lists are the same turn's phases in the same order, so the index IS
+    // the identity — the client's extras are whatever it has past the end of
+    // the server's. Matching on start time instead looks reasonable and is
+    // not: the record's stamp for a phase and the client's differ by however
+    // long the transition took to reach the browser, so a tolerance either
+    // duplicates the open phase or swallows a real one.
+    srv.phases = srv.phases || [];
+    for (let i = srv.phases.length; i < (live.phases || []).length; i++) {
+        srv.phases.push(live.phases[i]);
+    }
+
+    const keys = _recordToolKeys(srv);
+    const seen = new Map();
+    srv.tool_calls = (srv.tool_calls || []).slice();
+    for (const c of live.tool_calls || []) {
+        const name = c.name || 'tool';
+        const n = seen.get(name) || 0;
+        seen.set(name, n + 1);
+        if (_callKeys(c, n).some(k => keys.has(k))) continue;
+        srv.tool_calls.push(c);
+    }
+
+    // The client saw the closing transition on the wire; the record may have
+    // been read a moment before it was written. Either side saying the turn is
+    // over settles it.
+    srv.running = !!srv.running && live.running !== false;
+    if (!srv.running) {
+        for (const c of srv.tool_calls) c.running = false;
+        if (live.ended_at && !srv.ended_at) srv.ended_at = live.ended_at;
+    }
+    return srv;
 }
 
 // ---------------------------------------------------------------------------
