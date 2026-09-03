@@ -85,16 +85,16 @@
       <span>menu</span>
     </button>
     <nav class="topnav" id="topnav" aria-label="Primary">
+      <a href="#overnight">overnight</a>
       <a href="#anatomy">anatomy</a>
+      <a href="#toolbelt">toolbelt</a>
       <a href="#turn">how it thinks</a>
-      <a href="#layers">layers</a>
-      <a href="#durable">thesis</a>
+      <a href="#states">states</a>
       <a href="#api">api</a>
       <a href="#identity">soul</a>
       <a href="#start">start</a>
       <a href="#release">v3.1.0</a>
-      <a href="https://github.com/calvincs/Pernix/tree/main/docs" target="_blank" rel="noopener">docs ↗</a>
-      <a class="ghub" href="https://github.com/calvincs/Pernix" target="_blank" rel="noopener">github ↗</a>
+      <a class="ghub" href="https://github.com/calvincs/Pernix" target="_blank" rel="noopener">github <span id="nav-stars"></span>&#8599;</a>
     </nav>
   </div>
 </header>
@@ -102,48 +102,149 @@
 <main id="top">
 
 <!-- ========== HERO ========== -->
-<section class="hero">
-  <div class="hero-frame">
-    <canvas id="sigil" class="sigil-canvas" aria-hidden="true"></canvas>
+<section class="hero" id="hero">
+  <canvas id="wall" class="wall" aria-hidden="true"></canvas>
 
-    <div class="hero-corners" aria-hidden="true">
-      <span class="c tl">⊹</span>
-      <span class="c tr">⊹</span>
-      <span class="c bl">⊹</span>
-      <span class="c br">⊹</span>
-    </div>
-
-    <div class="hero-text">
-      <h1 class="title reveal">
-        <span class="title-line">Pernix</span>
+  <div class="hero-inner">
+    <div class="hero-copy">
+      <h1 class="hero-title reveal">
+        <span class="ht-line">Your model.</span>
+        <span class="ht-line">Your memory.</span>
+        <span class="ht-line"><em>Your machine.</em></span>
       </h1>
+      <p class="hero-sub reveal">
+        A Python agent server you run yourself. It researches, schedules, remembers &mdash; and keeps working after you close the tab.
+      </p>
+
+      <div class="hero-cta reveal">
+        <a class="btn btn-gold" href="#start">
+          <span>Run it</span>
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </a>
+        <button class="btn btn-ghost" type="button" id="watch-turn">Watch a turn</button>
+      </div>
+
+      <div class="install reveal">
+        <div class="install-h">
+          <span class="install-label">clone &middot; install &middot; run</span>
+          <button class="copy-btn" type="button" id="copy-install">copy</button>
+        </div>
+        <pre class="install-body" id="install-body"><span class="il"><span class="p">$</span> git clone https://github.com/calvincs/Pernix.git &amp;&amp; cd Pernix</span>
+<span class="il"><span class="p">$</span> python3 -m venv .venv &amp;&amp; . .venv/bin/activate</span>
+<span class="il"><span class="p">$</span> pip install -r requirements.txt &amp;&amp; python run.py</span></pre>
+      </div>
+
+      <ul class="facts reveal">
+        <li>MIT</li>
+        <li>no accounts</li>
+        <li>v3.1.0</li>
+        <li>Python 3.11+</li>
+        <li><a id="star-link" href="https://github.com/calvincs/Pernix" target="_blank" rel="noopener"><span id="star-count">&#9733; GitHub</span></a></li>
+      </ul>
     </div>
 
-    <p class="kicker reveal"><em>per&middot;nix</em> &nbsp;<span class="ipa">/ˈpɛɾ.nɪks/</span> &nbsp;<span class="def">— Latin: nimble, swift of foot.</span></p>
-  </div>
+    <div class="hero-stage reveal">
+      <div class="sw" id="replay" tabindex="-1">
+        <div class="sw-bar">
+          <svg class="sw-mark" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 2.2 L21.8 12 L12 21.8 L2.2 12 Z" fill="none" stroke="currentColor" stroke-width="1.1" opacity="0.95"/>
+            <path d="M12 2.2 Q 13.2 10.8 21.8 12 Q 13.2 13.2 12 21.8 Q 10.8 13.2 2.2 12 Q 10.8 10.8 12 2.2 Z" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.8"/>
+          </svg>
+          <span class="sw-title" id="sw-title">Morning brief</span>
+          <span class="sw-seq" id="sw-seq">1 / 3</span>
+        </div>
 
-  <div class="hero-below">
-    <p class="hero-prompt reveal" aria-hidden="true">
-      <span class="hero-prompt-mark">›</span>
-      <span id="hero-prompt-text">build my morning brief before I wake</span><span class="cursor"></span>
-    </p>
-    <p class="lede reveal">
-      An agent server you own outright.<br>
-      It researches, schedules, remembers, and keeps working after you close the tab — on a local model, a frontier API, or both.
-    </p>
-    <div class="hero-cta reveal">
-      <a class="btn btn-gold" href="#start">
-        <span>Run it</span>
-        <svg viewBox="0 0 24 24" width="14" height="14"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </a>
-      <a class="btn btn-ghost" href="#anatomy">Read the anatomy</a>
+        <div class="sw-body" id="sw-body" aria-hidden="true"></div>
+        <p class="sr-only" id="sw-sr" aria-live="polite"></p>
+
+        <div class="sw-status">
+          <span class="sw-dot" id="sw-dot" aria-hidden="true"></span>
+          <span class="sw-model">Qwen/Qwen3.8-27B</span>
+          <span class="sw-ctx">ctx: <span id="sw-ctx">31%</span></span>
+          <span class="sw-badge" id="sw-badge">idle_ready</span>
+        </div>
+      </div>
+
+      <ol class="rail" id="rail" aria-hidden="true">
+        <li data-p="0"><span class="rail-dot"></span><span class="rail-label">Session</span></li>
+        <li data-p="1"><span class="rail-dot"></span><span class="rail-label">Scout</span></li>
+        <li data-p="2"><span class="rail-dot"></span><span class="rail-label">Agent&nbsp;Loop</span></li>
+        <li data-p="3"><span class="rail-dot"></span><span class="rail-label">Reflect</span></li>
+        <li data-p="4"><span class="rail-dot"></span><span class="rail-label">Post&#8209;hooks</span></li>
+      </ol>
+
+      <div class="replay-bar">
+        <p class="replay-note">scripted replay of a real session</p>
+        <div class="replay-ctl">
+          <button class="rp-btn" type="button" id="rp-toggle">pause</button>
+          <button class="rp-btn" type="button" id="rp-next">next &rsaquo;</button>
+        </div>
+      </div>
     </div>
   </div>
 </section>
 
+<!-- ========== NIGHT SHIFT ========== -->
+<section class="night" id="overnight">
+  <p class="section-label reveal">I. The night shift</p>
+  <h2 class="section-title reveal">What ran <em>while you slept</em>.</h2>
+  <p class="section-sub reveal">The server keeps its own flight recorder. Here is one night of it, in order — the tab shut, the phone face-down, nobody watching.</p>
+
+  <ol class="ledger">
+    <li class="led is-you reveal">
+      <span class="led-t">23:14</span><span class="led-n" aria-hidden="true"></span>
+      <span class="led-tag">you</span>
+      <span class="led-x">you close the tab</span>
+    </li>
+
+    <li class="led-gap reveal"><span>7h 48m &middot; nobody watching</span></li>
+
+    <li class="led reveal">
+      <span class="led-t">23:40</span><span class="led-n" aria-hidden="true"></span>
+      <span class="led-tag">snooze</span>
+      <span class="led-x"><code>dedup_sweep</code> &mdash; 5 duplicate memory entries merged</span>
+    </li>
+    <li class="led reveal">
+      <span class="led-t">01:00</span><span class="led-n" aria-hidden="true"></span>
+      <span class="led-tag">snooze</span>
+      <span class="led-x"><code>catchup_distill</code> &mdash; 1 session reviewed &middot; 4 saved, 2 deduped</span>
+    </li>
+    <li class="led reveal">
+      <span class="led-t">03:00</span><span class="led-n" aria-hidden="true"></span>
+      <span class="led-tag">canary</span>
+      <span class="led-x">nightly heartbeat &mdash; 2 / 2 passed</span>
+    </li>
+    <li class="led reveal">
+      <span class="led-t">05:30</span><span class="led-n" aria-hidden="true"></span>
+      <span class="led-tag">worker</span>
+      <span class="led-x">worker <em>research-digest</em> finished &mdash; parent auto-resumed</span>
+    </li>
+    <li class="led reveal">
+      <span class="led-t">06:55</span><span class="led-n" aria-hidden="true"></span>
+      <span class="led-tag">cron</span>
+      <span class="led-x"><code>0 7 * * 1-5</code> fired &mdash; session <span class="led-id">8f2a1c3d</span></span>
+    </li>
+    <li class="led reveal">
+      <span class="led-t">07:00</span><span class="led-n" aria-hidden="true"></span>
+      <span class="led-tag">push</span>
+      <span class="led-x">&ldquo;Brief ready&rdquo; &mdash; sent to your phone</span>
+    </li>
+
+    <li class="led-gap is-dawn reveal"><span>lights on</span></li>
+
+    <li class="led is-you reveal">
+      <span class="led-t">07:02</span><span class="led-n" aria-hidden="true"></span>
+      <span class="led-tag">you</span>
+      <span class="led-x">you open the tab</span>
+    </li>
+  </ol>
+
+  <p class="night-foot reveal">Every line is a real event type. <em>None of it needed you awake.</em></p>
+</section>
+
 <!-- ========== THREE VOWS ========== -->
 <section class="vows" id="vows">
-  <p class="section-label reveal">I. The premise</p>
+  <p class="section-label reveal">II. The premise</p>
   <h2 class="section-title reveal">Three things <em>you</em> keep.</h2>
 
   <div class="vow-list">
@@ -165,9 +266,9 @@
   </div>
 </section>
 
-<!-- ========== ANATOMY (what is it) ========== -->
+<!-- ========== ANATOMY ========== -->
 <section class="anatomy" id="anatomy">
-  <p class="section-label reveal">II. The anatomy</p>
+  <p class="section-label reveal">III. The anatomy</p>
   <h2 class="section-title reveal">What you're getting.</h2>
   <div class="anatomy-grid">
     <div class="anatomy-text">
@@ -200,9 +301,182 @@
   </div>
 </section>
 
-<!-- ========== HOW IT THINKS — five phases ========== -->
+
+<!-- ========== CAPABILITIES (bento) ========== -->
+<section class="caps" id="toolbelt">
+  <p class="section-label reveal">IV. The toolbelt</p>
+  <h2 class="section-title reveal">A toolbelt. <span class="muted">Tools the agent reaches for.</span></h2>
+
+  <div class="bento">
+
+    <article class="tile wide reveal" id="tile-memory">
+      <div class="tile-h">
+        <h3>Memory, visible</h3>
+        <span class="tile-tag">markdown on your disk</span>
+      </div>
+      <div class="tile-viz mem-viz">
+        <ul class="mem-list" id="mem-list">
+          <li><span class="mem-f">pernix.decisions.md</span><span class="mem-a">6d</span></li>
+          <li><span class="mem-f">user.profile.md</span><span class="mem-a">2h</span></li>
+          <li><span class="mem-f">pernix.lessons.md</span><span class="mem-a">1d</span></li>
+          <li><span class="mem-f">pernix.tools.md</span><span class="mem-a">4d</span></li>
+        </ul>
+        <p class="mem-delta">
+          <span class="mem-count">14 entries</span>
+          <span class="mem-after"><span class="mem-arrow">&rarr;</span> <span class="mem-now">9</span> <span class="mem-note">&middot; 5 merged overnight</span></span>
+        </p>
+      </div>
+      <p class="tile-body">Facts, decisions and lessons as plain Markdown in <code>data/memories/</code> — full-text indexed, tagged with source and type, editable in any text editor. Recall hands the agent each entry with its file and its age, so an old belief is visibly old. The idle sweeps merge duplicates and retire what went stale.</p>
+      <p class="tile-tools">remember · recall · deep_recall · update_memory · forget</p>
+    </article>
+
+    <article class="tile reveal">
+      <div class="tile-h">
+        <h3>Workers</h3>
+        <span class="tile-tag">parallel sub&#8209;agents</span>
+      </div>
+      <div class="tile-viz">
+        <svg class="viz-svg fan" viewBox="0 0 220 108" aria-hidden="true">
+          <line x1="20" y1="54" x2="60" y2="54" stroke="rgba(212,168,67,0.45)" stroke-width="1"/>
+          <line x1="60" y1="54" x2="120" y2="22" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
+          <line x1="60" y1="54" x2="120" y2="54" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
+          <line x1="60" y1="54" x2="120" y2="86" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
+          <line class="dash" x1="120" y1="22" x2="176" y2="22" stroke="rgba(212,168,67,0.4)" stroke-width="1" stroke-dasharray="2 3"/>
+          <line class="dash" x1="120" y1="54" x2="176" y2="54" stroke="rgba(212,168,67,0.4)" stroke-width="1" stroke-dasharray="2 3"/>
+          <line class="dash" x1="120" y1="86" x2="176" y2="86" stroke="rgba(212,168,67,0.4)" stroke-width="1" stroke-dasharray="2 3"/>
+          <circle cx="20"  cy="54" r="5" fill="#d4a843"/>
+          <circle cx="60"  cy="54" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
+          <circle class="wnode" cx="120" cy="22" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
+          <circle class="wnode" cx="120" cy="54" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
+          <circle class="wnode" cx="120" cy="86" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
+          <text x="182" y="25" font-family="DM Mono, monospace" font-size="7" fill="#8a7e66">vision</text>
+          <text x="182" y="57" font-family="DM Mono, monospace" font-size="7" fill="#8a7e66">code</text>
+          <text x="182" y="89" font-family="DM Mono, monospace" font-size="7" fill="#8a7e66">research</text>
+        </svg>
+      </div>
+      <p class="tile-body">Inside a turn the agent fans work out to sub-agents, each in its own session on whichever model fits — a vision specialist beside a code model beside a researcher. Flat by design: workers don't spawn workers. The parent parks in <code>awaiting_workers</code> and resumes itself when they land.</p>
+      <p class="tile-tools">spawn_worker · await_workers · message_worker</p>
+    </article>
+
+    <article class="tile reveal">
+      <div class="tile-h">
+        <h3>Autonomy</h3>
+        <span class="tile-tag">a finish line, not a step graph</span>
+      </div>
+      <div class="tile-viz auto-viz">
+        <div class="av-row">
+          <span class="av-k">goal</span>
+          <span class="av-bar"><i id="goal-bar"></i></span>
+          <span class="av-v">budgeted</span>
+        </div>
+        <div class="av-row">
+          <span class="av-k">gate</span>
+          <code class="av-code">pytest -q</code>
+          <span class="av-ok">exit 0</span>
+        </div>
+        <div class="av-row">
+          <span class="av-k">beat</span>
+          <span class="av-hb" id="av-hb" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+          <span class="av-v">round boundary</span>
+        </div>
+      </div>
+      <p class="tile-body">A goal is intent that outlives a turn — budgeted in tokens, time and continuations, auto-resumed when a turn hits its ceiling. A gate is a shell check the model cannot talk its way past: it passes on the exit code or not at all. Heartbeats steer running work without interrupting it.</p>
+      <p class="tile-tools">goal_create · add_gate · set_heartbeat · evaluate</p>
+    </article>
+
+    <article class="tile reveal">
+      <div class="tile-h">
+        <h3>Cron</h3>
+        <span class="tile-tag">a standing order</span>
+      </div>
+      <div class="tile-viz cron-viz">
+        <code class="cron-expr">0 7 * * 1-5</code>
+        <ul class="week" id="week" aria-hidden="true">
+          <li class="on">M</li><li class="on">T</li><li class="on">W</li><li class="on">T</li><li class="on">F</li><li>S</li><li>S</li>
+        </ul>
+        <p class="cron-note">each run opens its own session &mdash; <span class="cq">Cron: morning-brief</span></p>
+      </div>
+      <p class="tile-body">Put a standing prompt on a schedule and the brief is built before you wake, the digest writes itself, the watchdog never sleeps. When a run needs you, it pings your phone through the PWA or a webhook.</p>
+      <p class="tile-tools">schedule_job · test_job · list_scheduled_jobs</p>
+    </article>
+
+    <article class="tile reveal">
+      <div class="tile-h">
+        <h3>MCP</h3>
+        <span class="tile-tag">other people's tools</span>
+      </div>
+      <div class="tile-viz mcp-viz">
+        <svg class="viz-svg hub" viewBox="0 0 220 108" aria-hidden="true">
+          <circle cx="34" cy="54" r="13" fill="none" stroke="rgba(212,168,67,0.5)" stroke-width="1"/>
+          <circle cx="34" cy="54" r="3" fill="#d4a843"/>
+          <path class="spoke s1" d="M47 54 L 118 22" fill="none" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="3 4"/>
+          <path class="spoke s2" d="M47 54 L 118 54" fill="none" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="3 4"/>
+          <path class="spoke s3" d="M47 54 L 118 86" fill="none" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="3 4"/>
+          <rect x="120" y="13" width="72" height="18" fill="none" stroke="rgba(212,168,67,0.4)" stroke-width="0.9"/>
+          <rect x="120" y="45" width="72" height="18" fill="none" stroke="rgba(212,168,67,0.4)" stroke-width="0.9"/>
+          <rect x="120" y="77" width="72" height="18" fill="none" stroke="rgba(212,168,67,0.4)" stroke-width="0.9"/>
+          <text x="128" y="26" font-family="DM Mono, monospace" font-size="7.5" fill="#8a7e66">stdio</text>
+          <text x="128" y="58" font-family="DM Mono, monospace" font-size="7.5" fill="#8a7e66">http</text>
+          <text x="128" y="90" font-family="DM Mono, monospace" font-size="7.5" fill="#8a7e66">sse</text>
+        </svg>
+        <p class="mcp-name"><code>mcp_&lt;server&gt;_&lt;tool&gt;</code></p>
+      </div>
+      <p class="tile-body">External Model Context Protocol servers — on the box or across the network — register as ordinary Pernix tools. The same scout curation, the same dangerous-tool gate, the same per-tool health metrics as the built-ins.</p>
+      <p class="tile-tools">mcp_add_server · mcp_list_servers · data/mcp_servers.json</p>
+    </article>
+
+    <article class="tile wide reveal" id="tile-boundary">
+      <div class="tile-h">
+        <h3>Runs on your hardware</h3>
+        <span class="tile-tag">nothing leaves unless you send it</span>
+      </div>
+      <div class="tile-viz">
+        <svg class="viz-svg boundary" viewBox="0 0 460 168" role="img" aria-label="Diagram: server, model, memory and workspace all sit inside a box labelled your machine; two optional dashed links leave it for OpenRouter and Tavily.">
+          <rect x="4" y="20" width="286" height="132" fill="none" stroke="rgba(212,168,67,0.45)" stroke-width="1"/>
+          <rect x="16" y="12" width="104" height="16" fill="#0a0908"/>
+          <text x="22" y="24" font-family="DM Mono, monospace" font-size="10" fill="#d4a843">your machine</text>
+
+          <rect x="24" y="42" width="118" height="40" fill="none" stroke="rgba(207,192,160,0.22)" stroke-width="0.9"/>
+          <text x="36" y="66" font-family="DM Mono, monospace" font-size="10" fill="#cfc0a0">server</text>
+          <rect x="154" y="42" width="118" height="40" fill="none" stroke="rgba(207,192,160,0.22)" stroke-width="0.9"/>
+          <text x="166" y="66" font-family="DM Mono, monospace" font-size="10" fill="#cfc0a0">model</text>
+          <rect x="24" y="94" width="118" height="40" fill="none" stroke="rgba(207,192,160,0.22)" stroke-width="0.9"/>
+          <text x="36" y="118" font-family="DM Mono, monospace" font-size="10" fill="#cfc0a0">memory</text>
+          <rect x="154" y="94" width="118" height="40" fill="none" stroke="rgba(207,192,160,0.22)" stroke-width="0.9"/>
+          <text x="166" y="118" font-family="DM Mono, monospace" font-size="10" fill="#cfc0a0">workspace</text>
+
+          <path class="leak" d="M290 62 L 352 62" fill="none" stroke="rgba(212,168,67,0.5)" stroke-width="1" stroke-dasharray="4 4"/>
+          <path class="leak" d="M290 110 L 352 110" fill="none" stroke="rgba(212,168,67,0.5)" stroke-width="1" stroke-dasharray="4 4"/>
+          <rect x="354" y="50" width="102" height="24" fill="none" stroke="rgba(212,168,67,0.32)" stroke-width="0.9"/>
+          <text x="364" y="66" font-family="DM Mono, monospace" font-size="9.5" fill="#8a7e66">OpenRouter</text>
+          <rect x="354" y="98" width="102" height="24" fill="none" stroke="rgba(212,168,67,0.32)" stroke-width="0.9"/>
+          <text x="364" y="114" font-family="DM Mono, monospace" font-size="9.5" fill="#8a7e66">Tavily</text>
+          <text x="354" y="140" font-family="DM Mono, monospace" font-size="9" fill="#4f4738">optional · your key</text>
+        </svg>
+      </div>
+      <p class="tile-body">One Python process on a box you own. The model can be local with Ollama, the memory is files on your disk, the workspace is a directory you can <code>cd</code> into. No accounts, no telemetry, no hosted control plane — it binds to <code>localhost</code> until you say otherwise. The two dashed lines are the only ones that leave, and only if you put a key in <code>.env</code>.</p>
+      <p class="tile-tools">python run.py · localhost:8090 · .env</p>
+    </article>
+
+  </div>
+
+  <div class="chips reveal">
+    <p class="chips-h">also in the box</p>
+    <ul class="chip-list">
+      <li>search_web</li><li>browse_web</li><li>http_get</li><li>repl</li>
+      <li>job_start</li><li>view_image</li><li>spaces</li><li>skills</li>
+      <li>reflect &amp; retry</li><li>self-written tools</li><li>a model per role</li>
+      <li>images · audio · pdf</li><li>PWA + web push</li><li>voice input</li>
+      <li>light theme</li><li>screen-reader floor</li><li>session search</li>
+      <li>tool safety gate</li><li>RLM</li><li>reliability ledger</li>
+      <li>dreams</li><li>canary suite</li><li>adaptive policy</li><li>archive &amp; storage</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ========== HOW A TURN THINKS ========== -->
 <section class="turn" id="turn">
-  <p class="section-label reveal">III. The unfolding</p>
+  <p class="section-label reveal">V. The unfolding</p>
   <h2 class="section-title reveal">How a turn thinks itself out.</h2>
   <p class="section-sub reveal">Every message you send rolls through five phases. Each one runs on a model suited to its job — fast for planning, capable for acting, light for verifying.</p>
 
@@ -226,25 +500,25 @@
         <p>Your message lands on a persistent thread — text, images, audio, PDFs. Append-only. Resumable. Restart-proof.</p>
         <span class="phase-model">queue</span>
       </li>
-      <li class="phase reveal" data-phase="2" tabindex="0" data-log="scout · plan drafted &nbsp;·&nbsp; 3 tools picked &nbsp;·&nbsp; 1 skill loaded &nbsp;·&nbsp; 4 memory hits">
+      <li class="phase reveal" data-phase="2" tabindex="0" data-log="scout.done · 3 tools &nbsp;·&nbsp; 840ms &nbsp;·&nbsp; skill: morning-brief">
         <div class="phase-node"><span>02</span></div>
         <h4>Scout</h4>
         <p>A small fast model in a fresh context plans the approach — recalls what you've told it before, picks tools, loads only the relevant skills.</p>
         <span class="phase-model">fast model</span>
       </li>
-      <li class="phase reveal" data-phase="3" tabindex="0" data-log="tool_call · search_web(&quot;…&quot;) → 8 results &nbsp;·&nbsp; round 2 of 50 &nbsp;·&nbsp; streaming">
+      <li class="phase reveal" data-phase="3" tabindex="0" data-log="tool.call · search_web(&quot;…&quot;) → 8 results &nbsp;·&nbsp; round 2 &nbsp;·&nbsp; streaming">
         <div class="phase-node"><span>03</span></div>
-        <h4>Loop</h4>
+        <h4>Agent Loop</h4>
         <p>The main model executes. Streams tokens, calls tools, reads results, calls more tools — until done. If the cloud rate-limits, it falls back to your local model mid-loop.</p>
         <span class="phase-model">main model</span>
       </li>
-      <li class="phase reveal" data-phase="4" tabindex="0" data-log="reflect_verdict · pass &nbsp;·&nbsp; intent met &nbsp;·&nbsp; retries 0 of 2">
+      <li class="phase reveal" data-phase="4" tabindex="0" data-log="reflect.done · verdict pass &nbsp;·&nbsp; retries 0 of 2">
         <div class="phase-node"><span>04</span></div>
         <h4>Reflect</h4>
         <p>A quality gate verifies intent was met. Returns <em>pass</em>, <em>retry</em>, or <em>escalate</em>. Up to two retries before surfacing.</p>
         <span class="phase-model">verify</span>
       </li>
-      <li class="phase reveal" data-phase="5" tabindex="0" data-log="distill · 2 memories written &nbsp;·&nbsp; title → &quot;morning brief&quot; &nbsp;·&nbsp; workers reaped">
+      <li class="phase reveal" data-phase="5" tabindex="0" data-log="session.title → &quot;morning brief&quot; &nbsp;·&nbsp; 2 entries saved &nbsp;·&nbsp; workers reaped">
         <div class="phase-node"><span>05</span></div>
         <h4>Post&#8209;hooks</h4>
         <p>Auto-titling, memory distillation, worker cleanup. The cleanup runs in the background after you've already seen the answer.</p>
@@ -271,146 +545,9 @@
   </div>
 </section>
 
-<!-- ========== ORCHESTRATION ========== -->
-<section class="layers" id="layers">
-  <p class="section-label reveal">IV. The orchestration</p>
-  <h2 class="section-title reveal">Four layers <em>between</em> you and the work.</h2>
-  <p class="section-sub reveal">A conversation, a swarm, a finish line, a standing order. Each one a different way to put the agent to work — chat, parallelize, let it run, schedule.</p>
-
-  <div class="layer-grid">
-    <article class="layer reveal">
-      <header class="layer-h">
-        <span class="layer-key">layer 01</span>
-        <h3>Sessions</h3>
-        <p class="layer-tag">a conversation thread</p>
-      </header>
-      <svg class="layer-viz" viewBox="0 0 220 110" aria-hidden="true">
-        <line x1="14" y1="55" x2="206" y2="55" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
-        <circle cx="20"  cy="55" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <circle cx="62"  cy="55" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <circle cx="104" cy="55" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <circle cx="146" cy="55" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <circle cx="188" cy="55" r="5" fill="#d4a843"/>
-        <circle cx="188" cy="55" r="9" fill="none" stroke="rgba(212,168,67,0.3)" stroke-width="1"/>
-        <text x="20"  y="78" font-family="DM Mono" font-size="6" fill="#5a5040" text-anchor="middle">u</text>
-        <text x="62"  y="78" font-family="DM Mono" font-size="6" fill="#5a5040" text-anchor="middle">a</text>
-        <text x="104" y="78" font-family="DM Mono" font-size="6" fill="#5a5040" text-anchor="middle">u</text>
-        <text x="146" y="78" font-family="DM Mono" font-size="6" fill="#5a5040" text-anchor="middle">a</text>
-        <text x="188" y="78" font-family="DM Mono" font-size="6" fill="#d4a843" text-anchor="middle">now</text>
-      </svg>
-      <p class="layer-body">A persistent thread. Append-only. Every message and tool call survives a restart. One agent loop runs at a time per session — but you can have many sessions open and switch between them.</p>
-      <ul class="layer-bits">
-        <li>SQLite-backed</li>
-        <li>pause &amp; resume any session</li>
-        <li>per-session model overrides</li>
-        <li>live cost per session</li>
-      </ul>
-    </article>
-
-    <article class="layer reveal">
-      <header class="layer-h">
-        <span class="layer-key">layer 02</span>
-        <h3>Workers</h3>
-        <p class="layer-tag">parallel sub&#8209;agents</p>
-      </header>
-      <svg class="layer-viz" viewBox="0 0 220 110" aria-hidden="true">
-        <line x1="20" y1="55" x2="60" y2="55" stroke="rgba(212,168,67,0.45)" stroke-width="1"/>
-        <line x1="60" y1="55" x2="120" y2="22" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
-        <line x1="60" y1="55" x2="120" y2="55" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
-        <line x1="60" y1="55" x2="120" y2="88" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
-        <line x1="120" y1="22" x2="180" y2="22" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="2 3"/>
-        <line x1="120" y1="55" x2="180" y2="55" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="2 3"/>
-        <line x1="120" y1="88" x2="180" y2="88" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="2 3"/>
-        <circle cx="20"  cy="55" r="5" fill="#d4a843"/>
-        <circle cx="60"  cy="55" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <circle cx="120" cy="22" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <circle cx="120" cy="55" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <circle cx="120" cy="88" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <text x="186" y="25" font-family="DM Mono" font-size="6" fill="#5a5040">vision</text>
-        <text x="186" y="58" font-family="DM Mono" font-size="6" fill="#5a5040">code</text>
-        <text x="186" y="91" font-family="DM Mono" font-size="6" fill="#5a5040">research</text>
-      </svg>
-      <p class="layer-body">Within a turn, the main agent can spawn workers — sub-agents in their own sessions, each on whichever model fits its task best. A slow planner orchestrates fast editors. A vision model and a code-specialist run side by side — and the UI shows the whole fleet live as it fans out.</p>
-      <ul class="layer-bits">
-        <li>different models per worker</li>
-        <li>flat — workers don't spawn workers</li>
-        <li>pause &amp; resume at round boundaries</li>
-        <li>live fleet strip in the UI</li>
-      </ul>
-    </article>
-
-    <article class="layer reveal">
-      <header class="layer-h">
-        <span class="layer-key">layer 03</span>
-        <h3>Autonomy</h3>
-        <p class="layer-tag">a finish line, not a step graph</p>
-      </header>
-      <svg class="layer-viz" viewBox="0 0 220 110" aria-hidden="true">
-        <line x1="30" y1="22" x2="100" y2="55" stroke="rgba(212,168,67,0.4)" stroke-width="1"/>
-        <line x1="30" y1="88" x2="100" y2="55" stroke="rgba(212,168,67,0.4)" stroke-width="1"/>
-        <line x1="100" y1="55" x2="170" y2="22" stroke="rgba(212,168,67,0.4)" stroke-width="1"/>
-        <line x1="100" y1="55" x2="170" y2="88" stroke="rgba(212,168,67,0.4)" stroke-width="1"/>
-        <line x1="170" y1="22" x2="200" y2="55" stroke="rgba(212,168,67,0.4)" stroke-width="1"/>
-        <line x1="170" y1="88" x2="200" y2="55" stroke="rgba(212,168,67,0.4)" stroke-width="1"/>
-        <rect x="22" y="14" width="16" height="16" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <rect x="22" y="80" width="16" height="16" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <rect x="92" y="47" width="16" height="16" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <rect x="162" y="14" width="16" height="16" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <rect x="162" y="80" width="16" height="16" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <rect x="192" y="47" width="16" height="16" fill="#d4a843"/>
-      </svg>
-      <p class="layer-body">A <strong>goal</strong> is intent that outlives a turn — budgeted in tokens, time, and continuations, auto-resumed when a turn hits its ceiling. A <strong>gate</strong> is a deterministic shell check the model cannot talk its way past. <strong>Heartbeats</strong> steer running work without interrupting it. Declare the finish line, not the step graph — the agent decides each next step from what the last one actually returned.</p>
-      <ul class="layer-bits">
-        <li>gates: pass/fail by exit code</li>
-        <li>goals with budgets + continuations</li>
-        <li>heartbeats at round boundaries</li>
-        <li>unattended multi-hour runs</li>
-      </ul>
-    </article>
-
-    <article class="layer reveal">
-      <header class="layer-h">
-        <span class="layer-key">layer 04</span>
-        <h3>Cron</h3>
-        <p class="layer-tag">a standing order</p>
-      </header>
-      <svg class="layer-viz" viewBox="0 0 220 110" aria-hidden="true">
-        <circle cx="60" cy="55" r="34" fill="none" stroke="rgba(212,168,67,0.4)" stroke-width="1"/>
-        <line x1="60" y1="21" x2="60" y2="27" stroke="rgba(212,168,67,0.5)" stroke-width="1"/>
-        <line x1="60" y1="83" x2="60" y2="89" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
-        <line x1="26" y1="55" x2="32" y2="55" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
-        <line x1="88" y1="55" x2="94" y2="55" stroke="rgba(212,168,67,0.35)" stroke-width="1"/>
-        <line x1="60" y1="55" x2="60" y2="33" stroke="#d4a843" stroke-width="1"/>
-        <line x1="60" y1="55" x2="74" y2="61" stroke="#d4a843" stroke-width="0.8"/>
-        <circle cx="60" cy="55" r="2" fill="#d4a843"/>
-        <line x1="94" y1="55" x2="150" y2="30" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="2 3"/>
-        <line x1="94" y1="55" x2="150" y2="55" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="2 3"/>
-        <line x1="94" y1="55" x2="150" y2="80" stroke="rgba(212,168,67,0.35)" stroke-width="1" stroke-dasharray="2 3"/>
-        <circle cx="156" cy="30" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <circle cx="156" cy="55" r="4" fill="#0a0908" stroke="#d4a843" stroke-width="1"/>
-        <circle cx="156" cy="80" r="4" fill="#d4a843"/>
-        <text x="168" y="33" font-family="DM Mono" font-size="6" fill="#5a5040">mon</text>
-        <text x="168" y="58" font-family="DM Mono" font-size="6" fill="#5a5040">tue</text>
-        <text x="168" y="83" font-family="DM Mono" font-size="6" fill="#d4a843">now</text>
-      </svg>
-      <p class="layer-body">Put a standing prompt on a schedule. Each run gets its own session — the morning brief is built before you wake, the weekly digest writes itself, the watchdog never sleeps. When something needs you, the agent can ping your phone through the PWA's push notifications or a webhook.</p>
-      <ul class="layer-bits">
-        <li>every run in its own session</li>
-        <li>cron presets in the UI</li>
-        <li>runs unattended, results in workspace</li>
-        <li>push / webhook alerts</li>
-      </ul>
-    </article>
-  </div>
-
-  <p class="layer-foot reveal">
-    <em>One conversation. Many workers. A finish line. A clock above them all.</em> &nbsp; Pernix is happiest when you use all four.
-  </p>
-</section>
-
 <!-- ========== STATE MACHINE ========== -->
 <section class="states" id="states">
-  <p class="section-label reveal">V. The state machine</p>
+  <p class="section-label reveal">VI. The state machine</p>
   <h2 class="section-title reveal">Ten states. One session at a time.</h2>
   <p class="section-sub reveal">Every session is in exactly one state, and every edge is a <code>(state,&nbsp;reason)</code> pair in an exhaustive table — anything not in the table is rejected. Transitions are logged, replayed to the UI in real time, and recovered after a crash. Hover or tap a state to see its real exits; left alone, the diagram walks an actual turn.</p>
 
@@ -479,166 +616,9 @@
   <p class="state-foot reveal">Edges drawn from the table in <code>sessions/state_v2.py</code>. Two housekeeping reasons are omitted for legibility: <code>reaper-unstick</code> and <code>cancel-timeout</code> return any stuck state to <code>idle_ready</code> — explicit rows in the table, not a generic force.</p>
 </section>
 
-<!-- ========== DURABLE LOOP THESIS ========== -->
-<section class="durable" id="durable">
-  <p class="section-label reveal">VI. The thesis</p>
-  <h2 class="section-title reveal">Build the loop once.<br><em>Swap the brain freely.</em></h2>
-  <p class="section-sub reveal">A chatbot is where you ask for help. A harness is where work happens — a job to do, a place to run, memory of what came before, and enough structure that the model can change without the work noticing.</p>
-
-  <div class="durable-trio">
-    <div class="durable-col reveal">
-      <h4>The loop is stable</h4>
-      <p>Define the job once — the skill, the gates, the schedule. It runs the same today and next quarter. <em>The loop outlives the brain.</em></p>
-    </div>
-    <div class="durable-col reveal">
-      <h4>The brain is swappable</h4>
-      <p>Cheap local passes, frontier reasoning, a vision specialist in one worker and a code model in the next. <em>The loop doesn't care which brain is inside.</em></p>
-    </div>
-    <div class="durable-col reveal">
-      <h4>The memory is yours</h4>
-      <p>Decisions and lessons in plain Markdown on your disk. Switch models or providers; the memory follows. <em>No lock-in. No drift.</em></p>
-    </div>
-  </div>
-</section>
-
-<!-- ========== CAPABILITIES ========== -->
-<section class="caps" id="capabilities">
-  <p class="section-label reveal">VII. The capabilities</p>
-  <h2 class="section-title reveal">A toolbelt. <span class="muted">Tools the agent reaches for.</span></h2>
-
-  <div class="caps-grid">
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><rect x="8" y="10" width="32" height="6" fill="none" stroke="currentColor" stroke-width="1"/><rect x="8" y="20" width="32" height="6" fill="none" stroke="currentColor" stroke-width="1"/><rect x="8" y="30" width="32" height="6" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="13" cy="13" r="1" fill="currentColor"/><circle cx="13" cy="23" r="1" fill="currentColor"/><circle cx="13" cy="33" r="1" fill="currentColor"/></svg>
-      <h4>Persistent memory</h4>
-      <p>Markdown facts, decisions, lessons. Searched before each turn, with each entry's age and provenance shown at recall. Idle-time consolidation merges duplicates and ages out stale lessons.</p>
-      <p class="cap-tools">remember · recall · update_memory · forget</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><path d="M12 11 V37" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="12" cy="11" r="1.6" fill="currentColor"/><rect x="19" y="10" width="20" height="6" fill="none" stroke="currentColor" stroke-width="0.8"/><rect x="19" y="21" width="20" height="6" fill="none" stroke="currentColor" stroke-width="0.8"/><rect x="19" y="32" width="20" height="6" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="12" y1="13" x2="19" y2="13" stroke="currentColor" stroke-width="0.6" opacity="0.6"/><line x1="12" y1="24" x2="19" y2="24" stroke="currentColor" stroke-width="0.6" opacity="0.6"/><line x1="12" y1="35" x2="19" y2="35" stroke="currentColor" stroke-width="0.6" opacity="0.6"/></svg>
-      <h4>Spaces</h4>
-      <p>Group long-lived work into a named, coloured space whose sessions share directives, memory, a workspace home and one REPL kernel — and never roll off the sidebar.</p>
-      <p class="cap-tools">data/agent/spaces/&lt;slug&gt; · pernix.space.&lt;slug&gt;.* · /api/spaces</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="24" cy="24" r="14" fill="none" stroke="currentColor" stroke-width="1"/><ellipse cx="24" cy="24" rx="6" ry="14" fill="none" stroke="currentColor" stroke-width="1"/><line x1="10" y1="24" x2="38" y2="24" stroke="currentColor" stroke-width="1"/><line x1="24" y1="10" x2="24" y2="38" stroke="currentColor" stroke-width="0.5"/></svg>
-      <h4>Web search & browser</h4>
-      <p>Tavily for search. Playwright for JS-heavy pages, SPAs, paywalled markdown.</p>
-      <p class="cap-tools">search_web · http_get · browse_web</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="14" cy="18" r="4" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="34" cy="18" r="4" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="34" r="4" fill="none" stroke="currentColor" stroke-width="1"/><line x1="14" y1="22" x2="22" y2="32" stroke="currentColor" stroke-width="0.6"/><line x1="34" y1="22" x2="26" y2="32" stroke="currentColor" stroke-width="0.6"/><line x1="18" y1="18" x2="30" y2="18" stroke="currentColor" stroke-width="0.6"/></svg>
-      <h4>Workers</h4>
-      <p>Spawn parallel sub-agents on different models. Slow planner, fast editor, vision specialist — same conversation.</p>
-      <p class="cap-tools">spawn_worker · message_worker · await_workers</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><polygon points="24,8 40,16 40,32 24,40 8,32 8,16" fill="none" stroke="currentColor" stroke-width="1"/><polygon points="24,16 32,20 32,28 24,32 16,28 16,20" fill="none" stroke="currentColor" stroke-width="1" opacity="0.6"/></svg>
-      <h4>Skills</h4>
-      <p>Markdown capability packs with YAML frontmatter. The agent loads them only when relevant.</p>
-      <p class="cap-tools">discover_skills · load_skill · read_skill_resource</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="24" cy="24" r="16" fill="none" stroke="currentColor" stroke-width="1"/><line x1="24" y1="14" x2="24" y2="24" stroke="currentColor" stroke-width="1"/><line x1="24" y1="24" x2="32" y2="28" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="24" r="1.5" fill="currentColor"/></svg>
-      <h4>Cron scheduling</h4>
-      <p>Run agents on a schedule. Morning brief, weekly digest, watchdog scripts — all built in.</p>
-      <p class="cap-tools">schedule_job · update_scheduled_job · list_scheduled_jobs</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><path d="M10 24 Q 24 8, 38 24" fill="none" stroke="currentColor" stroke-width="1"/><path d="M10 24 Q 24 40, 38 24" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="24" r="4" fill="none" stroke="currentColor" stroke-width="1"/></svg>
-      <h4>Reflect & retry</h4>
-      <p>On by default: each response is graded against the original intent. Missed it? The turn re-runs with the lesson appended — two retries, then it surfaces honestly.</p>
-      <p class="cap-tools">core/reflect.py · pass | retry | escalate</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><rect x="10" y="10" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1"/><line x1="24" y1="18" x2="24" y2="30" stroke="currentColor" stroke-width="1"/><line x1="18" y1="24" x2="30" y2="24" stroke="currentColor" stroke-width="1"/></svg>
-      <h4>Self-extending</h4>
-      <p>The agent can write its own tools and skills. New capabilities show up on the next turn — no rebuild, no restart.</p>
-      <p class="cap-tools">create_tool · create_skill · install_package</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="15" cy="24" r="6.5" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="15" cy="24" r="1.6" fill="currentColor"/><line x1="21.5" y1="24" x2="30" y2="24" stroke="currentColor" stroke-width="0.8"/><line x1="19.6" y1="19.4" x2="30" y2="12" stroke="currentColor" stroke-width="0.6" stroke-dasharray="2 3"/><line x1="19.6" y1="28.6" x2="30" y2="36" stroke="currentColor" stroke-width="0.6" stroke-dasharray="2 3"/><rect x="30" y="8" width="10" height="8" fill="none" stroke="currentColor" stroke-width="0.8"/><rect x="30" y="20" width="10" height="8" fill="none" stroke="currentColor" stroke-width="0.8"/><rect x="30" y="32" width="10" height="8" fill="none" stroke="currentColor" stroke-width="0.8"/></svg>
-      <h4>Plugs into MCP</h4>
-      <p>External Model Context Protocol servers — stdio or HTTP, on the box or across the network — register as ordinary Pernix tools, under the same scout curation and the same safety gate as the built-ins.</p>
-      <p class="cap-tools">data/mcp_servers.json · mcp_&lt;server&gt;_&lt;tool&gt; · mcp_add_server</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="16" cy="24" r="6" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="32" cy="24" r="6" fill="none" stroke="currentColor" stroke-width="1"/><line x1="22" y1="24" x2="26" y2="24" stroke="currentColor" stroke-width="1"/><line x1="10" y1="14" x2="6" y2="14" stroke="currentColor" stroke-width="0.6"/><line x1="38" y1="14" x2="42" y2="14" stroke="currentColor" stroke-width="0.6"/></svg>
-      <h4>A model per role</h4>
-      <p>Three roles — Primary, Background, Backup — across Ollama, OpenRouter, or any OpenAI-compatible server. Auto-fallback to your backup model when the cloud rate-limits, times out, or hiccups.</p>
-      <p class="cap-tools">switch_model · list_available_models · call_model</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><path d="M8 24 Q 24 10, 40 24 Q 24 38, 8 24 Z" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="24" r="5" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="24" cy="24" r="1.5" fill="currentColor"/><path d="M12 38 Q 18 34, 24 38 Q 30 42, 36 38" fill="none" stroke="currentColor" stroke-width="0.7" opacity="0.6"/></svg>
-      <h4>Sees, hears, reads</h4>
-      <p>Attach images for vision models, audio in any common format — transcoded to WAV automatically — and PDFs, extracted to text the agent can read and search. With <code>view_image</code>, the agent can also look at images it renders itself.</p>
-      <p class="cap-tools">images · audio → wav · pdf → text · view_image</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><rect x="16" y="8" width="16" height="32" rx="2" fill="none" stroke="currentColor" stroke-width="1"/><line x1="21" y1="12" x2="27" y2="12" stroke="currentColor" stroke-width="0.8"/><circle cx="24" cy="35" r="1.5" fill="none" stroke="currentColor" stroke-width="0.8"/><path d="M36 14 Q 40 19, 36 24" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.7"/><path d="M12 14 Q 8 19, 12 24" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.7"/></svg>
-      <h4>In your pocket</h4>
-      <p>The web UI is an installable PWA with a real phone and tablet tier — drawers and action sheets under a finger, the sidebar still docked on a landscape iPad — plus browser push notifications and voice input, four dictation engines each labeled with where your audio goes. In network mode, a QR code on the console gets your phone onto it in seconds.</p>
-      <p class="cap-tools">pwa · web push · run.py --qr</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="16" cy="19" r="9" fill="none" stroke="currentColor" stroke-width="1"/><path d="M16 10 A 9 9 0 0 1 16 28 Z" fill="currentColor" opacity="0.7"/><rect x="30" y="11" width="10" height="15" rx="1.5" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="33" y1="14" x2="37" y2="14" stroke="currentColor" stroke-width="0.6" opacity="0.7"/><rect x="8" y="33" width="32" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="13" y1="37.5" x2="35" y2="37.5" stroke="currentColor" stroke-width="0.6" opacity="0.55"/></svg>
-      <h4>For everyone</h4>
-      <p>A light theme beside the dark one, panels you can work from a keyboard with every icon-only control named for a screen reader, and one layout that follows the viewport while the touch sizes follow the pointer — phone, tablet, monitor.</p>
-      <p class="cap-tools">a11y.js · compact.css · touch.css</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><polyline points="8,32 16,32 20,18 26,38 30,26 34,26 40,26" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="40" cy="26" r="2" fill="none" stroke="currentColor" stroke-width="0.8"/></svg>
-      <h4>Glass walls</h4>
-      <p>Every turn as a lane of phases, the story of the one you pick told back in the agent's own words, and the state machine as a map lit live. Follow the worker fleet as it fans out, search full-text across every past session, and see what each one cost.</p>
-      <p class="cap-tools">GET /api/sessions/{id}/turns · /events · sse</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><path d="M24 6 L40 12 V24 Q40 36 24 42 Q8 36 8 24 V12 Z" fill="none" stroke="currentColor" stroke-width="1"/><line x1="16" y1="18" x2="32" y2="18" stroke="currentColor" stroke-width="0.8" opacity="0.9"/><line x1="16" y1="24" x2="32" y2="24" stroke="currentColor" stroke-width="0.8" opacity="0.6"/><line x1="16" y1="30" x2="32" y2="30" stroke="currentColor" stroke-width="0.8" opacity="0.32"/></svg>
-      <h4>Tool boundaries</h4>
-      <p>Tools are tagged <em>safe</em>, <em>caution</em>, or <em>dangerous</em>. Dangerous calls require per-session approval after the agent declares exactly what it will do — and every distinct action gates separately. The agent gets hands; the user keeps the keys.</p>
-      <p class="cap-tools">ask_user · approve_dangerous_tool</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><rect x="8" y="8" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1"/><rect x="14" y="14" width="20" height="20" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.75"/><rect x="20" y="20" width="8" height="8" fill="none" stroke="currentColor" stroke-width="0.6" opacity="0.5"/></svg>
-      <h4>Beyond the window</h4>
-      <p>An input too big for any context window becomes a variable in a sandboxed REPL. A root model writes code to slice it, farming chunks out to budgeted sub-calls until one answer comes back. Off by default.</p>
-      <p class="cap-tools">rlm_process · llm_query · repl</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><line x1="24" y1="10" x2="24" y2="38" stroke="currentColor" stroke-width="1"/><line x1="12" y1="14" x2="36" y2="14" stroke="currentColor" stroke-width="1"/><line x1="12" y1="14" x2="8" y2="24" stroke="currentColor" stroke-width="0.6"/><line x1="12" y1="14" x2="16" y2="24" stroke="currentColor" stroke-width="0.6"/><path d="M8 24 Q 12 28, 16 24" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="36" y1="14" x2="32" y2="26" stroke="currentColor" stroke-width="0.6"/><line x1="36" y1="14" x2="40" y2="26" stroke="currentColor" stroke-width="0.6"/><path d="M32 26 Q 36 30, 40 26" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="18" y1="38" x2="30" y2="38" stroke="currentColor" stroke-width="1"/></svg>
-      <h4>Earned trust</h4>
-      <p>Tool outcomes feed an append-only evidence ledger — reliability is earned, not assumed. The planner gets an exception report: healthy tools say nothing, so silence means no known problem. Off by default.</p>
-      <p class="cap-tools">predict_reliability · why_reliability</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><path d="M30 8 A 16 16 0 1 0 30 40 A 12.5 12.5 0 1 1 30 8 Z" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="34" cy="16" r="1" fill="currentColor"/><circle cx="38" cy="24" r="0.7" fill="currentColor" opacity="0.7"/></svg>
-      <h4>Dreams on idle</h4>
-      <p>Left alone, the agent raises hypotheses about its own memory — contradictions, stale lessons, tool patterns — then tries to <em>refute</em> them against recorded outcomes. A read-only journal narrates each day. Off by default.</p>
-      <p class="cap-tools">workspace/dreams/ · dream journal</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><rect x="8" y="14" width="32" height="20" rx="2" fill="none" stroke="currentColor" stroke-width="1"/><polyline points="12,24 18,24 21,18 25,30 28,24 36,24" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="16" y1="40" x2="32" y2="40" stroke="currentColor" stroke-width="0.8" opacity="0.6"/></svg>
-      <h4>Long compute</h4>
-      <p>Detached background jobs for work that outlives a turn: output captured to a log, completion durable across restarts, wall-clock caps, whole-group kill. The agent starts a solver, keeps working, and reads the log when it lands.</p>
-      <p class="cap-tools">job_start · job_tail · job_kill</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="24" cy="24" r="15" fill="none" stroke="currentColor" stroke-width="1"/><path d="M24 9 V 24 L 33 30" fill="none" stroke="currentColor" stroke-width="0.8"/><rect x="18" y="18" width="12" height="12" fill="none" stroke="currentColor" stroke-width="0.7" opacity="0.6"/></svg>
-      <h4>A REPL that remembers</h4>
-      <p>An optional persistent per-session Python kernel. Variables survive tool rounds, turns, compaction — and restarts, via snapshots. Huge tool results bind as variables instead of flooding the context window. Off by default.</p>
-      <p class="cap-tools">repl · session kernel · snapshots</p>
-    </article>
-    <article class="cap reveal">
-      <svg class="cap-icon" viewBox="0 0 48 48"><polyline points="8,36 16,30 24,32 32,22 40,14" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="40" cy="14" r="2.5" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="8" y1="40" x2="40" y2="40" stroke="currentColor" stroke-width="0.6" opacity="0.5"/></svg>
-      <h4>Gets better, provably</h4>
-      <p>Golden tasks re-run headlessly measure whether the agent is actually improving; a governed policy store applies low-risk edits with a veto window, full history, and one-click rollback — and a tripwire flags any batch that makes things worse. Off by default.</p>
-      <p class="cap-tools">canary suite · adaptive layer · telos</p>
-    </article>
-  </div>
-</section>
-
 <!-- ========== OPEN API ========== -->
 <section class="api" id="api">
-  <p class="section-label reveal">VIII. The interface</p>
+  <p class="section-label reveal">VII. The interface</p>
   <h2 class="section-title reveal">An open API. <em>Tinker freely.</em></h2>
   <div class="api-grid">
     <div class="api-text">
@@ -732,7 +712,7 @@ requests.post(<span class="str">"http://localhost:8090/api/chat"</span>, json={
 
 <!-- ========== SOUL & RULES ========== -->
 <section class="identity" id="identity">
-  <p class="section-label reveal">IX. The soul</p>
+  <p class="section-label reveal">VIII. The soul</p>
   <h2 class="section-title reveal">Three markdown files, <em>no black boxes</em>.</h2>
   <div class="identity-grid">
     <div class="identity-text">
@@ -860,7 +840,7 @@ and communicate clearly.
 
 <!-- ========== QUICK START ========== -->
 <section class="start" id="start">
-  <p class="section-label reveal">X. The first run</p>
+  <p class="section-label reveal">IX. The first run</p>
   <h2 class="section-title reveal">Just minutes from clone to chat.</h2>
   <p class="section-sub reveal">Install Ollama, pull a recent model, clone the repo, run the server. Pernix is well-tested with the latest <strong>Qwen 3 series</strong> on Ollama, and with current frontier models on OpenRouter. Use whatever's current — agentic workloads benefit from newer models with stronger tool-calling and reasoning.</p>
 
@@ -894,7 +874,7 @@ and communicate clearly.
 
 <!-- ========== RELEASE v3.1.0 ========== -->
 <section class="honest" id="release">
-  <p class="section-label reveal">XI. The release</p>
+  <p class="section-label reveal">X. The release</p>
   <h2 class="section-title reveal">New in <em>v3.1.0</em>.</h2>
   <p class="section-sub reveal">Everything since v3.0.0 under one tag — one week of field campaigns on the reference box, one commit per finding. The full story is in the <a class="link" href="https://github.com/calvincs/Pernix/blob/main/CHANGELOG.md" target="_blank" rel="noopener">changelog</a>; upgrade notes in the <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md" target="_blank" rel="noopener">upgrade guide</a>.</p>
 
@@ -931,7 +911,7 @@ and communicate clearly.
 
 <!-- ========== HONEST FRAMING ========== -->
 <section class="honest">
-  <p class="section-label reveal">XII. Honest about what this is</p>
+  <p class="section-label reveal">XI. Honest about what this is</p>
   <h2 class="section-title reveal">A tool for <em>integrations and recurring work</em>.</h2>
   <p class="section-sub reveal">Pernix is alpha. Actively developed. Things will change. Reading what it's <em>for</em> and what it <em>isn't</em> will save you the wrong expectation.</p>
 
