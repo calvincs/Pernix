@@ -2540,6 +2540,134 @@ section > *:not(.wall):not(.closing-inner) { max-width: var(--maxw); margin-left
   .night-foot { font-size: 16px; }
 }
 
+/* =====================================================
+   REAL SCREENSHOTS — device tabs, framed figures, the strip
+   ===================================================== */
+
+/* ---- anatomy: Desktop / Phone on the window mock ---- */
+.shot-tabs { margin-left: auto; display: inline-flex; gap: 4px; }
+.shot-tab {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--vellum-faint);
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 4px 10px;
+  min-height: 24px;
+  cursor: pointer;
+  transition: color .18s var(--ease), border-color .18s var(--ease);
+}
+.shot-tab:hover { color: var(--vellum); }
+.shot-tab.active { color: var(--gold-bright); border-color: var(--gold-deep); }
+.shot-tab:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+
+.shot-pane.hidden { display: none; }
+.phone-shot {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 440px;
+  margin: 20px auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+}
+.phone-caption { display: none; }
+.window-mock.is-phone .window-caption { display: none; }
+.window-mock.is-phone .phone-caption { display: block; }
+
+/* ---- a framed figure: the window chrome around one real crop ---- */
+.shot-figure { margin-top: 40px; }
+.shot-frame {
+  background: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+  box-shadow: 0 20px 52px rgba(0, 0, 0, 0.45);
+}
+.shot-frame .window-chrome { padding: 8px 12px; }
+.shot-frame img {
+  display: block;
+  width: 100%;
+  height: 300px;
+  object-fit: cover;
+  object-position: top left;
+}
+.shot-frame.is-wide { max-width: 860px; margin: 0 auto; }
+.shot-frame.is-wide img { height: 420px; object-position: top center; }
+
+.shot-figure figcaption,
+.shot-card figcaption {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  line-height: 1.6;
+  color: var(--vellum-dim);
+  margin-top: 12px;
+}
+.shot-figure figcaption { text-align: center; max-width: 860px; margin-left: auto; margin-right: auto; }
+
+/* ---- "In the app" three-up ---- */
+.inapp {
+  margin-top: 40px;
+  padding-top: 28px;
+  border-top: 1px solid var(--line-2);
+}
+.inapp-h {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--vellum-faint);
+  margin-bottom: 22px;
+}
+.inapp-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 26px;
+}
+.shot-card { min-width: 0; }
+.shot-card figcaption { color: var(--gold-deep); }
+
+/* ---- release, compacted to a strip ---- */
+.release { padding-top: 84px; border-top: 1px solid var(--line-2); }
+.rel-strip {
+  list-style: none;
+  margin-top: 34px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+.rel-strip li {
+  background: var(--ink);
+  padding: 22px 24px;
+  font-size: 15.5px;
+  line-height: 1.58;
+  color: var(--vellum-dim);
+}
+.rel-strip strong { color: var(--vellum-bright); }
+
+@media (max-width: 980px) {
+  .shot-frame.is-wide img { height: 340px; }
+  .inapp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+  .rel-strip { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 640px) {
+  .inapp-grid { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  .shot-frame img { height: 260px; }
+  .shot-frame.is-wide img { height: 210px; }
+  .phone-shot { max-height: 460px; margin: 18px auto; }
+  .shot-figure { margin-top: 30px; }
+  .inapp { margin-top: 32px; padding-top: 24px; }
+  .rel-strip li { padding: 18px 20px; }
+}
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

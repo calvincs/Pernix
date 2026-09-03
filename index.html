@@ -293,10 +293,21 @@
       <div class="window-chrome">
         <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
         <span class="window-url">localhost:8090</span>
+        <span class="shot-tabs" role="tablist" aria-label="Screen size">
+          <button class="shot-tab active" type="button" role="tab" id="tab-desktop" aria-selected="true" aria-controls="shot-desktop" data-shot="desktop">Desktop</button>
+          <button class="shot-tab" type="button" role="tab" id="tab-phone" aria-selected="false" aria-controls="shot-phone" data-shot="phone">Phone</button>
+        </span>
       </div>
+      <div class="shot-pane" id="shot-desktop" role="tabpanel" aria-labelledby="tab-desktop">
       <img class="window-shot" src="img/app.png" loading="lazy" decoding="async" width="1360" height="850"
-           alt="The Pernix web UI: the agent's finished morning brief — Austin's forecast, a note that nothing was flagged, and three headlines with their sources — above a table for the weekday 7am job it wrote and dry-ran. The sidebar lists the session and the job's own test run; the status bar shows the model, context use, and an idle state.">
-      <p class="window-caption">An unedited 3.1 session: asked for a morning brief, the agent gathered the forecast and the headlines itself, wrote the weekday 7am job, and dry-ran it before reporting back. Local Qwen3.8-27B, one take.</p>
+           alt="The Pernix web UI: a request to compare Austin and Chicago weather, then three tool rows the agent actually ran — two Open-Meteo fetches at 611ms and 628ms and a file_write of weather-compare.md — and its summary underneath. The sidebar shows a coloured Research space above sessions bucketed into Today, Yesterday and This Week; the status bar carries the model chip, context use and an idle state.">
+      </div>
+      <div class="shot-pane hidden" id="shot-phone" role="tabpanel" aria-labelledby="tab-phone">
+        <img class="phone-shot" src="img/shots/app-phone.png" loading="lazy" decoding="async" width="390" height="844"
+             alt="The chat on a phone &mdash; drawer sidebar, compact status strip, tool rows and answer stacked full-width.">
+      </div>
+      <p class="window-caption">A real 3.1 session, one take: asked to compare two cities' forecasts and save the result, the agent fetched both from Open-Meteo, wrote the file, and reported what it found — every tool call still open for inspection. Local Qwen3.8-27B.</p>
+      <p class="window-caption phone-caption">The same session on a 390&#8209;point phone: the sidebar becomes a drawer, the status bar collapses to a strip, and the tool rows and the answer stack full-width above the composer.</p>
     </div>
   </div>
 </section>
@@ -472,6 +483,36 @@
       <li>dreams</li><li>canary suite</li><li>adaptive policy</li><li>archive &amp; storage</li>
     </ul>
   </div>
+
+  <div class="inapp reveal">
+    <p class="inapp-h">In the app</p>
+    <div class="inapp-grid">
+      <figure class="shot-card">
+        <div class="shot-frame">
+          <div class="window-chrome"><span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span></div>
+          <img src="img/shots/workers-crop.png" loading="lazy" decoding="async" width="493" height="465"
+               alt="One turn spawning two parallel workers, awaiting them, and merging their results.">
+        </div>
+        <figcaption>session &rsaquo; transcript &mdash; fan out, await, merge</figcaption>
+      </figure>
+      <figure class="shot-card">
+        <div class="shot-frame">
+          <div class="window-chrome"><span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span></div>
+          <img src="img/shots/memory-crop.png" loading="lazy" decoding="async" width="359" height="450"
+               alt="Six memory files the agent has written across sessions, with entry counts and timestamps.">
+        </div>
+        <figcaption>Explorer &rsaquo; Knowledge &mdash; six files, twenty entries</figcaption>
+      </figure>
+      <figure class="shot-card">
+        <div class="shot-frame">
+          <div class="window-chrome"><span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span></div>
+          <img src="img/shots/workspace-crop.png" loading="lazy" decoding="async" width="359" height="650"
+               alt="A file the agent wrote, rendered in the Explorer&rsquo;s workspace browser.">
+        </div>
+        <figcaption>Explorer &rsaquo; Files &mdash; a file the agent wrote, rendered</figcaption>
+      </figure>
+    </div>
+  </div>
 </section>
 
 <!-- ========== HOW A TURN THINKS ========== -->
@@ -613,7 +654,19 @@
     </aside>
   </div>
 
-  <p class="state-foot reveal">Edges drawn from the table in <code>sessions/state_v2.py</code>. Two housekeeping reasons are omitted for legibility: <code>reaper-unstick</code> and <code>cancel-timeout</code> return any stuck state to <code>idle_ready</code> — explicit rows in the table, not a generic force.</p>
+  <p class="state-foot reveal">Edges drawn from the table in <code>sessions/state_v2.py</code>. Two housekeeping reasons are omitted for legibility. <code>reaper-unstick</code> returns six states to <code>idle_ready</code> — scouting, processing, pause_requested, paused, awaiting_user, awaiting_workers; <code>cancel-timeout</code> covers those six plus compacting, finalizing and cancelling. Both are explicit rows in the table, not a generic force.</p>
+
+  <figure class="shot-figure reveal">
+    <div class="shot-frame is-wide">
+      <div class="window-chrome">
+        <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
+        <span class="window-url">localhost:8090 &middot; State timeline</span>
+      </div>
+      <img src="img/shots/timeline-crop.png" loading="lazy" decoding="async" width="846" height="776"
+           alt="Five turns as phase-segmented lanes; the selected turn shows the scout&rsquo;s plan and its chosen tools.">
+    </div>
+    <figcaption>The same machine inside the app: five turns as phase bars, the fifth opened to its plan.</figcaption>
+  </figure>
 </section>
 
 <!-- ========== OPEN API ========== -->
@@ -651,11 +704,6 @@
           <span class="route">/api/sessions</span>
           <span class="route-desc">List all sessions</span>
         </div>
-        <div class="swagger-route post">
-          <span class="verb post">POST</span>
-          <span class="route">/api/sessions</span>
-          <span class="route-desc">Create a new session</span>
-        </div>
         <div class="swagger-route post expanded">
           <span class="verb post">POST</span>
           <span class="route">/api/chat</span>
@@ -692,18 +740,8 @@ requests.post(<span class="str">"http://localhost:8090/api/chat"</span>, json={
           <span class="route">/api/sessions/{id}/events</span>
           <span class="route-desc">SSE stream · tokens, tools, state</span>
         </div>
-        <div class="swagger-route post">
-          <span class="verb post">POST</span>
-          <span class="route">/api/sessions/{id}/pause</span>
-          <span class="route-desc">Pause a running session</span>
-        </div>
-        <div class="swagger-route get">
-          <span class="verb get">GET</span>
-          <span class="route">/api/memory/search</span>
-          <span class="route-desc">Hybrid BM25 + vector memory search</span>
-        </div>
         <div class="swagger-foot">
-          <span class="muted">+ 154 more endpoints · openapi.json</span>
+          <span class="muted">+ 157 more endpoints · openapi.json</span>
         </div>
       </div>
     </div>
@@ -873,47 +911,24 @@ and communicate clearly.
 </section>
 
 <!-- ========== RELEASE v3.1.0 ========== -->
-<section class="honest" id="release">
+<section class="release" id="release">
   <p class="section-label reveal">X. The release</p>
   <h2 class="section-title reveal">New in <em>v3.1.0</em>.</h2>
   <p class="section-sub reveal">Everything since v3.0.0 under one tag — one week of field campaigns on the reference box, one commit per finding. The full story is in the <a class="link" href="https://github.com/calvincs/Pernix/blob/main/CHANGELOG.md" target="_blank" rel="noopener">changelog</a>; upgrade notes in the <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md" target="_blank" rel="noopener">upgrade guide</a>.</p>
 
-  <div class="honest-grid">
-    <article class="honest-col is-for reveal">
-      <p class="honest-h">What's new…</p>
-      <ul>
-        <li><strong>Spaces.</strong> Named, coloured groups of long-lived sessions that share directives, memory, a workspace home and one REPL kernel — and, off by default, suggestions for the work you keep coming back to.</li>
-        <li><strong>An MCP client.</strong> External Model Context Protocol servers, local or remote, register as first-class Pernix tools. Scout curation, the dangerous-tool gate and the per-tool health metrics apply to them unchanged.</li>
-        <li><strong>A front end for someone who didn't write it.</strong> A light theme, accessibility as a floor rather than a polish layer, a real phone <em>and</em> tablet tier, and the Explorer and Settings regrouped by what you came to do.</li>
-        <li><strong>Archive, not delete.</strong> A chat idle for thirty days leaves the sidebar and keeps every message, still searchable, still openable. A Storage tab owns the archive, the backups, and the database size.</li>
-        <li><strong>The State timeline, retold.</strong> A lane of turns, the story of the one you pick in the agent's own words, and the state machine as a map lit live while the turn runs.</li>
-        <li><strong>Upkeep that runs itself.</strong> Skills heal from their own failures, the canary suite fires on change instead of on a clock, and adaptive retention retires a hint on its outcomes rather than on how often it was cited.</li>
-        <li><strong>The September stability audit.</strong> 122 findings across eleven passes; the critical and high ones fixed one commit each, every fix pinned by a dated regression test.</li>
-      </ul>
-    </article>
-
-    <article class="honest-col isnt-for reveal">
-      <p class="honest-h">…and what's gone</p>
-      <ul>
-        <li><strong>Three tools nobody called.</strong> Ten weeks of usage data recorded zero invocations of <code>get_tool_schema</code>, <code>delete_skill</code> and <code>list_skills</code> — and two of them were builtins, paying schema tokens on every single turn. <code>discover_tools</code> and <code>discover_skills</code> already covered them.</li>
-        <li><strong>Mermaid.</strong> The state graph is one hand-laid SVG now, painted straight from the palette the rest of the app uses — 3.3 MB lighter, with no colour bridge left to break.</li>
-        <li><strong>mobile.css.</strong> Split into <code>compact.css</code> for viewport width and <code>touch.css</code> for pointer, each on its own gate — because a tablet isn't a big phone, and iPadOS lies about being either.</li>
-        <li><strong>Nightly full canary sweeps.</strong> The suite is change-driven now: a targeted probe after a batch of edits, two canaries a night as a heartbeat, and a full sweep on a model swap or a deploy.</li>
-        <li><strong>Nothing of yours.</strong> Migrations v30–v35 run automatically; the MCP client is on but inert until you configure a server; the thirty-day sweep archives and never deletes.</li>
-      </ul>
-    </article>
-  </div>
-
-  <p class="honest-foot reveal">
-    Built by Calvin (<a class="link" href="https://github.com/calvincs" target="_blank" rel="noopener">calvincs</a>) with Claude (Anthropic) — and Pernix itself, whose own deployment ran the field campaigns that shaped this release.
-  </p>
+  <ul class="rel-strip">
+    <li class="reveal"><strong>Spaces.</strong> Named, coloured groups of long-lived sessions that share directives, memory, a workspace home and one REPL kernel.</li>
+    <li class="reveal"><strong>An MCP client.</strong> External Model Context Protocol servers, local or remote, register as first-class Pernix tools — same scout curation, same dangerous-tool gate.</li>
+    <li class="reveal"><strong>A front end for someone who didn&rsquo;t write it.</strong> A light theme, accessibility as a floor, a real phone <em>and</em> tablet tier, Explorer and Settings regrouped by what you came to do.</li>
+    <li class="reveal"><strong>Archive, not delete.</strong> A chat idle for thirty days leaves the sidebar and keeps every message, still searchable. Migrations v30&ndash;v35 run on first boot.</li>
+  </ul>
 </section>
 
 <!-- ========== HONEST FRAMING ========== -->
 <section class="honest">
   <p class="section-label reveal">XI. Honest about what this is</p>
   <h2 class="section-title reveal">A tool for <em>integrations and recurring work</em>.</h2>
-  <p class="section-sub reveal">Pernix is alpha. Actively developed. Things will change. Reading what it's <em>for</em> and what it <em>isn't</em> will save you the wrong expectation.</p>
+  <p class="section-sub reveal">Pernix is under active development. Knowing what it's <em>for</em>, and what it <em>isn't</em>, saves you the wrong expectation.</p>
 
   <div class="honest-grid">
     <article class="honest-col is-for reveal">
@@ -931,10 +946,10 @@ and communicate clearly.
     <article class="honest-col isnt-for reveal">
       <p class="honest-h">It isn't…</p>
       <ul>
-        <li><strong>A coding-harness replacement.</strong> Use Claude Code, Opencode, Codex, Cursor, or any IDE-integrated agent for serious software work. Pernix is not trying to be that.</li>
-        <li><strong>A polished commercial product.</strong> Rough edges. Missing UX. Quirks the author hasn't gotten to yet. Treat it like a workbench, not a finished tool.</li>
-        <li><strong>Production software.</strong> It executes shell commands and writes files on the host machine — that's what makes it useful, and that's also what makes it dangerous on the wrong box. Run it in a dedicated VM, container, or spare machine. Never expose network mode to the public internet.</li>
-        <li><strong>Done.</strong> The author uses it personally and is still building. Expect breaking changes. Expect new ideas. Expect to update.</li>
+        <li><strong>A coding harness.</strong> Use Claude Code, Opencode, Codex, Cursor, or any IDE-integrated agent for serious software work. Pernix is built for a different job.</li>
+        <li><strong>A commercial product.</strong> An independent open-source project, built for daily use by its author and shipped as-is under MIT.</li>
+        <li><strong>Production software.</strong> It executes shell commands and writes files on the host machine — that is what makes it useful, and what makes it dangerous on the wrong box. Run it in a dedicated VM, container, or spare machine, and never expose network mode to the public internet.</li>
+        <li><strong>Finished.</strong> Each release brings new ideas; read the upgrade notes when you pull.</li>
       </ul>
     </article>
   </div>
@@ -951,7 +966,7 @@ and communicate clearly.
     <p class="ornament" aria-hidden="true">✦ &nbsp; ⊹ &nbsp; ✦</p>
     <h2 class="closing-title reveal">Fork it. Read it. <em>Make it yours.</em></h2>
     <p class="closing-prose reveal">
-      Pernix is a working personal tool, not a polished product. Built for daily use and shared openly — use it, learn from it, build on it.
+      Pernix is a working tool, built for daily use and shared openly — use it, learn from it, build on it.
     </p>
     <div class="closing-cta reveal">
       <a class="btn btn-gold" href="https://github.com/calvincs/Pernix" target="_blank" rel="noopener">View on GitHub</a>

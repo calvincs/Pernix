@@ -57,9 +57,10 @@
       '0 7 * * 1-5',
     ];
 
-    // pre-baked alpha ramp: 0 → 0.20, so the hot loop never builds a string
+    // pre-baked alpha ramp: 0 → 0.36, so the hot loop never builds a string
     const INK = [];
-    for (let i = 0; i <= 40; i++) INK[i] = 'rgba(212,168,67,' + (i / 200).toFixed(3) + ')';
+    const INK_MAX = 54;
+    for (let i = 0; i <= INK_MAX; i++) INK[i] = 'rgba(212,168,67,' + (i / 150).toFixed(3) + ')';
 
     const rnd = (a, b) => a + Math.random() * (b - a);
     const glyph = () => GLYPHS[(Math.random() * GLYPHS.length) | 0];
@@ -67,7 +68,8 @@
     let W = 0, H = 0, cols = 0, rows = 0, span = 0;
     let grid = [], off = [], spd = [], VF = [];
     let ex = 0, ey = 0, er = 0, ex2 = 0, ey2 = 0, er2 = 0;
-    let word = null, nextWord = 0;
+    const MAXW = LOW ? 2 : 3;
+    let live = [], nextWord = 0;
 
     const vfade = (u) => {
       const top = Math.min(1, u / 0.10);
@@ -97,7 +99,7 @@
         const line = new Array(cols);
         for (let x = 0; x < cols; x++) {
           line[x] = Math.random() < FILL
-            ? { c: glyph(), a: rnd(0.05, 0.18), t: rnd(0.05, 0.18) }
+            ? { c: glyph(), a: rnd(0.13, 0.31), t: rnd(0.13, 0.31) }
             : null;
         }
         grid[y] = line;
@@ -111,7 +113,7 @@
         ex = W * 0.27; ey = H * 0.5; er = Math.min(W * 0.44, H * 0.80);
         ex2 = W * 0.72; ey2 = H * 0.5; er2 = Math.min(W * 0.30, H * 0.62);
       }
-      word = null;
+      live = [];
       nextWord = 0;
     };
 
@@ -125,25 +127,22 @@
       const row = Math.min(rows - 2, Math.max(1,
         band[0] + ((Math.random() * Math.max(1, band[1] - band[0])) | 0)));
       // columns whose x lands fully on screen without crossing the wrap seam
+      // one word per row, so two never collide mid-scroll
+      for (let i = 0; i < live.length; i++) if (live[i].row === row) return;
       const lo = Math.ceil(off[row] / CW);
       const hi = Math.floor((off[row] + W - (text.length + 1) * CW) / CW);
       if (hi <= lo) return;
-      word = {
+      live.push({
         text,
         row,
         col: lo + ((Math.random() * (hi - lo)) | 0),
         born: now,
         al: new Array(text.length).fill(0),
         out: null,
-      };
+      });
     };
 
-    const stepWord = (now) => {
-      if (!word) {
-        if (now >= nextWord) startWord(now);
-        return;
-      }
-      const w = word;
+    const stepOne = (w, now) => {
       const n = w.text.length;
       const inDone = (n - 1) * 70 + 240;
       const t = now - w.born;
@@ -162,17 +161,25 @@
         }
       } else {
         const ft = now - w.outAt;
-        let live = false;
+        let lit = false;
         for (let k = 0; k < n; k++) {
           const i = w.out[k];
           const p = Math.max(0, Math.min(1, (ft - k * 60) / 200));
           w.al[i] = 1 - p;
-          if (w.al[i] > 0.01) live = true;
+          if (w.al[i] > 0.01) lit = true;
         }
-        if (!live) {
-          word = null;
-          nextWord = now + (LOW ? rnd(4600, 8600) : rnd(2600, 5400));
-        }
+        if (!lit) return false;
+      }
+      return true;
+    };
+
+    const stepWord = (now) => {
+      if (live.length < MAXW && now >= nextWord) {
+        startWord(now);
+        nextWord = now + (LOW ? rnd(2600, 5200) : rnd(1300, 3000));
+      }
+      for (let i = live.length - 1; i >= 0; i--) {
+        if (!stepOne(live[i], now)) live.splice(i, 1);
       }
     };
 
@@ -191,28 +198,32 @@
           let px = x * CW - ro;
           if (px < -CW) px += span;
           if (px > W || px < -CW) continue;
-          let k = (c.a * vf * 200) | 0;
+          let k = (c.a * vf * 150) | 0;
           if (k < 3) continue;
-          if (k > 40) k = 40;
+          if (k > INK_MAX) k = INK_MAX;
           wx.fillStyle = INK[k];
           wx.fillText(c.c, px, py);
         }
       }
 
-      if (word) {
-        const w = word;
-        const py = w.row * RH;
-        const ro = off[w.row];
-        const vf = Math.max(0.45, VF[w.row]);
-        if (!LOW) { wx.shadowColor = 'rgba(240,200,99,0.6)'; wx.shadowBlur = 7; }
-        for (let i = 0; i < w.text.length; i++) {
-          const a = w.al[i] * vf;
-          if (a < 0.03) continue;
-          let px = (w.col + i) * CW - ro;
-          if (px < -CW) px += span;
-          if (px > W || px < -CW) continue;
-          wx.fillStyle = 'rgba(240,200,99,' + a.toFixed(3) + ')';
-          wx.fillText(w.text[i], px, py);
+      if (live.length) {
+        if (!LOW) { wx.shadowColor = 'rgba(240,200,99,0.75)'; wx.shadowBlur = 10; }
+        for (let n = 0; n < live.length; n++) {
+          const w = live[n];
+          const py = w.row * RH;
+          const ro = off[w.row];
+          const vf = Math.max(0.62, VF[w.row]);
+          for (let i = 0; i < w.text.length; i++) {
+            const a = w.al[i] * vf;
+            if (a < 0.03) continue;
+            let px = (w.col + i) * CW - ro;
+            if (px < -CW) px += span;
+            if (px > W || px < -CW) continue;
+            wx.fillStyle = 'rgba(240,200,99,' + a.toFixed(3) + ')';
+            wx.fillText(w.text[i], px, py);
+            // a second pass blooms the letters that are fully formed
+            if (a > 0.62) wx.fillText(w.text[i], px, py);
+          }
         }
         wx.shadowBlur = 0;
       }
@@ -253,7 +264,7 @@
         const x = (Math.random() * cols) | 0;
         const c = grid[y][x];
         if (!c) continue;
-        if (Math.random() < 0.55) c.t = rnd(0.04, 0.19);
+        if (Math.random() < 0.55) c.t = rnd(0.11, 0.33);
         else c.c = glyph();
       }
       stepWord(now);
@@ -267,8 +278,8 @@
 
     if (REDUCED) {
       // one still frame, one word already formed
-      startWord(0);
-      if (word) word.al.fill(1);
+      for (let i = 0; i < MAXW; i++) startWord(0);
+      live.forEach((w) => w.al.fill(1));
       draw();
     } else {
       const heroEl = document.querySelector('.hero');
@@ -287,7 +298,14 @@
     let rz;
     window.addEventListener('resize', () => {
       clearTimeout(rz);
-      rz = setTimeout(() => { build(); if (REDUCED) { startWord(0); if (word) word.al.fill(1); draw(); } }, 220);
+      rz = setTimeout(() => {
+        build();
+        if (REDUCED) {
+          for (let i = 0; i < MAXW; i++) startWord(0);
+          live.forEach((w) => w.al.fill(1));
+          draw();
+        }
+      }, 220);
     }, { passive: true });
   }
 
@@ -729,6 +747,30 @@
     }, { threshold: 0.35 }).observe(weekEl);
   }
 
+
+  /* -----------------------------------------
+     6. Anatomy — Desktop / Phone on the window mock
+     ----------------------------------------- */
+
+  const shotTabs = document.querySelectorAll('.shot-tab');
+  if (shotTabs.length) {
+    const mock = document.querySelector('.window-mock');
+    const panes = document.querySelectorAll('.shot-pane');
+    shotTabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const want = tab.dataset.shot;
+        shotTabs.forEach((t) => {
+          const on = t === tab;
+          t.classList.toggle('active', on);
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        panes.forEach((pane) => {
+          pane.classList.toggle('hidden', pane.id !== 'shot-' + want);
+        });
+        if (mock) mock.classList.toggle('is-phone', want === 'phone');
+      });
+    });
+  }
   /* -----------------------------------------
      6. Reveal-on-scroll
      ----------------------------------------- */
@@ -772,10 +814,10 @@
     processing: { name: 'processing',       desc: 'The main agent loop runs. Streams tokens, executes tool calls, appends results, and loops until a final answer or a round ceiling.', meta: 'main model · streaming' },
     compacting: { name: 'compacting',       desc: 'Context exceeded the proactive or critical threshold. Old turns are summarized into a digest. Originals stay in the database — only the prompt view changes.', meta: 'view transform' },
     finalizing: { name: 'finalizing',       desc: 'Post-hooks run after the user has seen the answer: auto-titling, memory distillation, worker cleanup, reflection feedback into the next turn.', meta: 'background · ~seconds' },
-    cancelling: { name: 'cancelling',       desc: 'You pressed cancel. The agent is being torn down at the next safe boundary. The reaper force-unsticks after 30s.', meta: 'user-initiated' },
+    cancelling: { name: 'cancelling',       desc: 'You pressed cancel. The agent is being torn down at the next safe boundary. If it is still here 30 seconds later, the reaper — which ticks every 60 seconds — forces it to idle_ready with cancel-timeout.', meta: 'user-initiated' },
     awaiting:   { name: 'awaiting_user',    desc: 'The agent called ask_user and is waiting for your reply. No LLM resources are being spent. As soon as you answer, a new turn begins.', meta: 'paused for input' },
     pause_req:  { name: 'pause_requested',  desc: 'A worker has been asked to pause. It will observe the request at the next round boundary and transition to PAUSED.', meta: 'in transit' },
-    paused:     { name: 'paused',           desc: 'A worker is parked, waiting for a resume signal. Useful for "wait, let me think." The safety net cancels after 24h.', meta: 'frozen' },
+    paused:     { name: 'paused',           desc: 'A worker is parked, waiting for a resume signal. Useful for "wait, let me think." A safety net cancels it after 24 hours idle, or as soon as its parent session is deleted.', meta: 'frozen' },
     awaiting_workers: { name: 'awaiting_workers', desc: 'The main loop spawned one or more workers and is parked while they run. As soon as the watched workers finish — or are cancelled — the parent session resumes its turn.', meta: 'parent · waiting on children' },
   };
 
