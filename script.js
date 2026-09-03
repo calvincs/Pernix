@@ -1,4 +1,13 @@
 /* =====================================================
+   Pernix — product page
+   1  hero glyph wall        2  hero replay
+   3  install copy           4  star count
+   5  cron tile ticker       6  reveal-on-scroll
+   7  topbar                 8  state machine
+   9  codex tabs            10  pipeline readout
+  11  mobile menu           12  api language tabs
+   ===================================================== */
+/* =====================================================
    Pernix product page — interactivity
    - Animated Lissajous sigil (canvas)
    - Scroll reveals
@@ -12,282 +21,716 @@
   'use strict';
 
   /* -----------------------------------------
-     1. The sigil — animated string-art diamond
-     Echoes the Pernix app icon: nested diamonds, each
-     filled with parabolic envelopes formed by N straight
-     lines connecting points on adjacent edges. Slow
-     multi-rate rotation gives it the breathing-flow look.
+     1. Hero — the glyph wall
+     A texture of identifier-ish glyphs scrolling row by row at
+     its own speed, with the harness's real vocabulary surfacing
+     out of the noise in gold and sinking back. 24fps ceiling,
+     paused offscreen and on a hidden tab, thinner on small
+     screens and low-core machines.
      ----------------------------------------- */
 
-  const canvas = document.getElementById('sigil');
-  if (canvas) {
-    const ctx = canvas.getContext('2d', { alpha: true });
+  const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-    // ---- Performance tiering (mobile / low-power → fewer strings, lower DPR, no glow)
-    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const small = matchMedia('(max-width: 768px)').matches;
+  const wallEl = document.getElementById('wall');
+  if (wallEl && wallEl.getContext) {
+    const wx = wallEl.getContext('2d', { alpha: true });
+    const narrow = matchMedia('(max-width: 860px)').matches;
     const cores = navigator.hardwareConcurrency || 2;
-    const lowPower = small || cores <= 4 ||
-      /Android|webOS|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+    const LOW = narrow || cores <= 4;
 
-    const TIER = lowPower ? 'low' : 'high';
-    const MAX_DPR = TIER === 'low' ? 1.5 : 2;
-    const TARGET_MS = TIER === 'low' ? 33 : 16; // 30fps mobile, 60fps desktop
+    const FS = LOW ? 12 : 11;         // glyph size
+    const CW = LOW ? 18 : 14;         // column advance
+    const RH = LOW ? 25 : 20;         // row height
+    const FILL = LOW ? 0.30 : 0.48;   // fraction of cells carrying a glyph
+    const MAXDPR = LOW ? 1 : 1.5;
+    const FRAME = 1000 / 24;
+    const GLYPHS = 'abcdefghijklmnopqrstuvwxyz_./:=<>[]{}()0123456789';
 
-    let w, h, cx, cy, dpr;
-
-    const resize = () => {
-      dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-      const rect = canvas.getBoundingClientRect();
-      w = rect.width;
-      h = rect.height;
-      canvas.width = Math.floor(w * dpr);
-      canvas.height = Math.floor(h * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      cx = w / 2;
-      cy = h / 2;
-    };
-    resize();
-    let resizeT;
-    window.addEventListener('resize', () => {
-      clearTimeout(resizeT);
-      resizeT = setTimeout(resize, 120);
-    }, { passive: true });
-
-    // ---- Filament bundles — all anchored to the SAME 4 outer corners.
-    // No nested diamonds: every filament connects two adjacent OUTER corners.
-    // The "depth" feel comes from multiple bundles with overlapping bow ranges
-    // (shallow to deep), all sharing the same anchor points. The bundles blend
-    // into one another rather than reading as concentric rings.
-    //
-    // Each bundle: bow sweeps from `bowFrom` (j=0, hugs the edge) to a depth
-    // that breathes between `baseDepth` (exhaled, shallow) and `peakDepth`
-    // (inhaled, dramatically inward). Ranges deliberately overlap.
-    // Each bundle carries its own colour — the deepest runs warmer (ember)
-    // so the veil reads as having depth instead of one flat gold.
-    const layers = TIER === 'low' ? [
-      { N: 14, alpha: 0.34, lw: 0.45, bowFrom: -0.005, baseDepth: -0.08, peakDepth: -0.18, col: '212,168,67' },
-      { N: 16, alpha: 0.40, lw: 0.45, bowFrom: -0.04,  baseDepth: -0.16, peakDepth: -0.28, col: '212,168,67' },
-      { N: 12, alpha: 0.30, lw: 0.40, bowFrom: -0.10,  baseDepth: -0.22, peakDepth: -0.36, col: '198,128,46' },
-    ] : [
-      { N: 22, alpha: 0.36, lw: 0.45, bowFrom: -0.005, baseDepth: -0.08, peakDepth: -0.18, col: '212,168,67' },
-      { N: 26, alpha: 0.42, lw: 0.45, bowFrom: -0.04,  baseDepth: -0.16, peakDepth: -0.30, col: '212,168,67' },
-      { N: 22, alpha: 0.32, lw: 0.40, bowFrom: -0.10,  baseDepth: -0.22, peakDepth: -0.38, col: '198,128,46' },
+    // Pernix's own vocabulary — states, events, tools, paths, a schedule.
+    const WORDS = [
+      'idle_ready', 'scouting', 'processing', 'compacting', 'finalizing', 'awaiting_user',
+      'session.state_changed', 'scout.done',
+      'remember', 'recall', 'deep_recall', 'search_web', 'browse_web',
+      'spawn_worker', 'await_workers', 'schedule_job', 'job_start', 'repl',
+      'view_image', 'mcp_add_server',
+      'data/memories/', 'SOUL.md', 'RULES.md', 'data/agent/spaces/<slug>/',
+      '0 7 * * 1-5',
     ];
 
-    // ---- Pointer parallax (fine pointers only) — the veil leans gently
-    // toward the cursor with inertia. Touch devices and reduced-motion skip it.
-    const finePointer = matchMedia('(pointer: fine)').matches;
-    const parTarget = { x: 0, y: 0 };
-    const par = { x: 0, y: 0 };
-    if (finePointer && !reduced) {
-      window.addEventListener('pointermove', (e) => {
-        parTarget.x = (e.clientX / window.innerWidth - 0.5) * 2;
-        parTarget.y = (e.clientY / window.innerHeight - 0.5) * 2;
-      }, { passive: true });
-    }
+    // pre-baked alpha ramp: 0 → 0.20, so the hot loop never builds a string
+    const INK = [];
+    for (let i = 0; i <= 40; i++) INK[i] = 'rgba(212,168,67,' + (i / 200).toFixed(3) + ')';
 
-    // Cardinal corner offsets for a diamond (square rotated 45°)
-    const CORNER_ANGLES = [0, Math.PI / 2, Math.PI, 3 * Math.PI / 2];
+    const rnd = (a, b) => a + Math.random() * (b - a);
+    const glyph = () => GLYPHS[(Math.random() * GLYPHS.length) | 0];
 
-    // Draw one filament bundle, all curves connecting the 4 outer corners.
-    // Bow sweeps from `bowShallow` (j=0, hugs the edge) → `bowDeep` (j=N-1,
-    // arches toward the diamond center). On top: a multi-frequency wobble and
-    // a tiny along-edge offset, both amplified by `breath` for whimsical motion.
-    const drawDiamond = (R, a, N, alpha, lw, bowShallow, bowDeep, t, breath, col = '212,168,67') => {
-      const cs = [
-        [cx + Math.cos(a + CORNER_ANGLES[0]) * R, cy + Math.sin(a + CORNER_ANGLES[0]) * R],
-        [cx + Math.cos(a + CORNER_ANGLES[1]) * R, cy + Math.sin(a + CORNER_ANGLES[1]) * R],
-        [cx + Math.cos(a + CORNER_ANGLES[2]) * R, cy + Math.sin(a + CORNER_ANGLES[2]) * R],
-        [cx + Math.cos(a + CORNER_ANGLES[3]) * R, cy + Math.sin(a + CORNER_ANGLES[3]) * R],
-      ];
+    let W = 0, H = 0, cols = 0, rows = 0, span = 0;
+    let grid = [], off = [], spd = [], VF = [];
+    let ex = 0, ey = 0, er = 0, ex2 = 0, ey2 = 0, er2 = 0;
+    let word = null, nextWord = 0;
 
-      // Two phase clocks running at different rates → quasi-random shimmer
-      const ph1 = t * 0.00065;
-      const ph2 = t * 0.00112;
-      const chaos = 0.4 + breath * 0.8; // 0.4 (calm) → 1.2 (whimsical at peak)
+    const vfade = (u) => {
+      const top = Math.min(1, u / 0.10);
+      const bot = 1 - Math.pow(Math.max(0, (u - 0.52) / 0.48), 1.35);
+      return Math.max(0.03, top * Math.max(0.03, bot));
+    };
 
-      ctx.beginPath();
-      for (let i = 0; i < 4; i++) {
-        const A = cs[i];
-        const B = cs[(i + 1) & 3];
-        const mx = (A[0] + B[0]) * 0.5;
-        const my = (A[1] + B[1]) * 0.5;
-        const ex = B[0] - A[0];
-        const ey = B[1] - A[1];
-        const len = Math.sqrt(ex * ex + ey * ey);
-        const exn = ex / len, eyn = ey / len;   // along-edge unit
-        const px = -eyn,    py = exn;            // perpendicular (right-hand)
-        const sign = ((mx - cx) * px + (my - cy) * py) > 0 ? 1 : -1;
+    const build = () => {
+      const r = wallEl.getBoundingClientRect();
+      W = Math.max(1, Math.round(r.width));
+      H = Math.max(1, Math.round(r.height));
+      const dpr = Math.min(window.devicePixelRatio || 1, MAXDPR);
+      wallEl.width = Math.round(W * dpr);
+      wallEl.height = Math.round(H * dpr);
+      wx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      wx.font = FS + "px 'DM Mono', ui-monospace, monospace";
+      wx.textBaseline = 'top';
 
-        const invN = N === 1 ? 0 : 1 / (N - 1);
-        for (let j = 0; j < N; j++) {
-          const u = N === 1 ? 0.5 : j * invN;
-          // Two-harmonic perpendicular wobble — the second harmonic only kicks
-          // in with breath, adding whimsy that blooms at peak inhale.
-          const w1 = Math.sin(ph1 + j * 0.71 + i * 1.37) * 0.012 * chaos;
-          const w2 = Math.sin(ph2 * 1.7 + j * 1.31 + i * 0.43) * 0.018 * breath;
-          const wob = w1 + w2;
-          // A tiny along-edge drift — control point doesn't sit exactly on the
-          // perpendicular bisector; it slides along the edge a touch.
-          const drift = Math.sin(ph2 * 0.6 + j * 0.43 + i * 2.11) * 0.04 * breath;
-
-          const bow = (bowShallow + (bowDeep - bowShallow) * u + wob) * len * sign;
-          const cpx = mx + px * bow + exn * drift * len;
-          const cpy = my + py * bow + eyn * drift * len;
-          ctx.moveTo(A[0], A[1]);
-          ctx.quadraticCurveTo(cpx, cpy, B[0], B[1]);
+      cols = Math.ceil(W / CW) + 6;
+      rows = Math.ceil(H / RH) + 1;
+      span = cols * CW;
+      grid = []; off = []; spd = []; VF = [];
+      for (let y = 0; y < rows; y++) {
+        off[y] = Math.random() * span;
+        spd[y] = rnd(0.10, 0.55);
+        VF[y] = vfade(rows > 1 ? y / (rows - 1) : 0);
+        const line = new Array(cols);
+        for (let x = 0; x < cols; x++) {
+          line[x] = Math.random() < FILL
+            ? { c: glyph(), a: rnd(0.05, 0.18), t: rnd(0.05, 0.18) }
+            : null;
         }
+        grid[y] = line;
       }
-      ctx.strokeStyle = `rgba(${col},${alpha})`;
-      ctx.lineWidth = lw;
-      ctx.stroke();
+      // Erase disc — keeps the wall off the headline. Left column on a
+      // two-column fold, top of the stack once the columns collapse.
+      if (narrow || W < 980) {
+        ex = W * 0.5; ey = H * 0.24; er = Math.max(W * 0.66, 260);
+        er2 = 0;
+      } else {
+        ex = W * 0.27; ey = H * 0.5; er = Math.min(W * 0.44, H * 0.80);
+        ex2 = W * 0.72; ey2 = H * 0.5; er2 = Math.min(W * 0.30, H * 0.62);
+      }
+      word = null;
+      nextWord = 0;
     };
 
-    // Crisp diamond outline (one closed quad) — anchors the silhouette
-    const drawOutline = (R, a, alpha, lw) => {
-      ctx.beginPath();
-      for (let i = 0; i < 4; i++) {
-        const x = cx + Math.cos(a + CORNER_ANGLES[i]) * R;
-        const y = cy + Math.sin(a + CORNER_ANGLES[i]) * R;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-      ctx.strokeStyle = `rgba(212,168,67,${alpha})`;
-      ctx.lineWidth = lw;
-      ctx.stroke();
+    const startWord = (now) => {
+      const text = WORDS[(Math.random() * WORDS.length) | 0];
+      if (cols < text.length + 6 || rows < 6) return;
+      // Bias away from the middle band, where the erase disc eats it.
+      const band = Math.random() < 0.4
+        ? [1, Math.max(2, Math.floor(rows * 0.18))]
+        : [Math.floor(rows * 0.62), rows - 2];
+      const row = Math.min(rows - 2, Math.max(1,
+        band[0] + ((Math.random() * Math.max(1, band[1] - band[0])) | 0)));
+      // columns whose x lands fully on screen without crossing the wrap seam
+      const lo = Math.ceil(off[row] / CW);
+      const hi = Math.floor((off[row] + W - (text.length + 1) * CW) / CW);
+      if (hi <= lo) return;
+      word = {
+        text,
+        row,
+        col: lo + ((Math.random() * (hi - lo)) | 0),
+        born: now,
+        al: new Array(text.length).fill(0),
+        out: null,
+      };
     };
 
-    // ---- Frame loop with 30fps cap on mobile, visibility pause
-    let t0 = performance.now();
-    let lastFrame = 0;
-    let isVisible = true;
-    let rafId = null;
-
-    // Breath: ~11.4 seconds per full cycle (0 → 1 → 0) — slow, deliberate
-    const BREATH_OMEGA = 0.00055;
-
-    const drawFrame = (now) => {
-      rafId = null;
-      if (!isVisible || document.hidden) return;
-
-      if (!reduced && now - lastFrame < TARGET_MS - 1) {
-        rafId = requestAnimationFrame(drawFrame);
+    const stepWord = (now) => {
+      if (!word) {
+        if (now >= nextWord) startWord(now);
         return;
       }
-      lastFrame = now;
-      const t = now - t0;
-
-      // breath: 0 (exhaled, dim) → 1 (inhaled, bright). Not linear — eased.
-      const raw = (Math.sin(t * BREATH_OMEGA) + 1) * 0.5;
-      const breath = raw * raw * (3 - 2 * raw);            // smoothstep
-      const scale = 1 + breath * 0.05;                      // 1.00 → 1.05
-      const alphaMult = 0.32 + breath * 0.68;               // 0.32 → 1.00 (clear pulse)
-      const blur = TIER === 'high' ? (8 + breath * 18) : 0; // 8 → 26 px on desktop
-
-      ctx.clearRect(0, 0, w, h);
-
-      // Vignette — keeps the title legible. Always centered on the text,
-      // regardless of where the parallax pushes the figure.
-      const grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.min(w, h) * 0.55);
-      grd.addColorStop(0,    'rgba(10,9,8,0.86)');
-      grd.addColorStop(0.55, 'rgba(10,9,8,0.40)');
-      grd.addColorStop(1,    'rgba(10,9,8,0.00)');
-      ctx.fillStyle = grd;
-      ctx.fillRect(0, 0, w, h);
-
-      // 0.46 keeps the whole diamond (plus glints and the breath swell)
-      // inside the frame at any aspect ratio — no clipped corners.
-      const baseR = Math.min(w, h) * 0.46 * scale;
-
-      // Parallax with inertia — ease toward the cursor, never snap.
-      par.x += (parTarget.x - par.x) * 0.045;
-      par.y += (parTarget.y - par.y) * 0.045;
-
-      // Tilt: a slow idle sway (~±1.1°) plus a lean toward the cursor.
-      const tilt = Math.sin(t * 0.00006) * 0.02 + par.x * 0.022;
-
-      // Shift the figure (not the vignette) a few px toward the cursor.
-      const baseCx = cx, baseCy = cy;
-      cx = baseCx + par.x * 12;
-      cy = baseCy + par.y * 9;
-
-      // Glow — desktop only, intensifies with breath
-      if (blur > 0) {
-        ctx.shadowColor = 'rgba(212,168,67,0.95)';
-        ctx.shadowBlur = blur;
+      const w = word;
+      const n = w.text.length;
+      const inDone = (n - 1) * 70 + 240;
+      const t = now - w.born;
+      if (!w.out) {
+        for (let i = 0; i < n; i++) {
+          w.al[i] = Math.max(0, Math.min(1, (t - i * 70) / 240));
+        }
+        if (t > inDone + 1800) {
+          w.out = [];
+          for (let i = 0; i < n; i++) w.out.push(i);
+          for (let i = n - 1; i > 0; i--) {
+            const j = (Math.random() * (i + 1)) | 0;
+            const tmp = w.out[i]; w.out[i] = w.out[j]; w.out[j] = tmp;
+          }
+          w.outAt = now;
+        }
       } else {
-        ctx.shadowBlur = 0;
-      }
-
-      // Single outer-corner outline — all filaments anchor here.
-      drawOutline(baseR * 1.03, tilt, 0.20 * alphaMult, 0.85);
-      drawOutline(baseR * 1.00, tilt, 0.12 * alphaMult, 0.45);
-
-      // Filament bundles — every one connects the SAME 4 outer corners.
-      // Each bundle has an overlapping bow range; together they read as a
-      // unified breathing veil rather than concentric rings.
-      for (let i = 0; i < layers.length; i++) {
-        const L = layers[i];
-        const bowDeep = L.baseDepth + (L.peakDepth - L.baseDepth) * breath;
-        drawDiamond(baseR, tilt, L.N, L.alpha * alphaMult, L.lw, L.bowFrom, bowDeep, t, breath, L.col);
-      }
-
-      // Corner glints — small luminous points at the 4 shared anchors,
-      // brightening on the inhale. They make the anchor structure legible.
-      const glintA = 0.22 + breath * 0.55;
-      const glintR = 1.1 + breath * 0.9;
-      ctx.fillStyle = `rgba(234,198,112,${glintA})`;
-      for (let i = 0; i < 4; i++) {
-        const gx = cx + Math.cos(tilt + CORNER_ANGLES[i]) * baseR * 1.03;
-        const gy = cy + Math.sin(tilt + CORNER_ANGLES[i]) * baseR * 1.03;
-        ctx.beginPath();
-        ctx.arc(gx, gy, glintR, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // Reset shadow so it doesn't leak into the next frame's clear,
-      // and restore the true center for the next vignette pass.
-      ctx.shadowBlur = 0;
-      cx = baseCx;
-      cy = baseCy;
-
-      // For reduced-motion users we render once; don't schedule another frame.
-      if (!reduced) {
-        rafId = requestAnimationFrame(drawFrame);
+        const ft = now - w.outAt;
+        let live = false;
+        for (let k = 0; k < n; k++) {
+          const i = w.out[k];
+          const p = Math.max(0, Math.min(1, (ft - k * 60) / 200));
+          w.al[i] = 1 - p;
+          if (w.al[i] > 0.01) live = true;
+        }
+        if (!live) {
+          word = null;
+          nextWord = now + (LOW ? rnd(4600, 8600) : rnd(2600, 5400));
+        }
       }
     };
 
-    const start = () => {
-      if (rafId === null && isVisible && !document.hidden && !reduced) {
-        rafId = requestAnimationFrame(drawFrame);
+    const draw = () => {
+      wx.clearRect(0, 0, W, H);
+      for (let y = 0; y < rows; y++) {
+        const vf = VF[y];
+        if (vf < 0.03) continue;
+        const py = y * RH;
+        const ro = off[y];
+        const line = grid[y];
+        for (let x = 0; x < cols; x++) {
+          const c = line[x];
+          if (!c) continue;
+          c.a += (c.t - c.a) * 0.06;
+          let px = x * CW - ro;
+          if (px < -CW) px += span;
+          if (px > W || px < -CW) continue;
+          let k = (c.a * vf * 200) | 0;
+          if (k < 3) continue;
+          if (k > 40) k = 40;
+          wx.fillStyle = INK[k];
+          wx.fillText(c.c, px, py);
+        }
       }
+
+      if (word) {
+        const w = word;
+        const py = w.row * RH;
+        const ro = off[w.row];
+        const vf = Math.max(0.45, VF[w.row]);
+        if (!LOW) { wx.shadowColor = 'rgba(240,200,99,0.6)'; wx.shadowBlur = 7; }
+        for (let i = 0; i < w.text.length; i++) {
+          const a = w.al[i] * vf;
+          if (a < 0.03) continue;
+          let px = (w.col + i) * CW - ro;
+          if (px < -CW) px += span;
+          if (px > W || px < -CW) continue;
+          wx.fillStyle = 'rgba(240,200,99,' + a.toFixed(3) + ')';
+          wx.fillText(w.text[i], px, py);
+        }
+        wx.shadowBlur = 0;
+      }
+
+      // punch the wall down where the copy sits
+      wx.globalCompositeOperation = 'destination-out';
+      const g = wx.createRadialGradient(ex, ey, 0, ex, ey, er);
+      g.addColorStop(0, 'rgba(0,0,0,0.95)');
+      g.addColorStop(0.5, 'rgba(0,0,0,0.62)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      wx.fillStyle = g;
+      wx.fillRect(0, 0, W, H);
+      if (er2) {
+        const g2 = wx.createRadialGradient(ex2, ey2, 0, ex2, ey2, er2);
+        g2.addColorStop(0, 'rgba(0,0,0,0.8)');
+        g2.addColorStop(0.55, 'rgba(0,0,0,0.42)');
+        g2.addColorStop(1, 'rgba(0,0,0,0)');
+        wx.fillStyle = g2;
+        wx.fillRect(0, 0, W, H);
+      }
+      wx.globalCompositeOperation = 'source-over';
     };
 
-    // Pause when offscreen
-    if ('IntersectionObserver' in window) {
-      const io = new IntersectionObserver(([entry]) => {
-        isVisible = entry.isIntersecting;
-        if (isVisible) start();
-      }, { rootMargin: '120px' });
-      io.observe(canvas);
+    let raf = null, last = 0, onScreen = true;
+
+    const tick = (now) => {
+      raf = requestAnimationFrame(tick);
+      if (!onScreen || document.hidden) { last = now; return; }
+      if (now - last < FRAME) return;
+      last = now;
+      for (let y = 0; y < rows; y++) {
+        off[y] += spd[y];
+        if (off[y] >= span) off[y] -= span;
+      }
+      const samples = Math.max(6, (cols * rows * 0.012) | 0);
+      for (let k = 0; k < samples; k++) {
+        const y = (Math.random() * rows) | 0;
+        const x = (Math.random() * cols) | 0;
+        const c = grid[y][x];
+        if (!c) continue;
+        if (Math.random() < 0.55) c.t = rnd(0.04, 0.19);
+        else c.c = glyph();
+      }
+      stepWord(now);
+      draw();
+    };
+
+    const playWall = () => { if (raf === null) { last = 0; raf = requestAnimationFrame(tick); } };
+    const stopWall = () => { if (raf !== null) { cancelAnimationFrame(raf); raf = null; } };
+
+    build();
+
+    if (REDUCED) {
+      // one still frame, one word already formed
+      startWord(0);
+      if (word) word.al.fill(1);
+      draw();
+    } else {
+      const heroEl = document.querySelector('.hero');
+      if (heroEl && 'IntersectionObserver' in window) {
+        new IntersectionObserver(([e]) => {
+          onScreen = e.isIntersecting;
+          if (onScreen) playWall(); else stopWall();
+        }, { threshold: 0 }).observe(heroEl);
+      }
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) stopWall(); else if (onScreen) playWall();
+      });
+      playWall();
     }
 
-    // Pause when tab is hidden
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) start();
+    let rz;
+    window.addEventListener('resize', () => {
+      clearTimeout(rz);
+      rz = setTimeout(() => { build(); if (REDUCED) { startWord(0); if (word) word.al.fill(1); draw(); } }, 220);
+    }, { passive: true });
+  }
+
+  /* -----------------------------------------
+     2. Hero — the replay
+     A scripted walk through three real turns: the five phases on
+     the rail, the real state names in the badge, real tool names
+     in the transcript. Pauses on hover, on focus, off-screen and
+     on a hidden tab; reduced motion gets the finished transcript.
+     ----------------------------------------- */
+
+  const swBody = document.getElementById('sw-body');
+  if (swBody) {
+    const swTitle = document.getElementById('sw-title');
+    const swSeq = document.getElementById('sw-seq');
+    const swSr = document.getElementById('sw-sr');
+    const swBadge = document.getElementById('sw-badge');
+    const swDot = document.getElementById('sw-dot');
+    const swCtx = document.getElementById('sw-ctx');
+    const swWin = document.getElementById('replay');
+    const railItems = Array.from(document.querySelectorAll('#rail li'));
+    const btnToggle = document.getElementById('rp-toggle');
+    const btnNext = document.getElementById('rp-next');
+    const btnWatch = document.getElementById('watch-turn');
+
+    const SCENARIOS = [
+      {
+        title: 'Morning brief',
+        say: 'Replay 1 of 3, a morning brief. The scout picks three tools; the agent fetches the forecast and the headlines, schedules a weekday 7am job, answers, and reflect passes.',
+        steps: [
+          ['phase', 0], ['state', 'idle_ready'], ['ctx', '12%'],
+          ['user', 'build my morning brief before I wake'],
+          ['wait', 380],
+          ['phase', 1], ['state', 'scouting'], ['wait', 820],
+          ['scout', 'scout — 3 tools, 840ms', [
+            ['approach', 'forecast, then headlines, then a standing job'],
+            ['tools', 'http_get · search_web · schedule_job'],
+            ['memory', 'prefers bullets · Austin, TX · nothing flagged'],
+          ]],
+          ['wait', 460],
+          ['phase', 2], ['state', 'processing'], ['ctx', '19%'],
+          ['tool', 'http_get', 'api.open-meteo.com', '✓ 0.4s', 880],
+          ['tool', 'search_web', '"austin headlines"', '✓ 1.1s', 1240],
+          ['tool', 'schedule_job', 'morning-brief · 0 7 * * 1-5', '✓ 0.2s', 820],
+          ['ctx', '31%'],
+          ['ans', 'Austin: overcast, high 100°F, precip 22%. Nothing flagged since yesterday.'],
+          ['ans', 'Three headlines below. The weekday 7:00 job is live — I dry-ran it once and it produced a correct brief.'],
+          ['wait', 380],
+          ['phase', 3], ['state', 'finalizing'],
+          ['meta', 'reflect.done · <b>pass</b>'],
+          ['wait', 500],
+          ['phase', 4],
+          ['meta', 'session.title → “Morning brief” · 2 entries saved'],
+          ['wait', 620], ['state', 'idle_ready'], ['phase', 5],
+          ['wait', 2200],
+        ],
+      },
+      {
+        title: 'Auth branch',
+        say: 'Replay 2 of 3, a question about last week. The agent recalls a memory entry and searches past sessions, then answers and cites the file it came from with its age.',
+        steps: [
+          ['phase', 0], ['state', 'idle_ready'], ['ctx', '9%'],
+          ['user', 'what did we decide about the auth branch last week?'],
+          ['wait', 380],
+          ['phase', 1], ['state', 'scouting'], ['wait', 760],
+          ['scout', 'scout — 2 tools, 610ms', [
+            ['approach', 'memory first, then the session archive'],
+            ['tools', 'recall · search_sessions'],
+            ['memory', 'auth branch · refresh tokens · mobile client'],
+          ]],
+          ['wait', 440],
+          ['phase', 2], ['state', 'processing'], ['ctx', '17%'],
+          ['tool', 'recall', '"auth branch decision"', '✓ 0.3s', 820],
+          ['tool', 'search_sessions', '"auth branch"', '✓ 0.6s', 980],
+          ['ans', 'You dropped refresh-token rotation for now — the mobile client could not re-auth in the background, and the workaround was worse than the risk.'],
+          ['cite', 'pernix.decisions.md', '6d ago'],
+          ['wait', 460],
+          ['phase', 3], ['state', 'finalizing'],
+          ['meta', 'reflect.done · <b>pass</b>'],
+          ['wait', 480],
+          ['phase', 4],
+          ['meta', 'session.title → “Auth branch” · 1 entry saved'],
+          ['wait', 620], ['state', 'idle_ready'], ['phase', 5],
+          ['wait', 2200],
+        ],
+      },
+      {
+        title: 'context7',
+        say: 'Replay 3 of 3, wiring up an MCP server. Adding a server is a dangerous tool, so the session waits for approval, then queries the new server through its generated tool names.',
+        steps: [
+          ['phase', 0], ['state', 'idle_ready'], ['ctx', '11%'],
+          ['user', 'wire up the context7 MCP server and check the FastAPI lifespan docs'],
+          ['wait', 380],
+          ['phase', 1], ['state', 'scouting'], ['wait', 780],
+          ['scout', 'scout — 3 tools, 720ms', [
+            ['approach', 'register the server, then read its docs tools'],
+            ['tools', 'mcp_add_server · mcp_context7_*'],
+            ['memory', 'remote MCP only on this box · never stdio'],
+          ]],
+          ['wait', 420],
+          ['phase', 2], ['state', 'processing'], ['ctx', '21%'],
+          ['ask', 'mcp_add_server is <b>dangerous</b> — add remote server “context7”?', 1600],
+          ['tool', 'mcp_add_server', 'context7 · remote', '✓ 0.9s', 900],
+          ['tool', 'mcp_context7_resolve_library_id', '"fastapi"', '✓ 0.3s', 760],
+          ['tool', 'mcp_context7_get_library_docs', '"lifespan"', '✓ 0.8s', 1000],
+          ['ans', 'context7 is registered — its tools are now mcp_context7_*, under the same scout curation and the same gate as the built-ins.'],
+          ['ans', 'Lifespan replaces @app.on_event: one async context manager, startup above the yield, shutdown below.'],
+          ['wait', 360],
+          ['phase', 3], ['state', 'finalizing'],
+          ['meta', 'reflect.done · <b>pass</b>'],
+          ['wait', 480],
+          ['phase', 4],
+          ['meta', 'session.title → “context7” · 1 entry saved'],
+          ['wait', 620], ['state', 'idle_ready'], ['phase', 5],
+          ['wait', 2200],
+        ],
+      },
+    ];
+
+    const ABORT = { abort: true };
+    let token = 0;
+    let cur = 0;
+    let userPaused = false;
+    let hoverPaused = false;
+    let offPaused = false;
+
+    const held = () => userPaused || hoverPaused || offPaused || document.hidden;
+
+    const sleep = (ms, tk) => new Promise((resolve, reject) => {
+      let left = ms;
+      let mark = performance.now();
+      const step = () => {
+        if (tk !== token) return reject(ABORT);
+        const now = performance.now();
+        if (!held()) left -= (now - mark);
+        mark = now;
+        if (left <= 0) return resolve();
+        setTimeout(step, Math.min(left, 45));
+      };
+      setTimeout(step, Math.min(ms, 45));
     });
 
-    if (reduced) {
-      // Static frame for reduced-motion users
-      drawFrame(performance.now());
+    const esc = (s) => String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const bottom = () => { swBody.scrollTop = swBody.scrollHeight; };
+
+    const addRow = (cls, html) => {
+      const d = document.createElement('div');
+      d.className = 'r ' + cls;
+      if (html != null) d.innerHTML = html;
+      swBody.appendChild(d);
+      bottom();
+      return d;
+    };
+
+    const setPhase = (p) => {
+      railItems.forEach((li, i) => {
+        li.classList.toggle('on', i === p);
+        li.classList.toggle('done', p >= 0 && i < p);
+      });
+    };
+
+    const RUNNING = ['scouting', 'processing', 'compacting', 'finalizing'];
+    const setState = (s) => {
+      swBadge.textContent = s;
+      swBadge.classList.toggle('run', RUNNING.indexOf(s) !== -1);
+      swBadge.classList.toggle('wait', s === 'awaiting_user');
+      swDot.classList.toggle('busy', s !== 'idle_ready');
+    };
+
+    const scoutHTML = (head, pairs) => {
+      let h = '<div class="sc-h">' + esc(head) + '</div>';
+      pairs.forEach((kv) => {
+        h += '<div class="sc-row"><span class="sc-k">' + esc(kv[0]) +
+             '</span><span class="sc-v">' + esc(kv[1]) + '</span></div>';
+      });
+      return h;
+    };
+
+    const citeHTML = (file, age) => '<span>' + esc(file) + '</span><i>' + esc(age) + '</i>';
+
+    async function typeInto(el, text, tk) {
+      for (let i = 1; i <= text.length; i++) {
+        if (tk !== token) throw ABORT;
+        el.innerHTML = esc(text.slice(0, i)) + '<span class="cur"></span>';
+        bottom();
+        await sleep(32, tk);
+      }
+      el.textContent = text;
+      bottom();
+    }
+
+    async function streamInto(el, text, tk) {
+      const parts = text.split(' ');
+      let acc = '';
+      for (let i = 0; i < parts.length; i++) {
+        if (tk !== token) throw ABORT;
+        acc += (i ? ' ' : '') + parts[i];
+        el.textContent = acc;
+        bottom();
+        await sleep(52, tk);
+      }
+    }
+
+    async function exec(st, tk) {
+      switch (st[0]) {
+        case 'phase': setPhase(st[1]); return;
+        case 'state': setState(st[1]); return;
+        case 'ctx': swCtx.textContent = st[1]; return;
+        case 'wait': return sleep(st[1], tk);
+        case 'user': return typeInto(addRow('r-user', ''), st[1], tk);
+        case 'scout': addRow('r-scout', scoutHTML(st[1], st[2])); return sleep(240, tk);
+        case 'ans': return streamInto(addRow('r-ans', ''), st[1], tk);
+        case 'cite': addRow('cite', citeHTML(st[1], st[2])); return sleep(280, tk);
+        case 'meta': addRow('r-meta', st[1]); return sleep(140, tk);
+        case 'tool': {
+          const d = addRow('r-tool',
+            '<span class="t-name">' + esc(st[1]) + '</span>' +
+            '<span class="t-arg">' + esc(st[2]) + '</span>' +
+            '<span class="t-res pending">· · ·</span>');
+          await sleep(st[4], tk);
+          if (tk !== token) throw ABORT;
+          const res = d.querySelector('.t-res');
+          res.className = 't-res';
+          res.textContent = st[3];
+          return;
+        }
+        case 'ask': {
+          const d = addRow('r-ask',
+            '<span>' + st[1] + '</span><span class="ask-a">waiting…</span>');
+          setState('awaiting_user');
+          await sleep(st[2], tk);
+          if (tk !== token) throw ABORT;
+          d.querySelector('.ask-a').textContent = 'approved';
+          setState('processing');
+          return;
+        }
+      }
+    }
+
+    function reset(idx) {
+      cur = idx;
+      const sc = SCENARIOS[idx];
+      swBody.innerHTML = '';
+      swTitle.textContent = sc.title;
+      swSeq.textContent = (idx + 1) + ' / ' + SCENARIOS.length;
+      if (swSr) swSr.textContent = sc.say;
+      setPhase(-1);
+      setState('idle_ready');
+      return sc;
+    }
+
+    // Reduced motion: the finished transcript, no timers.
+    function renderStill(idx) {
+      const sc = reset(idx);
+      let lastPhase = -1;
+      sc.steps.forEach((st) => {
+        switch (st[0]) {
+          case 'phase': if (st[1] >= 0) lastPhase = st[1]; break;
+          case 'ctx': swCtx.textContent = st[1]; break;
+          case 'user': { const d = addRow('r-user', ''); d.textContent = st[1]; break; }
+          case 'scout': addRow('r-scout', scoutHTML(st[1], st[2])); break;
+          case 'ans': { const d = addRow('r-ans', ''); d.textContent = st[1]; break; }
+          case 'cite': addRow('cite', citeHTML(st[1], st[2])); break;
+          case 'meta': addRow('r-meta', st[1]); break;
+          case 'tool':
+            addRow('r-tool',
+              '<span class="t-name">' + esc(st[1]) + '</span>' +
+              '<span class="t-arg">' + esc(st[2]) + '</span>' +
+              '<span class="t-res">' + esc(st[3]) + '</span>');
+            break;
+          case 'ask':
+            addRow('r-ask', '<span>' + st[1] + '</span><span class="ask-a">approved</span>');
+            break;
+        }
+      });
+      setPhase(Math.min(lastPhase, railItems.length - 1));
+      setState('idle_ready');
+      bottom();
+    }
+
+    async function play(idx) {
+      const tk = ++token;
+      const sc = reset(idx);
+      try {
+        for (let i = 0; i < sc.steps.length; i++) await exec(sc.steps[i], tk);
+      } catch (e) {
+        if (e !== ABORT) throw e;
+        return;
+      }
+      if (tk === token) play((idx + 1) % SCENARIOS.length);
+    }
+
+    const restart = (idx) => { if (REDUCED) renderStill(idx); else play(idx); };
+
+    // The window's resting state is a finished turn — a thumbnail, a shared
+    // link or a two-second skim all land on something already worth reading.
+    async function opening() {
+      const tk = ++token;
+      renderStill(0);
+      try {
+        await sleep(2500, tk);
+      } catch (e) {
+        if (e !== ABORT) throw e;
+        return;
+      }
+      if (tk === token) play(1);
+    }
+
+    if (REDUCED) {
+      renderStill(0);
+      if (btnToggle) btnToggle.hidden = true;
     } else {
-      start();
+      const stage = document.querySelector('.hero-stage');
+      swWin.addEventListener('mouseenter', () => { hoverPaused = true; });
+      swWin.addEventListener('mouseleave', () => { hoverPaused = false; });
+      // Focus inside the transcript holds it still — but not focus on the
+      // controls themselves, which would freeze the replay the moment you
+      // clicked 'next'.
+      if (stage) {
+        stage.addEventListener('focusin', (e) => {
+          if (!e.target.closest('.replay-ctl')) hoverPaused = true;
+        });
+        stage.addEventListener('focusout', () => { hoverPaused = false; });
+      }
+      if ('IntersectionObserver' in window) {
+        new IntersectionObserver(([e]) => { offPaused = !e.isIntersecting; },
+          { threshold: 0 }).observe(swWin);
+      }
+      btnToggle.addEventListener('click', () => {
+        userPaused = !userPaused;
+        btnToggle.textContent = userPaused ? 'play' : 'pause';
+        btnToggle.setAttribute('aria-pressed', userPaused ? 'true' : 'false');
+      });
+      opening();
+    }
+
+    btnNext.addEventListener('click', () => restart((cur + 1) % SCENARIOS.length));
+
+    if (btnWatch) {
+      btnWatch.addEventListener('click', () => {
+        swWin.scrollIntoView({ behavior: REDUCED ? 'auto' : 'smooth', block: 'center' });
+        userPaused = false;
+        if (btnToggle) { btnToggle.textContent = 'pause'; btnToggle.setAttribute('aria-pressed', 'false'); }
+        restart(0);
+      });
     }
   }
 
   /* -----------------------------------------
-     2. Reveal-on-scroll
+     3. Hero — copy the install strip
+     ----------------------------------------- */
+
+  const copyBtn = document.getElementById('copy-install');
+  const installBody = document.getElementById('install-body');
+  if (copyBtn && installBody) {
+    const text = Array.from(installBody.querySelectorAll('.il'))
+      .map((l) => l.textContent.replace(/^\s*\$\s*/, ''))
+      .join('\n');
+
+    const flash = (ok) => {
+      copyBtn.textContent = ok ? 'copied' : 'select it';
+      copyBtn.classList.toggle('done', ok);
+      setTimeout(() => { copyBtn.textContent = 'copy'; copyBtn.classList.remove('done'); }, 1800);
+    };
+
+    copyBtn.addEventListener('click', async () => {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          flash(true);
+          return;
+        }
+      } catch (e) { /* fall through to the textarea */ }
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        flash(ok);
+      } catch (e) {
+        flash(false);
+      }
+    });
+  }
+
+  /* -----------------------------------------
+     4. Live star count
+     Best-effort: the page reads fine without it, and it is never
+     attempted from a file:// preview.
+     ----------------------------------------- */
+
+  const starCount = document.getElementById('star-count');
+  const navStars = document.getElementById('nav-stars');
+  if (starCount && /^https?:$/.test(location.protocol)) {
+    const ctl = ('AbortController' in window) ? new AbortController() : null;
+    const kill = setTimeout(() => { if (ctl) ctl.abort(); }, 4000);
+    const opts = { headers: { Accept: 'application/vnd.github+json' } };
+    if (ctl) opts.signal = ctl.signal;
+    fetch('https://api.github.com/repos/calvincs/Pernix', opts)
+      .then((r) => (r && r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || typeof d.stargazers_count !== 'number') return;
+        const n = d.stargazers_count >= 1000
+          ? (d.stargazers_count / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+          : String(d.stargazers_count);
+        starCount.textContent = '★ ' + n;
+        if (navStars) navStars.textContent = '★' + n + ' ';
+      })
+      .catch(() => { /* offline, rate-limited or blocked — keep the static label */ })
+      .then(() => clearTimeout(kill));
+  }
+
+  /* -----------------------------------------
+     5. Cron tile — the weekday marker walks
+     ----------------------------------------- */
+
+  const weekEl = document.getElementById('week');
+  if (weekEl && !REDUCED && 'IntersectionObserver' in window) {
+    const days = Array.from(weekEl.children);
+    const lit = [0, 1, 2, 3, 4];
+    let k = 0, timer = null;
+    const stepDay = () => {
+      days.forEach((d) => d.classList.remove('now'));
+      days[lit[k]].classList.add('now');
+      k = (k + 1) % lit.length;
+    };
+    new IntersectionObserver(([e]) => {
+      if (e.isIntersecting && !timer) { stepDay(); timer = setInterval(stepDay, 1150); }
+      else if (!e.isIntersecting && timer) {
+        clearInterval(timer); timer = null;
+        days.forEach((d) => d.classList.remove('now'));
+      }
+    }, { threshold: 0.35 }).observe(weekEl);
+  }
+
+  /* -----------------------------------------
+     6. Reveal-on-scroll
      ----------------------------------------- */
 
   const revealEls = document.querySelectorAll('.reveal');
@@ -306,7 +749,7 @@
   }
 
   /* -----------------------------------------
-     3. Topbar — scrolled state
+     7. Topbar — scrolled state
      ----------------------------------------- */
 
   const topbar = document.querySelector('.topbar');
@@ -320,7 +763,7 @@
   }
 
   /* -----------------------------------------
-     4. State machine readout
+     8. State machine readout
      ----------------------------------------- */
 
   const stateInfo = {
@@ -543,7 +986,7 @@
   stateShell?.addEventListener('mouseleave', () => { if (!tracing) startTrace(); });
 
   /* -----------------------------------------
-     5. Codex tabs — SOUL / RULES / Skill
+     9. Codex tabs — SOUL / RULES / Skill
      ----------------------------------------- */
 
   const tabs = document.querySelectorAll('.codex-tab');
@@ -558,54 +1001,7 @@
   });
 
   /* -----------------------------------------
-     5b. Hero — rotating example prompts
-     ----------------------------------------- */
-
-  const promptEl = document.getElementById('hero-prompt-text');
-  if (promptEl && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    const PROMPTS = [
-      'build my morning brief before I wake',
-      'research this and have a report ready by lunch',
-      'put my research chats in a space',
-      'transcribe this voice memo into notes',
-      'watch my feeds — ping my phone if something matters',
-      'remember how I like my summaries',
-      'wire up the docs MCP server',
-    ];
-    let pi = 0;
-    const TYPE_MS = 42, ERASE_MS = 16, HOLD_MS = 2600;
-
-    const tick = (fn, ms) => setTimeout(() => {
-      // Idle quietly while the tab is hidden
-      if (document.hidden) { tick(fn, 600); return; }
-      fn();
-    }, ms);
-
-    const erase = () => {
-      const cur = promptEl.textContent;
-      if (cur.length === 0) {
-        pi = (pi + 1) % PROMPTS.length;
-        tick(type, 300);
-      } else {
-        promptEl.textContent = cur.slice(0, -1);
-        tick(erase, ERASE_MS);
-      }
-    };
-    const type = () => {
-      const target = PROMPTS[pi];
-      const cur = promptEl.textContent;
-      if (cur.length >= target.length) {
-        tick(erase, HOLD_MS);
-      } else {
-        promptEl.textContent = target.slice(0, cur.length + 1);
-        tick(type, TYPE_MS);
-      }
-    };
-    tick(erase, HOLD_MS); // start from the prerendered first prompt
-  }
-
-  /* -----------------------------------------
-     6. Pipeline event-log readout
+     10. Pipeline event-log readout
      ----------------------------------------- */
 
   const pipeLog = document.getElementById('pipe-log');
@@ -631,7 +1027,7 @@
   });
 
   /* -----------------------------------------
-     7b. Mobile section menu
+     11. Mobile section menu
      Below 980px the primary nav collapses into a panel the
      button opens. Escape closes it and hands focus back;
      picking a section or tapping away closes it too.
@@ -671,7 +1067,7 @@
   }
 
   /* -----------------------------------------
-     7. API code-sample language tabs
+     12. API code-sample language tabs
      ----------------------------------------- */
 
   const langTabs = document.querySelectorAll('.lang-tab');
