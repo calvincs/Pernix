@@ -1491,14 +1491,18 @@ def compile_context(
 
         # Internal metadata used by trim-notice generation and pin protection.
         # These keys are stripped before LLM dispatch (see _strip_private_fields).
-        entry["_db_id"] = msg["id"]
+        # `.get`, not `[...]`: history is not purely DB rows by this point —
+        # exclude_orphans splices in synthetic stubs that never had a row.
+        # Subscripting made one missing key a hard turn kill, and every
+        # `_db_id` reader downstream already tolerates None.
+        entry["_db_id"] = msg.get("id")
         entry["_created_at"] = msg.get("created_at")
         if tool_names:
             entry["_tool_names"] = tool_names
         # Pin the active turn's root user message so trim cannot drop the
         # user's actual ask. Without this, large parallel tool returns can
         # overflow history_budget and evict the prompt itself.
-        if turn_user_msg_id is not None and msg["id"] == turn_user_msg_id and msg["role"] == "user":
+        if turn_user_msg_id is not None and msg.get("id") == turn_user_msg_id and msg["role"] == "user":
             entry["_pinned"] = True
 
         messages.append(entry)
