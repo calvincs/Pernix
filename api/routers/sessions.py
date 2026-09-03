@@ -10,6 +10,10 @@ from sessions.manager import get_manager
 
 router = APIRouter(tags=["sessions"])
 
+# Matches HISTORY_PAGE in static/js/app.js — the transcript window the client
+# asks for, and the fallback when a caller passes a cursor with no size.
+DEFAULT_HISTORY_PAGE = 200
+
 
 @router.post("/api/sessions")
 async def create_session(body: dict = {}):
@@ -17,31 +21,98 @@ async def create_session(body: dict = {}):
     session_type = body.get("session_type", "normal")
     if session_type not in ("normal", "worker", "cron"):
         session_type = "normal"
+    space_id = body.get("space_id") or None
+    if space_id and not db.get_space(space_id):
+        raise HTTPException(404, detail=f"Space {space_id} not found")
     sid = manager.create_session(
         title=body.get("title", "New session"),
         system_prompt=body.get("system_prompt", ""),
         session_type=session_type,
         parent_session_id=body.get("parent_session_id"),
+        space_id=space_id,
     )
     return {"session_id": sid}
 
 
 @router.get("/api/sessions")
-async def list_sessions(limit: int = 50, offset: int = 0):
+async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False, exclude_types: str = ""):
+    """One page of sessions, newest first, plus how many there are in total.
+
+    `total`/`has_more` are what let the sidebar offer the page behind this one
+    instead of a dead "showing the 500 most recent" note: sessions past the
+    horizon used to be reachable only by full-text search, which is no help
+    when what you remember is the session, not a phrase inside it.
+
+    `has_more` is measured against the requested window, not the rows
+    returned — list_sessions_enriched unions space sessions back in past the
+    recency cut, so the response can be longer than `limit` while the page
+    itself is still exactly `limit` deep.
+
+    Archived sessions are absent by default: leaving the list is what
+    archiving IS. `archived=1` returns the same shape over that set instead,
+    and `total`/`has_more` then count only it. `archived_count` rides on
+    both answers so the sidebar can offer "Archived (N)" without a second
+    round trip — and, when it is zero, say nothing at all.
+
+    `exclude_types` is a comma list of session types to leave out entirely —
+    the sidebar's legend, moved from the client to the SQL. A machine-heavy
+    instance spends most of its page on rows nobody asked to see: on the
+    owner's box the 500 newest sessions are 277 canary self-checks, 47
+    workers and 33 cron runs, so only 106 of 310 chats fit on page one and
+    the rest sit behind "Load older sessions". Hiding a type in the browser
+    could not fix that — the row was already on the page it was hiding it
+    from. Unknown names are ignored rather than rejected, and `total` and
+    `has_more` count the same narrowed population so the paging control
+    agrees with the list above it.
+
+    `type_counts` is how many LIVE sessions wear each type, over the whole
+    unfiltered, unarchived population. The legend needs it precisely because
+    the filter is now server-side: the hidden type's rows are no longer in
+    the page to be counted, and a legend entry that reads 0 is a control the
+    user can no longer reason about.
+    """
     import asyncio as _asyncio
 
     from sessions.policy import annotate_read_only
 
-    rows = await _asyncio.to_thread(db.list_sessions_enriched, limit, offset)
+    wanted = [t.strip() for t in (exclude_types or "").split(",")]
+    excluded = [t for t in dict.fromkeys(wanted) if t in db.SESSION_TYPE_NAMES]
+
+    rows = await _asyncio.to_thread(db.list_sessions_enriched, limit, offset, archived=archived, exclude_types=excluded)
     sessions = [annotate_read_only(s) for s in rows]
-    return {"items": sessions, "count": len(sessions)}
+    spaces = await _asyncio.to_thread(db.list_spaces)
+    type_counts = await _asyncio.to_thread(db.count_sessions_by_type)
+    if archived:
+        total = await _asyncio.to_thread(db.count_sessions, archived=True, exclude_types=excluded)
+        archived_count = total if not excluded else await _asyncio.to_thread(db.count_sessions, archived=True)
+    else:
+        # type_counts already partitions the live population by exactly the
+        # thing `exclude_types` names, so the live total is a sum rather than
+        # a second full scan of the table.
+        total = sum(n for t, n in type_counts.items() if t not in excluded)
+        archived_count = await _asyncio.to_thread(db.count_sessions, archived=True)
+    return {
+        "items": sessions,
+        "count": len(sessions),
+        "spaces": spaces,
+        "total": total,
+        "has_more": (offset + limit) < total,
+        "archived": archived,
+        "archived_count": archived_count,
+        "excluded_types": excluded,
+        "type_counts": type_counts,
+    }
 
 
 @router.get("/api/sessions/search")
 async def search_sessions(q: str = "", limit: int = 20):
     """Full-text search across all session messages (FTS5). Groups hits by
     session for the sidebar search box. The index has existed all along —
-    this endpoint finally exposes it to the user."""
+    this endpoint finally exposes it to the user.
+
+    Archived sessions are deliberately still findable here — search is the
+    promise that archiving hides a conversation without losing it — so each
+    hit carries `archived` and the sidebar marks those rows."""
     if len(q.strip()) < 2:
         return {"results": []}
     import asyncio as _asyncio
@@ -56,6 +127,8 @@ async def search_sessions(q: str = "", limit: int = 20):
                 "session_id": sid,
                 "title": h["session_title"],
                 "session_type": h["session_type"],
+                "space_id": h.get("session_space_id"),
+                "archived": bool(h.get("session_archived")),
                 "updated_at": h["session_updated_at"],
                 "snippet": h["content"],
                 "matches": 1,
@@ -127,6 +200,10 @@ async def list_workers(session_id: str):
                 "id": r["id"],
                 "title": r.get("title") or "worker",
                 "state": state,
+                "kind": r.get("worker_kind") or "",
+                "model": r.get("model_override") or "",
+                "termination_reason": (w.termination_reason if w is not None else None),
+                "in_memory": w is not None,
                 "created_at": r.get("created_at"),
                 "updated_at": r.get("updated_at"),
             }
@@ -135,10 +212,24 @@ async def list_workers(session_id: str):
 
 
 @router.get("/api/sessions/{session_id}")
-async def get_session(session_id: str, limit: int | None = None):
+async def get_session(session_id: str, limit: int | None = None, before_id: int | None = None):
     """Session metadata + messages. With `limit`, only the newest N messages
     (oldest-first) plus a total count — the UI uses this so opening a long
-    session doesn't load (and render) the entire unbounded transcript."""
+    session doesn't load (and render) the entire unbounded transcript.
+
+    `before_id` pages further back: the newest `limit` rows OLDER than that
+    id, and nothing the client already holds. That is what makes "load
+    earlier" a prepend instead of a re-render of the whole transcript.
+
+    `has_more` answers "is there anything behind the page I just got" —
+    computed from the oldest row returned, so it stays correct on both the
+    first page and every page after it.
+
+    The row carries `archived_at` (NULL when live) alongside `read_only` /
+    `read_only_reason`: this is how the client knows to show Restore rather
+    than just a disabled composer, and it is the only lookup that finds a
+    session the sidebar list no longer contains.
+    """
     import asyncio as _asyncio
 
     from sessions.policy import annotate_read_only
@@ -147,9 +238,18 @@ async def get_session(session_id: str, limit: int | None = None):
     if not session:
         raise HTTPException(404, detail=f"Session {session_id} not found")
     annotate_read_only(session)
-    messages = await _asyncio.to_thread(db.get_messages, session_id, limit)
+    # A cursor with no window size is a whole-transcript read wearing a page's
+    # clothes; give it the default page instead of ignoring it.
+    if before_id is not None and limit is None:
+        limit = DEFAULT_HISTORY_PAGE
+    messages = await _asyncio.to_thread(db.get_messages, session_id, limit, before_id)
     total = await _asyncio.to_thread(db.count_messages, session_id) if limit is not None else len(messages)
-    return {**session, "messages": messages, "total_messages": total, "has_more": total > len(messages)}
+    has_more = False
+    if limit is not None and messages:
+        oldest_id = messages[0].get("id")
+        if oldest_id is not None:
+            has_more = await _asyncio.to_thread(db.count_messages, session_id, int(oldest_id)) > 0
+    return {**session, "messages": messages, "total_messages": total, "has_more": has_more}
 
 
 @router.get("/api/sessions/{session_id}/status")
@@ -163,8 +263,13 @@ async def get_session_status(session_id: str):
         session = await _asyncio.to_thread(db.get_session, session_id)
         if not session:
             raise HTTPException(404, detail=f"Session {session_id} not found")
-        return {"session_id": session_id, "status": "idle", "in_memory": False}
-    return status
+        # event_seq is stated as null rather than omitted: the client used
+        # to read a missing value as 0, which looks exactly like "the server
+        # restarted and its counter reset" and triggered a spurious
+        # transcript reload plus a scroll jump every time someone came back
+        # to a tab whose idle session had simply been reaped from memory.
+        return {"session_id": session_id, "status": "idle", "in_memory": False, "event_seq": None}
+    return {**status, "in_memory": True}
 
 
 @router.get("/api/sessions/{session_id}/events")
@@ -275,29 +380,37 @@ async def cancel_session(session_id: str):
 
 
 def _kill_session_process(session):
-    """Kill every tracked subprocess for this session.
+    """Kill every tracked subprocess for this session (shared with the
+    manager's cancel path; escalates TERM -> KILL)."""
+    from sessions.manager import kill_session_processes
 
-    Cancel is session-wide, so it sweeps all registrations rather than a single
-    slot — concurrent bash calls each register their own, and cancelling the
-    session must not leave the others running.
+    kill_session_processes(session)
+
+
+def require_idle(session_id: str, action: str) -> None:
+    """409 unless the session is idle enough to have its transcript rewritten.
+
+    Retry and clear delete messages the running turn is still working from:
+    the agent's next round then compiles a history with no root for its own
+    tool calls, and manager.prompt QUEUES the re-prompt behind the live turn
+    instead of replacing it, so the user gets the work twice. Compaction has
+    always guarded this way; these two did not.
     """
-    import os
-    import signal
+    from sessions import state_v2 as _sv2
 
-    for proc in session.all_processes():
-        if proc is None or proc.poll() is not None:
-            continue
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (OSError, ProcessLookupError):
-            pass
-    session._active_processes.clear()
+    session = get_manager().get(session_id)
+    if session is None:
+        return  # not resident: no turn can be running
+    current = _sv2._current_state(session)
+    if current not in (_sv2.SessionStateV2.IDLE_READY, _sv2.SessionStateV2.AWAITING_USER):
+        raise HTTPException(409, detail=f"Session is {current.value}; cancel it before you {action}")
 
 
 @router.post("/api/sessions/{session_id}/clear")
 async def clear_session(session_id: str):
     import asyncio as _asyncio
 
+    require_idle(session_id, "clear it")
     await _asyncio.to_thread(db.clear_messages_only, session_id)
     await _asyncio.to_thread(db.update_session, session_id, title="New session")
     return {"status": "cleared"}
@@ -305,8 +418,9 @@ async def clear_session(session_id: str):
 
 @router.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str):
-    manager = get_manager()
-    manager.delete_session(session_id)
+    # Async form: cancels the turn and kills its subprocesses on the loop,
+    # then does the DB cascade and file cleanup off it.
+    await get_manager().delete_session_async(session_id)
     return {"status": "deleted"}
 
 
@@ -373,13 +487,27 @@ async def patch_session(session_id: str, body: dict = {}):
     Accepted keys (absent keys are left unchanged):
       * title          — rename; must be a non-empty string.
       * pinned         — bool; pinned sessions sort to the top of the sidebar.
+      * space_id       — move to a space (validated id) or, with null/"",
+                         remove from one.
+      * archived       — bool; true stamps archived_at with now, false
+                         clears it. An archived session leaves the sidebar
+                         and its space group, keeps every message, stays
+                         searchable, and opens read-only with a Restore
+                         control. Delete remains a separate, explicit act.
       * model_override — model id string sets a persistent per-session
                          override; "" or null clears it. Lives on the
                          in-memory session (not persisted across restart),
                          and unlike agent-initiated switch_model it is NOT
                          reverted at turn end.
+
+    Nothing here bumps updated_at (set_session_meta's contract): recency
+    ordering is what the sidebar's buckets and the idle horizon are computed
+    from, so archiving must not reshuffle the list and restoring must put a
+    session back exactly where it was.
     """
     import asyncio as _asyncio
+
+    from sessions.policy import annotate_read_only
 
     if not await _asyncio.to_thread(db.get_session, session_id):
         raise HTTPException(404, detail=f"Session {session_id} not found")
@@ -399,6 +527,46 @@ async def patch_session(session_id: str, body: dict = {}):
         pinned = bool(body["pinned"])
         await _asyncio.to_thread(db.set_session_meta, session_id, pinned=pinned)
         result["pinned"] = pinned
+
+    if "archived" in body:
+        archived = bool(body["archived"])
+        await _asyncio.to_thread(db.set_session_meta, session_id, archived=archived)
+        result["archived"] = archived
+        # Same shape as the title update: the sidebar repaints from its own
+        # optimistic state, and this is what tells the OTHER tab (and the
+        # session that is open in it) that the composer has just changed
+        # sides.
+        row = await _asyncio.to_thread(db.get_session, session_id) or {}
+        verdict = annotate_read_only(dict(row))
+        get_manager().emit(
+            session_id,
+            {
+                "type": "session.archived",
+                "archived": archived,
+                "archived_at": verdict.get("archived_at"),
+                # The client must not re-derive "is this read-only" a third
+                # time: a session can be read-only for reasons archiving does
+                # not own (dream journals, RLM views), and sessions.policy is
+                # the one place that rule lives.
+                "read_only": verdict.get("read_only"),
+                "read_only_reason": verdict.get("read_only_reason"),
+            },
+        )
+
+    if "space_id" in body:
+        # Move to space (validated id) or remove from space (null/"").
+        space_id = body["space_id"] or None
+        if space_id and not await _asyncio.to_thread(db.get_space, space_id):
+            raise HTTPException(404, detail=f"Space {space_id} not found")
+        await _asyncio.to_thread(db.set_session_meta, session_id, space_id=space_id)
+        live = get_manager().get(session_id)
+        if live is not None:
+            from sessions.manager import _apply_space_fields
+
+            live.space_id = None
+            live.workspace_home = None
+            _apply_space_fields(live, space_id)
+        result["space_id"] = space_id
 
     if "model_override" in body:
         override = body["model_override"]
@@ -441,6 +609,35 @@ async def get_session_state_log(
         db.get_state_log, session_id, since_id=since_id, before_id=before_id, limit=limit, tail=tail
     )
     return {"session_id": session_id, "count": len(entries), "entries": entries}
+
+
+@router.get("/api/sessions/{session_id}/turns")
+async def get_session_turns(session_id: str, before_turn: int = 0, limit: int = 20):
+    """Return one record per turn — everything the agent produced inside it.
+
+    The State timeline used to build this in the browser: fetch the whole
+    state log, fetch the whole transcript, and join them by hand into turn
+    groups. That made the client download every tool result in the session
+    to draw a header saying "13 tools, 4 errors". The join is the same one,
+    done here over a bounded window instead.
+
+    Each record carries the turn's phases (with the wall-clock time spent in
+    each), its tool calls (name, argument digest, latency, error flag), the
+    scout report it opened with, the reflect retry chain, the eval gate
+    attempts, compaction summaries, notices, and token totals. Nothing new
+    is captured — every field is read back from `session_state_log`,
+    `messages` and `token_usage`.
+
+    Newest turn first. `before_turn` pages backward from a turn id;
+    `has_more` says whether an older page exists. `limit` is clamped to
+    1..100. `/state-log` and the message endpoints are unchanged: this is an
+    additional view over the same rows, not a replacement."""
+    import asyncio as _asyncio
+
+    session = await _asyncio.to_thread(db.get_session, session_id)
+    if not session:
+        raise HTTPException(404, detail=f"Session {session_id} not found")
+    return await _asyncio.to_thread(db.get_turns, session_id, before_turn=before_turn, limit=limit)
 
 
 @router.post("/api/sessions/{session_id}/pause")
@@ -488,27 +685,101 @@ async def http_pause_worker(session_id: str, worker_id: str):
 
 
 @router.post("/api/sessions/{session_id}/workers/{worker_id}/resume")
-async def http_resume_worker(session_id: str, worker_id: str):
-    """Resume a paused worker. Mirror of pause above."""
+async def http_resume_worker(session_id: str, worker_id: str, body: dict = {}):
+    """Resume a paused worker — or REVIVE a terminated/reaped one.
+
+    Parentage is checked against the DB row, not the in-memory worker_ids
+    list: after a server restart the parent's in-memory list is empty, and
+    revival (spec Feature 5) exists precisely for that case. Optional body
+    {"note": "..."} is injected into the continuation turn."""
+    import asyncio as _asyncio
+
     manager = get_manager()
-    parent = manager.get(session_id)
-    if not parent:
-        raise HTTPException(404, detail=f"Session {session_id} not found")
-    if worker_id not in parent.worker_ids:
+    if not manager.get(session_id):
+        raise HTTPException(404, detail=f"Session {session_id} not found in memory")
+    row = await _asyncio.to_thread(db.get_session, worker_id)
+    if not row:
+        raise HTTPException(404, detail=f"Worker {worker_id} not found")
+    if row.get("parent_session_id") != session_id:
         raise HTTPException(404, detail=f"Worker {worker_id} not a child of {session_id}")
-    if not manager.get(worker_id):
-        raise HTTPException(404, detail=f"Worker {worker_id} not in memory")
     from core.extensions.orchestration import resume_worker as _rw
 
-    msg = _rw(worker_id)
+    msg = _rw(worker_id, note=str((body or {}).get("note") or ""))
     return {"status": "resumed", "worker_id": worker_id, "detail": msg}
+
+
+def _non_negative_int(value, name: str) -> int:
+    """A purge knob, or a 400. Silently coercing garbage here would delete
+    the wrong set of sessions and report a number for it."""
+    if isinstance(value, bool) or isinstance(value, (list, dict)):
+        raise HTTPException(400, detail=f"{name} must be a non-negative integer")
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, detail=f"{name} must be a non-negative integer")
+    if n < 0:
+        raise HTTPException(400, detail=f"{name} must be a non-negative integer")
+    return n
+
+
+@router.post("/api/sessions/archive-idle")
+async def archive_idle(body: dict = {}):
+    """Archive ordinary chats idle for more than `days` — or say what it would.
+
+    Body: ``{days: <session_archive_idle_days>, space_id: null, dry_run:
+    false}``. `space_id` narrows the sweep to one space, which is what the
+    space header's "Archive idle sessions..." asks for; omit it to sweep
+    everything.
+
+    Nothing is deleted and nothing is lost: the sessions leave the sidebar
+    and their space group, keep every message, stay searchable, and come
+    back with one PATCH. Pinned chats are exempt.
+
+    A dry run computes exactly the same set as the real one, so the count in
+    the confirmation dialog is a promise this endpoint keeps. Returns
+    ``{count, ids, sample, days, dry_run}``.
+    """
+    import asyncio as _asyncio
+
+    from config import settings as _settings
+    from core import retention
+
+    body = body or {}
+    raw_days = body.get("days", None)
+    days = _non_negative_int(raw_days if raw_days is not None else _settings.session_archive_idle_days, "days")
+    space_id = body.get("space_id") or None
+    if space_id and not await _asyncio.to_thread(db.get_space, space_id):
+        raise HTTPException(404, detail=f"Space {space_id} not found")
+    return await _asyncio.to_thread(
+        retention.archive_idle_sessions,
+        days,
+        dry_run=bool(body.get("dry_run", False)),
+        space_id=space_id,
+    )
 
 
 @router.post("/api/sessions/purge")
 async def purge_sessions(body: dict = {}):
-    """Bulk delete old sessions."""
-    keep_days = body.get("keep_days", 7)
-    keep_min = body.get("keep_min", 5)
+    """Bulk-delete stale ordinary sessions — or, with dry_run, say what it would.
+
+    Body: ``{keep_days: 7, keep_min: 5, dry_run: false}``. keep_days 0 means
+    "everything already idle"; keep_min is how many of the stale candidates
+    survive regardless, newest first.
+
+    Candidates are ordinary user chats only: unpinned, spaceless, session_type
+    'normal', last touched before the cutoff. Typed sessions (canary, worker,
+    cron, rlm, snooze) each have their own retention horizon in
+    core/retention.py and are counted, not deleted. The scan is the whole
+    table — it used to be the 1,000 most recently updated rows, which hid
+    exactly the oldest sessions a purge is aimed at.
+
+    Both modes compute the same set from the same query, so a dry run is a
+    promise the real run keeps.
+    """
+    body = body or {}
+    keep_days = _non_negative_int(body.get("keep_days", 7), "keep_days")
+    keep_min = _non_negative_int(body.get("keep_min", 5), "keep_min")
+    dry_run = bool(body.get("dry_run", False))
 
     from datetime import datetime, timedelta, timezone
 
@@ -516,13 +787,25 @@ async def purge_sessions(body: dict = {}):
 
     import asyncio as _asyncio
 
-    sessions = await _asyncio.to_thread(db.list_sessions, 1000)
-    # Sort by updated_at, keep at least keep_min
-    candidates = [s for s in sessions if (s.get("updated_at") or "") < cutoff]
-    to_delete = candidates[keep_min:] if len(candidates) > keep_min else []
+    found = await _asyncio.to_thread(db.list_purge_candidates, cutoff)
+    candidates = found["candidates"]
+    to_delete = candidates[keep_min:]
 
-    manager = get_manager()
-    for s in to_delete:
-        manager.delete_session(s["id"])
+    purged = 0
+    if not dry_run:
+        manager = get_manager()
+        for s in to_delete:
+            manager.delete_session(s["id"])
+            purged += 1
 
-    return {"purged": len(to_delete)}
+    return {
+        "dry_run": dry_run,
+        "keep_days": keep_days,
+        "keep_min": keep_min,
+        "cutoff": cutoff,
+        "candidates": len(candidates),
+        "would_delete": len(to_delete),
+        "purged": purged,
+        "sample": [{k: s[k] for k in ("id", "title", "updated_at", "message_count")} for s in to_delete[:10]],
+        "skipped": found["skipped"],
+    }

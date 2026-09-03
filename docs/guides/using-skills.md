@@ -75,7 +75,7 @@ git clone https://example.com/some-skill-repo.git some-skill-name/
 
 The next turn picks it up. There's no install command — discovery is just a directory scan.
 
-To uninstall: delete the directory, or use the agent's `delete_skill` tool (it's a dangerous tool, so it'll ask you to confirm first).
+To uninstall: delete the directory, or use the `×` on the skill's row in Explorer → Capabilities → Skills (`DELETE /api/skills/{name}`).
 
 ---
 
@@ -88,6 +88,18 @@ You can disable a particular skill from being auto-injected for a session by inc
 This isn't a hard switch — there's no `disabled_skills` setting yet — but the scout respects in-conversation guidance.
 
 For permanent disabling, move the skill out of `data/skills/` (e.g., to `data/skills.disabled/`).
+
+---
+
+## Skill self-healing
+
+When a skill fails mid-session and the agent finds a workaround, that lesson doesn't just evaporate at the end of the turn. A background pass (**refine**) can turn it into a proposed edit to the skill's own `SKILL.md` — the fix the skill was missing, folded back in instead of being rediscovered next time.
+
+Pending proposals show up as a banner on Explorer → Capabilities → Skills, one row per proposal: which skill, which section, the problem it addresses, and — once it's been tried since being proposed — a trial tally (uses vs. how many actually helped). **review** opens the skill's editor with the change ready to apply.
+
+You don't have to click anything, though. A proposal older than `skill_proposal_auto_apply_after_hours` (24; 0 disables) applies itself during idle time once it clears a mechanical bar — the target skill still exists and is enabled, the change is under 4,000 characters, confidence is at least 0.6 — capped at `skill_proposal_max_auto_applies_per_day` (5). Before it touches the file, a timestamped copy of the current `SKILL.md` lands in `data/skill_backups/<skill>/`, so an auto-applied change is a rollback away, not a leap of faith. It shows up as a notification either way.
+
+A skill can also carry its own behavioral test: a `verify:` block in `SKILL.md` becomes a managed canary (`skill--<name>`) that the canary suite runs to check the skill still does what it claims — a proposal that breaks the skill's own test gets caught there, not just by eyeballing the diff. See [../authoring/writing-skills.md](../authoring/writing-skills.md) for the format.
 
 ---
 

@@ -5,9 +5,12 @@ manager.prompt (the cron precedent) → wait for the turn to finish (including
 reflect retries) → score by re-running the canary's gates against the final
 workspace state → canary_runs row → cleanup (gates deleted, temp dir removed).
 
-Sweeps run canaries sequentially — canary_max_concurrent stays 1 until the
-model-concurrency story says otherwise; a sweep is a background measurement,
-not a throughput problem.
+Sweeps run canaries sequentially and one sweep runs at a time (the scheduler
+holds the lock) — a sweep is a background measurement, not a throughput
+problem. Selection is change-driven: the nightly `scheduled` trigger is a
+small least-recently-run heartbeat over the non-parked canaries, `full`
+(model swap, deploy, "Run all") runs everything, and `post_batch`/`manual`
+run the caller's explicit names.
 """
 
 from __future__ import annotations
@@ -30,6 +33,40 @@ logger = logging.getLogger("pernix.canary")
 # give up waiting and score the run as-is (failed).
 _CANCEL_GRACE_S = 30
 _POLL_INTERVAL_S = 1.0
+
+# The canary sandbox: every canary session runs under this tool allowlist
+# (enforced at the agent schema intersection, scout filtering, and the
+# executor backstop — the same three points as scheduled-job charters).
+# Canary prompts include machine-authored content — auto-admitted tasks,
+# skill-verify runs whose injected SKILL.md may instruct mutating actions —
+# so the session gets computation and reads only: workspace/file/search
+# tools, memory RECALL (recall quality is part of what's measured; writes
+# stay denied by the denied_session_types belt), and read-only skill/tool
+# discovery so a skill-verify canary can load the skill under test. No
+# workers, no jobs, no notifications, no skill/tool/memory mutation. Bash
+# remains — the seed tasks need it — so this is a strong fence, not a jail;
+# the verify-gate allowlist proof narrows what machine-authored canaries
+# can make of it.
+CANARY_TOOL_ALLOWLIST = frozenset(
+    {
+        "bash",
+        "file_read",
+        "file_write",
+        "file_edit",
+        "multiedit",
+        "glob",
+        "grep",
+        "repl",
+        "view_image",
+        "recall",
+        "deep_recall",
+        "discover_skills",
+        "load_skill",
+        "read_skill_resource",
+        "discover_tools",
+        "list_gates",
+    }
+)
 # Only used on the degraded no-task-handle path in _wait_for_turn_end: how long
 # to give a turn to visibly leave IDLE_READY before assuming it already ended.
 _START_GRACE_S = 5.0
@@ -49,10 +86,27 @@ class CanaryRunResult:
     run_id: int | None = None
     flaky: bool = False
 
+    @property
+    def outcome(self) -> str:
+        """pass | gate_fail | timeout | error | noop — the honest failure
+        taxonomy. Only gate_fail means "the agent ran and the work was wrong";
+        the others are wall-clock or harness trouble and must never feed the
+        per-task tripwire."""
+        if self.passed:
+            return "pass"
+        if self.error.startswith("timeout"):
+            return "timeout"
+        if self.error:
+            return "error"
+        if self.tokens == 0 and self.duration_s < 1.0:
+            return "noop"
+        return "gate_fail"
+
     def to_dict(self) -> dict:
         return {
             "task": self.task,
             "passed": self.passed,
+            "outcome": self.outcome,
             "trigger": self.trigger,
             "session_id": self.session_id,
             "gates": self.gate_results,
@@ -171,6 +225,7 @@ async def run_canary(
         result.session_id = sid
         session = manager.get(sid)
         session.workspace_override = str(tmp)
+        session.tool_allowlist = CANARY_TOOL_ALLOWLIST
         if canary.model:
             session.model_override = canary.model
 
@@ -219,6 +274,7 @@ async def run_canary(
             if s is not None:
                 s.workspace_override = None
                 s.model_override = None
+                s.tool_allowlist = None
         except Exception:
             pass
         # Only reclaim the workspace once the turn is genuinely over. Deleting
@@ -247,6 +303,8 @@ async def run_canary(
             tokens=result.tokens,
             duration_s=result.duration_s,
             batch_id=batch_id,
+            outcome=result.outcome,
+            error=result.error[:500],
         )
     except Exception as e:
         logger.error("Failed to record canary run '%s': %s", canary.name, e)
@@ -254,7 +312,7 @@ async def run_canary(
     logger.info(
         "Canary '%s' %s (%.0fs, %d retries, trigger=%s)",
         canary.name,
-        "PASSED" if result.passed else "FAILED",
+        "PASSED" if result.passed else f"FAILED[{result.outcome}]",
         result.duration_s,
         result.retries,
         trigger,
@@ -262,30 +320,21 @@ async def run_canary(
     return result
 
 
-def _due_this_sweep(canary: CanaryDef, sweep_index: int) -> bool:
-    """Cadence filter for scheduled sweeps: run every Nth sweep.
+def _heartbeat_pick(defs: list[CanaryDef], k: int) -> list[CanaryDef]:
+    """The k least-recently-run active canaries — the nightly heartbeat.
 
-    Deterministic and stable per canary — the phase is derived from the
-    canary's own name, so demoted canaries spread across the rotation
-    instead of all landing on the same sweep.
+    Least-recently-run is self-healing under park/unpark/create/retire and
+    bounds every active canary's history staleness, which the per-task
+    tripwire's green precondition depends on. Never-run canaries sort first;
+    ties break by name for determinism.
     """
-    cadence = max(1, int(canary.cadence or 1))
-    if cadence == 1:
-        return True
-    phase = sum(canary.name.encode("utf-8")) % cadence
-    return sweep_index % cadence == phase
-
-
-def _next_sweep_index() -> int:
-    """Monotonic scheduled-sweep counter, durable across restarts."""
     from db import models as db
 
-    try:
-        current = int(db.get_snooze_state("canary_sweep_index") or "0")
-    except (TypeError, ValueError):
-        current = 0
-    db.set_snooze_state("canary_sweep_index", str(current + 1))
-    return current
+    def last_run_at(d: CanaryDef) -> str:
+        rows = db.list_canary_runs(task=d.name, limit=1)
+        return rows[0].get("created_at") or "" if rows else ""
+
+    return sorted(defs, key=lambda d: (last_run_at(d), d.name))[: max(1, k)]
 
 
 async def run_sweep(
@@ -293,12 +342,16 @@ async def run_sweep(
     batch_id: str | None = None,
     names: list[str] | None = None,
 ) -> list[CanaryRunResult]:
-    """Run the whole suite (or a named subset) sequentially.
+    """Run a selection of the suite sequentially.
 
-    Scheduled sweeps honour each canary's `cadence`; post_batch and manual
-    sweeps never do. The post-batch sweep is the tripwire's active probe and
-    must cover every canary that could regress, and a human asking for a run
-    means now.
+    Selection by trigger: `scheduled` is the nightly heartbeat — the
+    canary_heartbeat_per_night least-recently-run non-parked canaries, just
+    enough to keep every active canary's history warm. `full` runs
+    everything including parked canaries (model swaps, deploys, "Run all" —
+    the world changed, so every canary gets to speak). `post_batch` and
+    `manual` run the caller's explicit `names` (or everything, absent one) —
+    the post-batch probe's targeting happens at the scheduling layer, and a
+    human asking for a run means now.
     """
     if not settings.canary_enabled:
         logger.info("Canary sweep skipped: canary_enabled is off")
@@ -308,18 +361,33 @@ async def run_sweep(
         wanted = set(names)
         defs = [d for d in defs if d.name in wanted]
     elif trigger == "scheduled":
-        sweep_index = _next_sweep_index()
-        due = [d for d in defs if _due_this_sweep(d, sweep_index)]
-        deferred = len(defs) - len(due)
-        if deferred:
-            logger.info("Canary sweep #%d: %d canary(ies) deferred by cadence", sweep_index, deferred)
-        defs = due
+        active = [d for d in defs if not d.parked]
+        defs = _heartbeat_pick(active, settings.canary_heartbeat_per_night) if active else []
+        if defs:
+            logger.info("Canary heartbeat: %s", ", ".join(d.name for d in defs))
     if not defs:
         logger.info("Canary sweep: no canaries to run")
         return []
     results: list[CanaryRunResult] = []
     for d in defs:
         results.append(await run_canary(d, trigger=trigger, batch_id=batch_id))
+
+    # Confirm-rerun: the tripwire's active probe demands two independent
+    # gate_fails before a batch can be auto-rolled-back, and the rerun has to
+    # happen HERE — inside the sweep job, under the sweep lock — because the
+    # lock is skip-not-queue: a rerun enqueued from the (read-only) tripwire
+    # would be silently dropped while any sweep was running. Only honest
+    # gate_fails earn a rerun; timeouts and harness breaks are suite-health
+    # concerns and re-running them proves nothing about the batch.
+    if trigger == "post_batch":
+        by_name = {d.name: d for d in defs}
+        for r in list(results):
+            d = by_name.get(r.task)
+            if d is None or d.flaky or r.outcome != "gate_fail":
+                continue
+            logger.info("Canary '%s' gate-failed post-batch — confirm-rerun", r.task)
+            results.append(await run_canary(d, trigger=trigger, batch_id=batch_id))
+
     passed = sum(1 for r in results if r.passed)
     logger.info("Canary sweep complete: %d/%d passed (trigger=%s)", passed, len(results), trigger)
     return results

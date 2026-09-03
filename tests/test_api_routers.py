@@ -1,5 +1,6 @@
 """Tests for API routers using httpx AsyncClient + ASGITransport."""
 
+import asyncio
 import json
 
 import pytest
@@ -31,7 +32,12 @@ async def test_health_endpoint():
     assert "status" in data
     assert data["status"] == "healthy"
     assert "version" in data
+    # Two different numbers: work in flight, and sessions held in memory.
+    # A loaded session is idle for up to half an hour before it is reaped,
+    # so sessions_active must never be the loaded count.
     assert "sessions_active" in data
+    assert "sessions_loaded" in data
+    assert data["sessions_active"] <= data["sessions_loaded"]
 
 
 async def test_health_detailed_localhost():
@@ -147,6 +153,43 @@ async def test_list_sessions_with_data():
     assert data["count"] >= 1
 
 
+async def test_list_sessions_reports_total_and_has_more():
+    """The sidebar can only offer 'load older' if the page admits it is one."""
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    for i in range(12):
+        db.create_session(title=f"S{i}")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        page1 = (await client.get("/api/sessions?limit=5&offset=0")).json()
+        page2 = (await client.get("/api/sessions?limit=5&offset=5")).json()
+        page3 = (await client.get("/api/sessions?limit=5&offset=10")).json()
+    assert page1["total"] == 12
+    assert page1["count"] == 5
+    assert page1["has_more"] is True
+    assert page2["has_more"] is True
+    # The last page has fewer rows than the window and nothing behind it.
+    assert page3["count"] == 2
+    assert page3["has_more"] is False
+    # Pages do not overlap: three pages cover all twelve, once each.
+    ids = [s["id"] for p in (page1, page2, page3) for s in p["items"]]
+    assert len(ids) == 12
+    assert len(set(ids)) == 12
+
+
+async def test_list_sessions_has_more_false_when_everything_fits():
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    db.create_session(title="Only one")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        data = (await client.get("/api/sessions?limit=500")).json()
+    assert data["total"] == 1
+    assert data["has_more"] is False
+
+
 async def test_get_session_not_found():
     from api.routers import sessions
 
@@ -169,6 +212,79 @@ async def test_get_session_found():
     data = resp.json()
     assert data["id"] == sid
     assert len(data["messages"]) == 1
+
+
+async def test_get_session_paging_returns_newest_page_and_has_more():
+    """?limit= hands back the NEWEST page, oldest-first, and admits there is more."""
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Long one")
+    for i in range(25):
+        db.add_message(sid, "user", f"m{i}")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/sessions/{sid}?limit=10")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_messages"] == 25
+    assert data["has_more"] is True
+    contents = [m["content"] for m in data["messages"]]
+    assert contents == [f"m{i}" for i in range(15, 25)]
+
+
+async def test_get_session_before_id_returns_only_older_rows():
+    """The 'load earlier' fetch returns rows the client does not already hold."""
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Paged")
+    ids = [db.add_message(sid, "user", f"m{i}") for i in range(25)]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        page1 = (await client.get(f"/api/sessions/{sid}?limit=10")).json()
+        oldest = page1["messages"][0]["id"]
+        page2 = (await client.get(f"/api/sessions/{sid}?limit=10&before_id={oldest}")).json()
+        page3 = (await client.get(f"/api/sessions/{sid}?limit=10&before_id={page2['messages'][0]['id']}")).json()
+    assert [m["content"] for m in page2["messages"]] == [f"m{i}" for i in range(5, 15)]
+    assert page2["has_more"] is True
+    # Every id in page 2 is strictly older than the page-1 cursor: no overlap.
+    assert all(m["id"] < oldest for m in page2["messages"])
+    # The last page is short and says so — nothing is left behind it.
+    assert [m["content"] for m in page3["messages"]] == [f"m{i}" for i in range(0, 5)]
+    assert page3["has_more"] is False
+    assert page3["messages"][0]["id"] == ids[0]
+
+
+async def test_get_session_before_id_past_the_start_is_empty_not_a_reload():
+    """A cursor older than everything returns nothing — not the whole transcript."""
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Edge")
+    first = db.add_message(sid, "user", "only one")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/sessions/{sid}?limit=10&before_id={first}")
+    data = resp.json()
+    assert data["messages"] == []
+    assert data["has_more"] is False
+
+
+async def test_get_session_without_limit_still_returns_everything():
+    """No limit = the old whole-transcript read, and never a false has_more."""
+    from api.routers import sessions
+    from db import models as db
+
+    app = _make_app(sessions.router)
+    sid = db.create_session(title="Whole")
+    for i in range(5):
+        db.add_message(sid, "user", f"m{i}")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        data = (await client.get(f"/api/sessions/{sid}")).json()
+    assert len(data["messages"]) == 5
+    assert data["total_messages"] == 5
+    assert data["has_more"] is False
 
 
 async def test_get_session_status():
@@ -695,3 +811,88 @@ async def test_health_reports_build_id():
 
     data = await health()
     assert data.get("build") == BUILD_ID
+
+
+# ---------------------------------------------------------------------------
+# Jobs router — POST /api/jobs/{name}/run ("Run now")
+# ---------------------------------------------------------------------------
+
+
+async def test_run_job_now_dispatches_a_copy_of_the_live_meta(monkeypatch):
+    """A manual run reuses the scheduler's dispatch, on a COPY of the meta.
+
+    `_execute_cron_job` writes `last_fired_at` into whatever dict it is handed
+    (the live APScheduler job's, when the scheduler calls it). Handing it the
+    live dict from a manual run would move the missed-run grid, and a restart
+    would then believe a scheduled slot had already fired.
+    """
+    from api.routers import jobs as jobs_router
+
+    live_meta = {"name": "nightly", "prompt": "do the thing", "cron_expr": "0 3 * * *"}
+
+    class _Job:
+        kwargs = {"meta": live_meta}
+
+    class _Scheduler:
+        def get_job(self, name):
+            return _Job() if name == "nightly" else None
+
+    seen = {}
+
+    async def _fake_execute(meta):
+        seen["meta"] = meta
+        meta["last_fired_at"] = "written-by-the-dispatcher"
+
+    monkeypatch.setattr("core.extensions.scheduling._get_scheduler", lambda: _Scheduler(), raising=False)
+    monkeypatch.setattr("core.extensions.scheduling._execute_cron_job", _fake_execute, raising=False)
+
+    app = _make_app(jobs_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/jobs/nightly/run")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "run_started", "name": "nightly"}
+
+    # Fire-and-forget: give the created task a turn on the loop.
+    for _ in range(20):
+        if "meta" in seen:
+            break
+        await asyncio.sleep(0.01)
+
+    assert seen["meta"]["prompt"] == "do the thing"
+    assert seen["meta"]["transient"] is True
+    # The live job's dict is untouched.
+    assert "last_fired_at" not in live_meta
+    assert "transient" not in live_meta
+
+
+async def test_run_job_now_falls_back_to_disk_then_404s(monkeypatch, tmp_path):
+    from api.routers import jobs as jobs_router
+
+    stored = [{"name": "ondisk", "prompt": "p", "cron_expr": "* * * * *", "paused": True, "cron_trigger": "cron[...]"}]
+    seen = {}
+
+    async def _fake_execute(meta):
+        seen["meta"] = meta
+
+    monkeypatch.setattr("core.extensions.scheduling._get_scheduler", lambda: None, raising=False)
+    monkeypatch.setattr("core.extensions.scheduling._read_jobs_json", lambda: stored, raising=False)
+    monkeypatch.setattr("core.extensions.scheduling._execute_cron_job", _fake_execute, raising=False)
+
+    app = _make_app(jobs_router.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        ok = await client.post("/api/jobs/ondisk/run")
+        missing = await client.post("/api/jobs/nope/run")
+
+    assert ok.status_code == 200
+    assert missing.status_code == 404
+
+    for _ in range(20):
+        if "meta" in seen:
+            break
+        await asyncio.sleep(0.01)
+
+    # The persisted-only fields never reach the dispatcher.
+    assert "cron_trigger" not in seen["meta"]
+    assert "paused" not in seen["meta"]
+    assert seen["meta"]["name"] == "ondisk"

@@ -1,27 +1,19 @@
 // Pernix — Settings modal with tabs
 
 import { el, text, clear, setSanitizedSvg } from '../../render.js';
-import { get, post, setAuthToken } from '../../api.js';
+import { icon } from '../../icons.js';
+import { del, get, post, setAuthToken } from '../../api.js';
 import { getPermission, requestPermission } from '../../notifications.js';
+import { getTheme, setTheme } from '../../theme.js';
 import { runVoiceTest } from '../../voice.js';
-
-function _showToast(message, type = 'info') {
-    const colors = { success: 'var(--success)', error: 'var(--error)', info: 'var(--text-dim)' };
-    // Wraps rather than clipping, and clears the iOS home indicator — a
-    // nowrap toast ran off the side of a phone screen.
-    const toast = el('div', {
-        style: `position:fixed; bottom:max(1.5rem, calc(env(safe-area-inset-bottom, 0px) + 0.75rem));`
-             + `left:50%; transform:translateX(-50%); max-width:min(92vw, 420px);`
-             + `background:var(--bg-surface); border:1px solid ${colors[type] || colors.info};`
-             + `color:${colors[type] || colors.info}; font-family:var(--mono); font-size:var(--text-sm);`
-             + `padding:0.6rem 1.2rem; border-radius:var(--radius); z-index:9999; text-align:center;`
-             + `box-shadow:var(--shadow-md); pointer-events:none; line-height:1.4;`,
-    }, [text(message)]);
-    document.body.append(toast);
-    setTimeout(() => toast.remove(), 3500);
-}
+import { announce, openOverlay } from '../../a11y.js';
+import { notify } from '../../feedback.js';
+import { confirmDanger } from './confirm.js';
+import { bindStripScroll } from '../file-panel.js';
+import { isTouch } from '../../mobile.js';
 
 let _overlay = null;
+let _closeOverlay = null;  // teardown from a11y.js openOverlay()
 let _statusTimer = null;  // pending auto-clear of the footer status line
 let _original = {};  // snapshot of settings when modal opened
 let _models = [];    // [{id, valid: null|true|false, info: {}}]
@@ -46,14 +38,29 @@ const LOCKED_KEYS = new Set([
 const LOCKED_NOTE = 'Edit-locked. The settings API rejects changes to this field so a prompt-injected '
     + 'agent cannot widen its own sandbox through it. Change it in data/settings.json and restart.';
 
-// The server only reports restart_required for the network group, but several
-// other values are read exactly once — when the LLM router is constructed —
-// so a live save persists them while the running process keeps the old ones.
-const RESTART_ON_SAVE = new Set([
-    'network_enabled', 'ssl_mode', 'ssl_cert_path', 'ssl_key_path', 'cors_origins',
-    'llm_max_concurrent', 'openrouter_max_concurrent', 'openai_max_concurrent',
-    'llm_session_timeout',
+// The server only reports restart_required for the network group, but many
+// other values are read exactly once at startup — when the LLM router is
+// constructed, when tools register — so a live save persists them while the
+// running process keeps the old ones.
+//
+// Which keys those are is already declared, per field, as the `restart` string
+// that renders the badge beside the control. A second hand-maintained list
+// drifted from the badges the moment one was added: every RESTART_TOOLS field
+// (web_search_enabled, candor_enabled, rlm_enabled, telos_enabled, …) wore a
+// "restart" badge and then saved with a plain "Saved". Derive it instead. (S5)
+const RESTART_EXTRA_KEYS = new Set([
+    // List-valued editors with no field entry of their own. The Allowed
+    // Origins section carries the same warning in its own help text.
+    'cors_origins',
 ]);
+
+function restartKeys() {
+    const keys = new Set(RESTART_EXTRA_KEYS);
+    for (const field of allSettingFields()) {
+        if (field.restart) keys.add(field.key);
+    }
+    return keys;
+}
 
 const RESTART_ROUTER = 'Sizes a provider semaphore when the LLM router is built. Saving stores the '
     + 'value; the running process keeps its current slot count until the server restarts.';
@@ -79,6 +86,7 @@ const NETWORK_FIELDS = [
 const SECTIONS = [
     {
         title: 'LLM Providers',
+        tab: 'providers',
         description: 'Configure endpoints and concurrency for LLM providers. Max Concurrent limits parallel requests per provider. Session LLM Timeout caps how long a single session may hold LLM slots — prevents a hung or runaway session from blocking others indefinitely (0 = unlimited). Reasoning applies to Ollama models that have a thinking mode (the qwen3 family, nemotron3, …) and is off for both roles by default: it buys quality on hard turns and costs latency and output tokens everywhere. If Primary and Background name the same model the two cannot be told apart — Primary\'s setting applies to both. Model selection is on the Models tab.',
         fields: [
             { key: 'llm_base_url', label: 'Ollama Base URL', type: 'text' },
@@ -90,42 +98,59 @@ const SECTIONS = [
             { key: 'openrouter_cache_control', label: 'Anthropic Cache Breakpoints (via OpenRouter)', type: 'bool' },
             { key: 'openai_base_url', label: 'OpenAI URL (or any OpenAI-compatible server)', type: 'text' },
             { key: 'openai_max_concurrent', label: 'OpenAI Max Concurrent', type: 'number', min: 1, restart: RESTART_ROUTER },
-            { key: 'llm_session_timeout', label: 'Session LLM Timeout (s)', type: 'number', min: 0, restart: RESTART_ROUTER },
+            { key: 'llm_session_timeout', label: 'Session LLM Timeout (seconds)', type: 'number', min: 0, restart: RESTART_ROUTER },
+            {
+                key: 'fallback_burn_alert_share',
+                label: 'Fallback-burn Alert Share (0–1 fraction)',
+                type: 'number', min: 0, max: 1, step: 0.05,
+                hint: 'When the Backup model serves at least this share of the trailing 24h\'s tokens, a high-urgency notification fires (once/day) — the signature of a wedged primary provider silently billing everything to the paid tier. Watch-only; 0 disables.',
+            },
+            {
+                key: 'fallback_burn_min_tokens',
+                label: 'Fallback-burn Volume Floor (tokens)',
+                type: 'number', min: 0,
+                hint: 'The alert stays quiet unless the 24h window carried at least this many total tokens — a quiet day that happened to fail over is noise, not the incident.',
+            },
             { key: 'openrouter_api_key', label: 'OpenRouter API Key', type: 'apikey', envKey: 'OPENROUTER_API_KEY' },
             { key: 'openai_api_key', label: 'OpenAI API Key', type: 'apikey', envKey: 'OPENAI_API_KEY' },
         ],
     },
     {
         title: 'Context',
+        tab: 'agent',
         description: 'Context is auto-managed by default: the harness reads each model\'s real window and completion cap from the provider (Ollama /api/show, OpenRouter /models), budgets against it, and pins Ollama\'s num_ctx so the server window matches — turn Auto off to force the manual Context Budget / Max Output Tokens instead. The Ollama Context Cap bounds KV-cache VRAM use on big-window models (0 = model max). Compaction automatically summarizes older messages when context fills up; critical threshold triggers a hard reset if compaction can\'t free enough space. View pruning is the cheaper step before compaction: under budget pressure it stubs oversized tool results out of the compiled view only — stored messages are never touched.',
         fields: [
             { key: 'context_auto', label: 'Auto (use model-reported limits)', type: 'bool' },
             { key: 'ollama_num_ctx_cap', label: 'Ollama Context Cap (tokens, 0 = model max)', type: 'number' },
-            { key: 'context_budget', label: 'Context Budget (manual/fallback)', type: 'number' },
-            { key: 'max_tokens', label: 'Max Output Tokens (ceiling)', type: 'number' },
-            { key: 'compaction_threshold', label: 'Compaction Threshold', type: 'number', step: 0.05 },
-            { key: 'compaction_keep_tokens', label: 'Compaction Keep Tokens', type: 'number' },
-            { key: 'context_critical_threshold', label: 'Critical Reset Threshold', type: 'number', step: 0.05 },
-            { key: 'view_prune_pressure', label: 'View Prune Pressure (fraction of budget)', type: 'number', step: 0.05 },
+            { key: 'context_budget', label: 'Context Budget (tokens, manual/fallback)', type: 'number' },
+            { key: 'max_tokens', label: 'Max Output Tokens (tokens, ceiling)', type: 'number' },
+            { key: 'compaction_threshold', label: 'Compaction Threshold (0–1 fraction)', type: 'number', step: 0.05 },
+            { key: 'compaction_keep_tokens', label: 'Compaction Keep Tokens (tokens)', type: 'number' },
+            { key: 'context_critical_threshold', label: 'Critical Reset Threshold (0–1 fraction)', type: 'number', step: 0.05 },
+            { key: 'view_prune_pressure', label: 'View Prune Pressure (0–1 fraction of budget)', type: 'number', step: 0.05 },
             { key: 'view_prune_keep_recent', label: 'View Prune Keep Recent (messages)', type: 'number' },
             { key: 'view_prune_min_chars', label: 'View Prune Min Chars', type: 'number' },
         ],
     },
     {
         title: 'Agent',
-        description: 'Limits on the agent loop. Max Tool Rounds is a backstop against a runaway loop, not a spend cap — goal token/time budgets and the stuck detector are the real guards, so a high value is fine. Scout sends a lightweight model (the Background role) ahead to discover relevant tools and context before the Primary model responds.',
+        tab: 'agent',
+        description: 'Limits on the agent loop. Max Tool Rounds is a backstop against a runaway loop, not a spend cap — goal token/time budgets and the stuck detector are the real guards, so a high value is fine. Scout sends a lightweight model (the Background role) ahead to discover relevant tools and context before the Primary model responds. Forced follow-up: when a reply ends by announcing more work ("Next, I\'ll…") without doing it, the harness injects one bounded in-turn nudge to keep the agent working instead of ending the turn.',
         fields: [
             { key: 'max_tool_rounds', label: 'Max Tool Rounds', type: 'number' },
             { key: 'scout_enabled', label: 'Scout Enabled', type: 'bool' },
-            { key: 'scout_timeout', label: 'Scout Timeout (s)', type: 'number' },
+            { key: 'scout_timeout', label: 'Scout Timeout (seconds)', type: 'number' },
+            { key: 'forced_followup_enabled', label: 'Forced Follow-up Nudge', type: 'bool' },
+            { key: 'forced_followup_max_per_turn', label: 'Max Forced Follow-ups / Turn', type: 'number', min: 0, max: 5 },
         ],
     },
     {
         title: 'Shell & Tools',
+        tab: 'tools',
         description: 'Timeouts and security for tool execution. Strict shell security restricts commands to a built-in allowlist. Permissive mode allows any command. Size caps below: 0 = no cap. RLIMIT_FSIZE caps each bash subprocess\'s file writes; lift it for large model/video downloads.',
         fields: [
-            { key: 'tool_timeout', label: 'Tool Timeout (s)', type: 'number' },
-            { key: 'shell_timeout', label: 'Shell Timeout (s)', type: 'number' },
+            { key: 'tool_timeout', label: 'Tool Timeout (seconds)', type: 'number' },
+            { key: 'shell_timeout', label: 'Shell Timeout (seconds)', type: 'number' },
             { key: 'shell_security_mode', label: 'Shell Security', type: 'select', options: ['permissive', 'strict'], risk: 'security' },
             { key: 'shell_address_space_limit_bytes', label: 'Bash RLIMIT_AS (bytes, 0 = no cap)', type: 'number', min: 0 },
             { key: 'shell_fsize_limit_bytes', label: 'Bash RLIMIT_FSIZE (bytes, 0 = no cap)', type: 'number', min: 0 },
@@ -136,17 +161,19 @@ const SECTIONS = [
     },
     {
         title: 'Web',
+        tab: 'tools',
         description: 'Web search uses Tavily (requires API key — free tier at tavily.com). Browser uses Playwright for JS-rendered page extraction. Disable headless for login flows or visual debugging.',
         fields: [
             { key: 'web_search_enabled', label: 'Web Search', type: 'bool', restart: RESTART_TOOLS },
             { key: 'tavily_api_key', label: 'Tavily API Key', type: 'apikey', envKey: 'TAVILY_API_KEY' },
             { key: 'browser_enabled', label: 'Enable Browser (Playwright)', type: 'bool', restart: RESTART_TOOLS },
             { key: 'browser_headless', label: 'Headless Mode', type: 'bool' },
-            { key: 'browser_timeout', label: 'Page Load Timeout (s)', type: 'number', min: 5, max: 120 },
+            { key: 'browser_timeout', label: 'Page Load Timeout (seconds)', type: 'number', min: 5, max: 120 },
         ],
     },
     {
         title: 'Voice Input',
+        tab: 'integrations',
         description: 'Speech-to-text for the chat input. Each engine has a different privacy profile — the disclaimer below the engine selector says where your voice audio goes. Local Whisper transcribes on the Pernix server; Remote Whisper uploads recordings to an OpenAI-compatible endpoint; Direct-to-Model attaches the recording for an audio-capable chat model to hear; Browser Dictation uses your browser vendor\'s speech service.',
         fields: [
             { key: 'voice_mode', label: 'Engine', type: 'select', options: ['off', 'local_whisper', 'remote_whisper', 'model_direct', 'web_speech'] },
@@ -191,6 +218,7 @@ const SECTIONS = [
     },
     {
         title: 'Memory',
+        tab: 'agent',
         description: 'Automatic memory recall surfaces relevant past conversations at the start of each turn. The distillation audit is the feedback loop on memory quality: during snooze it re-derives the durable facts of an already-distilled session with the Background model and repairs anything the first pass missed. It costs a couple of background LLM calls per day — set the per-day count to 0 to keep the audit off without disabling the machinery.',
         fields: [
             { key: 'memory_recall', label: 'Auto-Recall', type: 'bool' },
@@ -206,6 +234,7 @@ const SECTIONS = [
     },
     {
         title: 'Background Work (Snooze)',
+        tab: 'autonomy',
         description: 'The master switch for everything the agent does while you are idle: memory maintenance and distillation, dreaming, telos loops, canary sweeps, adaptive edits and embedding sweeps all run inside a snooze cycle. Turning Background Work off stops all of it and is the one control that reliably ends idle-time LLM spend, whatever the individual feature toggles say. Cooldown is how long the machine must be quiet before a cycle may start; the tick interval paces how often the scheduler even looks. The cycle time limit is a hang backstop, not a scheduler — a cycle normally ends when its activity ladder finishes or you start typing; raise it for slow local models.',
         fields: [
             {
@@ -223,11 +252,13 @@ const SECTIONS = [
                 min: 1,
                 hint: 'One tick is 60s of maintenance loop, so 10 = a check roughly every 10 minutes.',
             },
-            { key: 'snooze_max_cycle_seconds', label: 'Cycle Time Limit (s)', type: 'number', min: 60 },
+            { key: 'snooze_max_cycle_seconds', label: 'Cycle Time Limit (seconds)', type: 'number', min: 60 },
         ],
     },
     {
-        title: 'Candor (Operational Memory)',
+        title: 'Operational memory (Candor)',
+        tab: 'integrations',
+        term: 'Internal name: Candor. Settings keys are candor_*.',
         description: 'Calibrated reliability tracking: tool outcomes and reflect verdicts feed an auditable evidence ledger, and scout receives an operational-intel brief flagging degraded tools, discovered conditions, and open questions. Observation capture, snooze maintenance, and the scout brief toggle immediately; the agent-facing tools (predict_reliability, why_reliability, reliability_questions) register at startup, so they appear/disappear after a restart.',
         fields: [
             { key: 'candor_enabled', label: 'Candor Enabled', type: 'bool', restart: RESTART_TOOLS },
@@ -236,7 +267,9 @@ const SECTIONS = [
         ],
     },
     {
-        title: 'RLM (Recursive Processing)',
+        title: 'Large-input runs (RLM)',
+        tab: 'tools',
+        term: 'Internal name: RLM \u2014 Recursive Language Models. Settings keys are rlm_*.',
         description: 'Recursive Language Models: the agent processes inputs far beyond the context window (huge files, corpora, transcripts) by writing code in a sandboxed REPL that holds the input as a variable and delegates chunks to sub-LLM calls. The caps guard against runaway runs: iterations bounds root turns, sub-calls bounds total LLM spend per run, depth 2+ allows recursive child RLMs. Caps apply immediately; the rlm_process tool registers at startup, so enabling/disabling takes a restart. RLM adds no model roles of its own: the root runs on your Primary model and sub-calls run on Background (both set under Models → Model Roles).',
         fields: [
             { key: 'rlm_enabled', label: 'RLM Enabled', type: 'bool', restart: RESTART_TOOLS },
@@ -244,12 +277,31 @@ const SECTIONS = [
             { key: 'rlm_max_subcalls', label: 'Max Sub-calls / Run', type: 'number' },
             { key: 'rlm_max_concurrent_subcalls', label: 'Sub-call Concurrency', type: 'number' },
             { key: 'rlm_max_depth', label: 'Max Recursion Depth', type: 'number' },
-            { key: 'rlm_timeout_seconds', label: 'Run Timeout (s)', type: 'number' },
+            { key: 'rlm_timeout_seconds', label: 'Run Timeout (seconds)', type: 'number' },
             { key: 'rlm_run_retention_days', label: 'Run Data Retention (days)', type: 'number' },
         ],
     },
     {
+        title: 'MCP Servers',
+        tab: 'integrations',
+        description: 'Model Context Protocol: plug external tool servers into the agent. Servers are configured in the Explorer → MCP tab (or data/mcp_servers.json, standard mcpServers format); each connected server\'s tools register as mcp_<server>_<tool> and go through the normal safety gate, scout curation, and health metrics. Enabling/disabling applies immediately — no restart. Turning it off kills local server processes but keeps the tool names visible; their calls return a clear "disabled" error.',
+        fields: [
+            { key: 'mcp_enabled', label: 'MCP Enabled', type: 'bool' },
+            { key: 'mcp_stdio_enabled', label: 'Allow stdio (local subprocess) Servers', type: 'bool', risk: 'security',
+              hint: 'A stdio server is arbitrary local code. Off = remote (url) servers only.' },
+            { key: 'mcp_default_safety', label: 'Default Tool Safety', type: 'select', options: ['safe', 'caution', 'dangerous'],
+              hint: 'Stamped on MCP tools unless the server config overrides it. Server-sent destructive hints always escalate to dangerous.' },
+            { key: 'mcp_call_timeout', label: 'Call Timeout (seconds)', type: 'number', min: 5 },
+            { key: 'mcp_connect_timeout', label: 'Connect Timeout (seconds)', type: 'number', min: 5 },
+            { key: 'mcp_idle_seconds', label: 'Suspend Idle stdio Servers After (seconds, 0 = never)', type: 'number', min: 0 },
+            { key: 'mcp_max_servers', label: 'Max Servers', type: 'number', min: 1 },
+            { key: 'mcp_max_tools_per_server', label: 'Max Tools per Server', type: 'number', min: 1 },
+            { key: 'mcp_refresh_interval_s', label: 'Tool Re-check Interval (seconds, 0 = manual only)', type: 'number', min: 0 },
+        ],
+    },
+    {
         title: 'Dream (Introspection)',
+        tab: 'autonomy',
         description: 'Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems, generates typed hypotheses about itself (contradictions, stale lessons, tool patterns), validates them against recorded outcomes, and writes a periodic dream report to workspace/dreams/. Hypotheses influence nothing until validated; replays/day bounds the counterfactual scout-replay spend (0 disables replay). All settings apply immediately.',
         fields: [
             { key: 'dream_enabled', label: 'Dreaming Enabled', type: 'bool' },
@@ -262,7 +314,43 @@ const SECTIONS = [
         ],
     },
     {
+        // `name` is how buildAutonomyTab finds this one again: it is the only
+        // section on the tab that grows controls of its own (Scan now, and
+        // the list of topics the user has declined).
+        name: 'space-suggest',
+        title: 'Space suggestions',
+        tab: 'autonomy',
+        description: 'Idle-time filing: during snooze the agent reads the last few weeks of ordinary '
+            + 'chats — archived ones included, machine sessions excluded — and makes one background-model '
+            + 'call that groups them by the kind of work you keep coming back to, not by the tool used or '
+            + 'the day it happened. A group that clears the thresholds below becomes a suggestion: either a '
+            + 'new space or a move into one you already have. It only ever offers. Nothing is created, moved '
+            + 'or written to a directive file until you press the button in the review sheet. A topic you '
+            + 'decline is never proposed again — nor a near synonym of it — until you clear it below, and a '
+            + 'suggestion you neither accept nor decline expires on its own. All settings apply immediately.',
+        fields: [
+            {
+                key: 'space_suggest_enabled',
+                label: 'Suggest spaces from recurring work',
+                type: 'bool',
+                risk: 'autonomy',
+                hint: 'Off = the scan never runs and the rung is absent from the idle ladder.',
+            },
+            { key: 'space_suggest_window_days', label: 'Look back (days)', type: 'number' },
+            { key: 'space_suggest_min_sessions', label: 'Min sessions per suggestion', type: 'number' },
+            {
+                key: 'space_suggest_min_days',
+                label: 'Min distinct days',
+                type: 'number',
+                hint: 'Calendar days those chats must span — a burst on one afternoon is not a habit.',
+            },
+            { key: 'space_suggest_scan_interval_hours', label: 'Scan at most every (hours)', type: 'number' },
+            { key: 'space_suggest_ttl_days', label: 'Suggestions expire after (days)', type: 'number' },
+        ],
+    },
+    {
         title: 'Reflect',
+        tab: 'agent',
         description: 'Post-task verification re-reads the agent\'s work and checks for mistakes or incomplete steps. If issues are found, the agent retries automatically. Min messages prevents reflect from firing on trivial exchanges. Deferred grading keeps interactive turns off the critical path: the grade runs in the background after a quiet period and can record lessons, but never retries the turn.',
         fields: [
             { key: 'reflect_enabled', label: 'Post-Task Verification', type: 'bool' },
@@ -270,29 +358,45 @@ const SECTIONS = [
             { key: 'reflect_min_messages', label: 'Min Messages to Trigger', type: 'number' },
             { key: 'reflect_deferred_normal', label: 'Defer Grading (Interactive)', type: 'bool' },
             { key: 'reflect_defer_idle_s', label: 'Defer Delay (seconds)', type: 'number' },
+            {
+                key: 'reflect_nonpass_confidence_floor',
+                label: 'Non-pass Confidence Floor (0–1 fraction)',
+                type: 'number', min: 0, max: 1, step: 0.05,
+                hint: 'A retry/escalate verdict the grader itself rates below this confidence is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous", and ambiguity should not burn a retry or fire an escalation. Malformed grades stay conservative. 0 disables.',
+            },
             { key: 'post_mortem_retention_days', label: 'Post-mortem retention (days)', type: 'number' },
+            {
+                key: 'notification_retention_days',
+                label: 'Notification retention (days)',
+                type: 'number', min: 0, max: 365,
+                hint: 'The bell is a recent-events surface, not an archive. 0 = keep forever (pre-v3.1 behavior).',
+            },
         ],
     },
     {
         title: 'Evaluation',
+        tab: 'agent',
         description: 'Feature-level QA against acceptance criteria in the feature registry (data/registry.json). When auto-evaluate is enabled, runs after each task to score registered features. Browser screenshots provide visual verification evidence.',
         fields: [
             { key: 'eval_auto', label: 'Auto-Evaluate', type: 'bool' },
-            { key: 'eval_threshold', label: 'Pass Threshold', type: 'number', step: 0.1 },
+            { key: 'eval_threshold', label: 'Pass Threshold (0–1 fraction)', type: 'number', step: 0.1 },
             { key: 'eval_max_retries', label: 'Max Retries', type: 'number' },
             { key: 'eval_browser_verify', label: 'Browser Screenshots', type: 'bool' },
         ],
     },
     {
         title: 'Orchestration',
+        tab: 'agent',
         description: 'Controls for multi-worker task decomposition. Max workers limits parallel sub-agents. Stall threshold detects stuck workers. Plan review timeout is how long you have to approve a generated plan before it auto-proceeds.',
         fields: [
             { key: 'max_concurrent_workers', label: 'Max Workers', type: 'number' },
-            { key: 'plan_review_timeout', label: 'Plan Review Timeout (s)', type: 'number' },
+            { key: 'plan_review_timeout', label: 'Plan Review Timeout (seconds)', type: 'number' },
         ],
     },
     {
-        title: 'Autonomy (Gates, Goals, Heartbeats, Kernel)',
+        title: 'Autonomy',
+        tab: 'autonomy',
+        term: 'Internal names: gates, goals, heartbeats, session kernel.',
         description: 'Long-running autonomous task substrate. Gates: deterministic shell checks Reflect cannot overrule. Goals: persistent objectives with budgets and auto-continuations. Heartbeats: recurring instructions steered into running work. Session kernel: a persistent per-session Python REPL whose variables survive turns and restarts.',
         fields: [
             { key: 'gates_enabled', label: 'Deterministic Gates', type: 'bool' },
@@ -303,13 +407,37 @@ const SECTIONS = [
     },
     {
         title: 'Canary Suite',
-        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline on a nightly schedule. Measures whether the agent is getting better or worse — the Adaptive Layer\'s tripwire reads these results. Canary sessions are isolated: no memory writes, no FTS, no reflect-signal contamination.',
+        tab: 'autonomy',
+        description: 'Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline. Change-driven: canaries run when something they cover changes (an adaptive batch, a skill edit, a model swap, a deploy), plus a small nightly heartbeat that keeps history warm. The Adaptive Layer\'s tripwire reads the post-batch results per task. Canary sessions are isolated and tool-allowlisted: computation and reads only.',
         fields: [
             { key: 'canary_enabled', label: 'Canary Suite Enabled', type: 'bool', restart: RESTART_TOOLS },
-            { key: 'canary_schedule', label: 'Sweep Schedule (cron)', type: 'text' },
+            { key: 'canary_schedule', label: 'Heartbeat Schedule (cron)', type: 'text' },
+            {
+                key: 'canary_heartbeat_per_night',
+                label: 'Heartbeat Canaries per Night',
+                type: 'number', min: 1, max: 10,
+                hint: 'How many least-recently-run active canaries each scheduled heartbeat runs. Parked canaries sit out.',
+            },
+            {
+                key: 'canary_post_batch_max',
+                label: 'Post-batch Probe Size',
+                type: 'number', min: 1, max: 12,
+                hint: 'Cap on canaries per post-batch probe: the ones covering the batch\'s edit kinds first, sentinels riding along.',
+            },
             { key: 'canary_retention_days', label: 'Run Retention (days)', type: 'number', min: 1, max: 365 },
-            { key: 'canary_baseline_runs', label: 'Baseline Sweeps', type: 'number', min: 1, max: 20 },
-            { key: 'canary_regression_delta', label: 'Regression Delta', type: 'number', step: 0.05 },
+            {
+                key: 'canary_baseline_runs',
+                label: 'Green Precondition Window',
+                type: 'number', min: 1, max: 20,
+                hint: 'A canary may testify against a batch only when this many trailing runs before the apply were all green.',
+            },
+            { key: 'canary_regression_delta', label: 'Passive Drift Delta (0–1 fraction)', type: 'number', step: 0.05 },
+            {
+                key: 'canary_park_after_passes',
+                label: 'Park After Consecutive Passes',
+                type: 'number', min: 3, max: 200,
+                hint: 'Long-green canaries are parked: off the heartbeat, still in the suite, auto-unparked by any red run.',
+            },
             {
                 key: 'canary_auto_admit',
                 label: 'Auto-admit New Canaries',
@@ -323,13 +451,15 @@ const SECTIONS = [
                 label: 'Auto-maintain Suite',
                 type: 'bool',
                 risk: 'autonomy',
-                hint: 'The nightly sweep promotes vetted canaries, tags flapping ones flaky, retires long-green '
-                    + 'ones to quarantine and eventually deletes them. A canary whose latest run failed is never auto-moved.',
+                hint: 'The idle sweep promotes vetted canaries, tags flapping ones flaky, parks long-green ones, '
+                    + 'syncs skill verify blocks, and retires exhausted probes. A canary whose latest run failed is '
+                    + 'never auto-moved — except that a red run un-parks.',
             },
         ],
     },
     {
         title: 'Adaptive Layer',
+        tab: 'autonomy',
         description: 'Governed machine-editable policy: routing hints and prompt notes the agent may auto-apply at idle (with full history and one-click rollback), and policies/worker specs that always wait for your approval. The canary tripwire flags any batch that makes the agent measurably worse. Run the canary suite for at least a week before enabling auto-apply.',
         fields: [
             { key: 'adaptive_enabled', label: 'Adaptive Layer Enabled', type: 'bool', risk: 'autonomy' },
@@ -337,25 +467,91 @@ const SECTIONS = [
             { key: 'adaptive_auto_rollback', label: 'Auto-rollback on Canary Regression', type: 'bool', risk: 'autonomy' },
             { key: 'adaptive_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number' },
             { key: 'adaptive_max_entries_per_kind', label: 'Max Entries / Kind', type: 'number' },
-            { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (h)', type: 'number' },
+            { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (hours)', type: 'number' },
+            {
+                key: 'adaptive_usage_retire_days',
+                label: 'Retire Unused After (days)',
+                type: 'number', min: 0, max: 365,
+                hint: 'Entries with zero recorded uses (scout/reflect citations) over this many instrumented days are retired — journaled, rollbackable. 0 disables.',
+            },
+            {
+                key: 'adaptive_prompt_note_ttl_days',
+                label: 'Prompt-note TTL (days)',
+                type: 'number', min: 0, max: 365,
+                hint: 'Prompt notes have no producer-side retirement; this TTL is their backstop. 0 = keep forever.',
+            },
+            {
+                key: 'adaptive_harmful_retire_min_uses',
+                label: 'Failure-dominated Retire — Min Outcomes',
+                type: 'number', min: 0, max: 100,
+                hint: 'An entry with at least this many attributed outcomes (successes + failures from synthesis) whose success share falls below the threshold retires even though it is used. 0 disables.',
+            },
+            {
+                key: 'adaptive_harmful_retire_max_success',
+                label: 'Failure-dominated Retire — Success Floor (0–1 fraction)',
+                type: 'number', min: 0, max: 1, step: 0.05,
+                hint: 'Success share below this = failure-dominated. Journaled soft-delete, one-click rollback, candor/user sources exempt.',
+            },
+            {
+                key: 'adaptive_suspect_ttl_days',
+                label: 'Passive Suspect-flag TTL (days)',
+                type: 'number', min: 0, max: 90,
+                hint: 'A suspect flag from the passive post-mortem signal alone can never self-clear; it auto-clears after this many days. Canary-confirmed flags are exempt. 0 = flags wait for your dismiss.',
+            },
+            {
+                key: 'adaptive_agent_notes_enabled',
+                label: 'Agent Self-notes (adaptive_note tool)',
+                type: 'bool',
+                risk: 'autonomy',
+                restart: RESTART_TOOLS,
+                hint: 'Lets the live agent mint prompt notes and routing hints the moment it learns something — content lint applies, 2/day, normal pipeline + tripwire, never policy.',
+            },
         ],
     },
     {
-        title: 'Telos (Teleological Layer)',
-        description: 'A non-convergent drive with correction machinery: turn anomalies mint questions, the SOUP generates cross-domain hypotheses at idle (only falsifiable ones execute), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (ordo), detecting Goodhart binding, measuring goal discharge (hevel), reconciling the agent\'s self-story against its append-only trace, and keeping exploration entropy above floor. State lives in data/telos/ as markdown. Enabling the agent tools needs a restart; everything else applies immediately.',
+        title: 'Goals (Telos)',
+        tab: 'autonomy',
+        term: 'Internal name: Telos \u2014 the teleological layer. Settings keys are telos_*.',
+        description: 'The operational question loop (carved down in v3.1): turn anomalies the rest of the system cannot explain mint questions, the SOUP generates falsifiable hypotheses at idle, supported claims can become scout routing hints, and a weekly entropy control keeps exploration from going stale. State lives in data/telos/ as markdown. Enabling the agent tools needs a restart; everything else applies immediately.',
         fields: [
             { key: 'telos_enabled', label: 'Telos Enabled', type: 'bool', restart: RESTART_TOOLS },
             { key: 'telos_schedule', label: 'Slow-loop Schedule (cron)', type: 'text' },
-            { key: 'telos_serendipity_budget', label: 'Serendipity Budget', type: 'number', step: 0.05 },
-            { key: 'telos_eig_floor', label: 'Gate EIG Floor', type: 'number', step: 0.05 },
+            { key: 'telos_serendipity_budget', label: 'Serendipity Budget (0–1 fraction)', type: 'number', step: 0.05 },
+            { key: 'telos_eig_floor', label: 'Gate EIG Floor (0–1 fraction)', type: 'number', step: 0.05 },
             { key: 'telos_hypotheses_per_question', label: 'Hypotheses / Question', type: 'number' },
-            { key: 'telos_budget_share_max', label: 'Binding Budget-share Max', type: 'number', step: 0.05 },
-            { key: 'telos_divergence_max', label: 'Ledger Divergence Alarm', type: 'number', step: 0.05 },
         ],
     },
     {
-        title: 'Backups',
-        description: 'The 24-hour maintenance tier writes a timestamped snapshot of the session database (SQLite VACUUM INTO, so it is consistent without stopping writes) plus a copy of the memory corpus into data/backups. Rotation is per-artifact — database snapshots and memory corpora rotate independently — so a restore always finds a matching pair. Snapshots are roughly the size of your live database, so the count is a disk-space decision.',
+        // `name` is how buildStorageTab finds this one again: it is the only
+        // declarative section on the tab that has to land in a particular
+        // place (directly under the sessions ledger whose Archived row it
+        // explains) and that grows two buttons of its own.
+        name: 'archive',
+        title: 'Archive',
+        tab: 'storage',
+        description: 'Archiving is the third answer to a finished conversation, between leaving it in the sidebar and deleting it. An archived chat leaves the list and its space group, keeps every message, stays searchable, and comes back on one click — nothing is lost, so the idle sweep can be generous. Deleting an archived chat is the opposite, and off by default: it is you asking to lose the transcript.',
+        fields: [
+            {
+                key: 'session_archive_idle_days',
+                label: 'Archive chats idle for (days)',
+                type: 'number',
+                hint: '0 never archives. Pinned chats are never archived; chats in a space are archived, never deleted.',
+            },
+            {
+                key: 'session_delete_archived_days',
+                label: 'Delete archived chats after (days)',
+                type: 'number',
+                hint: '0 keeps archived chats forever. Deleting removes their messages; archiving does not.',
+            },
+        ],
+    },
+    {
+        // "Backup schedule", not "Backups": the Storage tab's own Backups
+        // ledger sits directly above it, and two headings reading "Backups"
+        // on one screen read as a rendering bug.
+        title: 'Backup schedule',
+        tab: 'storage',
+        description: 'The 24-hour maintenance tier writes a timestamped snapshot of the session database (SQLite VACUUM INTO, so it is consistent without stopping writes) plus a copy of the memory corpus into data/backups. Rotation is per-artifact — database snapshots and memory corpora rotate independently — so a restore always finds a matching pair, and it counts every snapshot in the directory including ones named by older versions. Snapshots are roughly the size of your live database, so the count is a disk-space decision.',
         fields: [
             {
                 key: 'backup_keep_count',
@@ -363,12 +559,16 @@ const SECTIONS = [
                 type: 'number',
                 min: 0,
                 max: 90,
-                hint: '0 disables scheduled backups entirely. Values are clamped to 0–90 when the backup runs.',
+                hint: '0 disables scheduled backups entirely. Values are clamped to 0–90 when the backup runs. '
+                    + 'It applies to each backup directory on its own — a legacy data/.backups, if this '
+                    + 'instance has one, keeps its own newest N rather than sharing the count.',
             },
         ],
     },
     {
-        title: 'Webhook Notifications',
+        title: 'Notifications (webhooks)',
+        tab: 'integrations',
+        term: 'Internal name: webhook notifications. Settings keys are notify_webhook_*.',
         description: 'Pernix POSTs a JSON body to this URL whenever the agent calls ask_user and needs a human — the escape hatch for long autonomous runs you are not watching in the browser. Pair it with ntfy, Pushover, Slack, Discord or a home-automation hook. Leave the URL empty to disable.',
         fields: [
             {
@@ -379,7 +579,7 @@ const SECTIONS = [
                     + 'never shown here. Type a new URL to replace it. Removing one entirely means editing '
                     + 'notify_webhook_url in data/settings.json — the API refuses to blank a URL field.',
             },
-            { key: 'notify_webhook_timeout', label: 'Webhook Timeout (s)', type: 'number', min: 1, max: 60 },
+            { key: 'notify_webhook_timeout', label: 'Webhook Timeout (seconds)', type: 'number', min: 1, max: 60 },
         ],
     },
 ];
@@ -401,18 +601,44 @@ const MODEL_SELECT_FIELDS = [
 // Help tooltip
 // ---------------------------------------------------------------------------
 
+let _descUid = 0;
+
+// A section's description used to live ONLY inside the `?` tooltip, which is
+// hover-only — on a phone or tablet the entire explanation was unreachable.
+// It now also renders as a paragraph the user can open in place. Collapsed by
+// default so the 100+ controls stay scannable. (S6)
+function buildSectionDesc(description) {
+    const body = el('p', { class: 'settings-section-desc', id: `settings-desc-${++_descUid}` },
+        [text(description)]);
+    body.hidden = true;
+    const toggle = el('button', {
+        type: 'button',
+        class: 'settings-section-desc-toggle',
+        'aria-expanded': 'false',
+        'aria-controls': body.id,
+    }, [text('What\u2019s this?')]);
+    toggle.addEventListener('click', () => {
+        const opening = body.hidden;
+        body.hidden = !opening;
+        toggle.setAttribute('aria-expanded', String(opening));
+        toggle.textContent = opening ? 'Hide' : 'What\u2019s this?';
+    });
+    return el('div', { class: 'settings-section-desc-wrap' }, [toggle, body]);
+}
+
 function buildHelpIcon(tip) {
-    const icon = el('span', { class: 'section-help', tabindex: '0' }, [text('?')]);
+    // `mark`, not `icon`: the module now imports icon() from icons.js.
+    const mark = el('span', { class: 'section-help', tabindex: '0' }, [text('?')]);
     const tooltip = el('span', { class: 'section-help-tip' }, [text(tip)]);
-    const wrapper = el('span', { class: 'section-help-wrap' }, [icon, tooltip]);
+    const wrapper = el('span', { class: 'section-help-wrap' }, [mark, tooltip]);
 
     const position = () => {
-        const r = icon.getBoundingClientRect();
+        const r = mark.getBoundingClientRect();
         tooltip.style.left = `${r.left + r.width / 2 - 140}px`;
         tooltip.style.top = `${r.bottom + 6}px`;
     };
-    icon.addEventListener('mouseenter', position);
-    icon.addEventListener('focus', position);
+    mark.addEventListener('mouseenter', position);
+    mark.addEventListener('focus', position);
 
     return wrapper;
 }
@@ -456,8 +682,8 @@ function _wireNetworkSection() {
     const warning = el('div', {
         id: 'network-warning',
         style: `display: ${networkToggle.checked ? '' : 'none'}; `
-             + 'background: var(--surface-hover, #2a1a1a); '
-             + 'border-left: 3px solid var(--error, #e55); '
+             + 'background: var(--surface-hover); '
+             + 'border-left: 3px solid var(--error); '
              + 'padding: 0.6rem 0.8rem; margin-bottom: 0.8rem; '
              + 'border-radius: 4px; font-size: 0.85rem; line-height: 1.4;',
     }, [
@@ -522,8 +748,8 @@ function _updateVoiceVisibility() {
     if (disc) {
         disc.textContent = _VOICE_DISCLAIMERS[mode] || '';
         const warn = mode === 'web_speech';
-        disc.style.borderLeftColor = warn ? 'var(--error, #e55)' : 'var(--accent-dim, #888)';
-        disc.style.background = warn ? 'var(--surface-hover, #2a1a1a)' : 'var(--bg-soft, rgba(255,255,255,0.04))';
+        disc.style.borderLeftColor = warn ? 'var(--error)' : 'var(--accent-dim)';
+        disc.style.background = warn ? 'var(--surface-hover)' : 'var(--bg-soft)';
     }
 
     const note = document.getElementById('voice-fallback-note');
@@ -558,15 +784,15 @@ function _wireVoiceSection() {
     if (!section) return;
 
     const boxStyle =
-        'border-left: 3px solid var(--accent-dim, #888); '
-        + 'background: var(--bg-soft, rgba(255,255,255,0.04)); '
+        'border-left: 3px solid var(--accent-dim); '
+        + 'background: var(--bg-soft); '
         + 'padding: 0.6rem 0.8rem; margin: 0.5rem 0 0.8rem; '
         + 'border-radius: 4px; font-size: 0.85rem; line-height: 1.4;';
 
     const disclaimer = el('div', { id: 'voice-disclaimer', style: boxStyle });
     const statusLine = el('div', {
         id: 'voice-status-line',
-        style: 'display: none; color: var(--error, #e55); font-size: 0.85rem; margin: 0 0 0.6rem;',
+        style: 'display: none; color: var(--error); font-size: 0.85rem; margin: 0 0 0.6rem;',
     });
     // Disclaimer sits directly under the engine selector, where the choice is made
     const modeRow = modeSelect.closest('.setting-row');
@@ -579,7 +805,7 @@ function _wireVoiceSection() {
     if (fallbackRow) {
         fallbackRow.after(el('div', {
             id: 'voice-fallback-note',
-            style: boxStyle + 'border-left-color: var(--error, #e55);',
+            style: boxStyle + 'border-left-color: var(--error);',
         }, [
             text('When the engine above is unavailable (whisper missing, model can’t hear audio), '
                 + 'dictation falls back to your browser vendor’s speech service — your voice audio leaves '
@@ -636,7 +862,7 @@ async function _runVoiceTestClick(btn, resultEl) {
                 : phase === 'transcribing' ? 'Transcribing…'
                 : 'Checking…';
         });
-        resultEl.style.color = res.ok ? 'var(--accent)' : 'var(--error, #e55)';
+        resultEl.style.color = res.ok ? 'var(--accent)' : 'var(--error)';
         resultEl.textContent = res.ok
             ? (res.text ? `✓ Heard: “${res.text}”` : `✓ ${res.detail}`)
             : `✗ ${res.error}`;
@@ -651,6 +877,7 @@ function _showRestartButton(reason = 'network changes') {
     if (!footer) return;
 
     const statusEl = footer.querySelector('.save-status');
+    const message = `Saved \u00b7 restart required for: ${reason}`;
 
     // The restart endpoint is loopback-only (403 otherwise). A phone or
     // LAN-IP browser used to get the button anyway and a dead-end error —
@@ -660,14 +887,16 @@ function _showRestartButton(reason = 'network changes') {
         if (statusEl) {
             statusEl.className = 'save-status status-warn';
             statusEl.textContent =
-                `Saved, but a restart is needed to apply ${reason} — restart from the server console (or from a localhost browser).`;
+                `${message} — restart from the server console (or from a localhost browser).`;
+            announce(statusEl.textContent);
         }
         return;
     }
 
     if (statusEl) {
         statusEl.className = 'save-status status-warn';
-        statusEl.textContent = `Saved, but a restart is needed to apply ${reason}`;
+        statusEl.textContent = message;
+        announce(statusEl.textContent);
     }
     if (document.getElementById('restart-server-btn')) return;
 
@@ -794,8 +1023,164 @@ function _buildLabelCell(field) {
     return el('div', { class: 'setting-label-cell' }, children);
 }
 
+// ---------------------------------------------------------------------------
+// Field schema (S4)
+//
+// Ranges used to be typed in beside each label, and they drifted from the ones
+// update_settings() enforces — snooze_max_cycle_seconds claimed a floor of 60
+// against the server's 30, scout_timeout and compaction_threshold claimed none
+// at all. Out-of-range values are dropped silently, so the modal could show a
+// number the server had refused and call it saved.
+//
+// GET /api/settings/schema now supplies type/default/min/max/step/unit; this
+// file keeps the labels, hints and risk badges (UI prose, not configuration).
+// Everything below reads the merged record, so there is exactly one range.
+// ---------------------------------------------------------------------------
+
+let _schema = {};                     // key -> server record
+const _invalidKeys = new Map();       // key -> why it cannot be saved
+
+function _schemaFor(key) {
+    return Object.prototype.hasOwnProperty.call(_schema, key) ? _schema[key] : null;
+}
+
+/** The bound to enforce: the server's when it has one, else the field's own. */
+function _boundsFor(field) {
+    const rec = _schemaFor(field.key);
+    const lo = rec && rec.min !== null && rec.min !== undefined ? rec.min : field.min;
+    const hi = rec && rec.max !== null && rec.max !== undefined ? rec.max : field.max;
+    return { min: lo, max: hi };
+}
+
+function _defaultText(rec) {
+    const d = rec.default;
+    if (rec.type === 'bool') return `default: ${d ? 'on' : 'off'}`;
+    if (Array.isArray(d)) return `default: ${d.length ? d.join(', ') : 'empty'}`;
+    if (d === '' || d === null || d === undefined) return 'default: empty';
+    // A default URL or model id can be longer than the label it sits under —
+    // the point of this line is the number, not a second copy of the value.
+    const shown = String(d);
+    return `default: ${shown.length > 44 ? shown.slice(0, 43) + '…' : shown}`;
+}
+
+function _rangeText(field) {
+    const { min, max } = _boundsFor(field);
+    if (min === undefined || min === null || max === undefined || max === null) return '';
+    const rec = _schemaFor(field.key);
+    const unit = rec && rec.unit ? ` ${rec.unit}` : '';
+    return `range ${min}–${max}${unit}`;
+}
+
+/** What the control currently holds, in the field's own type. */
+function _controlValue(field, input) {
+    if (field.type === 'bool') return input.checked;
+    if (field.type === 'number') return input.value === '' ? null : Number(input.value);
+    return input.value;
+}
+
+function _isAtDefault(field, rec, input) {
+    const cur = _controlValue(field, input);
+    if (cur === null) return true;  // an empty number box means "leave it alone"
+    if (field.type === 'bool') return !!rec.default === !!cur;
+    if (field.type === 'number') return Number(rec.default) === cur;
+    return String(rec.default ?? '') === String(cur ?? '');
+}
+
+// Save is disabled while any control holds a value the server would drop —
+// the alternative is a save that silently keeps the old number.
+function _updateSaveDisabled() {
+    const btn = document.getElementById('settings-save-btn');
+    if (!btn) return;
+    const bad = [..._invalidKeys.keys()];
+    btn.disabled = bad.length > 0;
+    btn.title = bad.length
+        ? `Out of range: ${bad.map(_labelFor).join(', ')}`
+        : '';
+}
+
+function _setInvalid(key, message) {
+    if (message) _invalidKeys.set(key, message);
+    else _invalidKeys.delete(key);
+    const row = document.getElementById(`row-${key}`);
+    if (row) row.classList.toggle('setting-invalid', !!message);
+    const errEl = document.getElementById(`err-${key}`);
+    if (errEl) {
+        errEl.textContent = message || '';
+        errEl.hidden = !message;
+    }
+    _updateSaveDisabled();
+}
+
+function _validateNumber(field, input) {
+    if (field.type !== 'number') return;
+    const raw = input.value.trim();
+    if (raw === '') { _setInvalid(field.key, ''); return; }
+    const v = Number(raw);
+    const { min, max } = _boundsFor(field);
+    let msg = '';
+    if (!Number.isFinite(v)) msg = 'Must be a number.';
+    else if (min !== undefined && min !== null && v < min) msg = `Must be at least ${min}.`;
+    else if (max !== undefined && max !== null && v > max) msg = `Must be at most ${max}.`;
+    _setInvalid(field.key, msg);
+}
+
+// The meta line under a control: what the default is, what range the server
+// takes, a reset that only appears once you have moved off the default, and
+// the inline reason a value cannot be saved.
+function _buildFieldMeta(field, input) {
+    const rec = _schemaFor(field.key);
+    if (!rec) return null;
+    const locked = LOCKED_KEYS.has(field.key);
+
+    const parts = [_defaultText(rec)];
+    const range = _rangeText(field);
+    if (range) parts.push(range);
+    const factsEl = el('span', {
+        class: 'setting-facts',
+        title: `${field.label} — default ${String(rec.default)}${range ? `, ${range}` : ''}`,
+    }, [text(parts.join(' · '))]);
+
+    const resetBtn = el('button', {
+        type: 'button',
+        class: 'btn btn--ghost btn--xs setting-reset',
+        title: `Reset ${field.label} to its default`,
+        'aria-label': `Reset ${field.label} to its default`,
+    }, [icon('refresh', { size: 12 }), text('Reset')]);
+    resetBtn.hidden = true;
+
+    const errEl = el('span', { class: 'setting-error', id: `err-${field.key}`, role: 'alert' });
+    errEl.hidden = true;
+
+    const sync = () => {
+        resetBtn.hidden = locked || _isAtDefault(field, rec, input);
+    };
+
+    resetBtn.addEventListener('click', () => {
+        if (field.type === 'bool') input.checked = !!rec.default;
+        else input.value = rec.default === null || rec.default === undefined ? '' : String(rec.default);
+        _validateNumber(field, input);
+        sync();
+        announce(`${field.label} reset to its default`);
+    });
+
+    input.addEventListener('input', () => { _validateNumber(field, input); sync(); });
+    input.addEventListener('change', () => { _validateNumber(field, input); sync(); });
+    // A value already out of range when the modal opens (hand-edited
+    // settings.json, a bound tightened since) must block Save straight away.
+    // Nothing is in the document yet, so paint this first verdict by hand;
+    // _refreshValidationUI() replays it onto the row once the modal is live.
+    _validateNumber(field, input);
+    const initial = _invalidKeys.get(field.key) || '';
+    errEl.textContent = initial;
+    errEl.hidden = !initial;
+    sync();
+
+    return el('div', { class: 'setting-meta' }, [factsEl, resetBtn, errEl]);
+}
+
 function buildField(field, value) {
-    const { key, label, type, step, options, allowEmpty, min, max } = field;
+    const { key, label, type, step, options, allowEmpty } = field;
+    const { min, max } = _boundsFor(field);
     const locked = LOCKED_KEYS.has(key);
 
     let input;
@@ -835,13 +1220,14 @@ function buildField(field, value) {
             })
         );
     } else if (type === 'number') {
+        const rec = _schemaFor(key);
         input = el('input', {
             type: 'number',
             id: `setting-${key}`,
             value: String(value ?? ''),
-            step: String(step || (Number.isInteger(value) ? 1 : 0.01)),
-            ...(min === undefined ? {} : { min: String(min) }),
-            ...(max === undefined ? {} : { max: String(max) }),
+            step: String(step || (rec && rec.step) || (Number.isInteger(value) ? 1 : 0.01)),
+            ...(min == null ? {} : { min: String(min) }),
+            ...(max == null ? {} : { max: String(max) }),
         });
     } else {
         input = el('input', { type: 'text', id: `setting-${key}`, value: String(value ?? '') });
@@ -866,7 +1252,26 @@ function buildField(field, value) {
     if (locked) {
         row.append(el('span', { class: 'setting-locked-note', id: `locked-${key}` }, [text(LOCKED_NOTE)]));
     }
+
+    // What the default is, what range the server takes, and the reset. Skipped
+    // for the write-only kinds: the server redacts their value, so there is
+    // nothing to compare a default against. (S4)
+    if (type !== 'apikey' && type !== 'certpath' && type !== 'writeonly') {
+        const meta = _buildFieldMeta(field, input);
+        if (meta) row.append(meta);
+    }
     return row;
+}
+
+// Rows and the Save button are built before the modal is in the document, so
+// the first validation pass has nowhere to paint. Replay it once it does.
+function _refreshValidationUI() {
+    for (const [key, message] of _invalidKeys) {
+        document.getElementById(`row-${key}`)?.classList.add('setting-invalid');
+        const errEl = document.getElementById(`err-${key}`);
+        if (errEl) { errEl.textContent = message; errEl.hidden = false; }
+    }
+    _updateSaveDisabled();
 }
 
 function _rebuildModelSelects() {
@@ -904,6 +1309,9 @@ function _revertField(key) {
             input.value = '';
             input.placeholder = _writeOnlyPlaceholder(key);
         } else input.value = prev === undefined || prev === null ? '' : String(prev);
+        // Re-run the range check and the reset button's visibility against the
+        // value the server actually holds. (S4)
+        input.dispatchEvent(new Event('input', { bubbles: true }));
         return;
     }
     // List-valued editors keep their state outside the DOM.
@@ -982,10 +1390,22 @@ function collectChanges() {
 // Models tab
 // ---------------------------------------------------------------------------
 
+// The one byte formatter in this module. It used to bottom out at MB, which
+// was fine for the Ollama model list (nothing there is smaller) and wrong for
+// the storage ledger, where a fresh database is 200 KB and "0 MB" is not an
+// answer. Zero renders as "0 B": in a ledger that is a fact, not a blank.
 function formatBytes(bytes) {
-    if (!bytes) return '';
-    const gb = bytes / (1024 * 1024 * 1024);
-    return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+    const n = Number(bytes);
+    if (bytes == null || !Number.isFinite(n)) return '';
+    if (n < 1024) return `${Math.round(n)} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let value = n / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+    }
+    return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
 }
 
 async function refreshOllamaModels() {
@@ -1029,7 +1449,9 @@ function renderOllamaList() {
     }
 
     for (const m of _ollamaModels) {
-        const meta = [m.parameter_size, m.quantization, formatBytes(m.size)]
+        // Guarded, not left to the formatter: a model whose size Ollama did
+        // not report should show nothing in that slot, and "0 B" is not that.
+        const meta = [m.parameter_size, m.quantization, m.size ? formatBytes(m.size) : '']
             .filter(Boolean).join(' \u00b7 ');
         const item = el('div', { class: 'or-model-item' }, [
             el('span', { class: 'or-model-id' }, [text(m.name)]),
@@ -1043,6 +1465,7 @@ function buildOllamaSection() {
     const listEl = el('div', { class: 'or-model-list', id: 'ollama-model-list' });
     const refreshBtn = el('button', {
         class: 'ollama-refresh', id: 'ollama-refresh-btn', title: 'Refresh model list',
+        'aria-label': 'Refresh the Ollama model list',
     }, [text('\u21bb')]);
     refreshBtn.addEventListener('click', refreshOllamaModels);
 
@@ -1129,7 +1552,9 @@ function renderModelList(listEl) {
             infoText = 'not found';
         }
 
-        const removeBtn = el('button', { class: 'or-remove' }, [text('\u00d7')]);
+        const removeBtn = el('button', {
+            class: 'or-remove', title: 'Remove', 'aria-label': `Remove the model ${m.id}`,
+        }, [text('\u00d7')]);
         removeBtn.addEventListener('click', () => {
             _models.splice(idx, 1);
             renderModelList(listEl);
@@ -1375,10 +1800,7 @@ function buildNetworkTab(settings) {
 // --- QR Code button + overlay ---
 
 function _buildQRButton() {
-    const btn = el('button', {
-        class: 'btn-secondary',
-        style: 'font-family:var(--mono); font-size:var(--text-sm); padding:0.4rem 0.8rem; cursor:pointer;',
-    }, [text('Show QR Code')]);
+    const btn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Show QR Code')]);
 
     btn.addEventListener('click', async () => {
         btn.disabled = true;
@@ -1394,14 +1816,18 @@ function _buildQRButton() {
 
             // Build overlay
             const overlay = el('div', { class: 'modal-overlay' });
+            // The padding lives on an inner .modal-body, not inline on the
+            // card: an inline `padding` beats compact.css's bottom-sheet
+            // safe-area inset, so the last row of these dialogs sat under the
+            // home indicator on a phone. (V12)
             const card = el('div', {
                 class: 'modal-card',
-                style: 'max-width:360px; text-align:center; padding:1.5rem;',
+                style: 'max-width:360px; text-align:center;',
             });
 
             const title = el('h2', { style: 'margin-bottom:0.5rem; font-size:var(--text-lg);' }, [text('Scan to Connect')]);
             const qrContainer = el('div', {
-                style: 'background:#fff; border-radius:8px; padding:12px; display:inline-block; margin:0.75rem 0;',
+                class: 'settings-qr',
             });
             // Raw SVG markup off an HTTP response — inline SVG is a scripting
             // context, so sanitize rather than assigning innerHTML directly.
@@ -1420,11 +1846,11 @@ function _buildQRButton() {
             }, [text('Scan with your phone camera to open the app with auth')]);
 
             const closeBtn = el('button', {
-                class: 'btn-primary',
-                style: 'margin-top:1rem; padding:0.4rem 1.5rem;',
+                class: 'btn btn--primary settings-block-btn',
+                type: 'button',
             }, [text('Close')]);
 
-            card.append(title, qrContainer, hint, closeBtn);
+            card.append(el('div', { class: 'modal-body' }, [title, qrContainer, hint, closeBtn]));
             overlay.append(card);
             document.body.append(overlay);
 
@@ -1477,7 +1903,7 @@ function _openTokenOverlay(token, { title, note }) {
     const overlay = el('div', { class: 'modal-overlay' });
     // Wide enough for a 43-char urlsafe token at 16px mono. Narrower and the
     // value scrolls out of sight, which defeats the point of showing it.
-    const card = el('div', { class: 'modal-card', style: 'max-width:520px; padding:1.5rem;' });
+    const card = el('div', { class: 'modal-card', style: 'max-width:520px;' });
 
     const field = el('input', {
         type: 'text',
@@ -1491,26 +1917,18 @@ function _openTokenOverlay(token, { title, note }) {
     });
     field.addEventListener('focus', () => field.select());
 
-    const copyBtn = el('button', {
-        class: 'btn-secondary',
-        style: 'padding:0.4rem 0.8rem; cursor:pointer;',
-    }, [text('Copy')]);
+    const copyBtn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Copy')]);
     copyBtn.addEventListener('click', async () => {
         const ok = await _copyText(token, field);
         copyBtn.textContent = ok ? 'Copied' : 'Select and copy manually';
         setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
     });
 
-    const closeBtn = el('button', {
-        class: 'btn-primary',
-        style: 'padding:0.4rem 0.8rem; cursor:pointer;',
-    }, [text('Done')]);
+    const closeBtn = el('button', { class: 'btn btn--primary', type: 'button' }, [text('Done')]);
 
-    const row = el('div', {
-        style: 'display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1rem;',
-    }, [copyBtn, closeBtn]);
+    const row = el('div', { class: 'settings-btn-row' }, [copyBtn, closeBtn]);
 
-    card.append(
+    card.append(el('div', { class: 'modal-body' }, [
         el('h2', { style: 'font-size:var(--text-lg); margin-bottom:0.75rem;' }, [text(title)]),
         el('p', {
             style: 'font-family:var(--mono); font-size:var(--text-sm); color:var(--text-dim);'
@@ -1518,7 +1936,7 @@ function _openTokenOverlay(token, { title, note }) {
         }, [text(note)]),
         field,
         row,
-    );
+    ]));
     overlay.append(card);
     document.body.append(overlay);
 
@@ -1531,10 +1949,7 @@ function _openTokenOverlay(token, { title, note }) {
 }
 
 function _buildShowTokenButton() {
-    const btn = el('button', {
-        class: 'btn-secondary',
-        style: 'font-family:var(--mono); font-size:var(--text-sm); padding:0.4rem 0.8rem; cursor:pointer;',
-    }, [text('Show Token')]);
+    const btn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Show Token')]);
 
     btn.addEventListener('click', async () => {
         btn.disabled = true;
@@ -1543,7 +1958,7 @@ function _buildShowTokenButton() {
         try {
             const data = await get('/api/settings/auth-token');
             if (!data.token) {
-                _showToast('No access token is set — enable Network mode first.', 'error');
+                notify('error', 'No access token is set — enable Network mode first.');
                 return;
             }
             _openTokenOverlay(data.token, {
@@ -1552,7 +1967,7 @@ function _buildShowTokenButton() {
                     + 'has full access to this agent — treat it like a password.',
             });
         } catch (e) {
-            _showToast(`Could not read the token: ${e.message}`, 'error');
+            notify('error', `Could not read the token: ${e.message}`);
         } finally {
             btn.disabled = false;
             btn.textContent = label;
@@ -1565,15 +1980,11 @@ function _buildShowTokenButton() {
 // --- Regenerate token (destructive) ---
 
 function _buildRegenerateButton() {
-    const btn = el('button', {
-        class: 'btn-secondary',
-        style: 'font-family:var(--mono); font-size:var(--text-sm); padding:0.4rem 0.8rem;'
-             + 'cursor:pointer; border-color:var(--error, #e55); color:var(--error, #e55);',
-    }, [text('Regenerate Token')]);
+    const btn = el('button', { class: 'btn btn--danger', type: 'button' }, [text('Regenerate Token')]);
 
     btn.addEventListener('click', () => {
         const overlay = el('div', { class: 'modal-overlay' });
-        const card = el('div', { class: 'modal-card', style: 'max-width:380px; padding:1.5rem;' });
+        const card = el('div', { class: 'modal-card', style: 'max-width:380px;' });
         const title = el('h2', {
             style: 'font-size:var(--text-lg); margin-bottom:0.75rem;',
         }, [text('Regenerate access token?')]);
@@ -1585,18 +1996,13 @@ function _buildRegenerateButton() {
             + 'and any QR link or shared URL you handed out. They will each need the new '
             + 'token to get back in. This browser stays signed in.'
         )]);
-        const btnRow = el('div', { style: 'display:flex; gap:0.5rem; justify-content:flex-end;' });
-        const cancelBtn = el('button', {
-            class: 'btn-secondary', style: 'padding:0.4rem 0.8rem; cursor:pointer;',
-        }, [text('Cancel')]);
-        const confirmBtn = el('button', {
-            class: 'btn-primary',
-            style: 'padding:0.4rem 0.8rem; cursor:pointer;'
-                 + 'background:var(--error, #e55); border-color:var(--error, #e55);',
-        }, [text('Regenerate')]);
+        const btnRow = el('div', { class: 'settings-btn-row settings-btn-row--flush' });
+        const cancelBtn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Cancel')]);
+        const confirmBtn = el('button', { class: 'btn btn--danger', type: 'button' }, [text('Regenerate')]);
 
         btnRow.append(cancelBtn, confirmBtn);
-        card.append(title, body, btnRow);
+        const cardBody = el('div', { class: 'modal-body' }, [title, body, btnRow]);
+        card.append(cardBody);
         overlay.append(card);
         document.body.append(overlay);
 
@@ -1629,10 +2035,13 @@ function _buildRegenerateButton() {
                 if (!errEl) {
                     errEl = el('div', {
                         class: 'revoke-error',
-                        style: 'color:var(--error, #e55); font-family:var(--mono);'
+                        role: 'alert',
+                        style: 'color:var(--error); font-family:var(--mono);'
                              + 'font-size:var(--text-xs); margin-top:0.75rem;',
                     });
-                    card.append(errEl);
+                    // Inside the body, so it inherits the same padding as
+                    // everything else in the dialog.
+                    cardBody.append(errEl);
                 }
                 errEl.textContent = `Error: ${e.message}`;
             }
@@ -1664,8 +2073,10 @@ function _buildOriginsEditor(origins) {
                      + 'overflow:hidden; text-overflow:ellipsis; white-space:nowrap;',
             }, [text(_corsOrigins[idx])]);
             const removeBtn = el('button', {
-                style: 'background:none; border:none; color:var(--error); cursor:pointer; font-size:var(--text-md); padding:0 4px;',
+                class: 'btn btn--danger btn--icon',
+                type: 'button',
                 title: 'Remove',
+                'aria-label': `Remove the allowed origin ${_corsOrigins[idx]}`,
             }, [text('\u00d7')]);
             removeBtn.addEventListener('click', () => {
                 _corsOrigins.splice(idx, 1);
@@ -1689,10 +2100,7 @@ function _buildOriginsEditor(origins) {
                  + 'padding:0.3rem 0.5rem; background:var(--bg-surface); border:1px solid var(--border); '
                  + 'border-radius:var(--radius); color:var(--text); outline:none;',
         });
-        const addBtn = el('button', {
-            class: 'btn-secondary',
-            style: 'font-size:var(--text-xs); padding:0.3rem 0.6rem; cursor:pointer;',
-        }, [text('Add')]);
+        const addBtn = el('button', { class: 'btn btn--secondary btn--sm', type: 'button' }, [text('Add')]);
 
         function addOrigin() {
             const val = input.value.trim();
@@ -1722,10 +2130,121 @@ function _buildOriginsEditor(origins) {
     return container;
 }
 
+// ---------------------------------------------------------------------------
+// Enter sends the message (T5)
+//
+// Browser-local, like Appearance: it belongs to the keyboard in front of you
+// and not to the agent, so it is NOT in the settings payload and NOT in the
+// dirty diff — the change takes effect the moment the box is ticked, and
+// Save has nothing to do with it. The composer reads the same key and
+// listens for the same event.
+//
+// The default has to differ by device. On a desktop Enter has always sent,
+// and Shift+Enter is the newline everyone already knows. On a phone Enter IS
+// the on-screen keyboard's newline key — there is a send button an inch away
+// — and a message that fires the moment you reach for a second line is the
+// single most expensive misfire the composer has.
+// ---------------------------------------------------------------------------
+
+const ENTER_SENDS_KEY = 'pernix:enter-sends';
+
+/**
+ * @returns {boolean} true when Enter sends and Shift+Enter adds a line;
+ *          false when Enter adds a line and Ctrl/Cmd+Enter sends.
+ */
+export function enterSends() {
+    try {
+        const raw = localStorage.getItem(ENTER_SENDS_KEY);
+        if (raw === '1') return true;
+        if (raw === '0') return false;
+    } catch { /* private mode, or storage denied — fall through to the default */ }
+    return !isTouch();
+}
+
+function buildEnterSendsRow() {
+    const input = el('input', { type: 'checkbox', id: 'pref-enter-sends' });
+    input.checked = enterSends();
+    input.addEventListener('change', () => {
+        try {
+            localStorage.setItem(ENTER_SENDS_KEY, input.checked ? '1' : '0');
+        } catch { /* the event still fires: this session gets the new behaviour */ }
+        window.dispatchEvent(new CustomEvent('pernix:enter-sends', { detail: input.checked }));
+        announce(input.checked
+            ? 'Enter sends the message'
+            : 'Enter adds a line; Ctrl or Cmd plus Enter sends');
+    });
+
+    // Hand-built rather than buildField()'d on purpose: buildField is driven
+    // by the server schema, and everything it builds is collected into the
+    // save payload by key. This row has no server key to collect.
+    return el('div', { class: 'setting-row setting-row-bool', 'data-key': 'enter_sends' }, [
+        el('div', { class: 'setting-label-cell' }, [
+            el('span', { class: 'setting-label-line' }, [
+                el('label', { for: 'pref-enter-sends' }, [text('Enter sends the message')]),
+            ]),
+            el('span', { class: 'setting-hint' }, [text(
+                'Off: Enter adds a line and Ctrl/Cmd+Enter sends. '
+                + 'On by default with a mouse, off on touch.')]),
+        ]),
+        input,
+    ]);
+}
+
+// The section is named for where its settings LIVE, not for what they do.
+// Both of them are localStorage on this device: nothing here is in the
+// settings payload, nothing here is in the dirty diff, and Save does not
+// touch either one. Under the old "Appearance" heading the Enter-sends row
+// looked like one more server preference that had wandered into the wrong
+// group — and a preference that quietly does not sync is worse than one that
+// says so, because the first you hear of it is the other device behaving
+// differently.
+function buildThisBrowserSection() {
+    // Applied by theme.js, which reads the same key.
+    const select = el('select', {
+        id: 'setting-appearance',
+        'aria-label': 'Appearance',
+    }, [
+        el('option', { value: 'system' }, [text('System')]),
+        el('option', { value: 'dark' }, [text('Dark')]),
+        el('option', { value: 'light' }, [text('Light')]),
+    ]);
+    select.value = getTheme();
+    select.addEventListener('change', () => {
+        setTheme(select.value);
+        announce(`Appearance set to ${select.options[select.selectedIndex].text}`);
+    });
+
+    const row = el('div', { class: 'setting-row', 'data-key': 'appearance' }, [
+        el('div', { class: 'setting-label-cell' }, [
+            el('span', { class: 'setting-label-line' }, [
+                el('label', { for: 'setting-appearance' }, [text('Appearance')]),
+            ]),
+        ]),
+        select,
+    ]);
+
+    return el('div', { class: 'settings-section' }, [
+        el('h3', {}, [
+            text('This browser'),
+            buildHelpIcon('Dark is the default. System follows the operating system\'s '
+                + 'light/dark setting. Enter sends is on by default with a mouse and '
+                + 'off on touch, where Enter is the on-screen keyboard\'s newline key.'),
+        ]),
+        // Visible, not folded behind "What's this?": it is the reason the
+        // section exists, and a reader who has to open it has already made
+        // the assumption it is there to correct.
+        el('p', { class: 'settings-section-desc' }, [text(
+            'Stored in this browser only — not synced to the server or to your '
+            + 'other devices, and not part of Save.')]),
+        row,
+        buildEnterSendsRow(),
+    ]);
+}
+
 function buildNotificationsSection() {
     const perm = getPermission();
     const statusText = { granted: 'Enabled', denied: 'Blocked by browser', default: 'Not enabled', unsupported: 'Not supported' }[perm] || perm;
-    const statusColor = perm === 'granted' ? 'var(--success, #4c8)' : perm === 'denied' ? 'var(--error, #e55)' : 'var(--text-dim)';
+    const statusColor = perm === 'granted' ? 'var(--success)' : perm === 'denied' ? 'var(--error)' : 'var(--text-dim)';
 
     const statusEl = el('span', { style: `color:${statusColor}; font-size:var(--text-sm);` }, [text(statusText)]);
     const row = el('div', { class: 'setting-row', 'data-key': 'browser_notifications' }, [
@@ -1738,11 +2257,11 @@ function buildNotificationsSection() {
     const children = [el('h3', {}, [text('Notifications'), buildHelpIcon('System notifications let the agent alert you even when this tab is not in focus. Click a notification to jump to the originating session.')]), row];
 
     if (perm === 'default') {
-        const btn = el('button', { class: 'btn btn-secondary', style: 'margin-top:0.5rem; font-size:var(--text-sm);' }, [text('Enable Notifications')]);
+        const btn = el('button', { class: 'btn btn--secondary settings-block-btn', type: 'button' }, [text('Enable Notifications')]);
         btn.addEventListener('click', async () => {
             const granted = await requestPermission();
             statusEl.textContent = granted ? 'Enabled' : 'Permission denied';
-            statusEl.style.color = granted ? 'var(--success, #4c8)' : 'var(--error, #e55)';
+            statusEl.style.color = granted ? 'var(--success)' : 'var(--error)';
             if (granted) btn.remove();
         });
         children.push(btn);
@@ -1765,77 +2284,134 @@ function buildSessionCleanupSection() {
         id: 'setting-cleanup-keep-min',
     });
 
-    const statusEl = el('div', {
-        style: 'font-size:var(--text-sm); color:var(--text-dim); margin-top:0.5rem; min-height:1.2em;',
+    // The preview used to be a reimplementation: fetch a thousand sessions and
+    // re-derive the server's selection in the browser. It drifted the moment
+    // the server learned to skip anything — a space session, a cron session —
+    // and the number it showed was then confidently wrong. Ask the endpoint
+    // that does the deleting what it would delete. (Contract: POST with
+    // dry_run:true, which selects but removes nothing.)
+    const previewEl = el('div', {
+        style: 'font-size:var(--text-sm); color:var(--text-dim); margin-top:0.5rem;',
     });
+    previewEl.hidden = true;
 
-    async function _computePreview() {
-        const keepDays = Math.max(0, parseInt(daysInput.value || '0', 10));
-        const keepMin = Math.max(0, parseInt(minInput.value || '0', 10));
-        const cutoff = new Date(Date.now() - keepDays * 86400000).toISOString();
-        const data = await get('/api/sessions?limit=1000');
-        const sessions = data.items || [];
-        // Mirror server logic in api/routers/sessions.py:purge_sessions —
-        // sessions sorted by updated_at DESC, candidates older than cutoff,
-        // keep the first keep_min of those candidates.
-        const candidates = sessions.filter(s => (s.updated_at || '') < cutoff);
-        const toDelete = candidates.length > keepMin ? candidates.length - keepMin : 0;
-        return { toDelete, candidates: candidates.length, keepDays, keepMin };
+    function _params() {
+        return {
+            keep_days: Math.max(0, parseInt(daysInput.value || '0', 10)),
+            keep_min: Math.max(0, parseInt(minInput.value || '0', 10)),
+        };
     }
 
-    const previewBtn = el('button', {
-        class: 'btn btn-secondary',
-        style: 'font-size:var(--text-sm);',
-    }, [text('Preview')]);
+    // "Leaving 3 pinned, 47 in spaces and 612 automation sessions alone" —
+    // the sentence that explains why the number is smaller than the age
+    // cutoff alone would suggest.
+    function _skippedSentence(skipped) {
+        const parts = [];
+        if (skipped?.pinned) parts.push(`${skipped.pinned} pinned`);
+        if (skipped?.in_space) parts.push(`${skipped.in_space} in spaces`);
+        if (skipped?.other_types) parts.push(`${skipped.other_types} automation session${skipped.other_types === 1 ? '' : 's'}`);
+        if (!parts.length) return '';
+        const list = parts.length > 1
+            ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+            : parts[0];
+        return `Leaving ${list} alone.`;
+    }
+
+    function _renderPreview(result) {
+        clear(previewEl);
+        previewEl.hidden = false;
+        previewEl.style.color = 'var(--text-dim)';
+
+        const n = result.would_delete || 0;
+        previewEl.appendChild(el('div', { style: 'color:var(--text);' }, [
+            text(n === 0
+                ? `Nothing to prune — no plain chats older than ${result.keep_days} day${result.keep_days === 1 ? '' : 's'} past the keep-${result.keep_min} floor.`
+                : `${n} session${n === 1 ? '' : 's'} would be deleted, out of ${result.candidates} older than ${result.keep_days} day${result.keep_days === 1 ? '' : 's'}.`),
+        ]));
+
+        const skipped = _skippedSentence(result.skipped);
+        if (skipped) previewEl.appendChild(el('div', {}, [text(skipped)]));
+
+        // The titles matter more than the count: recognising one is how you
+        // find out the cutoff is wrong before the delete, not after.
+        const sample = result.sample || [];
+        if (sample.length) {
+            previewEl.appendChild(el('ul', {
+                style: 'margin:0.35rem 0 0; padding-left:1.1rem; list-style:disc;',
+            }, sample.slice(0, 5).map(s => el('li', {}, [
+                text(s.title || 'Untitled'),
+                el('span', { style: 'color:var(--text-faint);' }, [
+                    text(`  ${s.message_count ?? 0} message${s.message_count === 1 ? '' : 's'}`),
+                ]),
+            ]))));
+            if (n > sample.length) {
+                previewEl.appendChild(el('div', { style: 'color:var(--text-faint);' }, [
+                    text(`…and ${n - sample.length} more.`),
+                ]));
+            }
+        }
+    }
+
+    function _renderPreviewError(message) {
+        clear(previewEl);
+        previewEl.hidden = false;
+        previewEl.style.color = 'var(--error)';
+        previewEl.appendChild(text(message));
+    }
+
+    const previewBtn = el('button', { class: 'btn btn--secondary', type: 'button' }, [text('Preview')]);
     previewBtn.addEventListener('click', async () => {
         previewBtn.disabled = true;
         try {
-            const { toDelete, candidates, keepDays, keepMin } = await _computePreview();
-            statusEl.textContent = candidates === 0
-                ? `No sessions older than ${keepDays} day(s).`
-                : `${toDelete} session(s) would be deleted (${candidates} older than ${keepDays} day(s); keeping the most recent ${keepMin} of those).`;
-            statusEl.style.color = 'var(--text-dim)';
+            _renderPreview(await post('/api/sessions/purge', { ..._params(), dry_run: true }));
         } catch (e) {
-            statusEl.textContent = `Preview failed: ${e.message || e}`;
-            statusEl.style.color = 'var(--error)';
+            _renderPreviewError(`Preview failed: ${e.message || e}`);
         } finally {
             previewBtn.disabled = false;
         }
     });
 
-    const pruneBtn = el('button', {
-        class: 'btn btn-secondary',
-        style: 'font-size:var(--text-sm); color:var(--error); border-color:var(--error);',
-    }, [text('Prune now')]);
+    const pruneBtn = el('button', { class: 'btn btn--danger', type: 'button' }, [text('Prune now')]);
     pruneBtn.addEventListener('click', async () => {
         pruneBtn.disabled = true;
         previewBtn.disabled = true;
         try {
-            const { toDelete, keepDays, keepMin } = await _computePreview();
-            if (!toDelete) {
-                statusEl.textContent = `Nothing to prune (no sessions older than ${keepDays} day(s) past the keep-${keepMin} floor).`;
-                statusEl.style.color = 'var(--text-dim)';
-                return;
-            }
-            if (!confirm(
-                `Permanently delete ${toDelete} session(s) and all of their messages?\n\n`
-                + `This cascades to any worker sessions and cannot be undone.`
-            )) {
-                statusEl.textContent = 'Cancelled.';
-                statusEl.style.color = 'var(--text-dim)';
-                return;
-            }
-            const result = await post('/api/sessions/purge', {
-                keep_days: keepDays,
-                keep_min: keepMin,
+            // Always re-run the dry run rather than trusting a stale preview:
+            // the inputs may have changed since, and the confirmation names
+            // the number it is about to delete.
+            const plan = await post('/api/sessions/purge', { ..._params(), dry_run: true });
+            _renderPreview(plan);
+            const n = plan.would_delete || 0;
+            if (!n) return;
+
+            // A browser confirm() cannot say which sessions, cannot be styled
+            // to look like a deletion, and on some platforms is suppressed
+            // entirely — the one dialog where that matters most. (S2)
+            const go = await confirmDanger({
+                title: `Delete ${n} session${n === 1 ? '' : 's'}?`,
+                body: [
+                    `Plain chats older than ${plan.keep_days} day${plan.keep_days === 1 ? '' : 's'} go, `
+                    + `except the ${plan.keep_min} most recent of those.`,
+                    _skippedSentence(plan.skipped) || 'Nothing is being skipped.',
+                    'Their messages go with them, and so do any worker sessions they started. '
+                    + 'This cannot be undone.',
+                ],
+                verb: `Delete ${n}`,
+                cancelLabel: 'Keep them',
             });
-            statusEl.textContent = `Pruned ${result.purged} session(s).`;
-            statusEl.style.color = 'var(--success)';
-            _showToast(`Pruned ${result.purged} session(s)`, 'success');
+            if (!go) {
+                previewEl.appendChild(el('div', {}, [text('Cancelled — nothing was deleted.')]));
+                return;
+            }
+            const result = await post('/api/sessions/purge', { ..._params(), dry_run: false });
+            clear(previewEl);
+            previewEl.hidden = false;
+            previewEl.style.color = 'var(--success)';
+            previewEl.appendChild(text(`Pruned ${result.purged} session${result.purged === 1 ? '' : 's'}.`));
+            notify('success', `Pruned ${result.purged} session${result.purged === 1 ? '' : 's'}`);
         } catch (e) {
-            statusEl.textContent = `Prune failed: ${e.message || e}`;
-            statusEl.style.color = 'var(--error)';
-            _showToast('Prune failed', 'error');
+            _renderPreviewError(`Prune failed: ${e.message || e}`);
+            notify('error', 'Prune failed');
         } finally {
             pruneBtn.disabled = false;
             previewBtn.disabled = false;
@@ -1848,14 +2424,22 @@ function buildSessionCleanupSection() {
 
     return el('div', { class: 'settings-section' }, [
         el('h3', {}, [
-            text('Session Cleanup'),
+            text('Session cleanup'),
             buildHelpIcon(
-                'Permanently delete old sessions to keep the database tidy. '
+                'Permanently delete old plain chats to keep the database tidy. '
                 + '"Older than" sets the age cutoff (sessions whose updated_at is past this many days are candidates). '
                 + '"Always keep" preserves the N most recent of those candidates as a safety floor. '
-                + 'Worker sessions cascade with their parent. Cron-bound sessions are protected automatically by the daily maintenance task; this manual prune does not skip them, so use with care if you have active cron jobs.'
+                + 'Only ordinary chats are ever eligible: pinned sessions, anything in a space, and every automation '
+                + 'session (workers, cron, canaries, idle work) are skipped, and each of those has its own retention. '
+                + 'Worker sessions cascade with the parent chat that spawned them.'
             ),
         ]),
+        el('p', {
+            style: 'font-size:var(--text-sm); color:var(--text-dim); margin:0 0 0.6rem;',
+        }, [text(
+            'This only ever touches plain chats. Pinned sessions, anything filed in a space, and '
+            + 'automation sessions are left alone — Preview says how many that is.',
+        )]),
         el('div', { class: 'setting-row' }, [
             el('label', { for: 'setting-cleanup-keep-days' }, [text('Older than (days)')]),
             daysInput,
@@ -1865,8 +2449,794 @@ function buildSessionCleanupSection() {
             minInput,
         ]),
         actionRow,
-        statusEl,
+        previewEl,
     ]);
+}
+
+// ---------------------------------------------------------------------------
+// Storage tab
+// ---------------------------------------------------------------------------
+//
+// Everything that answers "why is this thing so big, and what can I get back"
+// in one place. It used to be nowhere: the only cleanup control lived at the
+// bottom of Environment & network, under the SSL settings, where the owner of
+// the box could not find it and the numbers it was acting on were invisible.
+
+// Session types the ledger has a name for. Anything else — a type added later,
+// a hand-written row — renders under its own key rather than being dropped or
+// lumped into "other", because a ledger that quietly omits rows is worse than
+// one with an unfamiliar word in it.
+const SESSION_TYPE_LABELS = {
+    normal: 'Plain chats',
+    worker: 'Workers',
+    cron: 'Scheduled runs',
+    snooze: 'Idle work',
+    canary: 'Canary runs',
+    rlm: 'Large-input runs',
+    dream: 'Dream sessions',
+};
+
+function _typeLabel(key) {
+    return SESSION_TYPE_LABELS[key] || (key.charAt(0).toUpperCase() + key.slice(1));
+}
+
+// One line of the ledger. `.setting-row` is the settings modal's own
+// label-left / value-right row, so the ledger lines up with every other
+// control on the page without a stylesheet of its own — and the settings
+// search, which walks `.setting-row`, finds these too.
+//
+// The inline flex overrides compact.css, which stacks `.setting-row` below
+// 640px so a full-width input has room to be full-width. A ledger line is a
+// label and a number: stacked, every row doubles in height to put "12" on
+// its own line under "Total sessions", and a twelve-row ledger stops fitting
+// on a phone at all.
+function _ledgerRow(label, value, { strong = false, hint = '' } = {}) {
+    const left = hint
+        ? el('div', {
+            class: 'setting-label-cell',
+            style: 'flex:1 1 auto; min-width:0; width:auto;',
+        }, [
+            el('label', {}, [text(label)]),
+            el('div', {
+                style: 'font-size:var(--text-xs); color:var(--text-faint); overflow-wrap:anywhere;',
+            }, [text(hint)]),
+        ])
+        : el('label', { style: 'flex:1 1 auto; min-width:0;' }, [text(label)]);
+    return el('div', {
+        class: 'setting-row',
+        style: 'flex-direction:row; flex-wrap:nowrap; align-items:baseline; '
+            + 'justify-content:space-between; gap:var(--sp-3);',
+    }, [
+        left,
+        el('span', {
+            style: 'flex:0 0 auto; white-space:nowrap; font-size:var(--text-sm); '
+                + `font-variant-numeric:tabular-nums; color:var(--${strong ? 'text' : 'text-dim'});`
+                + (strong ? ' font-weight:500;' : ''),
+        }, [text(value)]),
+    ]);
+}
+
+function _statusLine() {
+    const line = el('div', {
+        style: 'font-size:var(--text-sm); color:var(--text-dim); margin-top:0.5rem;',
+    });
+    line.hidden = true;
+    return line;
+}
+
+function _say(line, message, tone = 'dim') {
+    clear(line);
+    line.hidden = false;
+    line.style.color = tone === 'dim' ? 'var(--text-dim)' : `var(--${tone})`;
+    line.appendChild(text(message));
+}
+
+function _buildSessionsLedger(sessions) {
+    const rows = [_ledgerRow('Total sessions', String(sessions.total ?? 0), { strong: true })];
+    // Biggest first. The server sorts by key for a stable payload; here the
+    // question is "what is filling this up", and alphabetical order answers
+    // a different one.
+    const byType = Object.entries(sessions.by_type || {})
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    for (const [key, count] of byType) {
+        rows.push(_ledgerRow(_typeLabel(key), String(count)));
+    }
+    rows.push(_ledgerRow('Pinned', String(sessions.pinned ?? 0)));
+    rows.push(_ledgerRow('In spaces', String(sessions.in_spaces ?? 0)));
+    // null means the schema has no archive column yet — not zero archived.
+    // A count, not a link: the archive is a place in the sidebar, and a row
+    // that navigates out of Settings from inside a ledger is a trap.
+    if (sessions.archived != null) {
+        rows.push(_ledgerRow('Archived', String(sessions.archived), {
+            hint: 'Out of the sidebar with every message kept — still counted above under their kind',
+        }));
+    }
+
+    return el('div', { class: 'settings-section' }, [
+        el('h3', {}, [
+            text('Sessions'),
+            buildHelpIcon(
+                'Every row in the sessions table, by kind. Pinned, archived and in-a-space are '
+                + 'counted again here — they are flags on a session, not kinds of their own. '
+                + 'Automation sessions (workers, scheduled runs, canaries, idle work) each have their '
+                + 'own retention and are never touched by the cleanup below.'
+            ),
+        ]),
+        ...rows,
+    ]);
+}
+
+// The Archive block: the two knobs, and a way to try each of them.
+//
+// Both settings are ordinary declarative fields — they are saved by the same
+// Save button as everything else on the page — so what this adds is the part a
+// settings form cannot do. A retention horizon is a number whose only
+// interesting property is which of *your* conversations it catches, and the
+// form can only tell you it is between 0 and 3650. Each knob gets a button
+// that runs the sweep the setting schedules, against the value in the box
+// right now rather than the one on disk: typing 60 and pressing it answers
+// "what does 60 do here?" before 60 is committed to anything.
+//
+// The value is read out of the input at click time for exactly that reason.
+// Reading the saved setting instead would make the button answer a question
+// about a number the user has already stopped looking at.
+function _archiveDays(section, key) {
+    const input = section.querySelector(`#setting-${key}`);
+    const n = parseInt((input && input.value) || '', 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function _days(n) {
+    return `${n} day${n === 1 ? '' : 's'}`;
+}
+
+function _chats(n) {
+    return `${n} chat${n === 1 ? '' : 's'}`;
+}
+
+/** Up to five titles under a preview sentence. The count says how much; the
+ *  titles are what tells you the horizon is wrong before you agree to it. */
+function _sampleTitles(sample, total) {
+    const shown = (sample || []).slice(0, 5);
+    if (!shown.length) return [];
+    const nodes = [el('ul', {
+        style: 'margin:0.35rem 0 0; padding-left:1.1rem; list-style:disc;',
+    }, shown.map(s => el('li', {}, [text(s.title || 'Untitled')])))];
+    if (total > shown.length) {
+        nodes.push(el('div', { style: 'color:var(--text-faint);' }, [
+            text(`…and ${total - shown.length} more.`),
+        ]));
+    }
+    return nodes;
+}
+
+// Called once, not per render: the declarative section is a single node that
+// every refresh re-appends, so appending the controls inside `render` would
+// stack a second pair of buttons under it every time an action finished.
+// Returns the flash applier the ledger's refresh uses to put an action's
+// result back on screen after the rebuild that action triggered.
+function _wireArchiveBlock(section, onDone) {
+    const status = _statusLine();
+
+    function _preview(message, sample, total) {
+        clear(status);
+        status.hidden = false;
+        status.style.color = 'var(--text-dim)';
+        status.appendChild(el('div', { style: 'color:var(--text);' }, [text(message)]));
+        for (const node of _sampleTitles(sample, total)) status.appendChild(node);
+    }
+
+    const archiveBtn = el('button', {
+        class: 'btn btn--secondary settings-block-btn', type: 'button',
+    }, [icon('archive', { size: 12 }), text('Archive idle chats now')]);
+
+    archiveBtn.addEventListener('click', async () => {
+        const days = _archiveDays(section, 'session_archive_idle_days');
+        archiveBtn.disabled = true;
+        try {
+            if (!days) {
+                _say(status, 'Set a number of days above first — 0 means never archive.');
+                return;
+            }
+            // Ask the endpoint that does the archiving what it would archive.
+            // The dry run computes exactly the set the real call then takes,
+            // so the number in the dialog is a promise and not an estimate.
+            const plan = await post('/api/sessions/archive-idle', { days, dry_run: true });
+            const n = plan.count || 0;
+            if (!n) {
+                _say(status, `Nothing to archive — no chat has been idle for more than ${_days(days)}.`);
+                return;
+            }
+            _preview(`${_chats(n)} idle for more than ${_days(days)} would be archived.`, plan.sample, n);
+            const go = await confirmDanger({
+                title: `Archive ${_chats(n)}?`,
+                body: [
+                    `Every chat untouched for more than ${_days(days)} leaves the sidebar. `
+                    + 'Pinned chats stay; chats in a space are archived too.',
+                    'Nothing is deleted. They keep every message, stay searchable, and come '
+                    + 'back on one click from Archived in the sidebar.',
+                ],
+                verb: `Archive ${n}`,
+                cancelLabel: 'Leave them',
+            });
+            if (!go) {
+                _say(status, 'Cancelled — nothing was archived.');
+                return;
+            }
+            const result = await post('/api/sessions/archive-idle', { days, dry_run: false });
+            notify('success', `Archived ${_chats(result.count || 0)}`);
+            onDone({
+                archive: {
+                    text: `Archived ${_chats(result.count || 0)} idle for more than ${_days(days)}. `
+                        + 'Nothing was deleted — they are under Archived in the sidebar.',
+                    tone: 'success',
+                },
+            });
+        } catch (e) {
+            _say(status, `Could not archive: ${e.message || e}`, 'error');
+            notify('error', 'Could not archive the idle chats');
+        } finally {
+            archiveBtn.disabled = false;
+        }
+    });
+
+    const pruneBtn = el('button', {
+        class: 'btn btn--danger settings-block-btn', type: 'button',
+    }, [icon('trash', { size: 12 }), text('Delete archived chats older than…')]);
+
+    pruneBtn.addEventListener('click', async () => {
+        const days = _archiveDays(section, 'session_delete_archived_days');
+        pruneBtn.disabled = true;
+        try {
+            if (!days) {
+                _say(status, 'Set a number of days above first — 0 keeps archived chats forever.');
+                return;
+            }
+            const plan = await post('/api/storage/prune-archived', { days, dry_run: true });
+            const n = plan.count || 0;
+            if (!n) {
+                _say(status, `Nothing to delete — no chat has been in the archive for more than ${_days(days)}.`);
+                return;
+            }
+            _preview(`${_chats(n)} archived more than ${_days(days)} ago would be deleted.`, plan.sample, n);
+            const go = await confirmDanger({
+                title: `Delete ${_chats(n)}?`,
+                body: [
+                    `Every chat that has been in the archive for more than ${_days(days)} is `
+                    + 'removed from the database.',
+                    'Their messages go with them, and so does anything their workers wrote. '
+                    + 'This is the one control here that loses transcripts, and there is no undo.',
+                ],
+                verb: `Delete ${n}`,
+                cancelLabel: 'Keep them',
+            });
+            if (!go) {
+                _say(status, 'Cancelled — nothing was deleted.');
+                return;
+            }
+            const result = await post('/api/storage/prune-archived', { days, dry_run: false });
+            notify('success', `Deleted ${_chats(result.count || 0)}`);
+            onDone({
+                archive: {
+                    text: `Deleted ${_chats(result.count || 0)} that had been archived for more than ${_days(days)}.`,
+                    tone: 'success',
+                },
+            });
+        } catch (e) {
+            _say(status, `Could not delete: ${e.message || e}`, 'error');
+            notify('error', 'Could not delete the archived chats');
+        } finally {
+            pruneBtn.disabled = false;
+        }
+    });
+
+    // Appended to the declarative section itself rather than wrapped around
+    // it: the fields keep their ids, their reset buttons and their place in
+    // the Save flow, and the buttons read the inputs sitting directly above
+    // them. Re-rendering the ledger re-appends the same node, so an edit the
+    // user has not saved yet survives an action that refreshes the numbers.
+    section.append(el('div', {
+        style: 'display:flex; flex-wrap:wrap; gap:0.5rem;',
+    }, [archiveBtn, pruneBtn]), status);
+
+    return (flash) => { if (flash) _say(status, flash.text, flash.tone); };
+}
+
+function _buildDatabaseLedger(database, onDone, flash) {
+    const status = _statusLine();
+    const reclaimable = database.reclaimable_bytes || 0;
+    // Carried through the refresh that the action itself triggers. Without
+    // this the ledger redraws with new numbers and the sentence explaining
+    // where they came from disappears with the old DOM.
+    if (flash) _say(status, flash.text, flash.tone);
+
+    const compactBtn = el('button', {
+        class: 'btn btn--secondary settings-block-btn', type: 'button',
+    }, [icon('refresh', { size: 12 }), text('Compact database')]);
+
+    compactBtn.addEventListener('click', async () => {
+        compactBtn.disabled = true;
+        _say(status, 'Compacting — this holds the database for a moment…');
+        try {
+            const result = await post('/api/storage/optimize', {});
+            const freed = (result.bytes_before || 0) - (result.bytes_after || 0);
+            if (freed > 0) notify('success', `Database compacted — ${formatBytes(freed)} freed`);
+            onDone({
+                database: {
+                    text: freed > 0
+                        ? `${formatBytes(freed)} returned to the disk — ${formatBytes(result.bytes_before)} became ${formatBytes(result.bytes_after)}.`
+                        : `Nothing to reclaim — the file is still ${formatBytes(result.bytes_after)}.`,
+                    tone: freed > 0 ? 'success' : 'dim',
+                },
+            });
+        } catch (e) {
+            // 409 is the expected answer while a turn is running, not a
+            // failure: say what is in the way, and stay out of the error
+            // colour that means something went wrong.
+            if (e.status === 409) {
+                _say(status, e.detail || 'A turn is running — try again when the agent is idle.', 'warning');
+            } else {
+                _say(status, `Could not compact: ${e.message || e}`, 'error');
+                notify('error', 'Could not compact the database');
+            }
+        } finally {
+            compactBtn.disabled = false;
+        }
+    });
+
+    const rows = [
+        _ledgerRow('Database file', formatBytes(database.bytes), { strong: true, hint: database.path }),
+    ];
+    if (database.wal_bytes) {
+        rows.push(_ledgerRow('Write-ahead log', formatBytes(database.wal_bytes), {
+            hint: 'Committed writes not yet folded back into the file',
+        }));
+    }
+    rows.push(_ledgerRow('Reclaimable', formatBytes(reclaimable), {
+        hint: 'Free pages inside the file — deleted rows give this up, but only compacting hands it back',
+    }));
+
+    return el('div', { class: 'settings-section' }, [
+        el('h3', {}, [
+            text('Database'),
+            buildHelpIcon(
+                'Deleting sessions frees pages inside the database file; SQLite reuses them for new '
+                + 'rows but never returns them to the filesystem. Compacting rebuilds the file so that '
+                + 'space goes back to the disk. It holds a write lock for the whole rebuild, so it is '
+                + 'refused while a turn is running.'
+            ),
+        ]),
+        ...rows,
+        compactBtn,
+        status,
+    ]);
+}
+
+// One ledger shape, two directories. `data/backups` is where the schedule
+// writes; `data/.backups` is where it wrote before the rename, and a
+// boot-time path that was never updated still drops a database copy there on
+// every container start — so it is a live directory with nobody's retention
+// applied to it, and on a long-running box it is the bigger of the two. Same
+// block, same dry-run-then-confirm flow, its own `dir` on the rotate call:
+// the keep count means "the newest N in this directory", never a budget
+// pooled across both.
+const BACKUPS_BLOCK = {
+    primary: {
+        title: 'Backups',
+        flashKey: 'backups',
+        help: 'A snapshot of the database and the memory corpus, taken daily. backup_keep_count '
+            + 'sets how many are retained; rotation counts every snapshot in the directory, '
+            + 'including ones written under the older naming schemes earlier versions used.',
+    },
+    legacy: {
+        title: 'Pre-deploy copies (legacy)',
+        flashKey: 'legacyBackups',
+        help: 'The directory backups lived in before it was renamed. Nothing schedules these, but '
+            + 'a start-up path that predates the rename still drops a copy of the database and of '
+            + 'settings.json here every time the server boots — so it keeps growing, and until now '
+            + 'nothing ever swept it. The same keep count applies, counted separately from the '
+            + 'directory above.',
+    },
+};
+
+function _buildBackupsLedger(backups, onDone, flash, which = 'primary') {
+    const { title, help, flashKey } = BACKUPS_BLOCK[which] || BACKUPS_BLOCK.primary;
+    const status = _statusLine();
+    const beyond = backups.beyond_keep || [];
+    const beyondBytes = beyond.reduce((n, f) => n + (f.bytes || 0), 0);
+    if (flash) _say(status, flash.text, flash.tone);
+
+    const rows = [
+        _ledgerRow('Snapshots', String(backups.count ?? 0), { strong: true, hint: backups.dir }),
+        _ledgerRow('On disk', formatBytes(backups.bytes)),
+        _ledgerRow('Keeping', backups.keep > 0
+            ? `the newest ${backups.keep}`
+            : 'scheduled backups are off'),
+        _ledgerRow('Last backup', backups.last_backup_at
+            ? new Date(backups.last_backup_at).toLocaleString()
+            : 'never'),
+    ];
+
+    const children = [
+        el('h3', {}, [text(title), buildHelpIcon(help)]),
+        ...rows,
+    ];
+
+    if (beyond.length) {
+        children.push(el('div', {
+            style: 'font-size:var(--text-sm); color:var(--text-dim); margin-top:0.6rem;',
+        }, [text(
+            `${beyond.length} snapshot${beyond.length === 1 ? ' is' : 's are'} past the keep count, `
+            + `holding ${formatBytes(beyondBytes)}:`,
+        )]));
+        children.push(el('ul', {
+            style: 'margin:0.35rem 0 0; padding-left:1.1rem; list-style:disc; '
+                + 'font-size:var(--text-sm); color:var(--text-dim); max-height:12rem; overflow-y:auto;',
+        }, beyond.map(f => el('li', {}, [
+            text(f.name),
+            el('span', { style: 'color:var(--text-faint);' }, [text(`  ${formatBytes(f.bytes)}`)]),
+        ]))));
+
+        const rotateBtn = el('button', {
+            class: 'btn btn--danger settings-block-btn', type: 'button',
+        }, [icon('trash', { size: 12 }), text('Rotate now')]);
+
+        rotateBtn.addEventListener('click', async () => {
+            rotateBtn.disabled = true;
+            try {
+                // Ask the server what it would remove before asking the user
+                // to agree to it. The list on screen may be a minute old; the
+                // dialog names what is about to happen, not what was.
+                const plan = await post('/api/storage/backups/rotate', { dry_run: true, dir: which });
+                const names = plan.removed || [];
+                if (!names.length) {
+                    onDone({ [flashKey]: { text: 'Nothing to rotate — every snapshot is within the keep count.' } });
+                    return;
+                }
+                _say(
+                    status,
+                    `Would remove ${names.length} snapshot${names.length === 1 ? '' : 's'} `
+                    + `(${formatBytes(plan.bytes_freed)}): ${names.join(', ')}`,
+                );
+                const go = await confirmDanger({
+                    title: `Delete ${names.length} snapshot${names.length === 1 ? '' : 's'}?`,
+                    body: [
+                        `${formatBytes(plan.bytes_freed)} goes back to the disk. `
+                        + `The newest ${plan.kept} snapshot${plan.kept === 1 ? '' : 's'} stay.`,
+                        'These are backups. Deleting them is the one action here that cannot be '
+                        + 'undone by taking another one.',
+                    ],
+                    verb: `Delete ${names.length}`,
+                    cancelLabel: 'Keep them',
+                });
+                if (!go) {
+                    _say(status, 'Cancelled — nothing was deleted.');
+                    return;
+                }
+                const result = await post('/api/storage/backups/rotate', { dry_run: false, dir: which });
+                notify('success', `Rotated ${result.removed.length} old snapshot${result.removed.length === 1 ? '' : 's'}`);
+                onDone({
+                    [flashKey]: {
+                        text: `Removed ${result.removed.length} snapshot${result.removed.length === 1 ? '' : 's'}, `
+                            + `freeing ${formatBytes(result.bytes_freed)}.`,
+                        tone: 'success',
+                    },
+                });
+            } catch (e) {
+                _say(status, `Could not rotate: ${e.message || e}`, 'error');
+                notify('error', 'Could not rotate the backups');
+            } finally {
+                rotateBtn.disabled = false;
+            }
+        });
+        children.push(rotateBtn);
+    }
+
+    children.push(status);
+    return el('div', { class: 'settings-section' }, children);
+}
+
+// Counters whose name does not derive a readable row on its own. The archive
+// pair is here because one of them does not end in `_pruned` at all —
+// archiving deletes nothing — and because "Archived sessions", which the
+// generic rule would produce for the other, names a population rather than
+// the thing that happened to it.
+const SWEEP_LABELS = {
+    sessions_archived: 'Chats archived',
+    archived_sessions_pruned: 'Archived chats deleted',
+};
+
+function _buildSweepsLedger(sweeps) {
+    const rows = Object.entries(sweeps)
+        .filter(([key, value]) => value && (SWEEP_LABELS[key] || key.endsWith('_pruned')))
+        .map(([key, value]) => _ledgerRow(
+            SWEEP_LABELS[key] || _typeLabel(key.replace(/_pruned$/, '').replace(/_/g, ' ')),
+            String(value),
+        ));
+    if (!rows.length) return null;
+
+    return el('div', { class: 'settings-section' }, [
+        el('h3', {}, [
+            text('Swept automatically'),
+            buildHelpIcon(
+                'What the idle-time retention sweeps have done since the server started. '
+                + 'These run on their own; the counters are here so the manual controls above are '
+                + 'read against what is already happening, not instead of it. Archiving is the one '
+                + 'row here that deletes nothing.'
+            ),
+        ]),
+        ...rows,
+    ]);
+}
+
+// `settingSections` are this tab's declarative sections (the archive knobs and
+// the backup schedule), passed in rather than concatenated by the caller so
+// they can land beside the numbers they configure rather than after all of
+// them. Re-appending the same nodes on a refresh is deliberate: they keep
+// their ids and any edit the user has not saved yet.
+// ---------------------------------------------------------------------------
+// Autonomy tab — the one section there with controls of its own
+// ---------------------------------------------------------------------------
+// Same hook the Storage tab uses: find the section by its `name`, not by the
+// heading text a rename would break, and hang the buttons off the section node
+// itself so the fields keep their ids, their reset buttons and their place in
+// the Save flow.
+
+function buildAutonomyTab(settingSections = []) {
+    const suggest = settingSections.find(s => s.dataset && s.dataset.section === 'space-suggest');
+    if (suggest) _wireSpaceSuggestBlock(suggest);
+    return settingSections;
+}
+
+/** "5 chats" / "1 chat" — the count reads in both halves of this block. */
+function _suggChats(n) {
+    return `${n} chat${n === 1 ? '' : 's'}`;
+}
+
+// core.space_suggest reports its refusals as machine tokens, because the
+// snooze rung logs them. Scan now is where a person meets one, so this is
+// where they become English. An unrecognised token still says something.
+const SUGGEST_SKIPS = {
+    scan_in_progress: 'a scan is already running',
+    interval: 'the last scan was too recent',
+    nothing_new: 'too few new chats since the last scan',
+    pending_full: 'as many suggestions are already waiting as Pernix will keep',
+    too_few_candidates: 'there are not enough ordinary chats in the window to group',
+};
+
+function _suggNote(message) {
+    return el('div', { class: 'sugg-note' }, [text(message)]);
+}
+
+function _wireSpaceSuggestBlock(section) {
+    const status = _statusLine();
+    const proposals = el('div', { class: 'sugg-scan-out' });
+    const declinedHost = el('div', { class: 'sugg-declined' });
+
+    // --- Scan now: a dry run, so the user sees what a scan WOULD propose
+    // before anything is stored. Keeping it is a second, separate click.
+    const scanBtn = el('button', { class: 'btn btn--secondary settings-block-btn', type: 'button' }, [
+        icon('sparkle', { size: 12 }),
+        text('Scan now'),
+    ]);
+    const keepBtn = el('button', { class: 'btn btn--primary settings-block-btn', type: 'button' }, [
+        text('Keep these as suggestions'),
+    ]);
+    keepBtn.hidden = true;
+
+    // Returns the number of groupings on offer, or null when no scan ran —
+    // which is what tells the caller whether "this is a dry run" is a
+    // sentence worth printing under the button.
+    const renderResult = (result) => {
+        clear(proposals);
+        keepBtn.hidden = true;
+        // The scan reports its own refusals rather than throwing them: a
+        // window with too few chats in it is an answer, not a failure.
+        if (result.skipped) {
+            proposals.appendChild(_suggNote(`No scan ran — ${SUGGEST_SKIPS[result.skipped] || result.skipped}.`));
+            return null;
+        }
+        if (result.error) {
+            proposals.appendChild(_suggNote(`The scan could not finish — ${result.error}.`));
+            return null;
+        }
+        const kept = result.kept || [];
+        const scanned = result.scanned || 0;
+        proposals.appendChild(_suggNote(kept.length
+            ? `${_suggChats(scanned)} read. ${kept.length} would be suggested — nothing is stored yet.`
+            : `${_suggChats(scanned)} read. Nothing came through the gate.`));
+        for (const c of kept) {
+            const files = Object.keys(c.directives || {});
+            proposals.appendChild(el('div', { class: 'sugg-prop' }, [
+                el('div', { class: 'sugg-prop-head' }, [
+                    el('span', { class: 'sugg-prop-label' }, [text(c.label || c.topic_key || 'Untitled')]),
+                    el('span', { class: 'sugg-prop-kind' }, [
+                        text(c.kind === 'existing' ? 'move into an existing space' : 'new space'),
+                    ]),
+                    el('span', { class: 'sugg-prop-count' }, [text(_suggChats((c.session_ids || []).length))]),
+                ]),
+                c.why ? el('div', { class: 'sugg-prop-why' }, [text(c.why)]) : null,
+                files.length
+                    ? el('div', { class: 'sugg-prop-files' }, [text(`drafts ${files.join(', ')}`)])
+                    : null,
+            ]));
+        }
+        keepBtn.hidden = kept.length === 0;
+        return kept.length;
+    };
+
+    scanBtn.addEventListener('click', async () => {
+        scanBtn.disabled = true;
+        keepBtn.hidden = true;
+        _say(status, 'Scanning — one background-model call…');
+        try {
+            const kept = renderResult(await post('/api/space-suggestions/scan', { dry_run: true }));
+            // A scan that never ran has already said so in its own sentence;
+            // "this is a dry run" under that would be answering nothing.
+            if (kept === null) status.hidden = true;
+            else _say(status, 'This is a dry run: nothing has been stored.');
+        } catch (e) {
+            clear(proposals);
+            _say(status, `Could not scan: ${e.message || e}`, 'error');
+        } finally {
+            scanBtn.disabled = false;
+        }
+    });
+
+    keepBtn.addEventListener('click', async () => {
+        keepBtn.disabled = true;
+        _say(status, 'Storing…');
+        try {
+            const result = await post('/api/space-suggestions/scan', { dry_run: false });
+            const kept = (result.kept || []).length;
+            renderResult(result);
+            keepBtn.hidden = true;
+            _say(status, kept
+                ? `${kept} suggestion${kept === 1 ? '' : 's'} waiting under your spaces in the sidebar.`
+                : 'Nothing was stored.', kept ? 'success' : 'dim');
+            if (kept) notify('success', `${kept} space suggestion${kept === 1 ? '' : 's'} added to the sidebar`);
+            // The rows live in the sidebar, which is not this modal.
+            window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
+        } catch (e) {
+            _say(status, `Could not store: ${e.message || e}`, 'error');
+        } finally {
+            keepBtn.disabled = false;
+        }
+    });
+
+    // --- Declined: what the scan is not allowed to propose any more, and the
+    // one control that takes that back.
+    const renderDeclined = async () => {
+        clear(declinedHost);
+        declinedHost.appendChild(el('h4', { class: 'sugg-declined-title' }, [text('Declined')]));
+        let rows = [];
+        try {
+            const data = await get('/api/space-suggestions?status=rejected');
+            rows = data.suggestions || [];
+        } catch (e) {
+            declinedHost.appendChild(_suggNote(`Could not read the declined list — ${e.message || e}`));
+            return;
+        }
+        if (!rows.length) {
+            declinedHost.appendChild(_suggNote('Nothing declined.'));
+        }
+        for (const r of rows) {
+            const clearBtn = el('button', { class: 'btn btn--secondary btn--sm', type: 'button' }, [text('Clear')]);
+            clearBtn.addEventListener('click', async () => {
+                clearBtn.disabled = true;
+                try {
+                    await del(`/api/space-suggestions/${r.id}`);
+                    await renderDeclined();
+                } catch (e) {
+                    clearBtn.disabled = false;
+                    notify('error', `Could not clear “${r.label}” — ${e.message || e}`);
+                }
+            });
+            const when = _suggDate(r.resolved_at);
+            declinedHost.appendChild(el('div', { class: 'sugg-declined-row' }, [
+                el('span', { class: 'sugg-declined-label' }, [
+                    text(r.label + (r.existing_space ? ` → ${r.existing_space.label}` : '')),
+                ]),
+                el('span', { class: 'sugg-declined-meta' }, [
+                    text(`${when ? `declined ${when} · ` : ''}${_suggChats((r.session_ids || []).length)}`),
+                ]),
+                clearBtn,
+            ]));
+        }
+        if (rows.length) {
+            const allBtn = el('button', { class: 'btn btn--secondary btn--sm', type: 'button' }, [text('Clear all')]);
+            allBtn.addEventListener('click', async () => {
+                allBtn.disabled = true;
+                try {
+                    await del('/api/space-suggestions?status=rejected');
+                    await renderDeclined();
+                } catch (e) {
+                    allBtn.disabled = false;
+                    notify('error', `Could not clear the declined list — ${e.message || e}`);
+                }
+            });
+            declinedHost.appendChild(el('div', { class: 'sugg-declined-all' }, [allBtn]));
+        }
+        declinedHost.appendChild(_suggNote('Cleared topics can be suggested again.'));
+    };
+
+    // Appended to the declarative section itself, once — `renderDeclined`
+    // replaces the contents of its own host rather than the block, so a
+    // refresh never stacks a second pair of buttons under the fields.
+    section.append(
+        el('div', { style: 'display:flex; flex-wrap:wrap; gap:0.5rem;' }, [scanBtn, keepBtn]),
+        status,
+        proposals,
+        declinedHost,
+    );
+    renderDeclined();
+}
+
+function _suggDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function buildStorageTab(settingSections = []) {
+    // Built async into a host, the way the Security tab is: the tab bodies are
+    // assembled synchronously when the modal opens, and this one needs a
+    // round trip before it has anything true to say.
+    const host = el('div', {}, [
+        el('div', { class: 'settings-tab-loading' }, [text('Loading…')]),
+    ]);
+
+    // The archive knobs go directly under the sessions ledger, because the
+    // Archived row there is the number they move; everything else on this tab
+    // is placed by the block it belongs to. Wired once — `render` re-appends
+    // the same node, and wiring inside it would stack the buttons.
+    const archiveSection = settingSections.find(s => s.dataset && s.dataset.section === 'archive') || null;
+    const otherSections = settingSections.filter(s => s !== archiveSection);
+    const applyArchiveFlash = archiveSection ? _wireArchiveBlock(archiveSection, f => render(f)) : null;
+
+    // `flash` is how an action's own result survives the refresh it triggers:
+    // archiving, rotating and compacting all change the numbers, so the ledger
+    // has to be rebuilt, and rebuilding it would otherwise throw away the
+    // sentence saying what just happened.
+    async function render(flash) {
+        let data;
+        try {
+            data = await get('/api/storage');
+        } catch (e) {
+            clear(host);
+            host.appendChild(el('div', { class: 'settings-load-error', role: 'alert' }, [
+                el('strong', {}, [text('Storage could not be read.')]),
+                el('p', {}, [text(e.message || String(e))]),
+            ]));
+            for (const section of settingSections) host.appendChild(section);
+            host.appendChild(buildSessionCleanupSection());
+            return;
+        }
+        clear(host);
+        host.appendChild(_buildSessionsLedger(data.sessions || {}));
+        if (archiveSection) {
+            host.appendChild(archiveSection);
+            applyArchiveFlash(flash?.archive);
+        }
+        host.appendChild(_buildDatabaseLedger(data.database || {}, render, flash?.database));
+        host.appendChild(_buildBackupsLedger(data.backups || {}, render, flash?.backups));
+        // Null on every instance that has never run a version old enough to
+        // have written to data/.backups — which is most of them, and they get
+        // no block at all rather than an empty one about a path they do not have.
+        if (data.legacy_backups) {
+            host.appendChild(_buildBackupsLedger(data.legacy_backups, render, flash?.legacyBackups, 'legacy'));
+        }
+        for (const section of otherSections) host.appendChild(section);
+        const sweeps = data.sweeps ? _buildSweepsLedger(data.sweeps) : null;
+        if (sweeps) host.appendChild(sweeps);
+        host.appendChild(buildSessionCleanupSection());
+        // The tab can land after the user has already started searching.
+        if (_searchQuery) _applySettingsFilter(_searchQuery);
+    }
+
+    render();
+    return host;
 }
 
 async function buildSecurityTab(settings) {
@@ -1885,9 +3255,9 @@ async function buildSecurityTab(settings) {
     // Run Dangerously — read-only status badge (only settable via --dangerous at startup)
     const isEnabled = !!settings.auto_approve_dangerous;
     const statusBadge = el('span', {
-        style: 'font-size:var(--text-xs); font-weight:700; padding:2px 10px; border-radius:3px; '
+        style: 'font-size:var(--text-xs); font-weight:500; padding:2px 10px; border-radius:3px; '
              + (isEnabled
-                 ? 'background:color-mix(in srgb,var(--error,#c25450) 15%,var(--bg)); color:var(--error,#c25450); border:1px solid var(--error,#c25450);'
+                 ? 'background:color-mix(in srgb,var(--error) 15%,var(--bg)); color:var(--error); border:1px solid var(--error);'
                  : 'background:var(--bg-surface); color:var(--text-faint); border:1px solid var(--border);'),
     }, [text(isEnabled ? 'ENABLED' : 'DISABLED')]);
     const toggleSection = el('div', { class: 'settings-section' }, [
@@ -1919,12 +3289,35 @@ async function buildSecurityTab(settings) {
         let data = {};
         try { data = await get('/api/settings/tool-approvals'); } catch { /* ignore */ }
         const tools = Object.keys(data);
-        const clearBtn = el('button', { class: 'btn btn-secondary', style: 'font-size:var(--text-xs); padding:2px 8px;' }, [text('Clear all')]);
+        const clearBtn = el('button', { class: 'btn btn--secondary btn--sm', type: 'button' }, [text('Clear all')]);
+        clearBtn.disabled = tools.length === 0;
         clearBtn.addEventListener('click', async () => {
+            // Unprompted, one click wiped every scope the user had ever
+            // approved and said nothing either way — including when the
+            // request failed, because the bare fetch() carried no auth header
+            // and its rejection was swallowed. (S10)
+            const scopeCount = tools.reduce((n, t) => n + (data[t] || []).length, 0);
+            const go = await confirmDanger({
+                title: 'Clear every remembered approval?',
+                body: [
+                    `${scopeCount} approved scope${scopeCount === 1 ? '' : 's'} across `
+                    + `${tools.length} tool${tools.length === 1 ? '' : 's'} will be forgotten.`,
+                    'The agent will stop and ask you again the next time it needs any of them — '
+                    + 'which is the point, but it cannot be undone.',
+                ],
+                verb: 'Clear all',
+                cancelLabel: 'Keep them',
+            });
+            if (!go) return;
+            clearBtn.disabled = true;
             try {
-                await fetch('/api/settings/tool-approvals', { method: 'DELETE', headers: { 'Content-Type': 'application/json' } });
-                renderScopes();
-            } catch { /* ignore */ }
+                await del('/api/settings/tool-approvals');
+                notify('success', 'Remembered approvals cleared');
+                await renderScopes();
+            } catch (e) {
+                clearBtn.disabled = false;
+                notify('error', `Could not clear the remembered approvals: ${e.message || e}`);
+            }
         });
         scopesContainer.appendChild(el('div', { class: 'settings-section' }, [
             el('h3', {}, [
@@ -1958,7 +3351,7 @@ async function buildSecurityTab(settings) {
 // ---------------------------------------------------------------------------
 // Search / filter
 //
-// With 100+ controls spread over five tabs, "where is that setting" is the
+// With 100+ controls spread over six tabs, "where is that setting" is the
 // dominant cost of this modal. Typing a query drops the tab boundary and
 // filters every section at once; clearing it restores the tab you were on.
 // ---------------------------------------------------------------------------
@@ -2069,58 +3462,142 @@ function buildSearchBar() {
     return el('div', { class: 'settings-search' }, [input, count]);
 }
 
+// One "General" tab held twenty-one sections; four specialist tabs held the
+// rest. Finding a setting meant knowing which subsystem owned it, then
+// scrolling past every other subsystem to reach it. The tabs below group by
+// what someone came to DO. Every field still appears exactly once — the
+// grouping is a `tab` key on each section, so a field cannot be listed twice
+// or dropped by an edit to one list. (S6)
+// `short` is the label the strip falls back to on a narrow window. Six
+// goal-named tabs are ~800px of text; a 900px-wide window gives the card 810
+// and the strip scrolled the last tab half off the edge. Each short form is
+// the first word of its full name, so the accessible name (which stays the
+// full label, always) still contains the visible text — WCAG 2.5.3.
+const SETTINGS_TABS = [
+    { key: 'providers',    label: 'Providers & models',   short: 'Providers' },
+    { key: 'agent',        label: 'Agent behaviour',      short: 'Agent' },
+    { key: 'autonomy',     label: 'Autonomy & idle work', short: 'Autonomy' },
+    { key: 'tools',        label: 'Tools & safety',       short: 'Tools' },
+    { key: 'integrations', label: 'Integrations',         short: 'Integrations' },
+    { key: 'environment',  label: 'Environment & network', short: 'Network' },
+    { key: 'storage',      label: 'Storage',              short: 'Storage' },
+];
+
+// Deep links from elsewhere in the app (openSettings({tab:'security'}) in
+// file-panel.js, anything a bookmark or a doc still names) keep working.
+const SETTINGS_TAB_ALIASES = {
+    general: 'providers',
+    models: 'providers',
+    network: 'environment',
+    security: 'tools',
+};
+
+function _resolveSettingsTab(key) {
+    if (!key) return null;
+    if (SETTINGS_TABS.some(t => t.key === key)) return key;
+    return SETTINGS_TAB_ALIASES[key] || null;
+}
+
+// Activate a tab by key, alias included. Safe to call before or after the
+// modal is in the document.
+function _activateSettingsTab(key) {
+    const resolved = _resolveSettingsTab(key);
+    if (!resolved) return false;
+    const btn = _overlay?.querySelector(`.tab-btn[data-tab="${resolved}"]`);
+    if (!btn) return false;
+    btn.click();
+    return true;
+}
+
+function _buildSettingsSection(section, settings) {
+    const fields = section.fields.map(f => buildField(f, settings[f.key]));
+    const heading = [text(section.title)];
+    if (section.description) heading.push(buildHelpIcon(section.description));
+    // `data-section` is a handle for a tab that has to place one of its
+    // sections somewhere specific — matching on the rendered heading text
+    // would tie the layout to a label the next rename breaks.
+    return el('div', { class: 'settings-section', ...(section.name ? { 'data-section': section.name } : {}) }, [
+        // `term` carries the internal name of a section the UI renamed for
+        // humans, so searching for "Telos" or "Candor" still lands. (N9)
+        el('h3', section.term ? { title: section.term } : {}, heading),
+        ...(section.description ? [buildSectionDesc(section.description)] : []),
+        ...fields,
+    ]);
+}
+
 function buildTabs(settings) {
-    // Tab buttons
-    const generalTab = el('button', { class: 'tab-btn active', 'data-tab': 'general' }, [text('General')]);
-    const modelsTab = el('button', { class: 'tab-btn', 'data-tab': 'models' }, [text('Models')]);
-    const envTab = el('button', { class: 'tab-btn', 'data-tab': 'environment' }, [text('Environment')]);
-    const networkTab = el('button', { class: 'tab-btn', 'data-tab': 'network' }, [text('Network')]);
-    const securityTab = el('button', { class: 'tab-btn', 'data-tab': 'security' }, [text('Security')]);
-    const tabBar = el('div', { class: 'tab-bar' }, [generalTab, modelsTab, envTab, networkTab, securityTab]);
+    const sectionsFor = key => SECTIONS.filter(s => s.tab === key).map(s => _buildSettingsSection(s, settings));
 
-    // General tab content
-    const generalSections = SECTIONS.map(section => {
-        const fields = section.fields.map(f => buildField(f, settings[f.key]));
-        const heading = [text(section.title)];
-        if (section.description) heading.push(buildHelpIcon(section.description));
-        return el('div', { class: 'settings-section' }, [
-            el('h3', {}, heading),
-            ...fields,
-        ]);
-    });
-    generalSections.push(buildNotificationsSection());
-    generalSections.push(buildSessionCleanupSection());
-    const generalContent = el('div', { class: 'tab-content active', 'data-tab': 'general' }, generalSections);
-
-    // Models tab content
-    const modelsContent = el('div', { class: 'tab-content', 'data-tab': 'models' }, [buildModelsTab()]);
-
-    // Environment tab content
-    const envContent = el('div', { class: 'tab-content', 'data-tab': 'environment' }, [buildEnvTab(settings)]);
-
-    // Network tab content
-    const networkContent = el('div', { class: 'tab-content', 'data-tab': 'network' }, [buildNetworkTab(settings)]);
-
-    // Security tab content — async build, render placeholder then swap in
-    const securityPlaceholder = el('div', { class: 'tab-content', 'data-tab': 'security' }, [
-        el('div', { style: 'padding:var(--sp-4); color:var(--text-faint); font-size:var(--text-sm);' }, [text('Loading…')]),
+    // The Security content is built async; it lands in Tools & safety, which
+    // is where the rest of the sandbox lives.
+    const securityHost = el('div', {}, [
+        el('div', { class: 'settings-tab-loading' }, [text('Loading\u2026')]),
     ]);
     buildSecurityTab(settings).then(content => {
-        clear(securityPlaceholder);
-        securityPlaceholder.appendChild(content);
+        clear(securityHost);
+        securityHost.appendChild(content);
         // The tab arrives after the user may already be searching.
         if (_searchQuery) _applySettingsFilter(_searchQuery);
     });
 
-    // Tab switching
-    const tabs = [generalTab, modelsTab, envTab, networkTab, securityTab];
-    const contents = [generalContent, modelsContent, envContent, networkContent, securityPlaceholder];
+    const bodies = {
+        // "This browser" leads: the settings a first-time user reaches for
+        // first, and the only ones that change nothing about the agent.
+        providers: [buildThisBrowserSection(), buildModelsTab(), ...sectionsFor('providers')],
+        agent: sectionsFor('agent'),
+        autonomy: buildAutonomyTab(sectionsFor('autonomy')),
+        tools: [...sectionsFor('tools'), securityHost],
+        integrations: [buildNotificationsSection(), ...sectionsFor('integrations')],
+        environment: [
+            buildEnvTab(settings),
+            buildNetworkTab(settings),
+            ...sectionsFor('environment'),
+        ],
+        // Session cleanup used to sit at the bottom of this list, below the
+        // SSL settings. It is a storage control, and it now lives with the
+        // numbers it acts on. The tab places its own declarative sections,
+        // so they land beside the ledger they configure rather than after
+        // everything else.
+        storage: [buildStorageTab(sectionsFor('storage'))],
+    };
+
+    const tabs = [];
+    const contents = [];
+    SETTINGS_TABS.forEach((t, i) => {
+        const first = i === 0;
+        tabs.push(el('button', {
+            class: `tab-btn${first ? ' active' : ''}`,
+            'data-tab': t.key,
+            type: 'button',
+            // Both labels ship; CSS picks one by width. The accessible name
+            // and the tooltip stay the full one either way, so a narrow
+            // window never costs a screen reader (or a hovering mouse) the
+            // name the docs and the settings search use.
+            'aria-label': t.label,
+            title: t.label,
+        }, [
+            el('span', { class: 'tab-label-full' }, [text(t.label)]),
+            el('span', { class: 'tab-label-short', 'aria-hidden': 'true' }, [text(t.short)]),
+        ]));
+        contents.push(el('div', {
+            class: `tab-content${first ? ' active' : ''}`,
+            'data-tab': t.key,
+        }, bodies[t.key]));
+    });
+
+    const tabBar = el('div', { class: 'tab-bar settings-tab-bar' }, tabs);
+    // Seven tabs never fit a phone. The strip has always scrolled; now it says
+    // so, and the tab you pick is brought into view rather than left half
+    // off the edge you tapped it at. (P8)
+    const revealTab = bindStripScroll(tabBar, tabs[0]);
+
     tabs.forEach((tab, i) => {
         tab.addEventListener('click', () => {
             tabs.forEach(t => t.classList.remove('active'));
             contents.forEach(c => c.classList.remove('active'));
             tab.classList.add('active');
             contents[i].classList.add('active');
+            revealTab(tab);
             // The body is one shared scroller. Without this, switching tabs
             // lands you partway down (or past the end of) the new one.
             const body = _overlay?.querySelector('.modal-body');
@@ -2135,31 +3612,76 @@ function buildTabs(settings) {
 // Modal lifecycle
 // ---------------------------------------------------------------------------
 
+// /api/settings failing made the status bar's Settings button do nothing at
+// all — no modal, no message, no way to try again, and no way to tell a dead
+// server from a dead button. Render the shell with the reason and a Retry
+// instead. (F2)
+function _openLoadFailure(message, opts) {
+    const retryBtn = el('button', { class: 'btn btn-primary' }, [text('Retry')]);
+    const card = el('div', { class: 'modal-card' }, [
+        el('div', { class: 'modal-header' }, [
+            el('h2', {}, [text('Settings')]),
+            el('button', {
+                class: 'modal-close',
+                title: 'Close',
+                'aria-label': 'Close settings',
+                onClick: closeSettings,
+            }, [text('\u00d7')]),
+        ]),
+        el('div', { class: 'modal-body' }, [
+            el('div', { class: 'settings-load-error', role: 'alert' }, [
+                el('strong', {}, [text('Settings could not be loaded.')]),
+                el('p', {}, [text(message)]),
+                el('p', {}, [text(
+                    'Nothing has been changed. The server may be restarting, or the '
+                    + 'request may have been rejected — retry once it is back.',
+                )]),
+            ]),
+        ]),
+        el('div', { class: 'modal-footer' }, [
+            el('button', { class: 'btn btn-secondary', onClick: closeSettings }, [text('Close')]),
+            retryBtn,
+        ]),
+    ]);
+    retryBtn.addEventListener('click', () => {
+        closeSettings();
+        openSettings(opts);
+    });
+
+    _overlay = el('div', { class: 'modal-overlay' }, [card]);
+    _overlay.addEventListener('click', (e) => { if (e.target === _overlay) closeSettings(); });
+    document.body.appendChild(_overlay);
+    _closeOverlay = openOverlay(card, { onClose: closeSettings, initialFocus: retryBtn });
+    announce('Settings could not be loaded', { assertive: true });
+}
+
 export async function openSettings(opts = {}) {
     if (_overlay) {
         // Already open — just switch to the requested tab if specified
-        if (opts.tab) {
-            const btn = _overlay.querySelector(`.tab-btn[data-tab="${opts.tab}"]`);
-            if (btn) btn.click();
-        }
+        if (opts.tab) _activateSettingsTab(opts.tab);
         return;
     }
 
     let settings;
     try {
-        const [s, m, ev, om] = await Promise.all([
+        // One schema fetch per open. A failure is survivable: every control
+        // still renders, just without its default line or range check.
+        const [s, m, ev, om, sc] = await Promise.all([
             get('/api/settings'),
             get('/api/models'),
             get('/api/env-vars').catch(() => ({ vars: [] })),
             get('/api/models/ollama').catch(() => ({ models: [] })),
+            get('/api/settings/schema').catch(() => ({ fields: {} })),
         ]);
         settings = s;
         _availableModels = (m.models || []).sort((a, b) => a.id.localeCompare(b.id));
         _envVarNames = ev.vars || [];
         _ollamaModels = om.models || [];
         _ollamaError = om.error || '';
+        _schema = sc.fields || {};
+        _invalidKeys.clear();
     } catch (e) {
-        console.error('Failed to load settings:', e);
+        _openLoadFailure(e.message || String(e), opts);
         return;
     }
     _original = { ...settings };
@@ -2169,12 +3691,17 @@ export async function openSettings(opts = {}) {
     _models = (Array.isArray(modelIds) ? modelIds : []).map(id => ({ id, valid: null, info: null }));
 
     const { tabBar, contents } = buildTabs(settings);
-    const statusEl = el('span', { class: 'save-status' });
+    const statusEl = el('span', { class: 'save-status', role: 'status' });
 
-    const card = el('div', { class: 'modal-card' }, [
+    const card = el('div', { class: 'modal-card settings-card' }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text('Settings')]),
-            el('button', { class: 'modal-close', onClick: closeSettings }, [text('\u00d7')]),
+            el('button', {
+                class: 'modal-close',
+                title: 'Close',
+                'aria-label': 'Close settings',
+                onClick: closeSettings,
+            }, [text('\u00d7')]),
         ]),
         tabBar,
         buildSearchBar(),
@@ -2203,6 +3730,7 @@ export async function openSettings(opts = {}) {
                     if (Object.keys(changes).length === 0 && apikeyChanges.length === 0) {
                         statusEl.className = 'save-status status-muted';
                         statusEl.textContent = 'No changes';
+                        announce('No changes to save');
                         return;
                     }
                     try {
@@ -2228,6 +3756,7 @@ export async function openSettings(opts = {}) {
                         if (result.ssl_errors && result.ssl_errors.length > 0) {
                             statusEl.className = 'save-status status-error';
                             statusEl.textContent = result.ssl_errors.join('; ');
+                            announce(statusEl.textContent, { assertive: true });
                             return;
                         }
 
@@ -2279,23 +3808,27 @@ export async function openSettings(opts = {}) {
                             statusEl.textContent =
                                 `Rejected by the server and reverted: ${rejected.map(_labelFor).join(', ')}. `
                                 + 'The value was out of range or the field is edit-locked.';
+                            announce(statusEl.textContent, { assertive: true });
                             return;
                         }
 
-                        // restart_required only covers the network group; the
-                        // provider semaphores are sized once at router build.
-                        const needsRestart = [...accepted].filter(k => RESTART_ON_SAVE.has(k));
+                        // restart_required only covers the network group; every
+                        // other badged field is read once at startup.
+                        const restarts = restartKeys();
+                        const needsRestart = [...accepted].filter(k => restarts.has(k));
                         if (result.restart_required || needsRestart.length > 0) {
                             _restartRequired = true;
                             _showRestartButton(needsRestart.map(_labelFor).join(', ') || 'network changes');
                         } else {
                             statusEl.className = 'save-status';
                             statusEl.textContent = `Saved: ${saved.join(', ')}`;
+                            announce(statusEl.textContent);
                             _statusTimer = setTimeout(() => { statusEl.textContent = ''; }, 3000);
                         }
                     } catch (e) {
                         statusEl.className = 'save-status status-error';
                         statusEl.textContent = `Error: ${e.message}`;
+                        announce(statusEl.textContent, { assertive: true });
                     }
                 },
             }, [text('Save')]),
@@ -2312,17 +3845,17 @@ export async function openSettings(opts = {}) {
     });
 
     document.body.appendChild(_overlay);
-    document.addEventListener('keydown', _onEsc);
+    // Focus trap + inert + focus restore. Esc keeps this modal's own rule
+    // (back out of the search before closing the whole thing).
+    _closeOverlay = openOverlay(card, { onClose: _onEsc });
 
     // If a specific tab was requested, activate it now that the DOM is live.
-    if (opts.tab) {
-        const btn = _overlay.querySelector(`.tab-btn[data-tab="${opts.tab}"]`);
-        if (btn) btn.click();
-    }
+    if (opts.tab) _activateSettingsTab(opts.tab);
 
     // Wire network section visibility toggles (must be after DOM append)
     _wireNetworkSection();
     _wireVoiceSection();
+    _refreshValidationUI();
 
     // Validate models after modal is visible
     const listEl = document.getElementById('or-model-list');
@@ -2331,7 +3864,47 @@ export async function openSettings(opts = {}) {
     }
 }
 
-export function closeSettings() {
+// Everything typed into this modal lives in the DOM until Save, so every
+// dismissal — the ×, Cancel, the backdrop, Escape — is a discard. (S2)
+function _hasUnsavedChanges() {
+    if (!_overlay) return false;
+    if (Object.keys(collectChanges()).length > 0) return true;
+    // API keys never reach collectChanges(): the server only ever reports
+    // whether one is set, so there is nothing to diff a typed key against.
+    return SECTIONS.some(section => section.fields.some(f =>
+        f.type === 'apikey'
+        && (document.getElementById(`setting-${f.key}`)?.value || '').trim() !== ''
+    ));
+}
+
+// Async because the question is a real dialog now, and every caller — the ×,
+// Cancel, the backdrop, Escape — raises the intent and lets this finish it.
+// None of them reads the return value, so none of them needed changing.
+export async function closeSettings() {
+    if (_hasUnsavedChanges()) {
+        // window.confirm() was the last one left in the app: unstyled,
+        // unreadable on a phone, and blocking the event loop while an SSE
+        // stream runs behind it. (N6, and app.js's /clear for the reasoning.)
+        //
+        // Nothing re-enters here while the dialog is up: openOverlay() makes
+        // the settings modal inert behind it and only routes Escape to the
+        // topmost overlay, so the × cannot be clicked and Escape cancels the
+        // question rather than asking it again.
+        const discard = await confirmDanger({
+            title: 'Discard unsaved settings changes?',
+            body: [
+                'Nothing in Settings has been saved yet — every change since it opened, typed API keys included, is thrown away.',
+                'Keep editing and use Save to keep them.',
+            ],
+            verb: 'Discard',
+            cancelLabel: 'Keep editing',
+        });
+        // Cancel leaves the modal exactly as it was, edits and all. `_overlay`
+        // is re-checked because the await is a gap: something else may have
+        // torn the modal down while the question was on screen.
+        if (!discard || !_overlay) return;
+    }
+    if (_closeOverlay) { _closeOverlay(); _closeOverlay = null; }
     if (_overlay) {
         document.body.removeChild(_overlay);
         _overlay = null;
@@ -2344,12 +3917,13 @@ export function closeSettings() {
     _corsOrigins = [];
     _restartRequired = false;
     _searchQuery = '';
+    _schema = {};
+    _invalidKeys.clear();
     clearTimeout(_statusTimer);
-    document.removeEventListener('keydown', _onEsc);
 }
 
-function _onEsc(e) {
-    if (e.key !== 'Escape') return;
+// Called by openOverlay() on Escape.
+function _onEsc() {
     // Escape backs out of the search first — closing the whole modal because
     // the user wanted to clear a filter loses every unsaved edit.
     const search = document.getElementById('settings-search');

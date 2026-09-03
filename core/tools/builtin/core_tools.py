@@ -28,6 +28,9 @@ from core.tools.paths import (
 from core.tools.paths import (
     workspace as _workspace,
 )
+from core.tools.paths import (
+    workspace_home as _workspace_home,
+)
 from core.tools.truncation import MAX_OUTPUT, truncate_output
 
 # Upper bound on a single file_write payload (mirrors bash RLIMIT_FSIZE).
@@ -676,6 +679,11 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
 
     workspace = _workspace()
     workspace.mkdir(parents=True, exist_ok=True)
+    # Space sessions run in their home folder; everyone else this is just
+    # the workspace root. Venv/PATH stay on the global workspace either way
+    # — the toolchain is shared, only the working directory moves.
+    run_dir = _workspace_home()
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     # Non-invasive advisory: flag duplicate-workspace-prefix mistakes in the
     # output so the agent notices without us rewriting arbitrary shell.
@@ -701,7 +709,7 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
     # Prepend workspace venv bin so pip/python resolve to venv, not system
     workspace_venv_bin = str(workspace / ".venv" / "bin")
     env["PATH"] = f"{workspace_venv_bin}:/usr/local/bin:/usr/bin:/bin"
-    env["HOME"] = str(workspace)
+    env["HOME"] = str(run_dir)
     env["VIRTUAL_ENV"] = str(workspace / ".venv")
     # Python block-buffers stdout when it isn't a tty, so a long-running
     # script's progress prints sit in an unflushed buffer — and the
@@ -746,7 +754,7 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
                 executable="/bin/bash",  # bash-only features (source, <<<, $'...') work
                 stdout=out_f,
                 stderr=err_f,
-                cwd=str(workspace),
+                cwd=str(run_dir),
                 env=env,
                 preexec_fn=_child_setup,
             )
@@ -815,9 +823,9 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
 
         # Prepend CWD context so the agent always knows what directory bash runs in
         try:
-            cwd_display = workspace.relative_to(Path.cwd())
+            cwd_display = run_dir.relative_to(Path.cwd())
         except ValueError:
-            cwd_display = workspace
+            cwd_display = run_dir
         prefix = f"[cwd: {cwd_display}]\n"
         if _path_hint:
             prefix = f"{_path_hint}\n{prefix}"

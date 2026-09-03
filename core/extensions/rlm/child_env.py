@@ -301,6 +301,7 @@ class ChildREPL:
         in_flight=None,
         last_activity=None,
         soft_abort: bool = False,
+        lock_timeout: float | None = None,
     ) -> CellResult:
         """Run one cell; poll the watchdog while waiting for the result.
 
@@ -312,7 +313,13 @@ class ChildREPL:
         the child; the kill only happens if the interrupt doesn't land within
         SIGINT_GRACE. RLM keeps the hard kill — its child is per-run anyway.
         """
-        waited = self._acquire_rt("cell execution")
+        # Wait for the lock only as long as this call can actually use the
+        # result. RT_LOCK_TIMEOUT is 900s, so a shared space kernel busy with
+        # a sibling session's cell parked this call for 15 minutes — long
+        # past the executor's own dispatch timeout, which had already told
+        # the agent the tool timed out. The cell then ran anyway with nobody
+        # to receive it.
+        waited = self._acquire_rt("cell execution", timeout=lock_timeout or RT_LOCK_TIMEOUT)
         try:
             return self._execute_cell_locked(
                 code,

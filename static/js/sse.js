@@ -1,6 +1,6 @@
 // Pernix — SSE client with health monitoring and reconnection
 
-import { isOnline } from './api.js';
+import { isOnline, authHeaders } from './api.js';
 
 // Auth token is sent via cookie (set by api.js setAuthToken), no query params needed
 
@@ -29,10 +29,10 @@ let _lastSeq = 0;
 const EVENT_TYPES = [
     // Stream lifecycle
     'stream.token', 'stream.done', 'stream.error',
-    'stream.fallback', 'stream.retry', 'stream.length_continuation',
+    'stream.fallback', 'stream.retry', 'stream.reset', 'stream.length_continuation',
     'stream.budget_exhausted',
     // Tools / context / scout
-    'tool.start', 'tool.call',
+    'tool.start', 'tool.call', 'tool.call.intercepted',
     'context.compacting', 'context.compacted', 'context.reset',
     'context.view_pruned',
     'scout.start', 'scout.step', 'scout.done',
@@ -43,12 +43,15 @@ const EVENT_TYPES = [
     'session.message_combine_skipped',
     'session.queue_dropped', 'session.queue_full',
     'session.queue_removed',
+    // Archive/restore from another tab (or a Storage-tab sweep): the
+    // composer is the half that cannot wait for the next list poll.
+    'session.archived',
     // Goals (budget checkpoints + auto-continuation)
     'goal.budget_exceeded', 'goal.continuation',
     // Injected mid-turn messages
     'message.injected',
     // Workers
-    'worker.started', 'worker.done', 'worker.failed',
+    'worker.started', 'worker.done', 'worker.failed', 'worker.resumed',
     // RLM runs (recursive processing — live progress on the parent's stream)
     'rlm.started', 'rlm.activity', 'rlm.heartbeat', 'rlm.done',
     // Partial save (mid-stream persistence)
@@ -72,6 +75,8 @@ const EVENT_TYPES = [
     'model.divider', 'model.override',
     // Turn boundary (safety-net for button reset)
     'turn.complete',
+    // Forced follow-up (harness kept an idling agent working in-turn)
+    'turn.forced_followup', 'turn.forced_followup_outcome',
 ];
 
 window.addEventListener('pernix:offline', () => {
@@ -82,7 +87,12 @@ window.addEventListener('pernix:offline', () => {
 });
 window.addEventListener('pernix:online', () => {
     if (_sessionId && _onEvent && !_source) {
-        connectSSE(_sessionId, _onEvent);
+        const handler = _onEvent;
+        connectSSE(_sessionId, handler);
+        // connectSSE opens a brand-new source, so its own "first open" is
+        // not a reconnect from EventSource's point of view — but it is one
+        // for us: we were disconnected and may have missed a whole turn.
+        handler({ type: 'sse.reconnected' });
     }
 });
 
@@ -108,12 +118,24 @@ function _attachListeners(source, handler) {
                 _connectionState = 'connected';
                 _updateHealthIndicator('connected');
             }
+            let data;
             try {
-                const data = JSON.parse(e.data);
-                if (typeof data.seq === 'number' && data.seq > _lastSeq) _lastSeq = data.seq;
-                handler({ type, ...data });
+                data = JSON.parse(e.data);
             } catch {
-                handler({ type, raw: e.data });
+                // Unparseable frame: hand the raw text over once and stop.
+                try { handler({ type, raw: e.data }); } catch (err) { console.error('SSE handler failed', type, err); }
+                return;
+            }
+            if (typeof data.seq === 'number' && data.seq > _lastSeq) _lastSeq = data.seq;
+            try {
+                handler({ type, ...data });
+            } catch (err) {
+                // Do NOT re-dispatch as {type, raw}. That carried no seq, so
+                // it bypassed the dedup and ran the same branch a second
+                // time — duplicating whatever the first pass had already
+                // applied before it threw — and the second throw escaped
+                // the listener entirely.
+                console.error('SSE handler failed', type, err);
             }
         });
     });
@@ -130,12 +152,21 @@ export function connectSSE(sessionId, onEvent) {
     _consecutiveErrors = 0;
     _source = new EventSource(`/api/sessions/${sessionId}/events`);
 
+    let _opened = false;
     _source.onopen = () => {
         _connectionState = 'connected';
         _lastEventTime = Date.now();
         _consecutiveErrors = 0;
         _updateHealthIndicator('connected');
         console.debug('SSE connected');
+        // Every reopen after the first is a reconnect, whether EventSource
+        // did it natively or the pernix:online handler rebuilt the source.
+        // Only the stale-watchdog path used to announce one, so a mid-turn
+        // server restart or an offline→online bounce left the app with a
+        // stale event cursor: every post-restart event failed the dedup and
+        // the stop button never cleared.
+        if (_opened) onEvent({ type: 'sse.reconnected' });
+        _opened = true;
     };
 
     _source.onerror = () => {
@@ -161,7 +192,11 @@ async function _probeSessionExists() {
     const handler = _onEvent;
     if (!sid) return;
     try {
-        const resp = await fetch(`/api/sessions/${sid}/status`);
+        // The probe carries the header, not just the cookie: a client whose
+        // cookie is blocked (cross-site, third-party cookie policy, a private
+        // window) got a 401 here, read it as "not a 404, keep trying", and the
+        // dot span on "reconnecting" forever with no diagnosis.
+        const resp = await fetch(`/api/sessions/${sid}/status`, { headers: authHeaders() });
         if (resp.status === 404) {
             console.warn(`SSE: session ${sid} no longer exists — stopping reconnect attempts`);
             disconnectSSE();
@@ -218,7 +253,7 @@ async function _checkStale() {
     _staleProbeInFlight = true;
     let behind;
     try {
-        const resp = await fetch(`/api/sessions/${_sessionId}/status`);
+        const resp = await fetch(`/api/sessions/${_sessionId}/status`, { headers: authHeaders() });
         if (resp.status === 404) {
             // Session deleted elsewhere — same terminal case _probeSessionExists
             // handles for hard errors. Stop pretending it might come back.
@@ -286,9 +321,58 @@ async function _checkStale() {
     _attachListeners(_source, handler);
 }
 
+// A brief reconnect is normal and not worth interrupting anyone over; a long
+// one means the transcript in front of the user has silently stopped updating,
+// which they have no way of knowing. Ten seconds is the line between the two.
+const RECONNECT_BANNER_DELAY = 10000;
+let _reconnectBannerTimer = null;
+
+function _armReconnectBanner() {
+    if (_reconnectBannerTimer) return;
+    _reconnectBannerTimer = setTimeout(() => {
+        _reconnectBannerTimer = null;
+        if (_connectionState !== 'reconnecting') return;
+        // api.js owns the offline banner when the whole server is unreachable;
+        // do not fight it for the slot, and never remove the one it made.
+        if (document.getElementById('offline-banner')) return;
+        const banner = document.createElement('div');
+        banner.id = 'offline-banner';
+        banner.className = 'offline-banner';
+        banner.dataset.owner = 'sse';
+        const spinner = document.createElement('span');
+        spinner.className = 'offline-spinner';
+        const label = document.createElement('span');
+        label.textContent = 'Live updates paused — reconnecting…';
+        banner.appendChild(spinner);
+        banner.appendChild(label);
+        document.body.appendChild(banner);
+    }, RECONNECT_BANNER_DELAY);
+}
+
+function _clearReconnectBanner() {
+    if (_reconnectBannerTimer) {
+        clearTimeout(_reconnectBannerTimer);
+        _reconnectBannerTimer = null;
+    }
+    const banner = document.getElementById('offline-banner');
+    if (banner && banner.dataset.owner === 'sse') banner.remove();
+}
+
 function _updateHealthIndicator(state) {
+    if (state === 'reconnecting') _armReconnectBanner();
+    else _clearReconnectBanner();
     const el = document.getElementById('sse-health');
     if (!el) return;
     el.className = `sse-health ${state}`;
     el.title = `SSE: ${state}`;
+    // The dot is a 6px coloured circle with a tooltip: no text, no name, and
+    // nothing at all on a touch device. Carry the state as real text for
+    // anyone who cannot see the colour.
+    let label = el.querySelector('.visually-hidden');
+    if (!label) {
+        label = document.createElement('span');
+        label.className = 'visually-hidden';
+        el.appendChild(label);
+    }
+    label.textContent = `Live updates: ${state}`;
 }

@@ -7,8 +7,10 @@ reach.
 
 import pytest
 
+from core.llm.errors import FailoverError, FailoverReason
 from core.llm.router import ProviderRouter
-from tests.faux_provider import FauxProvider, StubRegistry, raise_status, respond
+from core.llm.stream_ladder import is_stream_retryable
+from tests.faux_provider import FauxProvider, StubRegistry, raise_connect, raise_status, respond
 
 
 def _router_with_fauxes(remote_steps, ollama_steps=None):
@@ -76,6 +78,65 @@ async def test_ollama_errors_never_fall_back(monkeypatch):
     with pytest.raises(Exception):
         await router.chat([{"role": "user", "content": "hi"}], model="some-local")
     assert remote.chat_calls == []
+
+
+# ---------------------------------------------------------------------------
+# No fallback model configured: the classified error must come back as-is
+# ---------------------------------------------------------------------------
+
+
+async def _drain(stream) -> list:
+    return [event async for event in stream]
+
+
+@pytest.mark.asyncio
+async def test_no_fallback_model_chat_raises_the_classified_error(monkeypatch):
+    """With no fallback configured the router used to replace a 503 with
+    RuntimeError("No fallback model configured") — text that matches no
+    retryable marker, so the ladder's 5/10/15s backoff never ran."""
+    monkeypatch.setattr("config.settings.fallback_model", "")
+    router, remote, local = _router_with_fauxes([raise_status(503, "upstream overloaded")])
+
+    with pytest.raises(FailoverError) as exc:
+        await router.chat([{"role": "user", "content": "hi"}], model="vendor/big-model")
+
+    assert exc.value.reason == FailoverReason.OVERLOADED
+    assert "503" in exc.value.message and "upstream overloaded" in exc.value.message
+    assert is_stream_retryable(exc.value.message)
+    assert local.chat_calls == []
+    assert router._semaphores["openrouter"].available == router._semaphores["openrouter"].capacity
+
+
+@pytest.mark.asyncio
+async def test_no_fallback_model_stream_raises_the_classified_error(monkeypatch):
+    """Streaming variant: the router yielded ERROR("No fallback model
+    configured") instead of raising the typed 503."""
+    monkeypatch.setattr("config.settings.fallback_model", "")
+    router, remote, local = _router_with_fauxes([raise_status(503, "upstream overloaded")])
+
+    with pytest.raises(FailoverError) as exc:
+        await _drain(router.chat_stream([{"role": "user", "content": "hi"}], model="vendor/big-model"))
+
+    assert exc.value.reason == FailoverReason.OVERLOADED
+    assert is_stream_retryable(exc.value.message)
+    assert local.stream_calls == []
+    assert router._semaphores["openrouter"].available == router._semaphores["openrouter"].capacity
+
+
+@pytest.mark.asyncio
+async def test_no_fallback_model_connect_error_stays_retryable(monkeypatch):
+    """A ConnectError with no fallback must reach the ladder with its class
+    name in the text — that name is the retry marker, and str(ConnectError)
+    can be empty."""
+    monkeypatch.setattr("config.settings.fallback_model", "")
+    router, remote, local = _router_with_fauxes([raise_connect()])
+
+    with pytest.raises(FailoverError) as exc:
+        await _drain(router.chat_stream([{"role": "user", "content": "hi"}], model="vendor/big-model"))
+
+    assert "ConnectError" in exc.value.message
+    assert is_stream_retryable(exc.value.message)
+    assert local.stream_calls == []
 
 
 @pytest.mark.asyncio

@@ -69,17 +69,48 @@ def test_reconcile_cron_runs_notifies():
 # ---------------------------------------------------------------------------
 
 
+def _utc_trigger(expr: str):
+    from apscheduler.triggers.cron import CronTrigger
+
+    return CronTrigger.from_crontab(expr, timezone="UTC")
+
+
 def test_count_missed_fires():
     now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
     # Daily at 03:00, last fired 3 days ago at noon -> 3 missed (8/3, 8/4, 8/5).
-    assert sched._count_missed_fires("0 3 * * *", "2026-08-02T12:00:00+00:00", now) == 3
+    assert sched._count_missed_fires(_utc_trigger("0 3 * * *"), "2026-08-02T12:00:00+00:00", now) == 3
     # Last fired after the most recent tick -> nothing missed.
-    assert sched._count_missed_fires("0 3 * * *", "2026-08-05T04:00:00+00:00", now) == 0
-    # Garbage inputs -> 0, never raises.
-    assert sched._count_missed_fires("not-cron", "2026-08-02T12:00:00+00:00", now) == 0
-    assert sched._count_missed_fires("0 3 * * *", "not-a-date", now) == 0
+    assert sched._count_missed_fires(_utc_trigger("0 3 * * *"), "2026-08-05T04:00:00+00:00", now) == 0
+    # Garbage date -> 0, never raises.
+    assert sched._count_missed_fires(_utc_trigger("0 3 * * *"), "not-a-date", now) == 0
     # Cap prevents unbounded spins on every-minute jobs with stale baselines.
-    assert sched._count_missed_fires("* * * * *", "2020-01-01T00:00:00+00:00", now, cap=50) == 50
+    assert sched._count_missed_fires(_utc_trigger("* * * * *"), "2020-01-01T00:00:00+00:00", now, cap=50) == 50
+
+
+def test_count_missed_fires_uses_live_trigger_grid():
+    """Regression for the 2026-08-31 phantom catch-up: the counter must run
+    on the SAME grid as the live trigger. A `0 */6 * * *` job on
+    America/Chicago fired its 12:00-local slot (17:00 UTC); a restart at
+    18:30 UTC must count ZERO missed fires — the old UTC-rebuilt grid saw a
+    nonexistent 18:00 UTC slot and dispatched a spurious coalesced run."""
+    from apscheduler.triggers.cron import CronTrigger
+
+    live = CronTrigger.from_crontab("0 */6 * * *", timezone="America/Chicago")
+    now = datetime(2026, 8, 31, 18, 30, tzinfo=timezone.utc)
+    assert sched._count_missed_fires(live, "2026-08-31T17:00:00.001746+00:00", now) == 0
+    # And a restart that genuinely spans a local slot still counts it:
+    # 18:00 local = 23:00 UTC.
+    late = datetime(2026, 8, 31, 23, 30, tzinfo=timezone.utc)
+    assert sched._count_missed_fires(live, "2026-08-31T17:00:00.001746+00:00", late) == 1
+
+
+def test_count_missed_fires_broken_trigger_returns_zero():
+    class BoomTrigger:
+        def get_next_fire_time(self, prev, now):
+            raise RuntimeError("boom")
+
+    now = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+    assert sched._count_missed_fires(BoomTrigger(), "2026-08-02T12:00:00+00:00", now) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -88,10 +119,16 @@ def test_count_missed_fires():
 
 
 class _FakeJob:
-    def __init__(self, job_id, meta, func=None, trigger="cron", next_run_time="soon"):
+    def __init__(self, job_id, meta, func=None, trigger=None, next_run_time="soon"):
         self.id = job_id
         self.kwargs = {"meta": meta}
         self.func = func if func is not None else sched._execute_cron_job
+        if trigger is None and meta.get("cron_expr"):
+            # A real trigger, like a live APScheduler job carries — the
+            # coalescer counts missed fires on job.trigger's own grid.
+            from apscheduler.triggers.cron import CronTrigger
+
+            trigger = CronTrigger.from_crontab(meta["cron_expr"], timezone="UTC")
         self.trigger = trigger
         self.next_run_time = next_run_time
 
@@ -246,7 +283,7 @@ async def test_execute_cron_job_claims_before_prompt(monkeypatch):
     observed = {}
 
     class _Mgr:
-        def create_session(self, title="", session_type="normal"):
+        def create_session(self, title="", session_type="normal", space_id=None):
             return "sess-claim"
 
         def get(self, sid):
@@ -275,11 +312,14 @@ async def test_execute_cron_job_claims_before_prompt(monkeypatch):
     assert observed["last_fired_meta"] == observed["fire_time_at_prompt"]
     final = db.list_cron_runs("claim-job")[0]
     assert final["status"] == "completed"
+    # Fresh-session jobs claim the run before the session exists — the
+    # resolved id must be back-filled or the History link stays NULL forever.
+    assert final["session_id"] == "sess-claim"
 
 
 async def test_execute_cron_job_error_path(monkeypatch):
     class _Mgr:
-        def create_session(self, title="", session_type="normal"):
+        def create_session(self, title="", session_type="normal", space_id=None):
             return "sess-err"
 
         def get(self, sid):

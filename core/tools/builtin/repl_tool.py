@@ -36,7 +36,14 @@ def repl(code: str, timeout: int | None = None, _context: dict | None = None) ->
     if not session_id:
         return "Error: repl requires a session context."
 
-    kernel = get_kernel_registry().get_or_create(session_id)
+    # Space sessions share one kernel keyed by their space (v33): live
+    # variables carry across every session in the space. cwd pins the
+    # child to the space's workspace home.
+    from core.spaces import kernel_key_for_session
+
+    kernel = get_kernel_registry().get_or_create(
+        kernel_key_for_session(session_id), cwd=(_context or {}).get("workspace_home")
+    )
 
     # Soft cancel: a user cancel SIGINTs the cell (aborting it, preserving
     # the namespace) rather than killing the kernel.
@@ -56,7 +63,15 @@ def repl(code: str, timeout: int | None = None, _context: dict | None = None) ->
         requested = 0.0
     effective_timeout = min(requested, _MAX_TIMEOUT_S) if requested > 0 else _DEFAULT_TIMEOUT_S
     try:
-        result, note = kernel.execute(code, timeout=effective_timeout, cancel_check=cancel_check)
+        # Cap the wait for a busy shared kernel at this call's own budget:
+        # waiting longer than the executor will wait for US produces a cell
+        # that runs after its result has been discarded.
+        result, note = kernel.execute(
+            code,
+            timeout=effective_timeout,
+            cancel_check=cancel_check,
+            lock_timeout=effective_timeout,
+        )
     except KernelError as e:
         # Kernel-level failure (child died mid-cell / unresponsive). The
         # next call respawns and revives from the last snapshot.

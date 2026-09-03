@@ -89,14 +89,23 @@ def _load_jobs():
                 except Exception as hb_err:
                     logger.warning("Failed to restore heartbeat %s: %s", job["name"], hb_err)
                 continue
-            _add_job_internal(
-                job["name"],
-                job["cron_expr"],
-                job["prompt"],
-                session_id=job.get("session_id"),
-                model=job.get("model", ""),
-                extra_meta=extra,
-            )
+            # Guarded per entry, like the heartbeat branch above. One bad
+            # record — a missing "prompt" key, an expression this APScheduler
+            # rejects — used to abort the loop, so every job AFTER it went
+            # unscheduled and the coalesced catch-up never ran for any of
+            # them, all behind a single "Failed to load cron jobs" line.
+            try:
+                _add_job_internal(
+                    job["name"],
+                    job["cron_expr"],
+                    job["prompt"],
+                    session_id=job.get("session_id"),
+                    model=job.get("model", ""),
+                    extra_meta=extra,
+                )
+            except Exception as job_err:
+                logger.warning("Skipping cron job %r: %s", job.get("name", "<unnamed>"), job_err)
+                continue
             # Restore paused state
             if job.get("paused") and _scheduler:
                 try:
@@ -104,9 +113,40 @@ def _load_jobs():
                 except Exception:
                     pass
         logger.info("Loaded %d cron jobs", len(jobs))
-        _schedule_coalesced_catchup(jobs)
     except Exception as e:
         logger.warning("Failed to load cron jobs: %s", e)
+        return
+    # Outside the try: a catch-up failure must not read as a load failure,
+    # and a load that partially succeeded still deserves its catch-up.
+    try:
+        _schedule_coalesced_catchup(jobs)
+    except Exception as e:
+        logger.warning("Coalesced catch-up scheduling failed: %s", e)
+
+
+def jobs_for_space(space_id: str) -> list[str]:
+    """Names of jobs bound to a space (space_id rides in extra_meta)."""
+    scheduler = _get_scheduler()
+    if not scheduler or not space_id:
+        return []
+    return [j.id for j in scheduler.get_jobs() if j.kwargs.get("meta", {}).get("space_id") == space_id]
+
+
+def unbind_space_jobs(space_id: str) -> int:
+    """Drop the space binding from every bound job (detach-delete path).
+    The jobs keep running; their future firings just land un-spaced."""
+    scheduler = _get_scheduler()
+    if not scheduler or not space_id:
+        return 0
+    changed = 0
+    for job in scheduler.get_jobs():
+        meta = job.kwargs.get("meta", {})
+        if meta.get("space_id") == space_id:
+            meta.pop("space_id", None)
+            changed += 1
+    if changed:
+        _save_jobs()
+    return changed
 
 
 def _save_jobs():
@@ -172,16 +212,22 @@ def _read_jobs_json() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def _count_missed_fires(cron_expr: str, last_fired_iso: str, now: datetime, cap: int = 1000) -> int:
+def _count_missed_fires(trigger, last_fired_iso: str, now: datetime, cap: int = 1000) -> int:
     """Count scheduled fires strictly after last_fired and at/before now.
 
-    Pure computation over the cron expression — used at startup to decide
-    whether downtime swallowed any ticks. Capped so a years-stale
-    last_fired_at on a every-minute job can't spin."""
-    from apscheduler.triggers.cron import CronTrigger
+    `trigger` must be the job's LIVE trigger object (``job.trigger``), so the
+    missed-run grid can never disagree with the grid that actually fires.
+    This function used to rebuild a trigger from the cron expression with a
+    hardcoded UTC timezone while the real jobs run on the container's local
+    zone (from_crontab with no tz → America/Chicago) — five hours of every
+    day the two grids disagreed, and any restart in that gap minted a
+    phantom "missed run" catch-up for a slot that had already fired
+    (2026-08-31: the 17:00 UTC curiosity-drive slot completed at 17:03, a
+    18:30 UTC deploy restart saw the UTC grid's nonexistent 18:00 slot and
+    dispatched a spurious coalesced run).
 
+    Capped so a years-stale last_fired_at on an every-minute job can't spin."""
     try:
-        trigger = CronTrigger.from_crontab(cron_expr, timezone="UTC")
         prev = datetime.fromisoformat(last_fired_iso)
     except (ValueError, TypeError):
         return 0
@@ -189,7 +235,10 @@ def _count_missed_fires(cron_expr: str, last_fired_iso: str, now: datetime, cap:
         prev = prev.replace(tzinfo=timezone.utc)
     missed = 0
     while missed < cap:
-        nxt = trigger.get_next_fire_time(prev, prev)
+        try:
+            nxt = trigger.get_next_fire_time(prev, prev)
+        except Exception:
+            return 0
         if nxt is None or nxt > now:
             break
         missed += 1
@@ -233,7 +282,7 @@ def _schedule_coalesced_catchup(job_entries: list[dict]) -> None:
             meta["last_fired_at"] = now.isoformat()
             advanced = True
             continue
-        missed = _count_missed_fires(expr, last, now)
+        missed = _count_missed_fires(job.trigger, last, now)
         if missed < 1:
             continue
         meta["last_fired_at"] = now.isoformat()
@@ -588,7 +637,7 @@ def _notify_job_failure(manager, bus, job_name: str, session_id: str | None, err
     bus.emit({**notification, "session_id": session_id or ""})
 
 
-def _ensure_dispatch_session(session_id: str | None, title: str = "") -> str:
+def _ensure_dispatch_session(session_id: str | None, title: str = "", space_id: str | None = None) -> str:
     """Resolve or create the session a scheduled dispatch will run in.
 
     session_type="cron" is what _is_unattended_session() keys off — without
@@ -596,12 +645,47 @@ def _ensure_dispatch_session(session_id: str | None, title: str = "") -> str:
     into the void, and wedge in AWAITING_USER forever. Jobs reusing an
     explicit session_id keep that session's type: a user-attended session
     shouldn't lose its gate just because a job also runs in it.
+
+    space_id (v33): a space-bound job's fresh run session is created INSIDE
+    the space, so the run inherits the space's directives, memory routing,
+    workspace home and shared kernel. Still titled "Cron: …" — the 7-day
+    machine-run sweep applies in spaces too, by decision.
     """
+    from db import models as _db
     from sessions.manager import get_manager
 
     if session_id:
-        return session_id
-    return get_manager().create_session(title=title, session_type="cron")
+        # A pinned session the user has since deleted used to be returned
+        # anyway: manager.prompt then raised on every tick, which meant an
+        # error cron_run row and a high-urgency notification every time the
+        # job fired — 96 a day for a */15 job, forever, with no way to
+        # notice except the noise. Fall back to a fresh run session.
+        if get_manager().get(session_id) is not None or _db.get_session(session_id) is not None:
+            return session_id
+        logger.warning(
+            "Scheduled job's session %s no longer exists — running in a fresh session instead",
+            session_id[:12],
+        )
+    return get_manager().create_session(title=title, session_type="cron", space_id=space_id)
+
+
+# A charter that grants a write tool must grant its repair tool: remember()
+# refuses near-duplicates with "supersede via update_memory(...)", and a run
+# allowed to remember but not to update_memory has the repair path named in
+# an error it cannot act on — the fact is then silently lost until another
+# session relearns it (agent-ergonomics plan §4.5; live memory notes
+# pernix.agent_engineering @1787710676 / @1787695237 record exactly this).
+_TOOL_REPAIR_PAIRS: dict[str, tuple[str, ...]] = {
+    "remember": ("update_memory", "recall"),
+}
+
+
+def _pair_repair_tools(allow: frozenset[str]) -> frozenset[str]:
+    extra: set[str] = set()
+    for tool, repairs in _TOOL_REPAIR_PAIRS.items():
+        if tool in allow:
+            extra.update(repairs)
+    return allow | frozenset(extra)
 
 
 async def _dispatch_prompt(
@@ -626,12 +710,15 @@ async def _dispatch_prompt(
     from sessions.manager import get_manager
 
     manager = get_manager()
+    # A session created for this dispatch is throwaway: nothing else will
+    # ever run in it, so its overrides need no clearing.
+    _created_fresh = not session_id
     session_id = _ensure_dispatch_session(session_id, title)
     session = manager.get(session_id)
     if session and model:
         session.model_override = model
     if session and allowed_tools:
-        session.tool_allowlist = frozenset(str(t) for t in allowed_tools if t)
+        session.tool_allowlist = _pair_repair_tools(frozenset(str(t) for t in allowed_tools if t))
 
     try:
         await asyncio.wait_for(
@@ -661,13 +748,29 @@ async def _dispatch_prompt(
             except Exception:
                 pass  # _run_agent_safe owns its errors; the wait is best-effort
     finally:
-        # Clear the model override and tool allow-list for reused sessions
+        # Clear the model override and tool allow-list for reused sessions.
+        #
+        # Bound to the TURN, never to the timer above. When the shielded wait
+        # times out (an orchestrating job legitimately running past
+        # cron_dispatch_timeout) the turn is still going: clearing here handed
+        # it the full tool surface mid-run and let its next LLM call fall back
+        # to the default model, which violates the never-auto-switch rule. A
+        # fresh session is thrown away after the run, so it needs no clearing
+        # at all; a reused one gets a done-callback on its own task.
         session = manager.get(session_id)
-        if session:
-            if model:
-                session.model_override = None
-            if allowed_tools:
-                session.tool_allowlist = None
+        if session and (model or allowed_tools) and not _created_fresh:
+
+            def _clear(_task=None, _s=session):
+                if model:
+                    _s.model_override = None
+                if allowed_tools:
+                    _s.tool_allowlist = None
+
+            task = getattr(session, "task", None)
+            if task is not None and not task.done():
+                task.add_done_callback(_clear)
+            else:
+                _clear()
     return session_id
 
 
@@ -693,24 +796,31 @@ async def _execute_cron_job(meta: dict):
     # sent, so a crash anywhere past this point surfaces as an 'uncertain' run
     # at next startup — reported, never replayed.
     fire_time = datetime.now(timezone.utc).isoformat()
-    run_id = db.add_cron_run(name, session_id, status="claimed", fire_time=fire_time)
+    # Off-loop: this callable runs ON the event loop, and every DB write
+    # plus _save_jobs (a file write under a threading lock shared with
+    # tool threads) stalled every SSE stream for its duration, on every
+    # fire.
+    run_id = await asyncio.to_thread(db.add_cron_run, name, session_id, status="claimed", fire_time=fire_time)
     meta["last_fired_at"] = fire_time  # meta is the live APScheduler job's dict
     try:
-        _save_jobs()
+        await asyncio.to_thread(_save_jobs)
     except Exception as e:  # persistence best-effort; the DB claim is the record
         logger.warning("Failed to persist last_fired_at for '%s': %s", name, e)
 
     bus.emit({"type": "job.started", "job_name": name, "session_id": session_id, "run_id": run_id})
 
     try:
-        db.update_cron_run(run_id, "running")
+        await asyncio.to_thread(db.update_cron_run, run_id, "running")
         # Bind the session id BEFORE dispatch: a timeout/error must still
-        # reference the session that holds the partial transcript.
-        session_id = _ensure_dispatch_session(session_id, title=f"Cron: {name}")
+        # reference the session that holds the partial transcript. The
+        # back-fill matters for fresh-session jobs — the claim row above was
+        # written before this session existed.
+        session_id = _ensure_dispatch_session(session_id, title=f"Cron: {name}", space_id=meta.get("space_id"))
+        await asyncio.to_thread(db.update_cron_run, run_id, "running", session_id=session_id)
         await _dispatch_prompt(session_id, prompt, model=model, allowed_tools=meta.get("allowed_tools"))
 
         duration_ms = int((time.time() - start_time) * 1000)
-        db.update_cron_run(run_id, "completed")
+        await asyncio.to_thread(db.update_cron_run, run_id, "completed")
         bus.emit(
             {
                 "type": "job.completed",
@@ -722,7 +832,9 @@ async def _execute_cron_job(meta: dict):
         )
     except Exception as e:
         logger.error("Cron job '%s' failed: %s", name, e)
-        db.update_cron_run(run_id, "error", str(e))
+        # session_id is whatever resolution reached before the failure —
+        # back-fill it when we have one so the error row links its transcript.
+        await asyncio.to_thread(db.update_cron_run, run_id, "error", str(e), session_id=session_id)
         bus.emit({"type": "job.error", "job_name": name, "session_id": session_id, "error": str(e)})
         # Notify user about the failure via push/webhook
         _notify_job_failure(manager, bus, name, session_id, str(e))
@@ -736,23 +848,50 @@ async def _init_scheduler_async():
 
 
 # ---------------------------------------------------------------------------
-# Canary triggers (adaptation plan 3.5): scheduled / post_batch / manual
+# Canary triggers: scheduled (heartbeat) / post_batch / manual / full
 # ---------------------------------------------------------------------------
 
-# One sweep at a time (canary_max_concurrent=1). A second trigger firing
-# mid-sweep skips rather than queues — canaries measure, they don't backlog.
+# One sweep at a time. A second trigger firing mid-sweep skips rather than
+# queues — canaries measure, they don't backlog. The exception is a sweep
+# whose meta says must_run (full sweeps after a model swap or deploy, and
+# coverage-triggered sweeps): those reschedule themselves instead of being
+# silently eaten by a heartbeat that happened to be in flight.
 _canary_sweep_lock = asyncio.Lock()
 
 # Post-batch retry cap: ~1 hour of 5-minute retries before giving up.
 _CANARY_BATCH_MAX_ATTEMPTS = 12
 _CANARY_BATCH_RETRY_S = 300
+# must_run lock-retry cap: ~20 minutes of 2-minute retries.
+_CANARY_LOCK_MAX_ATTEMPTS = 10
+_CANARY_LOCK_RETRY_S = 120
 
 
 async def _execute_canary_sweep_job(meta: dict):
-    """Scheduled/manual sweep executor. Never raises."""
+    """Sweep executor for every trigger. Never raises."""
     if not settings.canary_enabled:
         return
     if _canary_sweep_lock.locked():
+        if meta.get("must_run"):
+            attempts = int(meta.get("lock_attempts", 0)) + 1
+            scheduler = _get_scheduler()
+            if scheduler and attempts <= _CANARY_LOCK_MAX_ATTEMPTS:
+                from datetime import timedelta
+
+                from apscheduler.triggers.date import DateTrigger
+
+                scheduler.add_job(
+                    _execute_canary_sweep_job,
+                    trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=_CANARY_LOCK_RETRY_S)),
+                    id=meta.get("job_id") or "_canary_must_run_retry",
+                    replace_existing=True,
+                    kwargs={"meta": {**meta, "lock_attempts": attempts}},
+                )
+                logger.info(
+                    "Canary %s sweep waiting out the running sweep (attempt %d)",
+                    meta.get("trigger", "?"),
+                    attempts,
+                )
+                return
         logger.info("Canary sweep skipped: another sweep is running")
         return
     async with _canary_sweep_lock:
@@ -766,6 +905,39 @@ async def _execute_canary_sweep_job(meta: dict):
             )
         except Exception as e:
             logger.error("Canary sweep failed: %s", e)
+
+
+def _post_batch_targets(batch_id: str) -> list[str]:
+    """Which canaries a post-batch probe runs, resolved at EXECUTION time
+    (the suite may have changed during the up-to-an-hour idle deferral).
+
+    Canaries whose `covers:` matches the batch's edit kinds come first —
+    they are the ones actually testing what changed — then the
+    sentinel-tagged ones ride along, capped at canary_post_batch_max. A
+    missing or unreadable batch row falls back to sentinels; a suite with
+    neither coverage nor sentinels falls back to the active non-flaky
+    canaries so the tripwire is never left blind by omission.
+    """
+    import json as _json
+
+    from core.canary import scan_canaries
+    from db import models as db
+
+    kinds: set[str] = set()
+    try:
+        batch = db.adaptive_get_batch(batch_id)
+        for edit in _json.loads((batch or {}).get("payload_json") or "[]"):
+            if isinstance(edit, dict) and edit.get("kind"):
+                kinds.add(f"kind:{edit['kind']}")
+    except Exception as e:
+        logger.warning("Post-batch target resolution for %s fell back to sentinels: %s", batch_id, e)
+
+    defs = scan_canaries()
+    targets = [d.name for d in defs if kinds & set(d.covers)]
+    targets += [d.name for d in defs if "sentinel" in d.tags and d.name not in targets]
+    if not targets:
+        targets = [d.name for d in defs if not d.parked and not d.flaky]
+    return targets[: max(1, settings.canary_post_batch_max)]
 
 
 async def _execute_canary_batch_job(meta: dict):
@@ -803,7 +975,11 @@ async def _execute_canary_batch_job(meta: dict):
                 attempts,
             )
         return
-    await _execute_canary_sweep_job({**meta, "trigger": "post_batch"})
+    names = _post_batch_targets(str(meta.get("batch_id") or ""))
+    if not names:
+        logger.info("Post-batch canary sweep for %s: no canaries to run", meta.get("batch_id"))
+        return
+    await _execute_canary_sweep_job({**meta, "trigger": "post_batch", "names": names})
 
 
 def enqueue_post_batch_sweep(batch_id: str, delay_s: int = 60) -> bool:
@@ -844,8 +1020,76 @@ def enqueue_manual_canary(name: str) -> bool:
     return True
 
 
+def enqueue_targeted_sweep(names: list[str], reason: str) -> bool:
+    """Fire a coverage-triggered set of canaries as ONE job.
+
+    One job, not one per name: enqueue_manual_canary calls landing at the
+    same instant would race the skip-not-queue sweep lock and all but the
+    first would be silently dropped. must_run so a heartbeat in flight
+    defers rather than eats the probe.
+    """
+    names = [n for n in names if n]
+    if not names or not settings.canary_enabled:
+        return False
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return False
+    from apscheduler.triggers.date import DateTrigger
+
+    job_id = f"_canary_targeted_{reason}"
+    scheduler.add_job(
+        _execute_canary_sweep_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc)),
+        id=job_id,
+        replace_existing=True,
+        kwargs={
+            "meta": {
+                "kind": "canary",
+                "transient": True,
+                "trigger": "manual",
+                "names": names,
+                "must_run": True,
+                "job_id": job_id,
+            }
+        },
+    )
+    return True
+
+
+def enqueue_full_sweep(reason: str, delay_s: int = 0) -> bool:
+    """A the-world-changed sweep (model swap, deploy, 'Run all'): every
+    canary including parked ones, must_run so nothing in flight eats it."""
+    if not settings.canary_enabled:
+        return False
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return False
+    from datetime import timedelta
+
+    from apscheduler.triggers.date import DateTrigger
+
+    job_id = f"_canary_full_{reason}"
+    scheduler.add_job(
+        _execute_canary_sweep_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=max(0, delay_s))),
+        id=job_id,
+        replace_existing=True,
+        kwargs={
+            "meta": {
+                "kind": "canary",
+                "transient": True,
+                "trigger": "full",
+                "must_run": True,
+                "job_id": job_id,
+                "reason": reason,
+            }
+        },
+    )
+    return True
+
+
 def ensure_canary_schedule() -> None:
-    """Install the nightly sweep job from settings (config is the truth —
+    """Install the nightly heartbeat job from settings (config is the truth —
     the job is transient, recreated each boot, never persisted to JSON)."""
     if not settings.canary_enabled:
         return
@@ -864,13 +1108,13 @@ def ensure_canary_schedule() -> None:
             misfire_grace_time=3600,
             kwargs={"meta": {"kind": "canary", "transient": True, "trigger": "scheduled"}},
         )
-        logger.info("Canary sweep scheduled: %s", settings.canary_schedule)
+        logger.info("Canary heartbeat scheduled: %s", settings.canary_schedule)
     except Exception as e:
         logger.warning("Failed to schedule canary sweep: %s", e)
 
 
 # ---------------------------------------------------------------------------
-# TELOS slow loops: daily ordo/binding, weekly hevel/reconcile/entropy
+# TELOS slow loops: daily retirement sweeps, weekly entropy control
 # ---------------------------------------------------------------------------
 
 _telos_slow_lock = asyncio.Lock()
@@ -940,31 +1184,298 @@ def enqueue_manual_telos(force_weekly: bool = False) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def schedule_job(
-    name: str, cron_expr: str, prompt: str, session_id: str = "", model: str = "", _context: dict | None = None
-) -> str:
-    """Schedule a recurring job with cron expression."""
-    import asyncio
+# ---------------------------------------------------------------------------
+# Job spec validation + isolated test-run (spec Feature 7)
+# ---------------------------------------------------------------------------
 
+# A test-run is a smoke check, not a production run — bounded well under the
+# cron dispatch ceiling so a broken prompt fails fast.
+_JOB_TEST_TIMEOUT_S = 300
+_JOB_TEST_CANCEL_GRACE_S = 30
+
+
+def validate_job_spec(
+    cron_expr: str,
+    prompt: str,
+    model: str = "",
+    allowed_tools: list | None = None,
+) -> dict:
+    """Structured validation of a job spec. Errors block; warnings don't.
+
+    Errors are the locally-provable breaks (unparseable cron, empty prompt,
+    a tool name the registry has never heard of). Model resolution is a
+    warning only — the model registry can be stale or remote, and blocking a
+    save on it would reject legitimate OpenRouter ids.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
     from apscheduler.triggers.cron import CronTrigger
 
-    # Validate cron expression early for a clear error message
     try:
         CronTrigger.from_crontab(cron_expr)
     except (ValueError, KeyError) as e:
-        return f"Error: Invalid cron expression '{cron_expr}': {e}"
+        errors.append(f"cron_expr: invalid ({e})")
+    if len((prompt or "").strip()) < 10:
+        errors.append("prompt: too short to be a real job charter (<10 chars)")
+    if allowed_tools:
+        try:
+            from core.tools.registry import get_registry
+
+            treg = get_registry()
+            for t in allowed_tools:
+                t = str(t)
+                if not treg.exists(t):
+                    errors.append(f"allowed_tools: unknown tool '{t}'")
+                elif treg.is_disabled(t):
+                    warnings.append(f"allowed_tools: tool '{t}' is currently disabled")
+        except Exception as e:
+            warnings.append(f"allowed_tools: registry unavailable — not validated ({e})")
+    if model:
+        try:
+            from core.llm.client import get_llm_client
+
+            mreg = get_llm_client().router.registry
+            if not mreg.get_model_info(mreg.resolve_model_id(model)):
+                warnings.append(f"model: '{model}' not found in the model registry (may still resolve at dispatch)")
+        except Exception:
+            warnings.append("model: registry unavailable — not validated")
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def run_job_test(name: str) -> dict:
+    """Dry-run one job's prompt in an isolated temp workspace.
+
+    Mirrors the canary runner's mechanics (temp workspace override, real
+    manager.prompt, wait on the task handle, cancel + grace on timeout) but
+    runs under the job's OWN model and allow-list for fidelity. Never records
+    a cron_runs row and never consumes the schedule. The transcript session
+    (titled "Job test: <name>") is kept for inspection.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from core.canary.runner import _wait_for_turn_end
+    from core.events import get_event_bus
+    from sessions import state_v2 as sv2
+    from sessions.manager import get_manager
+
+    saved = _read_jobs_json()
+    job = next((j for j in saved if j["name"] == name), None)
+    if job is None:
+        return {"ok": False, "job": name, "error": f"job '{name}' not found"}
+
+    validation = validate_job_spec(
+        job.get("cron_expr", ""), job.get("prompt", ""), job.get("model", ""), job.get("allowed_tools")
+    )
+    bus = get_event_bus()
+    bus.emit({"type": "job.test_started", "job_name": name})
+
+    manager = get_manager()
+    start = time.monotonic()
+    tmp = Path(tempfile.mkdtemp(prefix=f"jobtest-{name[:24]}-"))
+    result: dict = {"ok": False, "job": name, "validation": validation}
+    sid = ""
+    turn_started = False
+    turn_ended = False
+    try:
+        sid = manager.create_session(title=f"Job test: {name}", session_type="cron")
+        result["session_id"] = sid
+        session = manager.get(sid)
+        session.workspace_override = str(tmp)
+        if job.get("model"):
+            session.model_override = job["model"]
+        if job.get("allowed_tools"):
+            session.tool_allowlist = frozenset(str(t) for t in job["allowed_tools"] if t)
+
+        await manager.prompt(sid, job.get("prompt", ""))
+        turn_started = True
+        turn_ended = await _wait_for_turn_end(session, time.monotonic() + _JOB_TEST_TIMEOUT_S)
+        if not turn_ended:
+            session.cancel_requested = True
+            turn_ended = await _wait_for_turn_end(session, time.monotonic() + _JOB_TEST_CANCEL_GRACE_S)
+            result["error"] = f"timeout after {_JOB_TEST_TIMEOUT_S}s"
+
+        result["termination_reason"] = session.termination_reason
+        if session.error:
+            result["error"] = session.error
+        if sv2._current_state(session) is sv2.SessionStateV2.AWAITING_USER:
+            # An unattended fire would hang here forever — that IS the finding.
+            result["error"] = "job asked a user question — an unattended run would wedge in AWAITING_USER"
+
+        def _read_outcome() -> tuple[str, int]:
+            preview = ""
+            for m in reversed(db.get_messages(sid, last=50)):
+                if m.get("role") == "assistant" and m.get("content"):
+                    preview = m["content"][:400]
+                    break
+            tokens = int((db.get_session_usage(sid) or {}).get("total", 0))
+            return preview, tokens
+
+        try:
+            _preview, _tokens = await asyncio.to_thread(_read_outcome)
+            if _preview:
+                result["answer_preview"] = _preview
+            result["tokens"] = _tokens
+        except Exception:
+            pass
+        result["ok"] = bool(turn_ended) and not result.get("error")
+    except Exception as e:
+        logger.exception("Job test '%s' failed", name)
+        result["error"] = result.get("error") or str(e)
+    finally:
+        result["duration_s"] = round(time.monotonic() - start, 1)
+        try:
+            s = manager.get(sid) if sid else None
+            if s is not None:
+                s.workspace_override = None
+                s.model_override = None
+                s.tool_allowlist = None
+        except Exception:
+            pass
+        # Same reclamation rule as the canary runner: never delete the temp
+        # workspace under a still-running agent — leak and log instead.
+        if turn_ended or not turn_started:
+            shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            logger.warning("Job test '%s' never ended its turn — leaving %s in place", name, tmp)
+
+    # Stamp the outcome onto the live job's meta (round-tripped by _save_jobs)
+    # so the panel can show "last test: pass/fail" without a separate store.
+    try:
+        scheduler = _get_scheduler()
+        live = scheduler.get_job(name) if scheduler else None
+        if live is not None:
+            live.kwargs.get("meta", {})["last_test"] = {
+                "ok": result["ok"],
+                "at": datetime.now(timezone.utc).isoformat(),
+                "error": (result.get("error") or "")[:300],
+                "duration_s": result["duration_s"],
+            }
+            _save_jobs()
+    except Exception as e:
+        logger.debug("Persisting job test outcome failed: %s", e)
+
+    bus.emit(
+        {
+            "type": "job.test_done",
+            "job_name": name,
+            "ok": result["ok"],
+            "error": result.get("error") or "",
+            "duration_s": result["duration_s"],
+            "session_id": result.get("session_id") or "",
+        }
+    )
+    logger.info(
+        "Job test '%s' %s (%.0fs)%s",
+        name,
+        "PASSED" if result["ok"] else "FAILED",
+        result["duration_s"],
+        f" — {result.get('error')}" if result.get("error") else "",
+    )
+    return result
+
+
+def test_job(name: str, _context: dict | None = None) -> str:
+    """Tool wrapper: run a job's prompt once in an isolated workspace."""
+    import asyncio
 
     ctx = _context or {}
     loop = ctx.get("_loop")
+    if not loop:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return "Error: no event loop available for test_job"
+    try:
+        result = asyncio.run_coroutine_threadsafe(run_job_test(name), loop).result(
+            timeout=_JOB_TEST_TIMEOUT_S + _JOB_TEST_CANCEL_GRACE_S + 60
+        )
+    except Exception as e:
+        return f"Error: job test did not complete: {e}"
+    lines = [f"Job test '{name}': {'PASS' if result.get('ok') else 'FAIL'} ({result.get('duration_s', 0)}s)"]
+    if result.get("error"):
+        lines.append(f"Error: {result['error']}")
+    v = result.get("validation") or {}
+    for e in v.get("errors", []):
+        lines.append(f"spec error: {e}")
+    for w in v.get("warnings", []):
+        lines.append(f"spec warning: {w}")
+    if result.get("termination_reason"):
+        lines.append(f"termination: {result['termination_reason']}")
+    if result.get("answer_preview"):
+        lines.append(f"answer preview: {result['answer_preview'][:300]}")
+    if result.get("session_id"):
+        lines.append(f"transcript session: {result['session_id']}")
+    lines.append("(dry run — no cron_runs row recorded, schedule untouched, temp workspace)")
+    return "\n".join(lines)
+
+
+def schedule_job(
+    name: str,
+    cron_expr: str,
+    prompt: str,
+    session_id: str = "",
+    model: str = "",
+    space_id: str = "",
+    _context: dict | None = None,
+) -> str:
+    """Schedule a recurring job with cron expression.
+
+    space_id binds the job to a space — every firing runs in a fresh cron
+    session created inside that space. When the CALLER is a space session
+    and no space_id is given, the job inherits the caller's space (work
+    scheduled from inside a space stays in the space); pass space_id="none"
+    to schedule an unbound job from a space session.
+    """
+    import asyncio
+
+    # Full spec validation up front (spec Feature 7): a job that can't fire
+    # correctly should fail at save time, not weeks later on schedule.
+    v = validate_job_spec(cron_expr, prompt, model=model)
+    if not v["ok"]:
+        return "Error: job spec invalid — " + "; ".join(v["errors"])
+
+    ctx = _context or {}
+    loop = ctx.get("_loop")
+
+    # Resolve the space binding: explicit id > caller's space > none.
+    resolved_space: str | None = None
+    if space_id and space_id.lower() != "none":
+        from db import models as _db
+
+        if not _db.get_space(space_id):
+            return f"Error: space '{space_id}' not found"
+        resolved_space = space_id
+    elif not space_id:
+        try:
+            from core.spaces import get_session_space
+
+            caller_space = get_session_space(ctx.get("session_id", ""))
+            resolved_space = caller_space["id"] if caller_space else None
+        except Exception:
+            resolved_space = None
+
+    extra_meta: dict = {"validation": v}
+    if resolved_space:
+        extra_meta["space_id"] = resolved_space
 
     try:
         if loop and not _scheduler:
             future = asyncio.run_coroutine_threadsafe(_init_scheduler_async(), loop)
             future.result(timeout=10)
 
-        _add_job_internal(name, cron_expr, prompt, session_id=session_id or None, model=model)
+        _add_job_internal(name, cron_expr, prompt, session_id=session_id or None, model=model, extra_meta=extra_meta)
         _save_jobs()
-        return f"Job '{name}' scheduled: {cron_expr}"
+        msg = f"Job '{name}' scheduled: {cron_expr}"
+        if v["warnings"]:
+            msg += " (warnings: " + "; ".join(v["warnings"]) + ")"
+        return msg
     except Exception as e:
         return f"Error scheduling job: {e}"
 
@@ -974,9 +1485,13 @@ def update_scheduled_job(
     cron_expr: str | None = None,
     prompt: str | None = None,
     model: str | None = None,
+    space_id: str | None = None,
     _context: dict | None = None,
 ) -> str:
-    """Update an existing scheduled job. Only provided fields are changed."""
+    """Update an existing scheduled job. Only provided fields are changed.
+
+    space_id: None = unchanged; ""/"none" = unbind; an id = rebind
+    (validated). Rides extra_meta like every non-structural field."""
     scheduler = _get_scheduler()
     if not scheduler:
         return "Scheduler not available"
@@ -987,11 +1502,36 @@ def update_scheduled_job(
     if not current:
         return f"Error: Job '{name}' not found"
 
+    if space_id is not None:
+        if not space_id or space_id.lower() == "none":
+            current.pop("space_id", None)
+        else:
+            from db import models as _db
+
+            if not _db.get_space(space_id):
+                return f"Error: space '{space_id}' not found"
+            current["space_id"] = space_id
+
     # Merge changes
     new_cron = cron_expr if cron_expr is not None else current.get("cron_expr", "")
     new_prompt = prompt if prompt is not None else current.get("prompt", "")
     new_model = model if model is not None else current.get("model", "")
     was_paused = current.get("paused", False)
+
+    # Re-validate the merged spec (spec Feature 7). Block ONLY on errors the
+    # edit itself introduces (a changed cron/prompt) — a job whose
+    # pre-existing prompt or allow-list wouldn't pass today's rules must stay
+    # editable, or the fix for an invalid job would be refused by its own
+    # invalidity. The full result still lands on the job for the UI badge.
+    v = validate_job_spec(new_cron, new_prompt, model=new_model, allowed_tools=current.get("allowed_tools"))
+    blocking: list[str] = []
+    if cron_expr is not None:
+        blocking += [e for e in v["errors"] if e.startswith("cron_expr")]
+    if prompt is not None:
+        blocking += [e for e in v["errors"] if e.startswith("prompt")]
+    if blocking:
+        return "Error: job spec invalid — " + "; ".join(blocking)
+    current["validation"] = v
 
     try:
         # Re-add with updated parameters (replace_existing=True in _add_job_internal).
@@ -1000,6 +1540,12 @@ def update_scheduled_job(
         # last_fired_at, session_mode and created_at from the job (field case:
         # a cron_expr edit dropped the curiosity deep-dive's allow-list).
         extra = {k: v for k, v in current.items() if k not in _ENTRY_STRUCTURAL_KEYS}
+        if cron_expr is not None and cron_expr != current.get("cron_expr", ""):
+            # Re-baseline on a schedule change: last_fired_at was recorded
+            # against the OLD grid, so the catch-up would measure missed
+            # slots of a schedule that no longer exists (weekly -> hourly
+            # produced a burst of "the server was down" runs).
+            extra["last_fired_at"] = datetime.now(timezone.utc).isoformat()
         _add_job_internal(
             name, new_cron, new_prompt, session_id=current.get("session_id"), model=new_model, extra_meta=extra
         )
@@ -1095,6 +1641,12 @@ def resume_job(name: str, _context: dict | None = None) -> str:
     try:
         scheduler.resume_job(name)
         _update_job_field(name, "paused", False)
+        # Re-baseline: last_fired_at still points at the run before the
+        # pause, so the coalesced catch-up would count every slot that
+        # elapsed WHILE PAUSED as missed and dispatch a run claiming the
+        # server was down across them. A deliberately paused period is not
+        # downtime.
+        _update_job_field(name, "last_fired_at", datetime.now(timezone.utc).isoformat())
         return f"Job '{name}' resumed"
     except Exception as e:
         return f"Error resuming job: {e}"
@@ -1146,6 +1698,13 @@ def get_all_jobs_with_status() -> list[dict]:
                 "next_run": next_runs.get(name),
                 "run_count": stats.get("run_count", 0),
                 "last_run_at": stats.get("last_run_at"),
+                # Spec-validation + last dry-run outcomes (spec Feature 7).
+                # None for pre-feature jobs — the UI renders those as
+                # "unvalidated", which is the honest state.
+                "validation": job.get("validation"),
+                "last_test": job.get("last_test"),
+                "allowed_tools": job.get("allowed_tools"),
+                "space_id": job.get("space_id"),
             }
         )
     return result
@@ -1233,6 +1792,11 @@ def register(reg) -> None:
                 "prompt": {"type": "string", "description": "Message to send when job fires"},
                 "session_id": {"type": "string", "description": "Session to target (empty = create new each time)"},
                 "model": {"type": "string", "description": "Model override for this job (empty = default model)"},
+                "space_id": {
+                    "type": "string",
+                    "description": "Bind the job to a space: each firing runs in a fresh session inside it. "
+                    "Empty = inherit the calling session's space (if any); 'none' = explicitly unbound",
+                },
             },
             "required": ["name", "cron_expr", "prompt"],
         },
@@ -1281,6 +1845,28 @@ def register(reg) -> None:
         tags=tags + ["pause", "resume", "stop", "start", "unpause"],
         timeout=15,
         parallel_safe=False,
+        **common,
+    )
+    reg.register(
+        name="test_job",
+        func=test_job,
+        description=(
+            "Dry-run a scheduled job's prompt ONCE in an isolated temp workspace, under the "
+            "job's own model and tool allow-list. Reports pass/fail, spec validation, and an "
+            "answer preview — without recording a run or touching the schedule. Use after "
+            "schedule_job/update_scheduled_job to prove the job actually works before it fires."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "Job name to test"}},
+            "required": ["name"],
+        },
+        tags=tags + ["test", "dry-run", "validate", "verify", "smoke"],
+        timeout=_JOB_TEST_TIMEOUT_S + _JOB_TEST_CANCEL_GRACE_S + 90,
+        parallel_safe=False,
+        long_poll=True,
+        safety_level="safe",
+        denied_session_types={"worker", "canary"},
         **common,
     )
     reg.register(

@@ -7,10 +7,10 @@ overrule), **goals** (persistent cross-turn objectives with budgets),
 **session kernel** (a persistent per-session Python REPL whose state survives
 everything shorter than the task itself).
 
-All four are off by default. Enable them in Settings → Autonomy (Gates,
-Goals, Heartbeats, Kernel); each flag registers its tools at startup, so
-flipping one takes a restart. Each is useful alone; the last section explains
-how they compose into an autonomous task.
+All four are off by default. Enable them in Settings → Autonomy & idle work →
+Autonomy (Gates, Goals, Heartbeats, Kernel); each flag registers its tools at
+startup, so flipping one takes a restart. Each is useful alone; the last
+section explains how they compose into an autonomous task.
 
 ## Gates — a finish line Reflect can't argue with
 
@@ -19,7 +19,7 @@ missed intent, but persuadable. A **gate** is not persuadable: it is a
 user-authored shell command whose exit code is the verdict. `pytest -q`
 either passes or it doesn't.
 
-With `gates_enabled`, the agent (or a canary, or a worker spec) registers
+With `gates_enabled`, the agent (or a canary, or a worker) registers
 gates via three tools:
 
 - `add_gate(name, command, watch_paths?, cwd?, scope?)` — register a check on
@@ -49,6 +49,19 @@ Two guardrails keep this honest and cheap:
   Green tests do not mean the feature works; they mean the tests pass.
 
 With `gates_enabled = false` there is zero behavior change.
+
+A different, always-on mechanism shares the name: the **tool-call gate**
+(`_ToolCallGate` in `core/agent.py`) type-checks every tool call's arguments
+against its JSON schema before dispatch — coercing numeric strings, `"true"`,
+and bare scalars where a string is expected (tagged
+`[note: coerced parameter type(s): …]` on the result), dropping unknown
+parameters with a note, and rejecting an uncoercible mismatch in-round with
+the expected type spelled out, enum membership included (checked *after*
+coercion, so `"5"` still matches an integer enum) and per-element array item
+types. It runs on every call regardless of `gates_enabled` — dispatch
+hygiene, not a user-authored check — and emits
+`tool.call.intercepted {name, action, reason}` so the UI and the adaptive
+layer can see what it corrected.
 
 ## Goals — intent that outlives a turn
 
@@ -112,6 +125,33 @@ by pretending the session is idle in any other sense.
 
 The default `continuation_budget` is 0: goals are user-driven unless you opt
 in.
+
+**Round-cap continuation is separate and always on.** Even with no goal
+active, a turn that hits the `max_tool_rounds` ceiling while healthy — tools
+ran, no error, no stuck repeat spiral — gets `round_cap_auto_continue`
+(default 1) fresh rounds and an extended LLM session-timeout budget, with a
+system message telling the model this is its last continuation and to wrap
+up honestly. This is what stops the 100-round ceiling from being the thing
+that ends deep work instead of the work itself; it composes with, but does
+not require, `continuation_budget`.
+
+**The forced follow-up nudge** catches the opposite failure: a turn that
+*ends* with no tool calls and a tail announcing work it never did ("Next,
+I'll update the settings file."). `_announces_future_work` (`core/agent.py`)
+scopes the check to the reply's last two sentences on purpose — an "I'll"
+three paragraphs up followed by a completed deliverable must not trigger —
+and a trailing question or a courtesy closer ("let me know if…", "happy to
+help") means the model handed the turn back deliberately, so neither fires
+it. When it does, the agent gets one bounded in-turn nudge naming the
+unfinished item — the active goal's objective if one is running, otherwise
+the model's own announced intent — instead of the turn ending and paying for
+a Reflect retry later. Gated on `forced_followup_enabled` (default `true`),
+capped per turn by `forced_followup_max_per_turn` (default 1, 0–5), and
+emitted as `turn.forced_followup`. Whether the nudge actually produced tool
+calls or the agent re-idled anyway is recorded as one aggregate
+`scout_signals` row (`forced_followup`/`global`) plus a
+`turn.forced_followup_outcome` event, so a week of live traffic answers
+whether the feature is earning its keep with one query.
 
 ### Retry discipline for unattended runs
 
@@ -243,6 +283,81 @@ Jobs are wall-clock capped via coreutils `timeout`
 session, and run under the same rlimits as `bash`. The pattern composes with
 everything above: start the solver as a job, keep working the goal, read the
 log when the gate is ready to check it.
+
+Scheduled cron jobs have a separate, unrelated validate-and-dry-run
+mechanism (`POST /api/jobs/{name}/validate`, `POST /api/jobs/{name}/test`) —
+see [../guides/scheduling-cron.md](../guides/scheduling-cron.md). This
+section is the ephemeral in-turn `job_start`/`job_status`/`job_tail` tool,
+not that.
+
+## Typed workers — spawning with a shape, surviving death
+
+A worker delegated mid-goal is still autonomous work, and v3.1 gave workers
+two things long-running tasks need: a repeatable shape, and a way back after
+they die.
+
+`spawn_worker(kind=...)` (`core/extensions/orchestration/kinds.py`) selects a
+named bundle instead of a hand-written charter: role instructions, an
+*exclusive* tool allowlist, a default model, and verification criteria
+Reflect grades against. The allowlist rides the same two-point enforcement
+scheduled-job charters use — schema intersection at the tool-schema builder,
+refusal at the executor — so there is no new enforcement path to audit. Five
+built-ins ship: `research`, `code`, `explore`, `debug`, `transform`;
+`research` and `explore` also get a cheap deterministic check on their own
+output (a `# KIND GATE` warning from `get_worker_result` when a research
+summary names zero sources, or an explore summary carries zero file:line
+citations). Operators add or override kinds by dropping a JSON file at
+`data/worker_kinds/<name>.json` — re-read on every resolve, so an edit
+applies to the next spawn without a restart; `"model": "background"`
+resolves to the Background role at spawn time. `retry_worker` replacements
+inherit the original's kind.
+
+`resume_worker(worker_id, note?, auto_resume_parent?)` unifies "bring a
+worker back" under one tool: a paused worker is released (unchanged); a
+worker that died — cancelled, errored, round-capped, reaped from memory, or
+lost to a server restart — is **revived**: its history rehydrates from the
+database (compacted if long), its kind allowlist and pinned model are
+restored (the migration-v31 `sessions.model_override` / `sessions.worker_kind`
+columns — previously in-memory only, so a rehydrated worker silently lost
+both), a model that no longer resolves falls back to the default with a
+model-visible note, the stale summary stamp is cleared so an old
+`# CANCELLED` header can't shadow the new result, and a continuation turn
+starts carrying `note`. `auto_resume_parent` (default false) adds the
+revived worker back to the parent's watch-set — same contract as
+`spawn_worker` — so the parent auto-wakes on its completion; reviving also
+extends the parent's LLM wall-clock budget (up to 2x the session timeout,
+capped at 24h) so a parent that revives-then-awaits doesn't die on its own
+next acquire. Emits `worker.resumed`.
+`POST /api/sessions/{id}/workers/{worker_id}/resume` (optional `{"note"}`
+body) does the same over the API and checks parentage against the database
+row, so it still works after a restart. See
+[../guides/workers.md](../guides/workers.md) for the full worker model.
+
+## The turn ledger — closing the awareness gap
+
+Every turn on a `normal` or `cron` session opens with a
+`[SINCE YOUR LAST TURN]` block (`_build_turn_ledger` in
+`core/context/compiler.py`, gated on `turn_ledger_enabled`, on by default):
+workers and background jobs that finished since the agent last looked, the
+Reflect verdict on the agent's *own* previous turn (which otherwise lands
+about five minutes after the turn ends, so without the ledger the agent
+learns its own grade a turn late or never), self-modifications the adaptive
+layer applied, canary regressions, platform restarts. It is delta-based and
+silent when nothing changed — a quiet system renders nothing, and the block
+is the empty string when the setting is off. Canary sessions never see it
+(platform state leaking into a synthetic measurement turn would contaminate
+it); worker sessions stay lean by design; Dream and RLM views take no turns.
+
+The `agent_state` tool (`core/extensions/session_tools/__init__.py`) is the
+on-demand companion for everything the ledger doesn't push automatically:
+one call answers what used to take several separate lookups — work in
+flight (sessions, background jobs, RLM runs), this session's recent Reflect
+verdicts, recent notifications, adaptive-layer counts, recent canary
+gate-fails, cron health, memory-store size, open Telos alarms.
+`data/workspace/SYSTEM-MAP.md` (`core/context/system_map.py`, regenerated at
+every boot) goes deeper still: the real schema of the tables the agent is
+likely to query, the data-directory layout, and the live FastAPI route
+inventory, so "where do I look" costs a read instead of a guess.
 
 ## How the pieces compose
 

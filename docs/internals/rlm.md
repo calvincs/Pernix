@@ -8,7 +8,7 @@ CSAIL), adapted from the MIT-licensed reference implementation at
 and rewritten for Pernix rather than taken as a dependency (each adapted file
 carries an attribution header).
 
-Off by default. Enable in Settings → General → RLM (Recursive Processing);
+Off by default. Enable in Settings → Tools & safety → Large-input runs (RLM);
 the `rlm_process` tool registers at startup (restart after toggling).
 
 RLM adds **no model roles of its own**. The root runs on the Primary role
@@ -130,6 +130,15 @@ answer.txt, payloads.jsonl, draft.txt — workspace-visible so the agent can
 `rlm_run_retention_days` (default 30) — along with the run's view session
 (below) — and a startup sweep marks rows orphaned by a restart.
 
+A run started from a [space](../guides/spaces.md) session (migration v33)
+mints its run dir under the space's workspace home instead —
+`spaces/<slug>/rlm/<run_id>/` — visible in the space's own folder rather than
+the top-level `rlm/`. `GET /api/rlm/runs?space_id=` lists every member
+session's runs together, and `continue_from` resolves the prior run's
+directory through the registry row's stored `run_dir` rather than assuming
+the top-level path, so a sibling session in the same space can continue a
+run it did not start.
+
 ## Continuation (`continue_from`) — reuse a dead run's paid-for work
 
 Motivated by stress-test session `a45fa830cef9`: a full-corpus run timed out
@@ -204,7 +213,7 @@ layers now surface it, all reading from the same trace:
   precedent). Deleting the view session purges the finished run's dir + rows
   (`manager._purge_rlm_artifacts`); retention deletes the view session with
   the run — symmetric, no orphans. Dream probes (`session_id="dream"`) get no
-  view session; their runs remain inspectable from the Jobs tab.
+  view session; their runs remain inspectable from the Automation → Jobs tab.
 
 ## How the agent discovers it
 

@@ -12,6 +12,7 @@ from typing import AsyncGenerator
 import httpx
 
 from config import settings
+from core.llm.providers._shared import describe_exception, http_status_failover
 from core.llm.types import (
     ChatResponse,
     HealthStatus,
@@ -282,10 +283,20 @@ class OllamaProvider:
         done_sent = False
         _closing = False  # set when GeneratorExit is in flight; gates the finally yield
         done_reason: str | None = None  # captured from final chunk if present
+        _tc_seq = 0  # stream-wide counter for tool calls that arrive without ids
 
         try:
             async with client.stream("POST", f"{base}/api/chat", json=payload) as resp:
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    # raise_for_status() inside a stream discards the body,
+                    # and the body is where Ollama says WHY: "model requires
+                    # more system memory", "system message must be at the
+                    # beginning", a context-length complaint. Without it a
+                    # 500 showed only its status line and burned three
+                    # retries, and a 400 about context length could never be
+                    # classified as overflow, so compaction never fired.
+                    body = (await resp.aread()).decode(resp.encoding or "utf-8", errors="replace")
+                    raise http_status_failover("Ollama", resp.status_code, body)
                 async for line in resp.aiter_lines():
                     if not line.strip():
                         continue
@@ -300,9 +311,24 @@ class OllamaProvider:
                     # Tool calls
                     raw_tcs = msg.get("tool_calls")
                     if raw_tcs:
+                        # The index is per-CHUNK, so two complete calls
+                        # arriving in two chunks both became "call_0" — and
+                        # the ladder then merged them into one call whose
+                        # name was the second's and whose arguments were the
+                        # two JSON bodies concatenated. Prefer the server's
+                        # id, then function.index, then a counter that spans
+                        # the whole stream.
                         tool_calls = [
                             ToolCall(
-                                id=tc.get("id", f"call_{i}"),
+                                id=(
+                                    tc.get("id")
+                                    or (
+                                        f"call_{tc['function']['index']}"
+                                        if isinstance(tc.get("function"), dict)
+                                        and isinstance(tc["function"].get("index"), int)
+                                        else f"call_{_tc_seq + i}"
+                                    )
+                                ),
                                 name=tc.get("function", {}).get("name", ""),
                                 arguments=(
                                     json.dumps(tc.get("function", {}).get("arguments", {}))
@@ -312,6 +338,7 @@ class OllamaProvider:
                             )
                             for i, tc in enumerate(raw_tcs)
                         ]
+                        _tc_seq += len(raw_tcs)
                         yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=tool_calls)
 
                     # Reasoning deltas (think=true). Not surfaced as tokens —
@@ -379,7 +406,7 @@ class OllamaProvider:
         except Exception as e:
             logger.error("Ollama stream error: %s", e)
             try:
-                yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
+                yield StreamEvent(type=StreamEventType.ERROR, error=describe_exception(e))
             except GeneratorExit:
                 # GeneratorExit arrived while we were yielding the ERROR event
                 # (caller broke out of their async-for after receiving it).

@@ -1,9 +1,14 @@
 // Pernix — Explorer panel (workspace, memory, skills, jobs)
 
 import { el, text, clear, renderMarkdown } from '../render.js';
+import { icon } from '../icons.js';
+import { hex, rgba, isLight } from '../theme.js';
 import { get, post, del, getAuthToken } from '../api.js';
-import { isMobile } from '../mobile.js';
+import { isCompact, isTouch, setMainInert } from '../mobile.js';
+import { notify } from '../feedback.js';
 import { openSettings } from './modals/settings.js';
+import { confirmDanger } from './modals/confirm.js';
+import { actionSheet } from './modals/sheet.js';
 
 function _authHdr() { const t = getAuthToken(); return t ? { 'Authorization': `Bearer ${t}` } : {}; }
 import {
@@ -28,6 +33,38 @@ const MONACO_LANG = {
     'swift': 'swift', 'ini': 'ini',
 };
 
+
+// The editor's chrome, built from the live tokens rather than from a second
+// hard-coded copy of the dark palette — which is what it was, and why it
+// stayed black when the rest of the app went to paper. `base` still has to
+// flip, because it is what supplies the syntax-highlighting rules.
+const MONACO_THEME = 'pernix';
+
+function defineMonacoTheme(monaco) {
+    const paper = isLight();
+    monaco.editor.defineTheme(MONACO_THEME, {
+        base: paper ? 'vs' : 'vs-dark',
+        inherit: true,
+        rules: [],
+        colors: {
+            'editor.background': hex('--bg'),
+            'editor.foreground': hex('--text-bright'),
+            'editor.lineHighlightBackground': hex('--bg-surface'),
+            'editor.selectionBackground': rgba('--accent', 0.15),
+            'editorCursor.foreground': hex('--accent'),
+            'editorLineNumber.foreground': hex('--line-faint'),
+            'editorLineNumber.activeForeground': hex('--text-dim'),
+            'editorIndentGuide.background': hex('--border'),
+            'editorWidget.background': hex('--bg-raised'),
+            'editorWidget.border': hex('--border'),
+            'input.background': hex('--bg-raised'),
+            'input.border': hex('--border'),
+            'scrollbarSlider.background': rgba('--border', 0.6),
+            'scrollbarSlider.hoverBackground': rgba('--line-faint', 0.6),
+        },
+    });
+}
+
 let _monacoReady = null;
 
 function loadMonaco() {
@@ -50,27 +87,13 @@ function loadMonaco() {
             paths: { vs: '/static/vendor/monaco/vs' },
         });
         window.require(['vs/editor/editor.main'], () => {
-            // Define Pernix dark theme once
-            window.monaco.editor.defineTheme('pernix-dark', {
-                base: 'vs-dark',
-                inherit: true,
-                rules: [],
-                colors: {
-                    'editor.background': '#0e0e0e',
-                    'editor.foreground': '#e8e3d6',
-                    'editor.lineHighlightBackground': '#1a1a1a',
-                    'editor.selectionBackground': 'rgba(212, 168, 67, 0.15)',
-                    'editorCursor.foreground': '#d4a843',
-                    'editorLineNumber.foreground': '#504b40',
-                    'editorLineNumber.activeForeground': '#7a7568',
-                    'editorIndentGuide.background': '#252525',
-                    'editorWidget.background': '#151515',
-                    'editorWidget.border': '#252525',
-                    'input.background': '#151515',
-                    'input.border': '#252525',
-                    'scrollbarSlider.background': 'rgba(37, 37, 37, 0.6)',
-                    'scrollbarSlider.hoverBackground': 'rgba(80, 75, 64, 0.6)',
-                },
+            defineMonacoTheme(window.monaco);
+            // Monaco's theme is global, so a live theme change has to redefine
+            // it and re-apply — otherwise the Explorer's editor stays a black
+            // rectangle in the middle of a paper-coloured panel.
+            window.addEventListener('pernix:theme', () => {
+                defineMonacoTheme(window.monaco);
+                window.monaco.editor.setTheme(MONACO_THEME);
             });
             resolve(window.monaco);
         }, reject);
@@ -82,8 +105,20 @@ function loadMonaco() {
  * Create a code editor inside `host`. Uses Monaco if available, falls back to textarea.
  * Returns { getValue, focus, dispose } — always synchronous after resolve.
  * `lang` is the EXT_LANG value (e.g. 'python', 'javascript').
+ *
+ * On touch there is no attempt at Monaco at all (E1). It is not that it
+ * fails — it loads, and then it is the wrong editor: it swallows the caret
+ * so the OS keyboard has nothing to follow, it renders 13px text that iOS
+ * zooms the page for, its own scroller fights the panel's, and none of the
+ * chrome it pays for (minimap, folding, multi-cursor, the command palette)
+ * can be reached with a thumb. The textarea is the SAME contract, keeps the
+ * system keyboard, its autocorrect and its selection handles, and is what a
+ * phone can actually edit a file in. Every editor on the surface goes
+ * through here, so the skill, memory, canary and space-directive editors
+ * come along.
  */
 async function createCodeEditor(host, content, lang, onChange) {
+    if (isTouch()) return createFallbackEditor(host, content, onChange);
     try {
         const monaco = await loadMonaco();
         return createMonacoEditor(host, monaco, content, lang, onChange);
@@ -97,7 +132,7 @@ function createMonacoEditor(host, monaco, content, lang, onChange) {
     const editor = monaco.editor.create(host, {
         value: content,
         language: monacoLang,
-        theme: 'pernix-dark',
+        theme: MONACO_THEME,
         fontSize: 13,
         fontFamily: "'DM Mono', 'SF Mono', 'Fira Code', monospace",
         lineNumbers: 'on',
@@ -167,11 +202,88 @@ const STORAGE_KEY = 'pernix:file-panel';
 const MIN_WIDTH = 260;
 const DEFAULT_WIDTH = 360;
 
+// ---------------------------------------------------------------------------
+// Navigation
+//
+// The Explorer carried nine peer tabs in one wrapping strip. At any panel
+// width worth using they took two rows of ten-point uppercase, and nothing
+// said that "Telos" and "Workspace" are different KINDS of thing — a file
+// browser sat beside a governance surface as equals.
+//
+// Five groups, each with its own sub-tabs, puts the nine leaves one level
+// down and gives the top strip a shape that fits (and scrolls, rather than
+// wrapping, when it doesn't). LEAF KEYS ARE UNCHANGED: every existing deep
+// link — openFilePanel({tab:'memory'}), {tab:'jobs'}, {tab:'workspace'} —
+// still lands exactly where it did. The internal names the docs and the
+// settings still use ride along in each tab's title. (S7)
+// ---------------------------------------------------------------------------
+
+// Exported because the Ctrl+K palette offers these same nine panes by name.
+// It derives its labels from this table rather than keeping a second copy:
+// the first copy drifted within one release, and a palette entry that names a
+// tab the Explorer no longer has is worse than no entry at all.
+export const EXPLORER_GROUPS = [
+    {
+        key: 'files', label: 'Files', icon: 'folder',
+        tabs: [{ key: 'workspace', label: 'Workspace' }],
+    },
+    {
+        key: 'knowledge', label: 'Knowledge', icon: 'search',
+        tabs: [{ key: 'memory', label: 'Memory' }],
+    },
+    {
+        key: 'capabilities', label: 'Capabilities', icon: 'settings',
+        tabs: [
+            { key: 'skills', label: 'Skills' },
+            { key: 'tools', label: 'Tools' },
+            { key: 'mcp', label: 'Servers', term: 'MCP' },
+        ],
+    },
+    {
+        key: 'automation', label: 'Automation', icon: 'clock',
+        tabs: [{ key: 'jobs', label: 'Jobs' }],
+    },
+    {
+        key: 'tuning', label: 'Self-tuning', icon: 'refresh',
+        tabs: [
+            { key: 'adaptive', label: 'Learning', term: 'Adaptive' },
+            { key: 'canary', label: 'Self-checks', term: 'Canary' },
+            { key: 'telos', label: 'Goals', term: 'Telos' },
+        ],
+    },
+];
+
+const TAB_KEYS = EXPLORER_GROUPS.flatMap(g => g.tabs.map(t => t.key));
+
+// The sub-tab each group opens on when nothing else is remembered.
+const DEFAULT_GROUP_TABS = Object.fromEntries(
+    EXPLORER_GROUPS.map(g => [g.key, g.tabs[0].key]),
+);
+
+function _groupOf(tabKey) {
+    return EXPLORER_GROUPS.find(g => g.tabs.some(t => t.key === tabKey)) || EXPLORER_GROUPS[0];
+}
+
+/**
+ * Resolve what a caller asked for: a leaf key (every old one still works),
+ * or a group key meaning "whichever sub-tab I was last on there".
+ * Returns null for anything unrecognised, so the caller can leave the panel
+ * where it is rather than jumping somewhere arbitrary.
+ */
+function _resolveTab(key) {
+    if (TAB_KEYS.includes(key)) return key;
+    const group = EXPLORER_GROUPS.find(g => g.key === key);
+    if (group) return _state.groupTabs[group.key] || group.tabs[0].key;
+    return null;
+}
+
 let _panel = null;        // root DOM element
 let _state = {
     open: false,
     width: DEFAULT_WIDTH,
-    tab: 'workspace',     // workspace | memory | skills | jobs | signals
+    tab: 'workspace',     // one of TAB_KEYS
+    group: 'files',       // the group that tab lives in
+    groupTabs: { ...DEFAULT_GROUP_TABS },  // last sub-tab visited per group
     viewMode: 'tree',     // tree | viewer | editor
     expandedDirs: new Set(),
     currentFile: null,    // { path, content, source, modified }
@@ -187,10 +299,20 @@ let _wsParent = null;      // parent path (null at root)
 let _wsSearchQuery = '';   // active search query
 let _wsSearchTimer = null;  // debounce timer for workspace search
 let _wsSeq = 0;           // request sequencing — discard stale directory responses
+// Upload rows: an entry per file being sent, kept OUTSIDE the DOM so a
+// directory re-render cannot wipe an error the user has not read yet.
+// [{ name, state: 'uploading' | 'error', detail }] (F1/S8)
+let _wsUploads = [];
 let _jobRenderTimer = null; // debounce timer for job panel re-renders
 let _memoryFiles = [];
 let _memoryResults = [];
 let _memorySeq = 0;       // request sequencing for search
+let _memoryQuery = '';    // live search query (kept for Load more)
+let _memoryHasMore = false;
+let _memoryFilter = '';   // filter over the FILE list, not the entries
+let _memoryFilterTimer = null;
+let _memoryListEl = null; // stable results/file-list container
+const MEMORY_PAGE = 10;   // rows per search page
 let _selectSessionFn = null;
 let _jobsSubTab = 'scheduled'; // active | scheduled | history
 let _skills = [];
@@ -269,6 +391,11 @@ function saveState() {
             open: _state.open,
             width: _state.width,
             tab: _state.tab,
+            // Which group you were in, and where you were inside each of the
+            // others — so coming back to Capabilities returns you to Servers
+            // rather than starting over at Skills. (S7)
+            group: _state.group,
+            groupTabs: _state.groupTabs,
             expandedDirs: [..._state.expandedDirs],
             wsPath: _wsCurrentPath,
             wsSortBy: _state.wsSortBy,
@@ -283,7 +410,18 @@ function loadState() {
         const s = JSON.parse(raw);
         if (typeof s.open === 'boolean') _state.open = s.open;
         if (typeof s.width === 'number') _state.width = Math.max(MIN_WIDTH, s.width);
-        if (typeof s.tab === 'string') _state.tab = s.tab;
+        // A tab key from a build that had different ones (or a hand-edited
+        // entry) must not leave the panel showing nothing.
+        if (typeof s.tab === 'string' && TAB_KEYS.includes(s.tab)) _state.tab = s.tab;
+        if (s.groupTabs && typeof s.groupTabs === 'object') {
+            for (const [gk, tk] of Object.entries(s.groupTabs)) {
+                if (gk in _state.groupTabs && TAB_KEYS.includes(tk) && _groupOf(tk).key === gk) {
+                    _state.groupTabs[gk] = tk;
+                }
+            }
+        }
+        _state.group = _groupOf(_state.tab).key;
+        _state.groupTabs[_state.group] = _state.tab;
         if (Array.isArray(s.expandedDirs)) _state.expandedDirs = new Set(s.expandedDirs);
         if (typeof s.wsPath === 'string') _wsCurrentPath = s.wsPath;
         if (s.wsSortBy === 'name' || s.wsSortBy === 'date' || s.wsSortBy === 'size') {
@@ -317,6 +455,10 @@ export function initFilePanel({ selectSession } = {}) {
     // Listen for SSE job events to refresh jobs tab
     window.addEventListener('pernix:job-event', _onJobEvent);
 
+    // Rotating a tablet into portrait turns an open side column into a
+    // full-screen overlay and back; the modality has to follow.
+    window.addEventListener('pernix:tier-change', () => _syncPanelModality(false));
+
     buildPanelDOM();
 
     if (_state.open) {
@@ -325,13 +467,88 @@ export function initFilePanel({ selectSession } = {}) {
         document.getElementById('files-btn')?.classList.add('active');
         loadTabData();
     }
+    _syncPanelInert();
+    // A restored-open panel is modal on compact, but it did not steal focus
+    // from anyone: nobody has typed yet at boot.
+    _syncPanelModality(false);
+}
+
+// A closed Explorer is width:0 + overflow:hidden — invisible, but every tab
+// button, tree row and editor inside it stayed in the tab order and in the
+// accessibility tree. inert removes both; it is cleared the moment the panel
+// opens. (A12)
+// Tree rows, breadcrumb segments and sortable column headers were plain
+// <div>/<span> elements carrying a click handler: visible, clickable by mouse,
+// and completely unreachable from a keyboard or a screen reader. role=button +
+// a tab stop + Enter/Space is the minimum that makes them real controls. (A1)
+function _makeActivatable(node, label, onActivate) {
+    node.setAttribute('role', 'button');
+    node.setAttribute('tabindex', '0');
+    if (label) node.setAttribute('aria-label', label);
+    node.addEventListener('click', onActivate);
+    node.addEventListener('keydown', (e) => {
+        // A real <button> nested inside the row (delete) handles its own keys;
+        // without this the row would fire a second time on the way up.
+        if (e.target !== node) return;
+        if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+        e.preventDefault();
+        onActivate(e);
+    });
+    return node;
+}
+
+function _syncPanelInert() {
+    _panel?.toggleAttribute('inert', !_state.open);
+}
+
+// Below 900px the Explorer covers the whole screen, so it is a modal surface
+// in every sense the assistive layer cares about: the transcript underneath
+// goes inert and focus moves inside, the way openOverlay does it for a dialog.
+// Above 899px it is a column BESIDE the chat — inerting #main there would take
+// away the conversation the file was opened to answer. (E4)
+let _fpReturnFocus = null;
+
+function _syncPanelModality(moveFocus = true) {
+    const modal = _state.open && isCompact();
+    if (modal && !_fpReturnFocus) _fpReturnFocus = document.activeElement;
+    setMainInert('explorer', modal);
+    if (modal) {
+        // #main's inert is cleared/applied above; the panel's own is cleared by
+        // _syncPanelInert, and focus() into an inert subtree is a silent no-op.
+        if (!moveFocus) return;
+        const target = _panel.querySelector('.fp-close')
+            || _panel.querySelector('.fp-group-btn.active, .fp-tab-btn.active')
+            || _panel;
+        target.focus();
+        return;
+    }
+    const back = _fpReturnFocus;
+    _fpReturnFocus = null;
+    if (!moveFocus || !back) return;
+    if (document.contains(back) && typeof back.focus === 'function') back.focus();
+    else document.getElementById('files-btn')?.focus();
+}
+
+// One question in one place. Every path that throws away an in-progress edit
+// — closing the panel, switching tabs, opening another file, Back/Cancel in
+// either editor — asks through this, and a confirmed discard clears the flag
+// so the beforeunload handler stops prompting for changes the user already
+// agreed to lose. (S1)
+function guardDirty() {
+    if (!_state.dirty) return true;
+    if (!confirm('Discard unsaved changes?')) return false;
+    _state.dirty = false;
+    return true;
 }
 
 export function toggleFilePanel() {
+    if (_state.open && !guardDirty()) return;
     _state.open = !_state.open;
     if (_state.open) {
         _panel.classList.add('open');
-        if (!isMobile()) _panel.style.width = _state.width + 'px';
+        // The stored width is a docked-column measurement; the compact tier
+        // makes the panel full-screen and has no use for it.
+        if (!isCompact()) _panel.style.width = _state.width + 'px';
         document.getElementById('files-btn')?.classList.add('active');
         loadTabData();
     } else {
@@ -339,6 +556,8 @@ export function toggleFilePanel() {
         _panel.style.width = '';
         document.getElementById('files-btn')?.classList.remove('active');
     }
+    _syncPanelInert();
+    _syncPanelModality();
     saveState();
 }
 
@@ -346,14 +565,24 @@ export function openFilePanel(opts = {}) {
     if (!_state.open) {
         _state.open = true;
         _panel.classList.add('open');
-        if (!isMobile()) _panel.style.width = _state.width + 'px';
+        if (!isCompact()) _panel.style.width = _state.width + 'px';
         document.getElementById('files-btn')?.classList.add('active');
+        _syncPanelInert();
+        _syncPanelModality();
     }
     if (opts.tab) {
-        _state.tab = opts.tab;
-        renderTabs();
+        // Leaf keys and group keys both work; anything unknown leaves the
+        // panel on whatever it was already showing.
+        const key = _resolveTab(opts.tab);
+        if (key) {
+            _state.tab = key;
+            _state.group = _groupOf(key).key;
+            _state.groupTabs[_state.group] = key;
+            renderTabs();
+        }
     }
     if (opts.file) {
+        if (!guardDirty()) return;
         viewFile(opts.file, 'workspace');
     }
     loadTabData();
@@ -370,7 +599,9 @@ function buildPanelDOM() {
     initResize(handle);
 
     // Header
-    const closeBtn = el('button', { class: 'fp-close', title: 'Close' }, [text('\u00d7')]);
+    const closeBtn = el('button', {
+        class: 'fp-close', title: 'Close', 'aria-label': 'Close the Explorer',
+    }, [text('\u00d7')]);
     closeBtn.addEventListener('click', toggleFilePanel);
     const header = el('div', { class: 'fp-header' }, [
         el('span', { class: 'fp-header-title' }, [text('Explorer')]),
@@ -378,7 +609,7 @@ function buildPanelDOM() {
     ]);
 
     // Tab bar
-    const tabBar = el('div', { class: 'fp-tab-bar', id: 'fp-tab-bar' });
+    const tabBar = el('div', { class: 'fp-nav', id: 'fp-tab-bar' });
 
     // Tab content containers
     const wsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'workspace', id: 'fp-workspace' });
@@ -386,6 +617,7 @@ function buildPanelDOM() {
     const skillContent = el('div', { class: 'fp-tab-content', 'data-tab': 'skills', id: 'fp-skills' });
     const jobsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'jobs', id: 'fp-jobs' });
     const toolsContent = el('div', { class: 'fp-tab-content', 'data-tab': 'tools', id: 'fp-tools' });
+    const mcpContent = el('div', { class: 'fp-tab-content', 'data-tab': 'mcp', id: 'fp-mcp' });
     const adaptiveContent = el('div', { class: 'fp-tab-content', 'data-tab': 'adaptive', id: 'fp-adaptive' });
     const canaryContent = el('div', { class: 'fp-tab-content', 'data-tab': 'canary', id: 'fp-canary' });
     const telosContent = el('div', { class: 'fp-tab-content', 'data-tab': 'telos', id: 'fp-telos' });
@@ -397,6 +629,7 @@ function buildPanelDOM() {
     _panel.appendChild(memContent);
     _panel.appendChild(skillContent);
     _panel.appendChild(toolsContent);
+    _panel.appendChild(mcpContent);
     _panel.appendChild(jobsContent);
     _panel.appendChild(adaptiveContent);
     _panel.appendChild(canaryContent);
@@ -405,44 +638,185 @@ function buildPanelDOM() {
     renderTabs();
 }
 
+/**
+ * Make a horizontally scrolling tab strip say where it is (P8).
+ *
+ * A strip that scrolls looks exactly like one that does not: the tabs past
+ * the edge are invisible, and nothing suggests there is anything to swipe
+ * to. This writes `data-scroll` on the strip — "none" when everything fits,
+ * otherwise "start", "mid" or "end" for which edge still has tabs behind it
+ * — and the stylesheet paints an edge fade from that.
+ *
+ * The four strips that need it (the Explorer's two, the settings tabs and
+ * the shared .tab-bar in the space and timeline modals) all call this, so
+ * they cannot drift apart.
+ *
+ * @param {HTMLElement} strip     the scrolling container.
+ * @param {HTMLElement} [active]  the selected tab, brought into view.
+ * @returns {(next?: HTMLElement) => void} call it when the selection changes:
+ *          the tab you just landed on can be off the right edge, after a
+ *          deep link or on a narrow panel.
+ */
+export function bindStripScroll(strip, active = null) {
+    if (!strip) return () => {};
+
+    const sync = () => {
+        const slack = strip.scrollWidth - strip.clientWidth;
+        if (slack <= 1) { strip.dataset.scroll = 'none'; return; }
+        const x = strip.scrollLeft;
+        strip.dataset.scroll = x <= 1 ? 'start' : x >= slack - 1 ? 'end' : 'mid';
+    };
+
+    strip.addEventListener('scroll', sync, { passive: true });
+    // A ResizeObserver on the strip catches the Explorer's drag handle, a
+    // rotation and the 900px crossing alike, and stops on its own when the
+    // strip is thrown away — which these are, on every re-render.
+    if (typeof ResizeObserver === 'function') {
+        new ResizeObserver(sync).observe(strip);
+    } else {
+        const onResize = () => {
+            if (!strip.isConnected) { window.removeEventListener('resize', onResize); return; }
+            sync();
+        };
+        window.addEventListener('resize', onResize);
+    }
+
+    const reveal = (next) => {
+        sync();
+        (next || active)?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    };
+
+    sync();
+    // scrollWidth is only right once the browser has laid the buttons out,
+    // and this runs on the render that builds them. Wrapped, not passed
+    // directly: rAF hands its callback a timestamp, and reveal() would take
+    // that number for the tab to scroll to.
+    requestAnimationFrame(() => reveal());
+    return reveal;
+}
+
+// Roving tabindex: one tab stop per strip, arrows move inside it — the
+// contract role="tab" commits you to. Shared by both levels.
+function _stripArrows(e, ids, index) {
+    const delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+    let target = null;
+    if (delta) target = ids[(index + delta + ids.length) % ids.length];
+    else if (e.key === 'Home') target = ids[0];
+    else if (e.key === 'End') target = ids[ids.length - 1];
+    if (!target) return;
+    e.preventDefault();
+    // The click rebuilds the strip — focus the NEW node, not this one.
+    document.getElementById(target)?.click();
+    document.getElementById(target)?.focus();
+}
+
+function _selectTab(key) {
+    if (!key || key === _state.tab) return;
+    if (!guardDirty()) return;
+    if (_state.tab === 'jobs' && key !== 'jobs') clearElapsedTimers();
+    _state.tab = key;
+    _state.group = _groupOf(key).key;
+    _state.groupTabs[_state.group] = key;
+    _state.viewMode = 'tree';
+    _state.currentFile = null;
+    renderTabs();
+    loadTabData();
+    saveState();
+}
+
 function renderTabs() {
-    const tabBar = document.getElementById('fp-tab-bar');
-    if (!tabBar) return;
-    clear(tabBar);
+    const nav = document.getElementById('fp-tab-bar');
+    if (!nav) return;
+    clear(nav);
 
-    const tabs = [
-        { key: 'workspace', label: 'Workspace' },
-        { key: 'memory', label: 'Memory' },
-        { key: 'skills', label: 'Skills' },
-        { key: 'tools', label: 'Tools' },
-        { key: 'jobs', label: 'Jobs' },
-        { key: 'adaptive', label: 'Adaptive' },
-        { key: 'canary', label: 'Canary' },
-        { key: 'telos', label: 'Telos' },
-    ];
+    const activeTab = _state.tab;
+    const activeGroup = _groupOf(activeTab);
+    const groupIds = EXPLORER_GROUPS.map(g => `fp-group-${g.key}`);
 
-    tabs.forEach(t => {
-        const btn = el('button', {
-            class: `fp-tab-btn${t.key === _state.tab ? ' active' : ''}`,
-            'data-tab': t.key,
-        }, [text(t.label)]);
-        btn.addEventListener('click', () => {
-            if (_state.tab === 'jobs' && t.key !== 'jobs') clearElapsedTimers();
-            _state.tab = t.key;
-            _state.viewMode = 'tree';
-            _state.currentFile = null;
-            renderTabs();
-            loadTabData();
-            saveState();
-        });
-        tabBar.appendChild(btn);
+    // --- level one: the five groups, one non-wrapping row ---
+    const groupBar = el('div', {
+        class: 'fp-group-bar', role: 'tablist', 'aria-label': 'Explorer sections',
     });
+    let activeGroupBtn = null;
+    EXPLORER_GROUPS.forEach((g, gi) => {
+        const selected = g.key === activeGroup.key;
+        const lands = selected ? activeTab : (_state.groupTabs[g.key] || g.tabs[0].key);
+        const btn = el('button', {
+            class: `fp-tab-btn fp-group-btn${selected ? ' active' : ''}`,
+            id: `fp-group-${g.key}`,
+            type: 'button',
+            'data-group': g.key,
+            role: 'tab',
+            'aria-selected': String(selected),
+            'aria-controls': `fp-${lands}`,
+            tabindex: selected ? '0' : '-1',
+            title: g.tabs.length > 1
+                ? `${g.label} — ${g.tabs.map(t => (t.term ? `${t.label} (${t.term})` : t.label)).join(', ')}`
+                : g.label,
+        }, [
+            icon(g.icon, { size: 13 }),
+            el('span', { class: 'fp-group-label' }, [text(g.label)]),
+        ]);
+        btn.addEventListener('click', () => _selectTab(_resolveTab(g.key)));
+        btn.addEventListener('keydown', (e) => _stripArrows(e, groupIds, gi));
+        if (selected) activeGroupBtn = btn;
+        groupBar.appendChild(btn);
+    });
+    nav.appendChild(groupBar);
+    bindStripScroll(groupBar, activeGroupBtn);
+
+    // --- level two: only where a group actually has more than one view ---
+    if (activeGroup.tabs.length > 1) {
+        const subIds = activeGroup.tabs.map(t => `fp-tab-${t.key}`);
+        const subBar = el('div', {
+            class: 'fp-subtab-bar', role: 'tablist',
+            'aria-label': `${activeGroup.label} views`,
+        });
+        let activeSubBtn = null;
+        activeGroup.tabs.forEach((t, ti) => {
+            const selected = t.key === activeTab;
+            const btn = el('button', {
+                class: `fp-tab-btn fp-subtab-btn${selected ? ' active' : ''}`,
+                id: `fp-tab-${t.key}`,
+                type: 'button',
+                'data-tab': t.key,
+                role: 'tab',
+                'aria-selected': String(selected),
+                'aria-controls': `fp-${t.key}`,
+                tabindex: selected ? '0' : '-1',
+                // The internal term stays one hover away: the docs, the
+                // settings and the agent's logs all still say "Adaptive".
+                title: t.term ? `${t.label} (${t.term})` : t.label,
+            }, [text(t.label)]);
+            btn.addEventListener('click', () => _selectTab(t.key));
+            btn.addEventListener('keydown', (e) => _stripArrows(e, subIds, ti));
+            if (selected) activeSubBtn = btn;
+            subBar.appendChild(btn);
+        });
+        nav.appendChild(subBar);
+        bindStripScroll(subBar, activeSubBtn);
+    }
 
     // Show/hide tab content
-    ['workspace', 'memory', 'skills', 'tools', 'jobs', 'adaptive', 'canary', 'telos'].forEach(key => {
+    TAB_KEYS.forEach(key => {
         const container = document.getElementById(`fp-${key}`);
-        if (container) container.classList.toggle('active', key === _state.tab);
+        if (!container) return;
+        const group = _groupOf(key);
+        container.classList.toggle('active', key === activeTab);
+        container.setAttribute('role', 'tabpanel');
+        // A panel is labelled by whichever control is actually on screen for
+        // it: its sub-tab when that strip is showing, its group otherwise.
+        container.setAttribute(
+            'aria-labelledby',
+            group.key === activeGroup.key && group.tabs.length > 1
+                ? `fp-tab-${key}`
+                : `fp-group-${group.key}`,
+        );
+        // The panel scrolls, so it needs to be reachable in its own right.
+        // Inactive panels are display:none and therefore not focusable.
+        container.setAttribute('tabindex', '0');
     });
+
 }
 
 async function loadTabData() {
@@ -450,6 +824,7 @@ async function loadTabData() {
     else if (_state.tab === 'memory') await loadMemory();
     else if (_state.tab === 'skills') await loadSkills();
     else if (_state.tab === 'tools') await loadTools();
+    else if (_state.tab === 'mcp') await loadMcp();
     else if (_state.tab === 'jobs') await loadJobs();
     else if (_state.tab === 'adaptive') await renderAdaptiveTab(document.getElementById('fp-adaptive'));
     else if (_state.tab === 'canary') await renderCanaryTab(document.getElementById('fp-canary'));
@@ -491,6 +866,9 @@ async function loadWorkspace(opts = {}) {
             saveState();
             return loadWorkspace();
         }
+        // Already at the root and it still failed — that is not a stale
+        // bookmark, it is the workspace being unreadable.
+        notify('error', `Could not list the workspace: ${e.message || e}`);
     }
     renderWorkspace();
 }
@@ -511,13 +889,21 @@ function renderWorkspace() {
     }
 
     // Section header with refresh + upload buttons
-    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('\u21bb')]);
+    const refreshBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the workspace listing',
+    }, [text('\u21bb')]);
     refreshBtn.addEventListener('click', () => {
         _wsSearchQuery = '';
         loadWorkspace({ path: _wsCurrentPath });
     });
 
-    const uploadBtn = el('button', { class: 'fp-icon-btn', title: 'Upload file' }, [text('\u2191')]);
+    const uploadBtn = el('button', {
+        class: 'fp-icon-btn',
+        title: _wsCurrentPath ? `Upload into ${_wsCurrentPath}/` : 'Upload into the workspace root',
+        'aria-label': _wsCurrentPath
+            ? `Upload a file into ${_wsCurrentPath}`
+            : 'Upload a file into the workspace root',
+    }, [icon('arrow-up')]);
     uploadBtn.addEventListener('click', triggerUpload);
 
     const fileCount = _wsEntries.filter(e => e.type === 'file').length;
@@ -538,7 +924,7 @@ function renderWorkspace() {
     ]));
     container.appendChild(_buildTabDesc(
         'Your agent\'s working directory — browse, upload, and edit files.',
-        'Files live at data/workspace/ and are accessible to agent tools. Navigate directories with the tree, view file contents inline, or open the editor to modify them directly. Uploads land at the workspace root.',
+        'Files live at data/workspace/ and are accessible to agent tools. Navigate directories with the tree, view file contents inline, or open the editor to modify them directly. Uploads land in the folder you are currently looking at.',
     ));
 
     // Search bar
@@ -565,9 +951,27 @@ function renderWorkspace() {
         container.appendChild(breadcrumb);
     }
 
+    if (_wsUploads.length) {
+        // Its own container, not a second .fp-tree: .fp-tree is flex:1, so a
+        // one-row upload list stretched to fill the panel and pushed the
+        // actual listing to the bottom of it.
+        const upEl = el('div', { class: 'fp-uploads' });
+        _renderUploadRows(upEl);
+        container.appendChild(upEl);
+    }
+
     if (_wsEntries.length === 0) {
-        const label = _wsSearchQuery ? `No results for "${_wsSearchQuery}"` : 'Empty directory';
-        container.appendChild(el('div', { class: 'fp-empty' }, [text(label)]));
+        container.appendChild(_wsSearchQuery
+            ? _emptyState(
+                `No file under this workspace matches "${_wsSearchQuery}".`,
+                { label: 'Clear the search', onClick: () => { _wsSearchQuery = ''; loadWorkspace({ path: _wsCurrentPath }); } },
+            )
+            : _emptyState(
+                _wsCurrentPath
+                    ? `${_wsCurrentPath}/ is empty — upload a file here, or ask the agent to write one into it.`
+                    : 'The workspace is empty — upload a file, or ask the agent to write one.',
+                { label: 'Upload a file', onClick: triggerUpload },
+            ));
         return;
     }
 
@@ -587,22 +991,60 @@ function renderWorkspace() {
     }
 }
 
-const _WS_SORT_INDICATOR = { name: '↑', size: '↓', date: '↓' };
+// One row per file in flight. It becomes the real file (row removed, listing
+// refreshed) or an error row that stays until dismissed. (F1/S8)
+function _renderUploadRows(parent) {
+    for (const up of _wsUploads) {
+        const isErr = up.state === 'error';
+        const row = el('div', { class: `fp-tree-item fp-upload-row${isErr ? ' error' : ''}` }, [
+            el('span', { class: 'fp-tree-icon' }, [icon(isErr ? 'warning' : 'arrow-up', { size: 12 })]),
+            el('span', { class: 'fp-tree-name' }, [text(up.name)]),
+            el('span', { class: 'fp-tree-count' }),
+            // The reason lives in a column sized for "12.4K", so it truncates
+            // to nonsense ("Faile"). Keep it readable and put the whole thing
+            // in the title; the toast carries it in full too.
+            el('span', {
+                class: 'fp-tree-meta fp-upload-detail',
+                title: isErr ? up.detail : 'Uploading\u2026',
+            }, [text(isErr ? up.detail : 'uploading\u2026')]),
+            el('span', { class: 'fp-tree-date' }),
+        ]);
+        if (isErr) {
+            const dismiss = el('button', {
+                class: 'fp-tree-action',
+                title: 'Dismiss',
+                'aria-label': `Dismiss the upload error for ${up.name}`,
+            }, [text('\u00d7')]);
+            dismiss.addEventListener('click', () => {
+                _wsUploads = _wsUploads.filter(u => u !== up);
+                renderWorkspace();
+            });
+            row.appendChild(el('span', { class: 'fp-tree-actions' }, [dismiss]));
+        }
+        parent.appendChild(row);
+    }
+}
+
+// Which way each column sorts when it is the active one. Icons, not arrow
+// glyphs: ↑/↓ sit on a different baseline from the label in DM Mono.
+const _WS_SORT_INDICATOR = { name: 'arrow-up', size: 'arrow-down', date: 'arrow-down' };
 
 function _buildColumnHeaders() {
     const sortBy = _state.wsSortBy;
 
     function makeCol(label, key, colClass) {
         const isActive = key && sortBy === key;
-        const indicator = isActive ? ` ${_WS_SORT_INDICATOR[key] || '↑'}` : '';
         const classes = ['fp-col-h', colClass, key ? 'sortable' : '', isActive ? 'active' : ''].filter(Boolean).join(' ');
-        const span = el('span', { class: classes }, [text(label + indicator)]);
+        const kids = [text(label)];
+        if (isActive) kids.push(icon(_WS_SORT_INDICATOR[key] || 'arrow-up', { size: 10 }));
+        const span = el('span', { class: classes }, kids);
         if (key) {
-            span.addEventListener('click', () => {
+            _makeActivatable(span, `Sort by ${label.toLowerCase()}`, () => {
                 _state.wsSortBy = key;
                 saveState();
                 renderWorkspace();
             });
+            span.setAttribute('aria-pressed', String(!!isActive));
         }
         return span;
     }
@@ -621,10 +1063,12 @@ function _buildBreadcrumb() {
     const bar = el('div', { class: 'fp-breadcrumb' });
 
     // Root link
-    const rootLink = el('span', { class: `fp-breadcrumb-part${parts.length === 0 ? ' active' : ''}` }, [text('\u2302')]);
+    const rootLink = el('span', { class: `fp-breadcrumb-part${parts.length === 0 ? ' active' : ''}` }, [icon('home', { size: 12, label: 'Workspace root' })]);
     if (parts.length > 0) {
         rootLink.style.cursor = 'pointer';
-        rootLink.addEventListener('click', () => loadWorkspace({ path: '' }));
+        _makeActivatable(rootLink, 'Go to the workspace root', () => loadWorkspace({ path: '' }));
+    } else {
+        rootLink.setAttribute('aria-label', 'Workspace root');
     }
     bar.appendChild(rootLink);
 
@@ -636,7 +1080,7 @@ function _buildBreadcrumb() {
         const seg = el('span', { class: `fp-breadcrumb-part${isLast ? ' active' : ''}` }, [text(parts[i])]);
         if (!isLast) {
             seg.style.cursor = 'pointer';
-            seg.addEventListener('click', () => loadWorkspace({ path: segPath }));
+            _makeActivatable(seg, `Go to ${segPath}`, () => loadWorkspace({ path: segPath }));
         }
         bar.appendChild(seg);
     }
@@ -660,14 +1104,71 @@ function _sortedWsEntries(entries, sortBy) {
     return all;
 }
 
+/** Save a workspace file. Shared by the viewer's button and the row sheet. */
+function downloadWorkspaceFile(path, name) {
+    const a = document.createElement('a');
+    a.href = `/workspace/${path}`;
+    a.download = name || path.split('/').pop();
+    a.click();
+}
+
+/**
+ * The overflow control on a workspace row (E6).
+ *
+ * On the desktop a row's only action is a delete × that hover reveals; on
+ * touch that × is hidden outright (there is no hover) and the swipe was the
+ * ONLY way to act on a row — a gesture with nothing on screen to suggest it
+ * exists. This is the discoverable half: the swipe stays as the accelerator
+ * for people who know it. Every item dispatches to the handler the desktop
+ * already uses.
+ */
+function _rowMenuButton(entry, type) {
+    const isDir = type === 'dir';
+    const btn = el('button', {
+        class: 'fp-row-menu',
+        type: 'button',
+        title: 'Actions',
+        'aria-label': `Actions for ${isDir ? 'the folder ' : ''}${entry.name}`,
+        'aria-haspopup': 'dialog',
+    }, [icon('more', { size: 18 })]);
+
+    btn.addEventListener('click', async (e) => {
+        // The row itself is a role=button that opens the entry.
+        e.stopPropagation();
+        const items = [{ id: 'open', label: isDir ? 'Open folder' : 'Open', icon: 'folder' }];
+        if (!isDir) items.push({ id: 'download', label: 'Download', icon: 'download' });
+        items.push({ id: 'delete', label: 'Delete', icon: 'trash', danger: true });
+
+        switch (await actionSheet({ title: entry.name, items })) {
+            case 'open':
+                if (isDir) {
+                    _wsSearchQuery = '';
+                    loadWorkspace({ path: entry.path });
+                } else {
+                    viewFile(entry.path, 'workspace');
+                }
+                break;
+            case 'download':
+                downloadWorkspaceFile(entry.path, entry.name);
+                break;
+            case 'delete':
+                deleteEntry(entry.path, type);
+                break;
+            default:
+                break;   // cancel, Escape, backdrop
+        }
+    });
+    return btn;
+}
+
 function _renderEntries(parent, entries) {
     // "Go up" entry when not at root and not searching
     if (!_wsSearchQuery && _wsParent !== null) {
         const upItem = el('div', { class: 'fp-tree-item dir' }, [
-            el('span', { class: 'fp-tree-icon' }, [text('\u2190')]),
+            el('span', { class: 'fp-tree-icon' }, [icon('arrow-left', { size: 12 })]),
             el('span', { class: 'fp-tree-name' }, [text('..')]),
         ]);
-        upItem.addEventListener('click', () => loadWorkspace({ path: _wsParent }));
+        _makeActivatable(upItem, 'Go up one folder', () => loadWorkspace({ path: _wsParent }));
         parent.appendChild(upItem);
     }
 
@@ -681,10 +1182,15 @@ function _renderEntries(parent, entries) {
                 el('span', { class: 'fp-tree-meta' }, [text(entry.size > 0 ? formatSize(entry.size) : '')]),
                 el('span', { class: 'fp-tree-date' }, [text(formatDate(entry.modified))]),
             ]);
-            const dirDelBtn = el('button', { class: 'fp-tree-action danger', title: 'Delete' }, [text('\u00d7')]);
+            const dirDelBtn = el('button', {
+                class: 'fp-tree-action danger',
+                title: 'Delete',
+                'aria-label': `Delete the folder ${entry.name}`,
+            }, [text('\u00d7')]);
             dirDelBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteEntry(entry.path, 'dir'); });
             item.appendChild(el('span', { class: 'fp-tree-actions' }, [dirDelBtn]));
-            item.addEventListener('click', () => {
+            if (isTouch()) item.appendChild(_rowMenuButton(entry, 'dir'));
+            _makeActivatable(item, `Open the folder ${entry.name}`, () => {
                 _wsSearchQuery = '';
                 loadWorkspace({ path: entry.path });
             });
@@ -692,7 +1198,7 @@ function _renderEntries(parent, entries) {
                 el('div', { class: 'fp-swipe-delete-bg' }, [text('Delete')]),
                 item,
             ]);
-            if (isMobile()) _attachSwipeDelete(item, entry.path, 'dir');
+            if (isTouch()) _attachSwipeDelete(item, entry.path, 'dir');
             parent.appendChild(dirWrap);
         } else {
             const displayName = _wsSearchQuery ? entry.path : entry.name;
@@ -705,16 +1211,21 @@ function _renderEntries(parent, entries) {
                 el('span', { class: 'fp-tree-date' }, [text(formatDate(entry.modified))]),
             ]);
 
-            const delBtn = el('button', { class: 'fp-tree-action danger', title: 'Delete' }, [text('\u00d7')]);
+            const delBtn = el('button', {
+                class: 'fp-tree-action danger',
+                title: 'Delete',
+                'aria-label': `Delete ${entry.name}`,
+            }, [text('\u00d7')]);
             delBtn.addEventListener('click', (e) => { e.stopPropagation(); deleteEntry(entry.path); });
             item.appendChild(el('span', { class: 'fp-tree-actions' }, [delBtn]));
+            if (isTouch()) item.appendChild(_rowMenuButton(entry, 'file'));
 
-            item.addEventListener('click', () => viewFile(entry.path, 'workspace'));
+            _makeActivatable(item, `Open ${displayName}`, () => viewFile(entry.path, 'workspace'));
             const fileWrap = el('div', { class: 'fp-tree-item-wrap' }, [
                 el('div', { class: 'fp-swipe-delete-bg' }, [text('Delete')]),
                 item,
             ]);
-            if (isMobile()) _attachSwipeDelete(item, entry.path, 'file');
+            if (isTouch()) _attachSwipeDelete(item, entry.path, 'file');
             parent.appendChild(fileWrap);
         }
     }
@@ -756,14 +1267,15 @@ async function viewFile(path, source = 'workspace') {
                     };
                 } else {
                     const content = await resp.text();
+                    const mtime = _mtimeOf(resp);
                     // Double-check: if the fetched text is huge (chunked response with no content-length)
                     if (content.length > MAX_TEXT_SIZE) {
                         _state.currentFile = {
                             path, content: content.slice(0, MAX_TEXT_SIZE),
-                            source, type: 'text', name, truncated: true,
+                            source, type: 'text', name, truncated: true, mtime,
                         };
                     } else {
-                        _state.currentFile = { path, content, source, type: 'text', name };
+                        _state.currentFile = { path, content, source, type: 'text', name, mtime };
                     }
                 }
             }
@@ -772,7 +1284,7 @@ async function viewFile(path, source = 'workspace') {
         _state.dirty = false;
         renderCurrentTab();
     } catch (e) {
-        console.error('Failed to load file:', e);
+        notify('error', `Could not open ${path}: ${e.message || e}`);
     }
 }
 
@@ -781,7 +1293,9 @@ function renderViewer(container) {
     if (!file) return;
 
     // Toolbar
-    const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back to tree' }, [text('\u2190')]);
+    const backBtn = el('button', {
+        class: 'fp-toolbar-back', title: 'Back to tree', 'aria-label': 'Back to the file tree',
+    }, [icon('arrow-left')]);
     backBtn.addEventListener('click', () => {
         if (file.type === 'image' && file.content.startsWith('blob:')) {
             URL.revokeObjectURL(file.content);
@@ -793,8 +1307,10 @@ function renderViewer(container) {
 
     const actions = el('div', { class: 'fp-toolbar-actions' });
 
-    // Edit button — not for memory files (read-only)
-    if (file.type === 'text' && file.source !== 'memory-file') {
+    // Memory files open in the same editor as everything else now — they are
+    // plain markdown, and "read-only" was a property of the API, not of the
+    // file. (S9)
+    if (file.type === 'text') {
         const editBtn = el('button', { class: 'fp-btn' }, [text('edit')]);
         editBtn.addEventListener('click', () => {
             _state.viewMode = 'editor';
@@ -805,8 +1321,13 @@ function renderViewer(container) {
         actions.appendChild(editBtn);
     }
 
+    // open/download address /workspace/<path>, which a memory file does not
+    // have — a memory file lives in data/memories and is reached through the
+    // memory API. Offering them here produced a 404 on click.
+    const inWorkspace = file.source !== 'memory-file';
+
     // Open in new browser tab — for browser-viewable file types
-    if (canOpenInBrowser(file.name)) {
+    if (inWorkspace && canOpenInBrowser(file.name)) {
         const openBtn = el('button', { class: 'fp-btn' }, [text('open')]);
         openBtn.addEventListener('click', () => {
             window.open(`/workspace/${file.path}`, '_blank');
@@ -814,14 +1335,11 @@ function renderViewer(container) {
         actions.appendChild(openBtn);
     }
 
-    const dlBtn = el('button', { class: 'fp-btn' }, [text('download')]);
-    dlBtn.addEventListener('click', () => {
-        const a = document.createElement('a');
-        a.href = `/workspace/${file.path}`;
-        a.download = file.name;
-        a.click();
-    });
-    actions.appendChild(dlBtn);
+    if (inWorkspace) {
+        const dlBtn = el('button', { class: 'fp-btn' }, [text('download')]);
+        dlBtn.addEventListener('click', () => downloadWorkspaceFile(file.path, file.name));
+        actions.appendChild(dlBtn);
+    }
 
     const toolbar = el('div', { class: 'fp-toolbar' }, [
         backBtn,
@@ -857,7 +1375,7 @@ function renderViewer(container) {
     } else if (isMarkdown(file.name)) {
         // Markdown with raw toggle
         let showRaw = false;
-        const toggleBtn = el('button', { class: 'fp-btn', style: 'margin-bottom: 8px' }, [text('raw')]);
+        const toggleBtn = el('button', { class: 'fp-btn fp-viewer-toggle', type: 'button' }, [text('raw')]);
         const contentWrap = el('div', { class: 'fp-viewer-md' });
         contentWrap.appendChild(renderMarkdown(file.content));
 
@@ -909,6 +1427,47 @@ function disposeActiveEditor() {
     }
 }
 
+// The mtime the server stamped on the file we read. Handed back as base_mtime
+// on save so a PUT can tell "nobody touched it" from "the agent rewrote it
+// while you were typing". Missing/garbled header = no conflict detection,
+// i.e. exactly the old behaviour. (S3)
+// The server's own explanation of a failure, when it has one. Every fetch()
+// in this file used to swallow the body and print a status code to a console
+// nobody has open. (F1/S8)
+async function _errorDetail(resp) {
+    try {
+        const data = await resp.json();
+        const d = data && data.detail;
+        if (d) return typeof d === 'string' ? d : JSON.stringify(d);
+        if (data && data.error) return String(data.error);
+    } catch { /* not JSON — fall through to the status line */ }
+    return `${resp.status} ${resp.statusText || 'request failed'}`;
+}
+
+function _mtimeOf(resp) {
+    const v = parseFloat(resp.headers.get('X-File-Mtime') || '');
+    return Number.isFinite(v) ? v : null;
+}
+
+// Inline result line for a 409, same shape as the MCP add form's: say what
+// happened, and offer the only two honest choices. Never a confirm() — the
+// user needs to see which file this is about. (S3)
+function _showSaveConflict(container, { onReload, onOverwrite }) {
+    container.querySelector('.fp-conflict')?.remove();
+    const reloadBtn = el('button', { class: 'fp-btn' }, [text('Reload')]);
+    reloadBtn.addEventListener('click', () => { box.remove(); onReload(); });
+    const overwriteBtn = el('button', { class: 'fp-btn fp-btn-danger' }, [text('Overwrite')]);
+    overwriteBtn.addEventListener('click', () => { box.remove(); onOverwrite(); });
+    const box = el('div', { class: 'fp-conflict', role: 'alert' }, [
+        el('span', { class: 'fp-conflict-msg' }, [text('Changed on disk since you opened it')]),
+        el('span', { class: 'fp-conflict-actions' }, [reloadBtn, overwriteBtn]),
+    ]);
+    const toolbar = container.querySelector('.fp-toolbar');
+    if (toolbar) toolbar.after(box);
+    else container.prepend(box);
+    return box;
+}
+
 // Warn on browser close/refresh with unsaved changes
 window.addEventListener('beforeunload', (e) => {
     if (_state.dirty) { e.preventDefault(); }
@@ -919,9 +1478,11 @@ function renderEditor(container) {
     if (!file) return;
 
     // Toolbar
-    const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back' }, [text('\u2190')]);
+    const backBtn = el('button', {
+        class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the file, discarding unsaved changes',
+    }, [icon('arrow-left')]);
     backBtn.addEventListener('click', () => {
-        if (_state.dirty && !confirm('Discard unsaved changes?')) return;
+        if (!guardDirty()) return;
         disposeActiveEditor();
         _state.viewMode = 'viewer';
         _state.dirty = false;
@@ -933,7 +1494,7 @@ function renderEditor(container) {
 
     const cancelBtn = el('button', { class: 'fp-btn' }, [text('cancel')]);
     cancelBtn.addEventListener('click', () => {
-        if (_state.dirty && !confirm('Discard unsaved changes?')) return;
+        if (!guardDirty()) return;
         disposeActiveEditor();
         _state.viewMode = 'viewer';
         _state.dirty = false;
@@ -986,7 +1547,30 @@ function renderEditor(container) {
     });
 }
 
-async function saveFile(container) {
+// Pull the on-disk text back into the open editor, discarding local edits.
+// The Reload half of a conflict — the user chose the other writer's version.
+async function _reloadWorkspaceFile(container) {
+    const file = _state.currentFile;
+    if (!file) return;
+    const statusEl = container.querySelector('.fp-editor-status');
+    try {
+        const resp = await fetch(`/workspace/${file.path}`, { headers: _authHdr() });
+        if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+        file.content = await resp.text();
+        file.mtime = _mtimeOf(resp);
+        _state.originalContent = file.content;
+        _state.dirty = false;
+        renderCurrentTab();
+    } catch (e) {
+        if (statusEl) {
+            statusEl.className = 'fp-editor-status error';
+            statusEl.textContent = `Reload failed: ${e.message}`;
+        }
+        notify('error', `Could not reload ${file.path}: ${e.message}`);
+    }
+}
+
+async function saveFile(container, { force = false } = {}) {
     const file = _state.currentFile;
     if (!file || !_activeEditor) return;
 
@@ -1001,12 +1585,33 @@ async function saveFile(container) {
     if (statusEl) { statusEl.className = 'fp-editor-status'; statusEl.textContent = 'Saving\u2026'; }
 
     try {
+        const body = { content };
+        // Overwrite = resend without base_mtime, which is the server's own
+        // opt-out and therefore literally last-writer-wins again.
+        if (!force && file.mtime != null) body.base_mtime = file.mtime;
         const resp = await fetch(url, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', ..._authHdr() },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify(body),
         });
+        if (resp.status === 409) {
+            let payload = {};
+            try { payload = await resp.json(); } catch { /* body is optional */ }
+            if (payload.mtime != null) file.mtime = payload.mtime;
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            if (statusEl) {
+                statusEl.className = 'fp-editor-status error';
+                statusEl.textContent = 'Changed on disk';
+            }
+            _showSaveConflict(container, {
+                onReload: () => _reloadWorkspaceFile(container),
+                onOverwrite: () => saveFile(container, { force: true }),
+            });
+            return;
+        }
         if (!resp.ok) throw new Error(`Save failed: ${resp.statusText}`);
+        const saved = await resp.json().catch(() => ({}));
+        if (saved.mtime != null) file.mtime = saved.mtime;
 
         file.content = content;
         _state.originalContent = content;
@@ -1037,8 +1642,18 @@ async function saveFile(container) {
 // ---------------------------------------------------------------------------
 
 async function deleteEntry(path, type = 'file') {
-    const label = type === 'dir' ? `folder "${path}" and all its contents` : path;
-    if (!confirm(`Delete ${label}?`)) return;
+    const name = path.split('/').pop() || path;
+    const go = await confirmDanger({
+        title: type === 'dir' ? `Delete the folder "${name}"?` : `Delete "${name}"?`,
+        body: type === 'dir'
+            ? [`Everything inside ${path} is deleted with it.`,
+               'Workspace files have no trash — this cannot be undone.']
+            : [`${path} is removed from the workspace.`,
+               'Workspace files have no trash — this cannot be undone.'],
+        verb: 'Delete',
+        cancelLabel: 'Keep',
+    });
+    if (!go) return;
     try {
         await del(`/workspace/${path.split('/').map(encodeURIComponent).join('/')}`);
         if (_state.currentFile?.path === path ||
@@ -1048,7 +1663,7 @@ async function deleteEntry(path, type = 'file') {
         }
         await loadWorkspace({ path: _wsCurrentPath });
     } catch (e) {
-        console.error('Delete failed:', e);
+        notify('error', `Could not delete ${path}: ${e.message || e}`);
     }
 }
 
@@ -1120,13 +1735,39 @@ function triggerUpload() {
     input.multiple = true;
     input.addEventListener('change', async () => {
         for (const file of input.files) {
-            const formData = new FormData();
-            formData.append('file', file);
+            const entry = { name: file.name, state: 'uploading', detail: '' };
+            _wsUploads.push(entry);
+            renderWorkspace();
+
+            let detail = null;
             try {
-                await fetch('/api/upload', { method: 'POST', body: formData, headers: _authHdr() });
+                const formData = new FormData();
+                formData.append('file', file);
+                // Uploads always landed at the workspace root, wherever you
+                // were standing — so a file dropped into a folder simply was
+                // not there afterwards. (S12)
+                if (_wsCurrentPath) formData.append('path', _wsCurrentPath);
+                const resp = await fetch('/api/upload', {
+                    method: 'POST', body: formData, headers: _authHdr(),
+                });
+                // A 2xx was assumed here, so a rejected upload (too large,
+                // blocked extension, collision) looked exactly like a success
+                // that had not appeared in the listing yet.
+                if (!resp.ok) detail = await _errorDetail(resp);
             } catch (e) {
-                console.error('Upload failed:', e);
+                detail = e.message || String(e);
             }
+
+            if (detail) {
+                // One rejection almost always applies to the rest of the batch
+                // (same size cap, same extension rule), so stop instead of
+                // firing the identical error once per file.
+                entry.state = 'error';
+                entry.detail = detail;
+                notify('error', `Upload failed — ${file.name}: ${detail}`);
+                break;
+            }
+            _wsUploads = _wsUploads.filter(u => u !== entry);
         }
         await loadWorkspace({ path: _wsCurrentPath });
     });
@@ -1144,8 +1785,9 @@ async function loadMemory() {
     try {
         const data = await get('/api/memory/files');
         _memoryFiles = data.files || [];
-    } catch {
+    } catch (e) {
         _memoryFiles = [];
+        notify('error', `Could not list memory files: ${e.message || e}`);
     }
 
     renderMemory();
@@ -1159,6 +1801,10 @@ function renderMemory() {
 
     if (_state.viewMode === 'viewer' && _state.currentFile) {
         renderViewer(container);
+        return;
+    }
+    if (_state.viewMode === 'editor' && _state.currentFile) {
+        renderMemoryEditor(container);
         return;
     }
 
@@ -1175,11 +1821,13 @@ function renderMemory() {
         'Memory files are markdown documents in data/memories/. The agent writes to them during distillation and memory tool calls. Use search to retrieve past observations, decisions, or any context it has retained.',
     ));
 
-    // Search bar
+    // Search bar — searches ENTRIES, across every file.
     const searchInput = el('input', {
         class: 'fp-search-input',
         type: 'text',
-        placeholder: 'Search memory...',
+        placeholder: 'Search memory\u2026',
+        'aria-label': 'Search memory entries',
+        value: _memoryQuery,
     });
     searchInput.addEventListener('input', () => {
         if (_searchTimer) clearTimeout(_searchTimer);
@@ -1187,94 +1835,385 @@ function renderMemory() {
     });
     container.appendChild(el('div', { class: 'fp-search-bar' }, [searchInput]));
 
-    // Results area (shared between search results and file list)
-    const listEl = el('div', { class: 'fp-memory-list', id: 'fp-memory-list' });
-
-    if (_memoryResults.length > 0) {
-        renderSearchResults(listEl);
-    } else {
-        renderMemoryFiles(listEl);
+    // Filter box over the FILE list. A corpus of a hundred files is a wall of
+    // names; this narrows it without spending a search. Hidden while a search
+    // is running, because then the list underneath is results, not files. (S9)
+    if (!_memoryQuery && _memoryFiles.length > 1) {
+        const filterInput = el('input', {
+            class: 'fp-search-input fp-filter-input',
+            type: 'text',
+            placeholder: 'Filter files by name\u2026',
+            'aria-label': 'Filter the memory file list',
+            value: _memoryFilter,
+        });
+        filterInput.addEventListener('input', () => {
+            _memoryFilter = filterInput.value.trim();
+            if (_memoryFilterTimer) clearTimeout(_memoryFilterTimer);
+            // In place: re-rendering the tab would take the focus with it.
+            _memoryFilterTimer = setTimeout(_renderMemoryList, 120);
+        });
+        container.appendChild(el('div', { class: 'fp-search-bar fp-filter-bar' }, [filterInput]));
     }
 
-    container.appendChild(listEl);
+    // Results area (shared between search results and file list)
+    _memoryListEl = el('div', { class: 'fp-memory-list', id: 'fp-memory-list' });
+    container.appendChild(_memoryListEl);
+    _renderMemoryList();
+
+    if (_memoryQuery) {
+        requestAnimationFrame(() => {
+            searchInput.focus();
+            searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
+        });
+    }
+}
+
+function _renderMemoryList() {
+    const listEl = _memoryListEl || document.getElementById('fp-memory-list');
+    if (!listEl) return;
+    clear(listEl);
+    if (_memoryQuery) renderSearchResults(listEl);
+    else renderMemoryFiles(listEl);
+}
+
+function _matchesMemoryFilter(f) {
+    const q = _memoryFilter.toLowerCase();
+    if (!q) return true;
+    return f.name.toLowerCase().includes(q)
+        || (f.description || '').toLowerCase().includes(q)
+        || String(f.keywords || '').toLowerCase().includes(q)
+        || (f.space_label || '').toLowerCase().includes(q);
 }
 
 function renderMemoryFiles(listEl) {
     if (_memoryFiles.length === 0) {
-        listEl.appendChild(el('div', { class: 'fp-empty' }, [text('No memory files')]));
+        listEl.appendChild(_emptyState(
+            'Nothing remembered yet — Pernix writes memory files as it distils sessions, '
+            + 'and whenever you ask it to remember something.',
+            {
+                label: 'Start a conversation',
+                onClick: () => {
+                    // On a phone the panel is a full-screen overlay, so the
+                    // composer it is sending you to is behind it. Beside it at
+                    // >=900px, where closing would be the wrong favour.
+                    if (isCompact()) toggleFilePanel();
+                    document.getElementById('msg-input')?.focus();
+                },
+            },
+        ));
         return;
     }
 
-    for (const f of _memoryFiles) {
+    const visible = _memoryFiles.filter(_matchesMemoryFilter);
+    if (visible.length === 0) {
+        listEl.appendChild(_emptyState(
+            `No memory file matches "${_memoryFilter}".`,
+            { label: 'Clear the filter', onClick: () => { _memoryFilter = ''; renderMemory(); } },
+        ));
+        return;
+    }
+
+    for (const f of visible) {
+        const editBtn = el('button', {
+            class: 'fp-icon-btn fp-memory-edit',
+            title: `Open ${f.name}.md in the editor`,
+            'aria-label': `Open ${f.name} in the editor`,
+        }, [icon('edit', { size: 12 })]);
+        editBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openMemoryFile(f.name, { edit: true });
+        });
+
         const item = el('div', { class: 'fp-memory-item' }, [
-            el('div', { class: 'fp-memory-name' }, [text(f.name)]),
+            el('div', { class: 'fp-memory-row' }, [
+                el('div', { class: 'fp-memory-name' }, [text(f.name)]),
+                editBtn,
+            ]),
             el('div', { class: 'fp-memory-desc' }, [text(f.description || '')]),
             el('div', { class: 'fp-memory-meta' }, [
+                // Space badge (v33): pernix.space.<slug>.* files carry their
+                // space's label + color from /api/memory/files.
+                f.space ? el('span', {
+                    class: 'space-chip-labeled',
+                    style: `--space-color: ${f.space_color || 'var(--text-dim)'}`,
+                    title: `Space memory bucket (${f.space})`,
+                }, [text(f.space_label || f.space)]) : null,
                 el('span', {}, [text(`${f.entry_count || 0} entries`)]),
+                f.updated ? el('span', { title: 'Last written' }, [text(formatDate(f.updated))]) : text(''),
                 f.keywords ? el('span', {}, [text(f.keywords)]) : text(''),
             ]),
         ]);
-        item.addEventListener('click', () => viewMemoryFile(f.name));
+        // A div with a click handler is not a control to a keyboard or a
+        // screen reader; the delete/edit button inside handles its own keys.
+        _makeActivatable(item, `Open the memory file ${f.name}`, () => openMemoryFile(f.name));
         listEl.appendChild(item);
     }
 }
 
-async function searchMemory(query) {
-    if (!query) {
+/**
+ * Search memory entries. `append` fetches the NEXT page and adds to what is
+ * already on screen — the Load more path — instead of replacing it.
+ */
+async function searchMemory(query, { append = false } = {}) {
+    if (!append) _memoryQuery = query;
+
+    if (!_memoryQuery) {
         _memoryResults = [];
-        const listEl = document.getElementById('fp-memory-list');
-        if (listEl) { clear(listEl); renderMemoryFiles(listEl); }
+        _memoryHasMore = false;
+        renderMemory();
         return;
     }
 
+    const offset = append ? _memoryResults.length : 0;
     const seq = ++_memorySeq;
     try {
-        const data = await get(`/api/memory/search?q=${encodeURIComponent(query)}&limit=10`);
+        const data = await get(
+            `/api/memory/search?q=${encodeURIComponent(_memoryQuery)}&limit=${MEMORY_PAGE}&offset=${offset}`,
+        );
         if (seq !== _memorySeq) return; // stale response
-        _memoryResults = data.results || [];
-    } catch {
+        const page = data.results || [];
+        _memoryResults = append ? [..._memoryResults, ...page] : page;
+        _memoryHasMore = !!data.has_more;
+    } catch (e) {
         if (seq !== _memorySeq) return;
-        _memoryResults = [];
+        if (!append) _memoryResults = [];
+        _memoryHasMore = false;
+        notify('error', `Memory search failed: ${e.message || e}`);
     }
 
-    const listEl = document.getElementById('fp-memory-list');
-    if (listEl) { clear(listEl); renderSearchResults(listEl); }
+    // A fresh search re-renders the tab (the filter box comes and goes with
+    // the query); a Load more only touches the list.
+    if (append) _renderMemoryList();
+    else renderMemory();
+}
+
+// The raw number is meaningless without the scale it belongs to — the store
+// documents > 3.0 as strong, 1.0–3.0 as usable, below 1.0 as noise. Say that
+// instead, and keep the number in the title for anyone tuning search. (S9)
+function _scoreBucket(score) {
+    if (score >= 3) return { label: 'strong', cls: 'strong' };
+    if (score >= 1) return { label: 'good', cls: 'good' };
+    return { label: 'weak', cls: 'weak' };
 }
 
 function renderSearchResults(listEl) {
     if (_memoryResults.length === 0) {
-        listEl.appendChild(el('div', { class: 'fp-empty' }, [text('No results')]));
+        listEl.appendChild(_emptyState(
+            `Nothing in memory matches "${_memoryQuery}" — memory search is over what the agent `
+            + 'wrote down, not over your chat transcripts.',
+            { label: 'Clear the search', onClick: () => searchMemory('') },
+        ));
         return;
     }
 
     for (const r of _memoryResults) {
+        const bucket = _scoreBucket(r.score);
         const item = el('div', { class: 'fp-search-result' }, [
             el('div', { class: 'fp-search-result-header' }, [
                 el('span', { class: 'fp-search-result-file' }, [text(r.file)]),
-                el('span', { class: 'fp-search-result-score' }, [text(`${r.score}`)]),
+                el('span', {
+                    class: `fp-score-chip score-${bucket.cls}`,
+                    title: `Relevance ${r.score} — the store scores above 3 as a strong match, `
+                         + '1 to 3 as usable, below 1 as noise.',
+                }, [text(bucket.label)]),
             ]),
             el('div', { class: 'fp-search-result-content' }, [text(r.content || '')]),
         ]);
-        item.addEventListener('click', () => viewMemoryFile(r.file));
+        _makeActivatable(item, `Open the memory file ${r.file}`, () => openMemoryFile(r.file));
         listEl.appendChild(item);
+    }
+
+    if (_memoryHasMore) {
+        const more = el('button', {
+            class: 'btn btn--secondary btn--sm fp-load-more',
+            type: 'button',
+        }, [text('Load more')]);
+        more.addEventListener('click', async () => {
+            more.disabled = true;
+            more.textContent = 'Loading\u2026';
+            await searchMemory(_memoryQuery, { append: true });
+        });
+        listEl.appendChild(more);
     }
 }
 
-async function viewMemoryFile(name) {
+/**
+ * Open a memory file in the viewer, or straight into the editor. The mtime
+ * comes back with the content and is what a later save hands to the server as
+ * base_mtime — same optimistic-concurrency contract as the workspace. (S9)
+ */
+async function openMemoryFile(name, { edit = false } = {}) {
+    if (!guardDirty()) return;
     try {
         const data = await get(`/api/memory/files/${encodeURIComponent(name)}`);
-        if (data.error) return;
+        if (data.error) { notify('error', data.error); return; }
         _state.currentFile = {
             path: name,
             content: data.content,
             source: 'memory-file',
             type: 'text',
             name: name + '.md',
+            mtime: data.mtime ?? null,
         };
-        _state.viewMode = 'viewer';
+        _state.originalContent = data.content;
+        _state.dirty = false;
+        _state.viewMode = edit ? 'editor' : 'viewer';
         renderMemory();
     } catch (e) {
-        console.error('Failed to load memory file:', e);
+        notify('error', `Could not open memory file ${name}: ${e.message || e}`);
+    }
+}
+
+function renderMemoryEditor(container) {
+    const file = _state.currentFile;
+    if (!file) return;
+
+    const backBtn = el('button', {
+        class: 'fp-toolbar-back', title: 'Back',
+        'aria-label': 'Back to the memory file, discarding unsaved changes',
+    }, [icon('arrow-left')]);
+    const leave = () => {
+        if (!guardDirty()) return;
+        disposeActiveEditor();
+        _state.viewMode = 'viewer';
+        _state.dirty = false;
+        renderMemory();
+    };
+    backBtn.addEventListener('click', leave);
+
+    const saveBtn = el('button', { class: 'fp-btn save-btn', disabled: true }, [text('save')]);
+    saveBtn.addEventListener('click', () => { if (_state.dirty) saveMemoryFile(container); });
+
+    const cancelBtn = el('button', { class: 'fp-btn' }, [text('cancel')]);
+    cancelBtn.addEventListener('click', leave);
+
+    const pathLabel = el('span', { class: 'fp-toolbar-path' }, [text(file.name)]);
+    container.appendChild(el('div', { class: 'fp-toolbar' }, [
+        backBtn,
+        pathLabel,
+        el('div', { class: 'fp-toolbar-actions' }, [saveBtn, cancelBtn]),
+    ]));
+
+    const statusEl = el('div', { class: 'fp-editor-status' }, [text('Ready')]);
+    const editorWrap = el('div', { class: 'fp-editor' });
+    const editorHost = el('div', { class: 'fp-editor-host' });
+    editorWrap.appendChild(editorHost);
+    editorWrap.appendChild(statusEl);
+    container.appendChild(editorWrap);
+
+    function onDirtyChange(dirty) {
+        _state.dirty = dirty;
+        saveBtn.disabled = !dirty;
+        saveBtn.className = `fp-btn save-btn${dirty ? ' dirty' : ''}`;
+        statusEl.className = `fp-editor-status${dirty ? ' dirty' : ''}`;
+        statusEl.textContent = dirty ? 'Modified' : 'Ready';
+        pathLabel.textContent = dirty ? `\u25CF ${file.name}` : file.name;
+    }
+
+    createCodeEditor(editorHost, file.content, 'markdown', (value) => {
+        onDirtyChange(value !== _state.originalContent);
+    }).then(inst => {
+        _activeEditor = inst;
+        inst.addSaveCommand(() => saveMemoryFile(container));
+        inst.focus();
+    });
+
+    editorHost.addEventListener('keydown', (e) => {
+        if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            saveMemoryFile(container);
+        }
+    });
+}
+
+// Reload half of a memory conflict — same contract as the workspace one.
+async function _reloadMemoryFile(container) {
+    const file = _state.currentFile;
+    if (!file) return;
+    const statusEl = container.querySelector('.fp-editor-status');
+    try {
+        const data = await get(`/api/memory/files/${encodeURIComponent(file.path)}`);
+        if (data.error) throw new Error(data.error);
+        file.content = data.content;
+        file.mtime = data.mtime ?? null;
+        _state.originalContent = file.content;
+        _state.dirty = false;
+        renderMemory();
+    } catch (e) {
+        if (statusEl) {
+            statusEl.className = 'fp-editor-status error';
+            statusEl.textContent = `Reload failed: ${e.message}`;
+        }
+        notify('error', `Could not reload ${file.name}: ${e.message}`);
+    }
+}
+
+async function saveMemoryFile(container, { force = false } = {}) {
+    const file = _state.currentFile;
+    if (!file || !_activeEditor) return;
+
+    const statusEl = container.querySelector('.fp-editor-status');
+    const saveBtn = container.querySelector('.save-btn');
+    const pathLabel = container.querySelector('.fp-toolbar-path');
+    const content = _activeEditor.getValue();
+
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'saving\u2026'; }
+    if (statusEl) { statusEl.className = 'fp-editor-status'; statusEl.textContent = 'Saving\u2026'; }
+
+    try {
+        const body = { content };
+        // Overwrite = resend without base_mtime, which is the server's own
+        // opt-out and therefore literally last-writer-wins again.
+        if (!force && file.mtime != null) body.base_mtime = file.mtime;
+        const resp = await fetch(`/api/memory/files/${encodeURIComponent(file.path)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', ..._authHdr() },
+            body: JSON.stringify(body),
+        });
+        if (resp.status === 409) {
+            let payload = {};
+            try { payload = await resp.json(); } catch { /* body is optional */ }
+            if (payload.mtime != null) file.mtime = payload.mtime;
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            if (statusEl) {
+                statusEl.className = 'fp-editor-status error';
+                statusEl.textContent = 'Changed on disk';
+            }
+            _showSaveConflict(container, {
+                onReload: () => _reloadMemoryFile(container),
+                onOverwrite: () => saveMemoryFile(container, { force: true }),
+            });
+            return;
+        }
+        if (!resp.ok) throw new Error(await _errorDetail(resp));
+        const saved = await resp.json().catch(() => ({}));
+        if (saved.mtime != null) file.mtime = saved.mtime;
+
+        file.content = content;
+        _state.originalContent = content;
+        _state.dirty = false;
+
+        if (saveBtn) { saveBtn.className = 'fp-btn save-btn'; saveBtn.textContent = 'save'; }
+        if (pathLabel) pathLabel.textContent = file.name;
+        if (statusEl) {
+            statusEl.className = 'fp-editor-status saved';
+            statusEl.textContent = 'Saved';
+            setTimeout(() => {
+                statusEl.className = 'fp-editor-status';
+                statusEl.textContent = 'Ready';
+            }, 1500);
+        }
+        // The entry count and the last-written stamp both just changed.
+        try {
+            const data = await get('/api/memory/files');
+            _memoryFiles = data.files || _memoryFiles;
+        } catch { /* the list refreshes on the next visit */ }
+    } catch (e) {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+        if (statusEl) {
+            statusEl.className = 'fp-editor-status error';
+            statusEl.textContent = `Error: ${e.message}`;
+        }
     }
 }
 
@@ -1342,7 +2281,9 @@ function renderSkills() {
     }
 
     // Section header
-    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('\u21bb')]);
+    const refreshBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the skills list',
+    }, [text('\u21bb')]);
     refreshBtn.addEventListener('click', loadSkills);
 
     container.appendChild(el('div', { class: 'fp-section-header' }, [
@@ -1396,16 +2337,19 @@ function renderSkills() {
                         source: 'skill',
                         type: 'text',
                         name: 'SKILL.md',
+                        mtime: skillData.mtime ?? null,
                         skillData,
                         pendingProposal: proposal,
                     };
                     _state.viewMode = 'viewer';
                     renderSkills();
                 } catch (e) {
-                    console.error('Failed to load skill for proposal review:', e);
-                    // Show inline error — skill may have been deleted since proposal was created
+                    // Inline on the button — the skill may have been deleted
+                    // since the proposal was written — plus the reason, which
+                    // "skill not found" alone cannot carry.
                     reviewBtn.textContent = 'skill not found';
                     reviewBtn.disabled = true;
+                    notify('error', `Could not open ${proposal.skill_name}: ${e.message || e}`);
                 }
             });
             row.appendChild(info);
@@ -1448,9 +2392,16 @@ function _renderSkillsFiltered() {
         : [..._skills];
 
     if (visible.length === 0) {
-        _skillsListEl.appendChild(el('div', { class: 'fp-empty' }, [
-            text(q ? `No skills match "${q}"` : 'No skills installed'),
-        ]));
+        _skillsListEl.appendChild(q
+            ? _emptyState(
+                `No skill matches "${_skillsSearchQuery}".`,
+                { label: 'Clear the search', onClick: () => { _skillsSearchQuery = ''; renderSkills(); } },
+            )
+            : _emptyState(
+                'No skills installed — drop a skill folder into data/skills/, or ask the agent '
+                + 'to write one for a task you keep repeating.',
+                { label: 'Reload', onClick: loadSkills },
+            ));
         return;
     }
 
@@ -1461,6 +2412,8 @@ function _renderSkillsFiltered() {
         const toggle = el('button', {
             class: `fp-skill-toggle${skill.enabled ? ' on' : ''}`,
             title: skill.enabled ? 'Disable skill' : 'Enable skill',
+            'aria-label': `${skill.enabled ? 'Disable' : 'Enable'} the skill ${skill.name}`,
+            'aria-pressed': String(!!skill.enabled),
         }, [text(skill.enabled ? 'on' : 'off')]);
         toggle.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -1470,6 +2423,7 @@ function _renderSkillsFiltered() {
         const deleteBtn = el('button', {
             class: 'fp-tree-action danger',
             title: 'Delete skill',
+            'aria-label': `Delete the skill ${skill.name}`,
         }, [text('\u00d7')]);
         deleteBtn.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -1534,12 +2488,13 @@ async function viewSkill(name) {
             source: 'skill',
             type: 'text',
             name: 'SKILL.md',
+            mtime: data.mtime ?? null,
             skillData: data,
         };
         _state.viewMode = 'viewer';
         renderSkills();
     } catch (e) {
-        console.error('Failed to load skill:', e);
+        notify('error', `Could not open skill ${name}: ${e.message || e}`);
     }
 }
 
@@ -1549,7 +2504,9 @@ function renderSkillViewer(container) {
     const data = file.skillData;
 
     // Toolbar
-    const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back' }, [text('\u2190')]);
+    const backBtn = el('button', {
+        class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the skills list',
+    }, [icon('arrow-left')]);
     backBtn.addEventListener('click', () => {
         _state.viewMode = 'tree';
         _state.currentFile = null;
@@ -1605,12 +2562,21 @@ function renderSkillViewer(container) {
             renderSkills();
         });
 
-        const applyBtn = el('button', { class: 'fp-btn fp-btn-primary' }, [text('apply')]);
+        const applyBtn = el('button', { class: 'fp-btn primary', type: 'button' }, [text('apply')]);
         applyBtn.title = 'Insert the suggested change into this skill\'s SKILL.md under the referenced section. Re-run the skill to validate the fix.';
         applyBtn.addEventListener('click', async () => {
-            if (!confirm(`Apply this proposal to ${proposal.skill_name}'s SKILL.md?\n\nSection: ${proposal.section || '(new section)'}\n\nNothing re-runs automatically — invoke the skill again to validate the fix.`)) {
-                return;
-            }
+            const go = await confirmDanger({
+                title: `Apply this change to ${proposal.skill_name}?`,
+                body: [
+                    `The suggested text is inserted into ${proposal.skill_name}/SKILL.md under `
+                    + `${proposal.section ? `"${proposal.section}"` : 'a new section'}.`,
+                    'Nothing re-runs automatically — invoke the skill again to see whether it helped. '
+                    + 'The file stays editable here afterwards.',
+                ],
+                verb: 'Apply change',
+                cancelLabel: 'Not now',
+            });
+            if (!go) return;
             try {
                 const res = await post(`/api/skills/proposals/${proposal.id}/apply`, {});
                 _pendingProposals = _pendingProposals.filter(p => p.id !== proposal.id);
@@ -1621,7 +2587,7 @@ function renderSkillViewer(container) {
                 await loadSkills();
                 renderSkills();
             } catch (e) {
-                alert(`Failed to apply proposal: ${e.message || e}`);
+                notify('error', `Could not apply the proposal: ${e.message || e}`);
             }
         });
 
@@ -1633,7 +2599,7 @@ function renderSkillViewer(container) {
                 file.pendingProposal = null;
                 renderSkills();
             } catch (e) {
-                console.error('Failed to reject proposal:', e);
+                notify('error', `Could not reject the proposal: ${e.message || e}`);
             }
         });
 
@@ -1684,9 +2650,11 @@ function renderSkillEditor(container) {
     if (!file) return;
 
     // Toolbar
-    const backBtn = el('button', { class: 'fp-toolbar-back', title: 'Back' }, [text('\u2190')]);
+    const backBtn = el('button', {
+        class: 'fp-toolbar-back', title: 'Back', 'aria-label': 'Back to the skill, discarding unsaved changes',
+    }, [icon('arrow-left')]);
     backBtn.addEventListener('click', () => {
-        if (_state.dirty && !confirm('Discard unsaved changes?')) return;
+        if (!guardDirty()) return;
         disposeActiveEditor();
         _state.viewMode = 'viewer';
         _state.dirty = false;
@@ -1698,7 +2666,7 @@ function renderSkillEditor(container) {
 
     const cancelBtn = el('button', { class: 'fp-btn' }, [text('cancel')]);
     cancelBtn.addEventListener('click', () => {
-        if (_state.dirty && !confirm('Discard unsaved changes?')) return;
+        if (!guardDirty()) return;
         disposeActiveEditor();
         _state.viewMode = 'viewer';
         _state.dirty = false;
@@ -1746,7 +2714,29 @@ function renderSkillEditor(container) {
     });
 }
 
-async function saveSkill(container) {
+// Reload half of a SKILL.md conflict — same contract as the workspace one.
+async function _reloadSkillFile(container) {
+    const file = _state.currentFile;
+    if (!file) return;
+    const statusEl = container.querySelector('.fp-editor-status');
+    try {
+        const data = await get(`/api/skills/${encodeURIComponent(file.path)}`);
+        file.content = data.raw_content || '';
+        file.mtime = data.mtime ?? null;
+        file.skillData = data;
+        _state.originalContent = file.content;
+        _state.dirty = false;
+        renderSkills();
+    } catch (e) {
+        if (statusEl) {
+            statusEl.className = 'fp-editor-status error';
+            statusEl.textContent = `Reload failed: ${e.message}`;
+        }
+        notify('error', `Could not reload ${file.path}/SKILL.md: ${e.message}`);
+    }
+}
+
+async function saveSkill(container, { force = false } = {}) {
     const file = _state.currentFile;
     if (!file || !_activeEditor) return;
 
@@ -1759,12 +2749,31 @@ async function saveSkill(container) {
     if (statusEl) { statusEl.className = 'fp-editor-status'; statusEl.textContent = 'Saving\u2026'; }
 
     try {
+        const body = { content };
+        if (!force && file.mtime != null) body.base_mtime = file.mtime;
         const resp = await fetch(`/api/skills/${encodeURIComponent(file.path)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', ..._authHdr() },
-            body: JSON.stringify({ content }),
+            body: JSON.stringify(body),
         });
+        if (resp.status === 409) {
+            let payload = {};
+            try { payload = await resp.json(); } catch { /* body is optional */ }
+            if (payload.mtime != null) file.mtime = payload.mtime;
+            if (saveBtn) { saveBtn.disabled = false; saveBtn.className = 'fp-btn save-btn dirty'; saveBtn.textContent = 'save'; }
+            if (statusEl) {
+                statusEl.className = 'fp-editor-status error';
+                statusEl.textContent = 'Changed on disk';
+            }
+            _showSaveConflict(container, {
+                onReload: () => _reloadSkillFile(container),
+                onOverwrite: () => saveSkill(container, { force: true }),
+            });
+            return;
+        }
         if (!resp.ok) throw new Error(`Save failed: ${resp.statusText}`);
+        const saved = await resp.json().catch(() => ({}));
+        if (saved.mtime != null) file.mtime = saved.mtime;
 
         file.content = content;
         _state.originalContent = content;
@@ -1791,19 +2800,33 @@ async function saveSkill(container) {
 
 async function toggleSkill(name, enabled) {
     try {
-        await fetch(`/api/skills/${encodeURIComponent(name)}`, {
+        const resp = await fetch(`/api/skills/${encodeURIComponent(name)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json', ..._authHdr() },
             body: JSON.stringify({ enabled }),
         });
+        // fetch() only rejects on a network error, so a 404/500 used to leave
+        // the toggle looking flipped after a reload that quietly undid it.
+        if (!resp.ok) throw new Error(await _errorDetail(resp));
         await loadSkills();
     } catch (e) {
-        console.error('Toggle failed:', e);
+        notify('error', `Could not ${enabled ? 'enable' : 'disable'} ${name}: ${e.message || e}`);
+        await loadSkills();
     }
 }
 
 async function deleteSkill(name) {
-    if (!confirm(`Delete skill "${name}"? This cannot be undone.`)) return;
+    const go = await confirmDanger({
+        title: `Delete the skill "${name}"?`,
+        body: [
+            `Its whole directory under data/skills/ goes — SKILL.md, scripts, references, assets.`,
+            'The agent stops being able to invoke it. This cannot be undone; disabling it instead '
+            + 'takes it out of consideration and keeps the files.',
+        ],
+        verb: 'Delete skill',
+        cancelLabel: 'Keep it',
+    });
+    if (!go) return;
     try {
         await del(`/api/skills/${encodeURIComponent(name)}`);
         if (_state.currentFile?.path === name) {
@@ -1812,7 +2835,7 @@ async function deleteSkill(name) {
         }
         await loadSkills();
     } catch (e) {
-        console.error('Delete failed:', e);
+        notify('error', `Could not delete skill ${name}: ${e.message || e}`);
     }
 }
 
@@ -1825,7 +2848,9 @@ function initResize(handle) {
     let startWidth = 0;
 
     handle.addEventListener('mousedown', (e) => {
-        if (isMobile()) return;
+        // Drag-to-resize is a mouse affordance; touch.css hides the handle at
+        // every width, so nothing on a finger device should arm it.
+        if (isTouch()) return;
         e.preventDefault();
         startX = e.clientX;
         startWidth = _panel.offsetWidth;
@@ -1887,7 +2912,7 @@ async function renderJobs() {
     // maintenance, RLM run cleanup, and the other idle-time activities.
     if (_lastSnoozeActivity && _lastSnoozeActivity.detail) {
         container.appendChild(el('div', { class: 'fp-snooze-activity' }, [
-            el('span', { class: 'fp-snooze-activity-icon' }, [text('◐')]),
+            el('span', { class: 'fp-snooze-activity-icon' }, [icon('moon', { size: 12 })]),
             text(` Snooze: ${_lastSnoozeActivity.detail}`),
         ]));
     }
@@ -1926,7 +2951,9 @@ async function renderJobs() {
         subTabBar.appendChild(btn);
     }
 
-    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('↻')]);
+    const refreshBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the jobs list',
+    }, [icon('refresh')]);
     refreshBtn.addEventListener('click', () => loadJobs());
 
     const subTabRow = el('div', { class: 'fp-jobs-header-row' }, [subTabBar, refreshBtn]);
@@ -1993,6 +3020,23 @@ function _onJobEvent(e) {
 // Tab description — shared helper used by all tabs
 // ---------------------------------------------------------------------------
 
+// An empty state that says what is missing AND what to do about it. "No
+// skills installed" and "Empty directory" leave a reader at a dead end: they
+// describe a state and offer no way out of it. One sentence, then the next
+// action — as a real button wherever there is one to press. (F11)
+function _emptyState(sentence, action = null) {
+    const kids = [el('div', { class: 'fp-empty-line' }, [text(sentence)])];
+    if (action) {
+        const btn = el('button', {
+            class: 'btn btn--secondary btn--sm',
+            type: 'button',
+        }, [text(action.label)]);
+        btn.addEventListener('click', action.onClick);
+        kids.push(btn);
+    }
+    return el('div', { class: 'fp-empty' }, kids);
+}
+
 function _buildTabDesc(brief, full) {
     let open = false;
     const fullEl = el('div', { class: 'fp-tab-desc-full' }, [text(full)]);
@@ -2036,14 +3080,20 @@ function renderTools() {
     clear(container);
 
     // Header
-    const refreshBtn = el('button', { class: 'fp-icon-btn', title: 'Refresh' }, [text('↻')]);
+    const refreshBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the tools list',
+    }, [icon('refresh')]);
     refreshBtn.addEventListener('click', loadTools);
 
-    const sortSelect = el('select', { class: 'fp-ws-sort', title: 'Sort tools by…' }, [
+    const sortSelect = el('select', {
+        class: 'fp-ws-sort', title: 'Sort tools by…', 'aria-label': 'Sort tools by',
+    }, [
         el('option', { value: 'name',     ...(_toolsSortBy === 'name'     ? { selected: '' } : {}) }, [text('Name')]),
         el('option', { value: 'safety',   ...(_toolsSortBy === 'safety'   ? { selected: '' } : {}) }, [text('Safety')]),
         el('option', { value: 'category', ...(_toolsSortBy === 'category' ? { selected: '' } : {}) }, [text('Category')]),
         el('option', { value: 'status',   ...(_toolsSortBy === 'status'   ? { selected: '' } : {}) }, [text('Status')]),
+        el('option', { value: 'uses',     ...(_toolsSortBy === 'uses'     ? { selected: '' } : {}) }, [text('Uses')]),
+        el('option', { value: 'failures', ...(_toolsSortBy === 'failures' ? { selected: '' } : {}) }, [text('Failures')]),
     ]);
     sortSelect.addEventListener('change', () => {
         _toolsSortBy = sortSelect.value;
@@ -2079,7 +3129,7 @@ function renderTools() {
         const helpBtn = el('button', { class: 'fp-danger-banner-help', 'aria-label': 'More info' }, [text('?')]);
         const banner = el('div', { class: 'fp-danger-mode-banner' }, [
             el('div', { class: 'fp-danger-banner-inner' }, [
-                el('span', { class: 'fp-danger-banner-icon' }, [text('⚠')]),
+                el('span', { class: 'fp-danger-banner-icon' }, [icon('warning', { size: 15 })]),
                 el('span', { class: 'fp-danger-banner-text' }, [
                     text('Run Dangerously mode is enabled — all tool approvals are bypassed'),
                 ]),
@@ -2143,13 +3193,27 @@ function _renderToolsFiltered() {
             if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
             return a.name.localeCompare(b.name);
         }
+        if (_toolsSortBy === 'uses' || _toolsSortBy === 'failures') {
+            // Descending — the most-used / most-failing tools are the ones
+            // worth looking at; never-observed tools sink to the bottom.
+            const key = _toolsSortBy === 'uses' ? 'uses' : 'failures';
+            const d = (b.performance?.[key] || 0) - (a.performance?.[key] || 0);
+            return d !== 0 ? d : a.name.localeCompare(b.name);
+        }
         return a.name.localeCompare(b.name);
     });
 
     if (visible.length === 0) {
-        _toolsListEl.appendChild(el('div', { class: 'fp-empty' }, [
-            text(q ? `No tools match "${q}"` : 'No tools loaded'),
-        ]));
+        _toolsListEl.appendChild(q
+            ? _emptyState(
+                `No tool matches "${_toolsSearchQuery}".`,
+                { label: 'Clear the search', onClick: () => { _toolsSearchQuery = ''; renderTools(); } },
+            )
+            : _emptyState(
+                'No tools registered — the registry loads at startup, so an empty list usually '
+                + 'means the server is still coming up.',
+                { label: 'Reload', onClick: loadTools },
+            ));
         return;
     }
 
@@ -2161,30 +3225,48 @@ function _renderToolsFiltered() {
         const toggle = el('button', {
             class: `fp-skill-toggle${tool.enabled ? ' on' : ''}`,
             title: tool.enabled ? 'Disable tool' : 'Enable tool',
+            'aria-label': `${tool.enabled ? 'Disable' : 'Enable'} the tool ${tool.name}`,
+            'aria-pressed': String(!!tool.enabled),
         }, [text(tool.enabled ? 'on' : 'off')]);
         toggle.addEventListener('click', async (e) => {
             e.stopPropagation();
             try {
-                await fetch('/api/tools/toggle', {
+                const resp = await fetch('/api/tools/toggle', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', ..._authHdr() },
                     body: JSON.stringify({ name: tool.name, enabled: !tool.enabled }),
                 });
+                if (!resp.ok) throw new Error(await _errorDetail(resp));
                 await loadTools();
-            } catch (err) { console.error('Tool toggle failed:', err); }
+            } catch (err) {
+                notify('error', `Could not ${tool.enabled ? 'disable' : 'enable'} ${tool.name}: ${err.message || err}`);
+                await loadTools();
+            }
         });
 
         // Safety level select
         const level = tool.safety_level || 'safe';
+        // The value to fall back to when a change is rejected — the last one
+        // the server actually acknowledged, not the one this row rendered with.
+        let acceptedLevel = level;
         const safetySelect = el('select', {
             class: `fp-tool-safety sl-${level}`,
             title: 'Safety level — controls whether auto_approve_dangerous gate applies',
+            'aria-label': `Safety level for ${tool.name}`,
         });
         for (const lvl of ['safe', 'caution', 'dangerous']) {
             const opt = el('option', { value: lvl }, [text(lvl)]);
             if (lvl === level) opt.selected = true;
             safetySelect.appendChild(opt);
         }
+        // A rejected change used to repaint the colour but leave the select
+        // showing the level the user picked — the UI claiming a safety level
+        // the server never took. Put the VALUE back too. (F1/S8)
+        const revertSafety = (why) => {
+            safetySelect.value = acceptedLevel;
+            safetySelect.className = `fp-tool-safety sl-${acceptedLevel}`;
+            notify('error', `Safety level for ${tool.name} not changed: ${why}`);
+        };
         safetySelect.addEventListener('change', async (e) => {
             e.stopPropagation();
             const newLevel = e.target.value;
@@ -2195,14 +3277,12 @@ function _renderToolsFiltered() {
                     headers: { 'Content-Type': 'application/json', ..._authHdr() },
                     body: JSON.stringify({ name: tool.name, safety_level: newLevel }),
                 });
-                const data = await res.json();
-                if (data.error) {
-                    console.error('Safety level update failed:', data.error);
-                    safetySelect.className = `fp-tool-safety sl-${level}`;
-                }
+                if (!res.ok) { revertSafety(await _errorDetail(res)); return; }
+                const data = await res.json().catch(() => ({}));
+                if (data.error) { revertSafety(String(data.error)); return; }
+                acceptedLevel = newLevel;
             } catch (err) {
-                console.error('Safety level update failed:', err);
-                safetySelect.className = `fp-tool-safety sl-${level}`;
+                revertSafety(err.message || String(err));
             }
         });
 
@@ -2250,6 +3330,339 @@ function _renderToolsFiltered() {
 }
 
 // ---------------------------------------------------------------------------
+// MCP tab — external tool servers (Model Context Protocol)
+// ---------------------------------------------------------------------------
+
+let _mcpData = null;
+let _mcpShowAdd = false;
+let _mcpBusy = false;
+let _mcpDraft = '';          // form text survives re-renders (status refreshes)
+let _mcpEditTarget = null;   // server name when the form is editing, null = adding
+let _mcpFormJustOpened = false;
+let _mcpRefreshTimer = null;
+
+async function loadMcp() {
+    try {
+        _mcpData = await get('/api/mcp/servers');
+    } catch {
+        _mcpData = null;
+    }
+    renderMcp();
+}
+
+const _MCP_STATUS_META = {
+    ready:      { cls: 'ok',   label: 'connected' },
+    connecting: { cls: 'wait', label: 'connecting…' },
+    idle:       { cls: 'wait', label: 'idle (suspended)' },
+    degraded:   { cls: 'err',  label: 'unreachable' },
+    disabled:   { cls: 'off',  label: 'disabled' },
+    stopped:    { cls: 'off',  label: 'stopped' },
+    offline:    { cls: 'off',  label: 'offline (MCP disabled)' },
+};
+
+function renderMcp() {
+    const container = document.getElementById('fp-mcp');
+    if (!container) return;
+    clear(container);
+
+    const refreshBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Refresh', 'aria-label': 'Refresh the MCP server list',
+    }, [icon('refresh')]);
+    refreshBtn.addEventListener('click', loadMcp);
+    const addBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Add server', 'aria-label': 'Add an MCP server',
+    }, [icon('plus')]);
+    addBtn.addEventListener('click', () => {
+        if (_mcpShowAdd && _mcpEditTarget === null) {
+            _mcpShowAdd = false;                    // toggle a plain add form closed
+        } else {
+            _mcpShowAdd = true;                     // (re)open as a fresh add
+            if (_mcpEditTarget !== null) _mcpDraft = '';
+            _mcpEditTarget = null;
+            _mcpFormJustOpened = true;
+        }
+        renderMcp();
+    });
+
+    const servers = _mcpData?.servers || [];
+    // A connecting server settles within seconds — refresh once on its own
+    // instead of making the user hammer the refresh button.
+    if (_mcpRefreshTimer) { clearTimeout(_mcpRefreshTimer); _mcpRefreshTimer = null; }
+    if (servers.some(s => s.status === 'connecting') && _state.tab === 'mcp') {
+        _mcpRefreshTimer = setTimeout(() => { _mcpRefreshTimer = null; loadMcp(); }, 3000);
+    }
+    const connected = servers.filter(s => s.status === 'ready').length;
+    container.appendChild(el('div', { class: 'fp-section-header' }, [
+        el('div', {}, [
+            el('span', {
+                class: 'fp-section-label',
+                title: 'Model Context Protocol servers',
+            }, [text('Servers (MCP)')]),
+            el('div', { class: 'fp-section-sub' }, [text(
+                _mcpData ? `${servers.length} configured · ${connected} connected` : 'unavailable',
+            )]),
+        ]),
+        el('div', { class: 'fp-section-actions' }, [addBtn, refreshBtn]),
+    ]));
+    container.appendChild(_buildTabDesc(
+        'External tool servers speaking the Model Context Protocol.',
+        'Each connected server\'s tools register as mcp_<server>_<tool> and show up in the Tools ' +
+        'tab with the normal enable/safety controls. Paste a standard mcpServers config from ' +
+        'Claude Code, Cursor, or VS Code — it works verbatim. Secrets belong in .env, referenced ' +
+        'as "${VAR}", never pasted into the config.',
+    ));
+
+    if (_mcpData && _mcpData.mcp_enabled === false) {
+        const banner = el('div', { class: 'fp-danger-mode-banner' }, [
+            el('div', { class: 'fp-danger-banner-inner' }, [
+                el('span', { class: 'fp-danger-banner-icon' }, [icon('ban', { size: 15 })]),
+                el('span', { class: 'fp-danger-banner-text' }, [
+                    text('MCP is disabled — servers will not connect. Click to open Settings.'),
+                ]),
+            ]),
+        ]);
+        banner.addEventListener('click', () => openSettings());
+        container.appendChild(banner);
+    }
+
+    if (_mcpShowAdd) container.appendChild(_buildMcpAddForm());
+
+    if (!_mcpData) {
+        container.appendChild(_emptyState(
+            'Could not read the MCP status — the server may still be starting.',
+            { label: 'Try again', onClick: loadMcp },
+        ));
+        return;
+    }
+    if (servers.length === 0) {
+        container.appendChild(_emptyState(
+            'No servers configured — add one by pasting a standard mcpServers config, '
+            + 'or ask the agent to run mcp_add_server.',
+            {
+                label: 'Add a server',
+                onClick: () => { _mcpShowAdd = true; _mcpEditTarget = null; _mcpFormJustOpened = true; renderMcp(); },
+            },
+        ));
+        return;
+    }
+
+    const listEl = el('div', { class: 'fp-skills-list' });
+    for (const s of servers) listEl.appendChild(_buildMcpServerItem(s));
+    container.appendChild(listEl);
+}
+
+function _buildMcpServerItem(s) {
+    const meta = _MCP_STATUS_META[s.status] || { cls: 'off', label: s.status };
+    const item = el('div', { class: `fp-skill-item${s.enabled ? '' : ' disabled'}` });
+
+    const toggle = el('button', {
+        class: `fp-skill-toggle${s.enabled ? ' on' : ''}`,
+        title: s.enabled ? 'Disable server (unregisters its tools)' : 'Enable server',
+        'aria-label': `${s.enabled ? 'Disable' : 'Enable'} the MCP server ${s.name}`,
+        'aria-pressed': String(!!s.enabled),
+    }, [text(s.enabled ? 'on' : 'off')]);
+    toggle.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (_mcpBusy) return;
+        _mcpBusy = true;
+        try { await post(`/api/mcp/servers/${encodeURIComponent(s.name)}/toggle`, { enabled: !s.enabled }); }
+        catch (err) { notify('error', `Could not ${s.enabled ? 'disable' : 'enable'} ${s.name}: ${err.message || err}`); }
+        _mcpBusy = false;
+        await loadMcp();
+    });
+
+    const editBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Edit server config',
+        'aria-label': `Edit the config for ${s.name}`,
+    }, [icon('edit')]);
+    editBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const cfg = _mcpData?.configs?.[s.name];
+        if (!cfg) return;
+        _mcpEditTarget = s.name;
+        _mcpDraft = JSON.stringify({ mcpServers: { [s.name]: cfg } }, null, 2);
+        _mcpShowAdd = true;
+        _mcpFormJustOpened = true;
+        renderMcp();
+    });
+
+    const reloadBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Reconnect + re-discover tools',
+        'aria-label': `Reconnect ${s.name} and re-discover its tools`,
+    }, [icon('refresh')]);
+    reloadBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (_mcpBusy) return;
+        _mcpBusy = true;
+        reloadBtn.textContent = '…';
+        try { await post(`/api/mcp/servers/${encodeURIComponent(s.name)}/reload`, {}); }
+        catch (err) { notify('error', `Could not reconnect ${s.name}: ${err.message || err}`); }
+        _mcpBusy = false;
+        await loadMcp();
+    });
+
+    const delBtn = el('button', {
+        class: 'fp-icon-btn', title: 'Remove server',
+        'aria-label': `Remove the MCP server ${s.name}`,
+    }, [icon('x')]);
+    delBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const tools = s.tool_count || 0;
+        const go = await confirmDanger({
+            title: `Remove the server "${s.name}"?`,
+            body: [
+                tools
+                    ? `Its ${tools} tool${tools === 1 ? '' : 's'} are unregistered immediately; the agent `
+                      + 'can no longer call them.'
+                    : 'Its entry is deleted and any tools it registered are unregistered.',
+                'The config is removed from data/mcp_servers.json — you would have to paste it again. '
+                + 'Disabling the server instead keeps the config and just stops it.',
+            ],
+            verb: 'Remove server',
+            cancelLabel: 'Keep it',
+        });
+        if (!go) return;
+        try { await del(`/api/mcp/servers/${encodeURIComponent(s.name)}`); }
+        catch (err) { notify('error', `Could not remove ${s.name}: ${err.message || err}`); }
+        await loadMcp();
+    });
+
+    item.appendChild(el('div', { class: 'fp-skill-header' }, [
+        el('div', { class: 'fp-skill-name' }, [
+            el('span', { class: `fp-mcp-dot ${meta.cls}`, title: meta.label }),
+            text(s.name),
+            el('span', { class: 'fp-skill-version' }, [text(s.transport)]),
+            el('span', { class: 'fp-skill-version' }, [text(`safety: ${s.safety}`)]),
+        ]),
+        el('div', { class: 'fp-skill-actions' }, [editBtn, reloadBtn, delBtn, toggle]),
+    ]));
+
+    const statusBits = [meta.label];
+    if (s.server_info) statusBits.push(s.server_info);
+    if (s.tool_count) statusBits.push(`${s.tool_count} tools`);
+    if (s.last_used) statusBits.push(`used ${timeAgo(s.last_used)}`);
+    item.appendChild(el('div', { class: 'fp-skill-desc' }, [
+        text(`${statusBits.join(' · ')}${s.target ? ` — ${s.target}` : ''}`),
+    ]));
+    if (s.error && (s.status === 'degraded' || s.status === 'stopped')) {
+        item.appendChild(el('div', { class: 'fp-mcp-error' }, [text(s.error)]));
+    }
+    if (s.tools && s.tools.length) {
+        const tagsEl = el('div', { class: 'fp-skill-tags' });
+        for (const t of s.tools.slice(0, 8)) tagsEl.appendChild(el('span', { class: 'fp-skill-tag' }, [text(t)]));
+        if (s.tools.length > 8) tagsEl.appendChild(el('span', { class: 'fp-skill-tag' }, [text(`+${s.tools.length - 8} more`)]));
+        item.appendChild(tagsEl);
+    }
+    return item;
+}
+
+function _normalizeMcpPaste(raw) {
+    // Accept a full {"mcpServers": {...}} blob or a bare {name: entry} map.
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && parsed.mcpServers) return { mcpServers: parsed.mcpServers };
+    if (parsed && typeof parsed === 'object') {
+        const values = Object.values(parsed);
+        if (values.length && values.every(v => v && typeof v === 'object' && (v.command || v.url))) {
+            return { mcpServers: parsed };
+        }
+    }
+    throw new Error('Expected {"mcpServers": {...}} or {"<name>": {"command"|"url": ...}}');
+}
+
+function _buildMcpAddForm() {
+    const editing = _mcpEditTarget !== null;
+    const ta = el('textarea', {
+        class: 'fp-mcp-add-input',
+        rows: String(Math.min(16, Math.max(8, _mcpDraft.split('\n').length + 1))),
+        placeholder: '{\n  "mcpServers": {\n    "github": {\n      "url": "https://api.githubcopilot.com/mcp/",\n      "headers": { "Authorization": "Bearer ${GITHUB_MCP_TOKEN}" }\n    }\n  }\n}',
+        spellcheck: 'false',
+    });
+    ta.value = _mcpDraft;
+    ta.addEventListener('input', () => { _mcpDraft = ta.value; });
+
+    const result = el('div', { class: 'fp-mcp-add-result' });
+    const setResult = (msg, isErr) => {
+        result.textContent = msg;
+        result.classList.toggle('err', !!isErr);
+    };
+
+    const buttons = [];
+    const setBusy = (busy, activeBtn, busyLabel) => {
+        for (const b of buttons) b.disabled = busy;
+        if (activeBtn) activeBtn.textContent = busy ? busyLabel : activeBtn.dataset.label;
+    };
+
+    const testBtn = el('button', { class: 'fp-mcp-add-btn', 'data-label': 'Test' }, [text('Test')]);
+    testBtn.addEventListener('click', async () => {
+        let body;
+        try { body = _normalizeMcpPaste(ta.value); } catch (e) { setResult(e.message, true); return; }
+        setBusy(true, testBtn, 'Testing…');
+        setResult('Connecting to the server without saving…');
+        try {
+            const res = await post('/api/mcp/test', body);
+            setResult(res.ok
+                ? `OK — ${res.server_info || 'server'} exposes ${res.tools.length} tool(s): ${res.tools.slice(0, 10).join(', ')}${res.tools.length > 10 ? '…' : ''}`
+                : `Failed: ${res.error}`, !res.ok);
+        } catch (e) { setResult(`Test failed: ${e.message || e}`, true); }
+        setBusy(false, testBtn);
+    });
+
+    const saveBtn = el('button', {
+        class: 'fp-mcp-add-btn primary',
+        'data-label': editing ? 'Save changes' : 'Save & Connect',
+    }, [text(editing ? 'Save changes' : 'Save & Connect')]);
+    saveBtn.addEventListener('click', async () => {
+        let body;
+        try { body = _normalizeMcpPaste(ta.value); } catch (e) { setResult(e.message, true); return; }
+        if (editing && !(_mcpEditTarget in (body.mcpServers || {}))) {
+            setResult(`This form is editing '${_mcpEditTarget}' but the config names ${Object.keys(body.mcpServers).join(', ')} — renaming creates a new server; remove the old one after.`, true);
+        }
+        setBusy(true, saveBtn, 'Connecting…');
+        try {
+            const res = await post('/api/mcp/servers', body);
+            const lines = Object.entries(res.results || {}).map(([name, r]) =>
+                `${name}: ${r.ok ? r.status : (r.error || r.status)}`);
+            const allOk = Object.values(res.results || {}).every(r => r.ok);
+            setResult(lines.join(' · ') || 'saved', !allOk);
+            if (allOk) {
+                _mcpShowAdd = false; _mcpDraft = ''; _mcpEditTarget = null;
+                await loadMcp();
+                return;
+            }
+        } catch (e) { setResult(`Save failed: ${e.message || e}`, true); }
+        // On failure the form stays open with the message — no re-render,
+        // which would wipe both the result line and the user's edits' focus.
+        setBusy(false, saveBtn);
+    });
+
+    const cancelBtn = el('button', { class: 'fp-mcp-add-btn', 'data-label': 'Cancel' }, [text('Cancel')]);
+    cancelBtn.addEventListener('click', () => {
+        _mcpShowAdd = false; _mcpDraft = ''; _mcpEditTarget = null;
+        renderMcp();
+    });
+    buttons.push(testBtn, saveBtn, cancelBtn);
+
+    const form = el('div', { class: 'fp-mcp-add' }, [
+        el('div', { class: 'fp-mcp-add-title' }, [
+            text(editing ? `Edit server: ${_mcpEditTarget}` : 'Add MCP server'),
+        ]),
+        el('div', { class: 'fp-mcp-add-hint' }, [
+            text(editing
+                ? 'Adjust the entry and Save — the server reconnects with the new config. Secrets stay in .env as "${VAR}".'
+                : 'Paste a standard mcpServers config (Claude Code / Cursor format works verbatim). Secrets go in .env, referenced as "${VAR}".'),
+        ]),
+        ta,
+        el('div', { class: 'fp-mcp-add-actions' }, [testBtn, saveBtn, cancelBtn]),
+        result,
+    ]);
+    if (_mcpFormJustOpened) {
+        _mcpFormJustOpened = false;
+        requestAnimationFrame(() => { ta.focus(); form.scrollIntoView({ block: 'nearest' }); });
+    }
+    return form;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -2258,6 +3671,7 @@ function renderCurrentTab() {
     else if (_state.tab === 'memory') renderMemory();
     else if (_state.tab === 'skills') renderSkills();
     else if (_state.tab === 'tools') renderTools();
+    else if (_state.tab === 'mcp') renderMcp();
     else if (_state.tab === 'jobs') renderJobs();
 }
 

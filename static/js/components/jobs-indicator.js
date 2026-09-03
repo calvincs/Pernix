@@ -1,6 +1,7 @@
 // Pernix — Jobs status bar indicator + SSE subscription
 
 import { el, text } from '../render.js';
+import { icon } from '../icons.js';
 import { get, isOnline } from '../api.js';
 
 let _el = null;
@@ -12,16 +13,31 @@ let _openPanel = null;  // callback to open jobs panel
 
 let _status = { running_jobs: 0, scheduled_count: 0, snooze: { running: false } };
 
+// A job.error used to decrement the running count and otherwise vanish: the
+// indicator went back to grey and the only trace was inside a panel nobody
+// had a reason to open. It stays red until a later job succeeds or the user
+// goes and looks.
+let _hasError = false;
+
 export function initJobsIndicator(container, { onOpenPanel }) {
     _openPanel = onOpenPanel;
 
-    _iconEl = el('span', { class: 'jobs-indicator-icon' }, ['\u23F1']);  // stopwatch
+    _iconEl = el('span', { class: 'jobs-indicator-icon' }, [icon('clock', { size: 13 })]);
     _countEl = el('span', { class: 'jobs-indicator-count' });
 
-    _el = el('span', {
+    // A <span> with a click handler: no tab stop, no role, and a title
+    // attribute is not an accessible name a keyboard user can reach. It opens
+    // the Jobs panel, so it is a button. (A1)
+    _el = el('button', {
         class: 'jobs-indicator',
+        type: 'button',
         title: 'Background jobs',
-        onClick: () => { if (_openPanel) _openPanel(); },
+        'aria-label': 'Background jobs',
+        onClick: () => {
+            _hasError = false;   // they are about to see it for themselves
+            _render();
+            if (_openPanel) _openPanel();
+        },
     }, [_iconEl, _countEl]);
 
     container.insertBefore(_el, document.getElementById('notification-bell'));
@@ -51,35 +67,58 @@ async function _refresh() {
     }
 }
 
+// The glyphs this replaced (⏱ and ◐) were emoji-presentation characters:
+// they rendered in full colour, at emoji size, in a monochrome status bar.
+function _setIcon(name) {
+    if (_iconEl.firstChild && _iconEl.firstChild.classList?.contains(`pxi-${name}`)) return;
+    while (_iconEl.firstChild) _iconEl.removeChild(_iconEl.firstChild);
+    _iconEl.appendChild(icon(name, { size: 13 }));
+}
+
 function _render() {
     const running = _status.running_jobs || 0;
     const scheduled = _status.scheduled_count || 0;
     const snoozing = _status.snooze?.running || false;
 
-    if (scheduled === 0 && !snoozing) {
+    // State first, visibility second: hiding on the early return below must
+    // not leave a stale has-error on a node that is about to come back.
+    // Mutually exclusive so the error colour is not fighting the running
+    // colour at the same specificity.
+    _el.classList.toggle('has-error', _hasError);
+    _el.classList.toggle('has-running', !_hasError && running > 0);
+    _el.classList.toggle('has-snooze', !_hasError && snoozing && running === 0);
+
+    // Running jobs are the one thing that must never be invisible. A manual
+    // job on an empty schedule hit exactly that: scheduled_count 0, so the
+    // indicator hid itself while the work was still going.
+    if (scheduled === 0 && !snoozing && running === 0 && !_hasError) {
         _el.style.display = 'none';
         return;
     }
     _el.style.display = '';
 
-    _el.classList.toggle('has-running', running > 0);
-    _el.classList.toggle('has-snooze', snoozing && running === 0);
-
     if (running > 0) {
-        _iconEl.textContent = '\u23F1';  // stopwatch
+        _setIcon('clock');
         _countEl.textContent = String(running);
         _el.title = `${running} job${running > 1 ? 's' : ''} running`;
     } else if (snoozing) {
-        _iconEl.textContent = '\u25D0';  // circle half
+        _setIcon('moon');
         _countEl.textContent = 'snooze';
         _el.title = _status.snooze?.detail
             ? `Snooze: ${_status.snooze.detail}`
             : 'Snooze cycle active';
     } else {
-        _iconEl.textContent = '\u23F1';
+        _setIcon('clock');
         _countEl.textContent = String(scheduled);
         _el.title = `${scheduled} job${scheduled > 1 ? 's' : ''} scheduled`;
     }
+
+    if (_hasError) {
+        _el.title = 'A background job failed — open Jobs for the details';
+    }
+    // The title carries the live count; the accessible name has to say the
+    // same thing, or a screen-reader user hears only "Background jobs".
+    _el.setAttribute('aria-label', _el.title);
 }
 
 function _connectSSE() {
@@ -88,6 +127,7 @@ function _connectSSE() {
         _eventSource = new EventSource('/api/jobs/events');
 
         for (const type of ['job.started', 'job.completed', 'job.error',
+                            'job.test_started', 'job.test_done',
                             'snooze.start', 'snooze.done', 'snooze.activity']) {
             _eventSource.addEventListener(type, (e) => {
                 try {
@@ -110,6 +150,7 @@ function _handleEvent(type, data) {
         _status.running_jobs = (_status.running_jobs || 0) + 1;
     } else if (type === 'job.completed' || type === 'job.error') {
         _status.running_jobs = Math.max(0, (_status.running_jobs || 0) - 1);
+        _hasError = type === 'job.error';
     } else if (type === 'snooze.start') {
         _status.snooze = { ..._status.snooze, running: true, activity: null, detail: null };
     } else if (type === 'snooze.activity') {

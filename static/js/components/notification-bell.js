@@ -1,10 +1,13 @@
 // Pernix — Unified notification bell: questions + notifications in one panel
 
 import { el, text } from '../render.js';
+import { icon } from '../icons.js';
 import { get, post } from '../api.js';
 import { getPermission, requestPermission } from '../notifications.js';
+import { announce, openOverlay } from '../a11y.js';
 
 let _overlay = null;
+let _closeOverlay = null;  // teardown from a11y.js openOverlay()
 let _selectSessionFn = null;  // set by initBell — jump-to-session for item chips
 let _pollTimer = null;
 let _items = [];  // merged list of questions + notifications
@@ -57,6 +60,9 @@ export function refreshBell() { _poll(); }
 // Badge
 // ---------------------------------------------------------------------------
 
+let _lastBadgeCount = 0;
+let _badgeSeen = false;   // first poll is the existing backlog, not an arrival
+
 function _updateBadge(count) {
     const badge = document.getElementById('bell-badge');
     const bell = document.getElementById('notification-bell');
@@ -64,6 +70,17 @@ function _updateBadge(count) {
     badge.textContent = count;
     badge.classList.toggle('has-items', count > 0);
     if (bell) bell.classList.toggle('has-notifications', count > 0);
+    // A badge going 0 -> 1 is invisible to a screen reader (and to anyone not
+    // looking at the corner of the status bar). Only announce arrivals; a
+    // count going DOWN is the user clearing items, which needs no narration.
+    if (_badgeSeen && count > _lastBadgeCount) {
+        const added = count - _lastBadgeCount;
+        announce(added === 1
+            ? `1 new notification, ${count} waiting`
+            : `${added} new notifications, ${count} waiting`);
+    }
+    _lastBadgeCount = count;
+    _badgeSeen = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,7 +97,12 @@ export function openBellPanel() {
     const card = el('div', { class: 'modal-card bell-panel' }, [
         el('div', { class: 'modal-header' }, [
             el('h2', {}, [text('Notifications')]),
-            el('button', { class: 'modal-close', onClick: closeBellPanel }, [text('\u00d7')]),
+            el('button', {
+                class: 'modal-close',
+                title: 'Close notifications',
+                'aria-label': 'Close notifications',
+                onClick: closeBellPanel,
+            }, [icon('x', { size: 14 })]),
         ]),
         el('div', { class: 'modal-body' }, banner ? [banner, itemsContainer] : [itemsContainer]),
     ]);
@@ -90,19 +112,17 @@ export function openBellPanel() {
     }}, [card]);
 
     document.body.appendChild(_overlay);
-    document.addEventListener('keydown', _onEsc);
+    _closeOverlay = openOverlay(card, { onClose: closeBellPanel });
     _renderItems();
 }
 
 export function closeBellPanel() {
+    if (_closeOverlay) { _closeOverlay(); _closeOverlay = null; }
     if (_overlay) {
         document.body.removeChild(_overlay);
         _overlay = null;
     }
-    document.removeEventListener('keydown', _onEsc);
 }
-
-function _onEsc(e) { if (e.key === 'Escape') closeBellPanel(); }
 
 /**
  * Permission banner — browsers suppress permission prompts that aren't
@@ -165,11 +185,25 @@ function _renderItems() {
         Object.keys(savedInputs).length > 0
     ) return;
 
+    // A button IS allowed to be focused across the wipe — but the node it
+    // lives on is about to be replaced, so remember which one it was. The
+    // panel rebuilds every five seconds; without this, Tab lands the user
+    // back at the top of the document on every poll.
+    const mark = (focused && container.contains(focused))
+        ? {
+            key: focused.closest('[data-key]')?.getAttribute('data-key') || null,
+            act: focused.getAttribute('data-act') || null,
+        }
+        : null;
+
     container.innerHTML = '';
 
     if (_items.length === 0) {
         container.appendChild(
-            el('div', { class: 'bell-empty' }, [text('No notifications')])
+            el('div', { class: 'bell-empty' }, [text(
+                'Nothing waiting. Questions from the agent and finished background '
+                + 'turns land here — leave this panel closed and the bell will count them.'
+            )])
         );
         return;
     }
@@ -183,6 +217,12 @@ function _renderItems() {
         const ta = row.querySelector('.question-answer');
         if (ta && savedInputs[row.dataset.qid]) ta.value = savedInputs[row.dataset.qid];
     });
+
+    if (mark && mark.key && mark.act) {
+        const host = container.querySelector(`[data-key="${mark.key}"]`);
+        const btn = host && host.querySelector(`[data-act="${mark.act}"]`);
+        if (btn) btn.focus({ preventScroll: true });
+    }
 }
 
 /**
@@ -194,7 +234,10 @@ function _sessionChip(sessionId) {
     if (!sessionId) return null;
     return el('a', {
         class: 'notif-session-link',
+        href: '#',
+        'data-act': 'open',
         title: 'Open this session',
+        'aria-label': `Open session ${sessionId}`,
         onClick: (e) => {
             e.preventDefault();
             closeBellPanel();
@@ -207,11 +250,16 @@ function _renderQuestion(q) {
     const answerInput = el('textarea', {
         class: 'question-answer',
         placeholder: 'Type your answer...',
+        'aria-label': 'Your answer',
         rows: '2',
     });
-    const statusEl = el('span', { class: 'notif-status' });
+    const statusEl = el('span', { class: 'notif-status', role: 'status' });
 
-    const row = el('div', { class: 'notif-item notif-question', 'data-qid': q.id }, [
+    const row = el('div', {
+        class: 'notif-item notif-question' + (q.urgency === 'high' ? ' urgent' : ''),
+        'data-qid': q.id,
+        'data-key': `q:${q.id}`,
+    }, [
         el('div', { class: 'notif-item-header' }, [
             el('span', { class: 'notif-item-type' }, [text(q.session_title ? `Question from: ${q.session_title}` : 'Agent Question')]),
             el('span', { class: 'notif-item-meta' }, [
@@ -225,8 +273,13 @@ function _renderQuestion(q) {
             answerInput,
             el('div', { class: 'notif-item-buttons' }, [
                 statusEl,
-                el('button', { class: 'btn btn-secondary btn-sm', onClick: () => _dismissQuestion(q.id) }, [text('Dismiss')]),
-                el('button', { class: 'btn btn-primary btn-sm', onClick: async () => {
+                el('button', {
+                    class: 'btn btn-secondary btn-sm',
+                    'data-act': 'dismiss',
+                    'aria-label': 'Dismiss this question',
+                    onClick: () => _dismissQuestion(q.id),
+                }, [text('Dismiss')]),
+                el('button', { class: 'btn btn-primary btn-sm', 'data-act': 'send', 'aria-label': 'Send your answer', onClick: async () => {
                     const answer = answerInput.value.trim();
                     if (!answer) { statusEl.textContent = 'Type an answer'; return; }
                     try {
@@ -242,7 +295,10 @@ function _renderQuestion(q) {
 }
 
 function _renderNotification(n) {
-    return el('div', { class: 'notif-item notif-notification' }, [
+    return el('div', {
+        class: 'notif-item notif-notification' + (n.urgency === 'high' ? ' urgent' : ''),
+        'data-key': `n:${n.id}`,
+    }, [
         el('div', { class: 'notif-item-header' }, [
             el('span', { class: 'notif-item-type' }, [text(n.title || 'Notification')]),
             el('span', { class: 'notif-item-meta' }, [
@@ -253,7 +309,12 @@ function _renderNotification(n) {
         n.body ? el('div', { class: 'notif-item-text' }, [text(n.body)]) : null,
         el('div', { class: 'notif-item-actions' }, [
             el('div', { class: 'notif-item-buttons' }, [
-                el('button', { class: 'btn btn-secondary btn-sm', onClick: () => _dismissNotification(n.id) }, [text('Dismiss')]),
+                el('button', {
+                    class: 'btn btn-secondary btn-sm',
+                    'data-act': 'dismiss',
+                    'aria-label': `Dismiss notification: ${n.title || 'Notification'}`,
+                    onClick: () => _dismissNotification(n.id),
+                }, [text('Dismiss')]),
             ]),
         ]),
     ].filter(Boolean));

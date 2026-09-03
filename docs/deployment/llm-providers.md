@@ -82,7 +82,7 @@ A native provider for the OpenAI API. Because the base URL is overridable, the s
 
 Setup:
 
-1. Add `OPENAI_API_KEY=sk-...` to `.env` (or set it in Settings → LLM Providers → OpenAI API Key). The key is **env-only by design** — it is never stored in `settings.json`, which is plaintext on disk.
+1. Add `OPENAI_API_KEY=sk-...` to `.env` (or set it in Settings → Providers & models → LLM Providers → OpenAI API Key). The key is **env-only by design** — it is never stored in `settings.json`, which is plaintext on disk.
 2. List the models you want in `openai_models` (Settings) or `OPENAI_MODELS` in `.env` (comma-separated, e.g. `gpt-4o,gpt-4o-mini`). This is what routes bare names to the provider.
 3. In Settings, set `llm_model` (or any role) to one of those names.
 
@@ -173,6 +173,16 @@ Router-level failover also covers a provider that's down entirely: a connection 
 **3. One-shot Backup retry.** Every non-streaming call site — compaction, reflect, titles, eval, distill — goes through `chat_with_backup()`: try the role's model, and on any exception retry exactly once on `fallback_model`. Because that retry is re-routed by the model registry, it can land on a different provider or the same one.
 
 If `fallback_model` is empty, all three layers are skipped and the caller sees the original error.
+
+---
+
+## Cost tracking and the fallback-burn watch
+
+`model_prices` is optional per-model USD pricing for `token_usage.cost_estimate` — `{"model_id": {"in": $/1M prompt tokens, "out": $/1M completion tokens}}`, exact model-id match. Unpriced and local models simply keep `cost_estimate` NULL; this is display/telemetry only, nothing routes on it. No Settings UI control — set it via `POST /api/settings` or `data/settings.json`.
+
+`fallback_burn_alert_share` (default `0.25`) and `fallback_burn_min_tokens` (default `50000`) are a standing watch on the Backup role, born from a real incident: a wedged primary provider silently rerouted every call to the paid fallback for days before anyone noticed. Snooze checks the trailing 24h of `token_usage`; when `fallback_model`'s share of tokens reaches `fallback_burn_alert_share` and the window carried at least `fallback_burn_min_tokens`, one high-urgency notification fires per day naming the share and volume. It is watch-only — nothing about routing changes — and `fallback_burn_alert_share = 0` disables it.
+
+`provider_quota_cooldown_s` (default `600`) is a related guard at the router layer: once a provider 403s on an exhausted quota, failover *to* that model is refused for this many seconds, so a dead key can't mask the real error behind a doomed retry.
 
 ---
 

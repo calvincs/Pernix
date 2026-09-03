@@ -26,6 +26,12 @@ def _duplicate_last_section(md_path, extra_header: str, body_suffix: str = "") -
 
 def test_repair_drops_identical_twins_and_re_epochs_real_collisions(tmp_path, monkeypatch):
     monkeypatch.setattr("config.settings.memory_dir", str(tmp_path / "memories"))
+    # get_memory_store() is a process-wide singleton with no per-test reset,
+    # so whether it points at THIS tmp_path depends on which test in this
+    # xdist worker built it first. Clear it, and the health check it runs on
+    # first init, so the assertions below are about this test's corpus only.
+    monkeypatch.setattr("core.memory.store._store", None)
+    monkeypatch.setattr("core.memory.store._startup_health_checked", True)
     store = get_memory_store()
     store.add_entry(
         content="Per-video output directories prevent collisions.", file_name="test.twins", entry_type="decision"

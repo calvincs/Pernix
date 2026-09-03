@@ -6,6 +6,30 @@ This is **not** a complete commit log — only changes you'd actually care about
 
 ---
 
+## v3.1.0 — 2026-09-03
+
+Everything since v3.0.0 (2026-08-26) in one tagged release: a week of field campaigns on the reference box, one commit per finding. The quick tour of what's new, then what's gone. Most of it ships **off by default**; a couple of exceptions are on by default and called out below.
+
+**Spaces.** Named, colored groups of long-lived sessions that share directives, memory, workspace, and kernel — a space's chats never roll off the sidebar, and cron jobs, RLM runs, and memory writes all route through it. See [guides/spaces.md](guides/spaces.md).
+
+**Space suggestions** (off by default, `space_suggest_enabled`). At idle, Pernix looks at the ordinary chats you keep coming back to and offers — never creates — a space for the habit: a sparkle row in the sidebar, a review sheet with a drafted directive, and a decline that's remembered so the same grouping isn't re-proposed.
+
+**A native MCP client.** External Model Context Protocol tool servers — local (stdio) or remote (Streamable HTTP) — register as first-class Pernix tools with scout curation, the safety gate, and health metrics. On by default (`mcp_enabled`) but fully inert with zero servers configured; paste a Claude Code / Cursor config straight into Explorer → Capabilities → Servers (MCP). See [mcp.md](mcp.md).
+
+**The front end, rebuilt for someone who did not write it.** A light theme (System/Dark/Light under Settings → Providers & models → Appearance), accessibility as a floor (keyboard operability, focus rings, live announcements), a real phone-and-tablet tier (`compact.css` + `touch.css`, replacing `mobile.css`), the Explorer and Settings regrouped into five and six purpose-based groups, a resizable sidebar, and a State timeline that opens on a **Lane** of turns, tells the **Story** of the one you pick, and draws the state machine as a **Map** (Mermaid is gone).
+
+**Archive, not delete.** A chat can be archived — kept, searchable, read-only — instead of deleted. A daily sweep archives plain chats idle past `session_archive_idle_days` (default 30 days); a separate setting controls hard-deletion of old archives (default: never). The new Storage tab owns both knobs, plus database size and backup rotation.
+
+**The self-improvement stack gets sharper.** Skill self-healing that actually fires (a workaround a session finds now folds back into the skill), a change-driven canary suite (golden tasks re-test only what a change touched, instead of everything every night), outcome-driven adaptive retention (a hint that's cited but wrong now retires), a scout audit, and a reflect calibration pass.
+
+**The September stability audit.** 122 findings across 11 passes on the reference deployment; every Critical and High one fixed at its mechanism with a dated regression test under `tests/regressions/`.
+
+**Gone:** the never-used `get_tool_schema`, `delete_skill`, and `list_skills` agent tools (the Explorer's own delete action and `discover_tools`/`discover_skills` already covered what they did), Mermaid (3.3 MB) from the timeline, and `mobile.css`.
+
+Migrations **v30–v35** run automatically on first start. Action items, if any apply to you, are in [upgrade.md](upgrade.md#2026-09-03--v310).
+
+*Credits: built by Calvin ([@calvincs](https://github.com/calvincs)) with Claude (Anthropic) pair-programming the whole arc — and Pernix itself, which ran the field campaigns on the reference box, surfaced its own failures, and validated the fixes.*
+
 ## v3.0.0 — 2026-08-26
 
 The first tagged release since v2.9.0, and the biggest. The quick tour of what's new, then what's gone. Everything new that changes agent behavior ships **off by default** unless noted.
@@ -88,7 +112,7 @@ The DB schema lands at **v29** (from v19); all ten migrations run automatically 
 
 **Restart recovery for stuck sessions.** Sessions stuck in `PROCESSING` or `AWAITING_WORKERS` from a prior crash are reconciled to `IDLE_READY` immediately at startup, instead of waiting for the 5-minute reaper tick. (migration v16, commit `cf849fa`)
 
-**`delete_skill` and `delete_workflow` tools.** Both are dangerous (require `ask_user` + `approve_dangerous_tool`); cron sessions auto-bypass the gate. (commit `9085876`) *(`delete_workflow` removed 2026-08.)*
+**`delete_skill` and `delete_workflow` tools.** Both are dangerous (require `ask_user` + `approve_dangerous_tool`); cron sessions auto-bypass the gate. (commit `9085876`) *(`delete_workflow` removed 2026-08; `delete_skill` removed 2026-09 — zero uses in 10 weeks, UI delete covers it.)*
 
 **Workspace upload limit raised from 10 MB to 250 MB.** Per file. Useful for media-cast skills and bulk file analysis. (commit `9b883b3`)
 
@@ -116,7 +140,7 @@ The DB schema lands at **v29** (from v19); all ten migrations run automatically 
 
 ## Database migrations (chronological)
 
-The DB schema is at v29. Each migration runs automatically on next start. Unless you've made manual changes to `data/sessions.db`, you don't need to do anything — Pernix migrates forward in place.
+The DB schema is at v35. Each migration runs automatically on next start. Unless you've made manual changes to `data/sessions.db`, you don't need to do anything — Pernix migrates forward in place.
 
 | Version | Description |
 |---|---|
@@ -149,6 +173,12 @@ The DB schema is at v29. Each migration runs automatically on next start. Unless
 | 27 | `jobs` table for background jobs (`job_start`/`job_status`/`job_tail`/`job_kill`) |
 | 28 | Questions become an audit trail (`answer`, `answered_at`; rows kept) |
 | 29 | `rlm_runs.surfaced_at` — orphaned-run surfacing (history backfilled) |
+| 30 | Canary run outcomes: separate timeout/error/noop from honest gate failures |
+| 31 | Resumable workers: persist a worker's pinned model and typed kind so rehydration after a reap/restart restores its identity |
+| 32 | Re-armable refine watermarks: convert `refined:{sid}` snooze state from ISO timestamps to the session's max message id |
+| 33 | Spaces: named/colored long-lived session groups |
+| 34 | Archive, not delete: a session can leave the sidebar with every message intact |
+| 35 | Space suggestions: proposals the user accepts or declines, never applied on their own |
 
 ---
 

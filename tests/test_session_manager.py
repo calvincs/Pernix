@@ -251,6 +251,33 @@ def test_active_count():
     assert mgr.active_count() == 2
 
 
+def test_busy_count_counts_work_not_loaded_sessions():
+    """A loaded session is not a working one — that is the whole distinction
+    /api/health's sessions_active used to get wrong (it reported the loaded
+    count, and sessions stay loaded ~30min after their last turn)."""
+    mgr = _make_manager()
+    sid = mgr.create_session(title="Idle but loaded")
+    session = mgr.get(sid)
+
+    session._state_v2 = sv2.SessionStateV2.IDLE_READY
+    assert mgr.busy_count() == 0
+    assert mgr.active_count() == 1
+
+    session._state_v2 = sv2.SessionStateV2.PROCESSING
+    assert mgr.busy_count() == 1
+    assert mgr.active_count() == 1
+
+    # Same rule as has_active_work, counted rather than short-circuited.
+    other = mgr.get(mgr.create_session(title="Also working"))
+    other._state_v2 = sv2.SessionStateV2.SCOUTING
+    assert mgr.busy_count() == 2 and mgr.has_active_work() is True
+
+    session._state_v2 = sv2.SessionStateV2.IDLE_READY
+    other._state_v2 = sv2.SessionStateV2.AWAITING_USER
+    assert mgr.busy_count() == 0 and mgr.has_active_work() is False
+    assert mgr.active_count() == 2
+
+
 def test_reap_idle_sessions():
     mgr = _make_manager()
     sid = mgr.create_session(title="Idle")

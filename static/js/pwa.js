@@ -16,6 +16,12 @@ if ('serviceWorker' in navigator) {
                 reg.update().catch(function () { /* offline is fine */ });
             }
         });
+        // visibilitychange alone never fires for a desktop tab left open for
+        // days, which is exactly the session that ends up several builds
+        // behind. Hourly is cheap: an unchanged /sw.js is a 304.
+        setInterval(function () {
+            reg.update().catch(function () { /* offline is fine */ });
+        }, 60 * 60 * 1000);
     }).catch(function (e) {
         console.warn('SW registration failed:', e);
     });
@@ -34,14 +40,32 @@ if ('serviceWorker' in navigator) {
         }
         // Visible: never yank the page mid-interaction — offer a tap.
         if (document.getElementById('sw-update-banner')) return;
-        var banner = document.createElement('button');
+        // Styling lives in layout.css / touch.css (#sw-update-banner) so it
+        // uses the real tokens and can be anchored above the composer on a
+        // phone, where a centred pill sat on top of the send button.
+        var banner = document.createElement('div');
         banner.id = 'sw-update-banner';
-        banner.textContent = 'Pernix updated — tap to refresh';
-        banner.style.cssText = 'position:fixed;bottom:calc(16px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:10000;padding:10px 18px;border-radius:999px;border:1px solid var(--border,#444);background:var(--surface,#1c1c1e);color:var(--text,#eee);font:inherit;box-shadow:0 4px 16px rgba(0,0,0,.35);cursor:pointer;';
-        banner.addEventListener('click', function () {
+
+        var refresh = document.createElement('button');
+        refresh.type = 'button';
+        refresh.className = 'sw-update-action';
+        refresh.textContent = 'Pernix updated — tap to refresh';
+        refresh.addEventListener('click', function () {
             reloaded = true;
             location.reload();
         });
+
+        // Without this the pill is unremovable: the only way out was to take
+        // the update you were in the middle of something else to avoid.
+        var dismiss = document.createElement('button');
+        dismiss.type = 'button';
+        dismiss.className = 'sw-update-dismiss';
+        dismiss.setAttribute('aria-label', 'Dismiss');
+        dismiss.textContent = '\u00d7';
+        dismiss.addEventListener('click', function () { banner.remove(); });
+
+        banner.appendChild(refresh);
+        banner.appendChild(dismiss);
         document.body.appendChild(banner);
     });
 }

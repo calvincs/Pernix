@@ -13,7 +13,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ENV_PATH = Path(".env")
 
 # Single source of truth for the release version (health endpoints, FastAPI docs).
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 
 # Fields that are machine-specific and should not be persisted
 _NO_PERSIST = {
@@ -99,6 +99,22 @@ class Settings:
     # doomed request and — worse — replaces the original error with the
     # quota 403, masking what actually went wrong (0 disables the breaker).
     provider_quota_cooldown_s: int = 600
+    # Fallback-burn watch: fallback_model is the paid/backup tier, and a
+    # silently wedged primary provider once rerouted every turn there for
+    # days before anyone noticed (the 2026-08-19 aibox key-loss incident).
+    # Snooze checks the trailing 24h of token_usage: when the fallback
+    # model's token share reaches fallback_burn_alert_share AND at least
+    # fallback_burn_min_tokens were spent in the window, a high-urgency
+    # notification fires (deduped daily). Watch-only — routing never
+    # changes. share=0 disables the watch.
+    fallback_burn_alert_share: float = 0.25
+    fallback_burn_min_tokens: int = 50000
+    # Optional per-model pricing for token_usage.cost_estimate: model id →
+    # {"in": USD per 1M prompt tokens, "out": USD per 1M completion tokens}.
+    # Unpriced models keep cost_estimate NULL (the pre-existing behavior);
+    # local models simply stay unlisted. Display/telemetry only — nothing
+    # routes on cost.
+    model_prices: dict = field(default_factory=dict)
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_max_concurrent: int = 4  # Max concurrent OpenRouter requests
     openrouter_models: list = field(default_factory=list)
@@ -170,6 +186,13 @@ class Settings:
     # (core/context/compiler.py). Past it, the oldest attachments are dropped
     # back to text markers. 32MB fits audio (a 19MB WAV → ~25MB base64).
     max_inline_attach_bytes: int = 32 * 1024 * 1024
+    # Turn-boundary ledger (agent-ergonomics plan, Tier 1): a delta block in
+    # the volatile tail telling the agent what changed since its previous
+    # turn — finished workers/jobs/RLM runs, its last reflect verdict,
+    # adaptive changes, canary regressions, platform restarts. Composition
+    # over existing tables; renders nothing when nothing changed. Off = the
+    # tail is byte-identical to the pre-ledger shape.
+    turn_ledger_enabled: bool = True
 
     # --- Agent Loop ---
     # Raised 10 -> 50 (audit P2): ten rounds was a weak-local-model-era value
@@ -183,6 +206,14 @@ class Settings:
     round_cap_auto_continue: int = 1
     # (max_continuations removed in plan 3b — it was referenced nowhere in
     #  core logic; goal continuation_budget is the real, per-goal knob.)
+    # Forced follow-up (spec Feature 9): when a turn ends with prose that
+    # announces MORE work ("Next, I'll…") instead of doing it, inject one
+    # bounded in-turn nudge to keep the agent working rather than paying for
+    # a post-hoc reflect retry. The trigger is narrow (future-intent tail, no
+    # trailing question, courtesy closers excluded) so finished answers are
+    # never looped.
+    forced_followup_enabled: bool = True
+    forced_followup_max_per_turn: int = 1
 
     # --- Scout ---
     scout_enabled: bool = True
@@ -339,32 +370,45 @@ class Settings:
 
     # --- Golden-task canary suite (plan 3.5, off by default) ---
     # Canned tasks + deterministic gates run headlessly through the full
-    # pipeline in session_type="canary" sessions. The Phase 4 tripwire's
-    # primary signal. Zero rows, zero behavior change while off.
+    # pipeline in session_type="canary" sessions. The tripwire's primary
+    # signal. Zero rows, zero behavior change while off.
+    #
+    # Canaries are CHANGE-DRIVEN: they run when something they cover changes
+    # (an adaptive batch, a skill edit, a model swap, a deploy), not on a
+    # wall clock. The only standing schedule is a small heartbeat — the
+    # canary_heartbeat_per_night least-recently-run active canaries per
+    # night — which keeps every canary's history warm enough that a failure
+    # right after a change is provably the change's fault.
     canary_enabled: bool = False
     canaries_dir: str = "data/canaries"
-    canary_schedule: str = "0 3 * * *"  # nightly sweep cron expression
-    canary_max_concurrent: int = 1
+    canary_schedule: str = "0 3 * * *"  # heartbeat cron expression
+    canary_heartbeat_per_night: int = 2
     canary_retention_days: int = 30
-    # Regression detection (consumed by the Phase 4 tripwire): compare a
-    # post-batch sweep's pass rate against the trailing N scheduled sweeps;
-    # a drop larger than the delta is a tripwire signal.
-    canary_baseline_runs: int = 3
+    # Per-task tripwire (core/adaptive/tripwire.py): a canary may testify
+    # against a batch only when its trailing canary_baseline_runs runs before
+    # the apply were all green. canary_regression_delta now feeds only the
+    # PASSIVE post-mortem drift signal.
+    canary_baseline_runs: int = 5
     canary_regression_delta: float = 0.15
+    # The post-batch probe: covering canaries (matched via `covers:`) plus
+    # the sentinel-tagged ones, capped here. Sentinels are the cheap, broad
+    # tasks that ride along on every probe.
+    canary_post_batch_max: int = 4
     # Graduated autonomy (suite self-management, active only under
     # canary_enabled). Auto-admission replaces the human approval click with
     # mechanical gates: an allowlist proof over the gate commands plus vetting
     # runs; specs the machine can't prove safe still queue for human review.
     # The maintenance sweep promotes vetted canaries, tags flapping ones
-    # flaky, retires long-green ones to .retired/ quarantine, and purges the
-    # quarantine after a retention window. Hard invariant (enforced in
-    # core/canary/maintain.py): a canary whose latest run failed is never
+    # flaky, PARKS long-green ones (off the heartbeat, still coverage-run,
+    # auto-unparked by a red run), retires exhausted probes, and purges the
+    # .retired/ quarantine after a retention window. Hard invariant (enforced
+    # in core/canary/maintain.py): a canary whose latest run failed is never
     # auto-mutated — only a pass streak or a human moves it.
     canary_auto_admit: bool = True
     canary_auto_maintain: bool = True
     canary_vetting_runs: int = 3  # consistent runs required to promote out of vetting
-    canary_retire_after_passes: int = 25  # consecutive passes before auto-retirement
-    canary_purge_after_days: int = 30  # quarantined canaries older than this are deleted
+    canary_park_after_passes: int = 25  # consecutive passes before auto-parking
+    canary_purge_after_days: int = 30  # retired canaries older than this are deleted
     canary_max_suite: int = 24  # auto-admission stops at this suite size (human path stays open)
 
     # --- Adaptive Layer (plan §6, off by default) ---
@@ -389,6 +433,37 @@ class Settings:
     adaptive_max_pending_proposals: int = 200  # review queue cap (0 = unbounded)
     adaptive_max_pending_per_producer: int = 60  # one producer's share of it (0 = unbounded)
     adaptive_proposal_ttl_days: int = 30  # pending proposals lapse after this (0 = never)
+    # Value-based retirement (v3.1): an entry that rendered into prompts for
+    # this many INSTRUMENTED days (counted from the usage epoch, stamped on
+    # the sweep's first run) without one recorded use — scout's used_hints,
+    # reflect's cited_policies — is retired. Journaled soft-deletes, one
+    # aggregate notification, one-click rollback. 0 disables. Candor-owned
+    # and human-authored entries are exempt.
+    adaptive_usage_retire_days: int = 45
+    # prompt_note has no producer-side retirement loop at all; this TTL is
+    # its backstop (0 = never). A still-useful note re-mints cheaply.
+    adaptive_prompt_note_ttl_days: int = 90
+    # Failure-dominated retirement: an entry whose attributed OUTCOMES are
+    # mostly failures retires even though it is used — before this, usage
+    # alone kept a provably harmful hint alive forever while an uncited good
+    # one died at the retire window. Needs at least min_uses attributed
+    # outcomes (successes+failures, written by synthesis) before the share
+    # is trusted; retires when the success share is below max_success.
+    # min_uses=0 disables the branch.
+    adaptive_harmful_retire_min_uses: int = 5
+    adaptive_harmful_retire_max_success: float = 0.3
+    # A suspect flag raised by the PASSIVE post-mortem signal alone can never
+    # self-clear (its comparison windows are frozen at the apply). After this
+    # many days it auto-clears with an annotation; canary-confirmed flags are
+    # exempt. 0 = flags persist until human dismiss (the pre-v3.1 behavior).
+    adaptive_suspect_ttl_days: int = 7
+    # The agent's own authorship valve: the adaptive_note tool lets the live
+    # agent mint prompt_note/routing_hint edits the moment it learns
+    # something, instead of hoping refine distills it later. Full guardrails:
+    # the content lint applies, the normal batch pipeline + tripwire watch
+    # it, 2 mints/day, never policy/worker_spec. Off by default per house
+    # convention (flip on where wanted).
+    adaptive_agent_notes_enabled: bool = False
     # The review queue is a VETO WINDOW, not an approval gate: a pending
     # proposal older than this many hours is approved by the system itself —
     # same apply path as a human approval, journaled, post-batch-swept and
@@ -402,6 +477,16 @@ class Settings:
     # graduated-autonomy path (canary_auto_admit) and a human invariant (I6).
     adaptive_auto_approve_after_hours: int = 24
     adaptive_max_auto_approvals_per_day: int = 40
+
+    # --- Skill self-healing (refine skill proposals, veto-window apply) ---
+    # Same veto-window contract as adaptive_auto_approve_after_hours, for
+    # SKILL.md improvement proposals: a pending proposal older than the
+    # window is machine-validated (skill exists + enabled, change bounded,
+    # frontmatter preserved) and applied with a timestamped backup under
+    # data/skill_backups/. A human can reject anything in the Skills tab
+    # inside the window; 0 disables auto-apply (manual Apply only).
+    skill_proposal_auto_apply_after_hours: int = 24
+    skill_proposal_max_auto_applies_per_day: int = 5
 
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
@@ -446,6 +531,41 @@ class Settings:
     # out of dedup/evidence silently. Terminal statuses only (refuted,
     # expired, archived, promoted) — pending and validated rows are work.
     dream_hypothesis_retention_days: int = 90
+
+    # --- MCP (Model Context Protocol client) ---
+    # Connects to external MCP servers (stdio subprocess or Streamable HTTP)
+    # and registers their tools in the ToolRegistry as mcp_<server>_<tool>
+    # with source="mcp" — scout curation, the dangerous-tool gate, per-tool
+    # health metrics and post-mortems all apply unchanged. Enabled by
+    # default but fully inert until a server is configured in
+    # data/mcp_servers.json (industry convention: configuring a server IS
+    # the opt-in). A hot toggle-off shuts the manager down (stdio children
+    # die) but keeps the schemas registered — calls return a clear disabled
+    # error, never a run. Design: docs/dev/mcp-integration-plan.md.
+    mcp_enabled: bool = True
+    # Allow stdio (local subprocess) servers. False = remote-only mode; a
+    # stdio entry refuses to connect. The supply-chain valve — a stdio
+    # server is arbitrary local code.
+    mcp_stdio_enabled: bool = True
+    # Safety level stamped on MCP tools with no per-server override.
+    # Server-sent annotations may only TIGHTEN this (destructive_hint →
+    # dangerous), never loosen it — annotations are server-controlled and
+    # therefore untrusted.
+    mcp_default_safety: str = "caution"
+    mcp_call_timeout: int = 60  # per-call ceiling (s); per-server override in mcp_servers.json
+    mcp_connect_timeout: int = 30  # transport open + initialize + tools/list budget (s)
+    # Idle stdio servers are suspended (child reaped, tools kept registered,
+    # respawned on the next call) after this many seconds. 0 disables.
+    # HTTP connections are cheap and never reaped.
+    mcp_idle_seconds: int = 900
+    mcp_max_servers: int = 10  # configured-server cap (sanity valve, not a quota)
+    mcp_max_tools_per_server: int = 50  # excess tools are skipped with a warning
+    # Server-supplied tool descriptions are untrusted text headed for the
+    # system prompt: cap them (chars) before registration.
+    mcp_max_description_chars: int = 1024
+    # Periodic tools/list re-check for servers that don't send listChanged
+    # notifications. 0 disables the sweep (manual mcp_reload_server only).
+    mcp_refresh_interval_s: int = 900
 
     # --- Dream (idle-time introspection add-on, off by default) ---
     # Hypothesis generation over memory/Candor/post-mortems, validated against
@@ -495,12 +615,6 @@ class Settings:
     # review's forensic record. 0 = keep forever.
     telos_soup_archive_retention_days: int = 180
     telos_soup_context_entries: int = 10  # memory entries in the band sample
-    telos_budget_share_max: float = 0.35  # binding-monitor 7d share alarm (§5.2)
-    telos_claims_floor_per_window: int = 1  # binding: new-claims floor
-    telos_divergence_max: float = 0.15  # ledger reconciliation alarm (§5.4)
-    telos_alarm_autoclose: bool = True  # discharge pass may close re-checked alarms (E3)
-    telos_alarm_autoclose_checks: int = 3  # consecutive clean re-checks to discharge
-    telos_alarm_autoclose_window_hours: int = 24  # min first→last clean-check span
 
     # --- Evaluation (extension) ---
     eval_auto: bool = False
@@ -540,6 +654,30 @@ class Settings:
 
     # --- Storage ---
     max_fetch_size: int = 100_000
+    # Archive, not delete. A chat idle this long leaves the sidebar and its
+    # space group; every message stays, it stays searchable, and it opens
+    # read-only with a Restore button. Pinned chats are exempt. 0 = never
+    # auto-archive (the archive is then a manual filing cabinet, which is
+    # still the point — deleting was the only way to clear the list before).
+    session_archive_idle_days: int = 30
+    # Hard-delete sessions that have been archived this long. Off by
+    # default, and deliberately: the archive is what "not delete" means, so
+    # a horizon on it is the user opting back in to losing transcripts.
+    session_delete_archived_days: int = 0
+
+    # --- Space suggestions ---
+    # Pernix scans the last N days of ordinary chats at idle and offers to
+    # turn a recurring kind of work into a space (or to move loose chats
+    # into one that already exists). Off by default, and inert when off:
+    # snooze Activity 2d is absent from the ladder entirely, so no
+    # background call is spent and no table is read. Nothing is ever
+    # created, moved or written to disk without the user clicking accept.
+    space_suggest_enabled: bool = False
+    space_suggest_window_days: int = 30  # how far back a scan looks
+    space_suggest_min_sessions: int = 5  # members a cluster needs to be offered
+    space_suggest_min_days: int = 3  # distinct calendar days a cluster needs
+    space_suggest_scan_interval_hours: int = 24  # floor between scheduled scans
+    space_suggest_ttl_days: int = 14  # pending suggestions expire after this
 
     # --- Backups (maintenance.py 24h tier; scripts/backup.py on demand) ---
     # How many timestamped snapshots to keep in data/backups. Rotation is
@@ -584,6 +722,15 @@ class Settings:
     reflect_max_retries: int = 2  # Max retry attempts before giving up
     reflect_max_retries_worker: int = 2  # Separate cap for worker sessions — bounds fan-out cost (2 retries allowed)
     reflect_min_messages: int = 3  # Min messages to trigger (skip trivial exchanges)
+    # Materiality floor for non-pass verdicts (2026-08-27 audit): the prompt
+    # defines confidence <0.5 as "evidence is ambiguous" and the materiality
+    # bar grades ambiguity as pass — yet low-confidence retry/escalate
+    # verdicts kept landing (a 0.45-confidence escalate over evidence the
+    # verifier itself couldn't see). A non-pass verdict the model grades
+    # below this floor is downgraded to pass-with-lessons mechanically.
+    # Coerced verdicts (malformed grades) are exempt and stay conservative.
+    # 0 disables.
+    reflect_nonpass_confidence_floor: float = 0.5
     reflect_full_transcript: bool = (
         False  # DEPRECATED: reflect now always sees the per-attempt transcript; kept as a no-op for backwards compat
     )
@@ -621,6 +768,10 @@ class Settings:
         # Formula is min(scout_timeout × 3 + 30, this cap). Raise to be more conservative.
     )
     post_mortem_retention_days: int = 90  # Days to keep synthesized post-mortems before snooze sweeps them
+    # Notifications had NO retention at all — the table only ever shrank by
+    # manual dismiss clicks, and idle-loop producers refill it on a fixed
+    # cadence. 0 = keep forever (the old behavior).
+    notification_retention_days: int = 30
 
     # --- Notifications ---
     notify_webhook_url: str = ""  # POST here when ask_user fires (empty = disabled)
@@ -709,7 +860,44 @@ class Settings:
             except (ValueError, TypeError) as e:
                 logger.warning("Failed to coerce setting %s=%r: %s", key, value, e)
 
+        instance._clamp_unsafe_values()
         return instance
+
+    # Settings whose value is used as a divisor, a semaphore size or a
+    # timeout budget: a zero or negative one does not degrade, it breaks a
+    # loop. snooze_interval_ticks = 0 raised ZeroDivisionError on every
+    # maintenance tick — swallowed by the tick handler, so snooze simply
+    # never ran again and the log filled with tracebacks.
+    _MIN_SAFE_VALUES = {
+        "snooze_interval_ticks": 1,
+        "snooze_max_cycle_seconds": 1,
+        "llm_max_concurrent": 1,
+        "openai_max_concurrent": 1,
+        "openrouter_max_concurrent": 1,
+        "max_concurrent_workers": 1,
+        "max_pending_messages": 1,
+        "max_tool_rounds": 1,
+        "cron_dispatch_timeout": 1,
+        "mcp_call_timeout": 1,
+        "mcp_connect_timeout": 1,
+        "mcp_max_servers": 1,
+    }
+
+    def _clamp_unsafe_values(self) -> None:
+        """Raise any of the above back to its floor, loudly.
+
+        Type coercion alone is not validation: a hand-edited settings.json
+        (or an older API write) can put a 0 in a field the code divides by
+        or sizes a scheduler from.
+        """
+        for name, floor in self._MIN_SAFE_VALUES.items():
+            try:
+                value = int(getattr(self, name))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if value < floor:
+                logger.warning("Setting %s=%r is below the safe minimum; using %d", name, value, floor)
+                setattr(self, name, floor)
 
 
 def load_env() -> None:

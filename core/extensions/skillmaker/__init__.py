@@ -189,14 +189,28 @@ def update_skill(
         frontmatter["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
     body = instructions if instructions else existing_body
 
-    # Write updated SKILL.md
-    content = _build_skill_md(
-        name=frontmatter["name"],
-        description=frontmatter["description"],
-        instructions=body,
-        tags=frontmatter.get("tags", []),
-        version=frontmatter.get("version", "1.0"),
-    )
+    # Write updated SKILL.md.
+    #
+    # Round-trip the WHOLE frontmatter and overwrite only the touched keys.
+    # _build_skill_md emits four fixed keys, so rebuilding from it silently
+    # dropped everything else the file carried — `verify:` above all, whose
+    # loss makes the maintenance sweep retire the skill's behavioural canary
+    # ("verify block removed") and purge it 30 days later, and `scripts:`,
+    # the contract the skill's own helper programs are declared under.
+    updated = dict(frontmatter)
+    updated["name"] = frontmatter["name"]
+    updated["description"] = frontmatter["description"]
+    updated["tags"] = frontmatter.get("tags", [])
+    updated.setdefault("version", "1.0")
+    yaml_str = yaml.dump(updated, default_flow_style=False, sort_keys=False).strip()
+    content = f"---\n{yaml_str}\n---\n\n{body}\n"
+
+    # Same backup create_skill takes: this path can now rewrite a file the
+    # user hand-edited, so a bad update must be recoverable.
+    try:
+        (skill_path / "SKILL.md.bak").write_text(skill_md.read_text(encoding="utf-8"), encoding="utf-8")
+    except OSError as e:
+        logger.warning("Could not back up %s before update: %s", skill_md, e)
     skill_md.write_text(content, encoding="utf-8")
 
     # Rescan
@@ -206,36 +220,6 @@ def update_skill(
     reg.rescan(Path(settings.skills_dir))
 
     return f"Skill '{name}' updated."
-
-
-def list_skills(_context: dict | None = None) -> str:
-    """List all enabled installed skills with their metadata.
-
-    Disabled skills are hidden from the agent (they appear in the Explorer UI
-    only). The agent should not be told about skills it cannot use.
-    """
-    from core.skills.registry import get_skill_registry
-
-    reg = get_skill_registry()
-    skills = reg.enabled_skills()
-
-    if not skills:
-        return "No skills installed. Use create_skill to create one."
-
-    lines = []
-    for s in sorted(skills, key=lambda x: x.name):
-        tags_str = ", ".join(s.tags[:5]) if s.tags else "none"
-        resources = reg.list_resources(s.name)
-        extras = []
-        if "scripts" in resources:
-            extras.append(f"{len(resources['scripts'])} scripts")
-        if "references" in resources:
-            extras.append(f"{len(resources['references'])} refs")
-        extra_str = f" [{', '.join(extras)}]" if extras else ""
-        lines.append(f"- **{s.name}** (v{s.version}): {s.description}")
-        lines.append(f"  tags: {tags_str}{extra_str}")
-
-    return "\n".join(lines)
 
 
 def add_skill_script(
@@ -543,17 +527,6 @@ def register(reg) -> None:
         timeout=30,
         parallel_safe=False,
         safety_level="safe",
-        **common,
-    )
-
-    reg.register(
-        name="list_skills",
-        func=list_skills,
-        description="List all installed skills with their metadata, tags, and resources.",
-        parameters={"type": "object", "properties": {}},
-        tags=tags_base + ["list", "show", "available"],
-        timeout=15,
-        parallel_safe=True,
         **common,
     )
 

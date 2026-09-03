@@ -123,6 +123,15 @@ def score_pair(a: FileSignature, b: FileSignature, threshold: float | None = Non
     realistic memory stores; without it ``find_clusters`` is O(F² × E_a × E_b)
     pairwise SequenceMatcher and runs for minutes.
     """
+    # Space-bucket boundary (v33): files in different buckets never merge,
+    # however similar they look — "pernix.space.alpha.research" vs
+    # "pernix.space.beta.research" is exactly the name-similar pair the
+    # 0.35 name weight would otherwise fuse across spaces.
+    from core.memory.routing import space_bucket
+
+    if space_bucket(a.name) != space_bucket(b.name):
+        return 0.0
+
     # Normalized name similarity
     if a.normalized == b.normalized:
         name_sim = 1.0

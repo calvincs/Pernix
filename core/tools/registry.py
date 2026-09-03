@@ -50,6 +50,15 @@ SYNONYMS: dict[str, list[str]] = {
         "completion",
     ],
     "tool": ["capability", "function", "action", "utility"],
+    "mcp": [
+        "server",
+        "integration",
+        "connector",
+        "external",
+        "protocol",
+        "plugin",
+        "service",
+    ],
     "rlm": [
         "recursive",
         "long context",
@@ -97,6 +106,9 @@ TOOL_COOCCURRENCE: dict[str, list[str]] = {
     "search_web": ["http_get", "browse_web"],
     "http_get": ["search_web", "browse_web"],
     "browse_web": ["search_web", "http_get"],
+    "mcp_list_servers": ["mcp_add_server", "mcp_reload_server", "mcp_remove_server"],
+    "mcp_add_server": ["mcp_list_servers", "mcp_reload_server"],
+    "mcp_reload_server": ["mcp_list_servers"],
 }
 
 
@@ -265,21 +277,34 @@ class ToolIndex:
         self._entries: dict[str, _IndexEntry] = {}
 
     def rebuild(self, tools: dict[str, ToolDef]) -> None:
-        """Rebuild index from registry."""
-        self._entries.clear()
+        """Rebuild index from registry.
+
+        Built into a fresh dict and swapped at the end, with each tool guarded:
+        MCP tool schemas come from a remote server, so `properties` can be
+        null or a list. Clearing in place and then raising on the first bad
+        one left the index holding only the tools iterated before it —
+        builtins included — and the supervisor re-wiped it on every retry.
+        One malformed remote tool must cost that tool, not discovery.
+        """
+        built: dict[str, _IndexEntry] = {}
         for name, tool in tools.items():
-            param_names = set(tool.parameters.get("properties", {}).keys())
-            entry = _IndexEntry(
-                name=name,
-                description=tool.description,
-                category=tool.category,
-                tags=list(tool.tags),
-                name_tokens=_tokenize(name.replace("_", " ")),
-                desc_tokens=_tokenize(tool.description),
-                tag_tokens={t.lower() for t in tool.tags},
-                param_tokens={p.lower() for p in param_names},
-            )
-            self._entries[name] = entry
+            try:
+                params = tool.parameters if isinstance(tool.parameters, dict) else {}
+                props = params.get("properties")
+                param_names = set(props.keys()) if isinstance(props, dict) else set()
+                built[name] = _IndexEntry(
+                    name=name,
+                    description=tool.description,
+                    category=tool.category,
+                    tags=list(tool.tags),
+                    name_tokens=_tokenize(name.replace("_", " ")),
+                    desc_tokens=_tokenize(tool.description),
+                    tag_tokens={t.lower() for t in tool.tags},
+                    param_tokens={p.lower() for p in param_names},
+                )
+            except Exception as e:
+                logger.warning("Skipping tool %r in the discovery index: %s", name, e)
+        self._entries = built
 
     def search(self, query: str, category: str | None = None, limit: int = 10) -> list[ToolSummary]:
         """Search tools by natural language query."""
@@ -383,8 +408,24 @@ class ToolRegistry:
             long_poll=long_poll,
             idempotent=idempotent,
         )
+        # A user's persisted safety override outranks the code default — same
+        # semantics load_config applies at boot, extended to tools that
+        # register after it (MCP servers connect asynchronously post-boot).
+        if name in self._safety_overrides:
+            self._tools[name].safety_level = self._safety_overrides[name]
         self.metrics.setdefault(name, ToolHealthMetrics())
         logger.debug("Registered tool: %s [%s]", name, source)
+
+    def unregister(self, name: str) -> bool:
+        """Remove a tool from the registry. Returns True if it existed.
+
+        Metrics, the disabled flag, and any safety override are all kept —
+        they are name-keyed on purpose so a tool that re-registers (an MCP
+        server refresh, a reconnect) keeps its history and the user's
+        settings. Callers must rebuild_index() after an unregister batch,
+        same as after registration.
+        """
+        return self._tools.pop(name, None) is not None
 
     def get(self, name: str) -> ToolDef | None:
         return self._tools.get(name)
@@ -483,9 +524,15 @@ class ToolRegistry:
                 data = json.loads(TOOLS_CONFIG_PATH.read_text())
                 self._disabled = set(data.get("disabled", []))
                 for name, level in data.get("safety_levels", {}).items():
-                    if name in self._tools and level in self._VALID_SAFETY_LEVELS:
+                    if level not in self._VALID_SAFETY_LEVELS:
+                        continue
+                    # Keep the override even when the tool isn't registered
+                    # yet: late registrants (MCP tools land after their server
+                    # connects, post-boot) pick it up in register(), and
+                    # _save_config no longer drops it from tools.json.
+                    self._safety_overrides[name] = level
+                    if name in self._tools:
                         self._tools[name].safety_level = level
-                        self._safety_overrides[name] = level
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning("Failed to load tools config: %s", e)
 
@@ -533,6 +580,7 @@ class ToolRegistry:
         from core.tools import paths as _paths
 
         _ws_token = _paths.WORKSPACE_OVERRIDE.set((context or {}).get("workspace_override"))
+        _wh_token = _paths.WORKSPACE_HOME.set((context or {}).get("workspace_home"))
         try:
             result = tool.function(**arguments)
             # Tools can return (str, dict) to include structured metadata
@@ -551,11 +599,7 @@ class ToolRegistry:
             expected = [
                 p.name for p in sig.parameters.values() if p.name != "_context" and p.default is inspect.Parameter.empty
             ]
-            return (
-                f"Error calling '{name}': {e}. "
-                f"Required parameters: {expected}. "
-                f"Use get_tool_schema('{name}') to see the full parameter spec."
-            )
+            return f"Error calling '{name}': {e}. Required parameters: {expected}."
         except Exception as e:
             return f"Error: {e}"
         finally:
@@ -563,6 +607,7 @@ class ToolRegistry:
             # across calls, so a leaked override would bleed into the next
             # session's tool call on that thread.
             _paths.WORKSPACE_OVERRIDE.reset(_ws_token)
+            _paths.WORKSPACE_HOME.reset(_wh_token)
 
     # --- Health report ---
 

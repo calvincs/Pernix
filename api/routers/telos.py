@@ -39,8 +39,6 @@ async def telos_overview():
         store.ensure_root()
         questions = store.list_questions()
         hyps = store.list_hypotheses()
-        goals = store.list_goals()
-        state = store.get_state()
 
         def by(items, key):
             out: dict = {}
@@ -63,14 +61,10 @@ async def telos_overview():
             # does not read as if they vanished.
             "hypotheses": by(hyps, "status"),
             "hypotheses_archived": store.count_archived("hypothesis"),
-            "goals": by(goals, "kind"),
-            "goals_suspended": sum(1 for g in goals if g.get("state") == "suspended"),
             "claims": len(store.list("claim")),
             "alarms_open": [_obj_dict(a) for a in store.list_alarms(open_only=True)[:10]],
             "band_mix": store.band_mix(),
             "serendipity_budget": store.serendipity_budget(),
-            "vapor_classes": state.get("vapor_classes") or [],
-            "coherence_series": (state.get("coherence_series") or [])[-12:],
         }
 
     return await _asyncio.to_thread(build)
@@ -117,19 +111,6 @@ async def telos_hypotheses(status: str = "", limit: int = 100):
                 f"{settings.telos_dir}/soup/archive/ (read on disk; there is no un-archive path)."
             )
         return out
-
-    return await _asyncio.to_thread(build)
-
-
-@router.get("/api/telos/goals")
-async def telos_goals():
-    if not settings.telos_enabled:
-        return {"goals": []}
-
-    def build():
-        store = _store()
-        store.ensure_root()
-        return {"goals": [_obj_dict(g) for g in store.list_goals()]}
 
     return await _asyncio.to_thread(build)
 

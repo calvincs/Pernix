@@ -1,0 +1,731 @@
+{
+ "home": {
+  "sidebar": [
+   0,
+   0,
+   270,
+   800,
+   "static",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "main": [
+   270,
+   0,
+   1009,
+   800,
+   "relative",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "status": [
+   270,
+   672,
+   1009,
+   41,
+   "static",
+   "flex",
+   "11px",
+   "8px 16px"
+  ],
+  "input": [
+   270,
+   713,
+   1009,
+   87,
+   "static",
+   "block",
+   "13px",
+   "12px 16px 20px"
+  ],
+  "messages": [
+   270,
+   0,
+   1009,
+   672,
+   "static",
+   "block",
+   "13px",
+   "20px 0px"
+  ],
+  "inner": [
+   295,
+   20,
+   960,
+   803,
+   "static",
+   "block",
+   "13px",
+   "0px 16px"
+  ],
+  "fp": [
+   1279,
+   0,
+   1,
+   800,
+   "relative",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "modal": null,
+  "toggle": [
+   282,
+   12,
+   36,
+   28,
+   "absolute",
+   "flex",
+   "14px",
+   "4px 8px"
+  ],
+  "header": [
+   0,
+   0,
+   0,
+   0,
+   "static",
+   "none",
+   "11px",
+   "8px 16px 8px 54px"
+  ],
+  "model": [
+   308,
+   684,
+   63,
+   17,
+   "static",
+   "block",
+   "11px",
+   "0px"
+  ],
+  "msg": [
+   367,
+   735,
+   815,
+   36,
+   "static",
+   "block",
+   "13px",
+   "8px 0px"
+  ],
+  "item": [
+   8,
+   149,
+   253,
+   54,
+   "relative",
+   "flex",
+   "12px",
+   "8px 12px 8px 22px"
+  ],
+  "btn": [
+   1165,
+   681,
+   98,
+   24,
+   "static",
+   "flex",
+   "12px",
+   "2px 8px"
+  ],
+  "sheets": [
+   "fonts.css",
+   "tokens.css",
+   "buttons.css",
+   "layout.css",
+   "modals.css",
+   "jobs.css",
+   "file-panel.css",
+   "compact.css",
+   "touch.css"
+  ]
+ },
+ "chat": {
+  "sidebar": [
+   0,
+   0,
+   270,
+   800,
+   "static",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "main": [
+   270,
+   0,
+   1009,
+   800,
+   "relative",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "status": [
+   270,
+   672,
+   1009,
+   41,
+   "static",
+   "flex",
+   "11px",
+   "8px 16px"
+  ],
+  "input": [
+   270,
+   713,
+   1009,
+   87,
+   "static",
+   "block",
+   "13px",
+   "12px 16px 20px"
+  ],
+  "messages": [
+   270,
+   37,
+   1009,
+   635,
+   "static",
+   "block",
+   "13px",
+   "20px 0px"
+  ],
+  "inner": [
+   295,
+   -737,
+   960,
+   1373,
+   "static",
+   "block",
+   "13px",
+   "0px 16px"
+  ],
+  "fp": [
+   1279,
+   0,
+   1,
+   800,
+   "relative",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "modal": null,
+  "toggle": [
+   282,
+   12,
+   36,
+   28,
+   "absolute",
+   "flex",
+   "14px",
+   "4px 8px"
+  ],
+  "header": [
+   270,
+   0,
+   1009,
+   37,
+   "static",
+   "flex",
+   "11px",
+   "8px 16px 8px 54px"
+  ],
+  "model": [
+   308,
+   684,
+   63,
+   17,
+   "static",
+   "block",
+   "11px",
+   "0px"
+  ],
+  "msg": [
+   367,
+   735,
+   815,
+   36,
+   "static",
+   "block",
+   "13px",
+   "8px 0px"
+  ],
+  "item": [
+   8,
+   149,
+   253,
+   54,
+   "relative",
+   "flex",
+   "12px",
+   "8px 12px 8px 22px"
+  ],
+  "btn": [
+   1165,
+   681,
+   98,
+   24,
+   "static",
+   "flex",
+   "12px",
+   "2px 8px"
+  ],
+  "sheets": [
+   "fonts.css",
+   "tokens.css",
+   "buttons.css",
+   "layout.css",
+   "modals.css",
+   "jobs.css",
+   "file-panel.css",
+   "compact.css",
+   "touch.css"
+  ]
+ },
+ "settings": {
+  "sidebar": [
+   0,
+   0,
+   270,
+   800,
+   "static",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "main": [
+   270,
+   0,
+   1009,
+   800,
+   "relative",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "status": [
+   270,
+   672,
+   1009,
+   41,
+   "static",
+   "flex",
+   "11px",
+   "8px 16px"
+  ],
+  "input": [
+   270,
+   713,
+   1009,
+   87,
+   "static",
+   "block",
+   "13px",
+   "12px 16px 20px"
+  ],
+  "messages": [
+   270,
+   37,
+   1009,
+   635,
+   "static",
+   "block",
+   "13px",
+   "20px 0px"
+  ],
+  "inner": [
+   295,
+   -737,
+   960,
+   1373,
+   "static",
+   "block",
+   "13px",
+   "0px 16px"
+  ],
+  "fp": [
+   1279,
+   0,
+   1,
+   800,
+   "relative",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "modal": [
+   200,
+   80,
+   880,
+   640,
+   "static",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "toggle": [
+   282,
+   12,
+   36,
+   28,
+   "absolute",
+   "flex",
+   "14px",
+   "4px 8px"
+  ],
+  "header": [
+   270,
+   0,
+   1009,
+   37,
+   "static",
+   "flex",
+   "11px",
+   "8px 16px 8px 54px"
+  ],
+  "model": [
+   308,
+   684,
+   63,
+   17,
+   "static",
+   "block",
+   "11px",
+   "0px"
+  ],
+  "msg": [
+   367,
+   735,
+   815,
+   36,
+   "static",
+   "block",
+   "13px",
+   "8px 0px"
+  ],
+  "item": [
+   8,
+   149,
+   253,
+   54,
+   "relative",
+   "flex",
+   "12px",
+   "8px 12px 8px 22px"
+  ],
+  "btn": [
+   1165,
+   681,
+   98,
+   24,
+   "static",
+   "flex",
+   "12px",
+   "2px 8px"
+  ],
+  "sheets": [
+   "fonts.css",
+   "tokens.css",
+   "buttons.css",
+   "layout.css",
+   "modals.css",
+   "jobs.css",
+   "file-panel.css",
+   "compact.css",
+   "touch.css"
+  ]
+ },
+ "explorer": {
+  "sidebar": [
+   0,
+   0,
+   270,
+   800,
+   "static",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "main": [
+   270,
+   0,
+   650,
+   800,
+   "relative",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "status": [
+   270,
+   672,
+   650,
+   41,
+   "static",
+   "flex",
+   "11px",
+   "8px 16px"
+  ],
+  "input": [
+   270,
+   713,
+   650,
+   87,
+   "static",
+   "block",
+   "13px",
+   "12px 16px 20px"
+  ],
+  "messages": [
+   270,
+   37,
+   650,
+   635,
+   "static",
+   "block",
+   "13px",
+   "20px 0px"
+  ],
+  "inner": [
+   294,
+   -796,
+   602,
+   1459,
+   "static",
+   "block",
+   "13px",
+   "0px 16px"
+  ],
+  "fp": [
+   920,
+   0,
+   360,
+   800,
+   "relative",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "modal": null,
+  "toggle": [
+   282,
+   12,
+   36,
+   28,
+   "absolute",
+   "flex",
+   "14px",
+   "4px 8px"
+  ],
+  "header": [
+   270,
+   0,
+   650,
+   37,
+   "static",
+   "flex",
+   "11px",
+   "8px 16px 8px 54px"
+  ],
+  "model": [
+   308,
+   684,
+   63,
+   17,
+   "static",
+   "block",
+   "11px",
+   "0px"
+  ],
+  "msg": [
+   367,
+   735,
+   456,
+   36,
+   "static",
+   "block",
+   "13px",
+   "8px 0px"
+  ],
+  "item": [
+   8,
+   149,
+   253,
+   54,
+   "relative",
+   "flex",
+   "12px",
+   "8px 12px 8px 22px"
+  ],
+  "btn": [
+   806,
+   681,
+   98,
+   24,
+   "static",
+   "flex",
+   "12px",
+   "2px 8px"
+  ],
+  "sheets": [
+   "fonts.css",
+   "tokens.css",
+   "buttons.css",
+   "layout.css",
+   "modals.css",
+   "jobs.css",
+   "file-panel.css",
+   "compact.css",
+   "touch.css"
+  ]
+ },
+ "collapsed": {
+  "sidebar": [
+   0,
+   0,
+   1,
+   800,
+   "static",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "main": [
+   1,
+   0,
+   1278,
+   800,
+   "relative",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "status": [
+   1,
+   672,
+   1278,
+   41,
+   "static",
+   "flex",
+   "11px",
+   "8px 16px"
+  ],
+  "input": [
+   1,
+   713,
+   1278,
+   87,
+   "static",
+   "block",
+   "13px",
+   "12px 16px 20px"
+  ],
+  "messages": [
+   1,
+   37,
+   1278,
+   635,
+   "static",
+   "block",
+   "13px",
+   "20px 0px"
+  ],
+  "inner": [
+   160,
+   -737,
+   960,
+   1373,
+   "static",
+   "block",
+   "13px",
+   "0px 16px"
+  ],
+  "fp": [
+   1279,
+   0,
+   1,
+   800,
+   "relative",
+   "flex",
+   "13px",
+   "0px"
+  ],
+  "modal": null,
+  "toggle": [
+   13,
+   12,
+   36,
+   28,
+   "absolute",
+   "flex",
+   "14px",
+   "4px 8px"
+  ],
+  "header": [
+   1,
+   0,
+   1278,
+   37,
+   "static",
+   "flex",
+   "11px",
+   "8px 16px 8px 54px"
+  ],
+  "model": [
+   39,
+   684,
+   63,
+   17,
+   "static",
+   "block",
+   "11px",
+   "0px"
+  ],
+  "msg": [
+   217,
+   735,
+   846,
+   36,
+   "static",
+   "block",
+   "13px",
+   "8px 0px"
+  ],
+  "item": [
+   8,
+   149,
+   34,
+   54,
+   "relative",
+   "flex",
+   "12px",
+   "8px 12px 8px 22px"
+  ],
+  "btn": [
+   1165,
+   681,
+   98,
+   24,
+   "static",
+   "flex",
+   "12px",
+   "2px 8px"
+  ],
+  "sheets": [
+   "fonts.css",
+   "tokens.css",
+   "buttons.css",
+   "layout.css",
+   "modals.css",
+   "jobs.css",
+   "file-panel.css",
+   "compact.css",
+   "touch.css"
+  ]
+ }
+}

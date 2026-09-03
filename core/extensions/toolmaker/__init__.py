@@ -99,7 +99,7 @@ def create_tool(
     if "def register(" not in code:
         return "Error: Code must define a register(reg) function"
 
-    # Write module
+    # Write module (create_tool already syntax-checks above).
     filepath = CUSTOM_TOOLS_DIR / f"custom_{name}.py"
     filepath.write_text(code)
 
@@ -168,13 +168,23 @@ def update_tool(name: str, code: str, requirements: str = "", _context: dict | N
         if pattern in code:
             return f"Error: Prohibited pattern '{pattern}' in code"
 
+    # compile() before touching the file at all: a syntax error caught only
+    # after the write replaced a WORKING tool with a broken one, and the
+    # error message said nothing about the tool having disappeared from the
+    # next boot.
+    try:
+        compile(code, f"custom_{name}.py", "exec")
+    except SyntaxError as e:
+        return f"Error: the tool code does not compile — {e.msg} (line {e.lineno}). The existing tool is unchanged."
+
     # Backup
     import shutil
 
     version = 1
     while (CUSTOM_TOOLS_DIR / f"custom_{name}.v{version}.bak").exists():
         version += 1
-    shutil.copy2(filepath, CUSTOM_TOOLS_DIR / f"custom_{name}.v{version}.bak")
+    backup_path = CUSTOM_TOOLS_DIR / f"custom_{name}.v{version}.bak"
+    shutil.copy2(filepath, backup_path)
 
     # Write new version
     filepath.write_text(code)
@@ -210,8 +220,18 @@ def update_tool(name: str, code: str, requirements: str = "", _context: dict | N
 
         return f"Tool '{name}' updated (backup: v{version})"
     except Exception as e:
+        # Put the working version back. Leaving the failed code on disk meant
+        # the tool was gone at the next boot, replaced by a module that
+        # raises on import — and the caller was told about register(), not
+        # about the tool it had just lost.
+        restored = ""
+        try:
+            shutil.copy2(backup_path, filepath)
+            restored = f" The previous version was restored from {backup_path.name}."
+        except OSError as restore_err:
+            restored = f" WARNING: could not restore {backup_path.name}: {restore_err}"
         return (
-            f"Error reloading tool '{name}': {type(e).__name__}: {e}. "
+            f"Error reloading tool '{name}': {type(e).__name__}: {e}.{restored} "
             f"Your register(reg) must call: "
             f"reg.register(name='tool_name', func=my_func, description='...', "
             f"parameters={{'type':'object','properties':{{...}},'required':[...]}})"

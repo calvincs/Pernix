@@ -21,10 +21,39 @@ spawn_worker(
     task_description="Research the latest changes to X. Output a 200-word summary.",
     title="research-x",                   # optional label
     model="anthropic/claude-haiku-4.5",   # optional model override
+    kind="research",                      # optional typed kind (see below)
 )
 ```
 
 The call returns a `worker_id`. The parent session enters `AWAITING_WORKERS` if it `await_workers`-blocks, or continues running if it just dispatches and moves on.
+
+### Typed kinds
+
+`kind` selects a named bundle instead of a hand-written charter: a role
+preamble, an **exclusive tool allowlist** (enforced in the schema and again at
+the executor, same as scheduled-job charters), a default model, and
+verification criteria the quality gate grades against. Built-ins:
+
+| Kind | Shape | Gate |
+|---|---|---|
+| `research` | web + memory reads, no file edits | claims must name sources |
+| `code` | file tools + shell + repl + jobs | states which check ran and its result |
+| `explore` | read-only workspace survey | findings carry file:line citations |
+| `debug` | file tools + shell + repl + jobs | reproduction shown, root cause stated |
+| `transform` | file tools + repl, no network | output files named with parse proof |
+
+Every kind can write files enough to produce its summary deliverable. `research`
+and `explore` also have a cheap deterministic gate in `get_worker_result`: a
+summary with zero citations comes back prefixed with a `# KIND GATE` warning.
+
+Operators can override a built-in or add new kinds by dropping
+`data/worker_kinds/<name>.json` with any subset of the fields
+(`description`, `role_instructions`, `tool_allowlist`, `model`,
+`verification`). `"model": "background"` resolves to the Background role at
+spawn time. Files are re-read on every spawn — no restart needed.
+
+The kind persists on the worker's session row, so a rehydrated worker (restart,
+reap, `resume_worker`) keeps its allowlist and model.
 
 In a chat, you can ask the parent agent to do this naturally:
 
@@ -44,6 +73,7 @@ Several control tools are always available to the parent:
 | `get_worker_result` | Fetch a finished worker's final response |
 | `message_worker` | Send a follow-up message into a running worker (mid-turn injection) |
 | `set_worker_state` | Pause (`paused=true`) or resume (`paused=false`) a worker at the next round boundary |
+| `resume_worker` | Release a paused worker — or **revive** a cancelled/errored/round-capped/reaped one from its persisted state, with an optional guidance note |
 | `await_workers` | Block the parent until specified workers complete |
 
 The parent can dispatch fan-out work, do other things while workers run, and collect results when ready. The orchestration extension lives in `core/extensions/orchestration/`.
@@ -80,6 +110,29 @@ The worker observes the pause at its next round boundary and parks in the `PAUSE
 
 Paused workers are not reaped for inactivity. Two independent safety nets apply: 24 hours of idleness, or the parent session being deleted — either one force-cancels the paused worker.
 
+### Reviving a dead worker
+
+Workers are sessions, and sessions persist — so a worker that was cancelled,
+errored, hit the round ceiling, was reaped from memory, or was lost to a server
+restart can be brought back instead of re-run from scratch:
+
+```
+resume_worker(worker_id, note="skip part one, it's already verified")
+```
+
+Revival rehydrates the persisted state (message history — compacted if long —
+plus the typed kind's allowlist and the pinned model), validates the model
+still exists (falling back to the default with a visible note if not), clears
+the stale summary stamp so the old `# CANCELLED` header can't shadow the new
+result, re-attaches the worker to its parent, and starts a continuation turn.
+The parent receives a `worker.resumed` event. `retry_worker` remains the right
+call when the prior work is *not* worth keeping — it spawns a fresh
+replacement.
+
+The REST mirror is `POST /api/sessions/{id}/workers/{worker_id}/resume` with an
+optional `{"note": "..."}` body; it revives terminated workers the same way the
+tool does.
+
 ---
 
 ## When NOT to use workers
@@ -96,6 +149,6 @@ A single-shot lookup ("What's the weather in NYC?") doesn't need a worker. A res
 
 ## Inspecting a worker mid-flight
 
-The UI shows worker progress in the parent's timeline drawer. You can also click into a worker session in the sidebar and watch it directly.
+The parent transcript grows one **Workers** card per fan-out, updated in place: a row per worker with its state and a control that reads pause/resume while it runs and **revive** once it has stopped. Above the composer, the worker strip carries a chip per live worker, plus up to 4 dimmed chips for recently-finished workers (kind and termination reason) with their own **↻ revive** button; below 900px that strip collapses to a single line counting how many are running, paused and finished, which taps through to the card. You can also click into a worker session in the sidebar — they nest under their parent with a `↳` — and watch it directly. Opening a worker's own chat shows a "← Parent: *title*" breadcrumb above the transcript so it's never unclear which session it belongs to.
 
 Programmatically: each worker has its own session ID. Subscribe to `GET /api/sessions/{worker_id}/events` to stream that worker's events independently.

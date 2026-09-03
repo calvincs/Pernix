@@ -46,6 +46,27 @@ logger = logging.getLogger("pernix.agent")
 
 STREAM_BACKOFFS = (5, 10, 15)
 
+
+def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    """USD estimate from settings.model_prices, or None for unpriced models.
+
+    model_prices: {model_id: {"in": USD per 1M prompt tok, "out": USD per 1M
+    completion tok}}. Exact model-id match only — a partial match silently
+    pricing the wrong model is worse than a NULL. Display/telemetry only.
+    """
+    try:
+        prices = settings.model_prices.get(model)
+        if not isinstance(prices, dict):
+            return None
+        rate_in = float(prices.get("in") or 0.0)
+        rate_out = float(prices.get("out") or 0.0)
+        if rate_in <= 0 and rate_out <= 0:
+            return None
+        return (int(prompt_tokens) * rate_in + int(completion_tokens) * rate_out) / 1_000_000.0
+    except Exception:
+        return None
+
+
 # Substrings that mark an error as worth retrying against the same model:
 # gateway/5xx codes and transport-level failures. Anything else (auth, bad
 # request, model-not-found) is a config problem that retrying only delays.
@@ -228,13 +249,23 @@ async def stream_with_failover(
                         total_tokens=event.usage.total_tokens,
                         cache_read_tokens=event.usage.cache_read_tokens,
                         cache_write_tokens=event.usage.cache_write_tokens,
+                        cost_estimate=estimate_cost(
+                            current_model,
+                            event.usage.prompt_tokens,
+                            event.usage.completion_tokens,
+                        ),
                         source="provider",
                         provider=client.resolve_provider(current_model),
                         goal_id=goal_id,
                     )
 
-                elif event.type == StreamEventType.ERROR and event.error:
-                    err = event.error
+                elif event.type == StreamEventType.ERROR:
+                    # An ERROR event is an error even when the adapter could
+                    # not describe it. Testing `event.error` for truth used to
+                    # drop the empty-string case (str(httpx.ReadTimeout()) is
+                    # ''), and the adapter's finally-DONE then ended the turn
+                    # as a clean, empty completion.
+                    err = event.error or "provider stream ended with an error and no detail"
                     break
 
                 elif event.type == StreamEventType.DONE:
@@ -290,6 +321,11 @@ async def stream_with_failover(
                 wait,
                 err,
             )
+            # Tell the UI to drop whatever partial text it has already
+            # rendered: the retry re-streams the answer from the beginning,
+            # and without this the viewer saw <partial><full answer> while
+            # the database stored only the second one.
+            emit({"type": "stream.reset", "discard_partial": True, "reason": "retry"})
             emit({"type": "stream.retry", "attempt": retries, "wait": wait, "error": err})
             await asyncio.sleep(wait)
             continue
@@ -321,6 +357,7 @@ async def stream_with_failover(
                 fallback,
                 err,
             )
+            emit({"type": "stream.reset", "discard_partial": True, "reason": "fallback"})
             emit({"type": "stream.fallback", "model": fallback})
             fb_provider = client.resolve_provider(fallback)
             if fb_provider in OPENAI_FORMAT_PROVIDERS:
@@ -341,9 +378,14 @@ def _merge_tool_call_deltas(collected: list[dict], deltas) -> None:
     """Fold streamed tool-call fragments into `collected`, merging by id."""
     for tc in deltas:
         existing = next((c for c in collected if c["id"] == tc.id and tc.id), None)
-        if existing:
-            if tc.name:
-                existing["name"] = tc.name
+        # A fragment with its own name is a NEW call, not a continuation:
+        # merging on id alone let an id collision (Ollama's per-chunk
+        # numbering) silently overwrite one call with another and glue their
+        # argument bodies together. A true delta carries only more arguments.
+        if existing and not tc.name:
+            existing["arguments"] += tc.arguments
+        elif existing and tc.name and not existing["name"]:
+            existing["name"] = tc.name
             existing["arguments"] += tc.arguments
         else:
             collected.append({"id": tc.id, "name": tc.name, "arguments": tc.arguments})

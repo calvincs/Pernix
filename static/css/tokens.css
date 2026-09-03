@@ -19,38 +19,85 @@
 
     /* Text scale */
     --text: #c4bfb2;
-    --text-dim: #7a7568;
-    --text-faint: #504b40;
+    /* --text-dim / --text-faint carry real content (timestamps, metadata,
+       hints, placeholder text), so both clear 4.5:1 against --bg rather than
+       the 3:1 large-text floor. The old #504b40 measured 2.23:1 — invisible
+       on a dim laptop screen and a WCAG AA failure on every surface. */
+    --text-dim: #8a8577;    /* 5.24:1 on --bg */
+    --text-faint: #807b6e;  /* 4.57:1 on --bg */
     --text-bright: #e8e3d6;
+    /* The old --text-faint value, kept for the one thing it was fine at:
+       lines and decorative fills that carry no meaning. */
+    --line-faint: #504b40;
 
     /* Accent */
     --accent: #d4a843;
     --accent-dim: #9a7a30;
-    --accent-subtle: rgba(212, 168, 67, 0.10);
-    --accent-glow: rgba(212, 168, 67, 0.06);
+    /* The lit top of the wordmark's gradient. Its own token because the two
+       themes want opposite ends of the value scale: on black the wordmark
+       reads brightest at the top, on paper it has to stay dark all the way
+       down or the big display type falls under 3:1. */
+    --accent-tint: #ece1c4;
+    /* Washes derive from the accent so a theme swap reaches them; mixing
+       with `transparent` is premultiplied, so this is exactly an alpha. */
+    --accent-subtle: color-mix(in srgb, var(--accent) 10%, transparent);
+    --accent-glow: color-mix(in srgb, var(--accent) 6%, transparent);
 
     /* Semantic */
-    --error: #c25450;
-    --error-subtle: rgba(194, 84, 80, 0.10);
+    --error: #d0605c;  /* 5.06:1 on --bg */
+    --error-subtle: color-mix(in srgb, var(--error) 10%, transparent);
     --success: #5a9a4a;
-    --success-subtle: rgba(90, 154, 74, 0.10);
+    --success-subtle: color-mix(in srgb, var(--success) 10%, transparent);
     --info: #5a8ab4;
-    --info-subtle: rgba(90, 138, 180, 0.10);
+    --info-subtle: color-mix(in srgb, var(--info) 10%, transparent);
     --teal: #5a9a8a;
     --teal-dim: #3d6b60;
-    --teal-subtle: rgba(90, 154, 138, 0.10);
+    --teal-subtle: color-mix(in srgb, var(--teal) 10%, transparent);
     --dream: #9a7fd1;
-    --dream-subtle: rgba(154, 127, 209, 0.10);
+    --dream-subtle: color-mix(in srgb, var(--dream) 10%, transparent);
     --rlm: #c06c8c;
-    --rlm-subtle: rgba(192, 108, 140, 0.10);
+    --rlm-subtle: color-mix(in srgb, var(--rlm) 10%, transparent);
     --canary: #c9a35a;
-    --canary-subtle: rgba(201, 163, 90, 0.10);
+    --canary-subtle: color-mix(in srgb, var(--canary) 10%, transparent);
+    /* The three live literal fallbacks (#e8a020, #c9a35a, #d4a142) were three
+       different ambers for one meaning. 8.51:1 on --bg. */
+    --warning: #e0a03a;
+    --warning-bg: color-mix(in srgb, var(--warning) 16%, var(--bg));
+    --warning-subtle: color-mix(in srgb, var(--warning) 10%, transparent);
+
+    /* Session-state palette — one fg/bg pair per state of the v2 state
+       machine, so the status badge, the timeline rows, the Mermaid diagram
+       and the dwell bars all say the same colour for the same state instead
+       of each carrying its own hand-picked hex. Derived from the semantic
+       tokens above via color-mix so a palette change propagates. Every pair
+       clears 5.5:1; timeline.js reads these same custom properties with
+       getComputedStyle rather than duplicating the values. */
+    --state-idle_ready-fg: color-mix(in srgb, var(--success) 75%, var(--text-bright));
+    --state-idle_ready-bg: color-mix(in srgb, var(--success) 16%, var(--bg));
+    --state-scouting-fg: color-mix(in srgb, var(--info) 80%, var(--text-bright));
+    --state-scouting-bg: color-mix(in srgb, var(--info) 16%, var(--bg));
+    --state-processing-fg: color-mix(in srgb, var(--info) 55%, var(--text-bright));
+    --state-processing-bg: color-mix(in srgb, var(--info) 20%, var(--bg));
+    --state-compacting-fg: color-mix(in srgb, var(--warning) 80%, var(--text-bright));
+    --state-compacting-bg: color-mix(in srgb, var(--warning) 18%, var(--bg));
+    --state-pause_requested-fg: color-mix(in srgb, var(--warning) 55%, var(--text-bright));
+    --state-pause_requested-bg: color-mix(in srgb, var(--warning) 18%, var(--bg));
+    --state-paused-fg: color-mix(in srgb, var(--accent) 90%, var(--text-bright));
+    --state-paused-bg: color-mix(in srgb, var(--accent) 14%, var(--bg));
+    --state-cancelling-fg: color-mix(in srgb, var(--error) 62%, var(--text-bright));
+    --state-cancelling-bg: color-mix(in srgb, var(--error) 20%, var(--bg));
+    --state-finalizing-fg: color-mix(in srgb, var(--dream) 58%, var(--text-bright));
+    --state-finalizing-bg: color-mix(in srgb, var(--dream) 20%, var(--bg));
+    --state-awaiting_user-fg: color-mix(in srgb, var(--dream) 85%, var(--text-bright));
+    --state-awaiting_user-bg: color-mix(in srgb, var(--dream) 16%, var(--bg));
+    --state-awaiting_workers-fg: color-mix(in srgb, var(--teal) 75%, var(--text-bright));
+    --state-awaiting_workers-bg: color-mix(in srgb, var(--teal) 16%, var(--bg));
 
     /* Typography */
     --mono: 'DM Mono', 'SF Mono', 'Fira Code', monospace;
     --serif: 'Newsreader', Georgia, serif;
     --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --text-xxs: 0.625rem;   /* 10px */
+    --text-xxs: 0.6875rem;  /* 11px — 10px was below the legibility floor */
     --text-xs: 0.6875rem;   /* 11px */
     --text-sm: 0.75rem;     /* 12px */
     --text-base: 0.8125rem; /* 13px */
@@ -64,8 +111,15 @@
     --chat-max-w: min(960px, calc(100% - 48px));
     --radius: 6px;
     --radius-lg: 10px;
+    --transition-fast: 0.1s ease;
     --transition: 0.15s ease;
     --transition-slow: 0.25s ease;
+
+    /* Two speeds for the one pulse. Anything that means "this is happening
+       right now" beats fast; anything ambient (a waiting badge, a scheduled
+       job) beats slow. */
+    --pulse-fast: 1.2s;
+    --pulse-slow: 2s;
 
     /* Spacing */
     --sp-1: 4px;
@@ -76,13 +130,198 @@
     --sp-6: 24px;
     --sp-8: 32px;
 
-    /* Shadows */
+    /* Shadows. --scrim is the wash behind a modal or a drawer; every
+       overlay in the app had its own rgba(0,0,0,.5-.65) literal, none of
+       which works on paper. */
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
     --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+    --scrim: rgba(0, 0, 0, 0.6);
+    /* For the handful of shadows whose geometry is bespoke (a drawer casts
+       sideways) and so cannot use a whole --shadow-* value. */
+    --shadow-color: rgba(0, 0, 0, 0.5);
+
+    /* ------------------------------------------------------------------
+       Aliases for names the CSS and JS already referenced but that were
+       never defined here. Each one was silently falling through to its
+       inline literal fallback, which is how the same idea
+       ended up with several slightly different literals across files — and
+       why a token change did not reach them. Values are chosen so the
+       rendered result is unchanged; the point is that the token now exists
+       and a future edit to the real token propagates.
+       ------------------------------------------------------------------ */
+    --fg: var(--text);
+    --fg-muted: var(--text-dim);
+    --muted: var(--text-dim);
+    --font-mono: var(--mono);
+    --danger: var(--error);
+    --ok: var(--success);
+    --bg-2: var(--bg);
+    --bg-alt: var(--bg);
+    --bg-deep: var(--bg);
+    --bg-panel: var(--bg);
+    --bg-soft: var(--bg-hover);
+    --bg-subtle: var(--bg-surface);
+    --surface: var(--bg-surface);
+    --surface-hover: var(--bg-hover);
+    /* No smaller radius token existed; 3px is the literal already used by
+       every hand-rolled small chip and badge in the app. */
+    --radius-sm: 3px;
+
+    /* Set per-element at runtime (sidebar.js / file-panel.js / jobs.js write
+       --space-color and --ticker-duration as inline styles); the defaults
+       here are what an element without one falls back to. --safe-* is
+       --safe-* is defined here rather than in touch.css/compact.css so
+       both tiers can use it; env() resolves to 0 on a desktop. */
+    --space-color: var(--accent);
+    /* The sigil canvas blends into the page rather than sitting on it. Screen
+       is lighten-only: perfect over black, and on paper it drives every pixel
+       to white — which is exactly how the brand mark vanished on the light
+       theme. Multiply is its mirror. */
+    --sigil-blend: screen;
+    /* A QR code is a machine target, not UI chrome: the scanner needs the
+       quiet zone white in both themes, so this one is intentionally the same
+       on paper and on black. */
+    --qr-paper: #ffffff;
+    --ticker-duration: 12s;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+}
+
+/* ======================================================================
+   Light theme. The product is dark-first, so dark is the bare :root above
+   and this is the override — applied when the OS asks for light and the
+   user has not explicitly chosen dark, or when the user has explicitly
+   chosen light (Settings -> General -> Appearance, stored in
+   localStorage `pernix_theme`, written onto <html data-theme>).
+
+   The block is written out twice on purpose: a media query cannot share a
+   selector list with a rule outside it, and the alternative — a second tier
+   of --lt-* tokens — costs the same number of lines and hides the values one
+   indirection further away. Keep the two copies identical.
+
+   Only the base tokens are re-declared. Everything derived — the ten
+   --state-*-fg/-bg pairs, --warning-bg, every -subtle wash and every alias —
+   is written with color-mix()/var() over these, and custom properties resolve
+   at use, so all of it follows automatically.
+   ====================================================================== */
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+    /* Warm paper, not white — #fff under a gold accent reads clinical and
+       the app's whole identity is warm. */
+    color-scheme: light;
+
+    --bg: #faf7f0;
+    --bg-raised: #f4f0e6;
+    --bg-surface: #ece7da;
+    --bg-hover: #e6e0d1;
+    --bg-active: #ddd6c4;
+
+    --border: #d9d2c1;
+    --border-subtle: #e8e2d4;
+    --border-focus: #b0a892;
+
+    /* Ink. Every one of these clears 4.5:1 on --bg (measured, not guessed):
+       text 15.0, text-bright 17.8, text-dim 7.1, text-faint 5.8. */
+    --text: #24211a;
+    --text-dim: #5a5344;
+    --text-faint: #67604f;
+    --text-bright: #12100b;
+    --line-faint: #b3ab96;
+
+    /* The same gold, darkened until it holds on paper — #d4a843 measures
+       1.8:1 here, which is a decorative wash, not a colour you can read.
+       #8a6410 is 5.0:1. */
+    --accent: #8a6410;
+    --accent-dim: #6b4d0a;
+    --accent-tint: #5c400a;
+
+    /* Semantics, all >= 5.8:1 on paper. */
+    --error: #a32620;
+    --success: #2d6b22;
+    --info: #1d5a8a;
+    --teal: #1a6656;
+    --teal-dim: #12463a;
+    --dream: #5c3ba3;
+    --rlm: #992f5e;
+    --canary: #7d5a12;
+    --warning: #7d5500;
+
+    /* Paper takes a far lighter shadow than a black page does; the dark
+       theme's 0.3-0.6 alphas read as smudges here. */
+    --shadow-sm: 0 1px 2px rgba(60, 50, 30, 0.10);
+    --shadow-md: 0 4px 12px rgba(60, 50, 30, 0.14);
+    --shadow-lg: 0 8px 24px rgba(60, 50, 30, 0.18);
+    --scrim: rgba(60, 50, 30, 0.35);
+    --shadow-color: rgba(60, 50, 30, 0.18);
+    --sigil-blend: multiply;
+    }
+}
+
+:root[data-theme="light"] {
+    /* Warm paper, not white — #fff under a gold accent reads clinical and
+       the app's whole identity is warm. */
+    color-scheme: light;
+
+    --bg: #faf7f0;
+    --bg-raised: #f4f0e6;
+    --bg-surface: #ece7da;
+    --bg-hover: #e6e0d1;
+    --bg-active: #ddd6c4;
+
+    --border: #d9d2c1;
+    --border-subtle: #e8e2d4;
+    --border-focus: #b0a892;
+
+    /* Ink. Every one of these clears 4.5:1 on --bg (measured, not guessed):
+       text 15.0, text-bright 17.8, text-dim 7.1, text-faint 5.8. */
+    --text: #24211a;
+    --text-dim: #5a5344;
+    --text-faint: #67604f;
+    --text-bright: #12100b;
+    --line-faint: #b3ab96;
+
+    /* The same gold, darkened until it holds on paper — #d4a843 measures
+       1.8:1 here, which is a decorative wash, not a colour you can read.
+       #8a6410 is 5.0:1. */
+    --accent: #8a6410;
+    --accent-dim: #6b4d0a;
+    --accent-tint: #5c400a;
+
+    /* Semantics, all >= 5.8:1 on paper. */
+    --error: #a32620;
+    --success: #2d6b22;
+    --info: #1d5a8a;
+    --teal: #1a6656;
+    --teal-dim: #12463a;
+    --dream: #5c3ba3;
+    --rlm: #992f5e;
+    --canary: #7d5a12;
+    --warning: #7d5500;
+
+    /* Paper takes a far lighter shadow than a black page does; the dark
+       theme's 0.3-0.6 alphas read as smudges here. */
+    --shadow-sm: 0 1px 2px rgba(60, 50, 30, 0.10);
+    --shadow-md: 0 4px 12px rgba(60, 50, 30, 0.14);
+    --shadow-lg: 0 8px 24px rgba(60, 50, 30, 0.18);
+    --scrim: rgba(60, 50, 30, 0.35);
+    --shadow-color: rgba(60, 50, 30, 0.18);
+    --sigil-blend: multiply;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* The UA stylesheet's `[hidden] { display: none }` loses to ANY author rule
+   that sets display, whatever its specificity — origin beats specificity. So
+   every author `display` on a control that toggles via the hidden attribute
+   silently defeated it: #pause-btn (index.html) rendered in the idle header
+   on a phone because touch.css gives .status-btn `display: flex`, and the
+   same trap was waiting for #voice-btn and #worker-strip, each of which had
+   grown its own `#id[hidden] { display: none }` patch. One rule instead, so
+   `el.hidden = true` means hidden everywhere. */
+[hidden] { display: none !important; }
 
 body {
     font-family: var(--mono);
@@ -97,15 +336,99 @@ body {
     -moz-osx-font-smoothing: grayscale;
 }
 
+/* ONE pulse. The app had eight near-identical fade keyframes — pulse,
+   jobPulse, dot-pulse, statusPulse, browserPulse, sse-pulse, attnPulse and
+   assistantWaiting — differing only in how far they dipped and, in one case,
+   in fading brightness instead of opacity. A custom property is resolved per
+   element, so a single keyframe can carry every depth: set --pulse-dip (and
+   --pulse-peak where the top of the cycle is not full opacity) on the element
+   and animate `pulse`. The two box-shadow halos (#voice-btn.recording,
+   #send-btn.stop-mode) are deliberately NOT folded in: they pulse a ring, not
+   a fade, and cannot be expressed by the same frames. */
+@keyframes pulse {
+    0%, 100% { opacity: var(--pulse-peak, 1); }
+    50%      { opacity: var(--pulse-dip, 0.4); }
+}
+
 /* Scrollbar — cross-browser */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+::-webkit-scrollbar-thumb:hover { background: var(--line-faint); }
 
 * {
     scrollbar-width: thin;
     scrollbar-color: var(--border) transparent;
+}
+
+/* Reduced motion — A9/V11.
+   The app animates a lot by default: the brand mark breathes, session dots
+   and the SSE indicator pulse, the state badge pulses while the agent works,
+   the activity ticker scrolls, modals slide up and messages fade in. For a
+   user with a vestibular disorder that is not decoration, it is a reason to
+   close the tab. One global stop, near-zero rather than zero so transitionend
+   and animationend listeners still fire. sidebar.js additionally skips
+   ADDING the ticker class at all (a marquee that snaps between two frames is
+   worse than a truncated line). */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+/* ======================================================================
+   Accessibility utilities
+   ====================================================================== */
+/* In the accessibility tree, out of the layout. Used by the skip link, the
+   live regions in index.html (a11y.js writes to them) and any label that
+   should be spoken but not drawn. `clip-path: inset(50%)` is the modern
+   half; `clip` stays for older WebKit. */
+.visually-hidden {
+    position: absolute !important;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* Same treatment until focused, then a real, visible control. */
+.skip-link {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 3000;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    background: var(--bg-raised);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    text-decoration: none;
+}
+.skip-link:focus {
+    width: auto;
+    height: auto;
+    margin: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    overflow: visible;
+    clip: auto;
+    clip-path: none;
 }
 
 /* Selection */

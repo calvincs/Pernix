@@ -13,6 +13,7 @@ For markdown-only capability extension, write a [skill](writing-skills.md) inste
 | Scenario | Use |
 |---|---|
 | Multi-step procedure the agent should follow, no new code needed | **Skill** |
+| The capability already exists as an MCP server (or you'd rather build one out-of-process, in any language) | **[MCP server](../mcp.md)** |
 | Need to call a Python library not exposed via existing tools | **Tool** |
 | Need to maintain state between calls within a session | **Tool** |
 | Need fine control over input/output schema | **Tool** |
@@ -118,7 +119,7 @@ Delete the `core/tools/builtin/custom_<name>.py` file (and its `.requirements.tx
 
 - Custom tool errors are logged the same way builtin tool errors are: `data/logs/`.
 - Use `list_custom_tools` to confirm the tool is registered.
-- The Tools panel in the UI shows every registered tool's schema and any recent calls.
+- The Tools panel in the UI shows every registered tool's schema, safety level, and use/failure counts.
 - For a Python traceback, open `data/logs/pernix.log` and search for the tool name.
 
 If a tool repeatedly fails, prefer fixing it via `update_tool` rather than asking the agent to monkey-patch it inline — the file on disk is the source of truth.

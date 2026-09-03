@@ -6,6 +6,7 @@ JS-rendered page extraction.
 
 from __future__ import annotations
 
+import asyncio as _asyncio_mod
 import atexit
 import logging
 import os
@@ -369,6 +370,29 @@ def _fetch_domain(url: str) -> str | None:
     return host[4:] if host.startswith("www.") else host
 
 
+# A whole-exchange deadline for http_get. httpx's timeout is per-read, so a
+# server that drips one byte at a time satisfies it forever while holding a
+# tool-executor thread.
+_HTTP_GET_DEADLINE_S = 60.0
+
+# Content-Length headroom before refusing outright: the body is streamed and
+# capped anyway, this just avoids starting an obviously hopeless download.
+_OVERSIZE_FACTOR = 4
+
+# Non-"text/*" types http_get will still read as text.
+_TEXTUAL_CONTENT_TYPES = {
+    "application/json",
+    "application/xml",
+    "application/xhtml+xml",
+    "application/javascript",
+    "application/ld+json",
+    "application/rss+xml",
+    "application/atom+xml",
+    "application/x-ndjson",
+    "application/yaml",
+}
+
+
 def _record_fetch(domain: str | None, ok: bool, method: str) -> None:
     """Log a fetch outcome to Candor. Fire-and-forget — never blocks the fetch.
 
@@ -460,20 +484,55 @@ def http_get(url: str, force: bool = False, _context: dict | None = None) -> str
         # Follow redirects manually so every hop goes through _validate_url —
         # httpx's automatic following would happily land on a private/metadata
         # address after the initial URL passed the SSRF check.
+        # timeout is per-read, so a slow-drip server could hold the thread
+        # indefinitely under the old single value; bound the whole exchange.
+        deadline = time.monotonic() + _HTTP_GET_DEADLINE_S
+        cap = int(settings.max_fetch_size)
         with httpx.Client(timeout=15.0, follow_redirects=False) as client:
             for _ in range(10):
-                resp = client.get(url)
-                if resp.is_redirect:
-                    location = resp.headers.get("location")
-                    if not location:
-                        break
-                    url = _validate_url(urljoin(url, location), allow_loopback=allow_loopback)
-                    continue
-                resp.raise_for_status()
-                content = resp.text
+                if time.monotonic() > deadline:
+                    _record_fetch(domain, False, method="http")
+                    return f"Error fetching {url}: exceeded {_HTTP_GET_DEADLINE_S}s overall deadline"
+                # stream(), not get(): get() reads and decodes the ENTIRE body
+                # before max_fetch_size is applied, so one `http_get` of a
+                # multi-GB file took the whole container's memory with it.
+                with client.stream("GET", url) as resp:
+                    if resp.is_redirect:
+                        location = resp.headers.get("location")
+                        if not location:
+                            break
+                        url = _validate_url(urljoin(url, location), allow_loopback=allow_loopback)
+                        continue
+                    resp.raise_for_status()
+
+                    declared = resp.headers.get("content-length")
+                    if declared and declared.isdigit() and int(declared) > cap * _OVERSIZE_FACTOR:
+                        _record_fetch(domain, False, method="http")
+                        return f"Error fetching {url}: response is {int(declared)} bytes, over the fetch cap"
+
+                    ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                    if ctype and not (ctype.startswith("text/") or ctype in _TEXTUAL_CONTENT_TYPES):
+                        _record_fetch(domain, False, method="http")
+                        return f"Error fetching {url}: content-type {ctype} is not text"
+
+                    chunks: list[bytes] = []
+                    total = 0
+                    truncated = False
+                    for chunk in resp.iter_bytes():
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total > cap:
+                            truncated = True
+                            break
+                        if time.monotonic() > deadline:
+                            truncated = True
+                            break
+                    raw = b"".join(chunks)
+                    content = raw.decode(resp.encoding or "utf-8", errors="replace")
+
                 _record_fetch(domain, not _WALL_RE.search(content[:8000]), method="http")
-                if len(content) > settings.max_fetch_size:
-                    content = content[: settings.max_fetch_size] + f"\n[truncated at {settings.max_fetch_size} bytes]"
+                if truncated or len(content) > cap:
+                    content = content[:cap] + f"\n[truncated at {cap} bytes]"
                 return content
             _record_fetch(domain, False, method="http")
             return f"Error fetching {url}: too many redirects"
@@ -724,13 +783,16 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
         html = html[:_MAX_HTML_BYTES]
         logger.warning("HTML truncated to %d bytes before extraction for %s", _MAX_HTML_BYTES, url)
 
-    # Trafilatura — pure CPU. Capped at 5MB above; runs inline. If profiling
-    # later shows blocking, wrap in `await asyncio.to_thread(...)`.
+    # Trafilatura — pure CPU over up to 5MB of DOM, on the event loop until
+    # now. A heavy page froze every SSE stream, state transition and API
+    # route for seconds; the comment here used to say "if profiling shows
+    # blocking, wrap in to_thread", and it does, so it is.
     content = None
     try:
         import trafilatura
 
-        content = trafilatura.extract(
+        content = await _asyncio_mod.to_thread(
+            trafilatura.extract,
             html,
             output_format="markdown",
             include_links=True,
@@ -766,9 +828,14 @@ async def _browse_and_extract_async(url: str, allow_loopback: bool, ctx: dict | 
                         if t:
                             self.parts.append(t)
 
-            extractor = _TextExtractor()
-            extractor.feed(html)
-            content = "\n".join(extractor.parts)
+            def _extract_text(raw: str) -> str:
+                ex = _TextExtractor()
+                ex.feed(raw)
+                return "\n".join(ex.parts)
+
+            # Same reasoning as trafilatura above: HTMLParser over 5MB is
+            # CPU-bound and must not run on the loop.
+            content = await _asyncio_mod.to_thread(_extract_text, html)
         except Exception:
             content = "(Failed to extract content)"
 

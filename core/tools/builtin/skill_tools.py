@@ -146,50 +146,6 @@ def read_skill_resource(
     return content
 
 
-def delete_skill(name: str, _context: dict | None = None) -> str:
-    """Permanently delete a skill and its directory from data/skills/{name}/.
-
-    This is irreversible. The agent MUST call ask_user() describing the skill
-    to be deleted and then approve_dangerous_tool() before this tool will execute.
-    """
-    import shutil
-    from pathlib import Path
-
-    from config import settings
-    from core.skills.registry import get_skill_registry
-
-    registry = get_skill_registry()
-    skill = registry.get(name)
-
-    if skill is None:
-        # Check disabled skills too
-        if not registry.exists(name):
-            available = sorted(s.name for s in registry.all_skills())
-            hint = f"Available: {', '.join(available)}" if available else "No skills installed."
-            return f"Skill '{name}' not found. {hint}"
-        # Exists but is disabled — still allow deletion
-        skills_dir = Path(settings.skills_dir).resolve()
-        skill_dir = skills_dir / name
-    else:
-        skill_dir = skill.path
-
-    if not skill_dir.exists():
-        return f"Skill directory not found at {skill_dir}."
-
-    try:
-        shutil.rmtree(skill_dir)
-    except OSError as e:
-        return f"Error deleting skill '{name}': {e}"
-
-    try:
-        skills_root = Path(settings.skills_dir).resolve()
-        registry.rescan(skills_root)
-    except Exception as e:
-        logger.warning("delete_skill: registry rescan failed: %s", e)
-
-    return f"Skill '{name}' deleted (data/skills/{name}/ removed)."
-
-
 def register(reg) -> None:
     reg.register(
         name="discover_skills",
@@ -237,48 +193,6 @@ def register(reg) -> None:
         tags=["skill", "activate", "load", "instructions", "expertise"],
         timeout=15,
         parallel_safe=True,
-    )
-
-    # Under --dangerous the executor gate never fires, so the approval-sequence
-    # text would teach a ritual with no enforcement behind it — describe the
-    # actual behavior instead.
-    from config import settings
-
-    if settings.auto_approve_dangerous:
-        _delete_skill_sequence = (
-            "Executes immediately (--dangerous mode, no approval gate) — "
-            "only call this when the user clearly asked for the deletion."
-        )
-    else:
-        _delete_skill_sequence = (
-            "Required call sequence: "
-            "1) ask_user() naming the skill to be deleted, "
-            "2) approve_dangerous_tool(tool_name='delete_skill', scope='delete skill <name>'), "
-            "3) delete_skill(name). "
-            "The executor will block this call if approval has not been granted."
-        )
-    reg.register(
-        name="delete_skill",
-        func=delete_skill,
-        description=(
-            "Permanently delete a skill and its directory from data/skills/{name}/. "
-            "IRREVERSIBLE. " + _delete_skill_sequence
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Exact skill name (directory name in data/skills/)",
-                },
-            },
-            "required": ["name"],
-        },
-        category="core",
-        tags=["skill", "delete", "remove", "uninstall", "destroy"],
-        timeout=15,
-        parallel_safe=False,
-        safety_level="dangerous",
     )
 
     reg.register(

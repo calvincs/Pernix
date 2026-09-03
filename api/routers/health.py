@@ -24,7 +24,12 @@ async def health():
         "model": settings.llm_model or "(not set)",
         "version": APP_VERSION,
         "build": BUILD_ID,
-        "sessions_active": manager.active_count(),
+        # Work in flight, not sessions in memory. A session stays loaded for
+        # up to half an hour after its last turn, so active_count() answered
+        # "nine active" on a box where nothing was running. Both numbers are
+        # published because both are real: one is load, the other is memory.
+        "sessions_active": manager.busy_count(),
+        "sessions_loaded": manager.active_count(),
         "maintenance": maint.get_stats(),
     }
 
@@ -148,8 +153,22 @@ _SETTING_BOUNDS = {
     # rounds the binding constraint; the UI rejected his 500. The floor and
     # the round-cap-continuation machinery keep runaway risk bounded.
     "max_tool_rounds": (1, 1000),
+    # 0 effectively disables even when the bool is on; >5 would defeat the
+    # "genuinely finished tasks are never looped" contract.
+    "forced_followup_max_per_turn": (0, 5),
     "llm_max_concurrent": (1, 20),
     "openrouter_max_concurrent": (1, 20),
+    # Same family, previously unbounded: 0 built a scheduler that never
+    # granted a permit, so every request on that provider queued forever.
+    "openai_max_concurrent": (1, 20),
+    # Divisor for the maintenance tick (0 raised ZeroDivisionError every
+    # tick and silently stopped snooze).
+    "snooze_interval_ticks": (1, 1440),
+    "snooze_max_cycle_seconds": (30, 7200),
+    # 0 means "unlimited" here, so the floor is 0 rather than 1.
+    "llm_session_timeout": (0, 86400),
+    "cron_dispatch_timeout": (60, 86400),
+    "reflect_defer_idle_s": (0, 86400),
     "max_concurrent_workers": (1, 20),
     "max_fetch_size": (1024, 10_000_000),
     "browser_timeout": (5, 120),
@@ -168,6 +187,21 @@ _SETTING_BOUNDS = {
     "rlm_max_concurrent_subcalls": (1, 8),
     "rlm_timeout_seconds": (60, 3600),
     "rlm_run_retention_days": (1, 365),
+    # Archive horizons. 0 is a real setting on both — "never auto-archive"
+    # and "never delete the archive" — so the floor is 0 rather than 1, and
+    # the ceiling is a decade because an archive is meant to outlive the
+    # sweep that fills it.
+    "session_archive_idle_days": (0, 3650),
+    "session_delete_archived_days": (0, 3650),
+    # Space suggestions. The window has to be long enough for a habit to
+    # show up across days and short enough that the prompt stays readable;
+    # min_sessions/min_days are what "a habit" means, so they get real
+    # floors rather than 0.
+    "space_suggest_window_days": (7, 365),
+    "space_suggest_min_sessions": (2, 100),
+    "space_suggest_min_days": (1, 30),
+    "space_suggest_scan_interval_hours": (1, 720),
+    "space_suggest_ttl_days": (1, 365),
     # Session kernel. kernel_idle_seconds must stay under the 1800s session
     # reap in practice, but the hard ceiling is a day; below 60s the kernel
     # would be reaped between tool rounds and never persist anything.
@@ -183,7 +217,9 @@ _SETTING_BOUNDS = {
     "canary_retention_days": (1, 365),
     "canary_baseline_runs": (1, 20),
     "canary_regression_delta": (0.01, 1.0),
-    "canary_max_concurrent": (1, 4),
+    "canary_heartbeat_per_night": (1, 10),
+    "canary_post_batch_max": (1, 12),
+    "canary_park_after_passes": (3, 200),
     "adaptive_max_entries_per_kind": (1, 100),
     # Mirrors scripts/backup.py's KEEP_MIN/KEEP_MAX so the API rejects what the
     # backup run would have clamped anyway. 0 disables scheduled backups.
@@ -191,6 +227,10 @@ _SETTING_BOUNDS = {
     "adaptive_max_auto_applies_per_day": (0, 50),
     "adaptive_edit_cooldown_hours": (0, 720),
     "adaptive_tripwire_window_turns": (5, 200),
+    "adaptive_usage_retire_days": (0, 365),
+    "adaptive_prompt_note_ttl_days": (0, 365),
+    "adaptive_suspect_ttl_days": (0, 90),
+    "notification_retention_days": (0, 365),
     "telos_serendipity_budget": (0.05, 0.5),
     "telos_eig_floor": (0.0, 1.0),
     "telos_hypotheses_per_question": (1, 10),
@@ -202,9 +242,13 @@ _SETTING_BOUNDS = {
     # only the archive's own horizon deletes, so long values are cheap.
     "telos_soup_retention_days": (0, 3650),
     "telos_soup_archive_retention_days": (0, 3650),
-    "telos_budget_share_max": (0.1, 0.9),
-    "telos_claims_floor_per_window": (0, 20),
-    "telos_divergence_max": (0.01, 1.0),
+    "mcp_call_timeout": (5, 3600),
+    "mcp_connect_timeout": (5, 300),
+    "mcp_idle_seconds": (0, 86_400),  # 0 = never suspend
+    "mcp_max_servers": (1, 50),
+    "mcp_max_tools_per_server": (1, 200),
+    "mcp_max_description_chars": (200, 8000),
+    "mcp_refresh_interval_s": (0, 86_400),  # 0 = manual reload only
 }
 
 
@@ -214,6 +258,132 @@ _RESTART_FIELDS = {"network_enabled", "ssl_mode", "ssl_cert_path", "ssl_key_path
 # than a truncated write. Every other *_url with a non-empty current value keeps
 # the empty-string guard.
 _CLEARABLE_URL_FIELDS = {"voice_remote_url", "notify_webhook_url"}
+
+
+# ---------------------------------------------------------------------------
+# Settings schema (S4)
+#
+# The browser used to carry its own copy of every field's range, hand-written
+# beside the label. It drifted: snooze_max_cycle_seconds said min 60 where the
+# server enforces 30, scout_timeout and compaction_threshold advertised no
+# range at all, and the rlm_* caps had theirs only in prose. A rejected save
+# was then indistinguishable from a broken one, because nothing on screen ever
+# said what the accepted range WAS.
+#
+# So the bounds the server actually enforces — _SETTING_BOUNDS, the same dict
+# update_settings() checks against — are published, together with the dataclass
+# defaults. Labels, hints and the risk markers stay in the client: they are
+# paragraphs of UI copy, not configuration, and moving them here would only
+# split one voice across two files.
+# ---------------------------------------------------------------------------
+
+# Units the key name cannot spell out on its own.
+_SETTING_UNITS = {
+    "context_budget": "tokens",
+    "max_tokens": "tokens",
+    "ollama_num_ctx_cap": "tokens",
+    "compaction_keep_tokens": "tokens",
+    "telos_max_eval_tokens": "tokens",
+    "max_fetch_size": "bytes",
+    "max_file_write_size": "bytes",
+    "max_edit_read_size": "bytes",
+    "large_result_bind_threshold": "chars",
+    "reflect_defer_idle_s": "seconds",
+    "mcp_refresh_interval_s": "seconds",
+    "kernel_snapshot_max_bytes": "bytes",
+    "view_prune_min_chars": "chars",
+    "mcp_max_description_chars": "chars",
+}
+
+# Suffixes that name their own unit.
+_UNIT_SUFFIXES = (
+    ("_seconds", "seconds"),
+    ("_timeout", "seconds"),
+    ("_days", "days"),
+    ("_hours", "hours"),
+    ("_minutes", "minutes"),
+    ("_ticks", "ticks"),
+    ("_bytes", "bytes"),
+    ("_tokens", "tokens"),
+    ("_chars", "chars"),
+)
+
+
+def _setting_unit(key: str, kind: str, lo, hi) -> str | None:
+    """The unit to print after a number, or None when there isn't one."""
+    if key in _SETTING_UNITS:
+        return _SETTING_UNITS[key]
+    # A float bounded inside 0..1 is a share of something, whatever it is called.
+    if kind == "float" and lo is not None and hi is not None and lo >= 0 and hi <= 1:
+        return "fraction"
+    for suffix, unit in _UNIT_SUFFIXES:
+        if key.endswith(suffix):
+            return unit
+    return None
+
+
+def _field_default(f):
+    """A dataclass field's declared default, factories included."""
+    from dataclasses import MISSING
+
+    if f.default is not MISSING:
+        return f.default
+    if f.default_factory is not MISSING:  # type: ignore[misc]
+        return f.default_factory()  # type: ignore[misc]
+    return None
+
+
+@router.get("/api/settings/schema")
+async def get_settings_schema():
+    """Per-field type, default, and the bounds the settings API enforces.
+
+    Shape, per key: ``{key, type, default, min, max, step, unit, restart,
+    locked, risk, hint}``. ``risk`` and ``hint`` are always null here — they
+    are the client's copy to own; the field is present so the merged record
+    the UI builds has one shape.
+    """
+    from dataclasses import fields
+
+    defaults = Settings()
+    out = {}
+    for f in fields(defaults):
+        if f.name in _REDACTED_FIELDS:
+            continue
+        value = _field_default(f)
+        if isinstance(value, bool):
+            kind = "bool"
+        elif isinstance(value, int):
+            kind = "int"
+        elif isinstance(value, float):
+            kind = "float"
+        elif isinstance(value, list):
+            kind = "list"
+        elif isinstance(value, dict):
+            kind = "dict"
+        else:
+            kind = "str"
+        lo, hi = _SETTING_BOUNDS.get(f.name, (None, None))
+        step = None
+        if kind == "int":
+            step = 1
+        elif kind == "float":
+            step = 0.05 if (lo is not None and hi is not None and lo >= 0 and hi <= 1) else 0.01
+        out[f.name] = {
+            "key": f.name,
+            "type": kind,
+            "default": value,
+            "min": lo,
+            "max": hi,
+            "step": step,
+            "unit": _setting_unit(f.name, kind, lo, hi),
+            # The server only *reports* restart_required for the network group;
+            # every other startup-read field wears its badge in the client.
+            "restart": f.name in _RESTART_FIELDS,
+            "locked": f.name in _LOCKED_FIELDS,
+            "risk": None,
+            "hint": None,
+        }
+    return {"fields": out, "count": len(out)}
 
 
 @router.post("/api/settings")
@@ -308,6 +478,44 @@ async def update_settings(body: dict):
             await client.refresh_registry()
         except Exception:
             pass  # Non-critical — next startup will pick it up
+
+    # mcp_enabled is hot both ways: on → start the manager (connects the
+    # configured servers, registers tools); off → stop it (stdio children
+    # die), leaving registered schemas in place so calls fail with a clear
+    # disabled error rather than a vanished tool.
+    if "mcp_enabled" in updated:
+        try:
+            from core.extensions.mcp.manager import get_mcp_manager, get_mcp_manager_if_started
+
+            if settings.mcp_enabled:
+                if get_mcp_manager_if_started() is None:
+                    await get_mcp_manager().start()
+            else:
+                mgr = get_mcp_manager_if_started()
+                if mgr is not None:
+                    await mgr.shutdown()
+        except Exception:
+            pass  # Non-critical — restart will always recover
+
+    # Validate mcp_default_safety like the other enums (a typo would stamp
+    # every future MCP tool with a bogus level).
+    if "mcp_default_safety" in updated and settings.mcp_default_safety not in (
+        "safe",
+        "caution",
+        "dangerous",
+    ):
+        settings.mcp_default_safety = "caution"
+        settings.save()
+
+    # A different llm_model is a different agent: re-baseline the whole
+    # canary suite (parked included). Same hook as POST /api/models/switch.
+    if "llm_model" in updated:
+        try:
+            from core.extensions.scheduling import enqueue_full_sweep
+
+            enqueue_full_sweep("model-swap", delay_s=60)
+        except Exception:
+            pass  # Non-critical — the nightly heartbeat still measures
 
     restart_required = bool(_RESTART_FIELDS & set(updated))
 

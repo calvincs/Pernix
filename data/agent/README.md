@@ -74,3 +74,15 @@ All files here survive `--rebuild` (sessions, memory, and workspace are wiped;
 this directory is not — alongside `settings.json`, `.env`, `data/skills/`, and
 `data/certs/`). The birthdate line in SOUL.md is the only exception — it is
 stripped on `--rebuild` and re-stamped on the next startup.
+
+---
+
+## Per-space overrides (`spaces/<slug>/`)
+
+A [space](../../docs/guides/spaces.md) may override any of the three files by
+placing its own copy at `data/agent/spaces/<slug>/SOUL.md`, `RULES.md`, or
+`SESSIONS.md`. Resolution is **per file**: a space that defines only RULES.md
+gets the default SOUL.md and SESSIONS.md. The files here are plain markdown —
+hand-edit them or use the space's editor in the UI (gear icon on the space).
+Deleting an override file reverts that space to the default. The birthdate is
+always read from the default SOUL.md — a space override never changes it.

@@ -37,7 +37,7 @@ curl -b "pernix_auth=<your-token>" https://host:8090/api/sessions
 curl "https://host:8090/api/sessions?token=<your-token>"
 ```
 
-Retrieve your token from the Settings UI or from `GET /api/settings/auth-token`. Rotate it with `POST /api/settings/auth-token/regenerate`. In network mode both require a valid Bearer token like every other endpoint — the old localhost-only restriction on them was deliberately removed.
+Retrieve your token from Settings → Environment & network → Remote Access (**Show Token**) or from `GET /api/settings/auth-token`. Rotate it with `POST /api/settings/auth-token/regenerate`. In network mode both require a valid Bearer token like every other endpoint — the old localhost-only restriction on them was deliberately removed.
 
 ---
 
@@ -59,15 +59,23 @@ Returns the new session object including `session_id`.
 
 ### List Sessions
 ```
-GET /api/sessions?limit=50&offset=0
+GET /api/sessions?limit=50&offset=0&archived=false&exclude_types=canary,worker
 ```
-Returns a paginated list of sessions, most recent first.
+One page of sessions, most recent first. Alongside `items`/`count`/`spaces` the response carries `total` (every session in the population being listed) and `has_more` (`offset + limit < total`) — the pair is what lets a client offer the page *behind* the one it is showing instead of stopping at a recency horizon. `has_more` is measured against the requested window rather than the rows returned, because space sessions are unioned back in past that horizon and can make a page longer than `limit`.
+
+**Archived sessions are absent by default** — leaving this list is what archiving *is*. `?archived=1` returns the same shape over that set instead, and `total`/`has_more` then count only it. Both answers also carry `archived_count` (how many sessions are archived in total) so a client can offer "Archived (N)" without a second round trip, and `archived` (which population it just returned). The archived page does **not** union space sessions back in: an archived session has left its space group.
+
+**`exclude_types`** is a comma-separated list of session types to leave out of the page entirely: `normal`, `worker`, `cron`, `rlm`, `snooze`, `canary`. Unknown names are ignored rather than rejected, and the applied list comes back as `excluded_types`. The filter is applied in SQL *before* the `LIMIT` — including in the never-roll-off space union — so the page **refills** with what is left rather than merely getting shorter, and `total`/`has_more` count the same narrowed population. This is what keeps a machine-heavy instance usable: where the 500 most recently updated sessions are mostly canary self-checks, workers and cron runs, excluding those types is the difference between a third of the user's chats fitting on page one and all of them. It works on `?archived=1` too.
+
+Both answers also carry **`type_counts`** — how many *live* sessions wear each type, over the whole unfiltered, unarchived population, e.g. `{"normal": 310, "worker": 47, "cron": 33, "rlm": 23, "snooze": 14, "canary": 277}`. It is deliberately *not* narrowed by `exclude_types`: a client offering the filter has to keep naming what it is hiding, or the control that turns a type back on reads zero. The six known types are always present; a type this build does not recognise is reported under its own name.
 
 ### Get Session (with messages)
 ```
-GET /api/sessions/{session_id}
+GET /api/sessions/{session_id}?limit=200&before_id=<message_id>
 ```
-Returns the full session object including all messages. Pass `?limit=N` to get only the newest N plus `total_messages` / `has_more`.
+Returns the full session object including its messages, oldest first. The row carries `archived_at` (`null` when live) alongside `read_only` and `read_only_reason` — and this is the only lookup that finds a session the list no longer contains, which is exactly what an archived one is. Pass `?limit=N` to get only the newest N plus `total_messages` (the session's whole count) and `has_more`.
+
+`before_id` pages further back: the newest `limit` messages **older** than that message id, and nothing the client already holds — which is what makes "load earlier" a prepend rather than a re-render of the whole transcript. A `before_id` with no `limit` gets the default page size (200) instead of the whole transcript. `has_more` is computed from the oldest row returned, so it stays correct on the first page and every page after it.
 
 ### Get Session Status
 ```
@@ -81,20 +89,68 @@ GET /api/sessions/{session_id}/state-log
 ```
 Returns the append-only state machine transition history for the session. Every state change is recorded with a timestamp, the triggering event, and optional metadata. Accepts `since_id`, `before_id`, `limit` (1–5000), and `tail`.
 
+### Get Turns
+
+```
+GET /api/sessions/{session_id}/turns?before_turn=<turn_id>&limit=20
+```
+
+One record per turn, newest first, holding everything the agent produced inside it. This is the read model behind the State timeline: the same join the modal used to do in the browser after downloading the whole state log *and* the whole transcript — every tool result included — just to draw a header saying "13 tools, 4 errors". Nothing new is captured; every field is read back from `session_state_log`, `messages` and `token_usage`.
+
+`limit` is clamped to 1–100. `before_turn` pages backward (turns older than that turn id); `has_more` says whether an older page exists. 404 on an unknown session; a known session with nothing logged yet returns an empty page.
+
+```json
+{ "session_id": "8af5b75db1b1", "count": 10, "has_more": true, "turns": [ {
+    "turn_id": 17, "parent_turn_id": null, "retry_index": 0, "running": false,
+    "started_at": "…", "ended_at": "…|null", "elapsed_ms": 115684,
+    "termination_reason": "complete|null",
+    "reflect_count": 0, "eval_count": 0, "compaction_count": 0,
+    "phases":  [ {"state","started_at","ended_at|null","elapsed_ms","reason_in","reason_out|null"} ],
+    "tool_calls": [ {"message_id","call_id","name","args_summary","latency_ms","was_error","started_at"} ],
+    "scout":  {"approach","tools","tool_rationale","memory","model","scout_model",
+               "latency_ms","from_cache","from_fallback","reused_prior", …} | null,
+    "reflect": [ {"attempt","verdict","reasoning","diagnostic","what_worked"} ],
+    "eval":    [ {"attempt","gates":[{"name","command","passed","exit_code","output_tail"}]} ],
+    "compactions": [ {"summary","compacted_up_to","original_count","at"} ],
+    "notices": [ {"text","at"} ],
+    "tokens": {"prompt","completion","total","calls","cost_estimate","models"},
+    "model": "…|null",
+    "invariant_violations": []
+} ] }
+```
+
+**A turn** runs from the transition that opened it — `prompt-arrived`, or `answer-received` / `workers-complete` after a question or a worker wait, which also set `parent_turn_id` — to the transition that parks the machine again. `running` is true only for the session's newest turn while it has no closing transition; an older turn without one was abandoned by a crash and says so in `invariant_violations` (`"turn-never-closed"`) rather than ticking forever.
+
+**Phases** are the states the turn passed through, in order, with the wall-clock time spent in each. Retries repeat them (`scouting → processing → finalizing → scouting → …`) and a compaction round trip shows as its own `compacting` phase. They sum exactly to `elapsed_ms`, which the old client-side header did not: it added up every log row's `elapsed_ms` including the opening row's, which measures how long the session sat *idle before the prompt* — on one real turn that was 71 minutes of idle reported as turn time.
+
+**`was_error`** is the executor's own verdict, stamped on the tool row (`metadata.was_error`): the call raised, timed out, returned nothing, or returned an `Error:`. For rows written before that stamp existed it falls back to the transcript's old heuristic. It is deliberately narrower than that heuristic, which also flagged any result merely *containing* a traceback — 336 rows on the owner's box, nearly all successful `bash` calls whose script printed one.
+
+**`tokens.cost_estimate`** is null, not `0`, when no usage row priced itself — an unpriced local model has no cost, which is not the same as a free one. **`model`** is the model most assistant rows in the turn recorded; null for turns saved before assistant rows carried it.
+
+**Messages are joined by time window**, not by `metadata.parent_user_msg_id`: that stamp names the turn root a row was written under, but `current_turn_user_msg_id` survives turns that never refresh it — on session `e058985e52df` one user message is stamped as the parent of four different turns — so keying on it collapses their work together. In the gap between two turns the discriminator is role: a `user` row there is the prompt that opened the next turn, everything else is the previous turn's post-hook tail.
+
+Malformed JSON in a message never fails the request. A scout, reflect or eval body that will not parse comes back as `{"raw": "<head of the content>"}`; a compaction summary that is prose rather than the usual fenced JSON block comes back as that text.
+
+`/state-log` and the message endpoints are unchanged — this is an additional view over the same rows.
+
 ### Search Sessions
 ```
 GET /api/sessions/search?q=<query>&limit=20
 ```
-FTS5 full-text search across all sessions' message content.
+FTS5 full-text search across all sessions' message content. Archived sessions are deliberately still findable here — staying searchable is the promise archiving makes — so each hit carries `archived: true|false` alongside `title`, `session_type` and `space_id`.
 
 ### Update Session Metadata
 ```
 PATCH /api/sessions/{session_id}
 ```
 ```json
-{ "title": "New title", "pinned": true, "model_override": "qwen3:32b" }
+{ "title": "New title", "pinned": true, "space_id": null, "archived": false, "model_override": "qwen3:32b" }
 ```
-Any subset of the three keys.
+Any subset of the five keys; absent keys are left unchanged.
+
+`archived: true` stamps `archived_at` with now, `false` clears it. An archived session leaves the session list and its space group, keeps every message, stays searchable, and opens read-only (`read_only_reason` becomes *"Archived — restore it to continue"*). Deleting stays a separate, explicit act.
+
+**Nothing here bumps `updated_at`.** Recency ordering is what the sidebar's time buckets and the idle horizon are computed from, so archiving must not reshuffle the list and restoring must put a session back exactly where it was. Archiving and restoring also emit a `session.archived` SSE event on that session's stream, carrying `archived`, `archived_at`, `read_only` and `read_only_reason`.
 
 ### Pause / Resume a Session
 ```
@@ -115,14 +171,167 @@ DELETE /api/sessions/{session_id}
 ```
 Deletes the session and cascades to any worker sessions it spawned.
 
+### Archive Idle Sessions
+```
+POST /api/sessions/archive-idle
+```
+```json
+{ "days": 30, "space_id": null, "dry_run": false }
+```
+Archives ordinary chats idle for more than `days` — or, with `dry_run`, says what it would. All three keys are optional: `days` defaults to `session_archive_idle_days` and must be a non-negative integer (anything else is a `400`); `space_id` narrows the sweep to one space (a `404` if it does not exist); omit it to sweep the whole table.
+
+A candidate is `session_type` `normal`, not already archived, not pinned, last updated before the cutoff. Space sessions **are** included: the v33 rule that spares them from every DELETE sweep is about never losing a transcript, and nothing here deletes one.
+
+A dry run computes exactly the same set as the real run, so the count in a confirmation dialog is a promise this endpoint keeps.
+
+```json
+{
+  "count": 74,
+  "ids": ["a1b2c3d4e5f6", "..."],
+  "sample": [
+    { "id": "a1b2c3d4e5f6", "title": "Old chat", "updated_at": "2026-07-01T09:12:44+00:00", "space_id": null }
+  ],
+  "days": 30,
+  "dry_run": false
+}
+```
+`sample` is the first ten. Sessions archived for longer than `session_delete_archived_days` are hard-deleted by a snooze sweep; that knob is `0` (never) by default.
+
 ### Purge Old Sessions
 ```
 POST /api/sessions/purge
 ```
 ```json
-{ "keep_days": 7, "keep_min": 5 }
+{ "keep_days": 7, "keep_min": 5, "dry_run": false }
 ```
-Bulk-deletes sessions whose last activity is older than `keep_days`, always keeping at least `keep_min` of the stale candidates.
+Bulk-deletes stale ordinary sessions. All three keys are optional and shown with their defaults; `keep_days` and `keep_min` must be non-negative integers (anything else is a `400`). `keep_days: 0` means "everything already idle".
+
+A **candidate** is a session that is all of: `session_type` `normal`, not pinned, not in a space, and last updated before the cutoff. The scan covers the whole table, not a recency window. The newest `keep_min` candidates are always kept; the rest are deleted (or, with `dry_run: true`, only counted).
+
+Sessions older than the cutoff that are *not* candidates are counted under `skipped`, each one under the first rule that spared it — `other_types`, then `pinned`, then `in_space`. Typed sessions (canary, worker, cron, rlm, snooze) are never purged here; each has its own retention horizon.
+
+Response (identical shape in both modes):
+```json
+{
+  "dry_run": false,
+  "keep_days": 7,
+  "keep_min": 5,
+  "cutoff": "2026-08-26T12:00:00+00:00",
+  "candidates": 312,
+  "would_delete": 307,
+  "purged": 307,
+  "sample": [
+    { "id": "a1b2c3d4e5f6", "title": "Old chat", "updated_at": "2026-07-01T09:12:44+00:00", "message_count": 18 }
+  ],
+  "skipped": { "pinned": 4, "in_space": 11, "other_types": 96 }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `dry_run` | Echo of the request — `true` means nothing was deleted |
+| `keep_days` / `keep_min` | The validated values actually applied |
+| `cutoff` | ISO-8601 UTC timestamp; a session is stale when `updated_at` is before it |
+| `candidates` | How many sessions matched the candidate rules |
+| `would_delete` | `candidates` minus the `keep_min` newest — the set the real run acts on |
+| `purged` | How many were deleted; always `0` when `dry_run` is `true` |
+| `sample` | The first 10 of the delete set (`id`, `title`, `updated_at`, `message_count`), newest first — enough to show a user before they commit |
+| `skipped` | Counts of the older-than-cutoff sessions each rule spared |
+
+A dry run and the real run compute the same set from the same query, so `would_delete` is a promise the real run keeps.
+
+---
+
+## Spaces
+
+Named, colored groups of long-lived sessions that share directives, memory, workspace and a kernel — see [guides/spaces.md](guides/spaces.md).
+
+### List Spaces
+```
+GET /api/spaces
+```
+Returns `{"items": [...]}`; each space carries `id`, `slug`, `label`, `color`, `sort_order`, `created_at`, `updated_at` and `session_count` (live — unarchived — member sessions only).
+
+### Create a Space
+```
+POST /api/spaces
+```
+```json
+{ "label": "Research", "color": "#7c9cff" }
+```
+`label` is required (max 120 chars, `400` if empty); `color` must be `#rrggbb` or is defaulted. The slug is derived from the label and is immutable — it names the memory-file prefix, the directive directory and the workspace home. `409` if the derived slug collides with an existing space.
+
+### Update a Space
+```
+PATCH /api/spaces/{space_id}
+```
+```json
+{ "label": "New name", "color": "#22c55e", "sort_order": 2 }
+```
+Any subset of the three keys; the slug never changes. Returns the updated space row.
+
+### Delete a Space
+```
+DELETE /api/spaces/{space_id}?cascade=false
+```
+`cascade=false` (default) **detaches**: member sessions return to the ordinary list, memory files and the workspace folder stay, bound jobs unbind. `cascade=true` **deletes** every member session plus the space's memory files, workspace folder and bound jobs. Either way the directive overrides and the shared kernel go with the space — they are configuration, not user artifacts. Returns `{"space_id", "cascade", ...}` with `sessions_detached`/`jobs_unbound` or `sessions_deleted`/`memory_files_deleted`/`jobs_removed` depending on the mode.
+
+### Directive Overrides
+```
+GET    /api/spaces/{space_id}/directives
+PUT    /api/spaces/{space_id}/directives/{name}     { "content": "<full markdown>" }
+DELETE /api/spaces/{space_id}/directives/{name}
+```
+`name` is `SOUL`, `RULES` or `SESSIONS`. GET returns `{"space_id", "files": {"SOUL": {"default": "...", "override": "...|null"}, "RULES": {...}, "SESSIONS": {...}}}` — the shared default text next to this space's override, if any. PUT writes an override (`content` non-empty, max 64,000 bytes); DELETE removes the override so the space reverts to the default. Undefined files fall back to the shared default; the compiler and scout both resolve through `core.spaces.directive_path`.
+
+---
+
+## Space Suggestions
+
+Off by default (`space_suggest_enabled`; Settings → Autonomy & idle work → **Space suggestions**). At idle, a background-model scan groups recent ordinary chats by the kind of work they are; a code gate keeps only the substantial groupings as pending suggestions the user accepts or declines — nothing is created or moved on its own. Guide: [guides/spaces.md](guides/spaces.md).
+
+### List Suggestions
+```
+GET /api/space-suggestions?status=pending
+```
+`status` is `pending` (default) | `accepted` | `rejected` | `expired` | `all`; anything else is `400`. Returns `{"suggestions": [...], "status"}`. Each row carries `id`, `kind` (`new` | `existing`), `topic_key`, `label`, `color`, `why`, `existing_space_id`, `session_ids`, `directives` (drafted additions keyed by `SOUL`/`RULES`/`SESSIONS`, each `{"addition", "rationale"}`, or `null`), `status`, `space_id`, `created_at`, `resolved_at` — plus resolved `sessions` (`id`/`title`/`subtitle`/`updated_at`/`space_id`; a member whose session was since deleted just drops out) and `existing_space` (`id`/`label`/`color`, or `null` for a `new`-kind suggestion).
+
+### Get One Suggestion
+```
+GET /api/space-suggestions/{suggestion_id}
+```
+Same shape as a list row, with each entry in `directives` further enriched with the shared `default` file text alongside the drafted `addition` — what the review sheet needs to show both. `404` if unknown.
+
+### Scan Now
+```
+POST /api/space-suggestions/scan
+```
+```json
+{ "dry_run": true }
+```
+Runs a scan immediately, outside its normal cadence. `dry_run` (default `true`) proposes without storing anything — this is what the settings pane's **Scan now** preview calls. Returns `{"scanned", "proposed", "kept", "dry_run"}` on a normal run, or `{"skipped": "<reason>"}` / `{"error": "..."}` when the scan declines to run or the model call fails. `409` if a scan is already in progress.
+
+### Accept
+```
+POST /api/space-suggestions/{suggestion_id}/accept
+```
+```json
+{ "directives": { "SOUL": "<full file content to write>" }, "session_ids": ["..."] }
+```
+Creates the space (kind `new`; `label`/`color` may override the draft) or targets the existing one (kind `existing`) — `409` if that space was deleted since the scan (the suggestion is expired instead of retried). `directives` here is the **full content** to write per file (what the sheet computed from default + addition, possibly edited), not the drafted `{addition, rationale}` shape the GET returns — and it is only ever written for a brand-new space, so an existing space's own overrides are never silently replaced. `session_ids` narrows which members to move (default: all of them); moving uses `set_session_meta`, not the ordinary update path, so accepting never bumps a chat's recency. A member move that fails is reported, not rolled back. Returns `{"status": "accepted", "space", "moved", "failed"}`. `404` unknown suggestion, `409` if not pending.
+
+### Reject
+```
+POST /api/space-suggestions/{suggestion_id}/reject
+```
+Declines. The row stays — its `topic_key` is what suppresses the same grouping from being proposed again until it is cleared. Returns `{"status": "rejected"}`. `404`/`409` as above.
+
+### Clear / Delete
+```
+DELETE /api/space-suggestions?status=rejected
+DELETE /api/space-suggestions/{suggestion_id}
+```
+The bulk form clears every suggestion in one terminal status (`accepted` | `rejected` | `expired`; `pending` is refused with `400` — accept or decline instead). The single form forgets one row whatever its status, and re-arms a declined topic so the scan may propose it again. `404` if the single id is unknown.
 
 ---
 
@@ -319,13 +528,26 @@ Returns a list of all memory files with entry counts and sizes.
 ```
 GET /api/memory/files/{filename}
 ```
-Returns `{"name", "content"}` as JSON.
+Returns `{"name", "content", "mtime"}` as JSON. `mtime` is the markdown file's modification time — hand it straight back as `base_mtime` on the next save to get conflict detection.
+
+### Write a Memory File
+```
+PUT /api/memory/files/{filename}
+Content-Type: application/json
+
+{ "content": "<full markdown>", "base_mtime": 1756800000.123456 }
+```
+Replaces the file's markdown and re-indexes it, so search stops matching text the file no longer contains. `content` is required and must be a string (max 5 MB, else 413); the file must already exist (404 otherwise).
+
+`base_mtime` is optional. Send the value the GET returned and a save that would overwrite someone else's change — the agent, a maintenance sweep — is refused with `409 {"detail": "changed_on_disk", "mtime": <current>}` instead of silently winning. Omit it and the write is last-writer-wins, which is what every non-editor caller gets. Returns `{"saved": true, "name", "bytes", "mtime"}`; the returned `mtime` is the next save's `base_mtime`.
 
 ### Search Memory
 ```
-GET /api/memory/search?q=your+query&limit=5&after=<epoch>
+GET /api/memory/search?q=your+query&limit=10&offset=0&after=<epoch>&space=<slug>
 ```
-Full-text search across all memory entries — BM25, or hybrid BM25 + vector when `embedding_model` is set. `limit` defaults to 5; `after` filters to entries newer than the given epoch. Returns entries with relevance scores.
+Full-text search across all memory entries — BM25, or hybrid BM25 + vector when `embedding_model` is set. `limit` defaults to 10 and is clamped to 100; `offset` pages the ranked results; `after` filters to entries newer than the given epoch; `space` (a slug) prioritizes that space's `pernix.space.<slug>.*` files.
+
+Returns `results` (entries with relevance scores) plus `offset`, `limit`, `returned` (rows in this page) and `has_more` (whether a further page exists). There is deliberately no exact `total`: the hybrid ranker fuses two result sets and stops at a scan cap, so any count would be contradicted by the next query. The flag is the honest answer.
 
 ### Memory Maintenance
 ```
@@ -351,14 +573,18 @@ GET /workspace/{path}
 ```
 Serves the file with auto-detected content type. Works for HTML, images, JSON, text, etc. Useful for opening agent-generated HTML files in the browser.
 
+The response carries an **`X-File-Mtime`** header — the file's modification time in seconds to six decimal places, exposed to browsers via `Access-Control-Expose-Headers`. An editor keeps that value and hands it back as `base_mtime` on save; that is the whole conflict-detection contract.
+
 ### Write a File
 ```
 PUT /workspace/{path}
 Content-Type: application/json
 
-{ "content": "<file contents>" }
+{ "content": "<file contents>", "base_mtime": 1756800000.123456 }
 ```
-The body is JSON with a `content` field (a raw text body is a 422). Creates parent directories automatically.
+The body is JSON with a `content` field (a raw text body is a 422). Creates parent directories automatically. Returns `{"saved": true, "path", "bytes", "mtime"}`.
+
+`base_mtime` is optional and opt-in: send the `X-File-Mtime` value from the GET and a write whose base is stale returns `409 {"detail": "changed_on_disk", "mtime": <current>}` — the file is left alone and the client can diff or reload. Omit it and the write is last-writer-wins, so agent tools, `curl`, and older clients are unaffected. The same contract, byte for byte, backs `PUT /api/memory/files/{name}` and `PUT /api/skills/{name}`.
 
 ### Delete a File
 ```
@@ -371,8 +597,9 @@ POST /api/upload
 Content-Type: multipart/form-data
 
 file=@localfile.pdf
+path=reports/2026          # optional
 ```
-Max 250MB. Filenames are sanitized. Blocked extensions: `.exe`, `.sh`, `.php`, `.bat`, `.dll`, `.msi`, `.scr`, `.cmd`, `.com`. Returns the saved path.
+Max 250MB. `path` is an optional form field naming a directory relative to the workspace root — the folder the Explorer is currently showing. It is created if missing and goes through the same traversal check as every other workspace route; omitted, the upload lands at the root. Filenames are sanitized. Blocked extensions: `.exe`, `.sh`, `.php`, `.bat`, `.dll`, `.msi`, `.scr`, `.cmd`, `.com`. Returns the saved path.
 
 ### List Data Files
 ```
@@ -456,7 +683,14 @@ Sets a per-session model override (does not change global settings).
 ```
 GET /api/health
 ```
-Returns `{"status": "healthy", ...}` with the release version, active session count, and current primary model.
+Returns `{"status": "healthy", ...}` with the release version, build id, current primary model, maintenance stats, and two session counts:
+
+| Key | Meaning |
+|---|---|
+| `sessions_active` | Sessions doing work right now — a turn running, scouting, compacting, finalizing, or holding a background task. Canary sessions are never counted. |
+| `sessions_loaded` | Sessions held in memory, busy or not. A session stays loaded for about 30 minutes after its last turn before the reaper drops it, so this is a memory figure, not a load figure. |
+
+`sessions_active` is always ≤ `sessions_loaded`. Watch the first for load and the second for footprint; a large gap just means recent conversations have not been reaped yet.
 
 ### Detailed Diagnostics *(localhost-only)*
 ```
@@ -478,6 +712,26 @@ Content-Type: application/json
 { "llm_model": "qwen3:32b", "max_tool_rounds": 15 }
 ```
 Updates one or more settings. Partial updates are supported — only the provided keys are changed.
+
+### Settings Schema
+```
+GET /api/settings/schema
+```
+The machine-readable half of the settings surface: every non-redacted settings field with the type, default, and bounds the settings API actually enforces, so a client never has to hardcode them. Returns `{"fields": {<key>: <record>}, "count": N}` with one record per key:
+
+| Key | Meaning |
+|---|---|
+| `key` | The setting name (same as the map key) |
+| `type` | `bool`, `int`, `float`, `str`, `list`, or `dict` — derived from the declared default |
+| `default` | The shipped default value |
+| `min` / `max` | The bounds `POST /api/settings` clamps to, or `null` when the field is unbounded |
+| `step` | Suggested increment: `1` for ints, `0.05` for floats bounded to 0–1, `0.01` for other floats, `null` otherwise |
+| `unit` | Display unit inferred from the key (`seconds`, `minutes`, `hours`, `days`, …), or `null` |
+| `restart` | `true` when changing the field requires a server restart |
+| `locked` | `true` when the field cannot be changed through the API at all |
+| `risk` / `hint` | Always `null` — the client owns this copy; the fields exist so the merged record has one shape |
+
+Redacted fields (API keys and other secrets) are absent entirely.
 
 ### Set API Keys
 ```
@@ -526,6 +780,51 @@ Runs one Snooze maintenance cycle on demand, skipping the cadence and cooldown c
 
 ---
 
+## Storage
+
+One ledger for "why is this box full?": sessions by type, the database file's size and reclaimable space, both backup directories, and the retention sweeps that already run in the background. Backs Settings → Storage.
+
+### Get the Ledger
+```
+GET /api/storage
+```
+```json
+{
+  "sessions": { "total": 1032, "by_type": {"normal": 310, "worker": 47, "...": 0}, "pinned": 12, "in_spaces": 84, "archived": 41 },
+  "database": { "path": "/app/data/sessions.db", "bytes": 176160768, "wal_bytes": 0, "page_size": 4096, "reclaimable_bytes": 8912896 },
+  "backups": { "dir": "data/backups", "count": 7, "bytes": 734003200, "keep": 7, "last_backup_at": "2026-09-02T18:37:03Z", "beyond_keep": [] },
+  "legacy_backups": { "dir": "data/.backups", "...": "same shape as backups, or null if this instance never had one" },
+  "sweeps": { "sessions_pruned": 307, "sessions_archived": 41, "...": 0, "last_cycle": "2026-09-02T22:00:00Z" }
+}
+```
+`sessions.archived` is `null` on a pre-v34 database rather than `0` — a build that cannot archive is not the same fact as zero archived sessions. `database.reclaimable_bytes` is the SQLite freelist (`freelist_count * page_size`) — what a `POST /api/storage/optimize` would give back. `backups`/`legacy_backups.bytes` is the whole directory (snapshots plus any memory corpora beside them); `beyond_keep` lists the snapshots rotation would remove, each with `name`, `bytes`, `mtime`, `scheme`. `legacy_backups` is `null` on an instance that never wrote to the pre-rename `data/.backups` directory. `sweeps` is present only when the snooze runner has stats to report — every `*_pruned` counter it tracks, plus `sessions_archived` and `last_cycle`.
+
+### Rotate Backups
+```
+POST /api/storage/backups/rotate
+```
+```json
+{ "dir": "primary", "dry_run": true }
+```
+Applies the retention count (`backup_keep_count`) to every snapshot in one directory, under every naming scheme it was ever written with. `dir` is `primary` (`data/backups`, the one the schedule writes) or `legacy` (`data/.backups`, which deploys still write to and nothing used to rotate) — each keeps its own newest `keep`, not a shared budget. `400` on an unknown `dir`; `404` if `dir: legacy` is asked for on an instance with no legacy directory. Defaults to a dry run.
+
+### Prune Archived Sessions
+```
+POST /api/storage/prune-archived
+```
+```json
+{ "days": 90, "dry_run": true }
+```
+Hard-deletes sessions that have been archived for more than `days`. `days` defaults to `session_delete_archived_days` (`0` = never, so an omitted body normally does nothing). Defaults to a dry run — past this point the transcript is actually gone. Returns `{"count", "ids", "sample", "days", "dry_run"}`, the same shape `POST /api/sessions/archive-idle` uses.
+
+### Compact the Database
+```
+POST /api/storage/optimize
+```
+`PRAGMA optimize`, then `VACUUM`, then a `wal_checkpoint(TRUNCATE)` so the freed pages actually leave the file on disk instead of waiting for the next checkpoint. Refused with `409` while any turn is running — `VACUUM` holds a write lock for the whole rebuild. Returns `{"bytes_before", "bytes_after"}`.
+
+---
+
 ## Skills
 
 ### List Skills
@@ -538,13 +837,18 @@ Returns metadata for all installed skills (name, description, tags, version, ena
 ```
 GET /api/skills/{name}
 ```
-Returns the full SKILL.md content.
+Returns the skill's metadata, rendered `instructions`, the raw `raw_content` of its SKILL.md, its `resources`, and `mtime` — the value to send back as `base_mtime` when saving.
 
 ### Skill Improvement Proposals
 
-Written by reflect and refine when a skill visibly under-performs; a human
-reviews each one before it touches a `SKILL.md`. Nothing is applied
-automatically.
+Written by reflect and refine when a skill visibly under-performs. A pending
+proposal reaches `SKILL.md` one of two ways: you approve-then-apply it
+yourself, or — past `skill_proposal_auto_apply_after_hours` (default 24; `0`
+disables) — a snooze sweep applies it on its own once it passes machine
+validation (skill exists and is enabled, change ≤ 4,000 chars, confidence ≥
+0.6), day-capped (`skill_proposal_max_auto_applies_per_day`, default 5), with
+a timestamped backup under `data/skill_backups/<skill>/` and status stamped
+`auto_applied` — reject it before the window closes to veto.
 
 ```
 GET    /api/skills/proposals                 List proposals (default status=pending)
@@ -553,8 +857,9 @@ POST   /api/skills/proposals/{id}/reject     Dismiss
 POST   /api/skills/proposals/{id}/apply      Write the change into the target SKILL.md
 ```
 
-Filter with `?skill_name=`, `?status=`, `?source_origin=` (`session` for
-post-turn reflect, `refine` for the authoring pass).
+Filter with `?skill_name=`, `?status=` (`pending` | `approved` | `rejected` |
+`applied` | `auto_applied`), `?source_origin=` (`session` for post-turn
+reflect, `refine` for the authoring pass).
 
 > These lived under `/api/workflows/proposals` before the workflow engine was
 > removed in 2026-08. Update any saved calls.
@@ -562,10 +867,11 @@ post-turn reflect, `refine` for the authoring pass).
 ### Update a Skill
 ```
 PUT /api/skills/{name}
-Content-Type: text/plain
+Content-Type: application/json
 
-<full SKILL.md content>
+{ "content": "<full SKILL.md content>", "base_mtime": 1756800000.123456 }
 ```
+Writes `content` verbatim to the skill's `SKILL.md` and rescans the registry. `base_mtime` is optional and behaves exactly as it does on `PUT /workspace/{path}`: send the `mtime` from `GET /api/skills/{name}` and a stale save is refused with `409 {"detail": "changed_on_disk", "mtime": <current>}`; omit it for last-writer-wins. Returns `{"ok": true, "mtime": <new>}`.
 
 ### Enable / Disable a Skill
 ```
@@ -619,7 +925,9 @@ POST /api/tools/set-safety
 Read-only history and live inspection of RLM (recursive processing) runs — see [internals/rlm.md](internals/rlm.md). Listing works even when `rlm_enabled` is off, so past runs stay inspectable.
 
 ```
-GET /api/rlm/runs?session_id=&limit=20        List runs, newest first (limit clamped to 100)
+GET /api/rlm/runs?session_id=&limit=20&space_id=  List runs, newest first (limit clamped to 100).
+                                              `space_id` returns every member session's runs and,
+                                              when given, wins over `session_id`.
 GET /api/rlm/runs/by-session/{ui_session_id}  Resolve a sidebar RLM view session to its run detail
 GET /api/rlm/runs/{run_id}                    One run: DB row + manifest + nested children + answer (when finished)
 GET /api/rlm/runs/{run_id}/trace?after=0      Parsed trace.jsonl events from byte offset `after`; returns
@@ -640,11 +948,20 @@ DELETE /api/jobs/{name}       Delete a job
 PUT    /api/jobs/{name}       Update a job
 POST   /api/jobs/{name}/pause Pause a job
 POST   /api/jobs/{name}/resume Resume a paused job
+POST   /api/jobs/{name}/run   Fire the job once, now
+POST   /api/jobs/{name}/validate   Re-validate the stored spec
+POST   /api/jobs/{name}/test  Dry-run the prompt once in a throwaway workspace
 GET    /api/jobs/runs?limit=&offset=&job_name=   Paginated run history ({items, total, limit, offset})
 DELETE /api/jobs/runs         Clear run history
 GET    /api/jobs/status       Current scheduler status
 GET    /api/jobs/events       SSE stream of job events
 ```
+
+**Run now.** `POST /api/jobs/{name}/run` fires the job through the scheduler's own dispatch, so a manual run *is* a run: same `cron_runs` row, same `job.started` / `job.completed` events, same entry in History. It does not touch the schedule — the missed-run grid is unaffected, and a paused job can still be run this way (that is the point of a manual trigger). Returns `{"status": "run_started", "name"}` immediately; the outcome arrives on `/api/jobs/events` like every other run's.
+
+**Validate.** `POST /api/jobs/{name}/validate` re-checks a stored job's spec — cron expression parses, prompt is non-trivial, every entry in `allowed_tools` exists (hard errors); an unknown model is a warning. The result is persisted on the job and returned as `{"name", "validation"}`, which is what drives the valid / invalid / unvalidated badges in the jobs panel. Creating or editing a job validates it automatically; this endpoint is for re-checking one whose world may have changed underneath it (a renamed tool, a removed model).
+
+**Test.** `POST /api/jobs/{name}/test` dry-runs the prompt once in a throwaway temp workspace under the job's own model and allow-list, writes **no** `cron_runs` row, and keeps the transcript as a `Job test: <name>` session. See [guides/scheduling-cron.md](guides/scheduling-cron.md).
 
 ---
 
@@ -693,7 +1010,7 @@ Golden-task canaries — see [internals/canary-and-adaptive.md](internals/canary
 ```
 GET /api/canary
 ```
-Returns `enabled`, the sweep `schedule`, and every canary definition (name, tags, flaky flag, gate names, timeout, `last_reviewed`) with per-task stats over the retention window (`runs`, `passed`, `last_run`).
+Returns `enabled`, the heartbeat `schedule` and `heartbeat_per_night`, and every canary definition (name, tags, `covers`, flaky/`parked` flags, probe fields `max_runs`/`expires`, gate names, timeout, `last_reviewed`) with per-task stats over the retention window (`runs`, `passed`, `last_run` including its `outcome`).
 
 ### List Runs
 ```
@@ -708,7 +1025,25 @@ POST /api/canary/run
 ```json
 { "name": "fix-failing-test" }
 ```
-Queues one canary by name, or the whole suite with `"name": "*"`. Returns `{"queued": ...}`; `400` when `canary_enabled` is off, `404` for an unknown name.
+Queues one canary by name, or a **full sweep** (every canary, parked included) with `"name": "*"`. Returns `{"queued": ...}`; `400` when `canary_enabled` is off, `404` for an unknown name.
+
+### Create a Canary
+```
+POST /api/canary
+```
+```json
+{ "raw": "---\nname: my-canary\nprompt: ...\ngates: [...]\n---\nnotes" }
+```
+Raw `CANARY.md` text (or a structured spec: `name`, `prompt`, `gates`, optional `files`/`tags`/`timeout`). Validated by a parse round-trip; gate commands are checked against the auto-admission allowlist proof and the verdicts returned as `warnings` — advisory, never a blocker. `400` on invalid content or a duplicate name.
+
+### Read / Edit / Park / Review / Retire
+```
+GET    /api/canary/{name}            → full definition + raw_content
+PUT    /api/canary/{name}            {"raw": "..."} — replace, validated; the frontmatter name must match
+PATCH  /api/canary/{name}            {"parked": true|false}
+POST   /api/canary/{name}/reviewed   → bumps last_reviewed to today
+DELETE /api/canary/{name}            → moves to .retired/ (purged after canary_purge_after_days — reversible until then)
+```
 
 ---
 
@@ -717,7 +1052,14 @@ Queues one canary by name, or the whole suite with `"name": "*"`. Returns `{"que
 The governed policy store — see [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md). Read endpoints work regardless of `adaptive_enabled`.
 
 ```
-GET  /api/adaptive/entries?kind=&status=active&limit=200   Entries by kind/status (+ enabled/auto_apply flags)
+GET  /api/adaptive/entries?kind=&status=active&limit=200   Entries by kind/status (+ enabled/auto_apply flags).
+                                                           Each row carries `usage` — the per-entry
+                                                           usefulness counters (uses/successes/failures from
+                                                           scout and reflect citations), null when never used
+POST /api/adaptive/entries                                 Direct authorship: {kind, title, content, scope?}.
+                                                           Immediately active, journaled, deliberately
+                                                           unlinted — the human is the authority the content
+                                                           lint substitutes for. 400 on validation/cap/dup
 DEL  /api/adaptive/entries/{entry_id}                      Release valve: soft-delete one entry as actor
                                                            "human" (status -> deleted, version bumped,
                                                            journaled so it rolls back). 404 if unknown or
@@ -761,7 +1103,6 @@ Surfaces for the teleological layer — see [internals/telos.md](internals/telos
 GET  /api/telos                          Layer status summary
 GET  /api/telos/questions                Open questions
 GET  /api/telos/hypotheses               SOUP hypotheses
-GET  /api/telos/goals                    The goal DAG
 GET  /api/telos/claims                   Committed claims
 GET  /api/telos/trace                    Append-only trace ledger
 POST /api/telos/run                      Run the telos machinery on demand
@@ -770,9 +1111,36 @@ POST /api/telos/alarms/{alarm_id}/ack    Acknowledge an alarm (silences the noti
 
 ---
 
+## MCP Servers
+
+External tool servers speaking the Model Context Protocol. Config CRUD works
+even while `mcp_enabled=false` (it edits `data/mcp_servers.json` directly);
+live operations (connect, reload, test) need the running manager and return
+`409` without it. Full guide: [mcp.md](mcp.md).
+
+```
+GET    /api/mcp/servers                  Configured servers merged with live status
+                                         (state, tools, last error, server_info)
+POST   /api/mcp/servers                  Add/update one server ({"name", "config"}) or
+                                         import a pasted {"mcpServers": {...}} blob;
+                                         connects immediately and reports per-server results
+DELETE /api/mcp/servers/{name}           Disconnect, unregister its tools, delete config
+POST   /api/mcp/servers/{name}/toggle    {"enabled": bool} — off unregisters tools, on reconnects
+POST   /api/mcp/servers/{name}/reload    Full reconnect + tool re-discovery (re-reads config from disk)
+POST   /api/mcp/test                     Dry-run connect (one server): nothing saved or
+                                         registered; returns server_info + tool names, or the error
+```
+
+Entries use the ecosystem-standard `mcpServers` shape (Claude Code / Cursor /
+VS Code configs paste verbatim); `${VAR}` placeholders in `headers`/`env`
+expand from `.env` at connect time, and values that look like literal secrets
+are rejected with a 400.
+
+---
+
 ## Voice
 
-Speech-to-text for the chat mic button — engines and their privacy labels are configured in Settings → Voice Input.
+Speech-to-text for the chat mic button — engines and their privacy labels are configured in Settings → Integrations → Voice Input.
 
 ```
 GET  /api/voice/status        Availability of the configured engine

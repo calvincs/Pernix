@@ -101,7 +101,7 @@ Navigate to **http://localhost:8090** in your browser. The web UI will load.
 
 Before you can have a conversation, you need to tell Pernix which model to use:
 
-1. Click the gear icon in the sidebar → **Settings**
+1. Click **Settings** in the status bar at the bottom of the window — the cog next to **Explorer**
 2. Set **`llm_model`** to a model you have available:
    - For Ollama: the name of a model you've already pulled (e.g. `qwen3:32b`, `qwen2.5-coder:32b`, or `qwen3:8b` if you have less VRAM). Older models like Llama 3.2 work but tend to be weaker at tool use and multi-step reasoning — agentic workloads do much better on current Qwen 3.x or comparable frontier-tier local models
    - For OpenRouter: the full model ID (e.g. `anthropic/claude-sonnet-4.6`, `x-ai/grok-4.1-fast`, or any current frontier model from your account)
@@ -158,7 +158,7 @@ AI-powered web search with summaries alongside results. Requires an account at [
 
 ```bash
 # tavily-python is already in requirements.txt — just add the key:
-# Add TAVILY_API_KEY=tvly-... to .env, or set it in Settings → Web → Tavily API Key
+# Add TAVILY_API_KEY=tvly-... to .env, or set it in Settings → Tools & safety → Web → Tavily API Key
 ```
 
 ### QR Code — LAN Access URL
@@ -204,7 +204,7 @@ Use `--rebuild` when you want a completely fresh start or are troubleshooting st
 
 Starts the server with the dangerous-tool approval gate disabled. Every tool call executes immediately — no `ask_user` confirmation, no `approve_dangerous_tool()` step required.
 
-**This flag is the only way to enable this mode.** It cannot be toggled via Settings, the API, or any environment variable while the server is running. This prevents a rogue process or prompt injection from silently elevating its own privileges mid-session. The mode is visible in **Settings → Security** (read-only status badge) and in a red banner at the top of the **Explorer → Tools** panel.
+**This flag is the only way to enable this mode.** It cannot be toggled via Settings, the API, or any environment variable while the server is running. This prevents a rogue process or prompt injection from silently elevating its own privileges mid-session. The mode is visible in **Settings → Tools & safety → Execution Mode** (read-only status badge) and in a red banner at the top of the **Explorer → Capabilities → Tools** panel.
 
 **The flag survives server restarts** — if `POST /api/admin/restart` is used, the new process inherits `--dangerous` from the original `sys.argv`.
 

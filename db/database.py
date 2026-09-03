@@ -45,6 +45,17 @@ class _TrackedConnection(sqlite3.Connection):
     def __exit__(self, *exc_info):
         try:
             return super().__exit__(*exc_info)
+        except Exception:
+            # A COMMIT that fails (busy timeout under a long writer) leaves
+            # the transaction OPEN on a connection this thread will reuse:
+            # the next `with conn:` block inherits it, and that block's own
+            # commit or rollback then decides the fate of these writes too.
+            # Roll back here so each block's outcome stays its own.
+            try:
+                super().rollback()
+            except Exception:
+                pass
+            raise
         finally:
             self._checkouts -= 1
 
@@ -969,6 +980,121 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE rlm_runs ADD COLUMN surfaced_at TEXT",
             """UPDATE rlm_runs SET surfaced_at = COALESCE(finished_at, created_at)
                WHERE status != 'running'""",
+        ],
+    ),
+    (
+        30,
+        "canary run outcomes: separate timeout/error/noop from honest gate failures",
+        [
+            # outcome ∈ pass | gate_fail | timeout | error | noop. Before this,
+            # a run killed at its wall clock and a run that genuinely failed
+            # its gates both landed as passed=0 — the tripwire and suite-health
+            # heuristics had to reverse-engineer the difference from tokens
+            # and duration. Legacy failed rows where that distinction is
+            # unrecoverable keep outcome NULL; consumers must treat NULL
+            # failures conservatively (they never feed the per-task tripwire).
+            "ALTER TABLE canary_runs ADD COLUMN outcome TEXT",
+            "ALTER TABLE canary_runs ADD COLUMN error TEXT",
+            "UPDATE canary_runs SET outcome = 'pass' WHERE passed = 1",
+            """UPDATE canary_runs SET outcome = 'noop'
+               WHERE passed = 0 AND IFNULL(tokens, 0) = 0 AND IFNULL(duration_s, 0) < 1.0""",
+        ],
+    ),
+    (
+        31,
+        "resumable workers: persist a worker's pinned model and typed kind "
+        "so rehydration after a reap/restart restores its identity",
+        [
+            # model_override / worker_kind were in-memory only, so a worker
+            # rehydrated from the DB (server restart, idle reap) silently
+            # lost its pinned model and its kind's tool allowlist. NULL =
+            # no override / untyped worker (every pre-v31 row).
+            "ALTER TABLE sessions ADD COLUMN model_override TEXT",
+            "ALTER TABLE sessions ADD COLUMN worker_kind TEXT",
+        ],
+    ),
+    (
+        32,
+        "re-armable refine watermarks: convert refined:{sid} snooze_state "
+        "values from ISO timestamps to the session's max message id",
+        [
+            # Old semantics: 'refined once, never again' (value = when).
+            # New semantics: 'refined up to message N' — a session that
+            # grows past N becomes eligible again, so refine can revisit a
+            # session whose interesting half (the workaround) happened
+            # after its first pass. Converting to the CURRENT max id means
+            # 'processed up to now' for every legacy row: nothing already
+            # graded re-runs on deploy, only future growth re-arms.
+            """UPDATE snooze_state
+               SET value = CAST(COALESCE(
+                       (SELECT MAX(m.id) FROM messages m
+                        WHERE m.session_id = substr(snooze_state.key, 9)),
+                       0) AS TEXT)
+               WHERE key LIKE 'refined:%'""",
+        ],
+    ),
+    (
+        33,
+        "spaces: named/colored long-lived session groups",
+        [
+            # slug is immutable after creation — the memory-file prefix
+            # (pernix.space.<slug>.*), the directives dir (data/agent/spaces/
+            # <slug>/) and the workspace home (data/workspace/spaces/<slug>/)
+            # all key off it, so a label rename must never move files.
+            """CREATE TABLE IF NOT EXISTS spaces (
+                id TEXT PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
+                label TEXT NOT NULL,
+                color TEXT NOT NULL DEFAULT '#7c9cff',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+            "ALTER TABLE sessions ADD COLUMN space_id TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_space ON sessions(space_id) WHERE space_id IS NOT NULL",
+        ],
+    ),
+    (
+        34,
+        "archive, not delete: a session can leave the sidebar with every message intact",
+        [
+            # NULL means live. A timestamp means the session is out of the
+            # sidebar and out of its space group, still searchable, still
+            # whole — the opposite of the delete it used to be the only
+            # alternative to.
+            "ALTER TABLE sessions ADD COLUMN archived_at TEXT",
+            # Every list query now filters on this column, and the archived
+            # set is the small one — a partial index is the whole cost.
+            "CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at) WHERE archived_at IS NOT NULL",
+        ],
+    ),
+    (
+        35,
+        "space suggestions: proposals the user accepts or declines, never applied on their own",
+        [
+            # A suggestion is a proposal, not a space: nothing here becomes a
+            # row in `spaces`, a directory on disk or a session move until an
+            # accept click says so. topic_key is the stability handle — a
+            # declined topic stays declined by key, so the same habit is not
+            # re-offered next month under a slightly different label.
+            """CREATE TABLE IF NOT EXISTS space_suggestions (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                topic_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                color TEXT NOT NULL DEFAULT '#7c9cff',
+                why TEXT NOT NULL DEFAULT '',
+                existing_space_id TEXT,
+                session_ids_json TEXT NOT NULL,
+                directives_json TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                space_id TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            )""",
+            # Every read is status-scoped (the sidebar wants pending, the
+            # settings pane wants rejected), and the table stays small.
+            "CREATE INDEX IF NOT EXISTS idx_space_suggestions_status ON space_suggestions(status)",
         ],
     ),
 ]

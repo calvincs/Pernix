@@ -6,7 +6,7 @@
 //                                    audio-capable chat model hears the recording itself
 //   web_speech                     — browser SpeechRecognition, live dictation into the
 //                                    input box (audio goes to the browser vendor's
-//                                    speech service — surfaced in Settings → Voice Input)
+//                                    speech service — surfaced in Settings → Integrations → Voice Input)
 //
 // The server (GET /api/voice/status) is the authority on which engine is
 // configured and whether it's actually usable; the browser-dictation fallback
@@ -182,15 +182,19 @@ async function _start() {
                 engine = 'web_speech';
                 if (!_fallbackNoticeShown) {
                     _fallbackNoticeShown = true;
-                    _deps.appendMessage('notice',
+                    // 'system', not 'notice': there is no .message.notice
+                    // rule in any stylesheet, so a notice rendered as an
+                    // unstyled block. loadMessages already maps a stored
+                    // role='notice' onto a system message.
+                    _deps.appendMessage('system',
                         `[voice: ${st.reason} — falling back to browser dictation. ` +
                         'Audio is processed by your browser vendor’s speech service, not this machine. ' +
-                        'Configure this in Settings → Voice Input.]');
+                        'Configure this in Settings → Integrations → Voice Input.]');
                 }
             } else {
                 _deps.appendMessage('system',
                     `Voice input unavailable: ${st.reason}. ` +
-                    'Fix the engine or enable the browser-dictation fallback in Settings → Voice Input.');
+                    'Fix the engine or enable the browser-dictation fallback in Settings → Integrations → Voice Input.');
                 return;
             }
         }
@@ -219,7 +223,7 @@ function _startWebSpeech(st) {
     if (!Ctor) {
         _deps.appendMessage('system',
             'This browser has no speech recognition (Web Speech API). ' +
-            'Use Chrome/Edge, or pick a whisper engine in Settings → Voice Input.');
+            'Use Chrome/Edge, or pick a whisper engine in Settings → Integrations → Voice Input.');
         return;
     }
     const ta = _deps.textarea();
@@ -409,7 +413,7 @@ function _insertAtCursor(text) {
 }
 
 // ---------------------------------------------------------------------------
-// Settings → Voice Input "Test" — round-trip the saved engine without
+// Settings → Integrations → Voice Input "Test" — round-trip the saved engine without
 // touching the chat input. Resolves {ok, text?|detail?, error?}; never
 // rejects, so callers just render the result.
 // ---------------------------------------------------------------------------

@@ -84,12 +84,41 @@ async def test_event_stream_replay_with_last_event_id():
 
 
 async def test_session_purge():
+    """The default call, and the full response contract a caller can rely on."""
     from api.routers import sessions
 
     app = _make_app(sessions.router)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/api/sessions/purge")
-    assert resp.status_code in (200, 400)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert set(data) == {
+        "dry_run",
+        "keep_days",
+        "keep_min",
+        "cutoff",
+        "candidates",
+        "would_delete",
+        "purged",
+        "sample",
+        "skipped",
+    }
+    assert data["dry_run"] is False
+    assert (data["keep_days"], data["keep_min"]) == (7, 5)
+    assert data["purged"] == data["would_delete"]
+    assert len(data["sample"]) <= 10
+    assert set(data["skipped"]) == {"pinned", "in_space", "other_types"}
+
+
+async def test_session_purge_dry_run_reports_without_deleting():
+    from api.routers import sessions
+
+    app = _make_app(sessions.router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/sessions/purge", json={"dry_run": True, "keep_days": 0})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["dry_run"] is True and data["purged"] == 0
 
 
 # ===========================================================================

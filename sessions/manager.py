@@ -189,11 +189,78 @@ def _map_termination_to_v2_reason(tr: str | None) -> tuple[str, sv2.TerminationR
     return mapping.get(key, ("loop-complete", sv2.TerminationReason.COMPLETE))
 
 
+# The fixed head of every synthetic worker-resume message. Single source:
+# _build_resume_message writes it, and _run_agent_safe's scout-reuse check
+# reads it to recognize a Gap-1 resume (parent already idle when the workers
+# finished, so the resume enters as an ordinary "prompt-arrived" turn).
+_WORKER_RESUME_PREFIX = "[Watched workers have completed"
+
+
+def _apply_space_fields(session: AgentSession, space_id: str | None) -> None:
+    """Set space_id + workspace_home on a session object (create AND
+    rehydrate must both run this, or a restart strips space behavior).
+    A vanished space (row deleted while the session survived a detach
+    race) degrades to no-space rather than failing the hydrate."""
+    if not space_id:
+        return
+    session.space_id = space_id
+    try:
+        from core import spaces as _spaces
+
+        space = _spaces.get_space(space_id)
+        if space is not None:
+            home = _spaces.space_workspace_home(space)
+            home.mkdir(parents=True, exist_ok=True)
+            session.workspace_home = str(home)
+    except Exception as e:
+        logger.warning("workspace_home setup failed for space %s: %s", space_id, e)
+
+
+def kill_session_processes(session, *, kill_after: float = 3.0) -> int:
+    """SIGTERM every tracked subprocess group for this session, SIGKILL the
+    survivors after `kill_after` seconds. Returns how many were signalled.
+
+    Cancel is session-wide: concurrent bash calls each register their own
+    process, and cancelling the session must not leave the others running.
+    The escalation matters for children that ignore TERM (or sit in D
+    state) — without it the tool thread stayed blocked until the tool's own
+    timeout while the "cancelled" session looked idle.
+    """
+    import os
+    import signal
+    import threading
+
+    procs = [p for p in session.all_processes() if p is not None and p.poll() is None]
+    for proc in procs:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+    session._active_processes.clear()
+    if procs and kill_after > 0:
+
+        def _escalate():
+            for proc in procs:
+                if proc.poll() is None:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        pass
+
+        threading.Timer(kill_after, _escalate, ()).start()
+    return len(procs)
+
+
 class SessionManager:
     """Manages in-memory session state and routes prompts to the agent loop."""
 
     def __init__(self):
         self._sessions: dict[str, AgentSession] = {}
+        # Set by lifespan shutdown before agent tasks are cancelled: the
+        # cascade fires _on_watched_worker_done -> _resume_from_workers ->
+        # _process_pending, which used to start a fresh turn against a
+        # closing LLM client and leave a phantom SCOUTING row for boot.
+        self.shutting_down = False
         self._agent_runner: Callable | None = None  # set by agent module on init
         self._global_subscribers: list[asyncio.Queue] = []  # global notification listeners
         # Strong refs for detached recovery tasks — see _spawn_detached.
@@ -297,6 +364,7 @@ class SessionManager:
             session_type=db_session.get("session_type", "normal"),
             parent_session_id=db_session.get("parent_session_id"),
         )
+        _apply_space_fields(session, db_session.get("space_id"))
 
         # Restore the persisted state (migration v16+). A row written before
         # v16, or one carrying a value this build no longer knows, hydrates at
@@ -331,6 +399,26 @@ class SessionManager:
                 session._watched_worker_ids = set(ids)
         except (ValueError, TypeError) as e:
             logger.warning("Could not parse watched_worker_ids for %s: %s", session_id, e)
+
+        # Restore a worker's persisted identity (migration v31): its pinned
+        # model and its typed kind's exclusive tool allowlist. Without this a
+        # rehydrated worker (restart, reap, resume_worker) silently ran on the
+        # default model with the full tool surface — the kind's confinement
+        # evaporated exactly when nobody was watching.
+        if session.session_type == "worker":
+            _model = db_session.get("model_override")
+            if _model:
+                session.model_override = _model
+            _kind_name = db_session.get("worker_kind")
+            if _kind_name:
+                try:
+                    from core.extensions.orchestration.kinds import resolve_kind
+
+                    _kind = resolve_kind(_kind_name)
+                    if _kind is not None and _kind.tool_allowlist:
+                        session.tool_allowlist = frozenset(_kind.tool_allowlist)
+                except Exception as e:
+                    logger.warning("Worker kind restore failed for %s: %s", session_id, e)
 
         self._sessions[session_id] = session
         return session
@@ -575,6 +663,7 @@ class SessionManager:
         system_prompt: str = "",
         session_type: str = "normal",
         parent_session_id: str | None = None,
+        space_id: str | None = None,
     ) -> str:
         """Create a new session in both DB and memory."""
         sid = db.create_session(
@@ -582,12 +671,14 @@ class SessionManager:
             system_prompt=system_prompt,
             session_type=session_type,
             parent_session_id=parent_session_id,
+            space_id=space_id,
         )
         session = AgentSession(
             session_id=sid,
             session_type=session_type,
             parent_session_id=parent_session_id,
         )
+        _apply_space_fields(session, space_id)
         self._sessions[sid] = session
         logger.info("Created session %s (type=%s)", sid, session_type)
         from core.snooze import SNOOZE_TRANSPARENT_TYPES, get_snooze
@@ -727,41 +818,86 @@ class SessionManager:
         except Exception as e:
             logger.warning("Kernel shutdown scheduling failed for %s: %s", session_id[:12], e)
 
+    def cancel_session(self, session: AgentSession, *, cascade: bool = True) -> bool:
+        """Stop a session's turn now: cooperative flag, queued prompts, child
+        processes, and the asyncio task. Loop-affine (Task.cancel).
+
+        Every cancel path used to do a different subset of this. The worker
+        cascade and the cancel_worker tool only cancelled the task, so the
+        worker's executor swallowed the CancelledError, the bash child ran
+        on, and the loop's cancel_requested checkpoints never fired.
+        Returns True when a running task was cancelled.
+        """
+        session.cancel_requested = True
+        session.pending_messages.clear()
+        kill_session_processes(session)
+        if cascade:
+            for wid in list(getattr(session, "worker_ids", []) or []):
+                w = self.get(wid)
+                if w is not None and w is not session:
+                    self.cancel_session(w, cascade=False)
+        if session.task and not session.task.done():
+            session.task.cancel()
+            return True
+        return False
+
     def delete_session(self, session_id: str) -> None:
-        """Delete session from both memory and DB (cascades workers)."""
-        # Cancel any running task
+        """Delete session from both memory and DB (cascades workers).
+
+        Synchronous form: both phases run inline on the caller's thread.
+        Prefer `delete_session_async` from the event loop — phase 2 is a
+        DB cascade plus filesystem work that must not run on the loop, and
+        phase 1 touches loop-affine state that must not run off it.
+        """
+        ids = self._delete_session_phase1(session_id)
+        self._delete_session_phase2(ids)
+
+    async def delete_session_async(self, session_id: str) -> None:
+        """Loop-side delete: stop the turn and drop the in-memory session
+        now, then do the DB/filesystem cleanup on a worker thread."""
+        ids = self._delete_session_phase1(session_id)
+        await asyncio.to_thread(self._delete_session_phase2, ids)
+
+    def _delete_session_phase1(self, session_id: str) -> list[str]:
+        """Loop-affine half: cancel the turn (flag, processes, task), pop the
+        session and its in-memory workers. Returns the ids to purge, workers
+        first. Deleting used to cancel only the task, so a bash child kept
+        running against the deleted workspace until its own timeout."""
+        ids: list[str] = []
         session = self._sessions.get(session_id)
         if session:
-            if session.task and not session.task.done():
-                session.task.cancel()
-            # Clean up workers first
+            self.cancel_session(session, cascade=False)
             for wid in list(session.worker_ids):
-                self.delete_session(wid)
+                ids.extend(self._delete_session_phase1(wid))
+        self._sessions.pop(session_id, None)
+        ids.append(session_id)
+        return ids
 
-        # Clean up per-worker summary file if this session was a worker
+    def _delete_session_phase2(self, ids: list[str]) -> None:
+        """Blocking half: summary file, scheduler budget, RLM artifacts,
+        kernel state, DB row — for each id in order."""
         from pathlib import Path as _P
 
-        worker_summary = _P(settings.workspace_dir) / f".worker_{session_id[:12]}_summary.md"
-        worker_summary.unlink(missing_ok=True)
-
-        self._sessions.pop(session_id, None)
-        # Same scheduler cleanup remove() does. Without it the per-provider
-        # wall-clock budget maps keep an entry for a session that no longer
-        # exists, for the life of the process.
         from core.llm.client import get_llm_client as _get_client
 
-        _get_client().purge_session(session_id)
-        self._purge_rlm_artifacts(session_id)
-        # Session deletion purges kernel state entirely — no snapshot; there
-        # is no session left to revive into (plan 2b).
-        try:
-            from core.kernel import get_kernel_registry
+        for session_id in ids:
+            worker_summary = _P(settings.workspace_dir) / f".worker_{session_id[:12]}_summary.md"
+            worker_summary.unlink(missing_ok=True)
+            # Same scheduler cleanup remove() does. Without it the per-provider
+            # wall-clock budget maps keep an entry for a session that no longer
+            # exists, for the life of the process.
+            _get_client().purge_session(session_id)
+            self._purge_rlm_artifacts(session_id)
+            # Session deletion purges kernel state entirely — no snapshot; there
+            # is no session left to revive into (plan 2b).
+            try:
+                from core.kernel import get_kernel_registry
 
-            get_kernel_registry().shutdown_session_detached(session_id, snapshot=False, purge_state=True)
-        except Exception as e:
-            logger.warning("Kernel purge scheduling failed for %s: %s", session_id[:12], e)
-        db.delete_session(session_id)
-        logger.info("Deleted session %s", session_id)
+                get_kernel_registry().shutdown_session_detached(session_id, snapshot=False, purge_state=True)
+            except Exception as e:
+                logger.warning("Kernel purge scheduling failed for %s: %s", session_id[:12], e)
+            db.delete_session(session_id)
+            logger.info("Deleted session %s", session_id)
 
     def _purge_rlm_artifacts(self, session_id: str) -> None:
         """Deleting an RLM view session (or a parent holding some) also removes
@@ -1199,9 +1335,21 @@ class SessionManager:
                 session,
                 message,
                 pre_saved=_pre_saved,
-                # Answer-resumed turns continue the same task — reuse the
-                # suspended turn's scout report instead of re-scouting.
-                reuse_scout=start_reason == "answer-received",
+                # Answer-resumed and worker-resumed turns continue the same
+                # task — reuse the suspended turn's scout report instead of
+                # re-scouting. The 2026-08-28 scout audit measured resume
+                # scouts at 17-25s each, and every sampled plan just restated
+                # the action the resume message already mandates (call
+                # get_worker_result for the listed workers). Gap-1 resumes
+                # (parent already idle when workers finished, resume queued
+                # as a pending message) enter as "prompt-arrived", so they
+                # are recognized by the fixed prefix _build_resume_message
+                # stamps. Reuse falls back to a fresh scout whenever
+                # last_scout_report is None (restart-lost).
+                reuse_scout=(
+                    start_reason in ("answer-received", "workers-complete")
+                    or (isinstance(message, str) and message.startswith(_WORKER_RESUME_PREFIX))
+                ),
             )
 
         except asyncio.CancelledError:
@@ -1239,8 +1387,8 @@ class SessionManager:
                 )
                 for wid in watched:
                     w = self._sessions.get(wid)
-                    if w and w.task and not w.task.done():
-                        w.task.cancel()
+                    if w is not None:
+                        self.cancel_session(w, cascade=False)
                 session._watched_worker_ids.clear()
                 self._persist_watched(session)
             logger.info("Session %s agent task cancelled", session.session_id)
@@ -1371,6 +1519,12 @@ class SessionManager:
                     await self._on_watched_worker_done(session)
                 except Exception as _e:
                     logger.error("Cancel-path watcher notify failed: %s", _e)
+            # A prompt that landed between the cancel endpoint clearing the
+            # queue and the task unwinding is a new request, not part of
+            # the cancelled turn; without this it sat in an IDLE_READY
+            # session's queue until the user's next send.
+            if session.pending_messages:
+                await self._process_pending(session)
             return
 
         # Normal path: if the agent loop returned cleanly we're still in
@@ -1588,8 +1742,14 @@ class SessionManager:
         # any user message that arrived during post-hooks but was lost from
         # the in-memory queue (e.g., server restarted between the
         # FINALIZING→IDLE_READY write and _process_pending running).
+        # Everything below runs after IDLE_READY; an exception here escaped
+        # _run_agent_safe's finally and left queued prompts undrained until
+        # the next send. Each step is best-effort so _process_pending runs.
         if not session.pending_messages:
-            await self._sweep_db_pending(session, exclude_msg_id=_completed_turn_msg_id)
+            try:
+                await self._sweep_db_pending(session, exclude_msg_id=_completed_turn_msg_id)
+            except Exception as _e:
+                logger.error("Post-turn DB pending sweep failed for %s: %s", session.session_id, _e)
 
         # Worker-specific: notify the parent session that this worker
         # turn has fully settled. Frontend listens for `worker.done`
@@ -1615,7 +1775,10 @@ class SessionManager:
                 },
             )
             # Gap 1+2: wake parent if it's watching this worker.
-            await self._on_watched_worker_done(session)
+            try:
+                await self._on_watched_worker_done(session)
+            except Exception as _e:
+                logger.error("Post-turn watcher notify failed for %s: %s", session.session_id, _e)
 
         # Process pending messages.
         await self._process_pending(session)
@@ -1643,7 +1806,7 @@ class SessionManager:
         # Grab the last assistant message as the best-available content.
         last_text = ""
         try:
-            messages = db.get_messages(session.session_id, last=100)
+            messages = await asyncio.to_thread(db.get_messages, session.session_id, last=100)
             for m in reversed(messages):
                 if m["role"] == "assistant" and m.get("content"):
                     last_text = m["content"]
@@ -1662,7 +1825,7 @@ class SessionManager:
         reflect_verdict: str | None = None
         reflect_reason: str = ""
         try:
-            msgs = db.get_messages(session.session_id, last=100)
+            msgs = await asyncio.to_thread(db.get_messages, session.session_id, last=100)
             for _m in reversed(msgs):
                 if _m.get("role") == "reflect":
                     import json as _json
@@ -1817,6 +1980,17 @@ class SessionManager:
             "from_fallback": scout_report.from_fallback,
             "latency_ms": scout_report.scout_latency_ms,
             "scout_model": scout_report.scout_model,
+            # Observability fields (2026-08-28 scout audit): these existed on
+            # the report but never reached the event, so the UI and every
+            # audit had to reconstruct them from post-mortems — and echo
+            # density (used_hints) was unmeasurable per-turn at all.
+            "used_hints": list(scout_report.used_hints or []),
+            "task_type": getattr(scout_report, "task_type", ""),
+            "execution_mode": scout_report.execution_mode,
+            "viability": scout_report.viability,
+            "scout_rounds": getattr(scout_report, "scout_rounds", 0),
+            "scout_prompt_tokens": scout_report.scout_tokens.prompt_tokens,
+            "scout_completion_tokens": scout_report.scout_tokens.completion_tokens,
         }
         session.emit_event(scout_event)
         db.add_message(session.session_id, "scout", json.dumps(scout_event))
@@ -1926,12 +2100,20 @@ class SessionManager:
         """Called when a worker completes its turn. If the parent is watching
         this worker, removes it from the watch-set and resumes the parent when
         the set empties."""
+        from sessions import state_v2 as sv2
+
         parent_id = worker_session.parent_session_id
         if not parent_id:
             return
         parent = self.get(parent_id)
         if parent is None:
-            return
+            # Reaped from memory while the worker flew on (idle parent, tab
+            # closed). The row still exists, so revive it the same way boot
+            # reconcile does — otherwise the finished result landed nowhere.
+            row = await asyncio.to_thread(db.get_session, parent_id)
+            if row is None:
+                return
+            parent = self.get_or_create(parent_id)
         watched: set = getattr(parent, "_watched_worker_ids", set())
         if worker_session.session_id not in watched:
             # Unwatched worker (spawned without auto_resume_parent). If the
@@ -1943,8 +2125,15 @@ class SessionManager:
             # documented Gap-1 idle-resume instead. A parent that is mid-turn,
             # awaiting the user, or deliberately watching OTHER workers keeps
             # the old semantics.
-            from sessions import state_v2 as sv2
 
+            if worker_session.termination_reason == "cancelled":
+                # A cancelled worker has nothing to synthesize. This is also
+                # the tail of the parent's own cancel: the cascade fires,
+                # the parent finalizes to IDLE_READY (resetting the
+                # cancel_requested flag _resume_from_workers guards on), and
+                # only THEN do the workers unwind and land here — resuming
+                # would start a fresh turn re-planning what the user stopped.
+                return
             if not watched and sv2._current_state(parent) is sv2.SessionStateV2.IDLE_READY:
                 logger.info(
                     "Unwatched worker %s finished with parent %s idle — Gap-1 resume",
@@ -1959,8 +2148,6 @@ class SessionManager:
             # Purge any stale IDs for workers that already completed but were
             # added to the watch-set after they fired (race condition). Without
             # this, a non-empty set of stale IDs permanently blocks resume.
-            from sessions import state_v2 as sv2
-
             stale = set()
             for wid in list(watched):
                 w = self.get(wid)
@@ -1980,6 +2167,13 @@ class SessionManager:
                 self._persist_watched(parent)
             if watched:
                 return  # other workers still outstanding
+        if (
+            worker_session.termination_reason == "cancelled"
+            and sv2._current_state(parent) is not sv2.SessionStateV2.AWAITING_WORKERS
+        ):
+            # The set drained on a cancel and the parent is not parked
+            # waiting for it: nothing to resume (see the unwatched branch).
+            return
         # Hand off to resume — extends LLM budget and starts/queues the
         # synthesis turn.
         await self._resume_from_workers(parent)
@@ -1991,7 +2185,7 @@ class SessionManager:
         cancellation) so the LLM is forced to acknowledge non-pass outcomes
         instead of having to discover them by reading get_worker_result()."""
         lines = [
-            f"[Watched workers have completed — {len(parent.worker_ids)} total]",
+            f"{_WORKER_RESUME_PREFIX} — {len(parent.worker_ids)} total]",
         ]
         problem_workers: list[str] = []
         for wid in parent.worker_ids:
@@ -2061,6 +2255,8 @@ class SessionManager:
         via _on_watched_worker_done — without this guard, the parent would
         re-enter SCOUTING and start a NEW turn (commonly spawning fresh workers
         to redo the cancelled work), defeating the user's cancel intent."""
+        if self.shutting_down:
+            return
         if parent.cancel_requested:
             logger.info(
                 "Resume-from-workers skipped for %s — cancel_requested is set",
@@ -2116,7 +2312,10 @@ class SessionManager:
         deferred_task: asyncio.Task | None = None
         async with parent.lock:
             current_v2 = sv2._current_state(parent)
-            resume_msg = self._build_resume_message(parent)
+            # Off-loop: one 100-row transcript read per worker, under the
+            # parent lock — an orchestrator with 20 workers stalled every
+            # SSE stream for the duration when this ran inline.
+            resume_msg = await asyncio.to_thread(self._build_resume_message, parent)
             # A fast worker can finish while the parent's suspended turn is
             # still settling its post-hooks. Starting the synthesis turn now
             # would run two turns against one transcript, so queue it and
@@ -2165,6 +2364,8 @@ class SessionManager:
         or AWAITING_WORKERS never returns to IDLE_READY, so the message that
         resumes it has to be dispatched from that state.
         """
+        if self.shutting_down:
+            return
         async with session.lock:
             if not session.pending_messages:
                 return
@@ -2367,6 +2568,9 @@ class SessionManager:
             except asyncio.QueueFull:
                 dead.append(q)
         for q in dead:
+            from core.events import mark_queue_dropped
+
+            mark_queue_dropped(q)
             if q in self._global_subscribers:
                 self._global_subscribers.remove(q)
 
@@ -2432,8 +2636,12 @@ class SessionManager:
     def active_count(self) -> int:
         return len(self._sessions)
 
-    def has_active_work(self, strict: bool = False) -> bool:
-        """Return True if any in-memory session is non-idle.
+    def _working_sessions(self, strict: bool = False):
+        """Yield the in-memory sessions that are actually doing something.
+
+        The single definition of "busy", so the question "is anything
+        running?" and the question "how many things are running?" can never
+        answer from two different rules.
 
         strict=True ignores goal-continuation transparency: only canary
         sessions stay invisible. Mutating snooze work (adaptive applies,
@@ -2444,7 +2652,6 @@ class SessionManager:
         Uses the v2 state machine directly. AWAITING_USER and AWAITING_WORKERS
         are excluded (agent genuinely suspended); FINALIZING is caught by the
         has_background_tasks check below (post-hooks hold a ref).
-        Used by snooze to skip cycles while real work is happening.
         """
         _idle_v2 = (
             sv2.SessionStateV2.IDLE_READY,
@@ -2463,10 +2670,29 @@ class SessionManager:
             elif snooze_transparent(session):
                 continue
             if sv2._current_state(session) not in _idle_v2:
-                return True
-            if session.has_background_tasks:
-                return True
-        return False
+                yield session
+            elif session.has_background_tasks:
+                yield session
+
+    def has_active_work(self, strict: bool = False) -> bool:
+        """True if any in-memory session is non-idle (see _working_sessions).
+
+        Used by snooze to skip cycles while real work is happening; the
+        generator is lazy, so this still stops at the first busy session.
+        """
+        return next(self._working_sessions(strict), None) is not None
+
+    def busy_count(self, strict: bool = False) -> int:
+        """How many in-memory sessions are non-idle (see _working_sessions).
+
+        The same rule has_active_work asks, counted rather than
+        short-circuited. This — not active_count — is what "sessions active"
+        means to a reader: a session stays loaded for up to half an hour
+        after its last turn (reap_idle_sessions), so the loaded count
+        reported nine busy sessions on a box where every one of them was
+        sitting idle waiting to be reaped.
+        """
+        return sum(1 for _ in self._working_sessions(strict))
 
     # ------------------------------------------------------------------
     # Maintenance
@@ -2622,7 +2848,14 @@ class SessionManager:
             if v2 is sv2.SessionStateV2.PAUSED:
                 # Never reap for inactivity while intentionally paused.
                 # Safety net: > 24h OR parent session deleted (orphan).
-                parent_gone = session.parent_session_id is not None and session.parent_session_id not in self._sessions
+                # "Gone" means deleted, not merely reaped from memory: an
+                # idle parent with its tab closed is evicted after max_idle,
+                # and that used to read as deleted and kill a worker the
+                # user had deliberately paused.
+                parent_gone = session.parent_session_id is not None and (
+                    session.parent_session_id not in self._sessions
+                    and db.get_session(session.parent_session_id) is None
+                )
                 if idle >= 86400 or parent_gone:
                     logger.warning(
                         "Force-cancelling orphan/stale PAUSED session %s " "(idle=%ds, parent_gone=%s)",

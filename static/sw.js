@@ -14,35 +14,44 @@
 const CACHE_VERSION = 'pernix-shell-__BUILD__';
 
 // What the app needs to boot and render a transcript offline. Deliberately
-// excludes the two heavyweight vendored libraries — Monaco (~13MB across 103
-// AMD modules) and Mermaid (~3.3MB) — which would turn every install into a
-// multi-megabyte download for features most sessions never open. Both live
-// under /static/ and so are picked up by the cache-first fetch handler the
-// first time they are actually used, which is also the only point at which
-// precaching them was ever possible: while they were CDN-loaded they sat on
-// a cross-origin URL that this worker never intercepts and cannot cache.
+// excludes the one heavyweight vendored library left — Monaco (~13MB across
+// 103 AMD modules) — which would turn every install into a multi-megabyte
+// download for a feature most sessions never open. It lives under /static/
+// and so is picked up by the cache-first fetch handler the first time it is
+// actually used, which is also the only point at which precaching it was ever
+// possible: while it was CDN-loaded it sat on a cross-origin URL that this
+// worker never intercepts and cannot cache. (Mermaid, ~3.3MB, used to be the
+// other one; the State timeline draws its own SVG now and it is gone.)
 const SHELL_ASSETS = [
     '/',
     '/static/css/tokens.css',
+    '/static/css/buttons.css',
     '/static/css/layout.css',
     '/static/css/modals.css',
     '/static/css/jobs.css',
     '/static/css/file-panel.css',
-    '/static/css/mobile.css',
+    '/static/css/compact.css',
+    '/static/css/touch.css',
     '/static/vendor/fonts/fonts.css',
     '/static/vendor/marked.min.js',
     '/static/vendor/purify.min.js',
     '/static/js/touch-boot.js',
+    '/static/js/theme-boot.js',
+    '/static/js/sidebar-boot.js',
+    '/static/js/theme.js',
     '/static/js/pwa.js',
     '/static/js/app.js',
     '/static/js/store.js',
     '/static/js/render.js',
+    '/static/js/icons.js',
     '/static/js/api.js',
     '/static/js/sse.js',
     '/static/js/voice.js',
     '/static/js/mobile.js',
     '/static/js/sigil.js',
     '/static/js/notifications.js',
+    '/static/js/a11y.js',
+    '/static/js/feedback.js',
     '/static/js/components/sidebar.js',
     '/static/js/components/file-panel.js',
     '/static/js/components/jobs-indicator.js',
@@ -51,10 +60,11 @@ const SHELL_ASSETS = [
     '/static/js/components/modals/settings.js',
     '/static/js/components/modals/timeline.js',
     '/static/js/components/modals/jobs.js',
-    '/static/js/components/modals/question.js',
+    '/static/js/components/modals/spaces.js',
     '/static/js/components/modals/adaptive.js',
     '/static/js/components/modals/canary.js',
     '/static/js/components/modals/telos.js',
+    '/static/js/components/modals/sheet.js',
     '/static/img/favicon.png',
     '/static/img/app-icon-192.png',
     '/static/manifest.json',
@@ -68,8 +78,15 @@ self.addEventListener('install', (e) => {
             // discard the entire precache and leave the app with no offline
             // shell at all. Missing entries just fall through to the fetch
             // handler on first use.
+            // {cache: 'reload'} bypasses the browser's HTTP cache for the
+            // precache fetch. Without it a new SW version happily precaches
+            // whatever the HTTP cache still considers fresh, so a deploy that
+            // changed two modules could stamp the OLD copy of one next to the
+            // NEW copy of the other into the same versioned cache — the
+            // mixed-version app behind the post-deploy "tap to refresh" that
+            // reloads into the same broken state.
             .then((cache) => Promise.all(
-                SHELL_ASSETS.map((url) => cache.add(url).catch(() => {}))
+                SHELL_ASSETS.map((url) => cache.add(new Request(url, { cache: 'reload' })).catch(() => {}))
             ))
             .catch(() => { /* precache is best-effort — fetch handler fills in */ })
             .then(() => self.skipWaiting())
@@ -100,7 +117,11 @@ self.addEventListener('fetch', (event) => {
         event.respondWith(
             caches.open(CACHE_VERSION).then(async (cache) => {
                 const cached = await cache.match(event.request);
-                const refresh = fetch(event.request)
+                // Revalidate against the server, not the HTTP cache: a
+                // heuristically-fresh old module would otherwise be written
+                // straight back into the versioned cache and never updated.
+                const revalidate = new Request(event.request, { cache: 'no-cache' });
+                const refresh = fetch(revalidate)
                     .then((resp) => {
                         if (resp && resp.ok) cache.put(event.request, resp.clone());
                         return resp;

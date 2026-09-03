@@ -102,14 +102,34 @@ async def test_remint_cooldown_suppresses_same_source(store):
     assert len(store.list_questions()) == n
 
 
-async def test_remint_cooldown_zero_disables(store, monkeypatch):
+def test_candor_tracked_tools_never_mint_questions():
+    """v3.1 yield fix: a tool Candor has ANY calibrated record for is already
+    tracked by the system that closes reliability loops — TELOS questions
+    are for anomalies the rest of the system cannot explain. This is the fix
+    for the 16-of-18-abandoned 'why did tool X fail' class on the live box."""
+    from core.telos.anomaly import extract_turn_anomalies
+
+    tracked = extract_turn_anomalies({"x": {"calls": 3, "failures": 2}}, None, False, "normal", priors={"x": 0.9})
+    assert not any("tool 'x'" in a["text"] for a in tracked)
+    novel = extract_turn_anomalies({"x": {"calls": 3, "failures": 2}}, None, False, "normal", priors={})
+    assert any("tool 'x'" in a["text"] for a in novel)
+
+
+async def test_remint_cooldown_zero_still_blocks_while_open(store, monkeypatch):
+    """Cooldown 0 disables the TIME suppression only (v3.1): one OPEN line of
+    inquiry per source, full stop — an expired cooldown must not re-mint a
+    question that is still sitting in the queue. Abandoning it (with the
+    cooldown off) reopens the window."""
     monkeypatch.setattr(settings, "telos_anomaly_remint_cooldown_days", 0)
     from core.telos.anomaly import _recently_minted
 
     await on_post_task(
         "s1", {"session_type": "normal"}, _FakeSession(turn_id="m1", tools={"x": {"calls": 1, "failures": 1}})
     )
-    assert _recently_minted(store, ["tool:x"]) is False
+    assert _recently_minted(store.list_questions(), ["tool:x"]) is True  # open blocks at any age
+    for q in store.list_questions():
+        store.update(q, state="abandoned")
+    assert _recently_minted(store.list_questions(), ["tool:x"]) is False
 
 
 async def test_hook_gated_off(monkeypatch):
@@ -144,20 +164,17 @@ def test_extension_tools_register_only_when_enabled(monkeypatch):
     reg2 = ToolRegistry()
     register(reg2)
     names = {t.name for t in reg2.all_tools()}
-    assert {"telos_status", "telos_ask", "telos_goal_add", "telos_goal_complete"} <= names
+    # The goal tools left with the v3.1 goal-DAG carve.
+    assert names == {"telos_status", "telos_ask"}
 
 
-def test_tool_flow_status_ask_goal(monkeypatch, store):
-    from core.extensions.telos import telos_ask, telos_goal_add, telos_goal_complete, telos_status
+def test_tool_flow_status_and_ask(monkeypatch, store):
+    from core.extensions.telos import telos_ask, telos_status
 
-    out = telos_goal_add(kind="milestone", title="Ship the probe", justification="opens measurement access to X")
-    assert "g_ship_the_probe" in out
-    out = telos_ask(question="What load class makes p99 deviate from the claim?", parent_goal="g_ship_the_probe")
+    out = telos_ask(question="What load class makes p99 deviate from the claim?")
     assert "Minted q_" in out
     status = telos_status()
-    assert "1 open" in status and "milestones" in status
-    out = telos_goal_complete(goal_id="g_ship_the_probe")
-    assert "Hevel discharge" in out
-    # Root is not completable via the tool.
-    out = telos_goal_complete(goal_id="g_root")
-    assert "not completable" in out
+    assert "1 open" in status and "Root question" in status
+    # A near-duplicate is refused.
+    out = telos_ask(question="What load class makes p99 deviate from the claim??")
+    assert "near-duplicate" in out

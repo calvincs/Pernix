@@ -8,7 +8,6 @@ submits a structured ScoutReport via the submit_report tool.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import re
@@ -128,7 +127,7 @@ When [OPERATIONAL INTEL] is present (calibrated reliability from logged outcome 
 - The percentages are calibrated from real observation counts. Weigh them by evidence: a wide credible interval or few obs is weak evidence; many obs is strong. An [unstable] or [under_specified] tag means the rate is context-dependent — flag that uncertainty in your plan rather than trusting the point estimate.
 - When reliability is central to the task, add predict_reliability / why_reliability / reliability_questions to recommended_tools so the main agent can query live calibrated numbers and their evidence chains.
 
-When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
+When [ADAPTIVE ROUTING HINTS] is present (machine-curated tool/skill selection guidance, human-governed): fold relevant hints into your tool and skill recommendations, and echo the [id] of EVERY hint that influenced the plan — even partially (a tool it steered you toward, a step it added, a pitfall it made you avoid) — in the report's used_hints array. The usage signal you echo is the only evidence the system has that a hint earns its place; a used-but-unechoed hint gets retired as dead weight. Hints are advisory — evidence-backed but not binding; the user's explicit request always wins.
 
 When [MODEL ROUTING INTEL] is present (observed verdict rates by model and task category): it is an exception report — a model absent from it has no known problem. Steer recommended_model away from listed (model, category) pairs when a viable alternative exists; never report a model's absence as a concern.
 
@@ -164,6 +163,8 @@ REPORT FIELD GUIDANCE:
 - approach_guidance: Step-by-step plan for approaching this task. Number each step, name tools/skills, flag risks, incorporate lessons from memory/past sessions. Max 500 tokens. **MEMORY-FIRST ORDERING**: If the baseline MEMORY SEARCH RESULTS or cross-session findings substantively cover the user's request, step 1 of approach_guidance MUST synthesize from those findings before any external research. Treat search_web/browse_web as supplementation for verification or gap-filling, not the default first move. Only when memory baseline is empty or clearly insufficient should external search lead the plan.
 - deliverables_plan: Array of concrete work items the agent is expected to produce (0-6). Each item has a "description" (the artifact or outcome, e.g. "Write summary.md with key findings") and an optional "execution_hint" (inline | task | worker). Leave empty for pure Q&A. Reflect will check each item at turn end, so be specific and measurable.
 - execution_mode: Overall approach — "inline" (default, single-agent work) or "tasks" (multi-step sequential via task system).
+- task_type: Classify what KIND of task this is: "research" (finding/verifying information, web or corpus), "coding" (writing or modifying code/config), "data_analysis" (computing over data or files), "writing" (producing documents, summaries, distillations), "ops" (operating this system or external services: settings, deploys, admin actions), "conversational" (questions answered from context/memory, discussion). Pick the dominant kind when mixed. This is a statistics label only — it never changes how the task runs.
+- used_hints: ALWAYS EMIT THIS FIELD. Array of [id] values from the ADAPTIVE ROUTING HINTS block whose guidance influenced this plan, even partially — a tool choice it steered, a step it added, a pitfall it made you avoid. Echo every hint you actually drew on (the retention sweep deletes hints that never record use, so omitting a used hint kills it); emit [] when no hint applied or no hints block was present. Do not echo hints that had no influence.
 
 RULES:
 - Be terse. Every token costs the main agent context space.
@@ -262,6 +263,11 @@ def _scout_system_prompt() -> str:
 # ---------------------------------------------------------------------------
 # Scout tool schemas (OpenAI function-calling format)
 # ---------------------------------------------------------------------------
+
+# The task-type taxonomy (outcome-stats axis). One tuple, referenced by the
+# schema enum and both parse paths, so the clamp can never drift from what
+# scout was offered.
+TASK_TYPES = ("research", "coding", "data_analysis", "writing", "ops", "conversational")
 
 _SCOUT_TOOLS = [
     {
@@ -374,14 +380,14 @@ _SCOUT_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_adaptive",
-            "description": "Search the adaptive layer (machine-curated routing hints, prompt notes, policies) by keyword. Use when the preloaded [ADAPTIVE ROUTING HINTS] block looks relevant but truncated, or to check for policy on a specific tool/skill/topic.",
+            "description": "Search the adaptive layer (machine-curated routing hints, prompt notes, policies) by keyword. Use when the preloaded [ADAPTIVE ROUTING HINTS] block ends with a '+N more hints' marker and the task might match one of the unrendered hints, or to check for policy on a specific tool/skill/topic.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Keywords to match against titles and content"},
                     "kind": {
                         "type": "string",
-                        "enum": ["routing_hint", "prompt_note", "policy", "worker_spec"],
+                        "enum": ["routing_hint", "prompt_note", "policy"],
                         "description": "Optional kind filter",
                     },
                 },
@@ -451,8 +457,18 @@ _SCOUT_TOOLS = [
                         "enum": ["inline", "tasks"],
                         "description": "Overall execution approach. Default 'inline' for simple tasks.",
                     },
+                    "task_type": {
+                        "type": "string",
+                        "enum": list(TASK_TYPES),
+                        "description": "What KIND of task this is (classification for outcome statistics; never changes execution).",
+                    },
+                    "used_hints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Ids from [ADAPTIVE ROUTING HINTS] that influenced this plan, even partially; [] if none applied.",
+                    },
                 },
-                "required": ["recommended_tools", "approach_guidance"],
+                "required": ["recommended_tools", "approach_guidance", "used_hints"],
             },
         },
     },
@@ -482,12 +498,15 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
             mode = args.get("mode", "hybrid")
             limit = min(args.get("limit", 10), 20)
             file_filter = args.get("file", "")
+            from core.spaces import space_slug_for_session
+
             results = store.search(
                 query,
                 mode=mode,
                 limit=limit * 2 if file_filter else limit,
                 _track_hits=False,
                 expand_wikilinks=True,  # H4: [[refs]] pull linked entries
+                space_slug=space_slug_for_session(brief.session_id),
             )
             if file_filter:
                 results = [r for r in results if r.entry.file_name.lower() == file_filter.lower()][:limit]
@@ -654,6 +673,11 @@ def _extract_report(args: dict) -> ScoutReport:
         # Clamp unknown / deprecated values (e.g. legacy "workers") to inline.
         mode = "inline"
 
+    task_type = str(args.get("task_type", "")).strip().lower()
+    if task_type not in TASK_TYPES:
+        # Unknown/absent → "" (reflect falls back to the legacy stamp).
+        task_type = ""
+
     # identity/rules/instructions are deliberately NOT read from args: the
     # compiler injects those files whole, and honoring a model-echoed copy
     # here would let a stale or re-worded variant shadow the real ones.
@@ -672,6 +696,12 @@ def _extract_report(args: dict) -> ScoutReport:
         approach_guidance=str(args.get("approach_guidance", "")),
         deliverables_plan=deliverables,
         execution_mode=mode,
+        task_type=task_type,
+        used_hints=(
+            [str(h)[:64] for h in args.get("used_hints", []) if h][:24]
+            if isinstance(args.get("used_hints"), list)
+            else []
+        ),
     )
 
 
@@ -893,19 +923,11 @@ CORE_MINIMUM = frozenset(
         "ask_user",
         "notify_user",
         "discover_tools",
-        "get_tool_schema",
         "discover_skills",
         "load_skill",
         "read_skill_resource",
     }
 )
-
-# Cache
-import threading as _threading
-
-_cache: dict[str, tuple[ScoutReport, float]] = {}
-_cache_lock = _threading.Lock()
-CACHE_TTL = 300  # 5 minutes
 
 # Known model IDs (populated during scout LLM run for validation)
 _known_model_ids: set[str] = set()
@@ -1065,10 +1087,10 @@ def build_session_brief(session_id: str, context_budget: int | None = None) -> S
 
 
 # ---------------------------------------------------------------------------
-def _build_lessons_section(message: str) -> str:
+def _build_lessons_section(message: str, space_slug: str | None = None) -> str:
     """Format relevant lessons (entry_type='lesson') for scout injection.
 
-    Lessons are operational workarounds extracted by snooze_reflect from past
+    Lessons are operational workarounds extracted by the refine pass from past
     failed sessions. We surface up to 5 high-relevance matches; if none match
     the current request, the section is omitted entirely (no empty header).
     """
@@ -1080,7 +1102,7 @@ def _build_lessons_section(message: str) -> str:
         store = get_memory_store()
         if not store:
             return ""
-        lessons = store.search_lessons(message, limit=5, _track_hits=False)
+        lessons = store.search_lessons(message, limit=5, _track_hits=False, space_slug=space_slug)
     except Exception as e:
         logger.debug("Scout lessons lookup failed: %s", e)
         return ""
@@ -1155,48 +1177,29 @@ def should_bypass_scout(message: str, turn_count: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _cache_key(message: str, brief: SessionBrief) -> str:
-    # Deliberately coarse. The old key included turn_count, the exact
-    # recently-used-tools list, and utilization at 0.1 granularity — all of
-    # which change between consecutive turns, so the cache could only hit
-    # when the same message was re-sent in the same turn state (essentially
-    # never; the cache was dead weight). Within the 5-minute TTL a report
-    # for the same message in the same session/phase at a similar context
-    # fill is still valid guidance.
-    util_bucket = int(brief.context_utilization * 4)  # 25% buckets
-    raw = f"{message}:{brief.session_id}:{brief.phase}:{util_bucket}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+def _count_hint_usage(report: ScoutReport) -> None:
+    """Record which adaptive routing hints shaped a FRESH scout plan.
 
-
-def _get_cached(message: str, brief: SessionBrief) -> ScoutReport | None:
-    key = _cache_key(message, brief)
-    with _cache_lock:
-        entry = _cache.get(key)
-        if entry and time.time() < entry[1]:
-            report = entry[0]
-            report.from_cache = True
-            return report
-    return None
-
-
-MAX_CACHE_SIZE = 500
-
-
-def _put_cache(message: str, brief: SessionBrief, report: ScoutReport) -> None:
-    with _cache_lock:
-        now = time.time()
-        # Evict expired entries when cache is getting large
-        if len(_cache) > MAX_CACHE_SIZE // 2:
-            expired = [k for k, (_, ttl) in _cache.items() if now >= ttl]
-            for k in expired:
-                del _cache[k]
-        # Hard cap: evict oldest entries if still over limit
-        if len(_cache) >= MAX_CACHE_SIZE:
-            oldest = sorted(_cache.items(), key=lambda x: x[1][1])
-            for k, _ in oldest[: len(_cache) - MAX_CACHE_SIZE + 1]:
-                del _cache[k]
-        key = _cache_key(message, brief)
-        _cache[key] = (report, now + CACHE_TTL)
+    Called at the fresh-report acceptance seams in run_scout (primary and
+    fallback-model success paths) — every report passing there came from a
+    live LLM run, so a single claim is counted exactly once. (This used to
+    live inside the report cache's write path; the cache recorded 0 hits in
+    506 live runs over 8 days — exact-string key, 5-minute TTL — and was
+    removed in the 2026-08-28 scout audit. The counting seam survives it.)
+    Citations are sanitized against the live hint ids: the model can only
+    credit hints that exist, and over-echo can at worst delay a retirement,
+    never cause one. Never raises — counting is telemetry, not control flow.
+    """
+    if not report.used_hints or not settings.adaptive_enabled:
+        return
+    try:
+        live = {e["id"] for e in db.adaptive_list_entries(kind="routing_hint", status="active", limit=200)}
+        kept = [h for h in dict.fromkeys(h.strip("[] ") for h in report.used_hints) if h in live]
+        report.used_hints = kept
+        for hid in kept:
+            db.upsert_signal("adaptive_entry", hid)
+    except Exception as e:
+        logger.debug("adaptive hint-usage count failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -1211,35 +1214,25 @@ async def run_scout(
     emit: Callable[[dict], None] | None = None,
     is_retry: bool = False,
 ) -> ScoutReport:
-    """Run the scout agent. Returns ScoutReport (from cache, LLM, or fallback).
+    """Run the scout agent. Returns ScoutReport (from LLM or fallback).
 
     The scout:
     1. Reads SOUL.md, RULES.md, SESSIONS.md (if they exist)
     2. Iteratively searches memory, tools, skills via tool calls
     3. Submits a curated ScoutReport via submit_report tool
 
-    is_retry: this turn repeats one that failed verification. Cache reads are
-    skipped — the key is coarse (message + session + phase + utilization
-    bucket) with a 5-minute TTL, so a reflect retry of the same user message
-    would otherwise be handed back the very plan that just failed. Writes are
-    unaffected: the fresh plan is still worth caching.
+    is_retry: this turn repeats one that failed verification. Currently
+    informational only — the report cache that once made it load-bearing
+    (skipping cache reads so a retry never got back the plan that just
+    failed) was removed in the 2026-08-28 scout audit after recording 0
+    hits in 506 live runs. Kept so callers still declare the semantics.
     """
     brief = session_brief or build_session_brief(session_id)
 
     # Check bypass
     if should_bypass_scout(message, brief.turn_count):
-        cached = None if is_retry else _get_cached(message, brief)
-        if cached:
-            logger.debug("Scout bypassed, using cached report for session %s", session_id)
-            return cached
         logger.debug("Scout bypassed, using fallback for session %s", session_id)
         return _build_fallback_report(message, brief, reason="bypass")
-
-    # Check cache
-    cached = None if is_retry else _get_cached(message, brief)
-    if cached:
-        logger.debug("Scout cache hit for session %s", session_id)
-        return cached
 
     # Run scout LLM with retry for transient errors (model loading, 500s, etc.)
     max_attempts = 3
@@ -1307,8 +1300,8 @@ async def run_scout(
             # A fallback report is a degraded artifact, not a scout result:
             # keep it as the floor but let the dedicated fallback model try
             # for a real plan first. Breaking out (rather than returning) also
-            # keeps it out of the cache, so the next turn re-scouts instead of
-            # inheriting a scout-less plan for the full CACHE_TTL.
+            # skips hint-usage counting — a deterministic fallback's hints
+            # are not an LLM's claim about what shaped the plan.
             if report.from_fallback:
                 logger.warning(
                     "Scout produced only a fallback report for session %s after %d attempt(s)",
@@ -1318,7 +1311,7 @@ async def run_scout(
                 degraded_report = report
                 break
 
-            _put_cache(message, brief, report)
+            _count_hint_usage(report)
             if attempt > 1:
                 logger.info("Scout succeeded on attempt %d for session %s", attempt, session_id)
             logger.info(
@@ -1390,7 +1383,7 @@ async def run_scout(
                 logger.warning("Scout fallback model produced no usable plan for session %s", session_id)
                 degraded_report = report
             else:
-                _put_cache(message, brief, report)
+                _count_hint_usage(report)
                 logger.info(
                     "Scout fallback model succeeded for session %s in %dms", session_id, report.scout_latency_ms
                 )
@@ -1452,22 +1445,25 @@ async def _run_scout_llm(
         f"SESSION CONTEXT:\n{brief.to_prompt_text()}",
     ]
 
-    # Read instruction files
+    # Read instruction files — through the same space-aware resolution the
+    # compiler uses (v33), so a space session's scout plans against the same
+    # overridden directives its main turn will run under.
+    from core.spaces import directive_path
+
     _step("reading", "Loading identity & rules")
-    for filename, label in [
-        ("data/agent/SOUL.md", "SOUL.md contents"),
-        ("data/agent/RULES.md", "RULES.md contents"),
+    for fname, label in [
+        ("SOUL.md", "SOUL.md contents"),
+        ("RULES.md", "RULES.md contents"),
     ]:
-        path = Path(filename)
+        path = directive_path(fname, brief.session_id)
         if path.exists():
             content = path.read_text()[:12000]
             user_content_parts.append(f"\n{label}:\n{content}")
 
-    # Check data/agent/ for SESSIONS.md / INSTRUCTIONS.md
+    # SESSIONS slot: space override, else default SESSIONS.md, else INSTRUCTIONS.md
     _step("reading", "Checking project instructions")
-    agent_dir = Path("data/agent")
     for fname in ["SESSIONS.md", "INSTRUCTIONS.md"]:
-        agent_path = agent_dir / fname
+        agent_path = directive_path(fname, brief.session_id) if fname == "SESSIONS.md" else Path("data/agent") / fname
         if agent_path.exists():
             content = agent_path.read_text()[:12000]
             user_content_parts.append(f"\nProject instructions ({fname}):\n{content}")
@@ -1482,6 +1478,13 @@ async def _run_scout_llm(
     # concurrently on threads (emit_event is thread-safe) and append results
     # in a fixed order to keep the prompt deterministic.
     _mem_cap = int(getattr(settings, "scout_preload_memory_char_limit", 300) or 300)
+    # Space scoping (v33): resolved once, shared by the memory gatherers.
+    try:
+        from core.spaces import space_slug_for_session as _slug_for
+
+        _space_slug = _slug_for(brief.session_id)
+    except Exception:
+        _space_slug = None
 
     def _gather_memory_baseline() -> str | None:
         _step("memory", "Searching memory")
@@ -1491,7 +1494,7 @@ async def _run_scout_llm(
             store = get_memory_store()
             if not store:
                 return None
-            results = store.search(message, limit=10, _track_hits=False)
+            results = store.search(message, limit=10, _track_hits=False, space_slug=_space_slug)
             if results:
                 _step("memory", f"Found {len(results)} relevant memories")
                 mem_lines = ["", "MEMORY SEARCH RESULTS (use search_memory tool for deeper/different queries):"]
@@ -1519,7 +1522,7 @@ async def _run_scout_llm(
         try:
             from core.scout.search import gather_deep_memory
 
-            deep_mem = gather_deep_memory(message, char_cap=_mem_cap)
+            deep_mem = gather_deep_memory(message, char_cap=_mem_cap, space_slug=_space_slug)
             if deep_mem:
                 _step("memory", "Deep search found additional results")
                 return f"\nDEEP MEMORY SEARCH:\n{deep_mem}"
@@ -1583,9 +1586,9 @@ async def _run_scout_llm(
 
     def _gather_lessons() -> str | None:
         # Relevant past lessons (entry_type='lesson') — workarounds extracted
-        # by snooze_reflect from prior failed sessions, via hybrid search.
+        # by the refine pass from prior failed sessions, via hybrid search.
         try:
-            lessons_section = _build_lessons_section(message)
+            lessons_section = _build_lessons_section(message, space_slug=_space_slug)
             if lessons_section:
                 _step("lessons", "Injecting relevant past lessons")
                 return lessons_section
@@ -1693,8 +1696,10 @@ async def _run_scout_llm(
     # When scout submits a report that fails _self_check_report, we inject
     # a revision request and let scout submit once more. Hard-capped at 1.
     revisions_used = 0
+    rounds_used = 0  # LLM rounds actually spent (observability — scout.done)
 
     for round_num in range(SCOUT_MAX_ROUNDS):
+        rounds_used = round_num + 1
         is_last_round = round_num == SCOUT_MAX_ROUNDS - 1
         # On the last round, drop the search tools so scout can't keep digging —
         # but keep submit_report. Removing every tool made the final round
@@ -1847,7 +1852,10 @@ async def _run_scout_llm(
             else:
                 # Execute read-only tool
                 _step("tool", f"{tc.name}")
-                result = _exec_scout_tool(tc.name, args, brief)
+                # Off-loop: search_memory runs an embedding HTTP call plus a
+                # full vector load; inline it froze every session's SSE for
+                # the embed timeout on each scout tool round.
+                result = await asyncio.to_thread(_exec_scout_tool, tc.name, args, brief)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
                 logger.debug("Scout tool %s returned %d chars", tc.name, len(result))
 
@@ -1882,6 +1890,7 @@ async def _run_scout_llm(
 
     report.scout_model = model
     report.scout_tokens = total_usage
+    report.scout_rounds = rounds_used
     return report
 
 
@@ -1937,6 +1946,10 @@ def _parse_scout_response(text: str) -> ScoutReport:
         report.from_fallback = True
         return report
 
+    raw_task_type = str(data.get("task_type", "")).strip().lower()
+    if raw_task_type not in TASK_TYPES:
+        raw_task_type = ""
+
     # identity/rules/instructions ignored — see _extract_report for rationale.
     return ScoutReport(
         memory_context=str(data.get("memory_context", "")),
@@ -1951,6 +1964,7 @@ def _parse_scout_response(text: str) -> ScoutReport:
         model_rationale=str(data.get("model_rationale", "")),
         session_state=str(data.get("session_state", "")),
         approach_guidance=str(data.get("approach_guidance", "")),
+        task_type=raw_task_type,
     )
 
 

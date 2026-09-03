@@ -12,7 +12,7 @@
     flex-direction: column;
     flex-shrink: 0;
     position: relative;
-    transition: width 0.2s ease;
+    transition: width var(--transition);
 }
 #file-panel.open {
     width: 360px;
@@ -28,7 +28,7 @@
     cursor: col-resize;
     z-index: 10;
     background: transparent;
-    transition: background 0.15s;
+    transition: background var(--transition);
 }
 .fp-resize-handle:hover,
 .fp-resize-handle.dragging {
@@ -70,14 +70,41 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-close:hover { color: var(--text-bright); }
 
 /* ======================================================================
-   Tab bar
+   Navigation — two levels (S7)
+
+   Nine peer tabs wrapped onto two rows at any panel width worth using.
+   Level one is five groups on a single row that SCROLLS rather than wraps
+   (a wrapped strip eats the top of a 360px panel); level two appears only
+   for the groups that actually hold more than one view.
    ====================================================================== */
-.fp-tab-bar {
+.fp-nav {
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
 }
+.fp-group-bar {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+}
+.fp-group-bar::-webkit-scrollbar { display: none; }
+/* A strip that scrolls has to look like one, or the groups past the right
+   edge simply do not exist as far as the reader is concerned. The fade is a
+   sticky flex item, so it rides the right edge of the scroller. */
+.fp-group-bar::after {
+    content: '';
+    position: sticky;
+    right: 0;
+    flex: 0 0 20px;
+    margin-left: -20px;
+    align-self: stretch;
+    pointer-events: none;
+    background: linear-gradient(to left, var(--bg-raised), transparent);
+}
+
 .fp-tab-btn {
     flex: 1 1 auto;
     min-width: 72px;
@@ -100,6 +127,39 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-tab-btn.active {
     color: var(--accent);
     border-bottom-color: var(--accent);
+}
+
+.fp-group-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    flex: 0 0 auto;
+    min-width: 0;
+    white-space: nowrap;
+}
+.fp-group-btn svg { flex-shrink: 0; opacity: 0.85; }
+.fp-group-btn.active svg { opacity: 1; }
+
+/* The second level reads as subordinate: no uppercase, a quieter ground, and
+   an underline that belongs to the strip rather than to the panel edge. */
+.fp-subtab-bar {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--line-faint);
+}
+.fp-subtab-bar::-webkit-scrollbar { display: none; }
+.fp-subtab-btn {
+    flex: 0 0 auto;
+    min-width: 0;
+    text-transform: none;
+    letter-spacing: 0.02em;
+    font-size: var(--text-xs);
+    padding: var(--sp-1) var(--sp-3);
+    white-space: nowrap;
 }
 
 /* ======================================================================
@@ -142,22 +202,7 @@ body.fp-resizing #main { pointer-events: none; }
     display: flex;
     gap: var(--sp-1);
 }
-.fp-icon-btn {
-    background: none;
-    border: 1px solid transparent;
-    color: var(--text-faint);
-    cursor: pointer;
-    font-size: var(--text-sm);
-    padding: 2px 6px;
-    border-radius: 3px;
-    transition: var(--transition);
-    font-family: var(--mono);
-}
-.fp-icon-btn:hover {
-    color: var(--accent);
-    border-color: var(--border);
-    background: var(--bg-hover);
-}
+/* .fp-icon-btn is .btn--ghost + .btn--icon; see buttons.css. */
 .fp-ws-sort {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -196,12 +241,12 @@ body.fp-resizing #main { pointer-events: none; }
     top: 0;
     bottom: 0;
     width: 80px;
-    color: #fff;
+    color: var(--bg);
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: var(--text-xs);
-    font-weight: 600;
+    font-weight: 500;
     pointer-events: none;
     user-select: none;
 }
@@ -215,7 +260,7 @@ body.fp-resizing #main { pointer-events: none; }
     font-size: var(--text-xs);
     color: var(--text-dim);
     background: var(--bg-raised);
-    transition: background 0.1s, color 0.1s, transform 0.15s ease;
+    transition: background var(--transition-fast), color var(--transition-fast), transform var(--transition);
     white-space: nowrap;
     overflow: hidden;
     position: relative;
@@ -235,7 +280,7 @@ body.fp-resizing #main { pointer-events: none; }
     width: 10px;
     text-align: center;
     flex-shrink: 0;
-    transition: transform 0.15s;
+    transition: transform var(--transition);
     color: var(--text-faint);
 }
 .fp-tree-item.dir.collapsed .fp-tree-chevron {
@@ -251,11 +296,39 @@ body.fp-resizing #main { pointer-events: none; }
 }
 .fp-tree-item.dir .fp-tree-icon { color: var(--accent-dim); }
 
+/* The row's overflow control — touch only, and rendered only there (E6).
+   The negative block margin cancels the row's own 8px touch padding so a
+   44px target does not turn a 44px row into a 60px one. */
+.fp-row-menu {
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    margin-block: -8px;
+    margin-left: var(--sp-1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: var(--radius);
+    color: var(--text-faint);
+    cursor: pointer;
+}
+.fp-row-menu:active { background: var(--bg-hover); color: var(--text-bright); }
+.fp-row-menu:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+
 .fp-tree-name {
     flex: 1;
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
+    /* Search results put the full relative path in this cell, so the same
+       head-truncation applies — otherwise every deep hit renders as the same
+       leading directory with the filename cut off. (V10) */
+    direction: rtl;
+    text-align: left;
+    unicode-bidi: plaintext;
 }
 
 .fp-tree-count {
@@ -290,7 +363,7 @@ body.fp-resizing #main { pointer-events: none; }
     display: flex;
     gap: 2px;
     opacity: 0;
-    transition: opacity 0.1s;
+    transition: opacity var(--transition-fast);
     position: absolute;
     right: var(--sp-2);
     top: 50%;
@@ -299,7 +372,9 @@ body.fp-resizing #main { pointer-events: none; }
     border-radius: var(--radius-sm, 2px);
     padding: 0 2px;
 }
-.fp-tree-item:hover .fp-tree-actions { opacity: 1; }
+.fp-tree-item:hover .fp-tree-actions,
+.fp-tree-item:focus-within .fp-tree-actions,
+.fp-tree-actions:focus-within { opacity: 1; }
 
 .fp-tree-action {
     background: none;
@@ -337,6 +412,12 @@ body.fp-resizing #main { pointer-events: none; }
 }
 .fp-toolbar-back:hover { color: var(--accent); }
 
+/* Truncate from the HEAD, not the tail. A path ellipsised the usual way keeps
+   "data/workspace/projects/rep…" and throws away the one part that identifies
+   the file. An rtl inline direction moves the ellipsis to the start; the
+   paragraph itself stays logically LTR (unicode-bidi: plaintext picks its
+   direction from the first strong character), so the text is not reordered,
+   and text-align keeps it against the left edge. (V10) */
 .fp-toolbar-path {
     font-size: var(--text-xs);
     color: var(--text-dim);
@@ -344,6 +425,9 @@ body.fp-resizing #main { pointer-events: none; }
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+    unicode-bidi: plaintext;
 }
 
 .fp-toolbar-actions {
@@ -351,55 +435,8 @@ body.fp-resizing #main { pointer-events: none; }
     gap: var(--sp-1);
 }
 
-.fp-btn {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    font-family: var(--mono);
-    font-size: 10px;
-    padding: 2px 8px;
-    border-radius: 3px;
-    cursor: pointer;
-    transition: var(--transition);
-}
-.fp-btn:hover {
-    color: var(--accent);
-    border-color: var(--accent);
-    background: var(--accent-glow);
-}
-.fp-btn.primary {
-    border-color: var(--accent-dim);
-    color: var(--accent);
-}
-.fp-btn.primary:hover {
-    background: var(--accent-subtle);
-}
-
-/* Save button states */
-.fp-btn.save-btn {
-    border-color: var(--border);
-    color: var(--text-faint);
-    opacity: 0.5;
-    cursor: default;
-    transition: all var(--transition);
-}
-.fp-btn.save-btn.dirty {
-    opacity: 1;
-    border-color: var(--accent);
-    color: var(--bg);
-    background: var(--accent);
-    cursor: pointer;
-}
-.fp-btn.save-btn.dirty:hover {
-    background: var(--accent-dim);
-    border-color: var(--accent-dim);
-}
-
-.fp-btn.danger:hover {
-    color: var(--error);
-    border-color: var(--error);
-    background: var(--error-subtle);
-}
+/* .fp-btn / .fp-btn.primary / .fp-btn.danger / .fp-btn.save-btn are the
+   .btn--secondary, .btn--primary and .btn--danger roles in buttons.css. */
 
 /* Viewer content */
 .fp-viewer {
@@ -465,15 +502,16 @@ body.fp-resizing #main { pointer-events: none; }
     font-style: italic;
     margin: 0.75em 0;
 }
-.fp-viewer-md h1, .fp-viewer-md h2, .fp-viewer-md h3 {
+/* Family and colour only — size, weight and rhythm come from the shared
+   prose heading scale in layout.css. The weight is re-clamped to 500 here
+   because this surface is mono and DM Mono has no 600 (V6). h4-h6 used to
+   fall through to the UA defaults and rendered smaller than body text. */
+.fp-viewer-md h1, .fp-viewer-md h2, .fp-viewer-md h3,
+.fp-viewer-md h4, .fp-viewer-md h5, .fp-viewer-md h6 {
     font-family: var(--mono);
     color: var(--text-bright);
-    margin: 1em 0 0.5em;
     font-weight: 500;
 }
-.fp-viewer-md h1 { font-size: var(--text-lg); }
-.fp-viewer-md h2 { font-size: var(--text-md); }
-.fp-viewer-md h3 { font-size: var(--text-sm); }
 .fp-viewer-md ul, .fp-viewer-md ol {
     margin: 0.5em 0 0.75em 1.5em;
 }
@@ -514,6 +552,90 @@ body.fp-resizing #main { pointer-events: none; }
     outline: none;
     tab-size: 2;
 }
+/* outline:none above is for the resting state; a keyboard user still needs
+   to see which editor has focus (A12). */
+.ce-fallback:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+/* Rows, breadcrumb segments and sortable headers are now keyboard-reachable
+   (A1). The browser's default ring is easy to lose against this palette, so
+   the focus state is stated rather than inherited. */
+.fp-tree-item[role="button"]:focus-visible,
+.fp-breadcrumb-part[role="button"]:focus-visible,
+.fp-col-h.sortable:focus-visible,
+.adaptive-event-head:focus-visible,
+.fp-tab-content:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    border-radius: var(--radius-sm);
+}
+.fp-col-h.sortable,
+.fp-breadcrumb-part[role="button"] {
+    cursor: pointer;
+}
+
+/* In-flight and failed upload rows — an upload used to be invisible until
+   the directory listing happened to refresh with the file already in it. */
+/* In-flight uploads sit above the listing and are only ever a few rows, so
+   this container must NOT be a .fp-tree — that is flex:1 and would push the
+   real listing to the bottom of the panel. */
+.fp-uploads {
+    flex: 0 0 auto;
+    padding: var(--sp-1) 0;
+}
+.fp-upload-row {
+    cursor: default;
+    opacity: 0.85;
+}
+/* The reason a file was rejected has to be readable, not clipped to the
+   width of a size column. */
+.fp-upload-row .fp-upload-detail {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.fp-upload-row .fp-tree-meta {
+    font-style: italic;
+}
+.fp-upload-row.error {
+    opacity: 1;
+    background: var(--warning-bg);
+}
+.fp-upload-row.error .fp-tree-icon,
+.fp-upload-row.error .fp-tree-meta {
+    color: var(--warning);
+    font-style: normal;
+}
+.fp-upload-row.error .fp-tree-actions {
+    opacity: 1;
+}
+
+/* Save conflict banner — the file changed on disk while the editor was open.
+   Sits between the toolbar and the editor so it cannot be scrolled past. */
+.fp-conflict {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    flex-wrap: wrap;
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--warning-bg);
+    border-bottom: 1px solid var(--line-faint);
+    font-size: var(--text-xs);
+}
+.fp-conflict-msg {
+    color: var(--warning);
+}
+.fp-conflict-actions {
+    display: flex;
+    gap: var(--sp-2);
+    flex-shrink: 0;
+}
+
 .fp-editor-status {
     font-size: 9px;
     color: var(--text-faint);
@@ -562,6 +684,11 @@ body.fp-resizing #main { pointer-events: none; }
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    /* Same head-truncation as .fp-toolbar-path: the deepest crumb is the one
+       that says where you are, so it is the one that must survive. (V10) */
+    direction: rtl;
+    text-align: left;
+    unicode-bidi: plaintext;
 }
 .fp-breadcrumb-part {
     color: var(--text-dim);
@@ -589,7 +716,7 @@ body.fp-resizing #main { pointer-events: none; }
     user-select: none;
 }
 .fp-col-h { flex-shrink: 0; white-space: nowrap; }
-.fp-col-h.sortable { cursor: pointer; transition: color 0.1s; }
+.fp-col-h.sortable { cursor: pointer; transition: color var(--transition-fast); }
 .fp-col-h.sortable:hover { color: var(--text-dim); }
 .fp-col-h.active { color: var(--text); }
 .fp-col-h.col-h-icon  { width: 14px; }
@@ -607,15 +734,37 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-memory-item {
     padding: var(--sp-2) var(--sp-3);
     cursor: pointer;
-    transition: background 0.1s;
+    transition: background var(--transition-fast);
     border-bottom: 1px solid var(--border-subtle);
 }
 .fp-memory-item:hover { background: var(--bg-hover); }
+
+/* Name on the left, the open-in-editor affordance on the right. The button
+   only earns its ink on hover/focus — a column of pencils reads as clutter
+   on a list you are mostly scanning. (S9) */
+.fp-memory-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+}
+.fp-memory-edit {
+    opacity: 0;
+    flex-shrink: 0;
+    transition: opacity var(--transition-fast);
+}
+.fp-memory-item:hover .fp-memory-edit,
+.fp-memory-item:focus-within .fp-memory-edit,
+.fp-memory-edit:focus-visible { opacity: 1; }
 
 .fp-memory-name {
     font-size: var(--text-xs);
     color: var(--text-bright);
     margin-bottom: 2px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .fp-memory-desc {
     font-size: 10px;
@@ -637,7 +786,7 @@ body.fp-resizing #main { pointer-events: none; }
     padding: var(--sp-2) var(--sp-3);
     cursor: pointer;
     border-bottom: 1px solid var(--border-subtle);
-    transition: background 0.1s;
+    transition: background var(--transition-fast);
 }
 .fp-search-result:hover { background: var(--bg-hover); }
 
@@ -658,6 +807,34 @@ body.fp-resizing #main { pointer-events: none; }
     border-radius: 3px;
     padding: 0 4px;
 }
+/* "2.7" told a reader nothing without the scale it belongs to. The bucket
+   says how good the match is; the number stays in the title. (S9) */
+.fp-score-chip {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-radius: var(--radius-sm);
+    padding: 0 5px;
+    border: 1px solid var(--line-faint);
+    color: var(--text-faint);
+    background: var(--bg-surface);
+    cursor: help;
+    flex-shrink: 0;
+}
+.fp-score-chip.score-strong {
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 45%, transparent);
+}
+.fp-score-chip.score-good { color: var(--text-dim); }
+
+/* Paging control under the results. Centred, full width, quiet. */
+.fp-load-more {
+    display: block;
+    width: calc(100% - var(--sp-6));
+    margin: var(--sp-3) auto;
+}
+/* The file filter sits under the search box; the pair needs a hair of air. */
+.fp-filter-bar { padding-top: 0; }
 .fp-search-result-content {
     font-size: var(--text-xs);
     color: var(--text-dim);
@@ -669,7 +846,7 @@ body.fp-resizing #main { pointer-events: none; }
 }
 
 /* Memory file viewer — hyperkb markers */
-.fp-hkb-entry { color: #b48ead; }     /* >>> / <<< markers */
+.fp-hkb-entry { color: var(--dream); } /* >>> / <<< markers */
 .fp-hkb-meta  { color: var(--info); }  /* @key: value */
 .fp-hkb-sep   { color: var(--text-faint); } /* --- */
 
@@ -712,9 +889,9 @@ body.fp-resizing #main { pointer-events: none; }
 }
 .fp-skill-pending-badge {
     font-size: var(--text-xxs);
-    color: var(--warning, #e8a020);
-    background: rgba(232, 160, 32, 0.12);
-    border: 1px solid rgba(232, 160, 32, 0.35);
+    color: var(--warning);
+    background: var(--warning-bg);
+    border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--warning-bg));
     padding: 1px 6px;
     border-radius: 3px;
     font-weight: 500;
@@ -775,7 +952,7 @@ body.fp-resizing #main { pointer-events: none; }
     font-variant-numeric: tabular-nums;
 }
 .fp-perf-line.fp-perf-warn {
-    color: var(--warning, #e8a020);
+    color: var(--warning);
 }
 .fp-tool-safety {
     appearance: none;
@@ -842,7 +1019,7 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-proposals-banner-title {
     padding: var(--sp-2) var(--sp-3);
     font-size: var(--text-xs);
-    font-weight: 600;
+    font-weight: 500;
     color: var(--accent);
     border-bottom: 1px solid var(--border);
 }
@@ -877,7 +1054,7 @@ body.fp-resizing #main { pointer-events: none; }
 .fp-proposal-origin {
     display: inline-block;
     font-size: 9px;
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0.04em;
     padding: 1px 5px;
     margin-right: var(--sp-2);
@@ -898,19 +1075,9 @@ body.fp-resizing #main { pointer-events: none; }
     color: var(--text-faint);
     font-style: italic;
 }
-.fp-btn-xs {
-    font-size: 10px;
-    padding: 1px 8px;
-    flex-shrink: 0;
-}
-.fp-btn-danger {
-    color: var(--error, #e06c75);
-    border-color: var(--error, #e06c75);
-}
-.fp-btn-danger:hover {
-    background: var(--error, #e06c75);
-    color: var(--bg);
-}
+.fp-btn-xs { flex-shrink: 0; }
+/* The raw/rendered toggle above a markdown preview. */
+.fp-viewer-toggle { margin-bottom: var(--sp-2); }
 .fp-proposal-callout {
     margin-bottom: var(--sp-3);
     border: 1px solid var(--accent-dim);
@@ -920,7 +1087,7 @@ body.fp-resizing #main { pointer-events: none; }
 }
 .fp-proposal-callout-label {
     font-size: var(--text-xs);
-    font-weight: 600;
+    font-weight: 500;
     color: var(--accent);
     margin-bottom: var(--sp-2);
 }
@@ -980,6 +1147,16 @@ body.fp-resizing #main { pointer-events: none; }
     text-align: center;
     color: var(--text-faint);
     font-size: var(--text-xs);
+    /* A sentence and, under it, the way out of the state it describes. (F11) */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--sp-3);
+}
+.fp-empty-line {
+    line-height: 1.55;
+    max-width: 34em;
+    text-wrap: pretty;
 }
 
 /* ======================================================================
@@ -1083,7 +1260,7 @@ body.fp-resizing #main { pointer-events: none; }
     opacity: 0.8;
     overflow: hidden;
     max-height: 0;
-    transition: max-height 0.2s ease, margin-top 0.15s ease;
+    transition: max-height var(--transition), margin-top var(--transition);
     margin-top: 0;
 }
 .fp-tab-desc-full.open {
@@ -1091,20 +1268,20 @@ body.fp-resizing #main { pointer-events: none; }
     margin-top: var(--sp-1);
 }
 
-/* The mobile tab-desc touch targets moved to mobile.css — a bare
-   `max-width: 768px` cannot see an iPad. See the header of mobile.css. */
+/* The mobile tab-desc touch targets moved to touch.css — a bare
+   `max-width: 768px` cannot see an iPad. See the header of touch.css. */
 
 /* ── Run Dangerously mode banner (Explorer → Tools) ─────────── */
 .fp-danger-mode-banner {
     margin: var(--sp-2) 0 var(--sp-3);
-    border: 1.5px solid var(--error, #c25450);
-    background: color-mix(in srgb, var(--error, #c25450) 10%, var(--bg));
+    border: 1.5px solid var(--error);
+    background: color-mix(in srgb, var(--error) 10%, var(--bg));
     border-radius: var(--radius);
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background var(--transition);
 }
 .fp-danger-mode-banner:hover {
-    background: color-mix(in srgb, var(--error, #c25450) 18%, var(--bg));
+    background: color-mix(in srgb, var(--error) 18%, var(--bg));
 }
 .fp-danger-banner-inner {
     display: flex;
@@ -1114,15 +1291,15 @@ body.fp-resizing #main { pointer-events: none; }
 }
 .fp-danger-banner-icon {
     font-size: 1rem;
-    color: var(--error, #c25450);
+    color: var(--error);
     flex-shrink: 0;
     line-height: 1;
 }
 .fp-danger-banner-text {
     flex: 1;
     font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--error, #c25450);
+    font-weight: 500;
+    color: var(--error);
     line-height: 1.3;
 }
 .fp-danger-banner-help-wrap {
@@ -1136,10 +1313,10 @@ body.fp-resizing #main { pointer-events: none; }
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background: var(--error, #c25450);
+    background: var(--error);
     color: var(--bg);
     font-size: 9px;
-    font-weight: 700;
+    font-weight: 500;
     cursor: help;
     border: none;
     padding: 0;
@@ -1156,7 +1333,7 @@ body.fp-resizing #main { pointer-events: none; }
     width: 280px;
     padding: var(--sp-2) var(--sp-3);
     background: var(--bg-raised);
-    border: 1px solid var(--error, #c25450);
+    border: 1px solid var(--error);
     border-radius: var(--radius);
     font-size: var(--text-xs);
     color: var(--text);
@@ -1189,8 +1366,32 @@ body.fp-resizing #main { pointer-events: none; }
 --------------------------------------------------------------------------- */
 #fp-adaptive, #fp-canary, #fp-telos { overflow-y: auto; padding: 10px 14px; }
 .adaptive-head { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+/* Six controls in a 360px column had nowhere to go: flex shrank every button
+   until its label was unreadable, and on a phone the last one ran off the
+   edge. Let the row wrap instead, and stop the shrink that made the crushing
+   possible — a control that will not fit beside the previous one goes on the
+   next line at its own size. Width and pointer both, because the Explorer is
+   360px wide on a tablet too. (E2) */
+body[data-compact] .adaptive-head,
+body[data-touch] .adaptive-head {
+    flex-wrap: wrap;
+    row-gap: var(--sp-2);
+    align-items: center;
+}
+body[data-compact] .adaptive-head > *,
+body[data-touch] .adaptive-head > * {
+    flex: 0 0 auto;
+    max-width: 100%;
+}
+body[data-touch] .adaptive-btn {
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+}
 .adaptive-section-title {
-    font-weight: 600; margin: 14px 0 6px; font-size: 0.95em;
+    font-weight: 500; margin: 14px 0 6px; font-size: 0.95em;
     border-bottom: 1px solid var(--border); padding-bottom: 3px;
 }
 .adaptive-kind-head { color: var(--text-dim); font-size: 0.85em; margin: 8px 0 4px; font-family: var(--mono); }
@@ -1201,20 +1402,15 @@ body.fp-resizing #main { pointer-events: none; }
     color: var(--text-dim); margin-right: 4px;
 }
 .adaptive-badge.ok { background: color-mix(in srgb, var(--teal) 18%, var(--bg)); color: var(--teal); }
-.adaptive-badge.warn { background: color-mix(in srgb, var(--warning, #c9a35a) 18%, var(--bg)); color: var(--warning, #c9a35a); }
+.adaptive-badge.warn { background: var(--warning-bg); color: var(--warning); }
 .adaptive-badge.off { opacity: 0.6; }
 .adaptive-card {
     border: 1px solid var(--border); border-radius: var(--radius);
     padding: 8px 10px; margin: 6px 0; font-size: 0.9em;
 }
-.adaptive-card.suspect { border-color: color-mix(in srgb, var(--warning, #c9a35a) 60%, var(--border)); }
+.adaptive-card.suspect { border-color: color-mix(in srgb, var(--warning) 60%, var(--border)); }
 .adaptive-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
 .adaptive-card-actions { margin-top: 6px; display: flex; gap: 6px; }
-.adaptive-btn {
-    padding: 2px 10px; border: 1px solid var(--border); border-radius: var(--radius);
-    background: var(--bg); color: var(--text); cursor: pointer; font-size: 0.85em;
-}
-.adaptive-btn:hover { border-color: var(--accent); }
 /* Entry rows — the Telos tab's row vocabulary (and the read-only rows on the
    Adaptive tab). Same card treatment as .adaptive-card; kept as its own name
    because entries are informational and carry no action row. Without these
@@ -1232,8 +1428,48 @@ body.fp-resizing #main { pointer-events: none; }
     font-family: var(--mono); overflow-wrap: anywhere;
 }
 .adaptive-entry-content, .adaptive-edit-line { color: var(--text-dim); margin-top: 4px; white-space: pre-wrap; }
-.adaptive-flag-reason { color: var(--warning, #c9a35a); margin-top: 4px; font-size: 0.85em; }
+.adaptive-flag-reason { color: var(--warning); margin-top: 4px; font-size: 0.85em; }
 .adaptive-empty { color: var(--text-dim); font-style: italic; margin: 4px 0; }
+/* Inline result line — what alert() used to do, where the user is looking. */
+.adaptive-result {
+    margin: 6px 0;
+    padding: 4px 8px;
+    border-left: 2px solid var(--line-faint);
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    font-size: 0.85em;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.adaptive-result.err {
+    border-left-color: var(--error);
+    color: var(--error);
+}
+/* Raw CANARY.md now uses the shared Monaco editor, which needs a sized host. */
+.adaptive-editor-host {
+    height: 320px;
+    margin: 6px 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+.adaptive-editor-host .ce-fallback {
+    width: 100%;
+    height: 100%;
+    resize: vertical;
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    background: var(--bg);
+    color: var(--text);
+    border: none;
+    padding: var(--sp-2);
+    outline: none;
+}
+.adaptive-editor-host .ce-fallback:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
 .adaptive-event-row { border-bottom: 1px dashed var(--border); padding: 4px 0; font-size: 0.85em; }
 .adaptive-event-head { cursor: pointer; }
 .adaptive-event-head:hover { color: var(--accent); }
@@ -1241,4 +1477,69 @@ body.fp-resizing #main { pointer-events: none; }
     background: color-mix(in srgb, var(--accent) 5%, var(--bg));
     padding: 8px; border-radius: var(--radius); overflow-x: auto;
     font-size: 0.9em; margin: 4px 0;
+}
+
+/* --- MCP tab --- */
+.fp-mcp-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    flex-shrink: 0;
+    background: var(--text-faint);
+}
+.fp-mcp-dot.ok { background: var(--success); }
+.fp-mcp-dot.err { background: var(--error); }
+.fp-mcp-dot.wait { background: var(--accent-dim); }
+.fp-mcp-dot.off { background: var(--border); }
+.fp-mcp-add {
+    margin: var(--sp-2) var(--sp-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.fp-mcp-add-input {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    padding: var(--sp-2);
+    resize: vertical;
+}
+.fp-mcp-add-actions {
+    display: flex;
+    gap: var(--sp-2);
+}
+.fp-mcp-add-result {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    font-family: var(--mono);
+    white-space: pre-wrap;
+}
+.fp-mcp-add-result.err { color: var(--error); }
+.fp-mcp-add-title {
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text);
+}
+.fp-mcp-add-hint {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    line-height: 1.4;
+}
+.fp-mcp-add-input:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+}
+.fp-mcp-error {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--error);
+    margin-top: var(--sp-1);
+    line-height: 1.4;
+    word-break: break-word;
 }

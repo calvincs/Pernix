@@ -402,17 +402,24 @@ async def inject(body: dict):
 @router.post("/api/retry/{session_id}")
 async def retry(session_id: str):
     """Retry from last user message (deletes partial + re-prompts)."""
-    session_db = db.get_session(session_id)
+    import asyncio as _asyncio
+
+    from api.routers.sessions import require_idle
+
+    session_db = await _asyncio.to_thread(db.get_session, session_id)
     if not session_db:
         raise HTTPException(404, detail=f"Session {session_id} not found")
+    require_idle(session_id, "retry")
 
     # Find last partial
-    partial = db.get_last_partial(session_id)
+    partial = await _asyncio.to_thread(db.get_last_partial, session_id)
     if partial:
-        db.delete_message(partial["id"])
+        await _asyncio.to_thread(db.delete_message, partial["id"])
 
-    # Find last user message
-    messages = db.get_messages(session_id)
+    # Find the last user message. Only that row is needed, so read the tail
+    # rather than materialising a whole transcript (tool results and all)
+    # onto the event loop.
+    messages = await _asyncio.to_thread(db.get_messages, session_id, 200)
     last_user = None
     for m in reversed(messages):
         if m["role"] == "user":
@@ -423,7 +430,7 @@ async def retry(session_id: str):
         raise HTTPException(400, detail="No user message to retry from")
 
     # Delete from last user message onward (re-process)
-    db.delete_messages_from(session_id, last_user["id"])
+    await _asyncio.to_thread(db.delete_messages_from, session_id, last_user["id"])
 
     manager = get_manager()
     await manager.prompt(session_id, last_user["content"])
@@ -459,9 +466,11 @@ async def compact(session_id: str):
                 detail=f"Session is {_sv2._current_state(session).value}, must be idle_ready to compact",
             )
 
+    import asyncio as _asyncio
+
     from core.context.compaction import compact_with_llm
 
-    messages = db.get_messages(session_id)
+    messages = await _asyncio.to_thread(db.get_messages, session_id)
     msg_dicts = [dict(m) for m in messages]
 
     did_compact = await compact_with_llm(session_id, msg_dicts)

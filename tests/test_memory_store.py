@@ -649,3 +649,94 @@ def test_near_duplicate_still_goes_through_the_similarity_gate(store):
         "execution after the workspace review on May 9."
     )
     assert store.add_entry(novel, file_name="market.snapshots", source="distill").startswith("Saved")
+
+
+# ---------------------------------------------------------------------------
+# _resolve_file_name — explicit targets (2026-08-31 curiosity-drive fix)
+# ---------------------------------------------------------------------------
+
+
+def _seed_dominant_file(store, name="pernix.eig_calibration_notes", n=4):
+    """Fill a file with near-identical content so FTS would rank it dominant
+    for that topic — the gravity-well precondition."""
+    for i in range(n):
+        store.add_entry(
+            f"EIG calibration holding pass {i}: zero-delta telos spot-check, "
+            f"stationarity window confirmed, pool unchanged at baseline.",
+            file_name=name,
+            skip_dedup=True,
+        )
+    return name
+
+
+def test_explicit_target_reaches_existing_empty_file(store):
+    """An explicitly named file that EXISTS with zero entries must receive
+    the write — the old entry_count>0 filter made it invisible to exact
+    match and content routing hijacked the entry (pernix.findings sat at 0
+    entries while 4 runs' findings were diverted)."""
+    _seed_dominant_file(store)
+    store._ensure_file("pernix.findings")
+
+    resolved = store._resolve_file_name(
+        "pernix.findings",
+        "EIG calibration holding pass finding: zero-delta telos spot-check at baseline.",
+    )
+    assert resolved == "pernix.findings"
+
+
+def test_explicit_new_name_wins_over_content_dominance(store):
+    """A valid explicit name that matches nothing existing is honored —
+    content similarity to another file must not override the caller's
+    stated target."""
+    dominant = _seed_dominant_file(store)
+
+    resolved = store._resolve_file_name(
+        "pernix.run_ledger",
+        "EIG calibration holding pass finding: zero-delta telos spot-check at baseline.",
+    )
+    assert resolved == "pernix.run_ledger"
+    assert resolved != dominant
+
+
+def test_explicit_target_full_write_lands_in_named_file(store):
+    _seed_dominant_file(store)
+    store._ensure_file("pernix.findings")
+    result = store.add_entry(
+        "F50 finding: holding-pass EIG calibration stationarity conclusion for the ledger.",
+        file_name="pernix.findings",
+        skip_dedup=True,
+    )
+    assert "Error" not in result
+    conn = store._connect()
+    try:
+        row = conn.execute("SELECT entry_count FROM memory_files WHERE name = 'pernix.findings'").fetchone()
+    finally:
+        conn.close()
+    assert row is not None and row["entry_count"] == 1
+
+
+def test_fuzzy_name_still_consolidates(store):
+    """Jaccard >= 0.6 against a populated file still maps near-miss names
+    onto the existing file (consolidation behavior preserved)."""
+    store.add_entry("Market data entry one.", file_name="pernix.market_data_findings", skip_dedup=True)
+    resolved = store._resolve_file_name("pernix.market_data_findings_extra", "Another market note.")
+    assert resolved == "pernix.market_data_findings"
+
+
+def test_explicit_target_on_archived_file_resolves_for_revive(store):
+    """An explicit write to an archived file must resolve TO that file so
+    add_entry's revive path (drop @archived, restore entries) can run —
+    the resolver must not divert it elsewhere."""
+    store.add_entry("Old stuff to archive.", file_name="pernix.dead_topic", skip_dedup=True)
+    store.archive_file("pernix.dead_topic")
+
+    resolved = store._resolve_file_name("pernix.dead_topic", "Fresh note on the dead topic.")
+    assert resolved == "pernix.dead_topic"
+
+
+def test_no_suggestion_still_auto_routes(store):
+    dominant = _seed_dominant_file(store)
+    resolved = store._resolve_file_name(None, "EIG calibration holding pass: zero-delta telos spot-check at baseline.")
+    assert isinstance(resolved, str) and resolved
+    # Content routing remains free to pick the dominant file here.
+    assert resolved != "pernix.findings"
