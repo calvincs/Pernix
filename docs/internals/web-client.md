@@ -289,6 +289,32 @@ same turn record:
 The Timeline tab's turn headers each carry a **Story** button that switches to
 the Lane with that turn selected, so the two readings of one turn stay joined.
 
+**While a turn runs**, with the modal open, all three tabs move rather than
+waiting for a reload. The running lane row's open segment grows and its
+duration ticks once a second, off one interval for the whole modal that stops
+with the page and picks the elapsed back up from the wall clock on the way in.
+A `tool.start` puts a tick on that row at *now*, drawn in `--accent` until its
+`tool.call` marks it done — in `--error` if it failed — because a bar that only
+grows a tick when a result arrives is a bar on which a four-minute call reads as
+an unexplained gap. A state change closes the open segment and opens the next
+one in place, with no refetch; the map's lit state follows the same transition
+and the edge just taken flashes once; and the Story's Act card grows and
+finishes the same two rows, when the turn being told is the running one.
+
+What still comes from the server is everything the client cannot know. A
+debounced refetch of the newest turn page fills the Plan card once the scout
+report has been written, and one extra pass two seconds after the turn parks
+fills Verify and Remembers, whose rows are written *after* the transition that
+ends the turn. That refetch replaces the running record wholesale, so
+everything the client added is keyed — by `call_id` where there is one,
+otherwise by the call's ordinal among same-named calls in its turn, which is
+what the server's own ordering agrees with — and merged rather than
+concatenated. Phases merge by index, because both lists are the same sequence
+and a start-time tolerance either duplicates the open phase or swallows a real
+one. **Both sides of that merge are keyed the same way**: key only the client's
+additions and the first refetch is right while every one after it appends the
+server's own rows again, once per refetch for the rest of the turn.
+
 The endpoint is the read model, not a slice of the other two: it does the join
 server-side that this modal used to do in the browser after downloading the
 whole state log *and* the whole transcript. See "Get Turns" in

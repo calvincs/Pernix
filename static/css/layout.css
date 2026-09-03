@@ -2430,6 +2430,16 @@ body.sidebar-resizing {
     opacity: 0.55;
 }
 .tl-lane-tick.error { background: var(--error); opacity: 1; }
+/* A call that has started and not come back. It is on the bar the moment the
+   tool.start lands — a bar that only grows a tick when the result arrives is a
+   bar on which a four-minute call reads as an unexplained gap — and it is
+   drawn in --accent to say the tick is not the whole story yet. */
+.tl-lane-tick.pending {
+    background: var(--accent);
+    opacity: 1;
+    --pulse-dip: 0.35;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
+}
 .tl-lane-live {
     position: absolute;
     top: 0;
@@ -2443,7 +2453,8 @@ body.sidebar-resizing {
 /* The global reduce block already collapses the duration; say it outright so
    a live turn's marker is a steady edge rather than a single flash. */
 @media (prefers-reduced-motion: reduce) {
-    .tl-lane-live { animation: none; }
+    .tl-lane-live,
+    .tl-lane-tick.pending { animation: none; }
 }
 
 /* ----------------------------------------------------------------------
@@ -2577,6 +2588,10 @@ body.sidebar-resizing {
     min-width: 0;
 }
 .tl-act-row.error { background: var(--state-cancelling-bg); }
+/* The Act card grows the same row the lane grows a tick for, and finishes it
+   in place when the result lands. */
+.tl-act-row.running { color: var(--text-dim); }
+.tl-act-row.running .tl-act-name { color: var(--text); }
 .tl-act-name { color: var(--text-bright); flex: 0 0 auto; }
 .tl-act-args {
     color: var(--text-dim);
