@@ -97,7 +97,8 @@ moved the desktop, and say in the message what moved and why.
 | `tab-air-l` | 1180×820 | **wide touch** |
 | `ipad-desk` | 1024×768, Mac UA, no `is_mobile` | **wide touch**, and the one that only passes because `touch-boot.js` recognises it — it is an iPad claiming to be a Mac, exactly as iPadOS desktop mode does |
 | desktop | 1280×800, mouse | the baseline comparison |
-| `state-graph` | 1280×800, mouse, reduced motion | one m1 check on the State timeline's Graph tab, in its own context because it seeds `session_state_log` rows for the graph to draw |
+| `state-graph` | 1280×800, mouse, reduced motion | one m1 check on the State timeline's Graph tab, in its own context because it opens a session no other pass touches |
+| `timeline-lane` | 1280×900 dark and light, plus 390×844 touch | three m2 checks on the State timeline's Lane tab and the Story under it, and one on the phone |
 
 ### The state-graph pass
 
@@ -111,11 +112,30 @@ reduced motion so one pass covers both, and asserts that no `--state-*` token
 reads as black, that no node box is within a hair of `#000`, and that every
 node label clears 3:1 against its own box.
 
+### The timeline-lane pass
+
+`seed.py`'s last block builds a session with three turns of state-log rows
+and the messages `db.get_turns` parses back into a scout report, a reflect
+chain, an eval gate, a compaction and a notice. It is its own session on
+purpose: the lane needs matching messages, and the desktop baseline pins the
+height of the main session's transcript, so eleven more rows there would fail
+a check that is not about the timeline at all. `check.py` finds it by title in
+the throwaway's own sqlite, because `run.sh` forwards only `main` and
+`parent`.
+
+The phase durations are chosen to be round shares of their own turn —
+10/30/5/10/40/5, 10/25/20/40/5, 10/70/20 — so the pass can assert that every
+segment is within 2px of its share of that row's bar. It also pins the tick
+counts, the compaction segment, the Story's four cards against the newest
+turn's seeded text, Arrow Up moving the selection, and — in both themes —
+that no segment paints black and the story's prose clears 4.5:1 on its card.
+The touch half asserts 44px rows and no sideways scroll at 390px.
+
 ## Files
 
 | | |
 |---|---|
 | `run.sh` | boots, seeds, runs, tears down |
-| `seed.py` | the fixture: a chat with markdown, a code block, a wide table, three tool rounds, a 120-message session for paging, a fan-out parent with three workers, a space, and cron/snooze sessions |
+| `seed.py` | the fixture: a chat with markdown, a code block, a wide table, three tool rounds, a 120-message session for paging, a fan-out parent with three workers, three spaces, cron/snooze/canary sessions, and a three-turn state log for the timeline |
 | `check.py` | the checks themselves; run directly if you already have a seeded instance |
 | `desktop-baseline.json` | see above |

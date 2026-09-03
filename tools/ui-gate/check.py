@@ -491,54 +491,75 @@ def desktop_layout(browser):
 
 
 # ---------------------------------------------------------------------------
-# State timeline — the Graph tab's colours
+# State timeline — the Lane tab, the Story under it, and the Graph's colours
 # ---------------------------------------------------------------------------
 
-STATE_ARC = [
-    (None, "idle_ready", "session-created", 0),
-    ("idle_ready", "scouting", "user-message", 900),
-    ("scouting", "processing", "scout-done", 4200),
-    ("processing", "compacting", "context-pressure", 31000),
-    ("compacting", "processing", "compaction-done", 5200),
-    ("processing", "awaiting_workers", "workers-spawned", 18000),
-    ("awaiting_workers", "processing", "workers-done", 26000),
-    ("processing", "paused", "user-pause", 9000),
-    ("paused", "processing", "user-resume", 12000),
-    ("processing", "finalizing", "turn-complete", 7400),
-    ("finalizing", "awaiting_user", "response-sent", 1300),
+# seed.py's last block builds this session: three turns of state-log rows with
+# the messages db.get_turns parses back into a scout report, a reflect chain,
+# an eval gate, a compaction and a notice. run.sh only forwards main and
+# parent, so it is looked up by title in the throwaway's own sqlite — the same
+# file seed.py has just written. (The arc used to be written from HERE, which
+# meant the gate's fixtures lived in two files and only the Graph tab had one.)
+TIMELINE_TITLE = "State timeline — three turns"
+
+# The seeded turns, as the lane has to draw them: turn id, then each phase's
+# share of that turn's own elapsed_ms. Every row is normalised to itself, so
+# these are the percentages of the row's bar, not of anything global.
+LANE_SHAPE = [
+    ("1", [10, 30, 5, 10, 40, 5]),  # a reflect retry: the arc runs twice
+    ("2", [10, 25, 20, 40, 5]),  # a compaction round trip in the middle
+    ("3", [10, 70, 20]),  # plain, and the one whose Story is asserted
 ]
+LANE_TICKS = [3, 1, 3]  # tool calls per turn — one tick each
+LANE_ERROR_TICKS = [1, 0, 1]
 
 
-def seed_state_log(sid):
-    """Give a seeded session a turn's worth of transitions for the graph to draw.
-
-    seed.py writes messages and nothing else, so session_state_log is empty and
-    the Graph tab renders "No state transitions yet" — against which the check
-    below would pass by drawing nothing at all. Written straight into the
-    throwaway's sqlite (run.sh cd's into the app dir before running this, so
-    data/sessions.db is that instance's own) rather than through seed.py, to
-    keep this addition inside one file. Returns "" or a reason it could not.
-    """
+def timeline_sid():
     path = os.path.join(os.getcwd(), "data", "sessions.db")
     if not os.path.exists(path):
-        return f"no sessions.db at {path}"
-    ts = int(time.time() * 1000) - 180_000
+        return ""
     conn = sqlite3.connect(path, timeout=10)
     try:
-        for from_state, to_state, reason, elapsed in STATE_ARC:
-            conn.execute(
-                "INSERT INTO session_state_log (session_id, turn_id, from_state, to_state,"
-                " reason, timestamp_ms, elapsed_ms) VALUES (?, 1, ?, ?, ?, ?, ?)",
-                (sid, from_state, to_state, reason, ts, elapsed),
-            )
-            ts += elapsed
-        conn.commit()
-    except Exception as e:  # noqa: BLE001
-        return f"state-log insert failed: {e}"
+        row = conn.execute("SELECT id FROM sessions WHERE title = ? LIMIT 1", (TIMELINE_TITLE,)).fetchone()
+        return row[0] if row else ""
     finally:
         conn.close()
-    return ""
 
+
+TIMELINE = timeline_sid()
+
+
+def open_timeline(pg, tab=None):
+    """Open the seeded timeline session and its State timeline modal."""
+    pg.evaluate(f"() => document.querySelector('[data-sid=\"{TIMELINE}\"]')?.click()")
+    time.sleep(1.2)
+    pg.click("#state-badge")
+    time.sleep(0.6)
+    if tab:
+        pg.evaluate(
+            "(name) => [...document.querySelectorAll('#timeline-modal .tab-btn')]"
+            ".find(b => b.textContent.trim() === name)?.click()",
+            tab,
+        )
+        time.sleep(0.5)
+
+
+# The contrast maths, shared by the graph pass and the lane pass. Both ask the
+# same question — is what was painted actually readable — of different marks.
+CONTRAST_JS = r"""
+  const lum = (c) => { const f = (x) => { x/=255; return x<=0.03928 ? x/12.92 : ((x+0.055)/1.055)**2.4; };
+                       return 0.2126*f(c[0])+0.7152*f(c[1])+0.0722*f(c[2]); };
+  // Two serialisations, and reading the second one as the first is the whole
+  // of the bug 3deb575 fixed in readColor(): a computed color-mix() comes back
+  // as `color(srgb 0.807 0.845 0.861)` — 0..1 floats — where a plain hex comes
+  // back as `rgb(138, 100, 16)`. The lane's segments ARE color-mix() tokens, so
+  // a probe that assumed 0..255 would call every one of them black.
+  const parse = (s) => { const t=String(s||'').trim(); const m=t.match(/[-+]?(?:\d*\.\d+|\d+)/g);
+                         if (!m || m.length < 3) return null;
+                         const n = m.slice(0,3).map(Number);
+                         return t.startsWith('color(') ? n.map(x => x * 255) : n; };
+  const ratio = (a, b) => { const x=lum(a), y=lum(b); return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05); };
+"""
 
 TOKENS_JS = """async () => {
   const t = await import('/static/js/theme.js');
@@ -547,11 +568,7 @@ TOKENS_JS = """async () => {
                    '--state-paused-fg','--accent','--bg']) out[k] = t.hex(k);
   return out; }"""
 
-STATE_GRAPH_JS = r"""() => {
-  const lum = (c) => { const f = (x) => { x/=255; return x<=0.03928 ? x/12.92 : ((x+0.055)/1.055)**2.4; };
-                       return 0.2126*f(c[0])+0.7152*f(c[1])+0.0722*f(c[2]); };
-  const parse = (s) => { const m=(s||'').match(/[-+]?(?:\d*\.\d+|\d+)/g);
-                         return m && m.length>=3 ? m.slice(0,3).map(Number) : null; };
+STATE_GRAPH_JS = r"""() => {""" + CONTRAST_JS + r"""
   const bad = [];
   // The [*] start/end markers are bare <circle>s: no box, no label to colour.
   const nodes = [...document.querySelectorAll('#timeline-graph g.node')]
@@ -570,9 +587,8 @@ STATE_GRAPH_JS = r"""() => {
     if (Math.max(rc[0], rc[1], rc[2]) <= 8) { bad.push(name + ': box ' + getComputedStyle(rect).fill); continue; }
     const lc = label ? parse(getComputedStyle(label).fill) : null;
     if (!lc) { bad.push(name + ': label has no fill'); continue; }
-    const a = lum(rc), b = lum(lc);
-    const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
-    if (ratio < 3) bad.push(name + ': label ' + ratio.toFixed(2) + ':1 on its box');
+    const r = ratio(rc, lc);
+    if (r < 3) bad.push(name + ': label ' + r.toFixed(2) + ':1 on its box');
   }
   const flat = [...document.querySelectorAll('.tl-dwell-seg, .tl-dwell-dot')]
       .map(s => getComputedStyle(s).backgroundColor)
@@ -584,8 +600,8 @@ STATE_GRAPH_JS = r"""() => {
 def state_graph_colours(browser):
     """m1: the State timeline's graph is painted from the --state-* palette.
 
-    Its own context, after the baseline pass, because it writes state-log rows
-    the other passes have no reason to see.
+    Its own context, after the baseline pass, because it opens a session the
+    other passes have no reason to touch.
 
     Two ways readColor() (static/js/theme.js) has handed back the wrong colour,
     each of which painted every box, label and dwell bar black in both themes:
@@ -601,9 +617,8 @@ def state_graph_colours(browser):
     This context asks for reduced motion, so one pass covers both.
     """
     problems = []
-    seeded = seed_state_log(MAIN)
-    if seeded:
-        problems.append(seeded)
+    if not TIMELINE:
+        problems.append(f"no seeded session titled {TIMELINE_TITLE!r}")
 
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
@@ -617,10 +632,9 @@ def state_graph_colours(browser):
     if toks.get("--state-processing-bg") == toks.get("--state-processing-fg"):
         problems.append("state fg and bg read the same: " + str(toks.get("--state-processing-bg")))
 
-    pg.evaluate(f"() => document.querySelector('[data-sid=\"{MAIN}\"]')?.click()")
-    time.sleep(1.2)
-    pg.click("#state-badge")
-    time.sleep(0.5)
+    # The Graph tab is no longer the one the modal opens on, and mermaid only
+    # renders once it is switched to.
+    open_timeline(pg, tab="Graph")
     try:
         pg.wait_for_selector("#timeline-graph g.node rect", timeout=15000)
         time.sleep(0.6)
@@ -635,6 +649,181 @@ def state_graph_colours(browser):
         problems.append(f"graph never rendered: {str(e)[:80]} status={status!r}")
     pg.screenshot(path=f"{shots}/{tag}-state-graph.png")
     check("state-graph", "state graph nodes are painted from the palette", not problems, problems[:6])
+    ctx.close()
+
+
+# --- the Lane tab -----------------------------------------------------------
+
+LANE_JS = r"""() => {""" + CONTRAST_JS + r"""
+  const rows = [...document.querySelectorAll('#timeline-lane .tl-lane-row')];
+  const box = e => e.getBoundingClientRect();
+  const flat = [], dim = [];
+  for (const s of document.querySelectorAll('#timeline-lane .tl-lane-seg')) {
+    const c = getComputedStyle(s).backgroundColor;
+    const p = parse(c);
+    if (!p || c === 'rgba(0, 0, 0, 0)' || Math.max(p[0], p[1], p[2]) <= 8) flat.push((s.dataset.state||'?') + ': ' + c);
+  }
+  const card = document.querySelector('#timeline-story .tl-card');
+  const prose = document.querySelector('#timeline-story .tl-story-prose');
+  if (card && prose) {
+    const r = ratio(parse(getComputedStyle(card).backgroundColor), parse(getComputedStyle(prose).color));
+    if (r < 4.5) dim.push('story prose ' + r.toFixed(2) + ':1 on its card');
+  } else {
+    dim.push('no story prose on screen');
+  }
+  return {
+    tabs: [...document.querySelectorAll('#timeline-modal .tab-btn')].map(b => b.textContent.trim()),
+    active: ((document.querySelector('#timeline-modal .tab-btn.active')||{}).textContent||'').trim(),
+    turns: rows.map(r => r.dataset.turn),
+    current: rows.filter(r => r.getAttribute('aria-current') === 'true').map(r => r.dataset.turn),
+    rowH: rows.map(r => Math.round(box(r).height)),
+    barW: rows.map(r => { const b = r.querySelector('.tl-lane-bar'); return b ? box(b).width : 0; }),
+    segs: rows.map(r => [...r.querySelectorAll('.tl-lane-seg')].map(s => [s.dataset.state, box(s).width])),
+    ticks: rows.map(r => r.querySelectorAll('.tl-lane-tick').length),
+    errTicks: rows.map(r => r.querySelectorAll('.tl-lane-tick.error').length),
+    eyebrows: [...document.querySelectorAll('#timeline-story .tl-card-eyebrow')].map(e => e.textContent.trim()),
+    verdicts: [...document.querySelectorAll('#timeline-story .tl-chip-pass, #timeline-story .tl-chip-retry,'
+              + ' #timeline-story .tl-chip-escalate, #timeline-story .tl-chip-fail')].map(c => c.textContent.trim()),
+    story: (document.getElementById('timeline-story')||{}).textContent || '',
+    flat, dim,
+    overflow: Math.round(document.documentElement.scrollWidth - innerWidth),
+  }; }"""
+
+
+def lane_geometry(lane):
+    """Every way the seeded shape and the drawn shape can disagree."""
+    bad = []
+    if lane["turns"] != [t for t, _ in LANE_SHAPE]:
+        bad.append(f"rows {lane['turns']} not {[t for t, _ in LANE_SHAPE]}")
+        return bad
+    for i, (turn, shares) in enumerate(LANE_SHAPE):
+        segs = lane["segs"][i]
+        if len(segs) != len(shares):
+            bad.append(f"T{turn}: {len(segs)} segments, seeded {len(shares)}")
+            continue
+        # A phase's share of its own turn, in pixels of its own bar.
+        for (state, width), share in zip(segs, shares):
+            want = lane["barW"][i] * share / 100
+            if abs(width - want) > 2:
+                bad.append(f"T{turn} {state}: {width:.1f}px, {share}% of the bar is {want:.1f}px")
+    if "compacting" not in [s[0] for s in lane["segs"][1]]:
+        bad.append("T2 has no compacting segment")
+    if lane["ticks"] != LANE_TICKS:
+        bad.append(f"ticks {lane['ticks']} not {LANE_TICKS}")
+    if lane["errTicks"] != LANE_ERROR_TICKS:
+        bad.append(f"error ticks {lane['errTicks']} not {LANE_ERROR_TICKS}")
+    return bad
+
+
+def timeline_lane(browser, light=False):
+    """m2: the Lane tab draws the seeded turns, and the Story reads the newest.
+
+    Its own context for the same reason the graph pass has one — it opens a
+    session nothing else touches, and the light half needs its own profile
+    because the theme is a localStorage choice.
+    """
+    theme = "light" if light else "dark"
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900}, color_scheme=theme, reduced_motion="reduce")
+    if light:
+        ctx.add_init_script("try { localStorage.setItem('pernix_theme', 'light'); } catch (e) {}")
+    pg = ctx.new_page()
+    pg.on("console", lambda m: console_errors.append(f"[lane-{theme}] {m.text}") if m.type == "error" else None)
+    pg.on("pageerror", lambda e: console_errors.append(f"[lane-{theme}] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.8)
+    open_timeline(pg)
+    pg.wait_for_selector("#timeline-lane .tl-lane-row", timeout=15000)
+    time.sleep(0.4)
+    lane = pg.evaluate(LANE_JS)
+    pg.screenshot(path=f"{shots}/{tag}-timeline-lane-{theme}.png")
+
+    if not light:
+        check(
+            "timeline-lane",
+            "m2: the modal opens on Lane, oldest turn first",
+            lane["tabs"] == ["Lane", "Graph", "Timeline"]
+            and lane["active"] == "Lane"
+            and lane["turns"] == ["1", "2", "3"]
+            and lane["current"] == ["3"],
+            lane,
+            "m2",
+        )
+        geom = lane_geometry(lane)
+        check("timeline-lane", "m2: each bar is its own turn's phases, to scale", not geom, geom[:6], "m2")
+        # The newest turn's story: the plan it opened with, the verdict it
+        # closed on, the gate that ran, and what the whole turn cost.
+        story = lane["story"]
+        missing = [
+            s for s in ("Run the suite, read the one failure", "gate tests", "620 / 180 / 800 tok") if s not in story
+        ]
+        if lane["eyebrows"] != ["Plan", "Act", "Verify"]:
+            missing.append(f"cards {lane['eyebrows']}")
+        if "pass" not in lane["verdicts"]:
+            missing.append(f"verdict chips {lane['verdicts']}")
+        check("timeline-lane", "m2: the Story reads the newest turn", not missing, missing[:6], "m2")
+
+        # ArrowUp is the lane's own navigation: previous row, and the story
+        # follows the selection rather than waiting for a click.
+        pg.evaluate("() => document.querySelector('#timeline-lane .tl-lane-row[data-turn=\"3\"]').focus()")
+        pg.keyboard.press("ArrowUp")
+        time.sleep(0.4)
+        up = pg.evaluate(LANE_JS)
+        check(
+            "timeline-lane",
+            "m2: ArrowUp selects the previous turn and the story follows",
+            up["current"] == ["2"] and "Walk the archive year by year" in up["story"] and "Remembers" in up["eyebrows"],
+            {"current": up["current"], "eyebrows": up["eyebrows"], "story": up["story"][:160]},
+            "m2",
+        )
+
+    check(
+        "timeline-lane",
+        f"m2: {theme} — every phase segment is painted and the story reads",
+        not lane["flat"] and not lane["dim"],
+        (lane["flat"] + lane["dim"])[:6],
+        "m2",
+    )
+    ctx.close()
+
+
+def timeline_lane_touch(browser):
+    """m2: the lane on a 390px phone — 44px rows, and no sideways scroll.
+
+    The bar is 100% of a grid column by construction, so the only way this
+    fails is a row that stops being a grid: a label column that will not
+    truncate, or a story field that keeps its key and value side by side.
+    """
+    ctx = browser.new_context(
+        viewport={"width": 390, "height": 844},
+        device_scale_factor=2,
+        color_scheme="dark",
+        is_mobile=True,
+        has_touch=True,
+    )
+    pg = ctx.new_page()
+    pg.on("console", lambda m: console_errors.append(f"[lane-touch] {m.text}") if m.type == "error" else None)
+    pg.on("pageerror", lambda e: console_errors.append(f"[lane-touch] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.8)
+    open_session(pg, TIMELINE, True)
+    pg.click("#state-badge")
+    time.sleep(0.8)
+    pg.wait_for_selector("#timeline-lane .tl-lane-row", timeout=15000)
+    time.sleep(0.4)
+    lane = pg.evaluate(LANE_JS)
+    sheet = rect(pg, "#timeline-modal")
+    pg.screenshot(path=f"{shots}/{tag}-timeline-lane-touch.png")
+    check(
+        "timeline-lane",
+        "m2: touch — lane rows are 44px and nothing scrolls sideways",
+        lane["turns"] == ["1", "2", "3"]
+        and all(h >= 44 for h in lane["rowH"])
+        and lane["overflow"] <= 0
+        and bool(sheet)
+        and sheet["w"] == 390,
+        {"rowH": lane["rowH"], "overflow": lane["overflow"], "sheet": sheet},
+        "m2",
+    )
     ctx.close()
 
 
@@ -886,6 +1075,23 @@ with sync_playwright() as p:
             f"{e}\n{traceback.format_exc()[-400:]}",
         )
     if LEVEL == "m2":
+        for light in (False, True):
+            try:
+                timeline_lane(browser, light=light)
+            except Exception as e:
+                check(
+                    "timeline-lane",
+                    f"m2: lane pass completed ({'light' if light else 'dark'})",
+                    False,
+                    f"{e}\n{traceback.format_exc()[-400:]}",
+                    "m2",
+                )
+        try:
+            timeline_lane_touch(browser)
+        except Exception as e:
+            check(
+                "timeline-lane", "m2: lane touch pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2"
+            )
         try:
             sidebar_resizer(browser)
         except Exception as e:
