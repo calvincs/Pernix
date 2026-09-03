@@ -314,6 +314,41 @@ const SECTIONS = [
         ],
     },
     {
+        // `name` is how buildAutonomyTab finds this one again: it is the only
+        // section on the tab that grows controls of its own (Scan now, and
+        // the list of topics the user has declined).
+        name: 'space-suggest',
+        title: 'Space suggestions',
+        tab: 'autonomy',
+        description: 'Idle-time filing: during snooze the agent reads the last few weeks of ordinary '
+            + 'chats — archived ones included, machine sessions excluded — and makes one background-model '
+            + 'call that groups them by the kind of work you keep coming back to, not by the tool used or '
+            + 'the day it happened. A group that clears the thresholds below becomes a suggestion: either a '
+            + 'new space or a move into one you already have. It only ever offers. Nothing is created, moved '
+            + 'or written to a directive file until you press the button in the review sheet. A topic you '
+            + 'decline is never proposed again — nor a near synonym of it — until you clear it below, and a '
+            + 'suggestion you neither accept nor decline expires on its own. All settings apply immediately.',
+        fields: [
+            {
+                key: 'space_suggest_enabled',
+                label: 'Suggest spaces from recurring work',
+                type: 'bool',
+                risk: 'autonomy',
+                hint: 'Off = the scan never runs and the rung is absent from the idle ladder.',
+            },
+            { key: 'space_suggest_window_days', label: 'Look back (days)', type: 'number' },
+            { key: 'space_suggest_min_sessions', label: 'Min sessions per suggestion', type: 'number' },
+            {
+                key: 'space_suggest_min_days',
+                label: 'Min distinct days',
+                type: 'number',
+                hint: 'Calendar days those chats must span — a burst on one afternoon is not a habit.',
+            },
+            { key: 'space_suggest_scan_interval_hours', label: 'Scan at most every (hours)', type: 'number' },
+            { key: 'space_suggest_ttl_days', label: 'Suggestions expire after (days)', type: 'number' },
+        ],
+    },
+    {
         title: 'Reflect',
         tab: 'agent',
         description: 'Post-task verification re-reads the agent\'s work and checks for mistakes or incomplete steps. If issues are found, the agent retries automatically. Min messages prevents reflect from firing on trivial exchanges. Deferred grading keeps interactive turns off the critical path: the grade runs in the background after a quiet period and can record lessons, but never retries the turn.',
@@ -2939,6 +2974,211 @@ function _buildSweepsLedger(sweeps) {
 // they can land beside the numbers they configure rather than after all of
 // them. Re-appending the same nodes on a refresh is deliberate: they keep
 // their ids and any edit the user has not saved yet.
+// ---------------------------------------------------------------------------
+// Autonomy tab — the one section there with controls of its own
+// ---------------------------------------------------------------------------
+// Same hook the Storage tab uses: find the section by its `name`, not by the
+// heading text a rename would break, and hang the buttons off the section node
+// itself so the fields keep their ids, their reset buttons and their place in
+// the Save flow.
+
+function buildAutonomyTab(settingSections = []) {
+    const suggest = settingSections.find(s => s.dataset && s.dataset.section === 'space-suggest');
+    if (suggest) _wireSpaceSuggestBlock(suggest);
+    return settingSections;
+}
+
+/** "5 chats" / "1 chat" — the count reads in both halves of this block. */
+function _suggChats(n) {
+    return `${n} chat${n === 1 ? '' : 's'}`;
+}
+
+// core.space_suggest reports its refusals as machine tokens, because the
+// snooze rung logs them. Scan now is where a person meets one, so this is
+// where they become English. An unrecognised token still says something.
+const SUGGEST_SKIPS = {
+    scan_in_progress: 'a scan is already running',
+    interval: 'the last scan was too recent',
+    nothing_new: 'too few new chats since the last scan',
+    pending_full: 'as many suggestions are already waiting as Pernix will keep',
+    too_few_candidates: 'there are not enough ordinary chats in the window to group',
+};
+
+function _suggNote(message) {
+    return el('div', { class: 'sugg-note' }, [text(message)]);
+}
+
+function _wireSpaceSuggestBlock(section) {
+    const status = _statusLine();
+    const proposals = el('div', { class: 'sugg-scan-out' });
+    const declinedHost = el('div', { class: 'sugg-declined' });
+
+    // --- Scan now: a dry run, so the user sees what a scan WOULD propose
+    // before anything is stored. Keeping it is a second, separate click.
+    const scanBtn = el('button', { class: 'btn btn--secondary settings-block-btn', type: 'button' }, [
+        icon('sparkle', { size: 12 }),
+        text('Scan now'),
+    ]);
+    const keepBtn = el('button', { class: 'btn btn--primary settings-block-btn', type: 'button' }, [
+        text('Keep these as suggestions'),
+    ]);
+    keepBtn.hidden = true;
+
+    // Returns the number of groupings on offer, or null when no scan ran —
+    // which is what tells the caller whether "this is a dry run" is a
+    // sentence worth printing under the button.
+    const renderResult = (result) => {
+        clear(proposals);
+        keepBtn.hidden = true;
+        // The scan reports its own refusals rather than throwing them: a
+        // window with too few chats in it is an answer, not a failure.
+        if (result.skipped) {
+            proposals.appendChild(_suggNote(`No scan ran — ${SUGGEST_SKIPS[result.skipped] || result.skipped}.`));
+            return null;
+        }
+        if (result.error) {
+            proposals.appendChild(_suggNote(`The scan could not finish — ${result.error}.`));
+            return null;
+        }
+        const kept = result.kept || [];
+        const scanned = result.scanned || 0;
+        proposals.appendChild(_suggNote(kept.length
+            ? `${_suggChats(scanned)} read. ${kept.length} would be suggested — nothing is stored yet.`
+            : `${_suggChats(scanned)} read. Nothing came through the gate.`));
+        for (const c of kept) {
+            const files = Object.keys(c.directives || {});
+            proposals.appendChild(el('div', { class: 'sugg-prop' }, [
+                el('div', { class: 'sugg-prop-head' }, [
+                    el('span', { class: 'sugg-prop-label' }, [text(c.label || c.topic_key || 'Untitled')]),
+                    el('span', { class: 'sugg-prop-kind' }, [
+                        text(c.kind === 'existing' ? 'move into an existing space' : 'new space'),
+                    ]),
+                    el('span', { class: 'sugg-prop-count' }, [text(_suggChats((c.session_ids || []).length))]),
+                ]),
+                c.why ? el('div', { class: 'sugg-prop-why' }, [text(c.why)]) : null,
+                files.length
+                    ? el('div', { class: 'sugg-prop-files' }, [text(`drafts ${files.join(', ')}`)])
+                    : null,
+            ]));
+        }
+        keepBtn.hidden = kept.length === 0;
+        return kept.length;
+    };
+
+    scanBtn.addEventListener('click', async () => {
+        scanBtn.disabled = true;
+        keepBtn.hidden = true;
+        _say(status, 'Scanning — one background-model call…');
+        try {
+            const kept = renderResult(await post('/api/space-suggestions/scan', { dry_run: true }));
+            // A scan that never ran has already said so in its own sentence;
+            // "this is a dry run" under that would be answering nothing.
+            if (kept === null) status.hidden = true;
+            else _say(status, 'This is a dry run: nothing has been stored.');
+        } catch (e) {
+            clear(proposals);
+            _say(status, `Could not scan: ${e.message || e}`, 'error');
+        } finally {
+            scanBtn.disabled = false;
+        }
+    });
+
+    keepBtn.addEventListener('click', async () => {
+        keepBtn.disabled = true;
+        _say(status, 'Storing…');
+        try {
+            const result = await post('/api/space-suggestions/scan', { dry_run: false });
+            const kept = (result.kept || []).length;
+            renderResult(result);
+            keepBtn.hidden = true;
+            _say(status, kept
+                ? `${kept} suggestion${kept === 1 ? '' : 's'} waiting under your spaces in the sidebar.`
+                : 'Nothing was stored.', kept ? 'success' : 'dim');
+            if (kept) notify('success', `${kept} space suggestion${kept === 1 ? '' : 's'} added to the sidebar`);
+            // The rows live in the sidebar, which is not this modal.
+            window.dispatchEvent(new CustomEvent('pernix:sessions-changed'));
+        } catch (e) {
+            _say(status, `Could not store: ${e.message || e}`, 'error');
+        } finally {
+            keepBtn.disabled = false;
+        }
+    });
+
+    // --- Declined: what the scan is not allowed to propose any more, and the
+    // one control that takes that back.
+    const renderDeclined = async () => {
+        clear(declinedHost);
+        declinedHost.appendChild(el('h4', { class: 'sugg-declined-title' }, [text('Declined')]));
+        let rows = [];
+        try {
+            const data = await get('/api/space-suggestions?status=rejected');
+            rows = data.suggestions || [];
+        } catch (e) {
+            declinedHost.appendChild(_suggNote(`Could not read the declined list — ${e.message || e}`));
+            return;
+        }
+        if (!rows.length) {
+            declinedHost.appendChild(_suggNote('Nothing declined.'));
+        }
+        for (const r of rows) {
+            const clearBtn = el('button', { class: 'btn btn--secondary btn--sm', type: 'button' }, [text('Clear')]);
+            clearBtn.addEventListener('click', async () => {
+                clearBtn.disabled = true;
+                try {
+                    await del(`/api/space-suggestions/${r.id}`);
+                    await renderDeclined();
+                } catch (e) {
+                    clearBtn.disabled = false;
+                    notify('error', `Could not clear “${r.label}” — ${e.message || e}`);
+                }
+            });
+            const when = _suggDate(r.resolved_at);
+            declinedHost.appendChild(el('div', { class: 'sugg-declined-row' }, [
+                el('span', { class: 'sugg-declined-label' }, [
+                    text(r.label + (r.existing_space ? ` → ${r.existing_space.label}` : '')),
+                ]),
+                el('span', { class: 'sugg-declined-meta' }, [
+                    text(`${when ? `declined ${when} · ` : ''}${_suggChats((r.session_ids || []).length)}`),
+                ]),
+                clearBtn,
+            ]));
+        }
+        if (rows.length) {
+            const allBtn = el('button', { class: 'btn btn--secondary btn--sm', type: 'button' }, [text('Clear all')]);
+            allBtn.addEventListener('click', async () => {
+                allBtn.disabled = true;
+                try {
+                    await del('/api/space-suggestions?status=rejected');
+                    await renderDeclined();
+                } catch (e) {
+                    allBtn.disabled = false;
+                    notify('error', `Could not clear the declined list — ${e.message || e}`);
+                }
+            });
+            declinedHost.appendChild(el('div', { class: 'sugg-declined-all' }, [allBtn]));
+        }
+        declinedHost.appendChild(_suggNote('Cleared topics can be suggested again.'));
+    };
+
+    // Appended to the declarative section itself, once — `renderDeclined`
+    // replaces the contents of its own host rather than the block, so a
+    // refresh never stacks a second pair of buttons under the fields.
+    section.append(
+        el('div', { style: 'display:flex; flex-wrap:wrap; gap:0.5rem;' }, [scanBtn, keepBtn]),
+        status,
+        proposals,
+        declinedHost,
+    );
+    renderDeclined();
+}
+
+function _suggDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
 function buildStorageTab(settingSections = []) {
     // Built async into a host, the way the Security tab is: the tab bodies are
     // assembled synchronously when the modal opens, and this one needs a
@@ -3305,7 +3545,7 @@ function buildTabs(settings) {
         // first, and the only ones that change nothing about the agent.
         providers: [buildThisBrowserSection(), buildModelsTab(), ...sectionsFor('providers')],
         agent: sectionsFor('agent'),
-        autonomy: sectionsFor('autonomy'),
+        autonomy: buildAutonomyTab(sectionsFor('autonomy')),
         tools: [...sectionsFor('tools'), securityHost],
         integrations: [buildNotificationsSection(), ...sectionsFor('integrations')],
         environment: [
