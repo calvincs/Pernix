@@ -5,6 +5,7 @@
    - State machine readout
    - Codex tabs (SOUL / RULES / Skill)
    - Topbar scrolled state
+   - Mobile section menu
    ===================================================== */
 
 (() => {
@@ -565,9 +566,11 @@
     const PROMPTS = [
       'build my morning brief before I wake',
       'research this and have a report ready by lunch',
+      'put my research chats in a space',
       'transcribe this voice memo into notes',
       'watch my feeds — ping my phone if something matters',
       'remember how I like my summaries',
+      'wire up the docs MCP server',
     ];
     let pi = 0;
     const TYPE_MS = 42, ERASE_MS = 16, HOLD_MS = 2600;
@@ -626,6 +629,46 @@
     ph.addEventListener('mouseleave', hide);
     ph.addEventListener('blur', hide);
   });
+
+  /* -----------------------------------------
+     7b. Mobile section menu
+     Below 980px the primary nav collapses into a panel the
+     button opens. Escape closes it and hands focus back;
+     picking a section or tapping away closes it too.
+     ----------------------------------------- */
+
+  const navToggle = document.querySelector('.nav-toggle');
+  const topnav = document.getElementById('topnav');
+
+  if (navToggle && topnav) {
+    const isOpen = () => navToggle.getAttribute('aria-expanded') === 'true';
+    const setOpen = (open) => {
+      navToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      topnav.classList.toggle('open', open);
+    };
+    const close = (refocus) => {
+      if (!isOpen()) return;
+      setOpen(false);
+      if (refocus) navToggle.focus();
+    };
+
+    navToggle.addEventListener('click', () => setOpen(!isOpen()));
+    topnav.addEventListener('click', (e) => {
+      if (e.target.closest('a')) close(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' || e.key === 'Esc') close(true);
+    });
+    document.addEventListener('click', (e) => {
+      if (!topnav.contains(e.target) && !navToggle.contains(e.target)) close(false);
+    });
+
+    // Back on a desktop viewport the panel is a plain row again.
+    const wide = matchMedia('(min-width: 981px)');
+    const onWide = () => { if (wide.matches) setOpen(false); };
+    if (wide.addEventListener) wide.addEventListener('change', onWide);
+    else if (wide.addListener) wide.addListener(onWide);
+  }
 
   /* -----------------------------------------
      7. API code-sample language tabs
