@@ -94,6 +94,52 @@ Two guards can stop retries before that cap:
 - `reflect_enabled = false` — disabled entirely.
 - `reflect_min_messages` (default 3) — turns shorter than this skip the gate. A one-liner ("yes thanks") doesn't need verification.
 
+### The 2026-08-27 calibration pass
+
+A live audit read 63 non-pass verdicts by hand over 5 days: about two-thirds
+were justified, and the rest clustered into four repeatable
+over-strictness patterns, each now fixed in the rubric (`core/reflect.py`):
+
+- **Plan-literalism** — an unmet plan item the user's own request doesn't
+  require cannot justify a non-pass verdict; only a requirement quoted from
+  `USER REQUEST` can (see the grounding-check section above). Field case: a
+  complete inline answer was retried because scout's plan wanted a report
+  file the user never asked for.
+- **Punitive process retries** — completed work is never retried for
+  efficiency or procedure violations (call/budget caps exceeded, forbidden
+  re-reads, a stray formatting artifact); those grade pass with the
+  violation recorded in `what_failed`/`experience`. Field case: a turn that
+  delivered everything was retried over a 2-call budget breach, and the
+  retry attempt — with nothing left to do — was then failed for "not
+  verifying" work its own charter forbade it from re-reading.
+- **Escalate-as-messaging** — escalate grades the turn's deliverable, not
+  the situation: a cron run the verdict itself called "delivered cleanly"
+  was once escalated to surface a stale-thread question, poisoning verdict
+  stats with a failure that never happened. A completed turn passes even
+  when a genuine open question remains; the question goes in
+  `experience.note`.
+- **Verifier blindness** — a verdict whose only nameable failure is that
+  *reflect itself* couldn't see the evidence (an elided tool result body,
+  unrenderable image bytes, a sandboxed workspace) grades pass with
+  confidence held below 0.5, never retry or escalate. Mechanically,
+  `_build_evidence` now lists the session's **effective** workspace — the
+  live `workspace_override` when one is set (job test-runs, canary
+  sandboxes), the shared workspace otherwise — instead of always the
+  shared one, so a job test-run is no longer escalated for "ignoring" files
+  in the real workspace it could never see.
+
+**The materiality floor.** `reflect_nonpass_confidence_floor` (default
+`0.5`; `0` disables) mechanically downgrades a `retry`/`escalate` verdict to
+pass-with-lessons whenever reflect's own *explicit* confidence sits below
+the floor — matching the rubric's stated "confidence < 0.5 = ambiguous
+evidence" rule instead of leaving it as a suggestion the grader could skip.
+The floor only fires on a numeric `confidence` the model itself emitted for
+an otherwise well-formed verdict; a coerced or malformed grade (no verdict
+field, or an invalid one — already defaulted to `retry`, never `pass`, by a
+separate defensive coercion) and a grade that omits `confidence` entirely
+are excluded on purpose, so the floor can't undo that conservative default
+by flipping it back to pass.
+
 ### Failure classification
 
 When reflect returns `retry` or `escalate`, it also classifies the *cause*:
@@ -121,6 +167,7 @@ The cause feeds into Snooze for offline analysis. Repeated `agent`-class failure
 | `reflect_emit_digest_on_pass` | `false` | Have reflect emit a turn digest even on `pass` verdicts (audit/debug). Default off — pass turns omit the digest to save output tokens. |
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Defensive trim at parse time regardless of what the model emits. |
 | `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op. |
+| `reflect_nonpass_confidence_floor` | `0.5` | Materiality floor: a `retry`/`escalate` verdict below this confidence downgrades to pass-with-lessons. `0` disables. |
 | *(reflect model)* | — | Reflect runs on the Primary role (`llm_model`); on failure it retries once on Backup (`fallback_model`) |
 
 ### Post-mortems
@@ -157,16 +204,22 @@ Each cycle walks an ordered ladder of activities. `core/snooze.py` owns the life
 | 12a | RLM run cleanup | Delete `data/workspace/rlm/<run_id>/` dirs + `rlm_runs` rows older than `rlm_run_retention_days` (default 30). Running runs are never touched. |
 | 12b | Candor maintenance | When `candor_enabled`: run the admission gate, drain the observation buffer, checkpoint the store. When `adaptive_enabled` too: queue `routing_hint` edits for tools whose calibrated reliability regressed (the Candor producer). |
 | 12c | Canary cleanup | When `canary_enabled`: prune `canary_runs` rows and their sessions past `canary_retention_days` (default 30), and nudge once per canary whose `last_reviewed` is over 90 days old. Never dispatches sweeps — those are enqueued for the next idle window. |
+| 12e | Session archive sweeps | Two independent rungs (no LLM): when `session_archive_idle_days` > 0 (default 30), archive ordinary chats idle past the horizon — nothing is deleted, the transcript stays searchable, one `PATCH` restores it; when `session_delete_archived_days` > 0 (default 0 = never), hard-delete sessions archived longer than that. A failure in either must not cost the other its cycle. |
 | 12d | Canary suite auto-maintenance | When `canary_auto_maintain`: promote vetted auto-admitted canaries, tag flapping ones flaky, retire long-green ones to quarantine, purge the quarantine (no LLM). A failing canary is never auto-mutated. |
-| 13 | Refine pass | Whole-session refine (`core/refine.py`) — the single session-improvement rung: skill-edit proposals + lessons from any idle session, not gated on the reflect verdict. |
+| 13 | Refine pass | Whole-session refine (`core/refine.py`) — the single session-improvement rung: skill-edit proposals + lessons from any idle session, not gated on the reflect verdict. Selection watermark `refined:{sid}` stores the session's max message id **at selection time**, not a timestamp — a session that grows after its first pass (an `ask_user` gets answered, it resumes, a workaround lands late) re-arms and gets refined again over its full story, instead of being graded once mid-story. Proposals dedupe against existing non-rejected rows per skill so a re-refine can't mint the same change twice; selection also stops treating `awaiting_user`/`awaiting_workers` as idle. |
+| 13b | Skill proposal auto-apply | When `skill_proposal_auto_apply_after_hours` (default 24; `0` disables) has elapsed on a pending SKILL.md proposal: machine-validated (skill exists + enabled, change ≤4000 chars, confidence ≥0.6) and applied with a timestamped backup under `data/skill_backups/<skill>/`, day-capped at `skill_proposal_max_auto_applies_per_day` (default 5), announced as a notification. The veto-window-plus-rollback pattern, not an approval gate; a proposal whose target skill is gone archives instead of parking forever. See [../authoring/writing-skills.md](../authoring/writing-skills.md). |
+| 13c | Skill-change → memory re-validation | Each enabled skill's `SKILL.md` + `scripts/` is content-hashed (`skill_content_hash:{name}`, baseline stamped silently on first sight, no LLM); when the hash changes — auto-apply, an in-session agent edit, or a human edit on disk — memory entries mentioning the skill are cited into `memory_stale` Dream hypotheses (hash-guarded, capped 6/skill, deduped against pending, one skill per cycle) so a claim like "the script lacks a flag" gets re-judged by the Dream validator instead of silently contradicting the fixed skill. |
 | 14 | Dream step | Idle-time introspection (`core/dream/`) — see [dream.md](dream.md). Only when `dream_enabled`. |
 | 14b | Distillation coverage audit | When `distill_audit_enabled`: audit distillation coverage against one sampled raw transcript per run, under a daily budget; misses land in Candor and are written back to memory (`core/memory/audit.py`). |
 | 16 | Telos step | The teleological slow loops (`core/telos/`) — see [telos.md](telos.md). Only when `telos_enabled`. |
 | 15 | Adaptive layer | When `adaptive_enabled`: drain pending auto-applies (safe here — the idle window means no session's cached prefix is mid-turn), enqueue post-batch canary sweeps, evaluate the tripwire (no LLM) — see [canary-and-adaptive.md](canary-and-adaptive.md). |
+| 17 | Fallback-burn watch | Pure store read, no LLM: when `fallback_model` served at least `fallback_burn_alert_share` (default 0.25) of the trailing 24h's tokens with at least `fallback_burn_min_tokens` (default 50000) of volume, one high-urgency notification per day names the share, the volume, and the compose-level `.env` fix. Encodes the 2026-08-19 silent-reroute incident (a dead primary key quietly billed every call to the paid fallback for days) as a standing check; watch-only, never touches routing, `share=0` disables it. |
 
 Activity 16 running *before* 15 is deliberate, not a typo: Telos may queue adaptive edits (a `supported` claim becomes a `routing_hint`), so the adaptive drain has to come after it or those edits wait a whole cycle.
 
 Numbering has gaps because it is historical, not ordinal — an activity that is removed does not renumber the ones after it, so cross-references in code and logs stay valid. Activity 2b (a separate snooze-reflect pass) was removed and folded into Activity 13.
+
+Migration v32 converts every legacy `refined:{sid}` value (an ISO timestamp) to "the session's current max message id" — a one-time rewrite so nothing already graded re-refines on deploy; only future growth re-arms a session from then on. Refine's own attribution also widened in v3.1: `_identify_active_skill` used to see only explicit `load_skill` calls, so a scout-planned session that runs a skill's script directly never attributed its proposal to that skill; it now also matches `skills/<name>/` path references across the transcript and skill names named in the scout plan, validated against the registry so a stray path string can't misroute a proposal. Refine's evidence changed too: instead of only the transcript's last 8000 characters, it now extracts failing tool/job results chronologically (`Error` prefix, `state=failed`, tracebacks, non-zero `exit=`, deduplicated) paired with the assistant intent that preceded each, so a long session's failure-then-workaround arc survives even when it happened well before the tail.
 
 A cycle runs until the ladder **completes** — there is no per-task time slice. Two things end it early:
 

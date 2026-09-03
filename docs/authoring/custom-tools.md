@@ -119,7 +119,7 @@ Delete the `core/tools/builtin/custom_<name>.py` file (and its `.requirements.tx
 
 - Custom tool errors are logged the same way builtin tool errors are: `data/logs/`.
 - Use `list_custom_tools` to confirm the tool is registered.
-- The Tools panel in the UI shows every registered tool's schema and any recent calls.
+- The Tools panel in the UI shows every registered tool's schema, safety level, and use/failure counts.
 - For a Python traceback, open `data/logs/pernix.log` and search for the tool name.
 
 If a tool repeatedly fails, prefer fixing it via `update_tool` rather than asking the agent to monkey-patch it inline — the file on disk is the source of truth.

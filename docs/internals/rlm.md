@@ -130,6 +130,15 @@ answer.txt, payloads.jsonl, draft.txt — workspace-visible so the agent can
 `rlm_run_retention_days` (default 30) — along with the run's view session
 (below) — and a startup sweep marks rows orphaned by a restart.
 
+A run started from a [space](../guides/spaces.md) session (migration v33)
+mints its run dir under the space's workspace home instead —
+`spaces/<slug>/rlm/<run_id>/` — visible in the space's own folder rather than
+the top-level `rlm/`. `GET /api/rlm/runs?space_id=` lists every member
+session's runs together, and `continue_from` resolves the prior run's
+directory through the registry row's stored `run_dir` rather than assuming
+the top-level path, so a sibling session in the same space can continue a
+run it did not start.
+
 ## Continuation (`continue_from`) — reuse a dead run's paid-for work
 
 Motivated by stress-test session `a45fa830cef9`: a full-corpus run timed out

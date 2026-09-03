@@ -192,8 +192,42 @@ relayouting the shell for that is free of any visible benefit.
 
 **Wide touch** gets the touch file and not the compact one: the sidebar
 **docks** as a column, the Explorer is a **side column beside the chat**
-(360–600px wide) rather than a lid over it, modals stay centred cards, and the
+(360–560px wide) rather than a lid over it, modals stay centred cards, and the
 worker strip keeps its chips — all at finger sizes.
+
+---
+
+## The sidebar's width
+
+Resizable on the tier that has a mouse, and only there: `#sidebar-resizer`, a
+6px strip pinned to `calc(var(--sidebar-w) - 3px)`, is `display: none` in both
+`compact.css` and `touch.css`. A drawer and a docked touch column keep
+whichever width their own stylesheet gives them; nothing about a drag applies
+to either.
+
+`--sidebar-w` defaults to 270px (`tokens.css`) and 220px under the existing
+`max-width: 1024px` rule, and is read by `layout.css`, that rule, and
+`touch.css`'s own Explorer-width clamp — none of which know a drag ever
+happened.
+
+Dragging calls `gate.apply(clamp(e.clientX))` on every `pointermove` — the
+sidebar starts at `x = 0` on this tier, so the pointer position *is* the width
+— and writes `localStorage['pernix:sidebar-width']` once, on `pointerup`, not
+on every move. The clamp is 200px to whichever is tighter of 520px or 45% of
+`window.innerWidth`, re-applied on window resize so a width chosen on a
+monitor cannot eat half of a laptop screen. With the handle focused, ArrowLeft
+/ ArrowRight move it 16px a step and Home/End jump to the ends, storing
+immediately; a double-click clears the stored value back to the stylesheet
+default.
+
+`static/js/sidebar-boot.js` — same reasoning as `theme-boot.js` next to it in
+`<head>`, and unable to be inline for the same CSP reason as `touch-boot.js`
+— applies a stored width to `<html>` before first paint, so a returning
+visitor's sidebar does not lay out at 270px and animate to a stored 420px on
+every load. It publishes the storage key, the range and the clamp function on
+`window.__pernixSidebarWidth`, and `sidebar.js` (the drag, the keyboard steps,
+the reset) reads that published copy rather than keeping a second one that
+could drift from it.
 
 ---
 

@@ -46,6 +46,8 @@ Sessions live in `data/sessions.db` (SQLite). They survive restarts. You can hav
 
 > **Why sessions instead of one big chat?** Most agentic work fits naturally into discrete projects: "write this report," "analyze these logs," "build this feature." Each session has its own memory recall scope, its own workers, and its own state. You don't accumulate cross-task contamination.
 
+For work you keep coming back to, sessions can belong to a **space** — a named, colored group of long-lived sessions that shares its own directives (SOUL/RULES/SESSIONS overrides), a memory namespace, a workspace home, and one REPL kernel across every member session, and that never rolls off the sidebar's recency window. See `core/spaces.py` and [guides/spaces.md](guides/spaces.md).
+
 ### 2. Scout — the planner
 
 Before the main agent runs, a **scout** runs first. Scout runs on the Background role (`background_model` — a smaller, faster model) in a fresh context window. Its job is to plan.
@@ -65,6 +67,8 @@ Why this matters:
 - If you have 30 skills installed, scout decides which 1–2 to load full instructions for, rather than always paying that token cost.
 
 Scout is a real LLM agent — it can call its own (read-only) tools to investigate before submitting the report. It's defined in `core/scout/runner.py`.
+
+The tool list scout curates isn't limited to Pernix's own extensions: Pernix ships a native **MCP** (Model Context Protocol) client, on by default (`mcp_enabled=true`) but inert with zero servers configured — connect one under Settings → Integrations → MCP Servers and its tools register as ordinary entries (`mcp_<server>_<tool>`) that scout picks from and the safety gate governs exactly like a builtin. See `core/extensions/mcp/` and [mcp.md](mcp.md).
 
 ### 3. The Agent Loop — the worker
 
@@ -194,14 +198,15 @@ The maintenance heartbeat runs every 60 seconds; the reaper fires every 5 ticks 
 
 | State | Reaper action | Threshold |
 |-------|--------------|-----------|
-| `PROCESSING` | Unstick → `IDLE_READY` (only if no background tasks running) | 300s idle |
+| `PROCESSING` | Unstick → `IDLE_READY` (only once its task has actually exited, no background tasks running) | 300s idle |
+| `SCOUTING` | Unstick → `IDLE_READY` if the task already exited (e.g. a server restart mid-scout); otherwise reap from memory if no subscribers | 300s / 3600s idle |
 | `FINALIZING` | Force-unstick → `IDLE_READY` (only if no background tasks running) | 120s idle |
 | `COMPACTING` | Force-unstick via `compaction-failed` → `FINALIZING` | 120s idle |
 | `CANCELLING` | Force-unstick → `IDLE_READY` | 30s idle |
 | `PAUSE_REQUESTED` | Unstick → `IDLE_READY` | 60s idle |
 | `PAUSED` | Safety net cancel | 24h idle or parent deleted |
 | `AWAITING_USER` | Unstick → `IDLE_READY` (if no question row exists) | 1800s idle |
-| `AWAITING_WORKERS` | Force-unstick → `IDLE_READY` (only if the watch-set is empty) | 1800s idle |
+| `AWAITING_WORKERS` | Empty watch-set: force-unstick → `IDLE_READY`. Non-empty watch-set stalled too long: force → `IDLE_READY` via `worker-timeout`, with a note queued for the next turn | 1800s / 3600s idle |
 | `IDLE_READY` | Reap from memory | 1800s idle, no subscribers |
 
 The `FINALIZING` and `PROCESSING` checks both guard with `not session.has_background_tasks` — post-hooks (reflect, distillation, auto-title) hold a background reference while running, so the reaper never cuts them short.
@@ -232,7 +237,7 @@ Use cases:
 
 Workers are flat — a worker can't spawn its own workers. The parent session waits for workers to complete (or explicitly checks on them via `check_workers`), then folds their deliverables back into its own context.
 
-Workers can be paused at round boundaries (via the `set_worker_state` tool or the worker pause/resume REST endpoints) and resumed later. Useful for "wait, don't keep going, let me think."
+Workers can be paused at round boundaries (via the `set_worker_state` tool or the worker pause/resume REST endpoints) and resumed later. Useful for "wait, don't keep going, let me think." A worker can also be spawned as a typed **kind** (`research`, `code`, `explore`, `debug`, `transform`, or a custom one from `data/worker_kinds/`) that pins its tool allowlist, default model, and verification criteria, and `resume_worker` doubles as a revival path — a cancelled, errored, or reaped worker can be brought back from its persisted state rather than only released from a pause. See [internals/autonomy.md](internals/autonomy.md).
 
 Workers are defined in `core/extensions/orchestration/__init__.py`.
 
@@ -309,6 +314,8 @@ Concurrency is controlled per-provider via semaphores: `llm_max_concurrent` for 
 | API keys | `.env` | dotenv |
 | Skills | `data/skills/` | Markdown + scripts |
 | Agent identity | `data/agent/SOUL.md`, `RULES.md`, `SESSIONS.md` | Markdown |
+| Spaces + per-space directive overrides | `data/sessions.db` (`spaces` table) + `data/agent/spaces/<slug>/` | SQLite + Markdown |
+| MCP server config | `data/mcp_servers.json` | JSON |
 
 Everything except `.env`, `settings.json`, `data/skills/`, `data/certs/`, and `data/agent/` can be wiped with `python run.py --rebuild`.
 
@@ -348,6 +355,7 @@ If you want to read the code:
 | Concept | Start here |
 |---|---|
 | Session orchestration | `sessions/manager.py`, `sessions/state_v2.py` |
+| Spaces (grouped sessions) | `core/spaces.py`, `core/space_suggest.py` |
 | Scout | `core/scout/runner.py` |
 | Main agent loop | `core/agent.py` |
 | Reflect | `core/reflect.py` |

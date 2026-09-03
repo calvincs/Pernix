@@ -122,7 +122,7 @@ re-testing tasks nothing had touched, at a 99% pass rate.
 | Trigger | When |
 |---|---|
 | `scheduled` | The nightly **heartbeat** (`canary_schedule`, default `0 3 * * *`): the `canary_heartbeat_per_night` (2) least-recently-run non-parked canaries. Keeps every active canary's history warm enough that a post-change failure is provably the change's fault. |
-| `post_batch` | Enqueued after every adaptive apply (auto **or** approved proposal), tagged with the batch id — the tripwire's active probe. **Targeted**: canaries whose `covers` matches the batch's edit kinds first, `sentinel`-tagged ones riding along, capped at `canary_post_batch_max` (4), resolved at execution time. A non-flaky `gate_fail` is immediately **confirm-rerun once** in the same sweep — two rows is what the tripwire calls confirmed. Enqueued for the next idle window, never dispatched inline. |
+| `post_batch` | Enqueued after every adaptive apply (auto **or** approved proposal), tagged with the batch id — the tripwire's active probe. **Targeted**: canaries whose `covers` matches the batch's edit kinds first, `sentinel`-tagged ones riding along, capped at `canary_post_batch_max` (4), resolved at execution time (the suite may have changed during the deferral to the next idle window) — a batch with neither a coverage nor a sentinel match falls back to the active non-flaky canaries, so the tripwire is never left blind by omission. A non-flaky `gate_fail` is immediately **confirm-rerun once** in the same sweep — two rows is what the tripwire calls confirmed. Enqueued for the next idle window, never dispatched inline. |
 | `manual` | The `canary_run(name)` tool, `POST /api/canary/run`, the Self-checks tab's run buttons, or a coverage-triggered targeted sweep (e.g. a skill edit). `canary_status` reads recent results. |
 | `full` | The-world-changed sweeps: a model swap (both switch paths), a deploy (the boot version stamp), or the tab's "Run all". Runs **everything including parked canaries** and carries `must_run`, so a sweep already in flight defers it instead of eating it (the lock is otherwise skip-not-queue). |
 
@@ -318,6 +318,51 @@ read-only rendered mirror at `data/adaptive/ADAPTIVE.md` is regenerated on
 change and **never read back** — hand-editing a version-chained store would
 corrupt rollback, so don't.
 
+### Task taxonomy and resource channels (v3.1)
+
+A related signal lives beside the adaptive store rather than in it: `model_route`
+rows in `scout_signals`, one per (model, task category), fed by reflect's
+post-mortems and read back by scout as the `[MODEL ROUTING INTEL]` brief —
+"models absent here have no known problem," steering `recommended_model`
+away from a listed pair when an alternative exists. Three v3.1 fixes make it
+worth trusting:
+
+- **A real task taxonomy.** Scout classifies each turn's `task_type`
+  (`research | coding | data_analysis | writing | ops | conversational`,
+  `core/scout/runner.py` `TASK_TYPES`) as a statistics label only — it never
+  changes how the turn runs. Reflect stamps it onto the post-mortem as
+  `task_category`, falling back to the legacy `execution_mode` stamp for
+  older reports. Before this, `model_route` was keyed by `execution_mode`,
+  whose two live values made almost everything read as `inline`; keying by
+  the real task type is what makes the brief's exception rows mean anything.
+  The brief drops rows with `n < 5` observations, a `≥70%` pass rate, or no
+  counter movement in 45 days (`_ROUTE_STALE_DAYS`, `core/synthesis.py`) —
+  legacy-keyed subjects age out on their own, no migration needed.
+- **Decoupled resource channels.** Reflect stamps `turn_metrics` (tokens,
+  LLM calls, wall-clock, retries included, anchored on the turn's user
+  message) into every post-mortem; synthesis accumulates per-(model,
+  category) averages into the `model_route` signal's payload via
+  read-merge-write, and the brief renders them as context — `avg ~Nk tok,
+  ~Ns/turn` — never as a routing rule. The pass/fail rate stays the only
+  thing that steers `recommended_model`.
+- **Fallback-burn watch** (`core/llm/burnwatch.py`): a standing snooze check
+  for the 2026-08-19 incident where a dead primary provider key silently
+  rerouted every call to the paid fallback for days. When `fallback_model`
+  served ≥ `fallback_burn_alert_share` (0.25) of the trailing 24h's tokens
+  with at least `fallback_burn_min_tokens` (50000) of volume, one
+  high-urgency notification fires per day naming the share, the volume, and
+  the fix (the primary's key, at the compose `.env` level). Watch-only —
+  it mints a notification and touches nothing else; `fallback_burn_alert_share
+  = 0` disables it.
+
+`cost_estimate` (`token_usage.cost_estimate`, previously a dead column) is
+now actually written: the stream ladder prices each usage frame from
+`model_prices` (`{model_id: {"in": $/Mtok prompt, "out": $/Mtok completion}}`,
+exact-id match only — a partial match would silently price the wrong model)
+via `estimate_cost()` in `core/llm/stream_ladder.py`. Unpriced and local
+models keep `cost_estimate` NULL; per-session cost sums light up on their
+own once a model has an entry in `model_prices`.
+
 ### Producers
 
 Producers emit adaptive edits, each batch carrying ≥1 evidence reference
@@ -500,9 +545,11 @@ days, so the anchor is the earliest non-rollback journal event for the batch
 landed.
 
 - *Primary (active)*: **per-task verdicts** from the batch's post-batch
-  canary sweep. A non-flaky canary whose trailing `canary_baseline_runs`
-  (5) runs before the apply were all green — the *green precondition* — and
-  which records `gate_fail` post-batch with no pass, has regressed;
+  canary sweep. A non-flaky canary whose trailing runs before the apply
+  (up to `canary_baseline_runs` (5), floored at 3 — fewer than 3 recorded
+  runs and the task can't testify either way) were all green — the *green
+  precondition* — and which records `gate_fail` post-batch with no pass,
+  has regressed;
   because the sweep confirm-reruns every gate_fail, a **confirmed**
   regression shows two gate_fail rows for the (batch, task) pair, while a
   single row (the rerun itself died) flags but can never auto-roll-back.

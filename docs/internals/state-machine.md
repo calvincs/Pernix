@@ -73,7 +73,7 @@ Table: `session_state_log` (append-only). Columns: `session_id, turn_id, parent_
 - `turn_id` increments on `prompt-arrived`, `answer-received` and `workers-complete`. An answer turn gets `parent_turn_id = <previous turn_id>` so the UI can group multi-round dialogs.
 - `retry_index` increments on `reflect-retry` and `eval-retry`; all rows in a retry share the same `turn_id`.
 - `compaction_count` increments each time PROCESSING → COMPACTING happens within a retry.
-- Retention: `retention.prune_cron()` (`core/retention.py:33-54`) prunes rows older than 30 days while keeping the most recent 500 per session, so the last turn of every session stays inspectable regardless of age. Snooze's Activity 7 (`cron_cleanup`) and maintenance's 24h fallback own the cadence; the sweep itself lives in `core/retention.py`, not `core/snooze.py`.
+- Retention: `retention.prune_cron()` (`core/retention.py:84-109`) prunes rows older than 30 days while keeping the most recent 500 per session, so the last turn of every session stays inspectable regardless of age. Snooze's Activity 7 (`cron_cleanup`) and maintenance's 24h fallback own the cadence; the sweep itself lives in `core/retention.py`, not `core/snooze.py`.
 
 ### 0.4 SSE events
 
@@ -84,10 +84,10 @@ Table: `session_state_log` (append-only). Columns: `session_id, turn_id, parent_
 Existing payload-detail events (`scout.start`, `stream.token`, `tool.call.*`, `context.compacting`, `reflect.*`, `turn.complete`, `worker.started`) remain and continue to fire. Later additions on the same stream:
 
 - `reflect.circuit_breaker {attempts, signature, reasoning}` (`sessions/hooks.py:1275`) — a reflect `retry` was refused because the last two attempts failed identically.
-- `goal.budget_exceeded {reason}` (`core/agent.py:1460`) — the in-turn budget checkpoint tripped mid-round; the loop breaks with `termination_reason="budget_exhausted"`.
-- `goal.continuation {goal_id, ordinal, budget}` (`sessions/manager.py:676`) — an auto-continuation turn was enqueued for the active goal.
-- `context.view_pruned {stubbed}` (`core/context/compiler.py:1201`) — budget-gated view pruning stubbed N oversized tool results out of the compiled view.
-- `session.message_combine_skipped {message_id, reason}` (`sessions/manager.py:1109`) — a rapid-fire message could not be folded into the in-flight turn and was queued instead.
+- `goal.budget_exceeded {reason}` (`core/agent.py:1858`) — the in-turn budget checkpoint tripped mid-round; the loop breaks with `termination_reason="budget_exhausted"`.
+- `goal.continuation {goal_id, ordinal, budget}` (`sessions/manager.py:767`) — an auto-continuation turn was enqueued for the active goal.
+- `context.view_pruned {stubbed}` (`core/context/compiler.py:1407`) — budget-gated view pruning stubbed N oversized tool results out of the compiled view.
+- `session.message_combine_skipped {message_id, reason}` (`sessions/manager.py:1245`) — a rapid-fire message could not be folded into the in-flight turn and was queued instead.
 - `gates.done {attempt, total, failed, names_failed}` (`sessions/hooks.py:407`) — deterministic goal gates finished.
 
 Every one of these must also appear in `EVENT_TYPES` in `static/js/sse.js`: `EventSource` only dispatches to listeners registered by exact name, so an unlisted event is silently dropped, `_lastSeq` never advances for it, and the client's gap detection fires a spurious soft reload on the next subscribed event.
@@ -118,22 +118,23 @@ Sessions/manager.py `reap_idle_sessions()`:
 | State | Rule |
 |---|---|
 | IDLE_READY | Reap from memory if `idle > max_idle`, no subscribers, no background refs |
-| SCOUTING | Reap if `idle > 2×max_idle` and no subscribers |
-| PROCESSING | Force IDLE_READY (reason=reaper-unstick) at 5 min if no background refs |
-| COMPACTING | Force FINALIZING (compaction-failed) at 120s |
-| PAUSE_REQUESTED | Force IDLE_READY at 60s |
+| SCOUTING | If the task has already exited: force IDLE_READY (reaper-unstick) at `min(max_idle, 300)`s — a server restart mid-scout. Otherwise: reap from memory at `idle > 2×max_idle` if no subscribers |
+| PROCESSING | Force IDLE_READY (reason=reaper-unstick) at `min(max_idle, 300)`s, only once the task has actually exited and no background refs remain |
+| COMPACTING | Force FINALIZING (compaction-failed) at 120s, only once the task has actually exited |
+| PAUSE_REQUESTED | Force IDLE_READY at 60s, only once the task has actually exited |
 | PAUSED | Never reap for inactivity. Safety net: force IDLE_READY at 24h or if parent deleted |
 | CANCELLING | Force IDLE_READY (cancel-timeout) at 30s |
-| FINALIZING | Force IDLE_READY (finalize-error) at 120s |
+| FINALIZING | Force IDLE_READY (finalize-error) at 120s if no background refs remain |
 | AWAITING_USER | Never reap for inactivity. Force IDLE_READY only if the question row is gone and `idle > max_idle` |
-| AWAITING_WORKERS | Auto-resumes when watched workers settle; forced IDLE_READY only when the watch-set is empty and idle ≥ `max_idle` (1800s) |
+| AWAITING_WORKERS | Auto-resumes when watched workers settle. Empty watch-set: force IDLE_READY (reaper-unstick) at `idle ≥ max_idle` (1800s). Non-empty watch-set stalled past `idle ≥ 2×max_idle` (3600s): force IDLE_READY (worker-timeout) and queue a synthetic message naming the workers that didn't finish |
 
 ### 0.8 API / observability
 
 - `GET /api/sessions/{id}/status` — now includes `state` (new 10-value enum, defined in `sessions/state_v2.py:SessionStateV2`), `compat_status` (legacy 3-value for CLI compat), `turn_id`, `retry_index`, `termination_reason`.
-- `GET /api/sessions/{id}/state-log?since_id=<id>&limit=<n>` — paginated replay of the transition log.
+- `GET /api/sessions/{id}/state-log?since_id=<id>&limit=<n>` (or `tail=true&limit=<n>` for the newest window, paged backward with `before_id`) — raw replay of the transition log, one row per `state_v2.transition()` call.
+- `GET /api/sessions/{id}/turns?before_turn=<id>&limit=<n>` (default `limit=20`, clamped 1–100, newest turn first, `has_more` on the response) — one assembled record per turn instead of raw log rows: phases with wall-clock durations, tool calls (name, argument digest, latency, the *executor's* error flag rather than a `"traceback"` string match), the scout report, the reflect retry chain, eval gate attempts, compaction summaries, notices, and token totals. It joins the same `session_state_log` / `messages` / `token_usage` rows `/state-log` exposes raw — added so the client doesn't have to download and join the whole transcript itself to render a turn header. `db.get_turns()` (`db/models.py`) does the assembly.
 - `POST /api/sessions/{id}/workers/{wid}/pause` / `/resume` — HTTP wrappers over the state-machine-aware `pause_worker` / `resume_worker` tools.
-- The frontend **State timeline** modal (`openTimeline()` in `static/js/components/modals/timeline.js:63`, opened from the status bar's state badge) reads from `/state-log` and subscribes to `session.state_changed` for live updates.
+- The frontend **State timeline** modal (`openTimeline()` in `static/js/components/modals/timeline.js`, opened from the status bar's state badge) has three tabs — **Lane** (default; one row per turn, built from `/turns`, with a **Story** detail panel under the selected row, not a fourth tab), **Map** (the state machine itself: all ten states and all 31 distinct edges of `TRANSITIONS`, hand-laid as one SVG — replacing the Mermaid diagram removed in v3.1), and **Timeline** (the raw transition/tool-call feed, still `/state-log`-driven). Full UI mechanics: [web-client.md § The State timeline](web-client.md#the-state-timeline).
 
 ---
 
@@ -155,92 +156,103 @@ Sessions/manager.py `reap_idle_sessions()`:
 
 Three ways a request lands in a session:
 
-- **REST** — `POST /api/chat` at `api/routers/chat.py:149-184` → `Manager.get_or_create()` (`sessions/manager.py:32-47`) → stores user message → `Manager.prompt()`
+- **REST** — `POST /api/chat` at `api/routers/chat.py:259-303` → `Manager.get_or_create()` (`sessions/manager.py:350`) → stores user message → `Manager.prompt()`
 - **Cron / snooze** — idle-time scheduler creates sessions with `session_type="cron"` for memory consolidation/distillation
-- **Worker spawn** — a parent session calls `spawn_worker` (`core/extensions/orchestration/__init__.py:49`) which creates a child session with `session_type="worker"` and `parent_session_id` set
+- **Worker spawn** — a parent session calls `spawn_worker` (`core/extensions/orchestration/__init__.py:57`) which creates a child session with `session_type="worker"` and `parent_session_id` set
 
-### 1.2 The lock and the queue (`manager.py:804`)
+### 1.2 The lock and the queue (`manager.py:940`)
 
-`Manager.prompt()` acquires `session.lock` (asyncio.Lock at `state.py:80`), then:
+`Manager.prompt()` acquires `session.lock` (asyncio.Lock, `async with session.lock:` at `manager.py:968`), then:
 
-- **ready** → clear reflect/eval retry flags, clear `error`/`termination_reason`, launch `_run_agent_safe()` (`manager.py:147-176`). Which states count as ready, and which reject rather than queue, is §0.6.
-- **busy** → append to `session.pending_messages` deque, emit `session.queued` (`manager.py:137-145`)
-- **queue full** (`len >= max_pending_messages`) → reject with `session.queue_full` event (`manager.py:127-135`)
+- **ready** (IDLE_READY / AWAITING_USER, and not still settling a prior turn — `_turn_in_flight`) → launch `_run_agent_safe()` (`manager.py:1211`). Which states count as ready, and which reject rather than queue, is §0.6.
+- **busy** → fold into the running turn's message row if it lands within the 3s rapid-fire window (`RAPID_FIRE_WINDOW_SECONDS`, `manager.py:24`), else append to `session.pending_messages` deque and emit `session.queued` (`manager.py:1071-1080`)
+- **queue full** (`len >= max_pending_messages`) → reject with `session.queue_full` event (`manager.py:995-1008`)
 
-When the turn finishes, `_process_pending()` (`manager.py:503-517`) drains the next queued message under the same lock.
+When the turn finishes, `_process_pending()` (`manager.py:2359`) drains the next queued message under the same lock.
 
-Note: `manager.prompt()` also **cancels snooze** unconditionally (`manager.py:118-121`: `get_snooze().request_cancel()`) — user work always preempts background consolidation.
+Note: `manager.prompt()` also **cancels snooze** (`manager.py:963`: `get_snooze().request_cancel()`) — user work preempts background consolidation, except for snooze-transparent sessions (`SNOOZE_TRANSPARENT_TYPES = {"canary"}`, `core/snooze.py:57`), which coexist with snooze by design and must not cancel the cycle they're part of.
 
 ### 1.3 Full turn timeline (with every phase)
 
 ```
-prompt() arrives
-  ├─ cancel snooze                                (manager.py:118-121)
-  └─ acquire session.lock
-      ├─ IDLE/ERROR? → reset flags, launch _run_agent_safe   (manager.py:126, 147-176)
-      └─ else → enqueue or reject (queue_full)
+prompt() arrives                                  (manager.py:940)
+  ├─ cancel snooze (unless snooze-transparent)     (manager.py:963)
+  └─ acquire session.lock                          (manager.py:968)
+      ├─ IDLE_READY / AWAITING_USER, not settling? → launch _run_agent_safe   (manager.py:1211)
+      └─ else → fold into rapid-fire row, enqueue, or reject (queue_full)
 
-_run_agent_safe:                                  (manager.py:1124)
-  IDLE → SCOUTING                                 (manager.py:188)
+_run_agent_safe:                                  (manager.py:1260)
+  session.turn = TurnState()                      (manager.py:1300)
+  IDLE_READY/AWAITING_USER/AWAITING_WORKERS → SCOUTING   (manager.py:1332)
        → run_scout                                [scout.start / scout.done]
-  SCOUTING → PROCESSING                           (manager.py:228)
-       → run_agent()                              [stream tokens, tool calls]
+  SCOUTING → PROCESSING
+       → run_agent()                              (agent.py:1133) [stream tokens, tool calls]
 
-       ┌─ INSIDE the agent loop, per-round checks (agent.py:807-825):
-       │    · cancel_requested → return (termination="cancelled")
-       │    · waiting_for_input → persist "waiting" assistant msg,
-       │                           set termination="complete", return
-       │                           (ask_user suspends the TURN, not the state)
+       ┌─ INSIDE the agent loop, per-round gates:
+       │    _pre_round_gate (agent.py:1834): cancel_requested → return "cancelled" (:1841)
+       │                                     pause_event clear → await, re-check cancel (:1867-1886)
+       │    _post_round_gate (agent.py:1891): cancel_requested → terminate "cancelled" (:1907)
+       │                                      waiting_for_input → persist "waiting" assistant msg,
+       │                                        termination="complete", suspend (:1914) — ask_user
+       │                                        suspends the TURN, not the state
+       │                                      waiting_for_workers → suspend the same way (:1917)
        └─ normal exit → termination ∈
-              {complete, round_ceiling, compaction_failed}
+              {complete, round_ceiling, compaction_failed, budget_exhausted}
 
-  except:
-       CancelledError → termination="cancelled"
-       Exception     → state → ERROR, termination="error"
+  except asyncio.CancelledError (manager.py:1355): → CANCELLING, termination="cancelled",
+       cascades cancel to any watched workers
+  except Exception (manager.py:1395): → FINALIZING via scout-error or agent-error,
+       termination="scout_error"/"error" (no ERROR state — see §0.1)
 
-  finally:                                        (manager.py:251-331)
-    force IDLE if in (PROCESSING | SCOUTING | ERROR)
+  finally: await self._finalize_turn(...)          (manager.py:1437-1440)
+    cancelled? → CANCELLING/timeout → IDLE_READY, skip post-hooks entirely,
+                 notify a watching parent, drain any messages queued during
+                 the race, return                  (manager.py:1456-1528)
+    else: PROCESSING/COMPACTING → FINALIZING        (manager.py:1536-1557)
 
-    ── POST-HOOKS PHASE (state==IDLE, post_hooks_complete==False) ──
-    if not cancelled:                             (manager.py:263)
-      while True:                                 (manager.py:272-295)
-        _run_post_hooks()  → title, distill, reflect, eval
-        if reflect_retry_requested and count < cap and queue empty:
-          _run_agent_retry()  → SCOUTING → PROCESSING → IDLE again
+    ── POST-HOOKS + RETRY LOOP (state==FINALIZING) ──
+      while True:                                   (manager.py:1564-1617)
+        _run_post_hooks()  → gated on state==FINALIZING, queue empty (manager.py:2495)
+                              → title, stale-question cleanup, distill, gates,
+                                reflect, eval, candor, telos (sessions/hooks.py:48-102)
+        if reflect_retry_requested and count < cap and queue empty and still FINALIZING:
+          _run_agent_retry()  → SCOUTING → PROCESSING → FINALIZING again  (manager.py:2008)
           continue
-        if eval_retry_requested and count < cap and queue empty:
+        if eval_retry_requested (same guards):
           _run_agent_retry()
           continue
         break
     ────────────────────────────────────────────────────────────────
 
-    restore per-session model override             (manager.py:300-308)
-    if worker: _finalize_worker                    (manager.py:314-319)
-    post_hooks_complete = True                     (manager.py:324)
-    emit turn.complete                             (manager.py:327)
-    _process_pending()                             (manager.py:330-331)
+    restore per-session model override, AFTER all retries   (manager.py:1655-1695)
+    if worker: _finalize_worker                             (manager.py:1703-1706)
+    goal-continuation enqueue, if any                        (manager.py:1716-1720)
+    FINALIZING → IDLE_READY (turn-complete)                  (manager.py:1722-1731)
+    emit turn.complete                                       (manager.py:1739)
+    notify parent if worker (worker.done)                    (manager.py:1762-1781)
+    _process_pending()                                       (manager.py:1784)
 ```
 
-> **Archival note.** The `ERROR` branch drawn above is the pre-v2 shape — that state was deleted; errors now land in `FINALIZING` with `termination_reason="error"` (see §0.1).
+`post_hooks_complete` is not assigned anywhere in this path — it is derived from `state == IDLE_READY` (§0.5), so it flips true automatically the moment the FINALIZING→IDLE_READY transition above lands.
 
 ### 1.4 Reflect: a retry-loop INSIDE the turn
 
-When reflect returns `retry`, `_run_agent_retry()` (`manager.py:1834`) re-enters `SCOUTING → PROCESSING → IDLE` **within the same user turn**, re-feeding `reflect_lessons` into the scout (`manager.py:452-454`). Bounded by `reflect_max_retries` (or `reflect_max_retries_worker` — tighter — for workers: `manager.py:265-269`). Eval retries have their own independent budget (`settings.eval_max_retries`) with the same mechanic. So a single user turn can cycle `IDLE → SCOUTING → PROCESSING → IDLE` up to `1 + reflect_retries + eval_retries` times before settling.
+When reflect returns `retry`, `_run_agent_retry()` (`manager.py:2008`) re-enters `SCOUTING → PROCESSING → FINALIZING` **within the same user turn**, re-feeding the combined retry directive into the scout — reflect's prose lessons plus, for an eval retry, per-feature judge feedback (`_build_retry_directive()`, `manager.py:44-65`). Bounded by `reflect_max_retries` (or `reflect_max_retries_worker` — tighter — for workers: checked inline in `_finalize_turn`, `manager.py:1561`). Eval retries have their own independent budget (`settings.eval_max_retries`) with the same mechanic. So a single user turn can cycle `FINALIZING → SCOUTING → PROCESSING → FINALIZING` up to `1 + reflect_retries + eval_retries` times before settling into `IDLE_READY`.
 
 ### 1.5 Reflect verdicts and how they manifest
 
 Reflect emits `{verdict, reasoning, failure_cause, confidence, strategy}` (`core/reflect.py:78-101`). Consequences:
 
-- `pass` → loop breaks, turn settles; worker auto-stamp header becomes `# AUTO-STAMPED (reflect=pass ...)` (`manager.py:409-410`)
-- `retry` → `reflect_retry_requested=True`, retry loop re-runs scout+agent with `reflect_lessons` prepended
-- `escalate` → no retry; worker auto-stamp becomes `# ESCALATED (reflect verdict: escalate)` (`manager.py:397-403`), signalling parent not to trust the output
-- retries exhausted with verdict still `retry` → `# UNVERIFIED (reflect verdict: retry, retries exhausted)` (`manager.py:404-408`)
-- reflect never ran (disabled or crashed) → `# UNVERIFIED (no reflect verdict recorded — quality not gated)` (`manager.py:411-413`)
+- `pass` → loop breaks, turn settles; worker auto-stamp header becomes `# AUTO-STAMPED (reflect=pass ...)` (`manager.py:1862-1863`)
+- `retry` → `reflect_retry_requested=True`, retry loop re-runs scout+agent with the retry directive prepended
+- `escalate` → no retry; worker auto-stamp becomes `# ESCALATED (reflect verdict: escalate)` (`manager.py:1850-1856`), signalling parent not to trust the output
+- retries exhausted with verdict still `retry` → `# UNVERIFIED (reflect verdict: retry, retries exhausted)` (`manager.py:1857-1861`)
+- reflect never ran (disabled or crashed) → `# UNVERIFIED (no reflect verdict recorded — quality not gated)` (`manager.py:1864-1866`)
 
-Non-reflect terminal conditions also get distinct headers:
-- `round_ceiling` / `compaction_failed` → `# INCOMPLETE` (`manager.py:390-391`)
-- `cancelled` → `# CANCELLED` (`manager.py:392-393`)
-- `error` → `# ERROR (worker exited with error: …)` (`manager.py:394-396`)
+Non-reflect terminal conditions also get distinct headers (`manager.py:1843-1849`):
+- `round_ceiling` / `compaction_failed` → `# INCOMPLETE`
+- `cancelled` → `# CANCELLED`
+- `error` (or an unset reason with `session.error` set) → `# ERROR (worker exited with error: …)`
 
 ### 1.6 `ask_user` is a turn terminator, not a pause
 
@@ -250,7 +262,7 @@ When the agent calls `ask_user`:
 2. Agent loop notices **after the round completes**: writes a placeholder assistant message, emits `stream.done`, sets `termination_reason="complete"`, returns
 3. Post-hooks run normally (reflect treats it as a complete turn)
 4. The session parks in `AWAITING_USER` — a real state, not a flag on an idle session
-5. When the user answers: `POST /api/questions/{id}/answer` calls `manager.prompt()` with the answer (`api/routers/questions.py:52`) — **a brand-new turn**, entered via `answer-received` and chained to the previous one by `parent_turn_id`
+5. When the user answers: `POST /api/questions/{id}/answer` calls `manager.prompt()` with the answer (`api/routers/questions.py:23-24`) — **a brand-new turn**, entered via `answer-received` and chained to the previous one by `parent_turn_id`
 
 The turn genuinely terminates; nothing is blocked waiting. `waiting_for_input` survives only as a read-only property meaning `state == AWAITING_USER`, so consumers that need to tell "done" from "parked on a question" have an honest signal.
 
@@ -258,26 +270,26 @@ The turn genuinely terminates; nothing is blocked waiting. `waiting_for_input` s
 
 Snooze (`core/snooze.py`) is a singleton background runner doing memory consolidation, user-insight extraction, dedup, and FTS5 reconciliation. It is NOT a session state. Interaction points:
 
-- Any user message arrival cancels snooze (`manager.py:118-121`: `get_snooze().request_cancel()`)
-- Snooze skips cycles when any session is non-idle (`core/snooze.py:165-179` checks every session against the v2 enum — `IDLE_READY`, `AWAITING_USER` and `AWAITING_WORKERS` count as idle; `manager.py:2435` provides `has_active_work()` which also trips on `has_background_tasks`)
-- When snooze is distilling a specific session it acquires `session.add_background_ref()` (`manager.py:527`) so the reaper won't sweep the session out from under it
+- Any user message arrival cancels snooze (`manager.py:963`: `get_snooze().request_cancel()`), except for snooze-transparent session types (`SNOOZE_TRANSPARENT_TYPES`, `core/snooze.py:57`)
+- Snooze skips cycles when any session is non-idle (`core/snooze.py:165-179` checks every session against the v2 enum — `IDLE_READY`, `AWAITING_USER` and `AWAITING_WORKERS` count as idle; `manager.py:2677` provides `has_active_work()` which also trips on `has_background_tasks`)
+- Post-hooks (which distillation runs under, via `run_post_task_hooks`) hold `session.add_background_ref()` for their duration (`manager.py:2510`) so the reaper won't sweep the session out from under them
 - Uses `settings.background_model` exclusively — no primary-model cost
 
 ### 1.8 Cooperative cancel
 
-`session.cancel_requested` is checked at several points inside the agent loop (`agent.py:808`, and at round boundaries). On trip:
+`session.cancel_requested` is checked at both round-boundary gates inside the agent loop, `_pre_round_gate` (`agent.py:1841`) and `_post_round_gate` (`agent.py:1907`). On trip:
 
-- agent returns with `termination_reason="cancelled"` (`agent.py:810`)
-- `finally` block **skips post-hooks entirely** (`manager.py:263`: `if not _was_cancelled and not session.cancel_requested`)
-- skips `_process_pending()` too (`manager.py:330`) — queued messages don't auto-run after a cancel
+- agent returns with `termination_reason="cancelled"`
+- `_finalize_turn` **skips post-hooks entirely** on the `was_cancelled or session.cancel_requested` early-return branch (`manager.py:1456-1528`)
+- still drains any message that landed during the cancel race (`manager.py:1526-1527`) — but the retry/post-hooks loop itself never runs
 
-### 1.9 Reaper (background correction, `reap_idle_sessions` at `manager.py:2475`)
+### 1.9 Reaper (background correction, `reap_idle_sessions` at `manager.py:2701`)
 
 Not part of a normal turn, but part of the lifecycle:
 
-- **Stuck PROCESSING** (>5 min idle, no background tasks) → force-reset to IDLE with a visible `system` event ("Session was stuck in processing and has been reset.") — handles the case where the agent task died without reaching `finally`
-- **Stuck SCOUTING / ERROR** (≥ `2×max_idle` idle, no subscribers) → session reaped from memory (not deleted from DB)
-- **Truly IDLE** (no subscribers, no background tasks, idle ≥ `max_idle`) → reaped from memory
+- **Stuck PROCESSING** (idle past `min(max_idle, 300)`s, task already exited, no background tasks) → force-reset to IDLE_READY via `reaper-unstick` — handles the case where the agent task died without reaching `finally`
+- **Stuck SCOUTING** (task already exited: same threshold as PROCESSING; task still alive: reaped from memory at `idle > 2×max_idle` if no subscribers) — the full per-state matrix is §0.7, which is authoritative here
+- **Truly IDLE_READY** (no subscribers, no background tasks, idle ≥ `max_idle`) → reaped from memory
 - Protected IDs (`protected_ids` set) are never reaped
 
 ### 1.10 Visual: what a session looks like
@@ -323,29 +335,35 @@ Not part of a normal turn, but part of the lifecycle:
 
 ## 2. Agent Turn Loop (tool calls within a session)
 
-### 2.1 The loop (`core/agent.py:256-514`)
+### 2.1 The loop (`run_agent`, `core/agent.py:1133-1798`)
 
 Iterates while `tool_round < settings.max_tool_rounds` (default 50); when the cap is hit on a healthy turn (tools were called, no error, not stuck), `round_cap_auto_continue` (default 1) grants one fresh round budget before `round_ceiling`:
 
-1. **Pre-round gates** (`agent.py:333-341`) — check `session.cancel_requested`, await `session.pause_event` (for worker pause/resume)
-2. **Compile context** (`agent.py:347-355`) — `compile_context()` in `core/context/compiler.py` returns compacted messages + active tool schemas + scout-report section + resource header (rounds left, token budget). Compaction runs as a view transform; stored messages are never mutated.
-3. **LLM stream** (`agent.py:405-500`) — `client.chat_stream()` emits `stream.token` events, merges partial tool-call deltas by id, handles `FailoverError` (context overflow triggers compaction-retry, rate-limit falls back to Ollama)
-4. **Response check** (`agent.py:502-514`)
+1. **Pre-round gates** (`_pre_round_gate`, `agent.py:1834`) — check `session.cancel_requested`, await `session.pause_event` (for worker pause/resume)
+2. **Compile context** (`agent.py:1359-1371`) — `compile_context()` in `core/context/compiler.py` returns compacted messages + active tool schemas + scout-report section + resource header (rounds left, token budget). Compaction runs as a view transform; stored messages are never mutated.
+3. **LLM stream** (`stream_with_failover` in `core/llm/stream_ladder.py:164`, called at `agent.py:1445-1471`) — emits `stream.token` events, merges partial tool-call deltas by id, and owns the retry/fallback ladder: a context overflow comes back to the loop for a compaction-retry (once per turn), a provider failure falls back to the Backup role (`settings.fallback_model`) and stays there for the rest of the turn (`_tried_fallback` is per-turn sticky)
+4. **Response check** (`agent.py:1538-1616`)
    - No tool calls → save assistant message, `termination_reason="complete"`, exit
    - Tool calls → proceed to validate + execute
-5. **Dedup + stuck detection** (`agent.py:113-405`; dedup in `_ToolCallGate`, `agent.py:523`) — hash-dedup exact repeats; semantic dedup for expensive tools in `_SEMANTIC_DEDUP_TOOLS = {"call_model"}` (same model + same images = near-duplicate regardless of prompt wording — `agent.py:441`). `StuckDetector` evaluates **10 signals** per round:
+5. **Dedup + stuck detection** (`StuckDetector`, `agent.py:113-405`; dedup in `_ToolCallGate`, `agent.py:728`) — hash-dedup exact repeats; semantic dedup for expensive tools in `_SEMANTIC_DEDUP_TOOLS = {"call_model"}` (same model + same images = near-duplicate regardless of prompt wording — `agent.py:441`). `StuckDetector` evaluates **13 signals** per round — 11 add to the stuck score, two (12, 13) only queue a one-time harness hint:
 
    | # | Signal | Weight | Detection |
    | - | ------ | ------ | --------- |
    | 1 | `content_repeat` | 0.5 | Exact assistant content seen in last 5 rounds |
-   | 2 | `tool_cycle` | 0.3 | Same sorted set of (name,args-hash) seen in last 10 rounds |
+   | 2 | `tool_cycle` | 0.4 | Same sorted set of (name,args-hash) seen in last 10 rounds **with no workspace mutation in between** (a verbatim rerun after a file edit or repl call is legitimate iteration and does not count) |
    | 3 | `error_loop` | 0.4 | Same (name, args-hash) that previously failed |
-   | 4 | `noop_loop` | 0.2 | No tools + content matches meta-commentary heuristic (`_is_meta_commentary`, `agent.py:244-249`) |
+   | 4 | `noop_loop` | 0.2 | No tools + content matches meta-commentary heuristic (`_is_meta_commentary`, `agent.py:511`) |
    | 5 | `hallucinated_tool` | 0.3 | Tool name not in registry |
    | 6 | `failure_drift` | 0.3 | Unrelated tool calls for ≥3 rounds after an unresolved failure |
    | 7 | `file_edit_loop` | 0.4 | Same (tool, file_path) failed ≥3 times with different args (bypasses Signal 3) |
+   | 8 | `empty_result_streak` | 0.3 | ≥3 consecutive web/search results matching the low-info pattern (no results / 404 / SSRF block) |
+   | 9 | `bot_wall_streak` | 0.3 | ≥3 of the last `browse_web`/`http_get` bodies under 800 bytes — a bot wall, not a page |
+   | 10 | `same_domain_repetition` | 0.2 | Same hostname hit more than 5 times in one turn |
+   | 11 | `tool_failure_loop` | 0.4 | Same non-file tool failing ≥3 times with varied args (Signal 7 generalised — e.g. `call_model` 404-ing on guessed model ids) |
+   | 12 | `rlm_hint` | — | Windowed re-reads/greps of the same big file; queues one `rlm_process` pointer instead of a score bump |
+   | 13 | `hypothesis_grind_hint` | — | ≥8 consecutive repl/bash results that each falsified a candidate fit; queues one "change the hypothesis class" pointer |
 
-   If `score > 0.3` with `repeat_count ≥ 3` (`agent.py:527-553`): prefers the **ask-user help path** when `ask_user` is available, otherwise breaks with `termination_reason="round_ceiling"`.
+   `repeat_count` rises by one on every round whose score is above 0.3 and decays otherwise. Below three repeats, a round over the threshold only gets a "you are repeating tool calls" system nudge. At three (`_handle_stuck_signals`, `agent.py:2280`): prefers the **ask-user help path** when `ask_user` is available — capped at a few consecutive nudges, since an agent that ignores the hint would otherwise spin forever — otherwise breaks with `termination_reason="round_ceiling"`.
 6. **Execute tools** via executor (safety gate below), append results, check cancel, check `waiting_for_input`, loop back
 
 ### 2.2 Scout agent (`core/scout/runner.py`)
@@ -358,57 +376,60 @@ Iterates while `tool_round < settings.max_tool_rounds` (default 50); when the ca
 
 ### 2.3 Tool routing (`core/tools/registry.py`, `core/extensions/`)
 
-- 36 **builtin tools** always registered (`file_read`, `file_write`, `bash`, `ask_user`, etc.); `call_model` is a model_mgmt extension, and `spawn_worker` / `get_worker_result` are orchestration extensions
-- **Extensions** conditionally registered by feature flag: browser, vcs, orchestration, planning, skillmaker, toolmaker
-- Agent sees only the schema slice for `active_tools` — scout-picked plus a monotonically-growing allowlist (`agent.py:349`)
-- `discover_tools()` during the loop can expand `active_tools` mid-turn (`agent.py:802-803`)
+- ~35 **builtin tools** always registered (`file_read`, `file_write`, `bash`, `ask_user`, etc.); `call_model` is a model_mgmt extension, and `spawn_worker` / `get_worker_result` are orchestration extensions
+- **Extensions** — thirteen modules listed in `BUNDLED_EXTENSIONS` (`core/extensions/__init__.py`): `web`, `orchestration`, `evaluation`, `scheduling`, `toolmaker`, `model_mgmt`, `session_tools`, `planning`, `skillmaker` always register; `candor`, `rlm`, `telos` and `mcp` register conditionally on their own settings (`candor_enabled`, `rlm_enabled`, `telos_enabled`, `mcp_enabled`). Full inventory and gating: [extensions.md](extensions.md)
+- Agent sees only the schema slice for `active_tools` — scout-picked plus a monotonically-growing allowlist (`_resolve_tool_surface()`, `agent.py:1216`)
+- `discover_tools()` during the loop can expand `active_tools` mid-turn (`agent.py:2269-2270`)
 
-### 2.4 Safety gate (`core/tools/executor.py:302-320`)
+### 2.4 Safety gate (`core/tools/executor.py:322-400`)
 
-Each `ToolDef` carries `safety_level ∈ {safe, caution, dangerous}`. Dangerous tools require `ask_user` confirmation **unless** `auto_approve_dangerous=true`. **Workers hit the exact same check — no privilege escalation.** Workers also have an additional gate: tools listing `"worker"` in `denied_session_types` (e.g. `spawn_worker` itself) are blocked for worker sessions (`executor.py:262-300`).
+Each `ToolDef` carries `safety_level ∈ {safe, caution, dangerous}`. Dangerous tools require `ask_user` confirmation **unless** `auto_approve_dangerous=true`, or the session is unattended — a cron session, or a worker spawned from one (`_is_unattended_session()`, `executor.py:227`; no user is present to answer the prompt). **Workers hit the exact same check — no privilege escalation.** Workers also have an additional gate: tools listing `"worker"` in `denied_session_types` (e.g. `spawn_worker` itself) are blocked for worker sessions (`executor.py:319-320`).
 
 ### 2.5 Reflect + post-hooks (`core/reflect.py`, `sessions/hooks.py`)
 
-After the agent loop exits, `_run_post_hooks()` (`manager.py:519-537`) runs — gated on `state == IDLE` and queue empty:
+After the agent loop exits, `Manager._run_post_hooks()` (`manager.py:2495`) runs — gated on `state == FINALIZING` and queue empty — and delegates to `run_post_task_hooks()` (`sessions/hooks.py:48-102`):
 
-1. **Auto-title** first exchange (`hooks.py:94-150`)
-2. **Distillation** via snooze
-3. **Reflect** (`hooks.py:51-52`) — judges turn against `deliverables_plan`. Output verdict `∈ {pass, retry, escalate}`
-   - `retry` → sets `session.reflect_retry_requested`, caller runs another agent loop (capped by `reflect_max_retries`, or `reflect_max_retries_worker` for workers)
+1. **Auto-title** first exchange (`hooks.py:61`, def at `hooks.py:145`)
+2. Clean up stale questions answered outside the modal (`hooks.py:64`)
+3. **Distillation** via snooze (`hooks.py:67`)
+4. **Deterministic gates**, once per attempt, immediately before Reflect (`hooks.py:75-76`; `gates.done` SSE event)
+5. **Reflect** (`hooks.py:81-82`, gated on `settings.reflect_enabled`) — judges turn against `deliverables_plan`. Output verdict `∈ {pass, retry, escalate}`
+   - `retry` → sets `session.turn.reflect_retry_requested`, caller runs another agent loop (capped by `reflect_max_retries`, or `reflect_max_retries_worker` for workers)
    - `escalate` → sets termination reason, worker gets escalation header stamped
    - `pass` → done
-4. **Evaluation** (optional QA) (`hooks.py:55-56`)
-5. **Worker auto-stamp** (`_finalize_worker`, `manager.py:339-432`) — if worker didn't write `.worker_{id[:12]}_summary.md`, generate one; header encodes reflect verdict as described in §1.5
-6. **Restore model override** if `switch_model` was called mid-turn (`manager.py:300-308`) — done AFTER all retries so retries run on the switched model
-7. Set `session.post_hooks_complete=True`, emit `turn.complete`, then `_process_pending()`
+   - reflect disabled but a gate failed → `_apply_gate_retry_fallback()` requests the retry directly (`hooks.py:83-84`)
+6. **Evaluation** (optional QA) (`hooks.py:87-88`)
+7. **Candor** and **TELOS** hooks, when enabled — mechanical, no LLM (`hooks.py:95-102`)
+8. Back in `_finalize_turn`: restore model override if `switch_model` was called mid-turn (`manager.py:1655-1695`) — done AFTER all retries so retries run on the switched model, then transition FINALIZING→IDLE_READY and emit `turn.complete` (`manager.py:1722-1739`). `post_hooks_complete` is not set explicitly — it reads true the instant the state is IDLE_READY (§0.5).
 
 ### 2.6 Compaction (nod)
 
 Compaction is the context-budget management layer. Full details live in `core/context/compaction.py` and `core/context/compiler.py`; the essentials relevant to the turn loop:
 
-- **Three triggers** all surface through the agent loop:
-  - **Proactive** (`agent.py:377-379`) — utilization exceeds `settings.compaction_threshold` (default 0.75 of history budget); emits `context.compacting` and compacts in-line
-  - **Critical** (`agent.py:359-375`) — utilization exceeds `settings.context_critical_threshold` (default 0.85); last-resort compaction before breaking the turn; one-retry budget per turn
-  - **API overflow** (`agent.py:465-471`) — `FailoverError(reason=CONTEXT_OVERFLOW)` returned from an actual LLM call; retries the same `tool_round` after compaction
+- **Three triggers**, run through a `_CompactionController` (`agent.py:1011`) and all surfacing inside `run_agent`'s per-round loop:
+  - **Proactive** (`agent.py:1423-1424`) — `payload.needs_compaction` (utilization exceeds `settings.compaction_threshold`, default 0.75); single-shot per turn, the critical path owns any further attempts
+  - **Critical** (`agent.py:1387-1411`) — utilization exceeds `settings.context_critical_threshold` (default 0.85); last-resort compaction before breaking the turn as `compaction_failed`
+  - **API overflow** (`agent.py:1477-1488`, gated by `_CompactionController.can_help_with_overflow`, `agent.py:1053`) — the provider rejected the request as too long; retries the same `tool_round` after a forced compaction, once per turn — a second overflow after that is treated as a fatal stream error
 - **Non-destructive** — stored messages are never mutated. Three-phase view:
   1. `apply_view_pruning()` — stubs oversized tool results **in a new list**. Budget-gated: it engages only when history chars exceed `view_prune_pressure` (0.5) of the char-equivalent budget, keeps the last `view_prune_keep_recent` (30) messages intact, and only stubs results larger than `view_prune_min_chars` (2000). Emits `context.view_pruned {stubbed}`
-  2. `exclude_orphans()` (`compaction.py:83-110`) — filters tool messages whose `tool_call_id` has no matching assistant call, view only
-  3. `compact_with_llm()` (`compaction.py:117-216`) — **appends** a new `role="compaction"` marker message containing the summary; originals stay in the DB
-- **Boundary** (`compaction.py:130-139`) — token count accumulates newest-to-oldest until exceeding `settings.compaction_keep_tokens` (default 51k); everything **before** that boundary is summarized. Recent turns are preserved in full.
-- **Metadata column** — `messages.metadata` (v5+), JSON blob `{compacted_up_to, original_count}` written by `db.add_compaction()` (`db/models.py:248-262`). Pre-v5 rows fall back to the `tool_calls` column (`compiler.py:310`).
-- **Compilation** — on each turn `compile_context()` reads the most recent compaction marker and assembles the view by **filtering** summarized history in favor of the marker — it does not delete anything (`compiler.py:305-315`).
-- **Failure** — if compaction itself errors (e.g. the `background_model` call fails), the agent loop sets `termination_reason="compaction_failed"` and breaks (`agent.py:484`). Downstream hooks classify the turn as INCOMPLETE.
+  2. `exclude_orphans()` (`compaction.py:105`) — filters tool messages whose `tool_call_id` has no matching assistant call, view only
+  3. `compact_with_llm()` (`compaction.py:304`) — **appends** a new `role="compaction"` marker message containing the summary; originals stay in the DB
+- **Boundary** — token count accumulates newest-to-oldest until exceeding the clamped keep-tokens value (see below); everything **before** that boundary is summarized. Recent turns are preserved in full. The active turn's root user message is never folded, even if that means keeping one turn more than the budget strictly allows (`_active_turn_root_index()`, `compaction.py:252-269`).
+- **Metadata column** — `messages.metadata` (v5+), JSON blob including `compacted_up_to` written by `db.add_compaction()` (`db/models.py:1836`).
+- **Compilation** — on each turn `compile_context()` (`compiler.py:1155`) reads the most recent compaction marker and assembles the view by **filtering** summarized history in favor of the marker — it does not delete anything.
+- **Keep-tokens clamp** — the configured `compaction_keep_tokens` (51k) is clamped to a fraction of the session's *actual* history/context budget (`_resolve_keep_tokens()`, `compaction.py:242-249`), floored at 2000 tokens — an unclamped 51k would exceed the entire history on a small-context model and fold the whole live conversation into a summary.
+- **Failure** — if compaction itself errors (e.g. the `background_model` call fails), the agent loop sets `termination_reason="compaction_failed"` and breaks. Downstream hooks classify the turn as INCOMPLETE.
 
 ### 2.7 LLM routing (nod)
 
 The LLM layer is abstracted by `ProviderRouter` (`core/llm/router.py`) sitting behind `core/llm/client.py`. Essentials:
 
-- **Providers** — three: `OllamaProvider` (local, always available, `settings.llm_base_url`), `OpenRouterProvider` (remote, opt-in, requires `OPENROUTER_API_KEY`) and `OpenAIProvider` (native OpenAI-compatible, `settings.openai_base_url`, key via `OPENAI_API_KEY`). Held in the name-keyed `self._providers` map (`router.py:108-113`); selection is model-driven via `router.registry.resolve_provider(model)` (`router.py:149-152`), which returns `"ollama" | "openrouter" | "openai"`. `get_provider()` falls back to Ollama when the resolved remote provider is unavailable (`router.py:124-131`).
-- **Per-provider semaphores** (`router.py:94-106`, `self._semaphores` at `:114-118`) — independent `SessionAwareLLMScheduler` instances, each constructed with `session_timeout = settings.llm_session_timeout` (default 1800s; `0` means unlimited):
+- **Providers** — three: `OllamaProvider` (local, always available, `settings.llm_base_url`), `OpenRouterProvider` (remote, opt-in, requires `OPENROUTER_API_KEY`) and `OpenAIProvider` (native OpenAI-compatible, `settings.openai_base_url`, key via `OPENAI_API_KEY`). Held in the name-keyed `self._providers` map (`router.py:110-114`); selection is model-driven via `router.registry.resolve_provider(model)` (`router.py:190-193`), which returns `"ollama" | "openrouter" | "openai"`. `get_provider()` falls back to Ollama when the resolved remote provider is unavailable (`router.py:150-172`).
+- **Per-provider semaphores** (`router.py:96-107`, `self._semaphores` at `:115-119`) — independent `SessionAwareLLMScheduler` instances, each constructed with `session_timeout = settings.llm_session_timeout` (default 1800s; `0` means unlimited):
   - Ollama capacity = `settings.llm_max_concurrent` (default 1)
   - OpenRouter capacity = `settings.openrouter_max_concurrent` (default 4)
   - OpenAI capacity = `settings.openai_max_concurrent` (default 4)
-  - The `semaphore_stats` property (`router.py:137-147`) sums `available`/`waiting`/`capacity` across all three and nests per-provider stats under the provider name; this is what `spawn_worker`'s saturation check consults
+  - The `semaphore_stats` property (`router.py:178-188`) sums `available`/`waiting`/`capacity` across all three and nests per-provider stats under the provider name; this is what `spawn_worker`'s saturation check consults
 - **Role slots** — three chat-model roles since the 2026-08 consolidation (`config.py:61-75`). `scout_model`, `reflect_model`, `critical_model`, `rlm_root_model` and `rlm_sub_model` no longer exist:
 
   | Setting | Role | Consumers |
@@ -419,12 +440,12 @@ The LLM layer is abstracted by `ProviderRouter` (`core/llm/router.py`) sitting b
 
   `embedding_model` is not a chat role — it names a local Ollama embedding model and setting it is what switches memory search from lexical to hybrid.
 - **Per-session override** — `session.model_override` is read at turn start; registry resolves bare names to provider-qualified IDs. Enables workers (or `switch_model`) to swap models without touching global config. Paired with `context_budget_override` so concurrent sessions on different-sized models don't clobber each other. Per-request overrides (`switch_model`, `spawn_worker(model=)`, worker specs) are the task-scoped axis and are orthogonal to the three role slots.
-- **Typed failover** — `FailoverReason` enum (`core/llm/errors.py:8-18`): `RATE_LIMIT`, `OVERLOADED`, `TIMEOUT`, `CONTEXT_OVERFLOW`, `AUTH`, `MODEL_NOT_FOUND`, `FORMAT_ERROR`, `UNKNOWN`. Classification via `classify_http_error()` (`errors.py:43-64`): 429/402 → `RATE_LIMIT`, 502/503 → `OVERLOADED`, 408 → `TIMEOUT`, 400 + context-keyword → `CONTEXT_OVERFLOW`.
+- **Typed failover** — `FailoverReason` enum (`core/llm/errors.py:8-18`): `RATE_LIMIT`, `OVERLOADED`, `TIMEOUT`, `CONTEXT_OVERFLOW`, `AUTH`, `MODEL_NOT_FOUND`, `FORMAT_ERROR`, `UNKNOWN`. Classification via `classify_http_error()` (`errors.py:78-102`): 429/402 → `RATE_LIMIT`, 502/503 → `OVERLOADED`, 408 → `TIMEOUT`, 400 + context-keyword → `CONTEXT_OVERFLOW`.
 - **Behavior by reason**:
-  - `RATE_LIMIT` / `OVERLOADED` on a remote provider → automatic fallback to Ollama running `settings.fallback_model`, via `_fallback_chat()` / `_fallback_stream()` (`router.py:253-305`). Eligibility is `_fallback_eligible()` (`router.py:120-122`): any provider that is not already Ollama. Fallback **sanitizes messages** first: strips vision blocks, converts tool→user messages (`router.py:25-81`) since Ollama may not support them
+  - `RATE_LIMIT` / `OVERLOADED` on a remote provider → automatic fallback to Ollama running `settings.fallback_model`, via `_fallback_chat()` / `_fallback_stream()` (`router.py:312-376`). Eligibility is `_fallback_eligible()` (`router.py:122-124`): any provider that is not already Ollama. Fallback **sanitizes messages** first: strips vision blocks, converts tool→user messages (`router.py:25-81`) since Ollama may not support them
   - `CONTEXT_OVERFLOW` → no fallback; surfaces to agent loop which runs compaction-retry (see §2.6)
   - `TIMEOUT` / `AUTH` / `MODEL_NOT_FOUND` / `FORMAT_ERROR` / `UNKNOWN` → no fallback; surfaces as hard error → `termination_reason="error"`
-- **Same-provider Backup failover** — above the router, the streaming agent loop switches to `settings.fallback_model` once its retry budget is spent and emits `stream.fallback` (`agent.py:1005-1022` for the tool loop, `:1772-1790` for the final response). The only requirement is that the backup differs from the model currently in flight — **a different model on the same provider counts**, so an Ollama-primary/Ollama-backup configuration has real failover. The switch re-runs `attach_cache_breakpoints()` for the new model so stale Anthropic cache parts are flattened when the backup is not `anthropic/*`.
+- **Same-provider Backup failover** — `stream_with_failover()` (`core/llm/stream_ladder.py:164`, shared by the tool loop and the final-answer call) switches to `settings.fallback_model` once its retry budget is spent and emits `stream.fallback` (`stream_ladder.py:361`). The only requirement is that the backup differs from the model currently in flight — **a different model on the same provider counts**, so an Ollama-primary/Ollama-backup configuration has real failover. The switch re-runs `attach_cache_breakpoints()` for the new model so stale Anthropic cache parts are flattened when the backup is not `anthropic/*`.
 - **One-shot Backup retry** — `chat_with_backup()` (`core/llm/client.py:154-169`) wraps every non-streaming call site (compaction, reflect, titles, eval, distill): try `model`, and on any exception retry exactly once on `settings.fallback_model` when it is set and different. Because it goes back through `client.chat()`, the backup is routed by the registry — it can land on a different provider or the same one.
 
 ### 2.8 Events / SSE (`core/events.py`, `sessions/state.py:153-173`)
@@ -443,7 +464,7 @@ Every event carries `_seq` for gap detection, `timestamp`, `session_id`. Types i
 - `worker.started`, `worker.done`, `worker.failed`
 - `session.queued`, `session.queue_full`
 - `turn.complete` — fires AFTER post-hooks, signals `post_hooks_complete=True`
-- `dialog.answered` — on user answer to `ask_user` (`questions.py:60-63`)
+- `dialog.answered` — on user answer to `ask_user` (`questions.py:73`)
 - `system` — catch-all for reaper notices etc.
 
 ---
@@ -460,17 +481,18 @@ A **child session** spawned by a parent. Properties:
 - Results surfaced through a stable API (`get_worker_result`, `get_worker_transcript`)
 - **Cannot spawn sub-workers** (flat hierarchy, enforced in executor)
 
-### 3.2 Spawn flow (`core/extensions/orchestration/__init__.py:49`)
+### 3.2 Spawn flow (`core/extensions/orchestration/__init__.py:57`)
 
-1. **LLM-slot saturation check** (`:46-59`) — count parent's active workers vs. `_get_semaphore_stats()["capacity"]`; if already saturated, return a warning string *before* creating a session ("additional workers will queue and likely timeout")
-2. **Validate `model`** (if specified) — resolve + check provider routing before creating anything (`:64-81`). A bare name routed to Ollama is rejected if Ollama doesn't have the model (avoids a non-obvious wrong-backend hit)
-3. **Acquire `_spawn_lock`** (threading.Lock at `:24`) — **TOCTOU guard**: count active workers under the lock and call `create_session` inside the same critical section so concurrent `spawn_worker` calls cannot both pass the `max_concurrent_workers` check (`:86-100`)
-4. **Build worker system prompt** (`:103-145`) — task description, auto-summary filename convention `.worker_{id[:12]}_summary.md`, model announcement if override, attachment hint (see §3.3)
-5. **Gate worker before `manager.prompt` runs** (`:152`) — immediately set `worker_session.post_hooks_complete = False`; `manager.prompt` will flip it itself, but without this assignment there is a tiny window where `check_workers` could see the newly-created worker as IDLE+complete
-6. **Schedule start** — `asyncio.run_coroutine_threadsafe(manager.prompt(worker_id, task))` and append worker_id to parent's list via `loop.call_soon_threadsafe()` (`:165-173`) so `worker_ids` is only mutated on the event-loop thread
-7. **Emit `worker.started`** to parent
+1. **Resolve `kind=`** first, before any session exists (`:84-96`) — an unknown kind name fails with the valid names listed, so the model can self-correct in the same round
+2. **State precondition** — spawning is only legal while the parent is `PROCESSING` (`:101-115`); any other state means the spawn is racing the parent's own lifecycle
+3. **LLM-slot saturation check** (`:117-131`) — count parent's active workers vs. `_get_semaphore_stats()["capacity"]`; if already saturated, return a warning string *before* creating a session ("additional workers will queue and likely timeout")
+4. **Validate `model`** (if specified) — resolve + check provider routing before creating anything (`:133-156`). A bare name routed to Ollama is rejected if Ollama doesn't have the model (avoids a non-obvious wrong-backend hit)
+5. **Acquire `_spawn_lock`** (threading.Lock at `:26`) — **TOCTOU guard**: count active workers under the lock and call `create_session` inside the same critical section so concurrent `spawn_worker` calls cannot both pass the `max_concurrent_workers` check (`:161-179`). The worker inherits the parent's `space_id` here, so it shares that space's directives, memory routing, workspace home and kernel.
+6. **Build worker system prompt** (`:181-248`) — task description, kind charter block if any, auto-summary filename convention `.worker_{id[:12]}_summary.md`, model announcement if override, attachment hint (see §3.3); kind + pinned model persisted to the DB row (migration v31) so a rehydrated worker keeps its identity
+7. **Schedule start** (`:345`) — `asyncio.run_coroutine_threadsafe(manager.prompt(worker_id, task))` and append worker_id to parent's list via `loop.call_soon_threadsafe()` so `worker_ids` is only mutated on the event-loop thread. There is no explicit "not done yet" flag to set: `post_hooks_complete` is derived from `state == IDLE_READY` (§0.5), and a freshly-created worker really is `IDLE_READY` — `check_workers`/`await_workers` instead distinguish "never ran" from "ran and settled" by whether any `session_state_log` row exists for the worker yet.
+8. **Emit `worker.started`** (`:352`) to parent
 
-### 3.3 Attachment visibility (`orchestration:111-144`)
+### 3.3 Attachment visibility (`orchestration:205-239`)
 
 Workers share the parent's workspace directory, so attachment **bytes** are always reachable via `file_read` / `bash`. But **auto-inlined vision blocks** only happen when the worker's own model is vision-capable. Spawn logic parses the last user message in the parent for `[attached: filename]` markers and injects a hint into the worker's system prompt:
 
@@ -481,49 +503,49 @@ This is the only mechanism by which the worker becomes aware of attachments — 
 
 ### 3.4 Full worker-management tool catalog
 
-All orchestration tools are registered with `denied_session_types={"worker"}` (`:1334`) so a worker cannot call any of them — hierarchy stays flat.
+All orchestration tools are registered with `denied_session_types={"worker"}` (`:1580`) so a worker cannot call any of them — hierarchy stays flat.
 
 | Tool | File | Purpose |
 | ---- | ---- | ------- |
-| `spawn_worker` | `:49` | Create a new worker session. Returns worker ID. Safety: `caution`. |
-| `check_workers` | `:359` | Status of all workers. A worker is "done" only when `state ∈ {idle, unknown} AND post_hooks_complete=True` (`:224`). Annotates "finalizing (reflect/post-hooks)" when `state==idle` but `post_hooks_complete==False` (`:230-231`). Triggers cross-pollination (§3.6) if some workers are done and others still running. |
-| `await_workers` | `:657` | Block up to 30 min (hardcoded `max_wait=1800`, `:457`). Polls every 3 s using `asyncio.run_coroutine_threadsafe(asyncio.sleep(3), loop).result(3.5)` — never blocks the event loop (`:500-505`). Snapshots `worker_ids` per iteration (`:463`) to avoid `RuntimeError` if the loop appends while iterating. Returns early if any worker is stalled past `stale_threshold` (default 120 s). |
-| `get_worker_result` | `:487` | Final summary with quality-gate header (see §1.5). Lookup order: per-worker summary file → legacy `summary.md` → last assistant message. Max 3000 chars read. If the summary file already starts with `#` (sentinel from `_finalize_worker`), returned as-is — avoids double-stamping. |
-| `get_worker_transcript` | `:586` | Full message stream, one line per message: `[role] content`, truncated to `max_chars` (default 30k). Role-aware formatting for `assistant:tool_calls`, `tool`, `reflect` (parses verdict), `scout` (parses approach), `system`, `user`. |
-| `message_worker` | `:982` | Fire-and-forget follow-up message into a running worker — internally just `manager.prompt(worker_id, message)` so the worker either picks it up on its current turn (queued) or starts a new turn. Safety: `caution`. |
-| `cancel_worker` | `:1034` | Calls `session.task.cancel()` which raises `CancelledError` in the worker's `_run_agent_safe`. Worker's post-hooks are **skipped entirely** (`manager.py:263`) — no reflect, no auto-stamp, `termination_reason="cancelled"`. Safety: `caution`. |
-| `pause_worker` | `:1048` | Calls `session.pause_event.clear()`. Agent loop awaits the event at its pre-round gate (`agent.py:333-341`), so the worker pauses **at the next tool-round boundary**, not mid-tool. |
-| `resume_worker` | `:1083` | Calls `session.pause_event.set()`. Worker resumes from the awaited gate. |
-| `retry_worker` | `:1125` | Cancel the old worker, then `spawn_worker` with a composed task that embeds the old worker's output (truncated to 2000 chars) + optional `reason` + `new_instructions`. Useful for UNVERIFIED/ESCALATED workers. |
+| `spawn_worker` | `:57` | Create a new worker session. Returns worker ID. `kind=` selects a typed worker bundle — role preamble, an exclusive tool allowlist, a default model, verification criteria (built-ins: `research`, `code`, `explore`, `debug`, `transform`; custom via `data/worker_kinds/<name>.json`) — an explicit `model=` overrides the kind's default. `auto_resume_parent=True` registers the worker on the parent's watch-set (same contract `resume_worker` uses). The pinned model and kind persist to `sessions.model_override` / `sessions.worker_kind` (migration v31) so they survive a reap or restart. Safety: `caution`. |
+| `check_workers` | `:370` | Status of all workers. A worker is "done" only when `state == IDLE_READY` and the turn actually started. Annotates `"finalizing (reflect/post-hooks)"` when the state is `FINALIZING`, `"waiting on user answer"` when `AWAITING_USER`, and similarly for `PAUSED`. Triggers cross-pollination (§3.6) if some workers are done and others still running. |
+| `await_workers` | `:711` | Block up to 30 min (hardcoded `max_wait=1800`, `:879`). Polls every 3 s via `asyncio.run_coroutine_threadsafe(asyncio.sleep(3), loop)` — never blocks the event loop. Snapshots `worker_ids` per iteration to avoid a `RuntimeError` if the loop appends while iterating. Returns early if any worker is stalled past `stale_threshold` (default 120 s, `:712`). |
+| `get_worker_result` | `:502` | Final summary with quality-gate header (see §1.5). Lookup order: per-worker summary file → legacy `summary.md` → last assistant message. Max 3000 chars read. If the summary file already starts with `#` (sentinel from `_finalize_worker`), returned as-is — avoids double-stamping. `research`/`explore`-kind workers also get a deterministic `# KIND GATE` warning line when the summary names zero sources / zero file citations. |
+| `get_worker_transcript` | `:640` | Full message stream, one line per message: `[role] content`, truncated to `max_chars` (default 30k). Role-aware formatting for `assistant:tool_calls`, `tool`, `reflect` (parses verdict), `scout` (parses approach), `system`, `user`. |
+| `message_worker` | `:1045` | Fire-and-forget follow-up message into a running worker — internally just `manager.prompt(worker_id, message)` so the worker either picks it up on its current turn (queued) or starts a new turn. Safety: `caution`. |
+| `cancel_worker` | `:1097` | Calls `session.task.cancel()` which raises `CancelledError` in the worker's `_run_agent_safe`. Worker's post-hooks are **skipped entirely** (`_finalize_turn`'s cancelled branch, `manager.py:1456-1528`) — no reflect, no auto-stamp, `termination_reason="cancelled"`. Safety: `caution`. |
+| `pause_worker` | `:1118` | Calls `session.pause_event.clear()`. Agent loop awaits the event at its pre-round gate (`_pre_round_gate`, `agent.py:1834`), so the worker pauses **at the next tool-round boundary**, not mid-tool. |
+| `resume_worker` | `:1182` | One tool, three cases — "bring the worker back to life": PAUSED/PAUSE_REQUESTED → release the pause (original behavior); a mid-turn state → no-op, reports the live state; a terminal state (cancelled, errored, round-capped, reaped from memory, or lost to a server restart) → **revive**: rehydrate the session from the DB (history, the persisted kind allowlist and pinned model from migration v31's columns), fall back to the default model with a visible note if the pinned one no longer resolves, clear the stale summary stamp so an old `# CANCELLED` header can't shadow the new result, re-attach to the parent, and start a continuation turn carrying an optional `note`. `auto_resume_parent=True` mirrors `spawn_worker`'s watch-set registration. Emits `worker.resumed`. `POST /api/sessions/{id}/workers/{wid}/resume` (optional `{"note"}` body) drives this over HTTP and checks parentage against the DB row. Non-worker sessions only ever get the pause-release path. |
+| `retry_worker` | `:1365` | Cancel the old worker, then `spawn_worker` with a composed task that embeds the old worker's output (truncated to 2000 chars) + optional `reason` + `new_instructions`; the replacement inherits the original's `kind`. Useful for UNVERIFIED/ESCALATED workers. |
 
 ### 3.5 Why `post_hooks_complete` matters here
 
-`state == IDLE` alone lies during the post-hooks window (reflect may still be running, may trigger a retry that sends the session back to SCOUTING → PROCESSING → IDLE). If `check_workers()` treated plain IDLE as "done", parents would race against reflect and read half-verified output. The gate makes the API honest: "done" means **every** retry ran and reflect committed a verdict row. Both `check_workers` (`:220-224`) and `await_workers` (`:470-474`) enforce this.
+`state == IDLE` alone lies during the post-hooks window (reflect may still be running, may trigger a retry that sends the session back to SCOUTING → PROCESSING → IDLE). If `check_workers()` treated plain IDLE as "done", parents would race against reflect and read half-verified output. The gate makes the API honest: "done" means **every** retry ran and reflect committed a verdict row. Both `check_workers` (`:370`, gate around `:406-427`) and `await_workers` (`:711`) enforce this.
 
 ### 3.6 Cross-pollination — sharing findings between live siblings
 
-`cross_pollinate()` (`orchestration:1157`) is a LogAct-inspired supervisor pattern: when one worker finishes, inject its finding into the conversation history of any still-running siblings, so they don't redo the same discovery.
+`cross_pollinate()` (`orchestration:1403`) is a LogAct-inspired supervisor pattern: when one worker finishes, inject its finding into the conversation history of any still-running siblings, so they don't redo the same discovery.
 
-**Triggered naturally** from `check_workers()` (`:252-258`) when there's a mix of done + running workers — **not on a polling timer**.
+**Triggered naturally** from `check_workers()` (`:465`) when there's a mix of done + running workers — **not on a polling timer**.
 
 Mechanics:
 - Classifies workers as `completed` (idle + has output) vs `running` (scouting/processing)
-- **Quality gate** (`:649-656`): only cross-pollinates from workers whose reflect verdict is `pass`. Escalated / retry / missing-reflect workers are **skipped** — historical bug: a preamble-only worker's output got broadcast and poisoned siblings with empty context
-- **Dedup** via `session_messages` table (`:631-640`): `(sender_id, recipient_id, message_type="cross_pollinate")` uniquely identifies a delivery; repeated calls don't re-send
-- **Delivery** (`:671-685`): injects a `system` message into the running worker's session via `db.add_message(rwid, "system", ...)`, formatted as `[Sibling worker finding — "{title}"] {summary[:300]} ...`. On the worker's next context compile, the finding appears as part of its conversation.
+- **Quality gate** (`:1469-1471`): only cross-pollinates from workers whose reflect verdict is `pass`. Escalated / retry / missing-reflect workers are **skipped** — historical bug: a preamble-only worker's output got broadcast and poisoned siblings with empty context
+- **Dedup** via `session_messages` table (`:1447-1458`): `(sender_id, recipient_id, message_type="cross_pollinate")` uniquely identifies a delivery; repeated calls don't re-send
+- **Delivery** (`:1483-1498`): injects a `system` message into the running worker's session via `db.add_message(rwid, "system", ...)`, formatted as `[Sibling worker finding — "{title}"] {summary[:300]} ...`. On the worker's next context compile, the finding appears as part of its conversation.
 
 ### 3.7 Worker cancel / pause semantics (important for consumers)
 
-- **Cancel** is terminal and bypasses the quality gate. No reflect runs (`manager.py:263`), no auto-stamp header is written (the auto-stamp *would* write `# CANCELLED` if invoked — but cancel skips the whole post-hooks phase, so the file simply doesn't exist unless the worker wrote one itself). `get_worker_result` falls through to its "no reflect row" branch and stamps `# CANCELLED (worker stopped before reflect ran)` at read time (`orchestration:324-325`).
+- **Cancel** is terminal and bypasses the quality gate. No reflect runs (`_finalize_turn`'s cancelled branch skips post-hooks entirely, `manager.py:1456-1528`), no auto-stamp header is written (the auto-stamp *would* write `# CANCELLED` if invoked — but cancel skips the whole post-hooks phase, so the file simply doesn't exist unless the worker wrote one itself). `get_worker_result` falls through to its "no reflect row" branch and stamps `# CANCELLED (worker stopped before reflect ran)` at read time (`orchestration:502`).
 - **Pause / resume** is non-destructive: worker sits at the pre-round gate awaiting `pause_event`. Any tools already in flight complete; no new round begins. `check_workers` will report the worker as `processing` with growing `idle_seconds` — **pause does not change state**. If left paused past stall thresholds, `await_workers` will flag it as stalled.
 
 ### 3.8 Session deletion cascades
 
-`manager.delete_session()` (`manager.py:83-101`) recursively deletes all `worker_ids` before removing itself, cancels their tasks, and deletes their auto-summary files (`manager.py:95-97`). Deletion is not a state: `delete_session` cancels the task, pops the session from the in-memory dict, and removes the DB row. (The pre-v2 enum carried a `DELETED` value that no code path ever set; it was deleted with the rest of that enum.)
+`manager.delete_session()` (`manager.py:844`) splits into a loop-affine phase 1 (`_delete_session_phase1`, `manager.py:861-874`: cancel the turn, recurse into `worker_ids`, pop each session from the in-memory dict) and a blocking phase 2 (`_delete_session_phase2`, `manager.py:876-900`: delete the auto-summary file, purge the LLM scheduler budget, purge RLM artifacts, purge kernel state, delete the DB row) — `delete_session_async` runs phase 2 off the event loop. Deletion is not a state. (The pre-v2 enum carried a `DELETED` value that no code path ever set; it was deleted with the rest of that enum.)
 
 ### 3.9 Same safety gate, no privilege escalation
 
-`executor.py:302-320` runs for both parent and worker sessions; dangerous tools without `auto_approve_dangerous` are refused regardless of `session_type`. Workers **cannot** bypass the gate by virtue of being "internal." Additionally, workers hit the `denied_session_types` gate (`executor.py:262-300`) which blocks all orchestration tools so the hierarchy stays flat.
+`executor.py:322-400` runs for both parent and worker sessions; dangerous tools without `auto_approve_dangerous` (or the unattended-session exemption, §2.4) are refused regardless of `session_type`. Workers **cannot** bypass the gate by virtue of being "internal." Additionally, workers hit the `denied_session_types` gate (`executor.py:319-320`) which blocks all orchestration tools so the hierarchy stays flat.
 
 ---
 
@@ -533,12 +555,12 @@ Mechanics:
 
 A worker runs the **identical** pipeline as a user-facing session: `_run_agent_safe()` → scout → agent loop → reflect → post-hooks. It is not a simplified path. Differences:
 
-- Worker reflect uses `reflect_max_retries_worker` (tighter) — `manager.py:265-269`
+- Worker reflect uses `reflect_max_retries_worker` (tighter) — checked inline in `_finalize_turn`, `manager.py:1561`
 - Worker's post-hooks include `_finalize_worker` — stamps summary file if worker didn't write its own
 - Worker typically has no queued user messages (it gets one prompt and completes)
 - Worker's system prompt includes task description + summary-file convention (`orchestration:103-145`)
 
-### 4.2 Sub-worker recursion is blocked (`executor.py:262-300`)
+### 4.2 Sub-worker recursion is blocked (`executor.py:319-320`)
 
 ```python
 if session_type and session_type in tool.denied_session_types:
@@ -570,23 +592,23 @@ Workers are typically single-turn (spawn → complete). But nothing stops a pare
 | ---------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------ |
 | Session lifecycle      | `sessions/state_v2.py`, `sessions/manager.py`    | 10-state machine + asyncio.Lock + `pending_messages` deque (see §0)            |
 | Session data           | `sessions/state.py`                              | `AgentSession`: event plumbing, cooperative-cancel bool, pause event, retry counters; state itself lives in `_state_v2` |
-| Agent loop             | `core/agent.py:256-514`                          | compile_context → stream → dedup/stuck → execute → cancel/ask_user checks      |
-| Stuck detection        | `core/agent.py:113-405`                          | Seven weighted signals; score > 0.3 with repeat_count ≥ 3 triggers help/break |
+| Agent loop             | `core/agent.py:1133-1798`                        | compile_context → stream → dedup/stuck → execute → cancel/ask_user checks      |
+| Stuck detection        | `core/agent.py:113-405`                          | Thirteen signals (11 scored, 2 hint-only); score > 0.3 for 3 rounds triggers help/break |
 | Compaction             | `core/context/compaction.py`, `core/context/compiler.py` | Non-destructive 3-phase view: prune → orphan-filter → `role="compaction"` summary marker; metadata in `messages.metadata` (v5+) |
 | LLM router             | `core/llm/router.py`, `core/llm/client.py`       | Ollama + OpenRouter + OpenAI-compatible; per-provider semaphores; typed `FailoverError`; remote rate-limit → Ollama fallback; CONTEXT_OVERFLOW → compaction-retry |
 | Scout                  | `core/scout/runner.py`                           | Fresh-context fast model, 6-round budget, emits `ScoutReport` + `deliverables_plan` |
 | Tool registry          | `core/tools/registry.py`, `core/extensions/`     | ~13 core + discoverable extensions; `active_tools` slice per turn              |
-| Safety gate            | `core/tools/executor.py:302-320`                 | `safety_level` check; workers not exempt; `denied_session_types` gates flat hierarchy |
+| Safety gate            | `core/tools/executor.py:322-400`                 | `safety_level` check; workers not exempt (unattended cron/worker sessions skip it); `denied_session_types` gates flat hierarchy |
 | Reflect                | `core/reflect.py`, `sessions/hooks.py`           | verdict ∈ {pass, retry, escalate}; retry bounded by `reflect_max_retries[_worker]` |
-| Reflect retry loop     | `sessions/manager.py:272-295`                    | re-enters SCOUTING→PROCESSING within one user turn until verdict passes or cap |
+| Reflect retry loop     | `sessions/manager.py:1564-1617`                  | re-enters SCOUTING→PROCESSING→FINALIZING within one user turn until verdict passes or cap |
 | ask_user               | `core/tools/builtin/dialog_tools.py`, `api/routers/questions.py` | Transitions to `AWAITING_USER`, terminates turn; answer = new prompt           |
 | Snooze                 | `core/snooze.py`                                 | Process-global; cancelled by user msg; gates on every session being IDLE       |
 | Reaper                 | `sessions/manager.py` `reap_idle_sessions`       | Per-state timeouts (§0.7); unsticks stuck PROCESSING, reaps idle SCOUTING      |
-| Workers — spawn        | `orchestration:49`                               | `_spawn_lock` atomic slot; LLM-slot warning; attachment-visibility hint         |
-| Workers — lifecycle    | `orchestration:359-1155`                         | `check_workers`, `await_workers`, `get_worker_result`, `get_worker_transcript`, `message_worker`, `cancel_worker`, `pause_worker`, `resume_worker`, `retry_worker` |
-| Cross-pollination      | `orchestration:1157`                             | Reflect=pass findings from completed workers injected as `system` msg into running siblings; dedup via `session_messages` table |
+| Workers — spawn        | `orchestration:57`                               | `_spawn_lock` atomic slot; LLM-slot warning; typed `kind=` bundle; attachment-visibility hint |
+| Workers — lifecycle    | `orchestration:370-1402`                         | `check_workers`, `await_workers`, `get_worker_result`, `get_worker_transcript`, `message_worker`, `cancel_worker`, `pause_worker`, `resume_worker` (release-or-revive), `retry_worker` |
+| Cross-pollination      | `orchestration:1403`                             | Reflect=pass findings from completed workers injected as `system` msg into running siblings; dedup via `session_messages` table |
 | Events                 | `core/events.py`, `sessions/state.py:153-173`    | Single SSE stream with `_seq` gap detection                                    |
-| Deletion               | `sessions/manager.py:83-101`                     | `delete_session` cancels task, cascades workers, removes summary files         |
+| Deletion               | `sessions/manager.py:844-900`                    | `delete_session` cancels task, cascades workers, removes summary files + artifacts |
 
 ---
 
