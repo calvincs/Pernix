@@ -688,6 +688,19 @@ export function renderSessionList(sessions, activeSid, spaces = []) {
         );
     }
 
+    // The seam between the spaces above and the plain buckets below. A row
+    // just past the last space and a row just past this heading both look
+    // like an ordinary session title, so without something here a reader
+    // scrolling down sees one continuous list instead of two sections. It
+    // renders only when there IS a seam (spaces above it) and something
+    // under it — a fresh install, or a list where every session lives in a
+    // space, must never show a heading over nothing.
+    if (_spaces.length && ungrouped.length) {
+        list.appendChild(el('div', { class: 'sessions-header', 'data-group': 'sessions' }, [
+            el('span', { class: 'sessions-header-label' }, [text('Sessions')]),
+        ]));
+    }
+
     for (const label of GROUP_ORDER) {
         const group = buckets[label];
         if (!group.length) continue;
@@ -1009,7 +1022,14 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
         ? [toggle, addBtn, ...controls]
         : [toggle, el('div', { class: 'space-actions' }, [addBtn, ...controls])]);
 
-    const body = el('div', { class: 'session-group-body' + (collapsed ? ' collapsed' : '') });
+    // The body carries the space's colour too — not just the header — because
+    // the rail that says "you are still inside this space" once the header has
+    // scrolled off lives on the body itself (CSS ::before), and it has to read
+    // --space-color off something still on screen when that happens.
+    const body = el('div', {
+        class: 'session-group-body space-group-body' + (collapsed ? ' collapsed' : ''),
+        style: `--space-color: ${space.color}`,
+    });
 
     const toggleSpace = () => {
         const isCollapsed = header.classList.toggle('collapsed');

@@ -380,6 +380,29 @@ body.sidebar-resizing {
     user-select: none;
 }
 .spaces-header .spaces-header-label { flex: 1; }
+
+/* The seam between the spaces above and the plain time buckets below — the
+   plain list used to butt straight up against the last space with nothing to
+   say where one ended and the other began, so a reader scrolling past it saw
+   one continuous list. Mirrors .spaces-header's shape; renderSessionList only
+   appends it when there is a seam to mark (spaces above it) and something
+   under it (a fresh install, or a list where every session lives in a space,
+   must never show a heading over nothing). */
+.sessions-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 10px var(--sp-3) 3px;
+    border-top: 1px solid var(--border);
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    user-select: none;
+}
+.sessions-header .sessions-header-label { flex: 1; }
+
 .space-group-header .space-label {
     color: var(--text-dim);
     text-transform: none;
@@ -475,13 +498,50 @@ body.sidebar-resizing {
     font-style: italic;
 }
 
+/* The rail down a space's left edge, centred under its header's chevron. A
+   long space scrolls its own header out of view like anything else, and once
+   it has, nothing below said "you are still inside Pernix" — a bucket header
+   or a session row carried no trace of the group they were in. The rail is
+   that trace: it runs the height of the body and ends exactly where the
+   space does, so it is gone the instant .space-group-body.collapsed sets
+   display:none and takes its ::before with it. */
+.space-group-body { position: relative; margin-bottom: 8px; }
+.space-group-body::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: calc(var(--sp-3) + 3px);   /* centred under the header's chevron (9px icon at padding-left --sp-3) */
+    width: 2px;
+    border-radius: 1px;
+    background: color-mix(in srgb, var(--space-color, var(--accent)) 50%, transparent);
+    z-index: 1;
+    pointer-events: none;
+}
+
+/* One indent level for everything a space holds, beside the rail — the same
+   x every row inside a space now shares, so a title still reads as "inside
+   the coloured group" once its own bucket header has scrolled off the top.
+   Mirrors the +10px .space-bucket-header already sits at below. */
+.space-group-body .session-item { padding-left: calc(var(--sp-3) + 10px); }
+.space-group-body .session-item.active { padding-left: calc(var(--sp-3) + 8px); }   /* keeps the 2px active border's alignment, same as the outer rule */
+.space-group-body .session-item.worker { padding-left: calc(var(--sp-3) + 26px); }
+.space-group-body .session-item.depth-2 { padding-left: calc(var(--sp-3) + 42px); }
+.space-group-body .worker-summary { padding-left: calc(var(--sp-3) + 26px); }
+.space-group-body .space-empty { padding-left: calc(var(--sp-3) + 10px); }
+.space-group-body .space-show-all { margin-left: calc(var(--sp-3) + 10px); width: calc(100% - var(--sp-3) * 2 - 10px); }
+
 /* Time buckets INSIDE a space. Deliberately not .session-group-header: these
    sit one level down from the space they divide, so they are smaller, dimmer
    and indented past the space dot, and they read as a subdivision of the
-   coloured group above rather than as a peer of the buckets below it. The
-   count is hidden while the bucket is open — an open bucket shows you its
-   rows, and a number over them is arithmetic nobody asked for. Folded, the
-   number is the only thing the header still owes the reader. */
+   coloured group above rather than as a peer of the buckets below it. Sentence
+   case rather than the plain list's uppercase, and for the same seam reason
+   as the rail above: the plain list's own Today/Yesterday/... headers already
+   own the uppercase style, and a bucket wearing it too read as their peer
+   instead of as something nested a level under a space. The count is hidden
+   while the bucket is open — an open bucket shows you its rows, and a number
+   over them is arithmetic nobody asked for. Folded, the number is the only
+   thing the header still owes the reader. */
 .space-bucket-header {
     display: flex;
     align-items: center;
@@ -500,8 +560,8 @@ body.sidebar-resizing {
     font-size: var(--text-xxs);
     color: var(--text-faint);
     cursor: pointer;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    text-transform: none;
     user-select: none;
     opacity: 0.75;
 }
