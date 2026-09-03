@@ -97,10 +97,10 @@ moved the desktop, and say in the message what moved and why.
 | `tab-air-l` | 1180×820 | **wide touch** |
 | `ipad-desk` | 1024×768, Mac UA, no `is_mobile` | **wide touch**, and the one that only passes because `touch-boot.js` recognises it — it is an iPad claiming to be a Mac, exactly as iPadOS desktop mode does |
 | desktop | 1280×800, mouse | the baseline comparison |
-| `state-graph` | 1280×800, mouse, reduced motion | one m1 check on the State timeline's Graph tab, in its own context because it opens a session no other pass touches |
+| `state-map` | 1280×800, mouse, reduced motion | one m1 check on the State timeline's Map tab, in its own context because it opens a session no other pass touches |
 | `timeline-lane` | 1280×900 dark and light, plus 390×844 touch | three m2 checks on the State timeline's Lane tab and the Story under it, and one on the phone |
 
-### The state-graph pass
+### The state-map pass
 
 `readColor()` in `static/js/theme.js` resolves a `--token` by setting `color:
 var(--token)` on a probe span and reading the computed value back, and it has
@@ -109,8 +109,20 @@ from a `color-mix()` token, and an interpolated `oklab(…)` from the `.01ms`
 transition the reduced-motion block puts on `*`. Both painted every node, node
 label and time-in-state bar in the State timeline black. The check asks for
 reduced motion so one pass covers both, and asserts that no `--state-*` token
-reads as black, that no node box is within a hair of `#000`, and that every
-node label clears 3:1 against its own box.
+reads as black.
+
+The map itself no longer goes through that bridge at all: it is inline SVG
+whose rects carry `tl-map-state tl-map-<name>` and take their `--state-*` pair
+from `layout.css`, so the token half of this pass now guards `theme.js` on
+behalf of the sigil and Monaco while the map half asserts that the CSS route is
+wired up. It draws all ten states of `sessions/state_v2.py` and all 31 edges of
+its `TRANSITIONS` table whatever the session did, so the check pins the count
+of each, that no box is within a hair of `#000`, that every label clears 3:1
+against its own box, that exactly the seven edges the seeded arc took are drawn
+solid and carry the right count, that the parked session lights `idle_ready`
+and pulses nothing, that the drawing does not scroll the page sideways — and
+that opening the tab asks for no `mermaid.min.js`, which is not vendored any
+more.
 
 ### The timeline-lane pass
 

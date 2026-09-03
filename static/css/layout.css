@@ -2299,8 +2299,8 @@ body.sidebar-resizing {
 
 /* Timeline modal — opened via #state-badge click (see modals/timeline.js).
    Reuses .modal-overlay / .modal-card / .modal-body chrome from modals.css.
-   Three tabs: Lane (a row per turn + its story), Graph (Mermaid) and
-   Timeline (interleaved state + tool rows). */
+   Three tabs: Lane (a row per turn + its story), Map (the state machine as
+   one inline SVG) and Timeline (interleaved state + tool rows). */
 
 .timeline-modal-content {
     display: flex;
@@ -2328,8 +2328,8 @@ body.sidebar-resizing {
    its neighbours and the shapes would stop being comparable.
 
    Every colour is a --state-<name>-{fg,bg} token, referenced from the
-   element's inline style as a var(). No hex is computed in JS for this tab
-   (unlike the Mermaid classDefs), so a theme swap repaints it for free. */
+   element's inline style as a var(). No hex is computed in JS anywhere in
+   this modal any more, so a theme swap repaints it for free. */
 .tl-lane-list {
     display: flex;
     flex-direction: column;
@@ -2642,26 +2642,38 @@ body.sidebar-resizing {
 }
 .tl-turn-story:hover { color: var(--accent); border-color: var(--accent-dim); }
 
-/* Graph tab */
-.timeline-graph-container {
+/* ----------------------------------------------------------------------
+   Map tab — the state machine as one inline SVG
+
+   Every colour on this tab is a --state-<name>-{fg,bg} pair, matched by
+   class. The Mermaid diagram this replaced could not do that: a classDef is
+   a comma-separated string, so it cannot carry a `color-mix()` token and
+   every colour had to be resolved to #rrggbb in JavaScript first — which is
+   where "every state painted black in both themes" came from, twice. There
+   is no bridge here to get wrong, and a theme swap repaints the map with no
+   JS at all.
+   ---------------------------------------------------------------------- */
+.timeline-map-container {
     width: 100%;
-    overflow: auto;
     padding: var(--sp-3) 0;
-    display: flex;
-    justify-content: center;
 }
-.timeline-graph-container svg {
-    max-width: 100%;
+/* The viewBox is the drawing's own size, so `width: 100%` is the whole of
+   the responsive behaviour: the map scales down to the modal rather than
+   overflowing it, and cannot be the thing that scrolls a 360px phone
+   sideways — which the diagram it replaced was. */
+.tl-map {
+    display: block;
+    width: 100%;
     height: auto;
 }
-.timeline-graph-status {
+.timeline-map-status {
     color: var(--text-faint);
     font-size: var(--text-xs);
     text-align: center;
     padding: var(--sp-2);
 }
-.timeline-graph-status:empty { display: none; }
-.timeline-graph-caption {
+.timeline-map-status:empty { display: none; }
+.timeline-map-caption {
     display: flex;
     flex-wrap: wrap;
     gap: var(--sp-3);
@@ -2672,11 +2684,106 @@ body.sidebar-resizing {
     border-top: 1px solid var(--border-subtle);
     margin-top: var(--sp-2);
 }
-.timeline-graph-caption:empty { display: none; }
+.timeline-map-caption:empty { display: none; }
 .tl-caption-current { color: var(--state-processing-fg); }
 .tl-caption-term { color: var(--text); }
 .tl-caption-warn { color: var(--state-cancelling-fg); }
 .tl-caption-stat { color: var(--text-faint); }
+
+/* A state box, before its own colours land. The fallback is a real surface
+   rather than the SVG default of solid black, so a state added to
+   state_v2.py before it is added here draws as an unpainted box instead of
+   an invisible label on a black one. */
+.tl-map-state {
+    fill: var(--bg-surface);
+    stroke: var(--line-faint);
+    stroke-width: 1;
+}
+.tl-map-label {
+    font-family: var(--font-mono, monospace);
+    font-size: 10px;
+    fill: var(--text-dim);
+    pointer-events: none;
+    user-select: none;
+}
+
+/* One pair per state, the same ten pairs the .state-badge and the lane's
+   segments read. idle_ready has its own here — under Mermaid it was the one
+   state with no classDef and drew in the library's default grey. */
+.tl-map-state.tl-map-idle_ready       { fill: var(--state-idle_ready-bg); stroke: var(--state-idle_ready-fg); }
+.tl-map-label.tl-map-idle_ready       { fill: var(--state-idle_ready-fg); }
+.tl-map-state.tl-map-scouting         { fill: var(--state-scouting-bg); stroke: var(--state-scouting-fg); }
+.tl-map-label.tl-map-scouting         { fill: var(--state-scouting-fg); }
+.tl-map-state.tl-map-processing       { fill: var(--state-processing-bg); stroke: var(--state-processing-fg); }
+.tl-map-label.tl-map-processing       { fill: var(--state-processing-fg); }
+.tl-map-state.tl-map-compacting       { fill: var(--state-compacting-bg); stroke: var(--state-compacting-fg); }
+.tl-map-label.tl-map-compacting       { fill: var(--state-compacting-fg); }
+.tl-map-state.tl-map-pause_requested  { fill: var(--state-pause_requested-bg); stroke: var(--state-pause_requested-fg); }
+.tl-map-label.tl-map-pause_requested  { fill: var(--state-pause_requested-fg); }
+.tl-map-state.tl-map-paused           { fill: var(--state-paused-bg); stroke: var(--state-paused-fg); }
+.tl-map-label.tl-map-paused           { fill: var(--state-paused-fg); }
+.tl-map-state.tl-map-cancelling       { fill: var(--state-cancelling-bg); stroke: var(--state-cancelling-fg); }
+.tl-map-label.tl-map-cancelling       { fill: var(--state-cancelling-fg); }
+.tl-map-state.tl-map-finalizing       { fill: var(--state-finalizing-bg); stroke: var(--state-finalizing-fg); }
+.tl-map-label.tl-map-finalizing       { fill: var(--state-finalizing-fg); }
+.tl-map-state.tl-map-awaiting_user    { fill: var(--state-awaiting_user-bg); stroke: var(--state-awaiting_user-fg); }
+.tl-map-label.tl-map-awaiting_user    { fill: var(--state-awaiting_user-fg); }
+.tl-map-state.tl-map-awaiting_workers { fill: var(--state-awaiting_workers-bg); stroke: var(--state-awaiting_workers-fg); }
+.tl-map-label.tl-map-awaiting_workers { fill: var(--state-awaiting_workers-fg); }
+
+/* Where the session is right now. */
+.tl-map-state.current { stroke: var(--accent); stroke-width: 2; }
+/* …and, while the turn is still running, the pulse the state badge in the
+   status bar carries, so the two say the same thing at the same rate. */
+.tl-map-state.current.live {
+    --pulse-dip: 0.45;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
+}
+
+.tl-map-edge {
+    fill: none;
+    stroke: var(--line-faint);
+    stroke-width: 1;
+    opacity: 0.45;
+}
+/* An edge the session actually took. */
+.tl-map-edge.used { stroke: var(--text-dim); stroke-width: 1.6; opacity: 1; }
+/* …and one it took that the transition table does not have. */
+.tl-map-edge.violation { stroke: var(--error); stroke-width: 1.6; opacity: 1; }
+.tl-map-arrowhead { fill: var(--line-faint); }
+.tl-map-arrowhead.on { fill: var(--text-dim); }
+.tl-map-arrowhead.bad { fill: var(--error); }
+.tl-map-count {
+    font-family: var(--font-mono, monospace);
+    font-size: 9px;
+    fill: var(--text-dim);
+    pointer-events: none;
+    user-select: none;
+}
+
+.tl-map-node { cursor: pointer; }
+.tl-map-node:hover .tl-map-state { stroke-width: 2; }
+.tl-map-node:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+
+/* The edge a live transition just travelled, for as long as it takes to see
+   which one it was. */
+@keyframes tlMapEdgeFlash {
+    0%   { stroke-width: 1.6; }
+    30%  { stroke-width: 4; stroke: var(--accent); }
+    100% { stroke-width: 1.6; }
+}
+.tl-map-edge.flash { animation: tlMapEdgeFlash 0.6s ease-out 1; }
+/* The global reduce block already collapses the duration; say both of these
+   outright so a running turn is a steady lit box and a taken edge simply
+   thickens into place rather than flashing once. */
+@media (prefers-reduced-motion: reduce) {
+    .tl-map-state.current.live { animation: none; }
+    .tl-map-edge.flash { animation: none; }
+}
 
 /* Turn header enrichment — secondary meta chips after the turn number */
 .tl-turn-meta {
@@ -2956,7 +3063,14 @@ body.sidebar-resizing {
     overflow: hidden;
     margin-bottom: 6px;
 }
-.tl-dwell-seg { height: 100%; }
+/* box-sizing, because the segment carries its --state-*-fg as a 2px bottom
+   border inside an 8px bar — the same fg-under-bg pairing the lane uses, and
+   the only thing that keeps two adjacent -bg washes apart. */
+.tl-dwell-seg {
+    height: 100%;
+    box-sizing: border-box;
+    border-bottom: 2px solid transparent;
+}
 .tl-dwell-chips {
     display: flex;
     flex-wrap: wrap;
