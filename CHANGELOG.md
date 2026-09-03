@@ -1,7 +1,13 @@
 # Changelog
 
 
-## Unreleased
+## v3.1.0 — 2026-09-03
+
+Pernix 3.1 — everything since v3.0.0 (2026-08-26) in one tagged release: a week of field campaigns on the reference box, one commit per finding. The headline arc: **Spaces** (named, coloured groups of long-lived sessions that share directives, memory, workspace and kernel — and, off by default, suggestions for the work you keep coming back to), a native **MCP client** (external Model Context Protocol tool servers, local or remote, as first-class Pernix tools with scout curation and the safety gate), and a **front end built for someone who did not write it**: a light theme, accessibility as a floor, a real phone and tablet tier, the Explorer and Settings regrouped by what you came to do, a resizable sidebar, archive-not-delete with a Storage tab, and a State timeline that tells each turn as a lane, a story and a map. Underneath: the September stability audit (122 findings across 11 passes; the Critical and High ones fixed one commit each with dated regression tests), skill self-healing that actually fires, a change-driven canary suite, outcome-driven adaptive retention, a scout audit and a reflect calibration pass.
+
+Migrations **v30–v35** run automatically. Two defaults worth knowing: the MCP client is on (inert until you add a server), and plain chats idle for 30 days are archived — never deleted — by a daily sweep (`session_archive_idle_days`; pinned chats and chats in a space are exempt from deletion). Gone: the never-used `get_tool_schema`, `delete_skill` and `list_skills` tools, Mermaid (3.3 MB) from the timeline, and `mobile.css` (now `compact.css` for width and `touch.css` for pointer).
+
+Credits: built by Calvin ([@calvincs](https://github.com/calvincs)) with Claude (Anthropic) pair-programming the whole arc — and Pernix itself, which ran the field campaigns on the reference box, surfaced its own failures, and validated the fixes.
 
 - fix(context): looking at an image no longer kills the chat. `view_image` writes its note into the conversation while it is still running, so the note lands between the assistant's call and that call's own result. The pass that fills in tool calls left unanswered by a round that died mid-flight read the note as the end of the round, stubbed a call that had already returned, and the stub — a row with no message id — crashed the turn before it reached the model. Because message order is stored, every later message in that chat crashed the same way within milliseconds and its Context tab returned 500. Answers are now matched by call id across the whole conversation rather than by what sits next to what, and the context compiler no longer assumes every row it holds came from the database. Chats already stuck recover on their own.
 

@@ -13,7 +13,7 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ENV_PATH = Path(".env")
 
 # Single source of truth for the release version (health endpoints, FastAPI docs).
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 
 # Fields that are machine-specific and should not be persisted
 _NO_PERSIST = {
