@@ -60,6 +60,10 @@ pytest --cov                                        # with coverage report
 
 Two pytest markers are defined: `slow` and `integration`. Most tests run in seconds; the `slow` markers are skipped in fast iterations.
 
+### Regression tests
+
+When a defect ships and gets fixed, pin it as its own file under `tests/regressions/`, one per incident: `test_<date-or-issue>_<slug>.py`, with a docstring stating what broke, how it manifested, and what the fix was — the codebase's own comment culture already cites incidents at the fix site, so these files make the citations executable. This directory is for defects that shipped, not feature coverage; a new feature's tests belong beside it in `tests/`. See [`tests/regressions/README.md`](../../tests/regressions/README.md).
+
 ### The UI gate (front-end changes only)
 
 `./check.sh` never opens a browser, so nothing in it can see a stylesheet. If you touch `static/css/touch.css`, `static/css/compact.css` or `static/js/mobile.js`, run the device-tier gate as well:
@@ -148,6 +152,8 @@ If you're new to the codebase, this is the rough mental map:
 | Builtin tools | `core/tools/builtin/` |
 | Extension tools (gated) | `core/extensions/*` |
 | RLM engine (recursive processing) | `core/extensions/rlm/` (`engine.py` loop, `child_runner.py` sandbox, `broker.py` sub-calls) |
+| MCP client | `core/extensions/mcp/` (`manager.py` connection lifecycle, `bridge.py` sync tool wrappers) |
+| Spaces | `core/spaces.py` (directives, workspace home), `core/space_suggest.py` (the suggestion scan) |
 | Memory store | `core/memory/store.py` |
 | Snooze (idle housekeeping) | `core/snooze.py` |
 | REST + SSE | `api/app.py`, `api/routers/*.py` |
