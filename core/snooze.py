@@ -469,6 +469,16 @@ class SnoozeRunner:
             _announce(bus, "skill_requirements", "Installing changed skill requirements into workspace venv")
             await self._rung("install_skill_requirements", self._install_skill_requirements())
 
+        # Activity 2d: Space suggestions — group the last N days of ordinary
+        # chats by the kind of work they repeat and propose a space for the
+        # habit. Own budget (independent of did_llm) like refine and dream:
+        # one background call, and only when the user turned it on. Gated on
+        # space_suggest_enabled — the rung is absent from the ladder when
+        # off, so nothing reads the table or spends a call.
+        if not self._is_cancelled() and settings.space_suggest_enabled and self._llm_ready():
+            _announce(bus, "space_suggest", "Looking for recurring work that deserves a space")
+            await self._rung("space_suggest", self._space_suggest_step())
+
         # Activity 3: Dedup sweep (no LLM)
         if not self._is_cancelled():
             _announce(bus, "dedup", "Checking for duplicate memory entries")
@@ -1940,6 +1950,16 @@ Output valid JSON only. No markdown fences. /no_think"""
             self._bump("distill_audit_recovered", result.get("recovered", 0))
         except Exception as e:
             logger.warning("Snooze distill audit failed: %s", e)
+
+    async def _space_suggest_step(self) -> None:
+        """One space-suggestion scan. The scan itself decides whether this
+        cycle is the one that spends a call (interval floor, "anything new"
+        watermark, pending cap) and never raises, so this is only the stat
+        bump. Nothing it stores creates a space — that waits for a click."""
+        from core.space_suggest import scan
+
+        result = await scan()
+        self._bump("space_suggestions", len(result.get("kept") or []))
 
     async def _dream_step(self) -> None:
         """One bounded dream unit: validate a pending hypothesis or generate

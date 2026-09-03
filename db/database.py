@@ -1068,6 +1068,35 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived_at) WHERE archived_at IS NOT NULL",
         ],
     ),
+    (
+        35,
+        "space suggestions: proposals the user accepts or declines, never applied on their own",
+        [
+            # A suggestion is a proposal, not a space: nothing here becomes a
+            # row in `spaces`, a directory on disk or a session move until an
+            # accept click says so. topic_key is the stability handle — a
+            # declined topic stays declined by key, so the same habit is not
+            # re-offered next month under a slightly different label.
+            """CREATE TABLE IF NOT EXISTS space_suggestions (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                topic_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                color TEXT NOT NULL DEFAULT '#7c9cff',
+                why TEXT NOT NULL DEFAULT '',
+                existing_space_id TEXT,
+                session_ids_json TEXT NOT NULL,
+                directives_json TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                space_id TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
+            )""",
+            # Every read is status-scoped (the sidebar wants pending, the
+            # settings pane wants rejected), and the table stays small.
+            "CREATE INDEX IF NOT EXISTS idx_space_suggestions_status ON space_suggestions(status)",
+        ],
+    ),
 ]
 
 
