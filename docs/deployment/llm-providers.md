@@ -176,6 +176,16 @@ If `fallback_model` is empty, all three layers are skipped and the caller sees t
 
 ---
 
+## Cost tracking and the fallback-burn watch
+
+`model_prices` is optional per-model USD pricing for `token_usage.cost_estimate` — `{"model_id": {"in": $/1M prompt tokens, "out": $/1M completion tokens}}`, exact model-id match. Unpriced and local models simply keep `cost_estimate` NULL; this is display/telemetry only, nothing routes on it. No Settings UI control — set it via `POST /api/settings` or `data/settings.json`.
+
+`fallback_burn_alert_share` (default `0.25`) and `fallback_burn_min_tokens` (default `50000`) are a standing watch on the Backup role, born from a real incident: a wedged primary provider silently rerouted every call to the paid fallback for days before anyone noticed. Snooze checks the trailing 24h of `token_usage`; when `fallback_model`'s share of tokens reaches `fallback_burn_alert_share` and the window carried at least `fallback_burn_min_tokens`, one high-urgency notification fires per day naming the share and volume. It is watch-only — nothing about routing changes — and `fallback_burn_alert_share = 0` disables it.
+
+`provider_quota_cooldown_s` (default `600`) is a related guard at the router layer: once a provider 403s on an exhausted quota, failover *to* that model is refused for this many seconds, so a dead key can't mask the real error behind a doomed retry.
+
+---
+
 ## Concurrency semaphores
 
 Each provider has its own concurrency limit, enforced via async semaphores:

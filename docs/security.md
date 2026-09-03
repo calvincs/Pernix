@@ -264,7 +264,7 @@ What remains true, and is the reason to run Pernix in a container: **an approved
 
 ## MCP Servers: Third-Party Tool Providers
 
-MCP servers are third-party software the agent calls as tools ([mcp.md](mcp.md)). The threat model and its controls:
+MCP servers are third-party software the agent calls as tools ([mcp.md](mcp.md)). Once connected, a server's tools register as `mcp_<server>_<tool>` and flow through the same machinery as native tools — scout curation, the dangerous-tool gate, per-tool health metrics — nothing about MCP tools is exempt from the controls documented above. The threat model and its controls:
 
 - **Supply chain (stdio).** A stdio server entry is a command Pernix executes — arbitrary local code. `mcp_add_server` is `dangerous` (always confirmed), the Explorer add path is an explicit human action, and `mcp_stdio_enabled=false` turns stdio off entirely (remote-only mode). Pin versions in stdio commands (`npx -y pkg@1.2.3`): an unpinned `npx -y` runs whatever was published most recently.
 - **Prompt injection via tool metadata.** Server-supplied names, descriptions, and schemas end up in the model's prompt. Descriptions are length-capped (`mcp_max_description_chars`) and provenance-prefixed `[MCP:<server>]` so the model always sees where a tool came from. Treat a server you add as able to talk to your agent.
@@ -313,6 +313,13 @@ Data leaves your machine **only** when the agent explicitly:
 - Calls a web search or `http_get` / `browse_web` tool
 - Sends a request to an LLM API (Ollama local, or OpenRouter cloud)
 - Triggers a configured webhook (`notify_webhook_url`)
+
+---
+
+## Data Retention
+
+- **Sessions.** A daily sweep archives plain chats idle for more than `session_archive_idle_days` (default `30`; `0` = never archives) — archiving keeps every message and only removes the chat from the sidebar and its space group; nothing is deleted. Pinned chats are exempt from archiving; chats filed in a space are not, because archiving loses nothing. `session_delete_archived_days` (default `0` = **never**) is the separate, opt-in horizon that hard-deletes chats once they have sat in the archive that long — the default keeps every archived transcript forever. See [configuration.md#storage](configuration.md#storage).
+- **Concurrent-edit protection.** The workspace, skill, and memory-file editors send back the mtime they read as `base_mtime`; a save whose base is stale is refused with `409 changed_on_disk` (`PUT /workspace/{path}`, `PUT /api/skills/{name}`, `PUT /api/memory/files/{name}`) and the current mtime, instead of one editor's write silently clobbering another's.
 
 ---
 

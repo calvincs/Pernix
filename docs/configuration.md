@@ -21,6 +21,8 @@ curl -X POST http://localhost:8090/api/settings \
 
 **Via Swagger UI (try-it interactively):** Pernix is FastAPI-based, so a live API explorer is available at [`http://localhost:8090/docs`](http://localhost:8090/docs). The `POST /api/settings` endpoint is right there — click "Try it out", paste a JSON body, and execute. ReDoc lives at `/redoc` for a more reference-style view of the schema.
 
+**Not server settings:** the theme (System/Dark/Light, under Settings → Providers & models → Appearance) and the sidebar's drag-resized width live in the browser's `localStorage`, not in `data/settings.json` — they belong to the device, not the agent, and are not covered by this page.
+
 ---
 
 ## LLM Models & Providers
@@ -36,6 +38,9 @@ These are the most important settings to configure before first use.
 | `llm_max_concurrent` | `1` | Maximum simultaneous requests to Ollama. Increase only if your hardware supports parallel inference. |
 | `llm_session_timeout` | `1800` | Maximum wall-clock seconds a session may hold an LLM slot. Prevents hung sessions from blocking others. Set to `0` for unlimited. |
 | `provider_quota_cooldown_s` | `600` | When a model 403s on an exhausted quota, failover *to* that model is refused for this many seconds — so a dead key can't mask the real error. |
+| `fallback_burn_alert_share` | `0.25` | Fallback-burn watch: when `fallback_model` serves at least this share (0–1) of the trailing 24h's tokens, a high-urgency notification fires once/day — the signature of a wedged primary provider silently billing everything to the paid tier. `0` disables the watch. |
+| `fallback_burn_min_tokens` | `50000` | The watch stays quiet unless the trailing 24h carried at least this many total tokens — a quiet day that happened to fail over is noise, not the incident. |
+| `model_prices` | `{}` | Optional per-model USD pricing for `token_usage.cost_estimate`: `{"model_id": {"in": $/1M prompt tokens, "out": $/1M completion tokens}}`, exact model-id match only. Unpriced/local models keep `cost_estimate` NULL. Display/telemetry only — nothing routes on cost. No Settings UI control; set via `POST /api/settings` or `data/settings.json`. |
 
 ### OpenRouter
 
@@ -136,6 +141,7 @@ After each agent turn, a lightweight reflect pass verifies that the agent actual
 | `reflect_min_messages` | `3` | Minimum messages in a conversation before reflect runs. Short exchanges (e.g., a simple one-liner) skip it. |
 | `reflect_deferred_normal` | `true` | Interactive sessions finalize immediately and get their grade later, observe-only — lessons, post-mortems, and experience records are written exactly as before, but no verdict can retry the turn. Off restores synchronous, retry-capable reflect on interactive turns. Cron/worker/canary sessions always keep the synchronous, retry-capable path, and deterministic gates still run (and clamp) in-line. |
 | `reflect_defer_idle_s` | `300` | Quiet seconds before a deferred grade runs. Only the latest completed turn is graded — a turn superseded inside this window never is. |
+| `reflect_nonpass_confidence_floor` | `0.5` | Materiality floor (2026-08-27 calibration audit): a `retry`/`escalate` verdict the grader itself rates below this confidence (0–1) is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous," and ambiguity should not burn a retry or fire an escalation. Coerced/malformed grades are exempt and stay conservative. `0` disables. |
 | `reflect_experience` | `true` | Parse reflect's per-turn experience read (sentiment, friction, user observations) and feed it to Candor, post-mortems, and user-profile memory. |
 
 ---
@@ -205,6 +211,21 @@ Idle-time introspection: during snooze the agent examines its own memory, Candor
 
 ---
 
+## Space Suggestions
+
+Idle-time filing: during Snooze, Pernix reads the last few weeks of ordinary chats (archived ones included, machine sessions excluded) and makes one background-model call that groups them by the kind of work you keep coming back to — not the tool used or the day it happened. A group that clears the thresholds below becomes a suggestion, either a new space or a move into one you already have, surfaced as a row in the sidebar. Nothing is created, moved, or written to a directive file until you accept it in the review sheet; declining a topic remembers it (and near-synonyms of it) until you clear it from the **Declined** list. Off by default, and inert when off — the scan is absent from the idle ladder entirely. Toggles live in Settings → Autonomy & idle work → Space suggestions. Guide: [guides/spaces.md](guides/spaces.md#suggested-spaces).
+
+| Setting | Default | Description |
+|---|---|---|
+| `space_suggest_enabled` | `false` | Master switch. Off = no background call spent, no table read. |
+| `space_suggest_window_days` | `30` | How many days of chat history one scan looks back over. |
+| `space_suggest_min_sessions` | `5` | Chats a cluster needs before it is offered as a suggestion. |
+| `space_suggest_min_days` | `3` | Distinct calendar days those chats must span — a burst on one afternoon is not a habit. |
+| `space_suggest_scan_interval_hours` | `24` | Floor between scheduled scans (also gated on ten new chats having appeared since the last one). |
+| `space_suggest_ttl_days` | `14` | A pending suggestion nobody accepted or declined expires after this many days and may be offered again. |
+
+---
+
 ## Telos (Teleological Layer Add-on)
 
 A non-convergent drive with correction machinery over the whole loop: turn anomalies mint Questions, an idle-time SOUP generates cross-domain hypotheses (only falsifiable ones execute; the rest wait in a speculation pool), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (Ordo), detecting Goodhart binding, measuring goal discharge (Hevel), reconciling the agent's self-story against its append-only trace ledger, and keeping exploration entropy above floor. All state is markdown+YAML under `data/telos/`. Toggles live in Settings → Autonomy & idle work → Goals (Telos); everything applies hot except tool registration (restart). How it works: [internals/telos.md](internals/telos.md); derivation: [dev/telos-spec.md](dev/telos-spec.md).
@@ -212,6 +233,7 @@ A non-convergent drive with correction machinery over the whole loop: turn anoma
 | Setting | Default | Description |
 |---|---|---|
 | `telos_enabled` | `false` | Master switch. Off: no directories created, snooze Activity 16 skipped, cron never installs, post-task hook inert. Registers the `telos_status` / `telos_ask` tools (restart). |
+| `telos_dir` | `data/telos` | Directory holding Telos state: SOUP hypotheses, ledgers, and the append-only JSONL trace, all markdown+YAML. No Settings UI control; set via `POST /api/settings` or `data/settings.json`. |
 | `telos_root_text` | `"What is actually going on here, and what is it for?"` | The root objective — a question with no satisfaction predicate. Re-expressing it is an operator-only edit. |
 | `telos_schedule` | `0 4 * * *` | Daily slow-loop cron (UTC): retirement sweeps, with the weekly entropy-control block watermarked inside it. |
 | `telos_serendipity_budget` | `0.15` | Share of scheduler throughput reserved for high-surprise questions with no goal relevance. |
@@ -288,8 +310,21 @@ A governed, machine-editable policy store — routing hints and prompt notes the
 | `adaptive_max_auto_approvals_per_day` | `40` | Cap on veto-window auto-approvals per rolling 24h. |
 | `adaptive_usage_retire_days` | `45` | Entries with zero recorded uses over this many *instrumented* days (counted from the usage epoch, stamped on the sweep's first run) are retired — journaled soft-deletes, one aggregate notification, one-click rollback. Candor-owned and human-authored entries exempt. `0` disables. |
 | `adaptive_prompt_note_ttl_days` | `90` | Backstop TTL for `prompt_note` (the kind with no producer-side retirement loop). `0` = keep forever. |
+| `adaptive_harmful_retire_min_uses` | `5` | Failure-dominated retirement: an entry needs at least this many attributed outcomes (successes + failures, written by synthesis) before its success share is trusted enough to retire it. `0` disables the branch. |
+| `adaptive_harmful_retire_max_success` | `0.3` | Below this success share (0–1), a sufficiently-observed entry retires even though it is used — usage alone used to keep a provably harmful hint alive forever while an uncited good one died at the usage-retire window. Journaled soft-delete, one-click rollback; Candor- and user-authored entries are exempt. |
 | `adaptive_suspect_ttl_days` | `7` | A suspect flag raised by the passive post-mortem signal alone can never self-clear (its windows are frozen at the apply); it auto-clears with an annotation after this many days. Canary-confirmed flags are exempt. `0` = flags wait for your dismiss. |
 | `adaptive_agent_notes_enabled` | `false` | The `adaptive_note` tool: the live agent may mint `prompt_note`/`routing_hint` edits the moment it learns something — content lint applies, 2/day, normal pipeline + tripwire, never `policy`. Registration needs a restart. |
+
+---
+
+## Skill Self-Healing
+
+When a skill fails and the session running it finds a workaround, refine can fold that fix back into the skill's `SKILL.md` — the same veto-window contract as the Adaptive Layer's auto-approve: a pending proposal older than the window is machine-validated (skill exists and is enabled, change bounded, frontmatter preserved) and applied with a timestamped backup under `data/skill_backups/<skill>/`. Reject any proposal from the Explorer's Capabilities → Skills tab inside the window. No Settings UI control for these two knobs; set via `POST /api/settings` or `data/settings.json`.
+
+| Setting | Default | Description |
+|---|---|---|
+| `skill_proposal_auto_apply_after_hours` | `24` | Veto window before a pending SKILL.md proposal auto-applies. `0` disables auto-apply (manual Apply only). |
+| `skill_proposal_max_auto_applies_per_day` | `5` | Cap on auto-applied skill proposals per day. |
 
 ---
 
