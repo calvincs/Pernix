@@ -28,9 +28,9 @@ When both providers offer a model with the same name, **Ollama wins** (local, fr
 
 There used to be a DuckDuckGo fallback; it was removed because it produced unreliable results. The Tavily key is now the gate.
 
-### Why does the agent ask me to confirm things like web searches or deleting a skill?
+### Why does the agent ask me to confirm things like web searches or creating a skill?
 
-That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `create_skill`) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
+That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `create_skill`, and any MCP tool whose server marks it destructive) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
 
 Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Tools & safety → Remembered Approvals**.
 
@@ -83,6 +83,26 @@ A handful of settings need a server restart — anything that changes the bind a
 Changing these in the UI marks them as restart-pending. Use `POST /api/admin/restart` (localhost-only) or stop and start the process.
 
 Everything else applies immediately on Save.
+
+---
+
+## Interface
+
+### Why did my chat disappear from the sidebar?
+
+It was probably **archived**, not deleted. A daily sweep archives ordinary chats idle for more than `session_archive_idle_days` (default 30) — pinned chats are exempt, but space chats aren't, since archiving loses nothing. Archiving keeps every message; it just leaves the sidebar's regular list. Turn on the **Archived (N)** entry in the sidebar legend to see the archived group, open the chat and click **Restore**, or find it by search first (archived hits carry an "archived" chip). See [guides/sessions-and-chat.md#archiving-instead-of-deleting](guides/sessions-and-chat.md#archiving-instead-of-deleting).
+
+### Where did the Graph tab go in the State timeline?
+
+It's now **Map**, alongside two new tabs: **Lane** (one row per turn, opens on that view) and the existing **Timeline** list. Map still draws the state machine and the edges a session took, without Mermaid — a hand-laid SVG replaced it, which also fixed the graph rendering solid black on the light theme. Nothing you could see on Graph is gone, it's just organized differently now.
+
+### How do I get the light theme?
+
+**Settings → Providers & models → This browser → Appearance**, then pick System, Dark or Light. It's stored in that browser only (not synced across devices), and applies before the page paints so there's no flash on load.
+
+### How do I add an MCP server?
+
+Explorer → Capabilities → Servers (MCP), or Settings → Integrations → MCP Servers — paste a server config in the same `mcpServers` shape Claude Code, Cursor, and VS Code use, test it, and save. MCP is on by default but does nothing until a server is configured. Full setup, transports, and safety model: [mcp.md](mcp.md).
 
 ---
 

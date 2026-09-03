@@ -74,7 +74,7 @@ Finding things:
 - **Ctrl+F** searches the transcript on screen. A session opens on its most recent 200 messages, so **Load earlier messages** at the top brings older ones into range first.
 - **↑** in an empty composer recalls your message history.
 
-(`/help` in any chat lists all of these.)
+(`/help` in any chat lists all of these.) The permanent home for the theme toggle — System / Dark / Light — is **Settings → Providers & models → This browser → Appearance**, next to **Enter sends the message** (on by default with a mouse, off on touch, where Enter is the on-screen keyboard's newline key; Ctrl/Cmd+Enter always sends regardless). Both rows are stored in this browser only, never synced to the server or your other devices.
 
 ---
 
@@ -167,6 +167,8 @@ The override lives in `session.model_override` (not in global Settings). Set it 
 
 The other two model roles (Background and Backup) follow the global setting; only Primary is overridable per session.
 
+Every assistant reply also carries its own small chip — `qwen3-27b · 4.2s` — under the message, independent of the status bar. A failover or an in-turn model switch changes which model answers mid-conversation, so the chip is saved per message rather than read off the current setting; reopening an old transcript still shows who actually answered each turn.
+
 ---
 
 ## Backpressure and the message queue
@@ -181,4 +183,4 @@ If the queue fills, further submissions get rejected immediately with a `session
 
 Some tools require human input. The most common is `ask_user`: the agent describes a question or a proposed dangerous action; the session enters `AWAITING_USER` and stops consuming LLM time. As soon as you answer (in the UI or via `POST /api/questions/{id}/answer`), a new turn begins from Scout.
 
-The `ask_user` flow is what gates dangerous tools — see [../faq.md](../faq.md#why-does-the-agent-ask-me-to-confirm-things-like-web-searches-or-deleting-a-skill).
+The `ask_user` flow is what gates dangerous tools — see [../faq.md](../faq.md#why-does-the-agent-ask-me-to-confirm-things-like-web-searches-or-creating-a-skill).
