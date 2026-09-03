@@ -1022,10 +1022,10 @@ function _renderSpaceGroup(space, group, list, activeSid, childrenByParent, side
         ? [toggle, addBtn, ...controls]
         : [toggle, el('div', { class: 'space-actions' }, [addBtn, ...controls])]);
 
-    // The body carries the space's colour too — not just the header — because
-    // the rail that says "you are still inside this space" once the header has
-    // scrolled off lives on the body itself (CSS ::before), and it has to read
-    // --space-color off something still on screen when that happens.
+    // The body carries the space's colour too, not just the header: the rail
+    // that says "you are still inside this space" once the header has scrolled
+    // off is the body's own ::before, and the body is the header's sibling,
+    // not its child, so it inherits nothing the header sets.
     const body = el('div', {
         class: 'session-group-body space-group-body' + (collapsed ? ' collapsed' : ''),
         style: `--space-color: ${space.color}`,
