@@ -223,6 +223,62 @@ that the drawer row, the header title and anything else can share.
 
 ---
 
+## The State timeline
+
+`static/js/components/modals/timeline.js`, opened by the state badge in the
+status bar. Three tabs, in reading order:
+
+| Tab | What it is | Where its data comes from |
+|---|---|---|
+| **Lane** (default) | One row per **turn**, oldest at the top | `GET /api/sessions/{id}/turns` |
+| **Graph** | A Mermaid state diagram of the states visited, with a dwell-time bar and a tool tally | `/state-log` |
+| **Timeline** | Every transition and tool call interleaved by timestamp, grouped into collapsible turns, with a filter bar | `/state-log` + the transcript |
+
+**A lane row** is a mono label (`T17`, plus `↳ T9` when the turn continued a
+question or a worker wait, and `·2` for a retry), a bar, and the turn's
+duration. The bar is the turn's **phases** as proportional segments — each row
+normalised to its *own* `elapsed_ms`, so the shape of a four-second turn and a
+forty-minute one are comparable and only the duration at the right edge tells
+them apart. A phase under 1.5% still draws at a 3px floor, so it stays
+hoverable. **Tool calls are 2px ticks** placed by the time the call was issued;
+an errored call's tick takes `--error`. A turn still running gets a pulsing end
+marker and reads its elapsed as so-far. A row is a `role="button"`: Enter or
+Space opens its Story, Arrow Up and Down move between rows, and the selected
+row carries `aria-current`.
+
+Every colour is a `--state-<name>-{fg,bg}` token from `tokens.css`, referenced
+from the element's own inline style as a `var()`. That matters because the
+Graph tab cannot do the same: a Mermaid `classDef` is a comma-separated string,
+so it needs a resolved `#rrggbb` and goes through `theme.js`'s `hex()` — which
+is where the "every state painted black" bug of `3deb575` lived. The lane has
+no such bridge to get wrong, and a theme swap repaints it with no JS at all.
+
+**The Story** under the lane is the selected turn (the newest, on open) in the
+order the agent lived it — four disclosure cards, all reading fields of that
+same turn record:
+
+- **Plan** — the `scout` report: the approach, the tools as chips, the
+  rationale, any recalled memory (folded), and the scout model, its latency and
+  a badge for `from_cache` / `from_fallback` / `reused_prior`.
+- **Act** — the turn's tool calls, errors first, then the token bill. A
+  `cost_estimate` of `null` prints *nothing*: an unpriced local model has no
+  cost, which is not a cost of zero.
+- **Verify** — the `reflect` chain with its verdict chips, then the `eval`
+  gates with their commands, exit codes and folded output tails.
+- **Remembers** — compactions and notices. Omitted entirely when there are
+  none.
+
+The Timeline tab's turn headers each carry a **Story** button that switches to
+the Lane with that turn selected, so the two readings of one turn stay joined.
+
+The endpoint is the read model, not a slice of the other two: it does the join
+server-side that this modal used to do in the browser after downloading the
+whole state log *and* the whole transcript. See "Get Turns" in
+[`docs/api.md`](../api.md) for the record's shape and for what a turn, a phase
+and `was_error` each mean.
+
+---
+
 ## Sending a message from a keyboard
 
 `shouldSendOnKey(e, { enterSends, touch })` in `app.js` is the whole decision,
