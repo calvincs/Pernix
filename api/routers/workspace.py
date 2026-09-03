@@ -262,7 +262,21 @@ async def delete_workspace_entry(path: str):
         for dirpath, dirnames, filenames in os.walk(str(target)):
             for name in dirnames + filenames:
                 entry = Path(dirpath) / name
-                if entry.is_symlink() and not entry.resolve().is_relative_to(workspace):
+                if not entry.is_symlink():
+                    continue
+                try:
+                    dest = entry.resolve()
+                except (OSError, RuntimeError):
+                    # Unresolvable link — a self-referential or circular one,
+                    # or a dangling target. There is no real path outside the
+                    # workspace for it to reach, and rmtree unlinks the link
+                    # itself without following it. Letting resolve() raise
+                    # turned the whole delete into a 500, so such a directory
+                    # could never be removed from the UI. Both exception types
+                    # are needed: pathlib re-raises the ELOOP OSError as a
+                    # RuntimeError("Symlink loop from ...").
+                    continue
+                if not dest.is_relative_to(workspace):
                     raise HTTPException(
                         400, detail=f"Refusing to delete: external symlink at {entry.relative_to(workspace)}"
                     )
