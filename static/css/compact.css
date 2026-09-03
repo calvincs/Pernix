@@ -480,3 +480,23 @@ body[data-compact] .space-dir-action {
 body[data-compact] .space-dir-mode-cell {
     justify-content: space-between;
 }
+
+/* ------------------------------------------------------------------
+   State timeline — the Lane tab in a bottom sheet
+
+   layout.css widens #timeline-modal to 820px so a turn's phase shares stay
+   legible on a desktop. That is an ID selector and .modal-card above is a
+   class one, so the sheet has to take its full width back by name or a
+   390px phone gets a 366px card floating inside a 390px overlay.
+
+   The label and duration columns give up what they can spare: at 390px the
+   bar itself is what has to survive, and it is the one part that cannot be
+   read at a glance if it is 140px wide.
+   ------------------------------------------------------------------ */
+#timeline-modal {
+    max-width: 100%;
+}
+.tl-lane-list {
+    --tl-lane-label-w: 84px;
+    --tl-lane-elapsed-w: 46px;
+}

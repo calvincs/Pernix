@@ -1,6 +1,13 @@
 // Pernix — State timeline modal
 //
-// Two tabs:
+// Three tabs:
+//   * Lane     — one row per TURN, oldest at the top. Each row is the turn's
+//                phases drawn as proportional segments of one bar, its tool
+//                calls as ticks placed by start time, and its duration at the
+//                right edge. Selecting a row opens its Story below the lane:
+//                Plan (the scout report), Act (the tool calls and the token
+//                bill), Verify (the reflect chain and the eval gates) and
+//                Remembers (compactions and notices).
 //   * Graph    — Mermaid stateDiagram-v2 of visited states, edge counts, current
 //                state highlighted, invariant-violation edges flagged, per-state
 //                dwell-time breakdown, per-turn tool tally. Clicking a state
@@ -11,10 +18,20 @@
 //                backward pagination ("load older").
 //
 // Data sources:
+//   GET /api/sessions/{sid}/turns?limit=20                  (the lane + story)
+//   GET /api/sessions/{sid}/turns?before_turn=N             (older turn pages)
 //   GET /api/sessions/{sid}/state-log?limit=500&tail=true   (newest window)
 //   GET /api/sessions/{sid}/state-log?before_id=N           (older pages)
 //   GET /api/sessions/{sid}                                 (messages → tool calls)
-// Merge key: state row `timestamp_ms` vs message `created_at` (ISO) → ms.
+// Merge key for the two list-tab sources: state row `timestamp_ms` vs message
+// `created_at` (ISO) → ms. The lane needs no merge at all — /turns is the read
+// model that already did the join, server-side (see docs/api.md, "Get Turns").
+//
+// Lane colours come straight from the --state-<name>-{fg,bg} custom properties
+// as `var()` references, not through theme.js's hex() bridge: these are HTML
+// elements, so the browser resolves the token itself and a theme swap repaints
+// them with no JS involved. The Mermaid classDefs below still need real hex,
+// because a comma-separated classDef cannot carry a color-mix() token stream.
 //
 // Mermaid is vendored and lazy-loaded from disk on first open.
 
@@ -35,11 +52,29 @@ const MERMAID_SRC = '/static/vendor/mermaid.min.js';
 const PAGE_LIMIT = 500;
 const GAP_MS = 30_000; // idle gap worth flagging between adjacent rows
 
+// Lane paging. 20 turns is the endpoint's own default and about two screens
+// of rows; "Load older turns" walks backward from there with before_turn.
+const TURN_PAGE_LIMIT = 20;
+// A phase this short is invisible at any realistic bar width, so it is drawn
+// at a floor instead of at its true fraction. 3px is the narrowest strip that
+// still reads as a segment and still takes a hover.
+const LANE_MIN_SEG_PCT = 1.5;
+
 let _overlay = null;
 let _closeOverlay = null;  // teardown from a11y.js openOverlay()
 let _mermaid = null;
 let _mermaidPromise = null;
 let _data = { stateLog: [], messages: [], liveTools: [], hasOlder: false };
+
+// The lane's own data: turn records from /turns, OLDEST FIRST (the endpoint
+// answers newest first; the lane reads top-to-bottom like the transcript).
+let _turns = [];
+let _turnsHasOlder = false;
+let _selectedTurn = null;
+let _laneListEl = null;
+let _storyEl = null;
+let _laneRefreshTimer = null;   // pending debounced refetch of the newest page
+let _laneLoadToken = 0;         // newest lane fetch wins
 
 // In-flight tool rows: appended on tool.start, upgraded in place on tool.call.
 // Without these, a multi-minute tool run (rlm_process, bash, spawn_worker)
@@ -66,8 +101,18 @@ export async function openTimeline() {
 
     _filter = { mode: 'all', q: '' };
     _lastRowTs = 0;
+    _turns = [];
+    _turnsHasOlder = false;
+    _selectedTurn = null;
 
-    const graphPane = el('div', { class: 'tab-content active', 'data-tab': 'graph' }, [
+    _laneListEl = el('div', { class: 'tl-lane-list', id: 'timeline-lane' });
+    _storyEl = el('div', { class: 'tl-story', id: 'timeline-story' });
+    const lanePane = el('div', { class: 'tab-content active', 'data-tab': 'lane' }, [
+        _laneListEl,
+        _storyEl,
+    ]);
+
+    const graphPane = el('div', { class: 'tab-content', 'data-tab': 'graph' }, [
         el('div', { class: 'timeline-graph-status' }, [text('Loading…')]),
         el('div', { class: 'timeline-graph-container', id: 'timeline-graph' }),
         el('div', { class: 'timeline-graph-caption', id: 'timeline-graph-caption' }),
@@ -79,10 +124,11 @@ export async function openTimeline() {
     ]);
 
     _tabBtns = [
-        el('button', { class: 'tab-btn active', 'data-tab': 'graph' }, [text('Graph')]),
+        el('button', { class: 'tab-btn active', 'data-tab': 'lane' }, [text('Lane')]),
+        el('button', { class: 'tab-btn', 'data-tab': 'graph' }, [text('Graph')]),
         el('button', { class: 'tab-btn', 'data-tab': 'timeline' }, [text('Timeline')]),
     ];
-    _panes = [graphPane, listPane];
+    _panes = [lanePane, graphPane, listPane];
     _tabBtns.forEach(btn => {
         btn.addEventListener('click', () => _switchTab(btn.getAttribute('data-tab')));
     });
@@ -96,7 +142,7 @@ export async function openTimeline() {
     }, [text('Copy JSON')]);
     copyBtn.addEventListener('click', () => _copyExport(copyBtn));
 
-    const modalBody = el('div', { class: 'modal-body timeline-modal-content' }, [graphPane, listPane]);
+    const modalBody = el('div', { class: 'modal-body timeline-modal-content' }, [lanePane, graphPane, listPane]);
     _scroller = modalBody;
 
     const card = el('div', {
@@ -126,7 +172,9 @@ export async function openTimeline() {
 
     await _load();
     _renderTimeline();
-    _renderGraph(graphPane);
+    _renderLane();
+    // The Graph tab is no longer the one on screen, and mermaid.min.js is a
+    // ~1MB parse. It loads on the first switch to it instead of on every open.
 }
 
 export function closeTimeline() {
@@ -139,15 +187,25 @@ export function closeTimeline() {
         clearTimeout(_graphRefreshTimer);
         _graphRefreshTimer = null;
     }
+    if (_laneRefreshTimer) {
+        clearTimeout(_laneRefreshTimer);
+        _laneRefreshTimer = null;
+    }
     // Invalidate any _renderGraph still parked on an await, so it cannot
-    // touch a pane belonging to a modal that is already gone.
+    // touch a pane belonging to a modal that is already gone. Same for a
+    // lane fetch in flight.
     _graphRenderToken++;
+    _laneLoadToken++;
     _scroller = null;
     _bodyEl = null;
     _filterInput = null;
     _filterBtns = [];
     _tabBtns = [];
     _panes = [];
+    _laneListEl = null;
+    _storyEl = null;
+    _turns = [];
+    _selectedTurn = null;
 }
 
 export function isTimelineOpen() {
@@ -161,6 +219,11 @@ function _switchTab(target) {
     if (target === 'graph') {
         const pane = _panes.find(p => p.getAttribute('data-tab') === 'graph');
         if (pane) _renderGraph(pane);
+    } else if (target === 'lane' && _scroller) {
+        // The lane reads top-down and its "Load older turns" control is at
+        // the top, so entering it lands at the top — the opposite of the
+        // Timeline tab, whose newest rows are at the bottom.
+        _scroller.scrollTop = 0;
     } else if (target === 'timeline' && _scroller) {
         // The .modal-body scroller is shared between tabs — land on the
         // newest rows when entering the timeline.
@@ -194,6 +257,7 @@ export function appendTimelineRow(row) {
     _data.stateLog.push(data);
     _appendLiveEntry({ kind: 'state', ts, turn: data.turn_id, data });
     _refreshGraphIfVisible();
+    _scheduleLaneRefresh();
 }
 
 // Live-append from the tool.start SSE handler in app.js: a "running" row
@@ -211,6 +275,7 @@ export function appendTimelineToolStart(tool) {
     };
     const rowEl = _appendLiveEntry({ kind: 'tool', ts: entry.ts, turn: null, data: entry });
     if (rowEl) _pendingToolRows.push({ name: entry.name, startTs: entry.ts, el: rowEl });
+    _scheduleLaneRefresh();
 }
 
 // Live-append from the tool.call SSE handler in app.js. Mirrors what the
@@ -234,11 +299,13 @@ export function appendTimelineToolRow(tool) {
         pending.el.replaceWith(_buildToolRow(entry, entry.ts));
         _data.liveTools.push(entry);
         _refreshGraphIfVisible();
+        _scheduleLaneRefresh();
         return;
     }
     _data.liveTools.push(entry);
     _appendLiveEntry({ kind: 'tool', ts: entry.ts, turn: null, data: entry });
     _refreshGraphIfVisible();
+    _scheduleLaneRefresh();
 }
 
 // Coalesce graph refreshes. Every live tool.start/tool.call invalidates the
@@ -292,22 +359,27 @@ function _appendLiveEntry(entry) {
 }
 
 async function _load() {
-    try {
-        const [logRes, sessRes] = await Promise.all([
-            get(`/api/sessions/${state.sid}/state-log?limit=${PAGE_LIMIT}&tail=true`),
-            get(`/api/sessions/${state.sid}`),
-        ]);
-        const entries = logRes.entries || [];
-        _data = {
-            stateLog: entries,
-            messages: sessRes.messages || [],
-            liveTools: [],
-            hasOlder: entries.length === PAGE_LIMIT,
-        };
-    } catch (e) {
-        console.error('Failed to load timeline data:', e);
-        _data = { stateLog: [], messages: [], liveTools: [], hasOlder: false };
-    }
+    // Three requests, one round trip. /turns is its own read model rather
+    // than a slice of the other two — it is the only one the Lane tab reads.
+    const [logRes, sessRes, turnRes] = await Promise.all([
+        get(`/api/sessions/${state.sid}/state-log?limit=${PAGE_LIMIT}&tail=true`)
+            .catch(e => { console.error('Failed to load the state log:', e); return null; }),
+        get(`/api/sessions/${state.sid}`)
+            .catch(e => { console.error('Failed to load the transcript:', e); return null; }),
+        get(`/api/sessions/${state.sid}/turns?limit=${TURN_PAGE_LIMIT}`)
+            .catch(e => { console.error('Failed to load the turn lane:', e); return null; }),
+    ]);
+    const entries = (logRes && logRes.entries) || [];
+    _data = {
+        stateLog: entries,
+        messages: (sessRes && sessRes.messages) || [],
+        liveTools: [],
+        hasOlder: entries.length === PAGE_LIMIT,
+    };
+    _turns = _turnsOldestFirst(turnRes);
+    _turnsHasOlder = !!(turnRes && turnRes.has_more);
+    // The newest turn is the one anybody opening the timeline came to read.
+    _selectedTurn = _turns.length ? _turns[_turns.length - 1].turn_id : null;
     _pendingToolRows = [];
 }
 
@@ -330,6 +402,514 @@ async function _loadOlder(btn) {
         btn.disabled = false;
         btn.textContent = 'Load older';
     }
+}
+
+// ---------------------------------------------------------------------------
+// Lane tab — one row per turn, oldest at the top
+//
+// Everything here is read straight off GET /api/sessions/{sid}/turns. The lane
+// does no joining and no arithmetic beyond turning a phase's elapsed_ms into a
+// percentage of its own turn: each row is normalised to ITSELF, so a 4-second
+// turn and a 40-minute turn are both a full-width bar and the shape of the
+// work inside them is comparable at a glance. Comparing their lengths is what
+// the duration at the right edge is for.
+// ---------------------------------------------------------------------------
+
+function _turnsOldestFirst(res) {
+    // The endpoint answers newest first (it pages backward); the lane reads
+    // top-to-bottom like the transcript does.
+    return ((res && res.turns) || []).slice().reverse();
+}
+
+function _selectedTurnRecord() {
+    return _turns.find(t => t.turn_id === _selectedTurn) || null;
+}
+
+// A debounced refetch of the NEWEST page, armed by every live row app.js
+// appends. The live SSE row lands in the Timeline tab immediately; the lane
+// is a server-side read model, so what it needs is the page again — once,
+// after the burst, not once per event.
+const LANE_REFRESH_DEBOUNCE_MS = 700;
+
+function _scheduleLaneRefresh() {
+    if (!_overlay || !state.sid) return;
+    if (_laneRefreshTimer) clearTimeout(_laneRefreshTimer);
+    _laneRefreshTimer = setTimeout(async () => {
+        _laneRefreshTimer = null;
+        const token = ++_laneLoadToken;
+        let res;
+        try {
+            res = await get(`/api/sessions/${state.sid}/turns?limit=${TURN_PAGE_LIMIT}`);
+        } catch (e) {
+            console.error('Failed to refresh the turn lane:', e);
+            return;
+        }
+        // The modal may have closed, or a newer refresh started, while this
+        // one was in flight.
+        if (token !== _laneLoadToken || !_laneListEl) return;
+        const head = _turnsOldestFirst(res);
+        if (!head.length) return;
+        // Older pages the reader already asked for stay; only the window the
+        // refetch covers is replaced.
+        const older = _turns.filter(t => t.turn_id < head[0].turn_id);
+        _turns = older.concat(head);
+        if (!older.length) _turnsHasOlder = !!res.has_more;
+        if (!_turns.some(t => t.turn_id === _selectedTurn)) {
+            _selectedTurn = _turns[_turns.length - 1].turn_id;
+        }
+        _renderLane();
+    }, LANE_REFRESH_DEBOUNCE_MS);
+}
+
+async function _loadOlderTurns(btn) {
+    if (!_turns.length) return;
+    btn.disabled = true;
+    btn.textContent = 'Loading…';
+    try {
+        const res = await get(
+            `/api/sessions/${state.sid}/turns?before_turn=${_turns[0].turn_id}&limit=${TURN_PAGE_LIMIT}`);
+        _turns = _turnsOldestFirst(res).concat(_turns);
+        _turnsHasOlder = !!res.has_more;
+        _renderLane();
+    } catch (e) {
+        console.error('Failed to load older turns:', e);
+        btn.disabled = false;
+        btn.textContent = 'Load older turns';
+    }
+}
+
+function _renderLane() {
+    if (!_laneListEl) return;
+    _laneListEl.innerHTML = '';
+
+    if (!_turns.length) {
+        _laneListEl.appendChild(el('div', { class: 'timeline-empty' }, [
+            text('No turns yet — this session has not run one.'),
+        ]));
+        if (_storyEl) _storyEl.innerHTML = '';
+        return;
+    }
+
+    if (_turnsHasOlder) {
+        const btn = el('button', { class: 'tl-lane-older-btn' }, [text('Load older turns')]);
+        btn.addEventListener('click', () => _loadOlderTurns(btn));
+        _laneListEl.appendChild(el('div', { class: 'tl-lane-older' }, [btn]));
+    }
+
+    for (const turn of _turns) _laneListEl.appendChild(_buildLaneRow(turn));
+    _syncLaneSelection();
+    _renderStory();
+}
+
+function _buildLaneRow(turn) {
+    const label = el('span', { class: 'tl-lane-label' }, [
+        el('span', { class: 'tl-lane-id' }, [text(`T${turn.turn_id}`)]),
+    ]);
+    if (turn.parent_turn_id != null) {
+        label.appendChild(el('span', {
+            class: 'tl-lane-parent',
+            title: `Continues turn ${turn.parent_turn_id}`,
+        }, [text(`↳ T${turn.parent_turn_id}`)]));
+    }
+    if (turn.retry_index > 0) {
+        label.appendChild(el('span', {
+            class: 'tl-lane-retry',
+            title: `${turn.retry_index} retr${turn.retry_index === 1 ? 'y' : 'ies'}`,
+        }, [text(`·${turn.retry_index}`)]));
+    }
+    const violations = turn.invariant_violations || [];
+    if (violations.length) {
+        label.appendChild(el('span', {
+            class: 'tl-lane-warn',
+            title: violations.join(', '),
+        }, [icon('warning', { size: 11 })]));
+    }
+
+    const elapsed = el('span', { class: 'tl-lane-elapsed' }, [
+        text(turn.running ? `${_fmtMs(turn.elapsed_ms) || '0ms'}…` : (_fmtMs(turn.elapsed_ms) || '—')),
+    ]);
+
+    const row = el('div', {
+        class: `tl-lane-row${turn.running ? ' running' : ''}${violations.length ? ' warned' : ''}`,
+        role: 'button',
+        tabindex: '0',
+        'data-turn': String(turn.turn_id),
+        'aria-label': _laneRowLabel(turn),
+    }, [label, _buildLaneBar(turn), elapsed]);
+
+    row.addEventListener('click', () => _selectTurn(turn.turn_id));
+    row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+            e.preventDefault();
+            _selectTurn(turn.turn_id);
+            return;
+        }
+        if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+        e.preventDefault();
+        const rows = [..._laneListEl.querySelectorAll('.tl-lane-row')];
+        const at = rows.indexOf(row);
+        const next = rows[at + (e.key === 'ArrowUp' ? -1 : 1)];
+        if (!next) return;
+        _selectTurn(Number(next.dataset.turn), { focus: true });
+    });
+    return row;
+}
+
+function _laneRowLabel(turn) {
+    const parts = [`Turn ${turn.turn_id}`];
+    if (turn.parent_turn_id != null) parts.push(`continuing turn ${turn.parent_turn_id}`);
+    if (turn.retry_index > 0) parts.push(`retry ${turn.retry_index}`);
+    parts.push(turn.running ? 'still running' : (_fmtMs(turn.elapsed_ms) || 'no elapsed time'));
+    const tools = (turn.tool_calls || []).length;
+    if (tools) parts.push(`${tools} tool call${tools === 1 ? '' : 's'}`);
+    if (turn.termination_reason) parts.push(turn.termination_reason);
+    return parts.join(', ');
+}
+
+// One bar per turn: the phases as proportional segments, the tool calls as
+// ticks positioned by when they were issued, and — while the turn is live —
+// a pulsing marker at the leading edge.
+function _buildLaneBar(turn) {
+    const phases = turn.phases || [];
+    const total = turn.elapsed_ms || phases.reduce((s, p) => s + (p.elapsed_ms || 0), 0);
+    const bar = el('div', { class: 'tl-lane-bar' });
+
+    if (!phases.length || !total) {
+        bar.appendChild(el('div', { class: 'tl-lane-seg tl-lane-seg-empty', style: 'width:100%' }));
+    }
+    for (const phase of phases) {
+        const pct = total ? ((phase.elapsed_ms || 0) / total) * 100 : 0;
+        const thin = pct < LANE_MIN_SEG_PCT;
+        const state_ = phase.state || 'unknown';
+        // var() with a fallback, so an unrecognised state paints a real
+        // surface colour rather than dropping to transparent.
+        bar.appendChild(el('div', {
+            class: `tl-lane-seg${thin ? ' tl-lane-seg-thin' : ''}`,
+            'data-state': state_,
+            style: `width:${pct.toFixed(4)}%;`
+                + `background:var(--state-${state_}-bg, var(--bg-surface));`
+                + `border-bottom-color:var(--state-${state_}-fg, var(--text-dim));`,
+            title: _phaseTitle(phase),
+        }));
+    }
+
+    const startMs = _isoToMs(turn.started_at);
+    for (const call of turn.tool_calls || []) {
+        const at = _isoToMs(call.started_at);
+        if (!at || !startMs || !total) continue;
+        const pct = Math.min(100, Math.max(0, ((at - startMs) / total) * 100));
+        bar.appendChild(el('div', {
+            class: `tl-lane-tick${call.was_error ? ' error' : ''}`,
+            style: `left:${pct.toFixed(4)}%`,
+            title: `${call.name || 'tool'} · ${_fmtMs(call.latency_ms) || '—'}`
+                + (call.was_error ? ' · error' : ''),
+        }));
+    }
+
+    if (turn.running) bar.appendChild(el('div', { class: 'tl-lane-live', title: 'Still running' }));
+    return bar;
+}
+
+function _phaseTitle(phase) {
+    const flow = phase.reason_out
+        ? `${phase.reason_in || '—'} → ${phase.reason_out}`
+        : `${phase.reason_in || '—'} → (still in this phase)`;
+    return `${phase.state} · ${_fmtMs(phase.elapsed_ms) || '0ms'} · ${flow}`;
+}
+
+function _syncLaneSelection() {
+    if (!_laneListEl) return;
+    for (const row of _laneListEl.querySelectorAll('.tl-lane-row')) {
+        const on = row.dataset.turn === String(_selectedTurn);
+        row.classList.toggle('selected', on);
+        if (on) row.setAttribute('aria-current', 'true');
+        else row.removeAttribute('aria-current');
+    }
+}
+
+function _selectTurn(turnId, { focus = false } = {}) {
+    if (!_turns.some(t => t.turn_id === turnId)) return;
+    _selectedTurn = turnId;
+    _syncLaneSelection();
+    _renderStory();
+    if (!focus || !_laneListEl) return;
+    const row = _laneListEl.querySelector(`.tl-lane-row[data-turn="${turnId}"]`);
+    if (row) row.focus();
+}
+
+// Entry point for the Timeline tab's per-turn "Story" affordance.
+function _showStoryFor(turnId) {
+    _switchTab('lane');
+    _selectTurn(turnId, { focus: true });
+}
+
+// ---------------------------------------------------------------------------
+// Story — the selected turn, in the order the agent lived it
+// ---------------------------------------------------------------------------
+
+function _renderStory() {
+    if (!_storyEl) return;
+    _storyEl.innerHTML = '';
+    const turn = _selectedTurnRecord();
+    if (!turn) return;
+
+    _storyEl.appendChild(el('div', { class: 'tl-story-head' }, [
+        el('span', { class: 'tl-story-turn' }, [text(`T${turn.turn_id}`)]),
+        el('span', { class: 'tl-story-when' }, [text(_fmtStamp(turn.started_at))]),
+        el('span', { class: 'tl-story-when' }, [
+            text(turn.running ? 'running' : (_fmtMs(turn.elapsed_ms) || '—')),
+        ]),
+        ...(turn.termination_reason
+            ? [el('span', { class: `tl-turn-term tl-turn-term-${turn.termination_reason.replace(/_/g, '-')}` },
+                [text(turn.termination_reason)])]
+            : []),
+    ]));
+
+    _storyEl.appendChild(_planCard(turn));
+    _storyEl.appendChild(_actCard(turn));
+    _storyEl.appendChild(_verifyCard(turn));
+    const remembers = _remembersCard(turn);
+    if (remembers) _storyEl.appendChild(remembers);
+}
+
+// A story card: a mono eyebrow that is also the disclosure control.
+function _storyCard(eyebrow, children, { open = true, cls = '' } = {}) {
+    const head = el('div', { class: 'tl-card-head' }, [
+        el('span', { class: 'tl-card-chevron' }, [icon('chevron-down', { size: 10 })]),
+        el('span', { class: 'tl-card-eyebrow' }, [text(eyebrow)]),
+    ]);
+    const body = el('div', { class: 'tl-card-body' }, children.filter(Boolean));
+    const card = el('div', { class: `tl-card${cls ? ` ${cls}` : ''}${open ? '' : ' collapsed'}` }, [head, body]);
+    _makeDisclosure(
+        head,
+        () => !card.classList.contains('collapsed'),
+        () => card.classList.toggle('collapsed'),
+    );
+    head.setAttribute('aria-label', `${eyebrow} — this turn`);
+    return card;
+}
+
+function _storyEmpty(msg) {
+    return el('div', { class: 'tl-story-empty' }, [text(msg)]);
+}
+
+function _storyField(label, value) {
+    if (value == null || value === '') return null;
+    return el('div', { class: 'tl-story-field' }, [
+        el('span', { class: 'tl-story-key' }, [text(label)]),
+        el('span', { class: 'tl-story-val' }, [text(String(value))]),
+    ]);
+}
+
+// A small nested disclosure for the bulky parts — recalled memory, a gate's
+// output tail — that are worth keeping but not worth opening on.
+function _storyFold(label, body) {
+    const head = el('div', { class: 'tl-fold-head' }, [
+        el('span', { class: 'tl-card-chevron' }, [icon('chevron-down', { size: 9 })]),
+        el('span', {}, [text(label)]),
+    ]);
+    const wrap = el('div', { class: 'tl-fold collapsed' }, [head, el('div', { class: 'tl-fold-body' }, [body])]);
+    _makeDisclosure(head, () => !wrap.classList.contains('collapsed'), () => wrap.classList.toggle('collapsed'));
+    head.setAttribute('aria-label', label);
+    return wrap;
+}
+
+function _plainText(value) {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+}
+
+// --- Plan --------------------------------------------------------------
+
+function _planCard(turn) {
+    const scout = turn.scout;
+    if (!scout) return _storyCard('Plan', [_storyEmpty('No scout report for this turn.')]);
+    if (typeof scout.raw === 'string' && scout.approach === undefined) {
+        return _storyCard('Plan', [
+            _storyEmpty('The scout report did not parse. Its raw head:'),
+            el('pre', { class: 'tl-story-raw' }, [text(scout.raw)]),
+        ]);
+    }
+
+    const parts = [];
+    if (scout.approach) parts.push(el('p', { class: 'tl-story-prose' }, [text(String(scout.approach))]));
+
+    const tools = Array.isArray(scout.tools) ? scout.tools.filter(Boolean) : [];
+    if (tools.length) {
+        parts.push(el('div', { class: 'tl-chip-row' },
+            tools.map(t => el('span', { class: 'tl-chip' }, [text(String(t))]))));
+    }
+    if (scout.tool_rationale) {
+        parts.push(el('p', { class: 'tl-story-note' }, [text(String(scout.tool_rationale))]));
+    }
+    const memory = _plainText(scout.memory).trim();
+    if (memory) parts.push(_storyFold('Memory recalled', el('pre', { class: 'tl-story-raw' }, [text(memory)])));
+
+    const meta = [];
+    const model = scout.scout_model || scout.model;
+    if (model) meta.push(el('span', {}, [text(`scout: ${model}`)]));
+    if (scout.latency_ms) meta.push(el('span', {}, [text(_fmtMs(scout.latency_ms))]));
+    for (const [key, label] of [['from_cache', 'cached'], ['from_fallback', 'fallback'], ['reused_prior', 'reused']]) {
+        if (scout[key]) meta.push(el('span', { class: 'tl-badge tl-badge-plan' }, [text(label)]));
+    }
+    if (meta.length) parts.push(el('div', { class: 'tl-story-meta' }, meta));
+
+    if (!parts.length) parts.push(_storyEmpty('The scout report is empty.'));
+    return _storyCard('Plan', parts);
+}
+
+// --- Act ---------------------------------------------------------------
+
+function _actCard(turn) {
+    const parts = [];
+    // Errors first: the reason anyone opens this card is to find the call
+    // that went wrong, and it is rarely the first one made.
+    const calls = (turn.tool_calls || []).slice()
+        .sort((a, b) => (b.was_error ? 1 : 0) - (a.was_error ? 1 : 0));
+    if (!calls.length) {
+        parts.push(_storyEmpty('No tool calls in this turn.'));
+    } else {
+        parts.push(el('div', { class: 'tl-act-list' }, calls.map(_buildActRow)));
+    }
+
+    const tokens = turn.tokens || {};
+    const meta = [];
+    if (tokens.total) {
+        meta.push(el('span', { class: 'tl-act-tokens' }, [
+            text(`${_fmtNum(tokens.prompt)} / ${_fmtNum(tokens.completion)} / ${_fmtNum(tokens.total)} tok`),
+        ]));
+    }
+    if (tokens.calls) meta.push(el('span', {}, [text(`${tokens.calls} call${tokens.calls === 1 ? '' : 's'}`)]));
+    const model = turn.model || (Array.isArray(tokens.models) && tokens.models.length ? tokens.models[0] : null);
+    if (model) meta.push(el('span', {}, [text(model)]));
+    // Null cost is "nobody priced it", which is not "it was free" — an
+    // unpriced local model must never read as $0.00.
+    if (typeof tokens.cost_estimate === 'number') {
+        meta.push(el('span', {}, [text(`$${tokens.cost_estimate.toFixed(4)}`)]));
+    }
+    if (meta.length) parts.push(el('div', { class: 'tl-story-meta' }, meta));
+    return _storyCard('Act', parts);
+}
+
+function _buildActRow(call) {
+    const head = [
+        el('span', { class: 'tl-act-name' }, [text(call.name || 'tool')]),
+        el('span', { class: 'tl-act-args' }, [text(call.args_summary || '')]),
+    ];
+    if (call.latency_ms != null) {
+        const cls = call.latency_ms < 500 ? 'fast' : call.latency_ms < 2000 ? 'medium' : 'slow';
+        head.push(el('span', { class: `tool-latency ${cls}` }, [text(`${call.latency_ms}ms`)]));
+    }
+    if (call.was_error) head.push(el('span', { class: 'tl-chip tl-chip-fail' }, [text('error')]));
+    return el('div', { class: `tl-act-row${call.was_error ? ' error' : ''}` }, head);
+}
+
+// --- Verify ------------------------------------------------------------
+
+const _VERDICT_CLASS = { pass: 'tl-chip-pass', retry: 'tl-chip-retry', escalate: 'tl-chip-escalate' };
+
+function _verifyCard(turn) {
+    const reflects = turn.reflect || [];
+    const evals = turn.eval || [];
+    if (!reflects.length && !evals.length) {
+        return _storyCard('Verify', [_storyEmpty('No verification ran.')]);
+    }
+
+    const parts = [];
+    for (const entry of reflects) {
+        const head = [
+            el('span', { class: 'tl-verify-attempt' }, [text(`reflect ${entry.attempt}`)]),
+        ];
+        if (entry.verdict) {
+            head.push(el('span', {
+                class: `tl-chip ${_VERDICT_CLASS[entry.verdict] || 'tl-chip-retry'}`,
+            }, [text(entry.verdict)]));
+        }
+        if (typeof entry.raw === 'string') head.push(el('span', { class: 'tl-chip' }, [text('unparsed')]));
+        const block = [el('div', { class: 'tl-verify-head' }, head)];
+        if (entry.reasoning) block.push(el('p', { class: 'tl-story-prose' }, [text(String(entry.reasoning))]));
+        if (entry.diagnostic) block.push(_storyField('diagnostic', entry.diagnostic));
+        if (entry.what_worked) block.push(_storyField('what worked', entry.what_worked));
+        if (typeof entry.raw === 'string') block.push(el('pre', { class: 'tl-story-raw' }, [text(entry.raw)]));
+        parts.push(el('div', { class: 'tl-verify-block' }, block.filter(Boolean)));
+    }
+
+    for (const attempt of evals) {
+        for (const gate of attempt.gates || []) {
+            const head = [
+                el('span', { class: 'tl-verify-attempt' }, [text(`gate ${gate.name || '—'}`)]),
+                el('span', {
+                    class: `tl-chip ${gate.passed ? 'tl-chip-pass' : 'tl-chip-fail'}`,
+                }, [text(gate.passed ? 'passed' : 'failed')]),
+            ];
+            if (gate.exit_code != null) head.push(el('span', { class: 'tl-verify-exit' }, [text(`exit ${gate.exit_code}`)]));
+            const block = [el('div', { class: 'tl-verify-head' }, head)];
+            if (gate.command) block.push(el('code', { class: 'tl-verify-cmd' }, [text(String(gate.command))]));
+            if (gate.output_tail) {
+                block.push(_storyFold('Output tail', el('pre', { class: 'tl-story-raw' }, [text(String(gate.output_tail))])));
+            }
+            parts.push(el('div', { class: 'tl-verify-block' }, block));
+        }
+        if (typeof attempt.raw === 'string') {
+            parts.push(el('div', { class: 'tl-verify-block' }, [
+                el('div', { class: 'tl-verify-head' }, [
+                    el('span', { class: 'tl-verify-attempt' }, [text(`eval ${attempt.attempt}`)]),
+                    el('span', { class: 'tl-chip' }, [text('unparsed')]),
+                ]),
+                el('pre', { class: 'tl-story-raw' }, [text(attempt.raw)]),
+            ]));
+        }
+    }
+    return _storyCard('Verify', parts);
+}
+
+// --- Remembers ---------------------------------------------------------
+
+function _remembersCard(turn) {
+    const compactions = turn.compactions || [];
+    const notices = turn.notices || [];
+    // Nothing to remember is not a state worth a card saying so.
+    if (!compactions.length && !notices.length) return null;
+
+    const parts = [];
+    for (const c of compactions) {
+        const block = [el('div', { class: 'tl-verify-head' }, [
+            el('span', { class: 'tl-verify-attempt' }, [text('compaction')]),
+            el('span', { class: 'tl-story-when' }, [text(_fmtStamp(c.at))]),
+        ])];
+        if (c.summary && typeof c.summary === 'object' && !Array.isArray(c.summary)) {
+            for (const [k, v] of Object.entries(c.summary)) {
+                block.push(_storyField(k, Array.isArray(v) ? v.map(String).join(' · ') : _plainText(v)));
+            }
+        } else if (c.summary) {
+            block.push(el('p', { class: 'tl-story-prose' }, [text(_plainText(c.summary))]));
+        }
+        const counts = [];
+        if (c.compacted_up_to != null) counts.push(`up to message ${c.compacted_up_to}`);
+        if (c.original_count != null) counts.push(`${c.original_count} messages before`);
+        if (counts.length) block.push(el('div', { class: 'tl-story-meta' }, [el('span', {}, [text(counts.join(' · '))])]));
+        parts.push(el('div', { class: 'tl-verify-block' }, block.filter(Boolean)));
+    }
+    for (const n of notices) {
+        parts.push(el('div', { class: 'tl-verify-block' }, [
+            el('div', { class: 'tl-verify-head' }, [
+                el('span', { class: 'tl-verify-attempt' }, [text('notice')]),
+                el('span', { class: 'tl-story-when' }, [text(_fmtStamp(n.at))]),
+            ]),
+            el('p', { class: 'tl-story-prose' }, [text(n.text || '')]),
+        ]));
+    }
+    return _storyCard('Remembers', parts);
+}
+
+function _fmtNum(n) {
+    return Number(n || 0).toLocaleString();
+}
+
+function _fmtStamp(iso) {
+    const ms = _isoToMs(iso);
+    return ms ? _fmtClock(ms) : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,7 +1646,30 @@ function _buildTurnHeader(turn, meta = {}) {
         parts.push(el('span', { class: `tl-turn-term tl-turn-term-${slug}` }, [text(meta.termination)]));
     }
     if (meta.parentTurnId != null) parts.push(el('span', { class: 'tl-turn-parent' }, [text(`↳ T${meta.parentTurnId}`)]));
+    if (turn != null) parts.push(_buildStoryLink(turn));
     return el('div', { class: 'timeline-turn-header' }, parts);
+}
+
+// The list tab and the lane are two readings of the same turn, so each turn
+// header carries the way across. It is a real <button> nested inside a
+// role="button" header, so both activations have to be kept off the header:
+// the click by stopPropagation, the key by stopping the keydown BEFORE the
+// header's own handler sees it (that handler calls preventDefault, which
+// would suppress the button's own click).
+function _buildStoryLink(turn) {
+    const btn = el('button', {
+        class: 'tl-turn-story',
+        title: `Show turn ${turn} in the lane`,
+        'aria-label': `Show turn ${turn} in the lane`,
+    }, [text('Story')]);
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _showStoryFor(turn);
+    });
+    btn.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') e.stopPropagation();
+    });
+    return btn;
 }
 
 function _buildStateRow(row, ts) {
@@ -1222,6 +1825,10 @@ async function _copyExport(btn) {
     const payload = {
         session_id: state.sid,
         exported_at: new Date().toISOString(),
+        // The turn records as the lane received them: the phases, the scout
+        // report, the reflect chain, the gates and the token bill, already
+        // grouped. Pasted into an issue this is the whole story of a turn.
+        turns: _turns,
         state_log: _data.stateLog,
         tool_calls: toolCalls,
     };

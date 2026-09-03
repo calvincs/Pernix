@@ -2299,7 +2299,8 @@ body.sidebar-resizing {
 
 /* Timeline modal — opened via #state-badge click (see modals/timeline.js).
    Reuses .modal-overlay / .modal-card / .modal-body chrome from modals.css.
-   Two tabs: Graph (Mermaid) and Timeline (interleaved state + tool rows). */
+   Three tabs: Lane (a row per turn + its story), Graph (Mermaid) and
+   Timeline (interleaved state + tool rows). */
 
 .timeline-modal-content {
     display: flex;
@@ -2313,6 +2314,333 @@ body.sidebar-resizing {
     font-family: var(--font-mono, monospace);
     font-size: var(--text-xxs);
 }
+/* The lane's card is wider than the default 600px: the whole point of the
+   bar is that a phase's share of the turn is legible without hovering it. */
+#timeline-modal { max-width: min(94vw, 820px); }
+
+/* ----------------------------------------------------------------------
+   Lane tab — one row per turn
+   ----------------------------------------------------------------------
+   Three columns, the same three on every row so the bars line up: a mono
+   turn label, the bar itself, the duration. The label column is a fixed
+   width rather than `auto` precisely so the bars share a left edge — with
+   `auto` a row carrying "↳ T9 ·2" would start its bar further right than
+   its neighbours and the shapes would stop being comparable.
+
+   Every colour is a --state-<name>-{fg,bg} token, referenced from the
+   element's inline style as a var(). No hex is computed in JS for this tab
+   (unlike the Mermaid classDefs), so a theme swap repaints it for free. */
+.tl-lane-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    --tl-lane-label-w: 104px;
+    --tl-lane-elapsed-w: 58px;
+}
+.tl-lane-older {
+    display: flex;
+    justify-content: center;
+    padding: var(--sp-1) 0 var(--sp-2);
+}
+.tl-lane-older-btn {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding: 3px var(--sp-3);
+}
+.tl-lane-older-btn:hover { color: var(--accent); border-color: var(--accent-dim); }
+.tl-lane-older-btn:disabled { cursor: default; opacity: 0.6; }
+
+.tl-lane-row {
+    display: grid;
+    grid-template-columns: var(--tl-lane-label-w) minmax(0, 1fr) var(--tl-lane-elapsed-w);
+    align-items: center;
+    gap: var(--sp-2);
+    padding: 3px var(--sp-2);
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    min-height: 26px;
+}
+.tl-lane-row:hover { background: var(--bg-hover); }
+.tl-lane-row.selected {
+    background: var(--bg-surface);
+    border-color: var(--accent-dim);
+}
+.tl-lane-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+.tl-lane-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    color: var(--text-dim);
+}
+.tl-lane-row.selected .tl-lane-label { color: var(--text-bright); }
+.tl-lane-id { color: var(--text); font-weight: 500; }
+.tl-lane-row.selected .tl-lane-id { color: var(--accent); }
+.tl-lane-parent { color: var(--text-faint); }
+.tl-lane-retry { color: var(--accent-dim); }
+.tl-lane-warn { color: var(--warning); display: inline-flex; align-items: center; }
+.tl-lane-elapsed {
+    color: var(--text-dim);
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+/* The bar. `overflow: hidden` is load-bearing twice over: it clips a tick
+   parked at 100% and it guarantees the row can never widen the modal, so
+   the lane cannot be the thing that makes a phone scroll sideways. */
+.tl-lane-bar {
+    position: relative;
+    display: flex;
+    height: 14px;
+    min-width: 0;
+    border-radius: 3px;
+    overflow: hidden;
+    background: var(--bg-surface);
+}
+.tl-lane-seg {
+    flex: 0 1 auto;
+    /* A phase under 1.5% of its turn still has to be findable by a cursor. */
+    min-width: 3px;
+    height: 100%;
+    box-sizing: border-box;
+    border-bottom: 2px solid transparent;
+}
+.tl-lane-seg-empty { background: var(--bg-hover); }
+.tl-lane-tick {
+    position: absolute;
+    top: 0;
+    bottom: 2px;
+    width: 2px;
+    margin-left: -1px;
+    background: var(--text-bright);
+    opacity: 0.55;
+}
+.tl-lane-tick.error { background: var(--error); opacity: 1; }
+.tl-lane-live {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: 3px;
+    background: var(--accent);
+    --pulse-dip: 0.25;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
+}
+/* The global reduce block already collapses the duration; say it outright so
+   a live turn's marker is a steady edge rather than a single flash. */
+@media (prefers-reduced-motion: reduce) {
+    .tl-lane-live { animation: none; }
+}
+
+/* ----------------------------------------------------------------------
+   Story — the selected turn, under the lane
+   ---------------------------------------------------------------------- */
+.tl-story {
+    margin-top: var(--sp-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.tl-story:empty { display: none; }
+.tl-story-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding-top: var(--sp-2);
+    border-top: 1px solid var(--border);
+}
+.tl-story-turn { color: var(--accent); font-weight: 500; }
+.tl-story-when { color: var(--text-faint); }
+
+.tl-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+}
+.tl-card-head {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    cursor: pointer;
+    user-select: none;
+}
+.tl-card-head:hover .tl-card-eyebrow { color: var(--accent); }
+.tl-card-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tl-card-eyebrow {
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+.tl-card-chevron {
+    display: inline-flex;
+    color: var(--text-faint);
+    transition: transform var(--transition-fast);
+}
+.tl-card.collapsed .tl-card-chevron,
+.tl-fold.collapsed .tl-card-chevron { transform: rotate(-90deg); }
+.tl-card.collapsed .tl-card-body,
+.tl-fold.collapsed .tl-fold-body { display: none; }
+.tl-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding: 0 var(--sp-3) var(--sp-3);
+    font-size: var(--text-xs);
+    color: var(--text);
+}
+.tl-story-prose { color: var(--text); line-height: var(--line-height); margin: 0; }
+.tl-story-note { color: var(--text-dim); font-size: var(--text-xxs); margin: 0; }
+.tl-story-empty { color: var(--text-faint); font-size: var(--text-xxs); }
+.tl-story-raw {
+    background: var(--bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    padding: var(--sp-2);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.tl-story-field {
+    display: flex;
+    gap: var(--sp-2);
+    font-size: var(--text-xxs);
+    min-width: 0;
+}
+.tl-story-key {
+    color: var(--text-faint);
+    font-family: var(--mono);
+    flex: 0 0 auto;
+    min-width: 84px;
+}
+.tl-story-val { color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.tl-story-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-1) var(--sp-3);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--text-dim);
+}
+.tl-act-tokens { color: var(--text); }
+
+.tl-chip-row { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.tl-chip {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding: 1px 6px;
+    white-space: nowrap;
+}
+.tl-chip-pass { background: var(--state-idle_ready-bg); border-color: var(--state-idle_ready-fg); color: var(--state-idle_ready-fg); }
+.tl-chip-retry { background: var(--state-compacting-bg); border-color: var(--state-compacting-fg); color: var(--state-compacting-fg); }
+.tl-chip-escalate,
+.tl-chip-fail { background: var(--state-cancelling-bg); border-color: var(--state-cancelling-fg); color: var(--state-cancelling-fg); }
+.tl-badge-plan { background: var(--accent-subtle); border: 1px solid var(--accent-dim); color: var(--accent); }
+
+.tl-act-list { display: flex; flex-direction: column; gap: 2px; }
+.tl-act-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding: 2px var(--sp-1);
+    border-radius: 3px;
+    min-width: 0;
+}
+.tl-act-row.error { background: var(--state-cancelling-bg); }
+.tl-act-name { color: var(--text-bright); flex: 0 0 auto; }
+.tl-act-args {
+    color: var(--text-dim);
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tl-verify-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    padding: var(--sp-2) 0;
+    border-top: 1px solid var(--border-subtle);
+}
+.tl-verify-block:first-child { border-top: none; padding-top: 0; }
+.tl-verify-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+}
+.tl-verify-attempt { color: var(--text-dim); letter-spacing: 0.06em; }
+.tl-verify-exit { color: var(--text-faint); }
+.tl-verify-cmd {
+    background: var(--bg);
+    border-radius: 3px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding: 2px 6px;
+    overflow-wrap: anywhere;
+}
+.tl-fold-head {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    color: var(--text-faint);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    user-select: none;
+}
+.tl-fold-head:hover { color: var(--accent); }
+.tl-fold-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tl-fold-body { padding-top: var(--sp-1); }
+
+/* The list tab's way across to the lane — one per turn header. */
+.tl-turn-story {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    margin-left: auto;
+    padding: 0 6px;
+}
+.tl-turn-story:hover { color: var(--accent); border-color: var(--accent-dim); }
 
 /* Graph tab */
 .timeline-graph-container {
