@@ -1355,3 +1355,52 @@ body[data-touch] .ce-fallback {
 .worker-summary:focus-visible {
     outline-offset: -2px;
 }
+
+/* ------------------------------------------------------------------
+   State timeline — the Lane tab and the Story under it
+
+   The lane's rows are the tab's primary control (each one opens a turn's
+   story), so they take the 44px floor rather than the 28px one. The story's
+   two side-by-side pairs — a field's key and value, a tool call's name and
+   its argument digest — stack instead: at 390px the value had about nine
+   characters of room beside its key and ellipsed away to nothing.
+   ------------------------------------------------------------------ */
+.tl-lane-row {
+    min-height: 44px;
+}
+.tl-lane-older-btn,
+.tl-turn-story {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.tl-card-head,
+.tl-fold-head {
+    min-height: 44px;
+}
+.tl-story-field {
+    flex-direction: column;
+    gap: 0;
+}
+.tl-story-key {
+    min-width: 0;
+}
+/* The argument digest goes under the name rather than beside it, and `order`
+   is what keeps the latency and the error flag up on the name's line: they
+   are written after the digest in the DOM, where a keyboard and a screen
+   reader still meet them in the order they are read out. */
+.tl-act-row {
+    flex-wrap: wrap;
+    align-items: center;
+    row-gap: 2px;
+}
+.tl-act-name { order: 0; }
+.tl-act-row .tool-latency { order: 1; margin-left: auto; }
+.tl-act-row .tl-chip { order: 2; }
+.tl-act-args {
+    order: 3;
+    flex: 1 0 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
