@@ -97,6 +97,117 @@ def open_session(pg, sid, compact):
         time.sleep(0.2)
 
 
+# ---------------------------------------------------------------------------
+# The seam between spaces and the plain list — colour rail, indent, heading
+# ---------------------------------------------------------------------------
+# Three checks, one probe: they all read the same DOM the seeded Pernix /
+# Research lab / Scale spaces sit in above the plain time buckets, so one
+# pg.evaluate gathers what each of them needs.
+SPACE_SEAM_JS = r"""() => {
+  const out = {};
+
+  // 1. the colour rail — what still says "inside this space" once the
+  // header's own dot has scrolled off the top. Every OPEN space body needs
+  // one, centred under that header's chevron.
+  out.rails = [...document.querySelectorAll('.space-group-body:not(.collapsed)')].map(b => {
+      const header = b.previousElementSibling;
+      const arrow = header ? header.querySelector('.sg-arrow') : null;
+      if (!arrow) return {ok: false, reason: 'no header arrow'};
+      const cs = getComputedStyle(b, '::before');
+      const br = b.getBoundingClientRect();
+      const ar = arrow.getBoundingClientRect();
+      const center = br.left + (parseFloat(cs.left) || 0) + (parseFloat(cs.width) || 0) / 2;
+      return {width: cs.width, bg: cs.backgroundColor,
+              center: Math.round(center), arrowLeft: Math.round(ar.left), arrowRight: Math.round(ar.right)};
+  });
+
+  // 2. the indent — a row inside a space vs. a row in the plain list below.
+  const spaceRow = document.querySelector('.space-group-body .session-item:not(.worker):not(.active)');
+  const topRow = document.querySelector('.session-group-body:not(.space-group-body) .session-item:not(.worker):not(.active)');
+  out.spaceFound = !!spaceRow;
+  out.topFound = !!topRow;
+  if (spaceRow) out.spacePad = parseFloat(getComputedStyle(spaceRow).paddingLeft);
+  if (topRow) out.topPad = parseFloat(getComputedStyle(topRow).paddingLeft);
+
+  // 3. the Sessions heading at the seam itself.
+  const heading = document.querySelector('.sessions-header');
+  if (heading) {
+      const label = heading.querySelector('.sessions-header-label');
+      const hr = heading.getBoundingClientRect();
+      const openBodies = [...document.querySelectorAll('.space-group-body:not(.collapsed)')];
+      const firstBucket = document.querySelector('.session-group-header:not(.space-group-header)');
+      out.heading = {
+          text: (label ? label.textContent : heading.textContent || '').trim(),
+          top: Math.round(hr.top),
+          maxSpaceBottom: openBodies.length
+              ? Math.round(Math.max(...openBodies.map(b => b.getBoundingClientRect().bottom))) : null,
+          bucketTop: firstBucket ? Math.round(firstBucket.getBoundingClientRect().top) : null,
+          borderTopWidth: getComputedStyle(heading).borderTopWidth,
+      };
+  } else {
+      out.heading = null;
+  }
+  return out;
+}"""
+
+
+def space_seam_checks(pg, name):
+    """Rail, indent and Sessions-heading — run wherever the seeded spaces sit
+    above the plain list, on every tier where the sidebar is on screen.
+
+    A top-level row only has to exist SOMEWHERE in the DOM — the outer time
+    buckets always render their rows, collapsed or not, unlike a space's own
+    folded buckets — but this opens one anyway if every top-level header
+    happens to be collapsed, so the measurement never depends on which
+    buckets a previous step left open.
+    """
+    pg.evaluate(
+        "() => { const h=[...document.querySelectorAll('.session-group-header:not(.space-group-header)')]"
+        ".find(x => x.classList.contains('collapsed')); if (h) h.click(); }"
+    )
+    time.sleep(0.3)
+    r = pg.evaluate(SPACE_SEAM_JS)
+
+    rails = r.get("rails") or []
+    check(
+        name,
+        "m2: colour rail under every open space",
+        bool(rails)
+        and all(
+            x.get("width") == "2px"
+            and x.get("bg") not in (None, "", "rgba(0, 0, 0, 0)", "transparent")
+            and x.get("arrowLeft") is not None
+            and x["arrowLeft"] - 1 <= x["center"] <= x["arrowRight"] + 1
+            for x in rails
+        ),
+        rails,
+        "m2",
+    )
+
+    check(
+        name,
+        "m2: rows inside a space sit 10px right of top-level rows",
+        r.get("spaceFound") and r.get("topFound") and round(r.get("spacePad", -999) - r.get("topPad", -999)) == 10,
+        r,
+        "m2",
+    )
+
+    hd = r.get("heading")
+    check(
+        name,
+        "m2: Sessions heading sits between the last space and the first bucket",
+        bool(hd)
+        and hd.get("text") == "Sessions"
+        and hd.get("maxSpaceBottom") is not None
+        and hd.get("bucketTop") is not None
+        and hd["top"] >= hd["maxSpaceBottom"] - 1
+        and hd["top"] <= hd["bucketTop"] + 1
+        and hd.get("borderTopWidth") == "1px",
+        hd,
+        "m2",
+    )
+
+
 def run_vp(browser, name, w, h, opts):
     ctx = browser.new_context(viewport={"width": w, "height": h}, device_scale_factor=2, color_scheme="dark", **opts)
     pg = ctx.new_page()
@@ -174,8 +285,15 @@ def run_vp(browser, name, w, h, opts):
             pg.evaluate("() => document.getElementById('sidebar').contains(document.activeElement)"),
         )
         if LEVEL == "m2":
+            # Scoped off .space-group-body: a space row now sits 10px further
+            # right than a plain one, and this check is about the general
+            # drawer budget, not about spaces — that guarantee is the desktop
+            # "session title inside a space keeps >=180px" check below,
+            # deliberately not asserted this tight on a narrow drawer. Without
+            # the scope this picked whichever row happened to render first,
+            # which on the seeded data is the Pernix space's.
             tw = pg.evaluate(
-                "() => { const it=document.querySelector('.session-item:not(.pinned)'); if(!it) return -1; const t=it.querySelector('.session-title-text, .session-title'); if(!t) return -2; let box=t; while(box && getComputedStyle(box).overflow==='visible' && box!==it) box=box.parentElement; return Math.round(box.getBoundingClientRect().width); }"
+                "() => { const it=document.querySelector('.session-group-body:not(.space-group-body) .session-item:not(.pinned)'); if(!it) return -1; const t=it.querySelector('.session-title-text, .session-title'); if(!t) return -2; let box=t; while(box && getComputedStyle(box).overflow==='visible' && box!==it) box=box.parentElement; return Math.round(box.getBoundingClientRect().width); }"
             )
             check(name, "m2: session title gets >=140px in drawer", tw >= 140, f"title box width={tw}px", "m2")
             check(
@@ -187,6 +305,7 @@ def run_vp(browser, name, w, h, opts):
                 "",
                 "m2",
             )
+            space_seam_checks(pg, name)
         shot("drawer")
         pg.keyboard.press("Escape")
         time.sleep(0.4)
@@ -230,6 +349,8 @@ def run_vp(browser, name, w, h, opts):
         time.sleep(0.5)
         sbo = rect(pg, "#sidebar")
         check(name, "wide: hamburger re-expands", sbo and sbo["w"] >= 200, sbo)
+        if LEVEL == "m2":
+            space_seam_checks(pg, name)
         shot("docked")
 
     # --- session + chat
@@ -486,6 +607,17 @@ def desktop_layout(browser):
             sh,
             "m2",
         )
+        space_seam_checks(pg, "desktop")
+
+        # Desktop only — the same title-box measurement the m2 drawer check
+        # above uses, aimed at a row inside a space instead of the drawer's
+        # first row. The space's own +10px indent has to come out of the
+        # title's ceiling, not out of the space's identity, so this is pinned
+        # lower (180px) than the drawer's 140px rather than left unpinned.
+        tw = pg.evaluate(
+            "() => { const it=document.querySelector('.space-group-body .session-item:not(.worker)'); if(!it) return -1; const t=it.querySelector('.session-title-text, .session-title'); if(!t) return -2; let box=t; while(box && getComputedStyle(box).overflow==='visible' && box!==it) box=box.parentElement; return Math.round(box.getBoundingClientRect().width); }"
+        )
+        check("desktop", "m2: session title inside a space keeps >=180px", tw >= 180, f"title box width={tw}px", "m2")
     ctx.close()
     return out
 
