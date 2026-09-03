@@ -94,7 +94,7 @@ Restoring a snapshot taken by an **older** Pernix is fine — migrations run for
 
 ## DB migrations
 
-The schema is at v29. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
+The schema is at v35. Migrations run sequentially at startup based on the version stored in the `schema_meta` table (`key='schema_version'` — not the SQLite `user_version` pragma). Each migration is forward-only — there's no automatic downgrade.
 
 If you ever need to downgrade Pernix to an older version (and therefore an older schema), the safe path is:
 
@@ -109,6 +109,27 @@ Running newer Pernix against an older DB is fine — that's just a normal upgrad
 ## Breaking changes worth knowing about
 
 These are the upgrade points where something the user might have set up needs attention. Each is dated.
+
+### 2026-09-03 — v3.1.0
+
+Migrations **v30–v35** ship with this release and run automatically: v30 adds `canary_runs.outcome`/`error` (separates timeout/error/noop from real gate failures); v31 adds `sessions.model_override` + `sessions.worker_kind` (a worker's pinned model and typed kind now survive a restart or idle reap); v32 converts the `refined:{sid}` snooze watermark from an ISO timestamp to a message-id high-water mark (refine can revisit a session that grew after its first pass instead of grading it once and never again — nothing re-processes on deploy); v33 adds the `spaces` table + `sessions.space_id`; v34 adds `sessions.archived_at`; v35 adds `space_suggestions`. Nothing to do for any of them.
+
+Several behaviors are **on by default** and worth knowing:
+
+- **The MCP client** (`mcp_enabled = true`): fully inert with zero servers configured — adding one in Explorer → Capabilities → Servers (MCP), or Settings → Integrations, is the opt-in. Set `mcp_enabled = false` if you'd rather the machinery not run at all.
+- **Daily archive sweep** (`session_archive_idle_days = 30`): a plain chat idle for 30+ days is archived, not deleted — it leaves the sidebar, keeps every message, and reopens read-only with a Restore control. Pinned chats are exempt from the sweep; chats inside a space are archived by it same as any other, but `session_delete_archived_days = 0` (the default) means nothing archived is ever hard-deleted, space chats included. Raise `session_archive_idle_days`, or set `session_delete_archived_days` if you actually want old archives purged.
+- **Forced follow-up nudge** (`forced_followup_enabled = true`): a turn that ends with a stated-but-undone intent and no tool calls (e.g. "Next, I'll update the settings file.") gets one bounded in-turn nudge instead of just ending — narrowly scoped, so trailing questions and courtesy closers never trigger it. Set `forced_followup_max_per_turn = 0` to disable.
+- **Turn ledger** (`turn_ledger_enabled = true`): every turn's context now opens with a terse `[SINCE YOUR LAST TURN]` block — finished background work, a deferred reflect verdict that landed after the fact, canary regressions, restarts. Informational only; nothing to configure.
+
+**Removed agent tools:** `get_tool_schema`, `delete_skill`, and `list_skills` — a ten-week usage audit found zero calls to any of them. Use `discover_tools` instead of `get_tool_schema` (it now injects full schemas directly); use the Explorer's skill delete action instead of `delete_skill` (skill deletion stays a human action); `discover_skills` already covers what `list_skills` did. If a skill or cron job prompt of yours calls one of these by name, rewrite it.
+
+**`mobile.css` is gone**, replaced by `compact.css` (width-based rules) and `touch.css` (pointer-based rules), each gated on its own `<link media>`. If you maintain custom CSS or JS against the old file or the `isMobile()` helper, retarget it — `isMobile()` is gone in favor of `isCompact()` / `isTouch()`. See [internals/web-client.md](internals/web-client.md).
+
+**The timeline's Graph tab is now Map** — the same state-machine diagram, hand-drawn as inline SVG instead of Mermaid (which is removed entirely, 3.3 MB off the page). It's a client-side tab rename with no setting or API behind it, so there's nothing to reconfigure.
+
+**`canary_park_after_passes` replaces `canary_retire_after_passes`.** If you had customized the old setting, it is not migrated — a hand-saved value under the old name is silently ignored and the new one reverts to its default (25). Re-set it under the new name if you rely on a non-default value.
+
+**Telos loses its goal-DAG half** (ordo/binding/hevel/reconcile/discharge) — a no-op removal if you don't run `telos_enabled` (off by default). If you do: `GET /api/telos/goals` is gone, and old `data/telos/ledgers/first_person/` directories on disk are inert and safe to delete by hand.
 
 ### 2026-08-26 — v3.0.0
 
