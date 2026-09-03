@@ -66,7 +66,7 @@ html {
 .skip-link:focus { top: 12px; }
 
 .hero-prompt {
-  margin: 0 0 26px;
+  margin: 0 0 22px;
   font-family: var(--mono, 'DM Mono'), monospace;
   font-size: clamp(14px, 1.15vw, 17px);
   letter-spacing: .03em;
@@ -206,6 +206,52 @@ strong { font-weight: 600; color: var(--vellum-bright); }
 .topnav a:hover { color: var(--vellum-bright); }
 .topnav a.ghub { color: var(--gold); }
 .topnav a.ghub:hover { color: var(--gold-bright); }
+.topnav a:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* Section menu — hidden on desktop, the only nav at <=980px */
+.nav-toggle {
+  display: none;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 13px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--vellum-dim);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  cursor: pointer;
+  transition: color .18s var(--ease), border-color .18s var(--ease);
+}
+.nav-toggle:hover { color: var(--vellum-bright); border-color: var(--gold-deep); }
+.nav-toggle[aria-expanded="true"] { color: var(--gold); border-color: var(--gold-deep); }
+.nav-toggle:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+.nav-toggle-bars {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 3px;
+  width: 14px;
+}
+.nav-toggle-bars span {
+  display: block;
+  width: 100%;
+  height: 1px;
+  background: currentColor;
+  transition: transform .22s var(--ease), opacity .18s var(--ease);
+}
+.nav-toggle[aria-expanded="true"] .nav-toggle-bars span:nth-child(1) { transform: translateY(4px) rotate(45deg); }
+.nav-toggle[aria-expanded="true"] .nav-toggle-bars span:nth-child(2) { opacity: 0; }
+.nav-toggle[aria-expanded="true"] .nav-toggle-bars span:nth-child(3) { transform: translateY(-4px) rotate(-45deg); }
 
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
@@ -214,7 +260,7 @@ strong { font-weight: 600; color: var(--vellum-bright); }
    ===================================================== */
 .hero {
   min-height: 100vh;
-  padding: 100px var(--gut) 60px;
+  padding: 84px var(--gut) 60px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -227,9 +273,9 @@ strong { font-weight: 600; color: var(--vellum-bright); }
   z-index: 2;
   text-align: center;
   max-width: 780px;
-  margin: 40px auto 0;
+  margin: 28px auto 0;
 }
-.hero-below .lede { margin-bottom: 34px; }
+.hero-below .lede { margin-bottom: 28px; }
 
 .hero-frame {
   position: relative;
@@ -239,9 +285,11 @@ strong { font-weight: 600; color: var(--vellum-bright); }
   padding: clamp(40px, 6vw, 80px) clamp(28px, 5vw, 70px);
   display: grid;
   place-items: center;
-  /* Square frame, sized to fit the viewport height when it's the constraint */
+  /* Square frame, sized so the lede and the CTA below it still clear the
+     fold: 332px is the hero's top padding + the whole .hero-below stack +
+     a breathing margin. Height, not width, is the usual constraint. */
   aspect-ratio: 1 / 1;
-  width: min(100%, calc(100vh - 240px));
+  width: min(100%, calc(100vh - 332px));
   background:
     radial-gradient(ellipse 70% 60% at 50% 50%, rgba(212,168,67,0.04), transparent 70%);
 }
@@ -296,7 +344,7 @@ strong { font-weight: 600; color: var(--vellum-bright); }
 .title {
   font-family: var(--serif);
   font-weight: 400;
-  font-size: clamp(80px, 16vw, 200px);
+  font-size: clamp(80px, min(16vw, 30vh - 100px), 200px);
   line-height: 1.12;
   letter-spacing: -0.02em;
   color: var(--vellum-bright);
@@ -331,7 +379,7 @@ strong { font-weight: 600; color: var(--vellum-bright); }
 }
 .kicker em { color: var(--gold); font-style: italic; font-family: var(--serif); font-size: 15px; }
 .kicker .ipa { color: var(--vellum-faint); }
-.kicker .def { color: var(--vellum-dim); }
+.kicker .def { color: var(--vellum-dim); white-space: nowrap; }
 
 .lede {
   font-size: clamp(18px, 1.8vw, 22px);
@@ -1843,8 +1891,10 @@ section > *:not(.hero-frame):not(.closing-inner) { max-width: var(--maxw); margi
 
 /* =====================================================
    CAPABILITY TOOL TAGS
+   Selector has to out-rank `.cap p`, or the tag line renders
+   as body copy instead of the small gold mono it wants.
    ===================================================== */
-.cap-tools {
+.cap p.cap-tools {
   margin-top: 18px;
   font-family: var(--mono, 'DM Mono'), monospace;
   font-size: 11px;
@@ -1948,7 +1998,42 @@ section > *:not(.hero-frame):not(.closing-inner) { max-width: var(--maxw); margi
    RESPONSIVE
    ===================================================== */
 @media (max-width: 980px) {
-  .topnav a:not(.ghub) { display: none; }
+  .nav-toggle { display: inline-flex; }
+  .topbar-inner { position: relative; }
+  .topnav {
+    position: absolute;
+    top: calc(100% + 13px);
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: 4px 0;
+    min-width: 210px;
+    max-height: calc(100vh - 96px);
+    overflow-y: auto;
+    background: var(--ink-2);
+    border: 1px solid var(--line);
+    border-radius: 2px;
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.6);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-6px);
+    transition: opacity .18s var(--ease), transform .18s var(--ease), visibility .18s;
+  }
+  .topnav.open {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+  }
+  .topnav a {
+    display: block;
+    padding: 11px 18px;
+    color: var(--vellum);
+  }
+  .topnav a + a { border-top: 1px solid var(--line-2); }
+  .topnav a:hover,
+  .topnav a:focus-visible { background: var(--gold-soft); color: var(--vellum-bright); }
+  .topnav a:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; border-radius: 0; }
   .anatomy-grid, .identity-grid, .start-grid, .api-grid { grid-template-columns: 1fr; gap: 50px; }
   .vow-list { grid-template-columns: 1fr; }
   .vow { border-left: none; border-top: 1px solid var(--line); }
@@ -2012,12 +2097,84 @@ section > *:not(.hero-frame):not(.closing-inner) { max-width: var(--maxw); margi
   .phases { grid-template-columns: 1fr; }
   .hero-frame { padding: 40px 22px; }
   body { font-size: 16px; }
-  .vow { padding: 32px 22px; }
-  .layer { padding: 32px 24px; }
-  .honest-col { padding: 32px 24px; }
+  .vow { padding: 26px 22px; }
+  .layer { padding: 26px 22px; }
+  .honest-col { padding: 26px 22px; }
   .topbar { padding: 12px 18px; }
-  .topnav { gap: 14px; font-size: 12.5px; }
-  .topnav a.ghub { padding: 5px 10px; border: 1px solid var(--gold-deep); border-radius: 2px; }
+  .topnav { font-size: 12.5px; }
+  .topnav a.ghub { color: var(--gold); }
+
+  /* ---- Vertical rhythm ----------------------------------------------
+     One column makes this page very long on a phone. Tighten the
+     scaffolding — section padding, block margins, card padding — and
+     leave every type size alone. */
+  section[class]:not(.hero) { padding-top: 46px; padding-bottom: 46px; }
+  .section-label { margin-bottom: 12px; }
+  .section-title { margin-bottom: 16px; }
+  .section-sub { margin-bottom: 32px; }
+  .hero-below { margin-top: 22px; }
+  .hero-below .lede { margin-bottom: 24px; }
+  .hero-prompt { margin-bottom: 18px; }
+  .vow-list, .pipeline, .asides,
+  .layer-grid, .layer-foot,
+  .caps-grid, .durable-trio { margin-top: 32px; }
+  .honest-grid { margin-top: 26px; }
+  .state-shell, .start-grid { margin-top: 24px; }
+  .state-foot, .honest-foot { margin-top: 22px; }
+  .anatomy-grid, .identity-grid, .start-grid, .api-grid { gap: 34px; }
+  .api-feats, .bullet-list { margin-top: 24px; }
+
+  /* Icon beside the title rather than stacked above it: 21 cards in one
+     column, so the saved 40px each is most of a phone screen. */
+  .cap {
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    column-gap: 13px;
+    padding: 24px 22px 22px;
+  }
+  .cap-icon {
+    width: 28px;
+    height: 28px;
+    margin-bottom: 0;
+    grid-row: 1;
+    align-self: start;
+    margin-top: 5px;
+  }
+  .cap h4 { grid-column: 2; margin-bottom: 8px; }
+  .cap p { grid-column: 2; }
+  .cap p.cap-tools { grid-column: 2; margin-top: 14px; }
+  .layer-h { margin-bottom: 18px; }
+  .layer-viz { width: 80%; margin-bottom: 18px; }
+  .layer-body { margin-bottom: 14px; }
+  .honest-col li { padding-top: 9px; padding-bottom: 9px; }
+  .honest-h { margin-bottom: 16px; }
+  .steps li { padding-top: 17px; padding-bottom: 17px; }
+  .api-feats li { padding-top: 11px; padding-bottom: 11px; }
+  .bullet-list li { padding-top: 8px; padding-bottom: 8px; }
+
+  /* Leading: still open, just not desktop-open, in a 350px column. */
+  .cap p { line-height: 1.55; }
+  .prose { line-height: 1.62; }
+  .layer-body { line-height: 1.58; }
+  .vow p { line-height: 1.58; }
+  .honest-col li { line-height: 1.55; }
+  .steps p { line-height: 1.55; }
+  .closing-inner .ornament { margin-bottom: 22px; }
+
+  /* ---- State machine: two columns so no label can clip ---- */
+  .state-nodes { grid-template-columns: repeat(2, 1fr); }
+  .snode {
+    white-space: normal;
+    text-align: center;
+    font-size: 10.5px;
+    line-height: 1.35;
+    min-height: 36px;
+    padding: 10px 8px;
+  }
+  .snode:nth-child(3n) { border-right: 1px solid var(--line-2); }
+  .snode:nth-child(2n) { border-right: none; }
+  .snode:nth-last-child(-n+3) { border-bottom: 1px solid var(--line-2); }
+  .snode:nth-last-child(-n+2) { border-bottom: none; }
   .codex-tabs { flex-wrap: wrap; }
   .codex-tab { flex: 1 0 50%; padding: 11px 12px; font-size: 10.5px; }
   .codex-body { font-size: 11.5px; padding: 18px 18px; min-height: 320px; }

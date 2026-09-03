@@ -47,7 +47,7 @@
   "operatingSystem": "Linux, macOS",
   "license": "https://opensource.org/license/mit",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-  "softwareVersion": "3.0.0",
+  "softwareVersion": "3.1.0",
   "description": "A self-hosted agent harness with persistent memory and long-running autonomy. Runs locally with Ollama or in the cloud via OpenRouter.",
   "codeRepository": "https://github.com/calvincs/Pernix"
 }
@@ -80,7 +80,11 @@
       </svg>
       <span class="brand-word">Pernix</span>
     </a>
-    <nav class="topnav" aria-label="Primary">
+    <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="topnav">
+      <span class="nav-toggle-bars" aria-hidden="true"><span></span><span></span><span></span></span>
+      <span>menu</span>
+    </button>
+    <nav class="topnav" id="topnav" aria-label="Primary">
       <a href="#anatomy">anatomy</a>
       <a href="#turn">how it thinks</a>
       <a href="#layers">layers</a>
@@ -88,7 +92,7 @@
       <a href="#api">api</a>
       <a href="#identity">soul</a>
       <a href="#start">start</a>
-      <a href="#release">v3.0.0</a>
+      <a href="#release">v3.1.0</a>
       <a href="https://github.com/calvincs/Pernix/tree/main/docs" target="_blank" rel="noopener">docs ↗</a>
       <a class="ghub" href="https://github.com/calvincs/Pernix" target="_blank" rel="noopener">github ↗</a>
     </nav>
@@ -177,7 +181,7 @@
 
       <ul class="spec-list">
         <li class="reveal"><span class="spec-key">stack</span><span class="spec-val">Python 3.11+ · FastAPI · SQLite · SSE · Playwright</span></li>
-        <li class="reveal"><span class="spec-key">interfaces</span><span class="spec-val">Web PWA · REST · Server-Sent Events</span></li>
+        <li class="reveal"><span class="spec-key">interfaces</span><span class="spec-val">Web PWA · REST · Server-Sent Events · MCP client</span></li>
         <li class="reveal"><span class="spec-key">storage</span><span class="spec-val">SQLite for sessions · Markdown for memory · filesystem workspace</span></li>
         <li class="reveal"><span class="spec-key">license</span><span class="spec-val">MIT</span></li>
       </ul>
@@ -189,9 +193,9 @@
         <span class="dot d-r"></span><span class="dot d-y"></span><span class="dot d-g"></span>
         <span class="window-url">localhost:8090</span>
       </div>
-      <img class="window-shot" src="img/app.png" loading="lazy" width="1360" height="850"
-           alt="The Pernix web UI: a session where the agent has just scheduled a weekday morning brief on cron — sidebar session list, streamed answer, and model, context, and state readouts in the status bar.">
-      <p class="window-caption">An unedited 2.x-era session: asked for a morning brief, the agent assembled it and put it on a weekday cron. Local model, one take. (It calls its plan a “workflow” — in 3.0 the same ask lands as a skill plus a scheduled job.)</p>
+      <img class="window-shot" src="img/app.png" loading="lazy" decoding="async" width="1360" height="850"
+           alt="The Pernix web UI: the agent's finished morning brief — Austin's forecast, a note that nothing was flagged, and three headlines with their sources — above a table for the weekday 7am job it wrote and dry-ran. The sidebar lists the session and the job's own test run; the status bar shows the model, context use, and an idle state.">
+      <p class="window-caption">An unedited 3.1 session: asked for a morning brief, the agent gathered the forecast and the headlines itself, wrote the weekday 7am job, and dry-ran it before reporting back. Local Qwen3.8-27B, one take.</p>
     </div>
   </div>
 </section>
@@ -510,6 +514,12 @@
       <p class="cap-tools">remember · recall · update_memory · forget</p>
     </article>
     <article class="cap reveal">
+      <svg class="cap-icon" viewBox="0 0 48 48"><path d="M12 11 V37" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="12" cy="11" r="1.6" fill="currentColor"/><rect x="19" y="10" width="20" height="6" fill="none" stroke="currentColor" stroke-width="0.8"/><rect x="19" y="21" width="20" height="6" fill="none" stroke="currentColor" stroke-width="0.8"/><rect x="19" y="32" width="20" height="6" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="12" y1="13" x2="19" y2="13" stroke="currentColor" stroke-width="0.6" opacity="0.6"/><line x1="12" y1="24" x2="19" y2="24" stroke="currentColor" stroke-width="0.6" opacity="0.6"/><line x1="12" y1="35" x2="19" y2="35" stroke="currentColor" stroke-width="0.6" opacity="0.6"/></svg>
+      <h4>Spaces</h4>
+      <p>Group long-lived work into a named, coloured space whose sessions share directives, memory, a workspace home and one REPL kernel — and never roll off the sidebar.</p>
+      <p class="cap-tools">data/agent/spaces/&lt;slug&gt; · pernix.space.&lt;slug&gt;.* · /api/spaces</p>
+    </article>
+    <article class="cap reveal">
       <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="24" cy="24" r="14" fill="none" stroke="currentColor" stroke-width="1"/><ellipse cx="24" cy="24" rx="6" ry="14" fill="none" stroke="currentColor" stroke-width="1"/><line x1="10" y1="24" x2="38" y2="24" stroke="currentColor" stroke-width="1"/><line x1="24" y1="10" x2="24" y2="38" stroke="currentColor" stroke-width="0.5"/></svg>
       <h4>Web search & browser</h4>
       <p>Tavily for search. Playwright for JS-heavy pages, SPAs, paywalled markdown.</p>
@@ -546,6 +556,12 @@
       <p class="cap-tools">create_tool · create_skill · install_package</p>
     </article>
     <article class="cap reveal">
+      <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="15" cy="24" r="6.5" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="15" cy="24" r="1.6" fill="currentColor"/><line x1="21.5" y1="24" x2="30" y2="24" stroke="currentColor" stroke-width="0.8"/><line x1="19.6" y1="19.4" x2="30" y2="12" stroke="currentColor" stroke-width="0.6" stroke-dasharray="2 3"/><line x1="19.6" y1="28.6" x2="30" y2="36" stroke="currentColor" stroke-width="0.6" stroke-dasharray="2 3"/><rect x="30" y="8" width="10" height="8" fill="none" stroke="currentColor" stroke-width="0.8"/><rect x="30" y="20" width="10" height="8" fill="none" stroke="currentColor" stroke-width="0.8"/><rect x="30" y="32" width="10" height="8" fill="none" stroke="currentColor" stroke-width="0.8"/></svg>
+      <h4>Plugs into MCP</h4>
+      <p>External Model Context Protocol servers — stdio or HTTP, on the box or across the network — register as ordinary Pernix tools, under the same scout curation and the same safety gate as the built-ins.</p>
+      <p class="cap-tools">data/mcp_servers.json · mcp_&lt;server&gt;_&lt;tool&gt; · mcp_add_server</p>
+    </article>
+    <article class="cap reveal">
       <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="16" cy="24" r="6" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="32" cy="24" r="6" fill="none" stroke="currentColor" stroke-width="1"/><line x1="22" y1="24" x2="26" y2="24" stroke="currentColor" stroke-width="1"/><line x1="10" y1="14" x2="6" y2="14" stroke="currentColor" stroke-width="0.6"/><line x1="38" y1="14" x2="42" y2="14" stroke="currentColor" stroke-width="0.6"/></svg>
       <h4>A model per role</h4>
       <p>Three roles — Primary, Background, Backup — across Ollama, OpenRouter, or any OpenAI-compatible server. Auto-fallback to your backup model when the cloud rate-limits, times out, or hiccups.</p>
@@ -560,14 +576,20 @@
     <article class="cap reveal">
       <svg class="cap-icon" viewBox="0 0 48 48"><rect x="16" y="8" width="16" height="32" rx="2" fill="none" stroke="currentColor" stroke-width="1"/><line x1="21" y1="12" x2="27" y2="12" stroke="currentColor" stroke-width="0.8"/><circle cx="24" cy="35" r="1.5" fill="none" stroke="currentColor" stroke-width="0.8"/><path d="M36 14 Q 40 19, 36 24" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.7"/><path d="M12 14 Q 8 19, 12 24" fill="none" stroke="currentColor" stroke-width="0.8" opacity="0.7"/></svg>
       <h4>In your pocket</h4>
-      <p>The web UI is an installable PWA with a mobile-first layout, browser push notifications, and voice input — four dictation engines, each labeled with where your audio goes. In network mode, a QR code on the console gets your phone onto it in seconds.</p>
+      <p>The web UI is an installable PWA with a real phone and tablet tier — drawers and action sheets under a finger, the sidebar still docked on a landscape iPad — plus browser push notifications and voice input, four dictation engines each labeled with where your audio goes. In network mode, a QR code on the console gets your phone onto it in seconds.</p>
       <p class="cap-tools">pwa · web push · run.py --qr</p>
+    </article>
+    <article class="cap reveal">
+      <svg class="cap-icon" viewBox="0 0 48 48"><circle cx="16" cy="19" r="9" fill="none" stroke="currentColor" stroke-width="1"/><path d="M16 10 A 9 9 0 0 1 16 28 Z" fill="currentColor" opacity="0.7"/><rect x="30" y="11" width="10" height="15" rx="1.5" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="33" y1="14" x2="37" y2="14" stroke="currentColor" stroke-width="0.6" opacity="0.7"/><rect x="8" y="33" width="32" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="0.8"/><line x1="13" y1="37.5" x2="35" y2="37.5" stroke="currentColor" stroke-width="0.6" opacity="0.55"/></svg>
+      <h4>For everyone</h4>
+      <p>A light theme beside the dark one, panels you can work from a keyboard with every icon-only control named for a screen reader, and one layout that follows the viewport while the touch sizes follow the pointer — phone, tablet, monitor.</p>
+      <p class="cap-tools">a11y.js · compact.css · touch.css</p>
     </article>
     <article class="cap reveal">
       <svg class="cap-icon" viewBox="0 0 48 48"><polyline points="8,32 16,32 20,18 26,38 30,26 34,26 40,26" fill="none" stroke="currentColor" stroke-width="1"/><circle cx="40" cy="26" r="2" fill="none" stroke="currentColor" stroke-width="0.8"/></svg>
       <h4>Glass walls</h4>
-      <p>Watch every state transition on a live timeline, follow the worker fleet as it fans out, search full-text across all past sessions, and see what each one costs.</p>
-      <p class="cap-tools">GET /api/sessions/{id}/events · sse</p>
+      <p>Every turn as a lane of phases, the story of the one you pick told back in the agent's own words, and the state machine as a map lit live. Follow the worker fleet as it fans out, search full-text across every past session, and see what each one cost.</p>
+      <p class="cap-tools">GET /api/sessions/{id}/turns · /events · sse</p>
     </article>
     <article class="cap reveal">
       <svg class="cap-icon" viewBox="0 0 48 48"><path d="M24 6 L40 12 V24 Q40 36 24 42 Q8 36 8 24 V12 Z" fill="none" stroke="currentColor" stroke-width="1"/><line x1="16" y1="18" x2="32" y2="18" stroke="currentColor" stroke-width="0.8" opacity="0.9"/><line x1="16" y1="24" x2="32" y2="24" stroke="currentColor" stroke-width="0.8" opacity="0.6"/><line x1="16" y1="30" x2="32" y2="30" stroke="currentColor" stroke-width="0.8" opacity="0.32"/></svg>
@@ -642,7 +664,7 @@
       </div>
       <div class="swagger-body">
         <div class="swagger-h">
-          <span class="swagger-name">Pernix API <span class="swagger-ver">v3.0.0</span></span>
+          <span class="swagger-name">Pernix API <span class="swagger-ver">v3.1.0</span></span>
         </div>
         <div class="swagger-route get">
           <span class="verb get">GET</span>
@@ -701,7 +723,7 @@ requests.post(<span class="str">"http://localhost:8090/api/chat"</span>, json={
           <span class="route-desc">Hybrid BM25 + vector memory search</span>
         </div>
         <div class="swagger-foot">
-          <span class="muted">+ 117 more endpoints · openapi.json</span>
+          <span class="muted">+ 154 more endpoints · openapi.json</span>
         </div>
       </div>
     </div>
@@ -716,7 +738,7 @@ requests.post(<span class="str">"http://localhost:8090/api/chat"</span>, json={
     <div class="identity-text">
       <p class="prose reveal">
         Pernix's behavior beyond raw model output is shaped by plain text on disk.
-        <strong>SOUL.md</strong> defines who it is. <strong>RULES.md</strong> defines how it acts. <strong>SESSIONS.md</strong> injects deployment-specific context — the user's timezone and key facts, the domains this installation is allowed to act in, per-domain permission levels, and active long-running intents the agent is tracking.
+        <strong>SOUL.md</strong> defines who it is. <strong>RULES.md</strong> defines how it acts. <strong>SESSIONS.md</strong> injects deployment-specific context — the user's timezone and key facts, the domains this installation is allowed to act in, per-domain permission levels, and active long-running intents the agent is tracking. A space can override any of the three for its own sessions, per file, in <code>data/agent/spaces/&lt;slug&gt;/</code>.
       </p>
       <p class="prose reveal">
         It's the opposite of a black box. The personality, the operational guardrails, the project conventions — all editable, all auditable, all yours. Open them in any text editor. The agent picks up the change on its next turn.
@@ -870,33 +892,34 @@ and communicate clearly.
   </div>
 </section>
 
-<!-- ========== RELEASE v3.0.0 ========== -->
+<!-- ========== RELEASE v3.1.0 ========== -->
 <section class="honest" id="release">
   <p class="section-label reveal">XI. The release</p>
-  <h2 class="section-title reveal">New in <em>v3.0.0</em>.</h2>
-  <p class="section-sub reveal">Everything since v2.9.0 under one tag — two months of field campaigns, distilled. The full story is in the <a class="link" href="https://github.com/calvincs/Pernix/blob/main/CHANGELOG.md" target="_blank" rel="noopener">changelog</a>; upgrade notes in the <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md" target="_blank" rel="noopener">upgrade guide</a>.</p>
+  <h2 class="section-title reveal">New in <em>v3.1.0</em>.</h2>
+  <p class="section-sub reveal">Everything since v3.0.0 under one tag — one week of field campaigns on the reference box, one commit per finding. The full story is in the <a class="link" href="https://github.com/calvincs/Pernix/blob/main/CHANGELOG.md" target="_blank" rel="noopener">changelog</a>; upgrade notes in the <a class="link" href="https://github.com/calvincs/Pernix/blob/main/docs/upgrade.md" target="_blank" rel="noopener">upgrade guide</a>.</p>
 
   <div class="honest-grid">
     <article class="honest-col is-for reveal">
       <p class="honest-h">What's new…</p>
       <ul>
-        <li><strong>Long-running autonomy.</strong> Deterministic gates, persistent goals with budgets and auto-continuations, heartbeats steered into running work — unattended multi-hour tasks that finish.</li>
-        <li><strong>The session kernel &amp; background jobs.</strong> A per-session Python REPL whose variables survive turns, compaction, and restarts — plus detached jobs for compute that outlives a turn.</li>
-        <li><strong>Recursive processing, visible.</strong> RLM analyzes inputs far larger than any context window — and every run now streams a live, read-only trace session in the sidebar.</li>
-        <li><strong>Semantic recall.</strong> Hybrid BM25 + vector memory search with wiki-links between entries, and a local CPU fallback when the embedding server is down.</li>
-        <li><strong>The self-improvement stack.</strong> A golden-task canary suite measures drift; a governed adaptive layer applies policy edits with veto windows and rollback; Telos keeps the drive pointed at questions worth asking.</li>
-        <li><strong>Sees and hears more.</strong> Voice input with four engines, clipboard paste, and <code>view_image</code> — the agent can look at images it renders itself.</li>
-        <li><strong>Simpler model plumbing.</strong> A native OpenAI-compatible provider (vLLM, LM Studio, llama.cpp), three model roles instead of six, prompt-cache breakpoints, and smarter failover.</li>
+        <li><strong>Spaces.</strong> Named, coloured groups of long-lived sessions that share directives, memory, a workspace home and one REPL kernel — and, off by default, suggestions for the work you keep coming back to.</li>
+        <li><strong>An MCP client.</strong> External Model Context Protocol servers, local or remote, register as first-class Pernix tools. Scout curation, the dangerous-tool gate and the per-tool health metrics apply to them unchanged.</li>
+        <li><strong>A front end for someone who didn't write it.</strong> A light theme, accessibility as a floor rather than a polish layer, a real phone <em>and</em> tablet tier, and the Explorer and Settings regrouped by what you came to do.</li>
+        <li><strong>Archive, not delete.</strong> A chat idle for thirty days leaves the sidebar and keeps every message, still searchable, still openable. A Storage tab owns the archive, the backups, and the database size.</li>
+        <li><strong>The State timeline, retold.</strong> A lane of turns, the story of the one you pick in the agent's own words, and the state machine as a map lit live while the turn runs.</li>
+        <li><strong>Upkeep that runs itself.</strong> Skills heal from their own failures, the canary suite fires on change instead of on a clock, and adaptive retention retires a hint on its outcomes rather than on how often it was cited.</li>
+        <li><strong>The September stability audit.</strong> 122 findings across eleven passes; the critical and high ones fixed one commit each, every fix pinned by a dated regression test.</li>
       </ul>
     </article>
 
     <article class="honest-col isnt-for reveal">
       <p class="honest-h">…and what's gone</p>
       <ul>
-        <li><strong>The workflow engine.</strong> Removed whole: <code>run_workflow</code>, its sibling tools, the routes, and the Workflows tab inside the Explorer. It was never used — zero invocations, ever — and a step graph declared before the work begins is the one assumption an agent lets you drop. Skills, workers, gates, goals, and cron cover everything it did.</li>
-        <li><strong>schedule_workflow.</strong> A thin wrapper whose metadata never persisted. Use <code>schedule_job</code>.</li>
-        <li><strong>The six-role model scheme.</strong> <code>scout_model</code>, <code>reflect_model</code>, <code>critical_model</code> and friends collapsed into Primary / Background / Backup.</li>
-        <li><strong>Nothing of yours.</strong> Migrations v20–v29 run automatically; no data is deleted; every removed surface has a documented replacement.</li>
+        <li><strong>Three tools nobody called.</strong> Ten weeks of usage data recorded zero invocations of <code>get_tool_schema</code>, <code>delete_skill</code> and <code>list_skills</code> — and two of them were builtins, paying schema tokens on every single turn. <code>discover_tools</code> and <code>discover_skills</code> already covered them.</li>
+        <li><strong>Mermaid.</strong> The state graph is one hand-laid SVG now, painted straight from the palette the rest of the app uses — 3.3 MB lighter, with no colour bridge left to break.</li>
+        <li><strong>mobile.css.</strong> Split into <code>compact.css</code> for viewport width and <code>touch.css</code> for pointer, each on its own gate — because a tablet isn't a big phone, and iPadOS lies about being either.</li>
+        <li><strong>Nightly full canary sweeps.</strong> The suite is change-driven now: a targeted probe after a batch of edits, two canaries a night as a heartbeat, and a full sweep on a model swap or a deploy.</li>
+        <li><strong>Nothing of yours.</strong> Migrations v30–v35 run automatically; the MCP client is on but inert until you configure a server; the thirty-day sweep archives and never deletes.</li>
       </ul>
     </article>
   </div>
@@ -968,7 +991,7 @@ and communicate clearly.
       <p class="footer-fine"><em>per&middot;nix</em> — Latin, <em>nimble</em>. A familiar that lives on your hardware.</p>
 
       <p class="footer-legal">
-        v3.0.0 · Built by Calvin (<a class="dim" href="https://github.com/calvincs" target="_blank" rel="noopener">calvincs</a>) with Claude (Anthropic) — and Pernix itself.
+        v3.1.0 · Built by Calvin (<a class="dim" href="https://github.com/calvincs" target="_blank" rel="noopener">calvincs</a>) with Claude (Anthropic) — and Pernix itself.
       </p>
       <p class="footer-legal">
         © 2026 Pernix contributors. Released under the MIT license.
