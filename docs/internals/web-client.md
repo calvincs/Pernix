@@ -231,7 +231,7 @@ status bar. Three tabs, in reading order:
 | Tab | What it is | Where its data comes from |
 |---|---|---|
 | **Lane** (default) | One row per **turn**, oldest at the top | `GET /api/sessions/{id}/turns` |
-| **Graph** | A Mermaid state diagram of the states visited, with a dwell-time bar and a tool tally | `/state-log` |
+| **Map** | The state machine itself as one inline SVG, with a dwell-time bar and a tool tally under it | `/state-log` |
 | **Timeline** | Every transition and tool call interleaved by timestamp, grouped into collapsible turns, with a filter bar | `/state-log` + the transcript |
 
 **A lane row** is a mono label (`T17`, plus `↳ T9` when the turn continued a
@@ -247,11 +247,29 @@ Space opens its Story, Arrow Up and Down move between rows, and the selected
 row carries `aria-current`.
 
 Every colour is a `--state-<name>-{fg,bg}` token from `tokens.css`, referenced
-from the element's own inline style as a `var()`. That matters because the
-Graph tab cannot do the same: a Mermaid `classDef` is a comma-separated string,
-so it needs a resolved `#rrggbb` and goes through `theme.js`'s `hex()` — which
-is where the "every state painted black" bug of `3deb575` lived. The lane has
-no such bridge to get wrong, and a theme swap repaints it with no JS at all.
+from the element's own inline style as a `var()`. Nothing in this modal
+resolves a token to a hex string in JavaScript any more, so a theme swap
+repaints all three tabs with no JS involved at all. That is a rule rather than
+a preference: the bridge that used to exist is where the "every state painted
+black in both themes" bug of `3deb575` lived, twice.
+
+**The Map** is the state machine, not this session's trace of it: all ten
+states of `sessions/state_v2.py` and all 31 distinct edges of its `TRANSITIONS`
+table, laid out once by hand in `timeline.js` — a coordinate table, a viewBox
+sized to the drawing, and `document.createElementNS`. The edges this session
+took are solid and carry their count, the rest stay faint, an
+invariant-violation edge takes `--error`, and the state the session is in is
+outlined in `--accent` — pulsing, like the status bar's badge, while the turn
+is still running. Activating a state filters the Timeline tab to it.
+
+Mermaid drew this until 3.3 MB of it was measured against ten fixed states.
+Three things it cost, each of which the SVG does not: a megabyte-plus parse on
+the first open of the tab; a `classDef` syntax that is comma-separated and
+therefore cannot carry a `color-mix()`, so every colour had to be resolved to
+`#rrggbb` through `theme.js`'s `hex()` — the colour bridge above, and the whole
+of that bug; and a laid-out diagram wide enough to scroll the modal sideways on
+a phone, where the hand-drawn one is a viewBox that scales to whatever width it
+is given.
 
 **The Story** under the lane is the selected turn (the newest, on open) in the
 order the agent lived it — four disclosure cards, all reading fields of that

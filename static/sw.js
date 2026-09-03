@@ -14,13 +14,14 @@
 const CACHE_VERSION = 'pernix-shell-__BUILD__';
 
 // What the app needs to boot and render a transcript offline. Deliberately
-// excludes the two heavyweight vendored libraries — Monaco (~13MB across 103
-// AMD modules) and Mermaid (~3.3MB) — which would turn every install into a
-// multi-megabyte download for features most sessions never open. Both live
-// under /static/ and so are picked up by the cache-first fetch handler the
-// first time they are actually used, which is also the only point at which
-// precaching them was ever possible: while they were CDN-loaded they sat on
-// a cross-origin URL that this worker never intercepts and cannot cache.
+// excludes the one heavyweight vendored library left — Monaco (~13MB across
+// 103 AMD modules) — which would turn every install into a multi-megabyte
+// download for a feature most sessions never open. It lives under /static/
+// and so is picked up by the cache-first fetch handler the first time it is
+// actually used, which is also the only point at which precaching it was ever
+// possible: while it was CDN-loaded it sat on a cross-origin URL that this
+// worker never intercepts and cannot cache. (Mermaid, ~3.3MB, used to be the
+// other one; the State timeline draws its own SVG now and it is gone.)
 const SHELL_ASSETS = [
     '/',
     '/static/css/tokens.css',

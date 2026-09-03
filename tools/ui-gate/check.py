@@ -491,7 +491,7 @@ def desktop_layout(browser):
 
 
 # ---------------------------------------------------------------------------
-# State timeline — the Lane tab, the Story under it, and the Graph's colours
+# State timeline — the Lane tab, the Story under it, and the Map's colours
 # ---------------------------------------------------------------------------
 
 # seed.py's last block builds this session: three turns of state-log rows with
@@ -499,7 +499,7 @@ def desktop_layout(browser):
 # an eval gate, a compaction and a notice. run.sh only forwards main and
 # parent, so it is looked up by title in the throwaway's own sqlite — the same
 # file seed.py has just written. (The arc used to be written from HERE, which
-# meant the gate's fixtures lived in two files and only the Graph tab had one.)
+# meant the gate's fixtures lived in two files and only one tab had one.)
 TIMELINE_TITLE = "State timeline — three turns"
 
 # The seeded turns, as the lane has to draw them: turn id, then each phase's
@@ -568,37 +568,80 @@ TOKENS_JS = """async () => {
                    '--state-paused-fg','--accent','--bg']) out[k] = t.hex(k);
   return out; }"""
 
-STATE_GRAPH_JS = r"""() => {""" + CONTRAST_JS + r"""
+# The ten states of sessions/state_v2.py, which is what the map draws whether
+# or not the session ever visited them.
+MAP_STATES = [
+    "idle_ready",
+    "scouting",
+    "processing",
+    "finalizing",
+    "cancelling",
+    "compacting",
+    "awaiting_user",
+    "awaiting_workers",
+    "pause_requested",
+    "paused",
+]
+
+# The seeded arc, read back off the map as edges rather than as rows: three
+# turns, one of which retries (finalizing→scouting) and one of which compacts
+# (processing↔compacting). Seven of the 31 edges, and the other 24 stay faint.
+MAP_USED_EDGES = {
+    "idle_ready||scouting": 3,
+    "scouting||processing": 4,
+    "processing||finalizing": 4,
+    "finalizing||scouting": 1,
+    "finalizing||idle_ready": 3,
+    "processing||compacting": 1,
+    "compacting||processing": 1,
+}
+
+STATE_MAP_JS = r"""() => {""" + CONTRAST_JS + r"""
   const bad = [];
-  // The [*] start/end markers are bare <circle>s: no box, no label to colour.
-  const nodes = [...document.querySelectorAll('#timeline-graph g.node')]
-                  .filter(n => (n.textContent||'').trim());
-  for (const n of nodes) {
-    const rect = n.querySelector('rect.label-container, rect, polygon, path');
-    // Mermaid paints the glyphs on the <tspan>. The parent <text> keeps the
-    // library's own default fill whatever the classDef says, so reading that
-    // one measures nothing.
-    const label = n.querySelector('tspan') || n.querySelector('text');
-    const name = (n.textContent||'').trim().split('Filter')[0].slice(0, 18);
-    const rc = parse(rect && getComputedStyle(rect).fill);
-    if (!rc) { bad.push(name + ': node has no fill'); continue; }
-    // Every palette colour is a long way from #000; the regression painted
-    // them exactly #000000/#010101, so proximity to black is the signature.
-    if (Math.max(rc[0], rc[1], rc[2]) <= 8) { bad.push(name + ': box ' + getComputedStyle(rect).fill); continue; }
+  const states = {}, edges = {};
+  for (const r of document.querySelectorAll('#timeline-map .tl-map-state')) {
+    // The state name is the second class: `tl-map-state tl-map-<name>`.
+    const name = [...r.classList].map(c => c.startsWith('tl-map-') && c !== 'tl-map-state' ? c.slice(7) : '')
+                   .find(Boolean) || '?';
+    const cs = getComputedStyle(r);
+    states[name] = {fill: cs.fill, stroke: cs.stroke, width: cs.strokeWidth,
+                    current: r.classList.contains('current'), live: r.classList.contains('live')};
+    const rc = parse(cs.fill);
+    // Every palette colour is a long way from #000; the regression this pass
+    // was written for painted them exactly #000000/#010101, so proximity to
+    // black — or no fill at all — is the signature.
+    if (!rc || cs.fill === 'none' || cs.fill === 'rgba(0, 0, 0, 0)') { bad.push(name + ': box ' + cs.fill); continue; }
+    if (Math.max(rc[0], rc[1], rc[2]) <= 8) { bad.push(name + ': box ' + cs.fill); continue; }
+    const label = document.querySelector('#timeline-map .tl-map-label.tl-map-' + name);
     const lc = label ? parse(getComputedStyle(label).fill) : null;
     if (!lc) { bad.push(name + ': label has no fill'); continue; }
-    const r = ratio(rc, lc);
-    if (r < 3) bad.push(name + ': label ' + r.toFixed(2) + ':1 on its box');
+    const ratioLabel = ratio(rc, lc);
+    if (ratioLabel < 3) bad.push(name + ': label ' + ratioLabel.toFixed(2) + ':1 on its box');
   }
+  for (const p of document.querySelectorAll('#timeline-map .tl-map-edge')) {
+    const cs = getComputedStyle(p);
+    edges[p.dataset.edge] = {used: p.classList.contains('used'),
+                             op: Math.round(parseFloat(cs.opacity) * 100) / 100,
+                             width: parseFloat(cs.strokeWidth)};
+  }
+  // A count sits at a table coordinate, not on its edge, so pairing the two
+  // by position would be fragile. Read them in document order instead: the
+  // drawing emits each label immediately after the path it belongs to.
+  const labelled = [...document.querySelectorAll('#timeline-map .tl-map-edges > *')]
+      .reduce((acc, n) => { if (n.tagName === 'path') acc.last = n.dataset.edge;
+                            else if (n.tagName === 'text') acc.out[acc.last] = n.textContent.trim();
+                            return acc; }, {out: {}, last: null}).out;
   const flat = [...document.querySelectorAll('.tl-dwell-seg, .tl-dwell-dot')]
       .map(s => getComputedStyle(s).backgroundColor)
       .filter(c => c === 'rgb(0, 0, 0)' || c === 'rgba(0, 0, 0, 0)');
-  return {n: nodes.length, bad, dwell: flat.length,
-          status: (document.querySelector('.timeline-graph-status')||{}).textContent || ''}; }"""
+  return {states, edges, labelled, bad, dwell: flat.length,
+          svgs: document.querySelectorAll('#timeline-map svg').length,
+          overflow: Math.round(document.documentElement.scrollWidth - innerWidth),
+          status: (document.querySelector('.timeline-map-status')||{}).textContent || ''}; }"""
 
 
-def state_graph_colours(browser):
-    """m1: the State timeline's graph is painted from the --state-* palette.
+def state_map_colours(browser):
+    """m1: the State timeline's Map is the machine, painted from the palette.
 
     Its own context, after the baseline pass, because it opens a session the
     other passes have no reason to touch.
@@ -614,7 +657,11 @@ def state_graph_colours(browser):
         the value read back is the interpolated one — the previous colour, in
         oklab(). Every token then reads as whatever was read first.
 
-    This context asks for reduced motion, so one pass covers both.
+    This context asks for reduced motion, so one pass covers both. The map
+    itself no longer goes anywhere near that bridge — its rects take their
+    --state-* pair from layout.css by class — so the token half of this check
+    now guards theme.js on behalf of the sigil and Monaco, and the map half
+    asserts that the CSS route is actually wired up.
     """
     problems = []
     if not TIMELINE:
@@ -622,8 +669,10 @@ def state_graph_colours(browser):
 
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[state-graph] {m.text}") if m.type == "error" else None)
-    pg.on("pageerror", lambda e: console_errors.append(f"[state-graph] pageerror: {e}"))
+    pg.on("console", lambda m: console_errors.append(f"[state-map] {m.text}") if m.type == "error" else None)
+    pg.on("pageerror", lambda e: console_errors.append(f"[state-map] pageerror: {e}"))
+    vendor_reqs = []
+    pg.on("request", lambda r: vendor_reqs.append(r.url) if "mermaid" in r.url else None)
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
 
@@ -632,23 +681,53 @@ def state_graph_colours(browser):
     if toks.get("--state-processing-bg") == toks.get("--state-processing-fg"):
         problems.append("state fg and bg read the same: " + str(toks.get("--state-processing-bg")))
 
-    # The Graph tab is no longer the one the modal opens on, and mermaid only
-    # renders once it is switched to.
-    open_timeline(pg, tab="Graph")
+    # The Map is not the tab the modal opens on; it draws on the first switch.
+    open_timeline(pg, tab="Map")
     try:
-        pg.wait_for_selector("#timeline-graph g.node rect", timeout=15000)
-        time.sleep(0.6)
-        g = pg.evaluate(STATE_GRAPH_JS)
-        problems += g["bad"]
-        if g["dwell"]:
-            problems.append(f"{g['dwell']} black time-in-state segments")
-        if g["n"] < 3:
-            problems.append(f"only {g['n']} nodes drawn ({g['status']!r})")
+        pg.wait_for_selector("#timeline-map .tl-map-state", timeout=15000)
+        time.sleep(0.4)
+        m = pg.evaluate(STATE_MAP_JS)
+        problems += m["bad"]
+        if m["dwell"]:
+            problems.append(f"{m['dwell']} black time-in-state segments")
+        drawn = sorted(m["states"])
+        if drawn != sorted(MAP_STATES):
+            problems.append(f"states drawn {drawn}")
+        if m["svgs"] != 1:
+            problems.append(f"{m['svgs']} svgs in the map container")
+        # The 31 edges of TRANSITIONS, of which the seeded arc took seven.
+        if len(m["edges"]) != 31:
+            problems.append(f"{len(m['edges'])} edges drawn, the table has 31")
+        used = {k for k, v in m["edges"].items() if v["used"]}
+        if used != set(MAP_USED_EDGES):
+            problems.append(f"used edges {sorted(used)}")
+        for key, n in MAP_USED_EDGES.items():
+            if m["labelled"].get(key) != f"{n}×":
+                problems.append(f"{key} labelled {m['labelled'].get(key)!r}, seeded {n}×")
+        # An unused edge has to be visibly fainter, or "solid where it ran" is
+        # not saying anything.
+        faint = [v for k, v in m["edges"].items() if not v["used"]]
+        if any(v["op"] >= 1 or v["width"] >= 1.6 for v in faint):
+            problems.append("an unused edge is drawn as solid as a used one")
+        # The seeded session ends parked in idle_ready, so that is the lit box
+        # and nothing pulses.
+        lit = [k for k, v in m["states"].items() if v["current"]]
+        if lit != ["idle_ready"]:
+            problems.append(f"lit states {lit}")
+        elif m["states"]["idle_ready"]["width"] not in ("2px", "2"):
+            problems.append(f"idle_ready lit at stroke-width {m['states']['idle_ready']['width']}")
+        if any(v["live"] for v in m["states"].values()):
+            problems.append("a state pulses in a session that is parked")
+        if m["overflow"] > 0:
+            problems.append(f"the map scrolls the page {m['overflow']}px sideways")
     except Exception as e:  # noqa: BLE001
-        status = pg.evaluate("() => (document.querySelector('.timeline-graph-status')||{}).textContent || ''")
-        problems.append(f"graph never rendered: {str(e)[:80]} status={status!r}")
-    pg.screenshot(path=f"{shots}/{tag}-state-graph.png")
-    check("state-graph", "state graph nodes are painted from the palette", not problems, problems[:6])
+        status = pg.evaluate("() => (document.querySelector('.timeline-map-status')||{}).textContent || ''")
+        problems.append(f"map never rendered: {str(e)[:80]} status={status!r}")
+    # 3.3MB of diagram library, deleted in this batch. Nothing may ask for it.
+    if vendor_reqs:
+        problems.append(f"requested {vendor_reqs[0]}")
+    pg.screenshot(path=f"{shots}/{tag}-state-map.png")
+    check("state-map", "the state map is the machine, painted from the palette", not problems, problems[:6])
     ctx.close()
 
 
@@ -741,7 +820,7 @@ def timeline_lane(browser, light=False):
         check(
             "timeline-lane",
             "m2: the modal opens on Lane, oldest turn first",
-            lane["tabs"] == ["Lane", "Graph", "Timeline"]
+            lane["tabs"] == ["Lane", "Map", "Timeline"]
             and lane["active"] == "Lane"
             and lane["turns"] == ["1", "2", "3"]
             and lane["current"] == ["3"],
@@ -1066,11 +1145,11 @@ with sync_playwright() as p:
     except Exception as e:
         check("desktop", "desktop pass completed", False, str(e))
     try:
-        state_graph_colours(browser)
+        state_map_colours(browser)
     except Exception as e:
         check(
-            "state-graph",
-            "state graph nodes are painted from the palette",
+            "state-map",
+            "the state map is the machine, painted from the palette",
             False,
             f"{e}\n{traceback.format_exc()[-400:]}",
         )

@@ -8,10 +8,13 @@
 //                Plan (the scout report), Act (the tool calls and the token
 //                bill), Verify (the reflect chain and the eval gates) and
 //                Remembers (compactions and notices).
-//   * Graph    — Mermaid stateDiagram-v2 of visited states, edge counts, current
-//                state highlighted, invariant-violation edges flagged, per-state
-//                dwell-time breakdown, per-turn tool tally. Clicking a state
-//                node filters the Timeline tab to that state.
+//   * Map      — the state machine itself, hand-drawn as inline SVG: the ten
+//                states of sessions/state_v2.py and every edge of its
+//                TRANSITIONS table. The edges this session actually took are
+//                solid and carry their count; the rest stay faint. The state
+//                the session is in is lit. Clicking a state filters the
+//                Timeline tab to it. Under the map, the dwell-time bar and
+//                the per-turn tool tally.
 //   * Timeline — state-log rows merged with tool-call rows by timestamp,
 //                grouped into collapsible turns, with wall-clock times, idle-gap
 //                dividers, a filter bar (all/states/tools/errors + text), and
@@ -27,27 +30,17 @@
 // `created_at` (ISO) → ms. The lane needs no merge at all — /turns is the read
 // model that already did the join, server-side (see docs/api.md, "Get Turns").
 //
-// Lane colours come straight from the --state-<name>-{fg,bg} custom properties
-// as `var()` references, not through theme.js's hex() bridge: these are HTML
-// elements, so the browser resolves the token itself and a theme swap repaints
-// them with no JS involved. The Mermaid classDefs below still need real hex,
-// because a comma-separated classDef cannot carry a color-mix() token stream.
-//
-// Mermaid is vendored and lazy-loaded from disk on first open.
+// Every colour in here is a --state-<name>-{fg,bg} custom property, referenced
+// as a `var()` from an element's own class or inline style. Nothing resolves a
+// token to a hex string in JavaScript any more, so a theme swap repaints the
+// whole modal with no JS involved at all.
 
-import { el, text, setSanitizedSvg } from '../../render.js';
+import { el, text } from '../../render.js';
 import { icon } from '../../icons.js';
 import { get } from '../../api.js';
 import { state } from '../../store.js';
 import { openOverlay } from '../../a11y.js';
-import { hex } from '../../theme.js';
 import { bindStripScroll } from '../file-panel.js';
-
-// Vendored rather than CDN-loaded: the page ships a `script-src 'self'` CSP
-// (see index.html) and has to work offline on a LAN. Mermaid 10's ESM build
-// is code-split across ~120 chunks, so the single-file UMD bundle is what is
-// vendored — hence a <script> tag and window.mermaid rather than import().
-const MERMAID_SRC = '/static/vendor/mermaid.min.js';
 
 const PAGE_LIMIT = 500;
 const GAP_MS = 30_000; // idle gap worth flagging between adjacent rows
@@ -62,8 +55,6 @@ const LANE_MIN_SEG_PCT = 1.5;
 
 let _overlay = null;
 let _closeOverlay = null;  // teardown from a11y.js openOverlay()
-let _mermaid = null;
-let _mermaidPromise = null;
 let _data = { stateLog: [], messages: [], liveTools: [], hasOlder: false };
 
 // The lane's own data: turn records from /turns, OLDEST FIRST (the endpoint
@@ -80,7 +71,7 @@ let _laneLoadToken = 0;         // newest lane fetch wins
 // Without these, a multi-minute tool run (rlm_process, bash, spawn_worker)
 // is invisible until it completes and then reads as an unexplained idle gap.
 // Purely a live-DOM affordance: entries only join _data.liveTools (export,
-// tally, graph) once the completed result arrives.
+// tally, map) once the completed result arrives.
 let _pendingToolRows = [];
 let _filter = { mode: 'all', q: '' };
 let _scroller = null;   // .modal-body — the actual scroll container
@@ -91,9 +82,7 @@ let _filterBtns = [];
 let _tabBtns = [];
 let _panes = [];
 let _lastRowTs = 0;     // last rendered row timestamp, for live gap dividers
-let _graphRefreshTimer = null;  // pending debounced graph refresh
-let _graphRenderToken = 0;      // newest _renderGraph call wins
-let _graphRenderSeq = 0;        // unique mermaid render ids
+let _mapRefreshTimer = null;    // pending debounced map refresh (tool bursts)
 
 export async function openTimeline() {
     if (_overlay) return;
@@ -112,10 +101,10 @@ export async function openTimeline() {
         _storyEl,
     ]);
 
-    const graphPane = el('div', { class: 'tab-content', 'data-tab': 'graph' }, [
-        el('div', { class: 'timeline-graph-status' }, [text('Loading…')]),
-        el('div', { class: 'timeline-graph-container', id: 'timeline-graph' }),
-        el('div', { class: 'timeline-graph-caption', id: 'timeline-graph-caption' }),
+    const mapPane = el('div', { class: 'tab-content', 'data-tab': 'map' }, [
+        el('div', { class: 'timeline-map-status' }),
+        el('div', { class: 'timeline-map-container', id: 'timeline-map' }),
+        el('div', { class: 'timeline-map-caption', id: 'timeline-map-caption' }),
     ]);
     _bodyEl = el('div', { id: 'timeline-modal-body' });
     const listPane = el('div', { class: 'tab-content', 'data-tab': 'timeline' }, [
@@ -125,10 +114,10 @@ export async function openTimeline() {
 
     _tabBtns = [
         el('button', { class: 'tab-btn active', 'data-tab': 'lane' }, [text('Lane')]),
-        el('button', { class: 'tab-btn', 'data-tab': 'graph' }, [text('Graph')]),
+        el('button', { class: 'tab-btn', 'data-tab': 'map' }, [text('Map')]),
         el('button', { class: 'tab-btn', 'data-tab': 'timeline' }, [text('Timeline')]),
     ];
-    _panes = [lanePane, graphPane, listPane];
+    _panes = [lanePane, mapPane, listPane];
     _tabBtns.forEach(btn => {
         btn.addEventListener('click', () => _switchTab(btn.getAttribute('data-tab')));
     });
@@ -142,7 +131,7 @@ export async function openTimeline() {
     }, [text('Copy JSON')]);
     copyBtn.addEventListener('click', () => _copyExport(copyBtn));
 
-    const modalBody = el('div', { class: 'modal-body timeline-modal-content' }, [lanePane, graphPane, listPane]);
+    const modalBody = el('div', { class: 'modal-body timeline-modal-content' }, [lanePane, mapPane, listPane]);
     _scroller = modalBody;
 
     const card = el('div', {
@@ -173,8 +162,8 @@ export async function openTimeline() {
     await _load();
     _renderTimeline();
     _renderLane();
-    // The Graph tab is no longer the one on screen, and mermaid.min.js is a
-    // ~1MB parse. It loads on the first switch to it instead of on every open.
+    // The Map is drawn on the first switch to it. It is cheap — one SVG of
+    // fixed geometry — but it is also not the tab on screen.
 }
 
 export function closeTimeline() {
@@ -183,18 +172,16 @@ export function closeTimeline() {
         _overlay.remove();
         _overlay = null;
     }
-    if (_graphRefreshTimer) {
-        clearTimeout(_graphRefreshTimer);
-        _graphRefreshTimer = null;
+    if (_mapRefreshTimer) {
+        clearTimeout(_mapRefreshTimer);
+        _mapRefreshTimer = null;
     }
     if (_laneRefreshTimer) {
         clearTimeout(_laneRefreshTimer);
         _laneRefreshTimer = null;
     }
-    // Invalidate any _renderGraph still parked on an await, so it cannot
-    // touch a pane belonging to a modal that is already gone. Same for a
-    // lane fetch in flight.
-    _graphRenderToken++;
+    // Invalidate a lane fetch still in flight, so it cannot render into a
+    // modal that is already gone.
     _laneLoadToken++;
     _scroller = null;
     _bodyEl = null;
@@ -216,9 +203,9 @@ function _switchTab(target) {
     _tabBtns.forEach(b => b.classList.toggle('active', b.getAttribute('data-tab') === target));
     _revealTab(_tabBtns.find(b => b.getAttribute('data-tab') === target));
     _panes.forEach(p => p.classList.toggle('active', p.getAttribute('data-tab') === target));
-    if (target === 'graph') {
-        const pane = _panes.find(p => p.getAttribute('data-tab') === 'graph');
-        if (pane) _renderGraph(pane);
+    if (target === 'map') {
+        const pane = _panes.find(p => p.getAttribute('data-tab') === 'map');
+        if (pane) _renderMap(pane);
     } else if (target === 'lane' && _scroller) {
         // The lane reads top-down and its "Load older turns" control is at
         // the top, so entering it lands at the top — the opposite of the
@@ -239,7 +226,7 @@ function _timelineActive() {
 }
 
 // Live-append from _renderStateBadge. Appends a state row to the Timeline
-// tab (if currently rendered) and invalidates the graph.
+// tab (if currently rendered) and redraws the map.
 export function appendTimelineRow(row) {
     const ts = Date.now();
     const data = {
@@ -256,7 +243,7 @@ export function appendTimelineRow(row) {
     };
     _data.stateLog.push(data);
     _appendLiveEntry({ kind: 'state', ts, turn: data.turn_id, data });
-    _refreshGraphIfVisible();
+    _refreshMapIfVisible();
     _scheduleLaneRefresh();
 }
 
@@ -298,32 +285,35 @@ export function appendTimelineToolRow(tool) {
         entry.ts = pending.startTs; // keep the row anchored where the run began
         pending.el.replaceWith(_buildToolRow(entry, entry.ts));
         _data.liveTools.push(entry);
-        _refreshGraphIfVisible();
+        _refreshMapIfVisible();
         _scheduleLaneRefresh();
         return;
     }
     _data.liveTools.push(entry);
     _appendLiveEntry({ kind: 'tool', ts: entry.ts, turn: null, data: entry });
-    _refreshGraphIfVisible();
+    _refreshMapIfVisible();
     _scheduleLaneRefresh();
 }
 
-// Coalesce graph refreshes. Every live tool.start/tool.call invalidates the
-// diagram, and mermaid.render() is a full layout pass — re-running it once per
-// event through a tool-heavy turn pins the main thread for no visible gain,
-// since the intermediate frames are superseded before anyone reads them. A
-// trailing debounce collapses a burst into a single render.
-const GRAPH_REFRESH_DEBOUNCE_MS = 250;
+// Coalesce map refreshes. A tool call moves nothing on the map itself — only
+// the tally and the caption under it — and a tool-heavy round fires a dozen
+// events whose intermediate frames are superseded before anyone reads them, so
+// a trailing debounce collapses the burst into one redraw. A state change is
+// the opposite: it is the whole point of the tab, so it redraws immediately.
+const MAP_REFRESH_DEBOUNCE_MS = 250;
 
-function _refreshGraphIfVisible() {
-    if (_graphRefreshTimer) clearTimeout(_graphRefreshTimer);
-    _graphRefreshTimer = setTimeout(() => {
-        _graphRefreshTimer = null;
-        const graphPane = document.querySelector('#timeline-modal .tab-content[data-tab="graph"]');
-        if (graphPane && graphPane.classList.contains('active')) {
-            _renderGraph(graphPane);
-        }
-    }, GRAPH_REFRESH_DEBOUNCE_MS);
+function _mapPane() {
+    const pane = _panes.find(p => p.getAttribute('data-tab') === 'map');
+    return pane && pane.classList.contains('active') ? pane : null;
+}
+
+function _refreshMapIfVisible() {
+    if (_mapRefreshTimer) clearTimeout(_mapRefreshTimer);
+    _mapRefreshTimer = setTimeout(() => {
+        _mapRefreshTimer = null;
+        const pane = _mapPane();
+        if (pane) _renderMap(pane);
+    }, MAP_REFRESH_DEBOUNCE_MS);
 }
 
 function _appendLiveEntry(entry) {
@@ -1045,7 +1035,7 @@ function _syncFilterBar() {
     if (_filterInput) _filterInput.value = _filter.q;
 }
 
-// Filter the Timeline tab to a single state — entry point for graph node clicks.
+// Filter the Timeline tab to a single state — entry point for map state clicks.
 function _filterTimelineByState(name) {
     _filter.mode = 'state';
     _filter.q = name;
@@ -1074,102 +1064,302 @@ function _jumpToNextError() {
 }
 
 // ---------------------------------------------------------------------------
-// Graph tab
+// Map tab — the state machine, drawn once by hand
+//
+// The machine is fixed. Ten states and the 31 distinct edges of the
+// TRANSITIONS table in sessions/state_v2.py, which changes about once a
+// release: it does not need a layout engine, and it certainly did not need
+// the 3.3 MB one that used to draw it. Mermaid cost a megabyte-plus parse on
+// the first open of a tab; its classDef syntax is comma-separated and cannot
+// carry a `color-mix()`, so every colour had to be resolved to #rrggbb through
+// theme.js's hex() — twice the source of "every state painted black in both
+// themes"; its default HTML labels live in a <foreignObject>, which the SVG
+// sanitizer strips; and the diagram it laid out was wide enough to scroll the
+// modal sideways on a phone.
+//
+// So the map is inline SVG, built with createElementNS — no markup string, so
+// nothing to sanitize. Every coordinate is in the three tables below. Moving a
+// state is editing two numbers and the `d` of the edges that touch it, and the
+// viewBox is the drawing's own size, so the browser scales the whole thing to
+// whatever width the modal has.
+//
+// The colours are CSS. A rect carries `tl-map-state tl-map-<state>` and takes
+// its --state-<name>-{fg,bg} pair from layout.css, exactly the way the lane's
+// segments do — which is why a theme swap repaints the map with no JS at all.
 // ---------------------------------------------------------------------------
 
-async function _renderGraph(pane) {
-    // This function awaits twice (library load, mermaid.render), so a second
-    // call can interleave with one already in flight. Both would then run the
-    // stale-section sweep below and both would insert their own dwell/tally
-    // block, leaving duplicates on screen. Newest call wins; older ones bail
-    // at their next resumption point.
-    const token = ++_graphRenderToken;
+const SVG_NS = 'http://www.w3.org/2000/svg';
 
-    const statusEl = pane.querySelector('.timeline-graph-status');
-    const container = pane.querySelector('.timeline-graph-container');
-    const caption = pane.querySelector('.timeline-graph-caption');
-    container.innerHTML = '';
-    caption.innerHTML = '';
+// The drawing, in user units. Wide rather than tall because the machine reads
+// left to right: idle_ready → scouting → processing → finalizing → idle_ready,
+// with compacting above processing, the four waits below it, and cancelling —
+// which seven states can reach — at the end.
+const MAP_VIEW = { w: 700, h: 292 };
+const MAP_BOX = { w: 104, h: 34, r: 6 };
 
-    // Remove any stale sections from a previous render.
-    pane.querySelectorAll('.tl-tool-tally, .tl-dwell').forEach(n => n.remove());
+// state → [x, y] of the box's top-left corner.
+const MAP_NODES = {
+    idle_ready:       [40, 104],
+    scouting:         [176, 104],
+    processing:       [312, 104],
+    finalizing:       [448, 104],
+    cancelling:       [584, 104],
+    compacting:       [312, 16],
+    awaiting_user:    [40, 200],
+    awaiting_workers: [176, 200],
+    pause_requested:  [312, 200],
+    paused:           [448, 200],
+};
 
-    if (!_data.stateLog.length) {
-        statusEl.textContent = 'No state transitions yet.';
-        return;
+// Every (from, to) pair in TRANSITIONS, once each — 31 edges carrying 48
+// reasons, because half that table is the reaper's and the cancel-finally
+// handler's escape hatches back to idle_ready and they all draw as one line.
+//
+// `d` is the path. Long runs are routed through lanes rather than drawn
+// straight, so the edges that cross do so at a right angle instead of
+// disappearing into each other: y = 62/76/90 above the main row, 144…192
+// between it and the waits, 244…280 below them, and x = 8/16/24 down the left
+// margin for the three returns that come back around the outside.
+//
+// `l` is where the count sits when the session used the edge. Unused edges
+// carry no label at all, so a collision needs two live edges sharing a lane,
+// and the lanes were assigned so that cannot happen for the common ones. `a`
+// is that label's text-anchor where `middle` is the wrong one.
+const MAP_EDGES = [
+    // The main flow, left to right, and the reaper's way back out of scouting.
+    { from: 'idle_ready', to: 'scouting', d: 'M144,114 H176', l: [160, 110] },
+    { from: 'scouting', to: 'idle_ready', d: 'M176,128 H144', l: [160, 140] },
+    { from: 'scouting', to: 'processing', d: 'M280,121 H312', l: [296, 117] },
+    { from: 'processing', to: 'finalizing', d: 'M416,121 H448', l: [432, 117] },
+    // The compaction round trip, and the three ways out of it.
+    { from: 'processing', to: 'compacting', d: 'M338,104 V50', l: [334, 80], a: 'end' },
+    { from: 'compacting', to: 'processing', d: 'M390,50 V104', l: [394, 80], a: 'start' },
+    { from: 'compacting', to: 'finalizing', d: 'M416,42 H466 V104', l: [441, 38] },
+    { from: 'compacting', to: 'cancelling', d: 'M416,26 H648 V104', l: [532, 22] },
+    { from: 'compacting', to: 'idle_ready', d: 'M312,33 H116 V104', l: [214, 29] },
+    // The returns, over the top of the row they leave.
+    { from: 'finalizing', to: 'idle_ready', d: 'M484,104 V62 H92 V104', l: [288, 58] },
+    { from: 'finalizing', to: 'scouting', d: 'M516,104 V76 H228 V104', l: [372, 72] },
+    { from: 'cancelling', to: 'idle_ready', d: 'M612,104 V90 H68 V104', l: [340, 86] },
+    // The band between the main row and the waits.
+    { from: 'scouting', to: 'finalizing', d: 'M264,138 V144 H460 V138', l: [362, 141] },
+    { from: 'processing', to: 'cancelling', d: 'M392,138 V152 H624 V138', l: [508, 149] },
+    { from: 'scouting', to: 'cancelling', d: 'M252,138 V160 H600 V138', l: [426, 157] },
+    { from: 'processing', to: 'awaiting_workers', d: 'M324,138 V168 H240 V200', l: [282, 165] },
+    { from: 'processing', to: 'awaiting_user', d: 'M336,138 V176 H104 V200', l: [220, 173] },
+    { from: 'processing', to: 'idle_ready', d: 'M316,138 V184 H120 V138', l: [218, 181] },
+    { from: 'awaiting_user', to: 'scouting', d: 'M124,200 V192 H202 V138', l: [163, 189] },
+    { from: 'paused', to: 'processing', d: 'M476,200 V192 H380 V138', l: [428, 189] },
+    // Straight down (or up) between a wait and the row above it.
+    { from: 'processing', to: 'pause_requested', d: 'M352,138 V200', l: [356, 172], a: 'start' },
+    { from: 'awaiting_workers', to: 'scouting', d: 'M216,200 V138', l: [212, 172], a: 'end' },
+    { from: 'awaiting_user', to: 'idle_ready', d: 'M76,200 V138', l: [72, 172], a: 'end' },
+    { from: 'pause_requested', to: 'paused', d: 'M416,217 H448', l: [432, 213] },
+    // Under the waits: three returns around the left margin, four runs right
+    // into cancelling.
+    { from: 'awaiting_workers', to: 'idle_ready', d: 'M204,234 V244 H24 V112 H40', l: [114, 241] },
+    { from: 'pause_requested', to: 'idle_ready', d: 'M340,234 V253 H16 V121 H40', l: [178, 250] },
+    { from: 'paused', to: 'idle_ready', d: 'M476,234 V262 H8 V130 H40', l: [242, 259] },
+    { from: 'pause_requested', to: 'cancelling', d: 'M388,234 V244 H648 V138', l: [518, 241] },
+    { from: 'paused', to: 'cancelling', d: 'M524,234 V253 H636 V138', l: [580, 250] },
+    { from: 'awaiting_user', to: 'cancelling', d: 'M92,234 V271 H660 V138', l: [376, 268] },
+    { from: 'awaiting_workers', to: 'cancelling', d: 'M252,234 V280 H672 V138', l: [462, 277] },
+];
+
+// The states in which a turn is over. Everything else means the machine is
+// still working, which is what pulses the lit state and the badge alike.
+const RESTING_STATES = new Set(['idle_ready', 'awaiting_user', 'awaiting_workers']);
+
+const MAP_FLASH_MS = 700;
+
+function _svgEl(name, attrs, children) {
+    const node = document.createElementNS(SVG_NS, name);
+    for (const [k, v] of Object.entries(attrs || {})) {
+        if (v != null) node.setAttribute(k, String(v));
     }
-    statusEl.textContent = '';
+    for (const c of children || []) if (c) node.appendChild(c);
+    return node;
+}
 
-    let mermaid;
-    try {
-        mermaid = await _ensureMermaid();
-    } catch (e) {
-        statusEl.textContent = 'Failed to load diagram library: ' + e.message;
-        return;
+function _svgTitle(str) {
+    return _svgEl('title', {}, [document.createTextNode(str)]);
+}
+
+// The same aggregation the Mermaid source used to do: one entry per (from, to)
+// pair, its count, the last reason seen on it, and whether any of them was an
+// invariant violation. A row with no from_state is the session's very first
+// and has no edge to draw.
+function _mapStats(rows) {
+    const edges = new Map();
+    let current = null;
+    let termination = null;
+    const invariantViolations = [];
+
+    for (const r of rows) {
+        const to = r.to_state;
+        if (!to) continue;
+        current = to;
+        if (r.termination_reason) termination = r.termination_reason;
+        if (!r.from_state) continue;
+        const key = `${r.from_state}||${to}`;
+        const edge = edges.get(key) || { count: 0, reason: '', invariant: false };
+        edge.count += 1;
+        if (r.reason) edge.reason = r.reason;   // keep last reason
+        if ((r.reason || '').startsWith('invariant-violation')) {
+            edge.invariant = true;
+            invariantViolations.push(r);
+        }
+        edges.set(key, edge);
     }
-    if (token !== _graphRenderToken) return;
+    return { edges, current, termination, invariantViolations };
+}
 
-    const { source, current, termination, invariantViolations, nodeNames } = _buildMermaidSource(_data.stateLog);
+function _buildMapSvg({ edges, current }) {
+    const running = !!current && !RESTING_STATES.has(current);
 
-    try {
-        // Unique id per render so Mermaid doesn't collide on re-entry. A
-        // counter, not Date.now() — two renders in the same millisecond are
-        // reachable from the debounce above plus a tab switch, and mermaid
-        // keys its internal style block on this id.
-        const id = `timeline-diagram-${++_graphRenderSeq}`;
-        const { svg } = await mermaid.render(id, source);
-        if (token !== _graphRenderToken) return;
-        // Node and edge labels come from server-supplied state-log rows
-        // (to_state, reason, termination_reason), so this markup is not
-        // developer-controlled. Inline SVG is a scripting context — sanitize
-        // rather than assigning innerHTML directly.
-        setSanitizedSvg(container, svg);
-    } catch (e) {
-        statusEl.textContent = 'Diagram render error: ' + e.message;
-        console.error('Mermaid render failed:', e, '\nSource:\n', source);
-        return;
+    // Three arrowheads rather than one with `context-stroke`: the faint layer,
+    // the edges this session took, and the ones it took illegally. Each is a
+    // <path> with a class, so its fill comes from layout.css like everything
+    // else here. userSpaceOnUse keeps the head one size whether the edge under
+    // it is drawn at 1px or 2px.
+    const marker = (id, cls) => _svgEl('marker', {
+        id,
+        markerWidth: 8,
+        markerHeight: 8,
+        refX: 8,
+        refY: 4,
+        orient: 'auto',
+        markerUnits: 'userSpaceOnUse',
+    }, [_svgEl('path', { class: cls, d: 'M0,0 L8,4 L0,8 Z' })]);
+
+    const defs = _svgEl('defs', {}, [
+        marker('tl-map-arrow', 'tl-map-arrowhead'),
+        marker('tl-map-arrow-on', 'tl-map-arrowhead on'),
+        marker('tl-map-arrow-bad', 'tl-map-arrowhead bad'),
+    ]);
+
+    const edgeLayer = _svgEl('g', { class: 'tl-map-edges' });
+    for (const e of MAP_EDGES) {
+        const key = `${e.from}||${e.to}`;
+        const used = edges.get(key);
+        const bad = !!(used && used.invariant);
+        edgeLayer.appendChild(_svgEl('path', {
+            class: `tl-map-edge${used ? ' used' : ''}${bad ? ' violation' : ''}`,
+            'data-edge': key,
+            d: e.d,
+            'marker-end': `url(#${bad ? 'tl-map-arrow-bad' : used ? 'tl-map-arrow-on' : 'tl-map-arrow'})`,
+        }, [_svgTitle(used
+            ? `${e.from} → ${e.to} · ${used.count}× · ${used.reason || 'no reason recorded'}`
+            : `${e.from} → ${e.to} · not taken in this session`)]));
+        if (!used) continue;
+        edgeLayer.appendChild(_svgEl('text', {
+            class: 'tl-map-count',
+            x: e.l[0],
+            y: e.l[1],
+            'text-anchor': e.a || 'middle',
+        }, [document.createTextNode(`${used.count}×`)]));
     }
 
-    // Cross-tab linking: activating a state node filters the Timeline tab.
-    // These are SVG <g> elements, so nothing about them was focusable or
-    // announced — the link between the two tabs was mouse-only. (A1)
-    container.querySelectorAll('g.node').forEach(node => {
-        const label = (node.textContent || '').trim();
-        if (!nodeNames.has(label)) return;
-        node.style.cursor = 'pointer';
-        node.setAttribute('role', 'button');
-        node.setAttribute('tabindex', '0');
-        node.setAttribute('aria-label', `Filter the timeline to the ${label} state`);
-        const activate = () => _filterTimelineByState(label);
+    const nodeLayer = _svgEl('g', { class: 'tl-map-nodes' });
+    for (const [name, [x, y]] of Object.entries(MAP_NODES)) {
+        const lit = name === current;
+        const rect = _svgEl('rect', {
+            class: `tl-map-state tl-map-${name}${lit ? ' current' : ''}${lit && running ? ' live' : ''}`,
+            x,
+            y,
+            width: MAP_BOX.w,
+            height: MAP_BOX.h,
+            rx: MAP_BOX.r,
+        });
+        const label = _svgEl('text', {
+            class: `tl-map-label tl-map-${name}`,
+            x: x + MAP_BOX.w / 2,
+            y: y + MAP_BOX.h / 2,
+            'text-anchor': 'middle',
+            'dominant-baseline': 'central',
+        }, [document.createTextNode(name)]);
+        // A bare SVG group is neither focusable nor announced, so the link
+        // across to the Timeline tab was mouse-only until the Mermaid nodes
+        // were given this treatment. The map keeps it.
+        const node = _svgEl('g', {
+            class: 'tl-map-node',
+            'data-state': name,
+            role: 'button',
+            tabindex: '0',
+            'aria-label': `Filter the timeline to the ${name} state`,
+        }, [rect, label, _svgTitle(lit
+            ? `${name} — where the session is now. Filter the timeline to it.`
+            : `${name} — filter the timeline to it.`)]);
+        const activate = () => _filterTimelineByState(name);
         node.addEventListener('click', activate);
         node.addEventListener('keydown', (e) => {
             if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
             e.preventDefault();
             activate();
         });
-        const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-        title.textContent = 'Filter timeline to this state';
-        node.appendChild(title);
-    });
+        nodeLayer.appendChild(node);
+    }
+
+    return _svgEl('svg', {
+        class: 'tl-map',
+        viewBox: `0 0 ${MAP_VIEW.w} ${MAP_VIEW.h}`,
+        preserveAspectRatio: 'xMidYMid meet',
+        role: 'group',
+        'aria-label': 'The session state machine. Solid edges are the ones this session took.',
+    }, [defs, edgeLayer, nodeLayer]);
+}
+
+// The edge a transition just travelled, briefly thickened. Called after the
+// map has been redrawn, so the class always lands on a fresh element and there
+// is no animation to restart.
+function _flashMapEdge(container, key) {
+    const path = container.querySelector(`.tl-map-edge[data-edge="${key}"]`);
+    if (!path) return;
+    path.classList.add('flash');
+    setTimeout(() => path.classList.remove('flash'), MAP_FLASH_MS);
+}
+
+function _renderMap(pane, opts = {}) {
+    const statusEl = pane.querySelector('.timeline-map-status');
+    const container = pane.querySelector('.timeline-map-container');
+    const caption = pane.querySelector('.timeline-map-caption');
+    container.innerHTML = '';
+    caption.innerHTML = '';
+
+    // Remove any stale sections from a previous render.
+    pane.querySelectorAll('.tl-tool-tally, .tl-dwell').forEach(n => n.remove());
+
+    // The map is the machine, not the session, so an empty state log is not a
+    // reason to draw nothing — it is a reason for every edge to stay faint.
+    // (The old Graph tab answered "No state transitions yet" and rendered an
+    // empty container, against which a colour check passes by drawing nothing.)
+    statusEl.textContent = _data.stateLog.length
+        ? ''
+        : 'Nothing has run in this session yet — no edge is lit.';
+
+    const stats = _mapStats(_data.stateLog);
+    container.appendChild(_buildMapSvg(stats));
+    if (opts.flash) _flashMapEdge(container, opts.flash);
 
     const entries = _allEntries();
 
-    // Dwell-time breakdown + tool tally — inserted between diagram and caption.
+    // Dwell-time breakdown + tool tally — inserted between map and caption.
     const dwellEl = _buildDwellEl(_data.stateLog);
     if (dwellEl) pane.insertBefore(dwellEl, caption);
     const tallyEl = _buildToolTallyEl(entries);
     if (tallyEl) pane.insertBefore(tallyEl, caption);
 
     const captionParts = [];
-    if (current) {
-        captionParts.push(el('span', { class: 'tl-caption-current' }, [text(`Now: ${current}`)]));
+    if (stats.current) {
+        captionParts.push(el('span', { class: 'tl-caption-current' }, [text(`Now: ${stats.current}`)]));
     }
-    if (termination) {
-        captionParts.push(el('span', { class: 'tl-caption-term' }, [text(`Last termination: ${termination}`)]));
+    if (stats.termination) {
+        captionParts.push(el('span', { class: 'tl-caption-term' }, [text(`Last termination: ${stats.termination}`)]));
     }
-    if (invariantViolations.length) {
+    if (stats.invariantViolations.length) {
+        const n = stats.invariantViolations.length;
         captionParts.push(el('span', { class: 'tl-caption-warn' }, [
-            text(`${invariantViolations.length} invariant violation${invariantViolations.length === 1 ? '' : 's'}`),
+            text(`${n} invariant violation${n === 1 ? '' : 's'}`),
         ]));
     }
 
@@ -1192,137 +1382,11 @@ async function _renderGraph(pane) {
     captionParts.forEach(p => caption.appendChild(p));
 }
 
-function _buildMermaidSource(rows) {
-    // Aggregate edges: key = `${from}||${to}`, value = {count, reasons[], invariant}
-    const edges = new Map();
-    const nodes = new Set();
-    let current = null;
-    let termination = null;
-    const invariantViolations = [];
-
-    for (const r of rows) {
-        const from = r.from_state || '__start__';
-        const to = r.to_state;
-        if (!to) continue;
-        nodes.add(to);
-        if (from !== '__start__') nodes.add(from);
-        const key = `${from}||${to}`;
-        const edge = edges.get(key) || { count: 0, reason: '', invariant: false };
-        edge.count += 1;
-        if (r.reason) edge.reason = r.reason;   // keep last reason
-        if ((r.reason || '').startsWith('invariant-violation')) {
-            edge.invariant = true;
-            invariantViolations.push(r);
-        }
-        edges.set(key, edge);
-        current = to;
-        if (r.termination_reason) termination = r.termination_reason;
-    }
-
-    const lines = ['stateDiagram-v2', '    direction LR'];
-    for (const [key, edge] of edges) {
-        const [from, to] = key.split('||');
-        const fromNode = from === '__start__' ? '[*]' : from;
-        const label = _edgeLabel(edge);
-        lines.push(`    ${fromNode} --> ${to}${label ? `: ${label}` : ''}`);
-    }
-
-    // Phase color hints — applied before current/violation so they can always override.
-    const phaseGroups = {
-        work:  ['processing', 'compacting'],
-        // scouting is a real, frequently-visited state (it has its own dwell
-        // colour below) and was the one phase with no hint here, so it drew
-        // in the default grey next to colour-coded neighbours.
-        scout: ['scouting'],
-        wait:  ['awaiting_user', 'awaiting_workers', 'paused', 'pause_requested'],
-        end:   ['finalizing', 'cancelling'],
-    };
-    // One state = one colour everywhere. The Mermaid classDefs, the dwell bars
-    // and the .state-badge in the status bar all read the same --state-*
-    // tokens (tokens.css) instead of each carrying its own hand-picked hex.
-    const phaseStyles = {
-        work:  _mermaidStyle('processing'),
-        scout: _mermaidStyle('scouting'),
-        wait:  _mermaidStyle('paused'),
-        end:   _mermaidStyle('cancelling'),
-    };
-    for (const [phaseName, stateList] of Object.entries(phaseGroups)) {
-        const present = stateList.filter(s => nodes.has(s));
-        if (!present.length) continue;
-        lines.push(`    classDef phase_${phaseName} ${phaseStyles[phaseName]}`);
-        lines.push(`    class ${present.join(',')} phase_${phaseName}`);
-    }
-
-    // Highlight current state (applied after phase hints — wins on any overlap).
-    if (current) {
-        lines.push(`    classDef current ${_mermaidStyle('processing')},stroke-width:2px`);
-        lines.push(`    class ${current} current`);
-    }
-
-    // Flag invariant-violation targets.
-    const violationTargets = new Set();
-    for (const [key, edge] of edges) {
-        if (edge.invariant) violationTargets.add(key.split('||')[1]);
-    }
-    if (violationTargets.size) {
-        lines.push(`    classDef violation ${_mermaidStyle('cancelling')}`);
-        lines.push(`    class ${[...violationTargets].join(',')} violation`);
-    }
-
-    return {
-        source: lines.join('\n'),
-        current,
-        termination,
-        invariantViolations,
-        nodeNames: nodes,
-    };
-}
-
-function _edgeLabel(edge) {
-    if (edge.count > 1) {
-        return `${edge.count}×`;
-    }
-    const r = edge.reason || '';
-    const short = r.length > 24 ? r.slice(0, 22) + '…' : r;
-    // Mermaid edge labels choke on : ; " \n — replace with safe chars.
-    return short.replace(/[:;"\n]/g, ' ').trim();
-}
-
-// ---------------------------------------------------------------------------
-// State colours — single source of truth is the --state-<name>-{fg,bg} pairs
-// in tokens.css. Mermaid classDefs are comma-separated, so a raw
-// `color-mix(in srgb, …)` token stream (what getPropertyValue hands back for
-// an unregistered custom property) would break the parser. Resolve it to a
-// plain #rrggbb through a probe element, whose `color` IS a real colour
-// property and therefore computes color-mix() for us.
-// ---------------------------------------------------------------------------
-const _STATE_COLOR_CACHE = new Map();
-
-function _stateColor(state, part) {
-    const key = `${state}|${part}`;
-    if (_STATE_COLOR_CACHE.has(key)) return _STATE_COLOR_CACHE.get(key);
-    // The fallback is a token too — an unknown state must not paint a dark
-    // node onto a light diagram. Check the property exists first: `color:
-    // var(--nope)` is invalid at computed-value time, so the probe would
-    // quietly hand back the inherited text colour instead of nothing.
-    const token = `--state-${state}-${part}`;
-    const defined = getComputedStyle(document.documentElement)
-        .getPropertyValue(token).trim();
-    const out = hex(defined ? token : (part === 'bg' ? '--bg-surface' : '--text-dim'));
-    _STATE_COLOR_CACHE.set(key, out);
-    return out;
-}
-
-// The cache holds resolved hex, so it has to die when the palette changes.
-window.addEventListener('pernix:theme', () => _STATE_COLOR_CACHE.clear());
-
-// `fill:…,stroke:…,color:…` for one Mermaid classDef.
-function _mermaidStyle(state) {
-    return `fill:${_stateColor(state, 'bg')},stroke:${_stateColor(state, 'fg')},color:${_stateColor(state, 'fg')}`;
-}
-
 // Per-state dwell-time breakdown — elapsed_ms on a transition row is the time
-// spent in from_state, so summing by from_state answers "where did the time go".
+// spent in from_state, so summing by from_state answers "where did the time
+// go". The segments carry their --state-* pair as var() references, the way
+// the lane's do: this used to hand a JS-resolved hex to a background, which is
+// the bridge that painted the whole bar one black strip twice.
 
 function _buildDwellEl(stateLog) {
     const byState = new Map();
@@ -1339,7 +1403,10 @@ function _buildDwellEl(stateLog) {
         const pct = (ms / total) * 100;
         return el('div', {
             class: 'tl-dwell-seg',
-            style: `width:${Math.max(pct, 1.5)}%;background:${_stateColor(name, 'fg')}`,
+            'data-state': name,
+            style: `width:${Math.max(pct, 1.5)}%;`
+                + `background:var(--state-${name}-bg, var(--bg-surface));`
+                + `border-bottom-color:var(--state-${name}-fg, var(--text-dim));`,
             title: `${name}: ${_fmtMs(ms)} (${pct.toFixed(0)}%)`,
         });
     });
@@ -1347,7 +1414,10 @@ function _buildDwellEl(stateLog) {
     const chips = sorted.map(([name, ms]) => {
         const pct = ((ms / total) * 100).toFixed(0);
         return el('span', { class: 'tl-dwell-chip' }, [
-            el('span', { class: 'tl-dwell-dot', style: `background:${_stateColor(name, 'fg')}` }),
+            el('span', {
+                class: 'tl-dwell-dot',
+                style: `background:var(--state-${name}-fg, var(--text-dim))`,
+            }),
             text(`${name} ${_fmtMs(ms)} (${pct}%)`),
         ]);
     });
@@ -1408,66 +1478,6 @@ function _buildToolTallyEl(entries) {
         el('div', { class: 'tl-tally-header' }, [text(headerText)]),
         ...rows,
     ]);
-}
-
-async function _ensureMermaid() {
-    if (_mermaid) return _mermaid;
-    if (!_mermaidPromise) {
-        _mermaidPromise = new Promise((resolve, reject) => {
-            if (window.mermaid) { resolve(window.mermaid); return; }
-            // index.html loads Monaco's AMD loader, which installs a global
-            // define() with define.amd set. Mermaid's UMD wrapper checks for
-            // that first and registers itself as an anonymous AMD module
-            // instead of assigning window.mermaid — which nothing ever
-            // require()s, so the global stays undefined and the graph tab dies
-            // with "Failed to load diagram library". Hide define() for the
-            // duration of the load so the UMD wrapper takes its browser-global
-            // branch, then put it back for Monaco.
-            const prevDefine = window.define;
-            const restore = () => { if (prevDefine !== undefined) window.define = prevDefine; };
-            if (prevDefine && prevDefine.amd) window.define = undefined;
-
-            const tag = document.createElement('script');
-            tag.src = MERMAID_SRC;
-            tag.onload = () => { restore(); resolve(window.mermaid); };
-            tag.onerror = () => {
-                restore();
-                _mermaidPromise = null;  // let a later open retry
-                reject(new Error('Failed to load diagram library'));
-            };
-            document.head.appendChild(tag);
-        }).then(m => {
-            if (!m) throw new Error('Diagram library loaded but exported nothing');
-            _mermaid = m;
-            _mermaid.initialize({
-                startOnLoad: false,
-                theme: 'dark',
-                securityLevel: 'strict',
-                // Native <text> labels, not HTML-in-<foreignObject>.
-                //
-                // Mermaid's default label mode wraps every node and edge label
-                // in a <foreignObject>, and DOMPurify ships `foreignobject` in
-                // its svgDisallowed list — so setSanitizedSvg() stripped all of
-                // them and the graph rendered as correctly-coloured, correctly
-                // -connected, completely UNLABELLED boxes. It also broke the
-                // click-a-node-to-filter wiring below, which matches on
-                // node.textContent (empty once the labels are gone).
-                //
-                // Widening the sanitizer does NOT fix this: allowing
-                // foreignObject through keeps the element but DOMPurify's
-                // namespace check still strips its HTML children, so the
-                // labels stay empty. Turning htmlLabels off is what actually
-                // works — mermaid then emits plain SVG <text>, which survives
-                // sanitization untouched and needs no loosening of the CSP or
-                // the purifier. Both keys are needed: the state renderer reads
-                // the flowchart config for label construction.
-                flowchart: { htmlLabels: false },
-                state: { htmlLabels: false },
-            });
-            return _mermaid;
-        });
-    }
-    return _mermaidPromise;
 }
 
 // ---------------------------------------------------------------------------

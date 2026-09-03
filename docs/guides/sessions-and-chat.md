@@ -125,7 +125,7 @@ This means:
 
 - Scrolling back through a long session always shows the original turns — the transcript opens on the last 200 messages and **Load earlier messages** at the top fetches the page before, saying how many are left.
 - A failed compaction can be retried without losing state.
-- You can audit what the agent saw at any point via the **State timeline** — the state badge in the status bar opens it. Its **Lane** tab draws one bar per turn: the phases the turn passed through, to scale, with a tick for every tool call. Selecting a bar tells that turn's story underneath — the plan the scout drew, the calls it made and what they cost, the reflect verdict and the gates that ran, and any compaction or notice. The **Graph** tab is the same history as a state diagram, and the **Timeline** tab is every transition and tool call in one filterable list.
+- You can audit what the agent saw at any point via the **State timeline** — the state badge in the status bar opens it. Its **Lane** tab draws one bar per turn: the phases the turn passed through, to scale, with a tick for every tool call. Selecting a bar tells that turn's story underneath — the plan the scout drew, the calls it made and what they cost, the reflect verdict and the gates that ran, and any compaction or notice. The **Map** tab draws the state machine itself, with the edges this session actually took picked out of it, and the **Timeline** tab is every transition and tool call in one filterable list.
 
 Three triggers fire compaction:
 
