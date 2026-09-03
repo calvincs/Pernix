@@ -15,6 +15,7 @@ Spaces group; they do not isolate. Ordinary sessions can read a space's files an
 - **Move a session in or out**: the move button (four arrows) on a session row opens a space picker; on touch it is **Move to space…** in the row's `⋯` sheet. Moving never changes the session's recency ordering.
 - **Edit**: the cog on the space header — label, color, and the directive editor. On touch the cog and the × move behind one `⋯` on the header (**Space settings**, **Delete space**); the `+` stays.
 - **Delete**: the × on the space header (the same `⋯` sheet on touch). By default everything is kept (sessions return to the normal list, memory files and the workspace folder stay, jobs unbind). Tick the checkbox in the dialog to also delete its sessions, memory files, workspace folder, and bound jobs.
+- **Rail and indent**: every open space draws a thin colored rail down its left edge, from its first row to the **Show all**/**Show fewer** row, with everything inside — buckets, sessions, workers — indented beside it. A **Sessions** heading separates spaces from the ordinary list below, once at least one space and one session outside a space both exist.
 
 What a space owns on disk:
 
