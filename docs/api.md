@@ -242,6 +242,99 @@ A dry run and the real run compute the same set from the same query, so `would_d
 
 ---
 
+## Spaces
+
+Named, colored groups of long-lived sessions that share directives, memory, workspace and a kernel — see [guides/spaces.md](guides/spaces.md).
+
+### List Spaces
+```
+GET /api/spaces
+```
+Returns `{"items": [...]}`; each space carries `id`, `slug`, `label`, `color`, `sort_order`, `created_at`, `updated_at` and `session_count` (live — unarchived — member sessions only).
+
+### Create a Space
+```
+POST /api/spaces
+```
+```json
+{ "label": "Research", "color": "#7c9cff" }
+```
+`label` is required (max 120 chars, `400` if empty); `color` must be `#rrggbb` or is defaulted. The slug is derived from the label and is immutable — it names the memory-file prefix, the directive directory and the workspace home. `409` if the derived slug collides with an existing space.
+
+### Update a Space
+```
+PATCH /api/spaces/{space_id}
+```
+```json
+{ "label": "New name", "color": "#22c55e", "sort_order": 2 }
+```
+Any subset of the three keys; the slug never changes. Returns the updated space row.
+
+### Delete a Space
+```
+DELETE /api/spaces/{space_id}?cascade=false
+```
+`cascade=false` (default) **detaches**: member sessions return to the ordinary list, memory files and the workspace folder stay, bound jobs unbind. `cascade=true` **deletes** every member session plus the space's memory files, workspace folder and bound jobs. Either way the directive overrides and the shared kernel go with the space — they are configuration, not user artifacts. Returns `{"space_id", "cascade", ...}` with `sessions_detached`/`jobs_unbound` or `sessions_deleted`/`memory_files_deleted`/`jobs_removed` depending on the mode.
+
+### Directive Overrides
+```
+GET    /api/spaces/{space_id}/directives
+PUT    /api/spaces/{space_id}/directives/{name}     { "content": "<full markdown>" }
+DELETE /api/spaces/{space_id}/directives/{name}
+```
+`name` is `SOUL`, `RULES` or `SESSIONS`. GET returns `{"space_id", "files": {"SOUL": {"default": "...", "override": "...|null"}, "RULES": {...}, "SESSIONS": {...}}}` — the shared default text next to this space's override, if any. PUT writes an override (`content` non-empty, max 64,000 bytes); DELETE removes the override so the space reverts to the default. Undefined files fall back to the shared default; the compiler and scout both resolve through `core.spaces.directive_path`.
+
+---
+
+## Space Suggestions
+
+Off by default (`space_suggest_enabled`; Settings → Autonomy & idle work → **Space suggestions**). At idle, a background-model scan groups recent ordinary chats by the kind of work they are; a code gate keeps only the substantial groupings as pending suggestions the user accepts or declines — nothing is created or moved on its own. Guide: [guides/spaces.md](guides/spaces.md).
+
+### List Suggestions
+```
+GET /api/space-suggestions?status=pending
+```
+`status` is `pending` (default) | `accepted` | `rejected` | `expired` | `all`; anything else is `400`. Returns `{"suggestions": [...], "status"}`. Each row carries `id`, `kind` (`new` | `existing`), `topic_key`, `label`, `color`, `why`, `existing_space_id`, `session_ids`, `directives` (drafted additions keyed by `SOUL`/`RULES`/`SESSIONS`, each `{"addition", "rationale"}`, or `null`), `status`, `space_id`, `created_at`, `resolved_at` — plus resolved `sessions` (`id`/`title`/`subtitle`/`updated_at`/`space_id`; a member whose session was since deleted just drops out) and `existing_space` (`id`/`label`/`color`, or `null` for a `new`-kind suggestion).
+
+### Get One Suggestion
+```
+GET /api/space-suggestions/{suggestion_id}
+```
+Same shape as a list row, with each entry in `directives` further enriched with the shared `default` file text alongside the drafted `addition` — what the review sheet needs to show both. `404` if unknown.
+
+### Scan Now
+```
+POST /api/space-suggestions/scan
+```
+```json
+{ "dry_run": true }
+```
+Runs a scan immediately, outside its normal cadence. `dry_run` (default `true`) proposes without storing anything — this is what the settings pane's **Scan now** preview calls. Returns `{"scanned", "proposed", "kept", "dry_run"}` on a normal run, or `{"skipped": "<reason>"}` / `{"error": "..."}` when the scan declines to run or the model call fails. `409` if a scan is already in progress.
+
+### Accept
+```
+POST /api/space-suggestions/{suggestion_id}/accept
+```
+```json
+{ "directives": { "SOUL": "<full file content to write>" }, "session_ids": ["..."] }
+```
+Creates the space (kind `new`; `label`/`color` may override the draft) or targets the existing one (kind `existing`) — `409` if that space was deleted since the scan (the suggestion is expired instead of retried). `directives` here is the **full content** to write per file (what the sheet computed from default + addition, possibly edited), not the drafted `{addition, rationale}` shape the GET returns — and it is only ever written for a brand-new space, so an existing space's own overrides are never silently replaced. `session_ids` narrows which members to move (default: all of them); moving uses `set_session_meta`, not the ordinary update path, so accepting never bumps a chat's recency. A member move that fails is reported, not rolled back. Returns `{"status": "accepted", "space", "moved", "failed"}`. `404` unknown suggestion, `409` if not pending.
+
+### Reject
+```
+POST /api/space-suggestions/{suggestion_id}/reject
+```
+Declines. The row stays — its `topic_key` is what suppresses the same grouping from being proposed again until it is cleared. Returns `{"status": "rejected"}`. `404`/`409` as above.
+
+### Clear / Delete
+```
+DELETE /api/space-suggestions?status=rejected
+DELETE /api/space-suggestions/{suggestion_id}
+```
+The bulk form clears every suggestion in one terminal status (`accepted` | `rejected` | `expired`; `pending` is refused with `400` — accept or decline instead). The single form forgets one row whatever its status, and re-arms a declined topic so the scan may propose it again. `404` if the single id is unknown.
+
+---
+
 ## Chat
 
 ### Send a Message
@@ -687,6 +780,51 @@ Runs one Snooze maintenance cycle on demand, skipping the cadence and cooldown c
 
 ---
 
+## Storage
+
+One ledger for "why is this box full?": sessions by type, the database file's size and reclaimable space, both backup directories, and the retention sweeps that already run in the background. Backs Settings → Storage.
+
+### Get the Ledger
+```
+GET /api/storage
+```
+```json
+{
+  "sessions": { "total": 1032, "by_type": {"normal": 310, "worker": 47, "...": 0}, "pinned": 12, "in_spaces": 84, "archived": 41 },
+  "database": { "path": "/app/data/sessions.db", "bytes": 176160768, "wal_bytes": 0, "page_size": 4096, "reclaimable_bytes": 8912896 },
+  "backups": { "dir": "data/backups", "count": 7, "bytes": 734003200, "keep": 7, "last_backup_at": "2026-09-02T18:37:03Z", "beyond_keep": [] },
+  "legacy_backups": { "dir": "data/.backups", "...": "same shape as backups, or null if this instance never had one" },
+  "sweeps": { "sessions_pruned": 307, "sessions_archived": 41, "...": 0, "last_cycle": "2026-09-02T22:00:00Z" }
+}
+```
+`sessions.archived` is `null` on a pre-v34 database rather than `0` — a build that cannot archive is not the same fact as zero archived sessions. `database.reclaimable_bytes` is the SQLite freelist (`freelist_count * page_size`) — what a `POST /api/storage/optimize` would give back. `backups`/`legacy_backups.bytes` is the whole directory (snapshots plus any memory corpora beside them); `beyond_keep` lists the snapshots rotation would remove, each with `name`, `bytes`, `mtime`, `scheme`. `legacy_backups` is `null` on an instance that never wrote to the pre-rename `data/.backups` directory. `sweeps` is present only when the snooze runner has stats to report — every `*_pruned` counter it tracks, plus `sessions_archived` and `last_cycle`.
+
+### Rotate Backups
+```
+POST /api/storage/backups/rotate
+```
+```json
+{ "dir": "primary", "dry_run": true }
+```
+Applies the retention count (`backup_keep_count`) to every snapshot in one directory, under every naming scheme it was ever written with. `dir` is `primary` (`data/backups`, the one the schedule writes) or `legacy` (`data/.backups`, which deploys still write to and nothing used to rotate) — each keeps its own newest `keep`, not a shared budget. `400` on an unknown `dir`; `404` if `dir: legacy` is asked for on an instance with no legacy directory. Defaults to a dry run.
+
+### Prune Archived Sessions
+```
+POST /api/storage/prune-archived
+```
+```json
+{ "days": 90, "dry_run": true }
+```
+Hard-deletes sessions that have been archived for more than `days`. `days` defaults to `session_delete_archived_days` (`0` = never, so an omitted body normally does nothing). Defaults to a dry run — past this point the transcript is actually gone. Returns `{"count", "ids", "sample", "days", "dry_run"}`, the same shape `POST /api/sessions/archive-idle` uses.
+
+### Compact the Database
+```
+POST /api/storage/optimize
+```
+`PRAGMA optimize`, then `VACUUM`, then a `wal_checkpoint(TRUNCATE)` so the freed pages actually leave the file on disk instead of waiting for the next checkpoint. Refused with `409` while any turn is running — `VACUUM` holds a write lock for the whole rebuild. Returns `{"bytes_before", "bytes_after"}`.
+
+---
+
 ## Skills
 
 ### List Skills
@@ -703,9 +841,14 @@ Returns the skill's metadata, rendered `instructions`, the raw `raw_content` of 
 
 ### Skill Improvement Proposals
 
-Written by reflect and refine when a skill visibly under-performs; a human
-reviews each one before it touches a `SKILL.md`. Nothing is applied
-automatically.
+Written by reflect and refine when a skill visibly under-performs. A pending
+proposal reaches `SKILL.md` one of two ways: you approve-then-apply it
+yourself, or — past `skill_proposal_auto_apply_after_hours` (default 24; `0`
+disables) — a snooze sweep applies it on its own once it passes machine
+validation (skill exists and is enabled, change ≤ 4,000 chars, confidence ≥
+0.6), day-capped (`skill_proposal_max_auto_applies_per_day`, default 5), with
+a timestamped backup under `data/skill_backups/<skill>/` and status stamped
+`auto_applied` — reject it before the window closes to veto.
 
 ```
 GET    /api/skills/proposals                 List proposals (default status=pending)
@@ -714,8 +857,9 @@ POST   /api/skills/proposals/{id}/reject     Dismiss
 POST   /api/skills/proposals/{id}/apply      Write the change into the target SKILL.md
 ```
 
-Filter with `?skill_name=`, `?status=`, `?source_origin=` (`session` for
-post-turn reflect, `refine` for the authoring pass).
+Filter with `?skill_name=`, `?status=` (`pending` | `approved` | `rejected` |
+`applied` | `auto_applied`), `?source_origin=` (`session` for post-turn
+reflect, `refine` for the authoring pass).
 
 > These lived under `/api/workflows/proposals` before the workflow engine was
 > removed in 2026-08. Update any saved calls.
@@ -781,7 +925,9 @@ POST /api/tools/set-safety
 Read-only history and live inspection of RLM (recursive processing) runs — see [internals/rlm.md](internals/rlm.md). Listing works even when `rlm_enabled` is off, so past runs stay inspectable.
 
 ```
-GET /api/rlm/runs?session_id=&limit=20        List runs, newest first (limit clamped to 100)
+GET /api/rlm/runs?session_id=&limit=20&space_id=  List runs, newest first (limit clamped to 100).
+                                              `space_id` returns every member session's runs and,
+                                              when given, wins over `session_id`.
 GET /api/rlm/runs/by-session/{ui_session_id}  Resolve a sidebar RLM view session to its run detail
 GET /api/rlm/runs/{run_id}                    One run: DB row + manifest + nested children + answer (when finished)
 GET /api/rlm/runs/{run_id}/trace?after=0      Parsed trace.jsonl events from byte offset `after`; returns
