@@ -28,8 +28,14 @@ from db import models as db
 logger = logging.getLogger(__name__)
 
 
-def mint_run_dir(parent_run_dir: Path | None = None) -> tuple[str, Path, str]:
-    """Create a fresh run dir. Returns (run_id, absolute dir, workspace-relative dir)."""
+def mint_run_dir(parent_run_dir: Path | None = None, base_dir: Path | None = None) -> tuple[str, Path, str]:
+    """Create a fresh run dir. Returns (run_id, absolute dir, workspace-relative dir).
+
+    base_dir (v33): a space session's runs nest under its workspace home
+    (spaces/<slug>/rlm/<id>) so run artifacts live with the space's files.
+    run_rel stays relative to the GLOBAL workspace root either way — every
+    consumer (purge, retention, continue_from) resolves it against that root.
+    """
     run_id = secrets.token_hex(4)
     if parent_run_dir is not None:
         run_dir = Path(parent_run_dir).resolve() / "sub" / run_id
@@ -37,7 +43,8 @@ def mint_run_dir(parent_run_dir: Path | None = None) -> tuple[str, Path, str]:
         # Absolute, always: workspace_dir defaults to a relative path, and the
         # child process (cwd = run dir) must see socket/context paths that
         # don't re-resolve against itself.
-        run_dir = (Path(settings.workspace_dir) / "rlm" / run_id).resolve()
+        root = Path(base_dir).resolve() if base_dir is not None else Path(settings.workspace_dir).resolve()
+        run_dir = (root / "rlm" / run_id).resolve()
     run_dir.mkdir(parents=True, exist_ok=False)
     try:
         run_rel = str(run_dir.resolve().relative_to(Path(settings.workspace_dir).resolve()))

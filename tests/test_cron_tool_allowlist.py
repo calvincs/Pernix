@@ -48,7 +48,9 @@ async def test_executor_refuses_tool_outside_allowlist(monkeypatch):
 
     result = await _execute_single("bash", {}, {"session_id": "cron-test"}, reg)
     assert result.was_error
-    assert "not permitted in this scheduled run" in result.content
+    # Wording generalized in v3.1: the same allowlist now fences canary
+    # sessions, not only scheduled-job charters.
+    assert "not permitted in this constrained session" in result.content
     # The permitted set is named so the model can reroute instead of retrying.
     assert "recall" in result.content
 
@@ -339,4 +341,45 @@ def test_update_scheduled_job_preserves_extra_meta(monkeypatch, tmp_path):
     result = scheduling.update_scheduled_job("j1", cron_expr="0 4 * * 3")
     assert "updated" in result
     assert captured["extra_meta"].get("allowed_tools") == ["recall", "bash"]
+    assert captured["extra_meta"].get("session_mode") == "fresh"
+    # last_fired_at is deliberately NOT round-tripped when the schedule
+    # changes: it was recorded against the old grid, and the coalesced
+    # catch-up would otherwise count slots of a schedule that no longer
+    # exists as missed downtime. It is re-baselined, not dropped.
+    assert captured["extra_meta"].get("last_fired_at") not in (None, "2026-08-18T00:00:00+00:00")
+
+
+def test_update_scheduled_job_keeps_last_fired_at_when_the_schedule_is_unchanged(monkeypatch, tmp_path):
+    """Only a schedule change invalidates the baseline — a prompt edit does not."""
+    import json as _json
+
+    from core.extensions import scheduling
+
+    cron_path = tmp_path / "cron_jobs.json"
+    cron_path.write_text(
+        _json.dumps(
+            [
+                {
+                    "name": "j1",
+                    "cron_expr": "0 3 * * 2",
+                    "prompt": "old",
+                    "model": "",
+                    "session_id": None,
+                    "paused": False,
+                    "last_fired_at": "2026-08-18T00:00:00+00:00",
+                }
+            ]
+        )
+    )
+    monkeypatch.setattr(scheduling, "CRON_PATH", cron_path)
+    captured = {}
+
+    def _fake_add(name, cron, prompt, session_id=None, model="", extra_meta=None):
+        captured["extra_meta"] = extra_meta or {}
+
+    monkeypatch.setattr(scheduling, "_add_job_internal", _fake_add)
+    monkeypatch.setattr(scheduling, "_get_scheduler", lambda: object())
+    monkeypatch.setattr(scheduling, "_save_jobs", lambda: None)
+
+    scheduling.update_scheduled_job("j1", prompt="new wording")
     assert captured["extra_meta"].get("last_fired_at") == "2026-08-18T00:00:00+00:00"

@@ -11,6 +11,8 @@ pyyaml>=6.0
 
 pywebpush>=2.0           # Web Push (VAPID) — background push notifications
 pypdf>=4.0               # PDF text extraction for attached PDFs at ingest
+mcp==2.1.*               # Official MCP SDK — client side only (core/extensions/mcp);
+                         # ships its own httpx2, no conflict with httpx above
 
 # Candor — operational-memory add-on (candor_enabled toggle; zero transitive deps).
 # Vendored wheel so installs work offline/in Docker. Rebuild after upstream changes:

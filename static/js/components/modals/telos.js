@@ -1,9 +1,10 @@
-// Pernix — Telos tab (Explorer): the teleological layer's state — root
-// question, goal DAG, question/hypothesis pipeline, claims, alarms, and
-// exploration temperature. Read-heavy by design: the only controls are the
-// manual slow-loop trigger and alarm acknowledgement.
+// Pernix — Telos tab (Explorer): the question loop's state — root question,
+// question/hypothesis pipeline, claims, alarms, and exploration
+// temperature. Read-heavy by design: the only controls are the manual
+// slow-loop trigger and alarm acknowledgement.
 
 import { el, text, clear } from '../../render.js';
+import { icon } from '../../icons.js';
 import { get, post } from '../../api.js';
 
 function relTime(isoStr) {
@@ -27,6 +28,49 @@ function sectionTitle(label) {
     return el('div', { class: 'adaptive-section-title' }, [text(label)]);
 }
 
+/**
+ * One plain-words line under a tab header, in the shape file-panel.js's
+ * _buildTabDesc gives every other Explorer tab. Telos, Canary and Adaptive
+ * opened straight into badges and vocabulary ("acedia signature", "EIG floor",
+ * "tripwire") with nothing anywhere saying what the tab is FOR. Shared from
+ * here because all three need the same treatment. (S11)
+ */
+export function tabGlossary(line) {
+    return el('div', { class: 'fp-tab-desc' }, [
+        el('div', { class: 'fp-tab-desc-brief' }, [el('span', {}, [text(line)])]),
+    ]);
+}
+
+/**
+ * Turn a <div> that toggles a detail block into a real disclosure control:
+ * a tab stop, an announced role, and Enter/Space. Every expandable row on
+ * these tabs was mouse-only. (A1)
+ */
+export function makeDisclosure(headerEl, isExpanded, toggle) {
+    headerEl.setAttribute('role', 'button');
+    headerEl.setAttribute('tabindex', '0');
+    const sync = () => headerEl.setAttribute('aria-expanded', String(!!isExpanded()));
+    const activate = () => { toggle(); sync(); };
+    headerEl.addEventListener('click', activate);
+    headerEl.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+        e.preventDefault();
+        activate();
+    });
+    sync();
+    return headerEl;
+}
+
+// Inline result line, same shape as the MCP add form's — alert() steals focus,
+// cannot be read next to the thing it is about, and is unreachable to anything
+// that renders the tab in the background.
+export function resultLine(message, isError = false) {
+    return el('div', {
+        class: `adaptive-result${isError ? ' err' : ''}`,
+        role: isError ? 'alert' : 'status',
+    }, [text(message)]);
+}
+
 function countLine(obj) {
     return Object.entries(obj || {})
         .map(([k, v]) => `${v} ${k}`)
@@ -45,21 +89,46 @@ export async function renderTelosTab(container) {
         return;
     }
 
+    container.appendChild(tabGlossary(
+        'Telos is the question loop: what the agent noticed it cannot explain, '
+        + 'the guesses it is testing about it, and what it has concluded.',
+    ));
+
+    const resultSlot = el('div');
+    // Chips first, then buttons. The row wraps on a narrow panel (E2), and a
+    // wrapped row that alternates chip / button / chip / button leaves a
+    // status badge stranded on a line of its own below the controls.
     const head = el('div', { class: 'adaptive-head' }, [
         badge(overview.enabled ? 'enabled' : 'disabled', overview.enabled ? 'ok' : 'off'),
-        el('button', { class: 'adaptive-btn', onClick: refresh }, [text('↻ Refresh')]),
+        ...(overview.enabled ? [badge(`slow loops ${overview.schedule}`)] : []),
+        el('button', {
+            class: 'adaptive-btn',
+            title: 'Reload the Telos state',
+            'aria-label': 'Refresh the Telos tab',
+            onClick: refresh,
+        }, [icon('refresh', { size: 12 }), text('Refresh')]),
     ]);
     if (overview.enabled) {
-        head.appendChild(badge(`slow loops ${overview.schedule}`));
-        const runBtn = el('button', { class: 'adaptive-btn' }, [text('▶ Run slow loops')]);
+        const runBtn = el('button', {
+            class: 'adaptive-btn',
+            title: 'Run the slow loops now instead of waiting for the schedule',
+            'aria-label': 'Run the Telos slow loops now',
+        }, [icon('play', { size: 12 }), text('Run slow loops')]);
         runBtn.addEventListener('click', async () => {
             runBtn.disabled = true;
-            try { await post('/api/telos/run', {}); runBtn.textContent = 'Queued ✓'; }
-            catch (e) { alert(`Run failed: ${e.message || e}`); runBtn.disabled = false; }
+            clear(resultSlot);
+            try {
+                await post('/api/telos/run', {});
+                runBtn.textContent = 'Queued ✓';
+            } catch (e) {
+                resultSlot.appendChild(resultLine(`Run failed: ${e.message || e}`, true));
+                runBtn.disabled = false;
+            }
         });
         head.appendChild(runBtn);
     }
     container.appendChild(head);
+    container.appendChild(resultSlot);
 
     if (!overview.enabled) {
         container.appendChild(el('div', { class: 'adaptive-empty' }, [
@@ -83,7 +152,7 @@ export async function renderTelosTab(container) {
     const alarms = overview.alarms_open || [];
     container.appendChild(sectionTitle(`Open alarms (${alarms.length})`));
     if (!alarms.length) {
-        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No open alarms — no binding, divergence, or acedia signatures holding.')]));
+        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No open alarms — no acedia signature holding (exploration entropy is above floor).')]));
     } else {
         alarms.forEach(a => {
             const row = el('div', { class: 'adaptive-entry' }, [
@@ -94,15 +163,26 @@ export async function renderTelosTab(container) {
                 ]),
                 el('div', { class: 'adaptive-entry-meta' }, [text(JSON.stringify(a.evidence || {}))]),
             ]);
-            const ack = el('button', { class: 'adaptive-btn' }, [text('Acknowledge')]);
+            const ack = el('button', {
+                class: 'adaptive-btn',
+                'aria-label': `Acknowledge the ${a.type} alarm on ${a.target}`,
+            }, [text('Acknowledge')]);
+            const ackResult = el('div');
             ack.addEventListener('click', async () => {
                 ack.disabled = true;
-                try { await post(`/api/telos/alarms/${a.id}/ack`, {}); refresh(); }
-                catch (e) { alert(`Ack failed: ${e.message || e}`); ack.disabled = false; }
+                clear(ackResult);
+                try {
+                    await post(`/api/telos/alarms/${a.id}/ack`, {});
+                    refresh();
+                } catch (e) {
+                    ackResult.appendChild(resultLine(`Ack failed: ${e.message || e}`, true));
+                    ack.disabled = false;
+                }
             });
             // Wrapped rather than appended bare, so the button picks up the
             // shared action-row spacing instead of butting against the meta line.
             row.appendChild(el('div', { class: 'adaptive-card-actions' }, [ack]));
+            row.appendChild(ackResult);
             container.appendChild(row);
         });
     }
@@ -118,14 +198,6 @@ export async function renderTelosTab(container) {
         el('div', { class: 'adaptive-entry-meta' }, [text(`Claims committed: ${overview.claims || 0}`)]),
         el('div', { class: 'adaptive-entry-meta' }, [
             text(`Band mix near/mid/far: ${(overview.band_mix?.near ?? 0).toFixed(2)} / ${(overview.band_mix?.mid ?? 0).toFixed(2)} / ${(overview.band_mix?.far ?? 0).toFixed(2)} · serendipity budget ${(overview.serendipity_budget ?? 0).toFixed(2)}`),
-        ]),
-    ]));
-
-    // --- Goals ---
-    container.appendChild(sectionTitle('Goal DAG'));
-    container.appendChild(el('div', { class: 'adaptive-entry' }, [
-        el('div', { class: 'adaptive-entry-meta' }, [
-            text(`${countLine(overview.goals)} · ${overview.goals_suspended || 0} suspended · vapor classes: ${(overview.vapor_classes || []).join(', ') || 'none'}`),
         ]),
     ]));
 
@@ -173,14 +245,4 @@ export async function renderTelosTab(container) {
         });
     }
 
-    // --- Coherence series ---
-    const series = overview.coherence_series || [];
-    if (series.length) {
-        container.appendChild(sectionTitle('Ledger coherence (divergence by week — lower is better)'));
-        container.appendChild(el('div', { class: 'adaptive-entry' }, [
-            el('div', { class: 'adaptive-entry-meta' }, [
-                text(series.map(p => `${p.week}: ${(p.divergence * 100).toFixed(0)}%`).join(' · ')),
-            ]),
-        ]));
-    }
 }

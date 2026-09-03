@@ -43,6 +43,7 @@ data/settings.json
 data/registry.json
 data/registry_archive.json
 data/cron_jobs.json
+data/mcp_servers.json
 data/tools.json
 data/tool_approvals.json
 data/model_pref.txt
@@ -141,3 +142,9 @@ data/candor/
 data/kernels/
 data/telos/
 data/settings.json.bak*
+
+# =============================================================================
+# UI gate output (throwaway instance, screenshots, results) — see
+# tools/ui-gate/README.md. desktop-baseline.json beside it IS committed.
+# =============================================================================
+tools/ui-gate/out/

@@ -8,7 +8,9 @@ with no reflect verdict at all. (It replaced a narrower reflect-gated sibling,
 the same sessions for the same artifacts.)
 
 Triggered as the tail-end activity of snooze (Activity 13). Watermarks via
-``snooze_state['refined:{sid}']`` so each session is processed at most once.
+``snooze_state['refined:{sid}']`` (max message id seen) so each session is
+processed at most once per growth spurt — a session that gains messages
+after its last pass re-arms and is refined again over the fuller story.
 
 Hard rule: never auto-applies skill edits. All SKILL.md changes flow through
 the existing proposals UI for human approve/deny.
@@ -19,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 from config import settings
@@ -30,6 +33,12 @@ logger = logging.getLogger("pernix.refine")
 # Bar for a paste-ready SKILL.md change. Lessons use no floor (advisory; scout
 # already gates on hits).
 PROPOSAL_CONFIDENCE_FLOOR: float = 0.6
+
+
+def _norm_change(text: str) -> str:
+    """Normalize a proposed_change for duplicate comparison: collapse
+    whitespace, lowercase, first 240 chars."""
+    return " ".join(text.split()).lower()[:240]
 
 
 REFINE_PROMPT = """You are a Session Refine Agent. A regular agent session has gone idle
@@ -113,12 +122,31 @@ RULES:
 - Output valid JSON only. No markdown fences, no commentary. /no_think"""
 
 
+# Path references like `../skills/youtube-whisper/scripts/...` or
+# `/app/data/skills/foo/SKILL.md` — the dominant way skills are invoked now
+# that the scout pre-digests them into plans (the agent runs the script
+# directly and never calls load_skill).
+_SKILL_PATH_RE = re.compile(r"skills/([A-Za-z0-9][A-Za-z0-9_-]{1,63})/")
+
+
 def _identify_active_skill(messages: list[dict]) -> str | None:
     """Best-effort: find the skill the session was operating under.
 
-    Scans assistant tool_calls in reverse for the most recent successful
-    `load_skill` invocation. Returns the skill name, or None.
+    Three signals, strongest first:
+      1. The most recent `load_skill` tool call (explicit activation).
+      2. `skills/<name>/` path references anywhere in the transcript —
+         assistant tool_calls, tool results, scout plans. Most-referenced
+         registered skill wins.
+      3. A registered skill's name appearing verbatim in a scout message
+         (the scout recommends skills by name in its plan).
+
+    Signal 1 used to be the ONLY detector, which made proposals impossible
+    for every scout-planned session — zero proposals ever reached the table
+    on the live box while skills failed and got worked around in plain
+    sight. Names are validated against the registry so a stray path can't
+    route a proposal to a skill that doesn't exist.
     """
+    # Signal 1: explicit load_skill (most recent wins).
     for m in reversed(messages):
         if m.get("role") != "assistant":
             continue
@@ -148,6 +176,51 @@ def _identify_active_skill(messages: list[dict]) -> str | None:
             name = args.get("name")
             if isinstance(name, str) and name.strip():
                 return name.strip()
+
+    from core.skills.registry import get_skill_registry
+
+    try:
+        registry = get_skill_registry()
+    except Exception:
+        return None
+
+    def _known(name: str) -> bool:
+        try:
+            return bool(registry.exists(name))
+        except Exception:
+            return False
+
+    # Signal 2: skills/<name>/ path references across the whole transcript.
+    path_counts: dict[str, int] = {}
+    for m in messages:
+        role = m.get("role")
+        if role not in ("assistant", "tool", "scout"):
+            continue
+        blobs = [m.get("content") or ""]
+        if role == "assistant" and m.get("tool_calls"):
+            blobs.append(str(m["tool_calls"]))
+        for blob in blobs:
+            for name in _SKILL_PATH_RE.findall(blob):
+                path_counts[name] = path_counts.get(name, 0) + 1
+    known_paths = {n: c for n, c in path_counts.items() if _known(n)}
+    if known_paths:
+        return max(sorted(known_paths), key=lambda n: known_paths[n])
+
+    # Signal 3: registered skill names mentioned by the scout's plan.
+    scout_text = "\n".join((m.get("content") or "") for m in messages if m.get("role") == "scout")
+    if scout_text:
+        try:
+            all_names = [s.name for s in registry.all_skills()]
+        except Exception:
+            all_names = []
+        mention_counts: dict[str, int] = {}
+        for name in all_names:
+            n = len(re.findall(rf"(?<![A-Za-z0-9_-]){re.escape(name)}(?![A-Za-z0-9_-])", scout_text))
+            if n:
+                mention_counts[name] = n
+        if mention_counts:
+            return max(sorted(mention_counts), key=lambda n: mention_counts[n])
+
     return None
 
 
@@ -185,11 +258,59 @@ def _build_tool_summary(messages: list[dict]) -> dict[str, dict[str, Any]]:
             tname = pending_calls.pop(tid, None) if tid else None
             if not tname:
                 continue
-            content = m.get("content") or ""
-            if content.startswith("Error") or "\nError" in content[:200]:
+            if _is_failure_content(m.get("content") or ""):
                 summary[tname]["failures"] = summary[tname].get("failures", 0) + 1
 
     return summary
+
+
+def _is_failure_content(content: str) -> bool:
+    """Does a tool result read as a failure?
+
+    Beyond the classic "Error" prefix: detached-job status lines
+    ("state=failed"), tracebacks, and non-zero exits — the shapes a failing
+    skill script actually produces through job_status/job_tail.
+    """
+    head = content[:400]
+    if content.startswith("Error") or "\nError" in head:
+        return True
+    if "state=failed" in head or "Traceback (most recent call last)" in head:
+        return True
+    if re.search(r"\bexit=(?!0\b)\d+", head):
+        return True
+    return False
+
+
+def _build_failure_arc(messages: list[dict], cap: int = 10) -> tuple[str, int]:
+    """Deterministic evidence extraction: every failing tool result, paired
+    with the nearest preceding assistant narration (the intent behind it).
+
+    Returns (rendered block, failure count). The old tail-only transcript
+    window meant a long session's failure→workaround arc simply fell out of
+    the prompt; this pins the failures into evidence regardless of where in
+    the session they happened.
+    """
+    excerpts: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    last_narration = ""
+    for m in messages:
+        role = m.get("role")
+        content = (m.get("content") or "").strip()
+        if role == "assistant" and content:
+            last_narration = content
+        elif role == "tool" and content and _is_failure_content(content):
+            # Re-polling a failed job repeats the same status line — count
+            # and render each distinct failure once.
+            key = re.sub(r"\[as of [^\]]+\]", "", content[:300])
+            if key in seen:
+                continue
+            seen.add(key)
+            total += 1
+            if len(excerpts) < cap:
+                intent = f"  intent: {last_narration[:240]}\n" if last_narration else ""
+                excerpts.append(f"- FAILURE {total}:\n{intent}  result: {content[:300]}")
+    return ("\n".join(excerpts), total)
 
 
 def _latest_reflect_verdict(messages: list[dict]) -> dict | None:
@@ -235,6 +356,22 @@ def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], 
         adaptive_edits = []
     if not isinstance(canary_proposals, list):
         canary_proposals = []
+    # The contract's confidence floor and 2-edit cap, enforced mechanically —
+    # prompt prose alone held neither. Edits without a confidence field
+    # (older outputs) pass; an explicit low confidence does not.
+    kept = []
+    for e in adaptive_edits:
+        if not isinstance(e, dict):
+            continue
+        try:
+            conf = float(e["confidence"]) if "confidence" in e else None
+        except (TypeError, ValueError):
+            conf = None
+        if conf is not None and conf < PROPOSAL_CONFIDENCE_FLOOR:
+            logger.info("refine: adaptive edit below confidence floor (%.2f) dropped", conf)
+            continue
+        kept.append(e)
+    adaptive_edits = kept[:2]
     nothing_actionable = bool(data.get("nothing_actionable"))
     return proposals, lessons, adaptive_edits, canary_proposals, nothing_actionable
 
@@ -261,6 +398,25 @@ def _build_user_content(
         elif role == "tool" and content:
             transcript_lines.append(f"[tool_result] {content[:300]}")
     transcript = "\n".join(transcript_lines)[-8000:]
+
+    # The failure arc is assembled independently of the tail window: in a
+    # long session the failures happen early and the workaround late, and a
+    # tail-only view shows the LLM neither.
+    task_head = next(
+        (m.get("content", "")[:600] for m in messages if m.get("role") == "user" and (m.get("content") or "").strip()),
+        "",
+    )
+    arc_block, failure_count = _build_failure_arc(messages)
+    if failure_count:
+        arc_section = (
+            f"\nMACHINE SIGNAL: this session recorded {failure_count} failed tool/job "
+            "result(s). If the transcript shows the task ultimately succeeding via a "
+            "different path, that workaround is exactly what the governing skill is "
+            "missing — capture it as a proposal (and a lesson).\n"
+            f"\nFailure evidence (chronological, deduplicated):\n{arc_block}\n"
+        )
+    else:
+        arc_section = ""
 
     tool_lines = [
         f"  - {name}: calls={info.get('calls', 0)}, failures={info.get('failures', 0)}"
@@ -293,10 +449,12 @@ def _build_user_content(
         f"--- SESSION: {session.get('id')} ---\n"
         f"Title: {session.get('title', '?')}\n"
         f"Active skill: {active_skill or '(none)'}\n"
+        f"Original task: {task_head}\n"
         f"{reflect_block}"
         f"\nTool summary:\n{tool_block}\n"
+        f"{arc_section}"
         f"{skill_block}"
-        f"\nConversation transcript (truncated):\n{transcript}\n"
+        f"\nConversation transcript (tail, truncated):\n{transcript}\n"
     )
 
 
@@ -418,8 +576,20 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
         except Exception as e:
             logger.warning("refine: canary proposal queueing failed: %s", e)
 
-    # Persist proposals only when an active skill is identified.
+    # Persist proposals only when an active skill is identified. Since the
+    # watermark re-arms (a session can be refined again after it grows),
+    # dedupe against every non-rejected proposal already on file for the
+    # skill — the same session revisited must not mint the same change twice.
     if active_skill:
+        existing_norms: set[str] = set()
+        try:
+            for prior in db.list_skill_proposals(skill_name=active_skill, limit=200):
+                if prior.get("status") == "rejected":
+                    continue
+                existing_norms.add(_norm_change(prior.get("proposed_change") or ""))
+        except Exception as e:
+            logger.debug("refine: proposal dedupe lookup failed: %s", e)
+
         for p in proposals:
             if not isinstance(p, dict):
                 continue
@@ -437,6 +607,11 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
                     active_skill,
                 )
                 continue
+            change_norm = _norm_change(str(p.get("proposed_change", "") or ""))
+            if not change_norm or change_norm in existing_norms:
+                stats["proposals_deduped"] = stats.get("proposals_deduped", 0) + 1
+                continue
+            existing_norms.add(change_norm)
             try:
                 db.add_skill_proposal(
                     skill_name=p_skill,
@@ -489,11 +664,14 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
                 except Exception as e:
                     logger.warning("refine: could not save lesson: %s", e)
 
+    stats["active_skill"] = active_skill
     logger.info(
-        "refine: session=%s nothing_actionable=%s proposals=%d lessons=%d",
+        "refine: session=%s active_skill=%s nothing_actionable=%s proposals=%d deduped=%d lessons=%d",
         session_id,
+        active_skill or "-",
         nothing_actionable,
         stats["proposals_saved"],
+        stats.get("proposals_deduped", 0),
         stats["lessons_saved"],
     )
     return stats

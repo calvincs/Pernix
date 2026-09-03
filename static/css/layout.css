@@ -29,6 +29,61 @@
     width: 0;
     border-right-color: transparent;
 }
+/* While the edge is being dragged the width has to follow the pointer, not
+   trail a quarter second behind it. */
+#sidebar.resizing {
+    transition: none;
+}
+
+/* The drag handle for that width. `position: fixed` rather than absolute:
+   #sidebar is `position: static` and `overflow: hidden`, and both of those
+   are load-bearing (the desktop baseline records the first, the collapse
+   depends on the second), so the handle sits over the seam instead of
+   inside it. The sidebar is always flush left on this tier, which is what
+   makes calc() on the token exact. */
+#sidebar-resizer {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: calc(var(--sidebar-w) - 3px);
+    width: 6px;
+    z-index: 50;
+    cursor: col-resize;
+    /* An invisible strip. Six pixels is what a mouse needs to catch an edge;
+       a visible six-pixel bar is a rule down the middle of the app. */
+    background: none;
+    border: none;
+    padding: 0;
+}
+#sidebar-resizer::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 2px;
+    width: 2px;
+    background: transparent;
+    transition: background var(--transition);
+}
+#sidebar-resizer:hover::after,
+#sidebar-resizer:focus-visible::after,
+#sidebar-resizer.dragging::after {
+    background: var(--accent);
+}
+#sidebar-resizer:focus-visible {
+    outline: none;   /* the accent line above IS the focus indicator */
+}
+/* Nothing to resize, and nothing under the strip to grab. */
+#sidebar.collapsed ~ #sidebar-resizer {
+    display: none;
+}
+/* A drag that starts on a 6px strip must not turn into a text selection the
+   moment the pointer leaves it, and the cursor has to stay col-resize over
+   whatever it passes. */
+body.sidebar-resizing {
+    user-select: none;
+    cursor: col-resize;
+}
 
 #sidebar header {
     padding: var(--sp-4) var(--sp-4) var(--sp-3);
@@ -59,7 +114,7 @@
     width: 20px;
     height: 20px;
     color: var(--accent);
-    filter: drop-shadow(0 0 3px rgba(212, 168, 67, 0.35));
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 35%, transparent));
     animation: brandBreathe 11.4s ease-in-out infinite;
     flex-shrink: 0;
     display: block;  /* drops baseline gap from inline default */
@@ -119,6 +174,12 @@
     gap: 0;
     position: relative;
     margin-bottom: 2px;
+    /* What the action overlay paints itself with: the row's own background,
+       flattened. --bg-hover is already opaque; --accent-subtle is a 10% wash
+       over the sidebar, so the active row states the same colour with the
+       sidebar mixed in rather than layering the wash a second time. A theme
+       swap reaches both, because both are tokens. */
+    --row-veil: var(--bg-hover);
 }
 .session-top {
     display: flex;
@@ -133,7 +194,11 @@
     flex: 1;
     min-width: 0;
 }
-.session-item:hover {
+.session-item:hover,
+/* Tabbing to a row is the keyboard's hover: it is what brings the action
+   overlay out, so the row has to light up under it or the overlay appears
+   to float over nothing. */
+.session-item:focus-within {
     background: var(--bg-hover);
     color: var(--text);
 }
@@ -142,6 +207,7 @@
     color: var(--accent);
     border-left: 2px solid var(--accent);
     padding-left: calc(var(--sp-3) - 2px);
+    --row-veil: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
 }
 
 .session-meta {
@@ -149,6 +215,62 @@
     align-items: center;
     gap: var(--sp-1);
     flex-shrink: 0;
+}
+/* The five 24px buttons used to set this line's height. They are an overlay
+   now and no longer in flow, so the height they were incidentally holding
+   has to be stated or the row loses 3px and the whole list re-flows. Keyed
+   on the overlay's presence rather than on the tier: a touch row has no
+   .session-actions and its line is sized by its own 44px control. */
+.session-item:has(.session-actions) .session-meta {
+    min-height: 24px;
+}
+
+/* The row's actions, over the title's tail rather than beside it.
+   Absolutely positioned against .session-item, so five 24px targets cost the
+   title nothing until a pointer or the keyboard asks for them. The gradient
+   is the seam: the overlay fades in from transparent over its first 20px so
+   it reads as sitting ON the title rather than butting into it. */
+.session-actions {
+    position: absolute;
+    top: var(--sp-2);
+    right: var(--sp-3);
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    padding-left: 20px;
+    opacity: 0;
+    transition: opacity var(--transition);
+    background: linear-gradient(to right, transparent, var(--row-veil) 20px);
+    /* The strip is a backdrop, not a target: the fade and the gaps between
+       the icons pass their clicks down to the row, so a near miss opens the
+       session instead of doing nothing. Only the buttons take a click, and
+       only once they are visible — an invisible control that is still
+       clickable is the bug the touch tier was built to fix. */
+    pointer-events: none;
+}
+.session-actions > * {
+    pointer-events: none;
+}
+.session-item:hover .session-actions,
+.session-item:focus-within .session-actions {
+    opacity: 1;
+}
+.session-item:hover .session-actions > *,
+.session-item:focus-within .session-actions > * {
+    pointer-events: auto;
+}
+/* An open inline rename owns the line the overlay lies on, and focusing its
+   input is itself a :focus-within. */
+.session-item.renaming .session-actions { display: none; }
+
+/* Pinned is a state, so it stays in the line: the toggle that changes it
+   lives in the overlay and is invisible at rest like its neighbours. */
+.session-pinned-mark {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    color: var(--accent);
 }
 
 .session-time {
@@ -165,6 +287,11 @@
 .session-delete {
     background: none;
     border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-faint);
     cursor: pointer;
     font-size: var(--text-sm);
@@ -173,7 +300,9 @@
     opacity: 0;
     transition: var(--transition);
 }
-.session-item:hover .session-delete { opacity: 1; }
+.session-item:hover .session-delete,
+.session-item:focus-within .session-delete,
+.session-delete:focus-visible { opacity: 1; }
 .session-delete:hover { color: var(--error); }
 /* Auto-created cron sessions — present but de-emphasized */
 .session-item.cron-session:not(.active) { opacity: 0.6; }
@@ -181,16 +310,14 @@
 .session-item.snooze-session:not(.active) { opacity: 0.6; }
 .session-item.snooze-session:not(.active):hover { opacity: 1; }
 
-.session-delete.confirm {
-    opacity: 1;
-    color: var(--error);
-    font-size: var(--text-xxs);
-    font-weight: 600;
-}
-
 .session-id-badge {
     background: none;
     border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-faint);
     cursor: pointer;
     font-family: var(--font-mono, monospace);
@@ -200,11 +327,13 @@
     opacity: 0;
     transition: var(--transition);
 }
-.session-item:hover .session-id-badge { opacity: 0.7; }
-.session-id-badge:hover { opacity: 1 !important; color: var(--accent); }
+.session-item:hover .session-id-badge,
+.session-item:focus-within .session-id-badge { opacity: 0.7; }
+.session-id-badge:hover,
+.session-id-badge:focus-visible { opacity: 1 !important; color: var(--accent); }
 .session-id-badge.copied {
     opacity: 1 !important;
-    color: var(--success, #4ade80);
+    color: var(--success);
 }
 .session-id-badge.copied::after {
     content: ' copied';
@@ -238,6 +367,348 @@
 }
 .session-group-body.collapsed { display: none; }
 
+/* --- Spaces (v33): colored long-lived session groups above the buckets --- */
+.spaces-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px var(--sp-3) 3px;
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    user-select: none;
+}
+.spaces-header .spaces-header-label { flex: 1; }
+
+/* The seam between the spaces above and the plain time buckets below — the
+   plain list used to butt straight up against the last space with nothing to
+   say where one ended and the other began, so a reader scrolling past it saw
+   one continuous list. Mirrors .spaces-header's shape; renderSessionList only
+   appends it when there is a seam to mark (spaces above it) and something
+   under it (a fresh install, or a list where every session lives in a space,
+   must never show a heading over nothing). */
+.sessions-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 10px var(--sp-3) 3px;
+    border-top: 1px solid var(--border);
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    user-select: none;
+}
+.sessions-header .sessions-header-label { flex: 1; }
+
+/* A pending space suggestion (v35) — an offer, filed with the spaces it is
+   about rather than with the sessions below it, and never a .session-item.
+   The accent tint and the coloured left edge are the whole point: a row that
+   looked like a session row would read as a chat the user does not remember
+   starting, which is the opposite of what it is. */
+.space-suggest-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    margin: 3px var(--sp-2) 5px;
+    padding: 4px var(--sp-2);
+    border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+    border-left: 2px solid var(--space-color, var(--accent));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    user-select: none;
+    transition: background var(--transition), color var(--transition);
+}
+.space-suggest-row:hover {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--text);
+}
+.space-suggest-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+.space-suggest-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--accent);
+}
+.space-suggest-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.space-suggest-meta {
+    flex-shrink: 0;
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+}
+
+.space-group-header .space-label {
+    color: var(--text-dim);
+    text-transform: none;
+    letter-spacing: normal;
+    font-size: var(--text-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.space-group-header:hover .space-label { color: var(--text); }
+.space-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 3px;
+    background: var(--space-color, var(--accent));
+    flex-shrink: 0;
+}
+.space-btn {
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-size: var(--text-xs);
+    padding: 0 3px;
+    line-height: 1;
+    visibility: hidden;
+}
+.spaces-header .space-btn,
+.spaces-header:hover .space-btn { visibility: visible; }
+.space-btn:hover { color: var(--text-bright); }
+.space-group-header .sg-count { margin-left: auto; }
+
+/* A space header's three controls — new session, settings, delete — over the
+   label's tail rather than beside it. The same move the session rows make one
+   level down, for the same reason: three targets that are invisible until a
+   pointer asks for them were taking 48px out of the row in flow, and the
+   label — the one thing that tells two spaces apart — was reading them at
+   122px of a 253px header. Positioned against the header, so the label is
+   measured against the whole row and the buttons cost it nothing. */
+.space-group-header {
+    position: relative;
+    /* What the overlay paints itself with. The header has no background of
+       its own — hover only changes its colour — so this is the sidebar it
+       sits on, and it is a token, so a theme swap reaches it. */
+    --row-veil: var(--bg-raised);
+}
+.space-actions {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: var(--sp-3);
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    /* 20px of runway for the gradient, and the header's own 8px-over-3px
+       padding carried onto the strip so the icons centre on the label rather
+       than on the box, which sits 2.5px higher. */
+    padding: 5px 0 0 20px;
+    opacity: 0;
+    transition: opacity var(--transition);
+    background: linear-gradient(to right, transparent, var(--row-veil) 20px);
+    /* The strip is a backdrop, not a target: the fade and the gaps between
+       the icons pass their clicks to the header, so a near miss collapses the
+       group instead of doing nothing. Only the buttons take a click, and only
+       once they are visible. */
+    pointer-events: none;
+}
+.space-actions > * { pointer-events: none; }
+.space-group-header:hover .space-actions,
+.space-group-header:focus-within .space-actions { opacity: 1; }
+.space-group-header:hover .space-actions > *,
+.space-group-header:focus-within .space-actions > * { pointer-events: auto; }
+/* The overlay states its own visibility rather than inheriting .space-btn's
+   hidden default. That default was the whole of the old mechanism, and inside
+   a strip that already fades as one it would do the same job twice — and do
+   it worse: `visibility: hidden` takes an element out of the tab order, so
+   the buttons would only exist for the keyboard once something else in the
+   header had focus. Opacity leaves them where Tab can find them. */
+.space-actions .space-btn {
+    visibility: visible;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+}
+.space-empty {
+    padding: 4px var(--sp-3) 8px;
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    font-style: italic;
+}
+
+/* The rail down a space's left edge, centred under its header's chevron. A
+   long space scrolls its own header out of view like anything else, and once
+   it has, nothing below said "you are still inside Pernix" — a bucket header
+   or a session row carried no trace of the group they were in. The rail is
+   that trace: it runs the height of the body and ends exactly where the
+   space does, so it is gone the instant .space-group-body.collapsed sets
+   display:none and takes its ::before with it. */
+.space-group-body { position: relative; margin-bottom: 8px; }
+.space-group-body::before {
+    content: '';
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: calc(var(--sp-3) + 3px);   /* centred under the header's chevron (9px icon at padding-left --sp-3) */
+    width: 2px;
+    border-radius: 1px;
+    background: color-mix(in srgb, var(--space-color, var(--accent)) 50%, transparent);
+    z-index: 1;
+    pointer-events: none;
+}
+
+/* One indent level for everything a space holds, beside the rail — the same
+   x every row inside a space now shares, so a title still reads as "inside
+   the coloured group" once its own bucket header has scrolled off the top.
+   Mirrors the +10px .space-bucket-header already sits at below. */
+.space-group-body .session-item { padding-left: calc(var(--sp-3) + 10px); }
+.space-group-body .session-item.active { padding-left: calc(var(--sp-3) + 8px); }   /* keeps the 2px active border's alignment, same as the outer rule */
+.space-group-body .session-item.worker { padding-left: calc(var(--sp-3) + 26px); }
+.space-group-body .session-item.depth-2 { padding-left: calc(var(--sp-3) + 42px); }
+.space-group-body .worker-summary { padding-left: calc(var(--sp-3) + 26px); }
+.space-group-body .space-empty { padding-left: calc(var(--sp-3) + 10px); }
+.space-group-body .space-show-all { margin-left: calc(var(--sp-3) + 10px); width: calc(100% - var(--sp-3) * 2 - 10px); }
+
+/* Time buckets INSIDE a space. Deliberately not .session-group-header: these
+   sit one level down from the space they divide, so they are smaller, dimmer
+   and indented past the space dot, and they read as a subdivision of the
+   coloured group above rather than as a peer of the buckets below it. Sentence
+   case rather than the plain list's uppercase, and for the same seam reason
+   as the rail above: the plain list's own Today/Yesterday/... headers already
+   own the uppercase style, and a bucket wearing it too read as their peer
+   instead of as something nested a level under a space. The count is hidden
+   while the bucket is open — an open bucket shows you its rows, and a number
+   over them is arithmetic nobody asked for. Folded, the number is the only
+   thing the header still owes the reader. */
+.space-bucket-header {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    /* Indented past the space dot above it, so the eye reads it as inside
+       the coloured group rather than as the next thing after it. */
+    padding: 6px var(--sp-3) 3px calc(var(--sp-3) + 10px);
+    /* A full-width disclosure row, and the gate's floor for something a
+       thumb has to hit. The existing group headers get an exemption from it
+       instead; a control this commit is adding can just clear it. */
+    box-sizing: border-box;
+    min-height: 28px;
+    /* --text-xxs is smaller than the space label (--text-xs) it sits under,
+       and it is the size touch.css already raises to its 11px floor — so
+       these headers follow the tier without a rule of their own over there. */
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    cursor: pointer;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    user-select: none;
+    opacity: 0.75;
+}
+.space-bucket-header:hover { color: var(--text-dim); opacity: 1; }
+.space-bucket-header .sg-arrow {
+    display: inline-flex;
+    align-items: center;
+    transition: transform var(--transition);
+}
+.space-bucket-header.collapsed .sg-arrow { transform: rotate(-90deg); }
+.space-bucket-header .sg-count {
+    margin-left: auto;
+    opacity: 0.6;
+    font-size: var(--text-xxs);
+}
+
+/* "Show all 47" — one row at the end of what a space is showing. Full width
+   and dashed so it reads as the edge of the group rather than as another
+   session in it. It is a real target rather than a caption, and the one
+   control this commit adds that a thumb has to find: 32px, on both tiers,
+   which is why it needs no exemption from the gate's 28px floor. */
+.space-show-all {
+    display: block;
+    box-sizing: border-box;
+    width: calc(100% - var(--sp-3) * 2);
+    min-height: 32px;
+    margin: 2px var(--sp-3) 6px;
+    padding: 4px 8px;
+    background: none;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-faint);
+    font-family: inherit;
+    font-size: var(--text-xxs);
+    cursor: pointer;
+    transition: color var(--transition), border-color var(--transition);
+}
+.space-show-all:hover {
+    color: var(--text-dim);
+    border-color: var(--text-faint);
+}
+.space-chip {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 2px;
+    background: var(--space-color, var(--accent));
+    margin-right: 5px;
+    flex-shrink: 0;
+}
+.space-chip-labeled {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: var(--text-xxs);
+    color: var(--text-dim);
+    border: 1px solid var(--space-color, var(--accent));
+    background: color-mix(in srgb, var(--space-color, var(--accent)) 12%, transparent);
+    white-space: nowrap;
+}
+.session-space-move {
+    background: none;
+    border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-faint);
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 10px;
+}
+.session-space-move:hover { color: var(--text-bright); }
+.space-move-menu {
+    position: fixed;
+    z-index: 1000;
+    min-width: 180px;
+    background: var(--bg-raised, var(--bg));
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: var(--shadow-lg);
+    padding: 4px;
+}
+.space-move-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    cursor: pointer;
+}
+.space-move-item:hover { background: var(--bg-hover); color: var(--text); }
+.space-move-item.current { opacity: 0.5; cursor: default; }
+
 /* Session type dots */
 .session-dot {
     display: inline-block;
@@ -256,11 +727,7 @@
 .session-dot.snooze { background: var(--dream); }
 .session-dot.rlm    { background: var(--rlm); }
 .session-dot.canary { background: var(--canary); }
-.session-dot.active-pulse { animation: dot-pulse 1.2s ease-in-out infinite; }
-@keyframes dot-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.2; }
-}
+.session-dot.active-pulse { --pulse-dip: 0.2; animation: pulse var(--pulse-fast) ease-in-out infinite; }
 
 /* Session activity ticker */
 .session-activity {
@@ -305,8 +772,11 @@
 }
 
 .legend-item {
-    display: flex;
+    display: inline-flex;
     align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    min-height: 24px;
     gap: 4px;
     background: none;
     border: 1px solid transparent;
@@ -451,6 +921,10 @@
 
 /* Sidebar toggle */
 #sidebar-toggle {
+    /* Its content is an <svg> now, not a glyph — centre it as a box. */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     position: absolute;
     top: var(--sp-3);
     left: var(--sp-3);
@@ -469,6 +943,92 @@
     color: var(--accent);
     border-color: var(--accent);
     background: var(--accent-glow);
+}
+
+/* Session header — one quiet line naming the conversation you are in and the
+   space it belongs to. The left padding clears the floating #sidebar-toggle
+   above; on touch layouts mobile.js moves that button into the status bar and
+   touch.css drops the clearance. */
+#session-header {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    min-height: 34px;
+    padding: var(--sp-2) var(--sp-4) var(--sp-2) calc(var(--sp-3) + 42px);
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+}
+.session-header-title {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    padding: 2px var(--sp-1);
+    max-width: 60ch;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    text-align: left;
+    cursor: text;
+    transition: var(--transition);
+}
+.session-header-title:hover {
+    border-color: var(--border-subtle);
+    color: var(--text-bright);
+}
+.session-header-title:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: 1px;
+}
+/* "← Parent: <title>" on a worker or an RLM trace view. Quiet enough to read
+   as a breadcrumb rather than as a second title, and first in the row so the
+   way back is where the eye starts. */
+.session-header-parent {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    max-width: 28ch;
+    overflow: hidden;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding: 2px var(--sp-1);
+    cursor: pointer;
+    transition: var(--transition);
+}
+.session-header-parent > span {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.session-header-parent:hover {
+    color: var(--accent);
+    border-color: var(--border-subtle);
+}
+.session-header-parent:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: 1px;
+}
+
+#session-header-rename {
+    flex: 1 1 320px;
+    min-width: 0;
+    max-width: 60ch;
+    background: var(--bg-surface);
+    border: 1px solid var(--accent-dim);
+    border-radius: var(--radius-sm);
+    color: var(--text-bright);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    padding: 2px var(--sp-1);
+    outline: none;
 }
 
 /* ======================================================================
@@ -492,7 +1052,6 @@
     background: var(--bg-raised);
     font-size: var(--text-xxs);
 }
-#worker-strip[hidden] { display: none; }
 .worker-strip-label { color: var(--text-faint); }
 .worker-chip {
     display: inline-flex;
@@ -511,9 +1070,10 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--teal-dim, #4a8);
+    background: var(--teal-dim);
     margin-right: 4px;
-    animation: browserPulse 1.5s ease-in-out infinite;
+    --pulse-dip: 0.5;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
 }
 .worker-chip-dot.rlm { background: var(--rlm); }
 .worker-chip.rlm-chip:hover { color: var(--rlm); border-color: var(--rlm); }
@@ -526,7 +1086,7 @@
     height: 2px;
     width: 0;
     background: var(--accent);
-    transition: width 0.2s ease;
+    transition: width var(--transition);
 }
 .file-chip.uploading { opacity: 0.85; }
 
@@ -569,6 +1129,91 @@
     font-size: var(--text-xs);
 }
 
+/* ---------------------------------------------------------------------------
+   Archive (v34) — the state between "in my sidebar" and "gone"
+
+   Deleting used to be the only way to clear a chat off the list, so a sidebar
+   with a year in it forced a choice between clutter and losing the
+   transcript. Everything here is deliberately quiet: an archived session is
+   not an alert, it is a session that has stopped asking for attention.
+   --------------------------------------------------------------------------- */
+
+/* The row's sixth overlay control, sized like its five neighbours. The strip
+   is absolutely positioned, so a new button in it does not move the row. */
+.session-archive {
+    background: none;
+    border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-faint);
+    cursor: pointer;
+    padding: 0 2px;
+    line-height: 1;
+}
+.session-archive:hover { color: var(--text-bright); }
+
+/* The legend's Archived entry is a place, not a session type, so its dot is
+   the one with no colour of its own — a ring rather than a filled dot. */
+.legend-dot.archived {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--text-faint);
+}
+.legend-item.archived:not(.dimmed) .legend-dot.archived {
+    box-shadow: inset 0 0 0 1.5px var(--text);
+}
+
+/* The group sits at the foot of the list and says so by being quieter than
+   the time buckets above it, and so do its rows. Not disabled-looking —
+   every one of them is a whole conversation one click from coming back. */
+.archived-group-header { color: var(--text-faint); }
+.session-item.archived-row .session-title-text { color: var(--text-dim); }
+
+/* Search keeps finding archived sessions — that is the whole promise — so
+   the hit carries the one word that explains why it is not in the list. */
+.archived-chip {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 0 4px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.03em;
+    vertical-align: 1px;
+}
+
+/* The way out of the one read-only state a user CAN leave. Every other
+   reason is permanent for the life of the session, so a disabled textarea
+   and a sentence were the whole story; this one needs the verb attached.
+   Above the input bar rather than in it — a live control inside a dead row
+   reads as a bug. */
+.composer-restore {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-raised);
+}
+.composer-restore-text {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+}
+#composer-restore-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    flex-shrink: 0;
+}
+
 /* Optimistic user bubble whose POST was rejected — not actually sent */
 .message.rejected {
     opacity: 0.55;
@@ -581,21 +1226,12 @@
 }
 
 /* Load-earlier control (paginated history) */
+/* Centred on its own line, on the raised surface; the rest is
+   .btn--secondary. */
 .load-earlier-btn {
-    display: block;
+    display: flex;
     margin: 0 auto var(--sp-4);
     background: var(--bg-raised);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    font-size: var(--text-xs);
-    padding: var(--sp-1) var(--sp-3);
-    border-radius: var(--radius);
-    cursor: pointer;
-    transition: var(--transition);
-}
-.load-earlier-btn:hover {
-    color: var(--accent);
-    border-color: var(--accent);
 }
 
 /* Jump-to-bottom — appears when the user scrolls up during a live turn */
@@ -617,7 +1253,11 @@
     transition: var(--transition);
     line-height: 1;
 }
-#jump-to-bottom.visible { display: block; }
+#jump-to-bottom {
+    align-items: center;
+    justify-content: center;
+}
+#jump-to-bottom.visible { display: flex; }
 #jump-to-bottom:hover {
     color: var(--accent);
     border-color: var(--accent);
@@ -660,7 +1300,7 @@
     width: 100%;
     height: 100%;
     z-index: 0;
-    mix-blend-mode: screen;
+    mix-blend-mode: var(--sigil-blend);
     pointer-events: none;
 }
 .empty-state-title {
@@ -673,13 +1313,15 @@
     line-height: 1.12;
     letter-spacing: -0.02em;
     color: var(--text-bright);
-    text-shadow: 0 0 60px rgba(212, 168, 67, 0.18);
+    text-shadow: 0 0 60px color-mix(in srgb, var(--accent) 18%, transparent);
     margin: 0;
 }
 .empty-state-title-line {
-    /* Vertical gold gradient on the wordmark — copied verbatim from the website. */
+    /* Vertical gold gradient on the wordmark. Token-driven so it survives a
+       theme swap — on paper --accent-tint is a DARKER gold than --accent, so
+       the whole wordmark stays above the 3:1 large-text floor. */
     display: inline-block;
-    background: linear-gradient(180deg, #ece1c4 0%, #d4a843 80%, #8a6720 100%);
+    background: linear-gradient(180deg, var(--accent-tint) 0%, var(--accent) 80%, var(--accent-dim) 100%);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
@@ -740,6 +1382,27 @@
     margin: var(--sp-3) 0 0;
 }
 
+/* Waiting for a transcript to arrive. Without a row here the pane is blank,
+   which is indistinguishable from an empty session. */
+.messages-loading {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-4) 2px;
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+}
+.messages-loading-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+    --pulse-dip: 0.2;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
+}
+
 /* Message card */
 .message {
     margin-bottom: var(--sp-4);
@@ -789,12 +1452,33 @@
     line-height: 1.65;
     color: var(--text);
     padding: var(--sp-2) 0;
+    /* Measure. --chat-max-w sizes the whole column (code blocks, tables and
+       tool cards all want the room); prose does not — past ~75 characters the
+       eye loses the line it is returning to. Deliberately NOT --chat-max-w:
+       narrowing that would shrink the code blocks with it. */
+    max-width: 72ch;
     /* Prose wraps rather than widening the column. Without this a single
        long token (a URL, a file path) makes the whole transcript scroll
        sideways — every message shifts, not just the offending line. */
     overflow-wrap: break-word;
     min-width: 0;
 }
+/* Presence. Between "sent" and the first token the assistant bubble is an
+   empty card with a label on it, which reads as a hang rather than as work.
+   The dots are content, not decoration, so they stay put for a reader who
+   asked for no motion — the global prefers-reduced-motion rule already cuts
+   the animation to a stop. */
+.message.assistant .content:empty::after {
+    content: '\00b7\00b7\00b7';
+    display: inline-block;
+    color: var(--text-faint);
+    letter-spacing: 0.18em;
+    font-family: var(--mono);
+    --pulse-peak: 0.3;
+    --pulse-dip: 0.95;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
+}
+
 .message.assistant .content p { margin-bottom: 0.75em; }
 .message.assistant .content p:last-child { margin-bottom: 0; }
 .message.assistant .content ul,
@@ -880,6 +1564,127 @@
     font-weight: 500;
 }
 
+/* ======================================================================
+   Shared prose heading scale (V2)
+   ----------------------------------------------------------------------
+   Markdown headings render in two surfaces — assistant messages and the
+   Explorer's markdown viewer — and neither had a full scale. The assistant
+   bubble had no heading rules at all, so an h1 came out at the UA's 2em
+   (32px) next to 16px body prose, and h4-h6 came out SMALLER than the text
+   around them. One ratio set and one vertical rhythm for both; each surface
+   keeps the family it already chose (serif here, mono in the file viewer,
+   which re-clamps the weight to 500 because DM Mono has no 600).
+
+   System messages are deliberately excluded: they are a flat 11px italic
+   aside where every heading level is 1em on purpose, not a prose surface.
+   ====================================================================== */
+.message.assistant .content :is(h1, h2, h3, h4, h5, h6),
+.fp-viewer-md :is(h1, h2, h3, h4, h5, h6) {
+    font-weight: 600;
+    line-height: 1.25;
+    margin: 1.2em 0 .4em;
+}
+.message.assistant .content h1,
+.fp-viewer-md h1 { font-size: 1.35em; }
+.message.assistant .content h2,
+.fp-viewer-md h2 { font-size: 1.2em; }
+.message.assistant .content h3,
+.fp-viewer-md h3 { font-size: 1.05em; }
+.message.assistant .content :is(h4, h5, h6),
+.fp-viewer-md :is(h4, h5, h6) { font-size: 1em; }
+.message.assistant .content > :is(h1, h2, h3, h4, h5, h6):first-child,
+.fp-viewer-md > :is(h1, h2, h3, h4, h5, h6):first-child { margin-top: 0; }
+
+/* ---------------------------------------------------------------------------
+   Worker lifecycle card — one card per fan-out, in the transcript.
+   Deliberately the same visual family as a tool group: it is the same kind of
+   thing (a collapsed summary of machine work with a detail list under it), and
+   giving it a second look would only make the transcript louder.
+   --------------------------------------------------------------------------- */
+.worker-card {
+    margin: var(--sp-2) 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+    overflow: hidden;
+}
+.worker-card.has-error { border-color: var(--error); }
+.worker-card-header {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    cursor: pointer;
+    user-select: none;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-faint);
+    transition: color var(--transition);
+}
+.worker-card-header:hover { color: var(--accent-dim); }
+.worker-card-header:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+.worker-card.has-error .wc-label { color: var(--error); }
+.wc-toggle {
+    display: inline-flex;
+    transition: transform var(--transition);
+}
+.worker-card.expanded .wc-toggle { transform: rotate(90deg); }
+.wc-rows { display: none; }
+.worker-card.expanded .wc-rows { display: block; }
+.wc-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    border-top: 1px solid var(--border-subtle);
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+}
+.wc-row-dot {
+    width: 6px;
+    height: 6px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--teal-dim);
+    --pulse-dip: 0.5;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
+}
+.wc-row.finished .wc-row-dot { background: var(--text-dim); animation: none; }
+.wc-row.failed .wc-row-dot { background: var(--error); animation: none; }
+.wc-row-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+}
+.wc-row-state {
+    flex: none;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+}
+.wc-row-state.failed { color: var(--error); }
+.wc-row-time {
+    flex: none;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    min-width: 4ch;
+    text-align: right;
+}
+.wc-row-actions {
+    flex: none;
+    display: flex;
+    gap: var(--sp-1);
+}
+
 /* Tool call groups */
 .tool-group {
     margin: var(--sp-2) 0;
@@ -900,12 +1705,30 @@
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-faint);
-    transition: color 0.15s;
+    transition: color var(--transition);
 }
 .tool-group-header:hover { color: var(--accent-dim); }
+/* Every disclosure header in the app is a <div role="button">, so the only
+   ring it ever had was the UA's — which Chrome draws in its own blue and
+   Safari does not draw at all on a div. One rule for all of them, in the
+   accent. The offset is negative on purpose: these rows are full-bleed
+   inside containers that clip (.scout-activity and .reflect-activity are
+   `overflow: hidden`), so an outward ring would be sliced off. */
+.tool-group-header:focus-visible,
+.tool-item-header:focus-visible,
+.scout-activity-header:focus-visible,
+.reflect-header:focus-visible,
+.timeline-turn-header:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+/* A round that failed says so on the one line that stays visible when the
+   group is collapsed. (The group with a failure is never auto-collapsed —
+   see closeToolGroup — but the user can still fold it by hand.) */
+.tool-group.has-error .tool-group-header { color: var(--error); }
 .tg-toggle {
     font-size: 8px;
-    transition: transform 0.2s;
+    transition: transform var(--transition);
 }
 .tool-group.collapsed .tg-toggle { transform: rotate(-90deg); }
 .tool-group.collapsed .tool-group-items { display: none; }
@@ -917,10 +1740,16 @@
 /* Tool items — three-tier progressive disclosure */
 .tool-item {
     border-bottom: 1px solid var(--border);
-    transition: background 0.15s;
+    transition: background var(--transition);
 }
 .tool-item:last-child { border-bottom: none; }
 .tool-item:hover { background: var(--bg-hover); }
+
+/* A tool that has started but not returned. The row is replaced in place by
+   the finished one, so the group never reflows underneath the reader. It has
+   no body to open yet — hence no chevron and no pointer cursor. */
+.tool-item.running .tool-item-header { cursor: default; }
+.tool-item.running .tool-item-summary { color: var(--text-dim); }
 
 .tool-item-header {
     display: flex;
@@ -933,7 +1762,7 @@
 .tool-item-chevron {
     font-size: 8px;
     color: var(--text-faint);
-    transition: transform 0.2s;
+    transition: transform var(--transition);
     flex-shrink: 0;
 }
 .tool-item.expanded .tool-item-chevron {
@@ -1060,6 +1889,22 @@
 }
 .file-view-btn.inline { margin-left: var(--sp-2); }
 
+/* A tool row whose call wrote a file carries a "view" button beside the
+   disclosure header rather than inside it — nothing interactive may nest in
+   a role="button". The header keeps all the flexible width. (A1) */
+.tool-item-headrow {
+    display: flex;
+    align-items: center;
+}
+.tool-item-headrow .tool-item-header {
+    flex: 1;
+    min-width: 0;
+}
+.tool-item-headrow .file-view-btn {
+    flex-shrink: 0;
+    margin-right: var(--sp-3);
+}
+
 .message.assistant .content code.file-path-link {
     cursor: pointer;
     text-decoration: underline;
@@ -1080,6 +1925,11 @@
     position: absolute;
     top: 4px;
     right: 4px;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: var(--bg-raised);
     border: 1px solid var(--border);
     color: var(--text-dim);
@@ -1089,13 +1939,23 @@
     padding: 2px 8px;
     border-radius: 3px;
     opacity: 0;
-    transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+    transition: opacity var(--transition), color var(--transition), border-color var(--transition);
 }
-.code-block-wrap:hover .copy-btn { opacity: 1; }
+.code-block-wrap:hover .copy-btn,
+.code-block-wrap:focus-within .copy-btn,
+.copy-btn:focus-visible { opacity: 1; }
 .copy-btn:hover {
     color: var(--accent);
     border-color: var(--accent);
 }
+
+/* The head strip (C2). On a fine pointer it contributes NO box: display
+   contents takes it out of the layout entirely, so the copy button is still
+   laid out against .code-block-wrap and sits exactly where it always has, and
+   the language label is display:none — not merely invisible, so it stays out
+   of innerText and out of a copied transcript. */
+.code-block-head { display: contents; }
+.code-block-lang { display: none; }
 
 /* Legacy tool messages (kept for backward compat with loadMessages) */
 .message.tool .content {
@@ -1138,12 +1998,12 @@
     align-items: center;
     gap: var(--sp-1);
     user-select: none;
-    transition: color 0.15s;
+    transition: color var(--transition);
 }
 .scout-activity-header:hover { color: var(--accent-dim); }
 .scout-toggle {
     font-size: 8px;
-    transition: transform 0.2s;
+    transition: transform var(--transition);
 }
 .scout-activity.scout-collapsed .scout-toggle { transform: rotate(-90deg); }
 .scout-activity.scout-collapsed .scout-body { display: none; }
@@ -1193,7 +2053,7 @@
     align-items: center;
     gap: var(--sp-1);
     user-select: none;
-    transition: color 0.15s;
+    transition: color var(--transition);
 }
 .reflect-header:hover { color: var(--accent-dim); }
 .reflect-activity.scout-collapsed .scout-toggle { transform: rotate(-90deg); }
@@ -1202,7 +2062,7 @@
     padding: 1px 6px;
     border-radius: 3px;
     font-size: 9px;
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0.06em;
 }
 .reflect-pass { background: var(--success-subtle); color: var(--success); }
@@ -1217,7 +2077,7 @@
     font-size: 10px;
     color: var(--text-faint);
     border: 1px solid var(--border-subtle);
-    background: rgba(255,255,255,0.02);
+    background: var(--bg-surface);
 }
 
 /* System messages */
@@ -1240,7 +2100,7 @@
 .message.system .content h5,
 .message.system .content h6 {
     font-size: 1em;
-    font-weight: 600;
+    font-weight: 500;
     font-style: normal;
     margin: 0.6em 0 0.2em;
     color: var(--text);
@@ -1272,8 +2132,8 @@
     padding: 2px 6px;
     text-align: left;
 }
-.message.system .content th { color: var(--text); font-weight: 600; }
-.message.system .content strong { color: var(--text); }
+.message.system .content th { color: var(--text); font-weight: 500; }
+.message.system .content strong { color: var(--text); font-weight: 500; }
 
 /* Command result cards */
 .cmd-card {
@@ -1324,7 +2184,7 @@
     padding: 1px 8px;
     border-radius: 9px;
     font-size: var(--text-xxs);
-    font-weight: 600;
+    font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
@@ -1384,9 +2244,23 @@
     width: 100%;
 }
 
+/* #status-model and #state-badge are <button>s (they open a menu and a
+   dialog); strip the UA chrome so they still read as status-bar text. */
 #status-bar .model {
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    cursor: pointer;
     color: var(--accent-dim);
     font-weight: 500;
+}
+#status-bar .model:focus-visible,
+#state-badge:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: 2px;
 }
 #status-bar .model.has-override {
     color: var(--text-faint);
@@ -1419,50 +2293,46 @@
     font-size: var(--text-xxs);
     letter-spacing: 0.02em;
     border: 1px solid var(--border-subtle);
-    background: var(--bg-surface, rgba(255,255,255,0.02));
+    background: var(--bg-surface);
     color: var(--text-faint);
     white-space: nowrap;
 }
 .model-divider-pill .model-divider-arrow {
-    color: var(--amber, #d4a142);
+    color: var(--warning);
     margin: 0 2px;
-    font-weight: 600;
+    font-weight: 500;
 }
 .model-divider-pill.model-divider-override {
-    color: var(--accent, #4ea1ff);
-    border-color: rgba(78,161,255,0.3);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 .model-divider-pill.model-divider-restore {
-    color: var(--accent-dim, #88a);
+    color: var(--accent-dim);
 }
 #status-bar .model .model-override-shuffle {
     display: inline-block;
     margin: 0 2px;
-    color: var(--amber, #d4a142);
-    font-weight: 700;
-    animation: statusPulse 1.6s ease-in-out infinite;
+    color: var(--warning);
+    font-weight: 500;
+    --pulse-dip: 0.55;
+    animation: pulse var(--pulse-slow) ease-in-out infinite;
 }
 #status-bar .model .model-override-temp {
-    color: var(--accent, #4ea1ff);
-    font-weight: 600;
+    color: var(--accent);
+    font-weight: 500;
 }
-@keyframes statusPulse {
-    0%, 100% { filter: brightness(1); }
-    50% { filter: brightness(0.6); }
-}
-
 #status-bar .ctx {
     color: var(--text-faint);
-    transition: color 120ms ease;
+    transition: color var(--transition-fast);
 }
 
 #status-bar .ctx.ctx-approaching {
-    color: var(--amber, #d4a142);
+    color: var(--warning);
 }
 
 #status-bar .ctx.ctx-critical {
-    color: var(--red, #d06060);
-    font-weight: 600;
+    color: var(--error);
+    font-weight: 500;
 }
 
 #status-bar .info {
@@ -1475,6 +2345,19 @@
     text-overflow: ellipsis;
 }
 
+/* Recovery notices ("reconnected — transcript refreshed"). Its own span so
+   updateStatus('') cannot wipe it, and its own colour so it reads as an
+   explanation rather than as live turn status. */
+#status-bar .notice {
+    font-size: var(--text-xxs);
+    color: var(--accent-dim);
+    max-width: 240px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#status-bar .notice:empty { display: none; }
+
 .status-divider {
     width: 1px;
     align-self: stretch;
@@ -1483,19 +2366,10 @@
     flex-shrink: 0;
 }
 
+/* .btn--ghost, at icon size, with room for an optional text label. */
 .status-btn {
-    background: none;
-    border: none;
-    color: var(--text-faint);
-    cursor: pointer;
-    font-size: var(--text-md);
     padding: 2px var(--sp-2);
-    transition: var(--transition);
     border-radius: var(--radius);
-}
-.status-btn:hover {
-    color: var(--accent);
-    background: var(--accent-glow);
 }
 
 /* State badge — visible indicator of the v2 state-machine state.
@@ -1505,30 +2379,36 @@
     padding: 1px 8px;
     border-radius: 10px;
     font-size: var(--text-xxs);
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0.3px;
     text-transform: uppercase;
     border: 1px solid transparent;
     white-space: nowrap;
-    transition: background 120ms ease, color 120ms ease;
+    transition: background var(--transition-fast), color var(--transition-fast);
 }
-.state-badge.idle_ready         { background: #1f3a1f; color: #7fd07f; border-color: #2d5e2d; }
-.state-badge.scouting           { background: #1e3a4f; color: #6db5e8; border-color: #2d567d; }
-.state-badge.processing         { background: #1e3a4f; color: #7ec4f0; border-color: #2d567d; animation: statusPulse 1.5s ease-in-out infinite; }
-.state-badge.compacting         { background: #4a3a1a; color: #e8c06d; border-color: #7d5e2d; animation: statusPulse 1.5s ease-in-out infinite; }
-.state-badge.pause_requested    { background: #4a3a1a; color: #f0c87e; border-color: #7d5e2d; }
-.state-badge.paused             { background: #3a2f1a; color: #ccaa55; border-color: #5e4d2d; }
-.state-badge.cancelling         { background: #4a1f1a; color: #e88080; border-color: #7d2d2d; animation: statusPulse 1s ease-in-out infinite; }
-.state-badge.finalizing         { background: #3a2a4a; color: #c89ae8; border-color: #5d4a7d; animation: statusPulse 1.5s ease-in-out infinite; }
-.state-badge.awaiting_user      { background: #2a1a4a; color: #9a80e8; border-color: #4a3a7d; }
+.state-badge.idle_ready         { background: var(--state-idle_ready-bg); color: var(--state-idle_ready-fg); border-color: color-mix(in srgb, var(--state-idle_ready-fg) 40%, var(--state-idle_ready-bg)); }
+.state-badge.scouting           { background: var(--state-scouting-bg); color: var(--state-scouting-fg); border-color: color-mix(in srgb, var(--state-scouting-fg) 40%, var(--state-scouting-bg)); }
+.state-badge.processing         { background: var(--state-processing-bg); color: var(--state-processing-fg); border-color: color-mix(in srgb, var(--state-processing-fg) 40%, var(--state-processing-bg)); --pulse-dip: 0.55; animation: pulse var(--pulse-fast) ease-in-out infinite; }
+.state-badge.compacting         { background: var(--state-compacting-bg); color: var(--state-compacting-fg); border-color: color-mix(in srgb, var(--state-compacting-fg) 40%, var(--state-compacting-bg)); --pulse-dip: 0.55; animation: pulse var(--pulse-fast) ease-in-out infinite; }
+.state-badge.pause_requested    { background: var(--state-pause_requested-bg); color: var(--state-pause_requested-fg); border-color: color-mix(in srgb, var(--state-pause_requested-fg) 40%, var(--state-pause_requested-bg)); }
+.state-badge.paused             { background: var(--state-paused-bg); color: var(--state-paused-fg); border-color: color-mix(in srgb, var(--state-paused-fg) 40%, var(--state-paused-bg)); }
+.state-badge.cancelling         { background: var(--state-cancelling-bg); color: var(--state-cancelling-fg); border-color: color-mix(in srgb, var(--state-cancelling-fg) 40%, var(--state-cancelling-bg)); --pulse-dip: 0.55; animation: pulse var(--pulse-fast) ease-in-out infinite; }
+.state-badge.finalizing         { background: var(--state-finalizing-bg); color: var(--state-finalizing-fg); border-color: color-mix(in srgb, var(--state-finalizing-fg) 40%, var(--state-finalizing-bg)); --pulse-dip: 0.55; animation: pulse var(--pulse-fast) ease-in-out infinite; }
+.state-badge.awaiting_user      { background: var(--state-awaiting_user-bg); color: var(--state-awaiting_user-fg); border-color: color-mix(in srgb, var(--state-awaiting_user-fg) 40%, var(--state-awaiting_user-bg)); }
+.state-badge.awaiting_workers   { background: var(--state-awaiting_workers-bg); color: var(--state-awaiting_workers-fg); border-color: color-mix(in srgb, var(--state-awaiting_workers-fg) 40%, var(--state-awaiting_workers-bg)); }
 
 /* State badge is clickable — opens the timeline modal. */
-#state-badge { cursor: pointer; }
+#state-badge {
+    cursor: pointer;
+    font-family: inherit;
+    line-height: inherit;
+}
 #state-badge:hover { filter: brightness(1.15); }
 
 /* Timeline modal — opened via #state-badge click (see modals/timeline.js).
    Reuses .modal-overlay / .modal-card / .modal-body chrome from modals.css.
-   Two tabs: Graph (Mermaid) and Timeline (interleaved state + tool rows). */
+   Three tabs: Lane (a row per turn + its story), Map (the state machine as
+   one inline SVG) and Timeline (interleaved state + tool rows). */
 
 .timeline-modal-content {
     display: flex;
@@ -1542,27 +2422,381 @@
     font-family: var(--font-mono, monospace);
     font-size: var(--text-xxs);
 }
+/* The lane's card is wider than the default 600px: the whole point of the
+   bar is that a phase's share of the turn is legible without hovering it. */
+#timeline-modal { max-width: min(94vw, 820px); }
 
-/* Graph tab */
-.timeline-graph-container {
-    width: 100%;
-    overflow: auto;
-    padding: var(--sp-3) 0;
+/* ----------------------------------------------------------------------
+   Lane tab — one row per turn
+   ----------------------------------------------------------------------
+   Three columns, the same three on every row so the bars line up: a mono
+   turn label, the bar itself, the duration. The label column is a fixed
+   width rather than `auto` precisely so the bars share a left edge — with
+   `auto` a row carrying "↳ T9 ·2" would start its bar further right than
+   its neighbours and the shapes would stop being comparable.
+
+   Every colour is a --state-<name>-{fg,bg} token, referenced from the
+   element's inline style as a var(). No hex is computed in JS anywhere in
+   this modal any more, so a theme swap repaints it for free. */
+.tl-lane-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    --tl-lane-label-w: 104px;
+    --tl-lane-elapsed-w: 58px;
+}
+.tl-lane-older {
     display: flex;
     justify-content: center;
+    padding: var(--sp-1) 0 var(--sp-2);
 }
-.timeline-graph-container svg {
-    max-width: 100%;
+.tl-lane-older-btn {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding: 3px var(--sp-3);
+}
+.tl-lane-older-btn:hover { color: var(--accent); border-color: var(--accent-dim); }
+.tl-lane-older-btn:disabled { cursor: default; opacity: 0.6; }
+
+.tl-lane-row {
+    display: grid;
+    grid-template-columns: var(--tl-lane-label-w) minmax(0, 1fr) var(--tl-lane-elapsed-w);
+    align-items: center;
+    gap: var(--sp-2);
+    padding: 3px var(--sp-2);
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    min-height: 26px;
+}
+.tl-lane-row:hover { background: var(--bg-hover); }
+.tl-lane-row.selected {
+    background: var(--bg-surface);
+    border-color: var(--accent-dim);
+}
+.tl-lane-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+.tl-lane-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    color: var(--text-dim);
+}
+.tl-lane-row.selected .tl-lane-label { color: var(--text-bright); }
+.tl-lane-id { color: var(--text); font-weight: 500; }
+.tl-lane-row.selected .tl-lane-id { color: var(--accent); }
+.tl-lane-parent { color: var(--text-faint); }
+.tl-lane-retry { color: var(--accent-dim); }
+.tl-lane-warn { color: var(--warning); display: inline-flex; align-items: center; }
+.tl-lane-elapsed {
+    color: var(--text-dim);
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+/* The bar. `overflow: hidden` is load-bearing twice over: it clips a tick
+   parked at 100% and it guarantees the row can never widen the modal, so
+   the lane cannot be the thing that makes a phone scroll sideways. */
+.tl-lane-bar {
+    position: relative;
+    display: flex;
+    height: 14px;
+    min-width: 0;
+    border-radius: 3px;
+    overflow: hidden;
+    background: var(--bg-surface);
+}
+.tl-lane-seg {
+    flex: 0 1 auto;
+    /* A phase under 1.5% of its turn still has to be findable by a cursor. */
+    min-width: 3px;
+    height: 100%;
+    box-sizing: border-box;
+    border-bottom: 2px solid transparent;
+}
+.tl-lane-seg-empty { background: var(--bg-hover); }
+.tl-lane-tick {
+    position: absolute;
+    top: 0;
+    bottom: 2px;
+    width: 2px;
+    margin-left: -1px;
+    background: var(--text-bright);
+    opacity: 0.55;
+}
+.tl-lane-tick.error { background: var(--error); opacity: 1; }
+/* A call that has started and not come back. It is on the bar the moment the
+   tool.start lands — a bar that only grows a tick when the result arrives is a
+   bar on which a four-minute call reads as an unexplained gap — and it is
+   drawn in --accent to say the tick is not the whole story yet. */
+.tl-lane-tick.pending {
+    background: var(--accent);
+    opacity: 1;
+    --pulse-dip: 0.35;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
+}
+.tl-lane-live {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: 3px;
+    background: var(--accent);
+    --pulse-dip: 0.25;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
+}
+/* The global reduce block already collapses the duration; say it outright so
+   a live turn's marker is a steady edge rather than a single flash. */
+@media (prefers-reduced-motion: reduce) {
+    .tl-lane-live,
+    .tl-lane-tick.pending { animation: none; }
+}
+
+/* ----------------------------------------------------------------------
+   Story — the selected turn, under the lane
+   ---------------------------------------------------------------------- */
+.tl-story {
+    margin-top: var(--sp-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.tl-story:empty { display: none; }
+.tl-story-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding-top: var(--sp-2);
+    border-top: 1px solid var(--border);
+}
+.tl-story-turn { color: var(--accent); font-weight: 500; }
+.tl-story-when { color: var(--text-faint); }
+
+.tl-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+}
+.tl-card-head {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    cursor: pointer;
+    user-select: none;
+}
+.tl-card-head:hover .tl-card-eyebrow { color: var(--accent); }
+.tl-card-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tl-card-eyebrow {
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+.tl-card-chevron {
+    display: inline-flex;
+    color: var(--text-faint);
+    transition: transform var(--transition-fast);
+}
+.tl-card.collapsed .tl-card-chevron,
+.tl-fold.collapsed .tl-card-chevron { transform: rotate(-90deg); }
+.tl-card.collapsed .tl-card-body,
+.tl-fold.collapsed .tl-fold-body { display: none; }
+.tl-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding: 0 var(--sp-3) var(--sp-3);
+    font-size: var(--text-xs);
+    color: var(--text);
+}
+.tl-story-prose { color: var(--text); line-height: var(--line-height); margin: 0; }
+.tl-story-note { color: var(--text-dim); font-size: var(--text-xxs); margin: 0; }
+.tl-story-empty { color: var(--text-faint); font-size: var(--text-xxs); }
+.tl-story-raw {
+    background: var(--bg);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    margin: 0;
+    max-height: 220px;
+    overflow: auto;
+    padding: var(--sp-2);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.tl-story-field {
+    display: flex;
+    gap: var(--sp-2);
+    font-size: var(--text-xxs);
+    min-width: 0;
+}
+.tl-story-key {
+    color: var(--text-faint);
+    font-family: var(--mono);
+    flex: 0 0 auto;
+    min-width: 84px;
+}
+.tl-story-val { color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.tl-story-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-1) var(--sp-3);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--text-dim);
+}
+.tl-act-tokens { color: var(--text); }
+
+.tl-chip-row { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.tl-chip {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding: 1px 6px;
+    white-space: nowrap;
+}
+.tl-chip-pass { background: var(--state-idle_ready-bg); border-color: var(--state-idle_ready-fg); color: var(--state-idle_ready-fg); }
+.tl-chip-retry { background: var(--state-compacting-bg); border-color: var(--state-compacting-fg); color: var(--state-compacting-fg); }
+.tl-chip-escalate,
+.tl-chip-fail { background: var(--state-cancelling-bg); border-color: var(--state-cancelling-fg); color: var(--state-cancelling-fg); }
+.tl-badge-plan { background: var(--accent-subtle); border: 1px solid var(--accent-dim); color: var(--accent); }
+
+.tl-act-list { display: flex; flex-direction: column; gap: 2px; }
+.tl-act-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding: 2px var(--sp-1);
+    border-radius: 3px;
+    min-width: 0;
+}
+.tl-act-row.error { background: var(--state-cancelling-bg); }
+/* The Act card grows the same row the lane grows a tick for, and finishes it
+   in place when the result lands. */
+.tl-act-row.running { color: var(--text-dim); }
+.tl-act-row.running .tl-act-name { color: var(--text); }
+.tl-act-name { color: var(--text-bright); flex: 0 0 auto; }
+.tl-act-args {
+    color: var(--text-dim);
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tl-verify-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    padding: var(--sp-2) 0;
+    border-top: 1px solid var(--border-subtle);
+}
+.tl-verify-block:first-child { border-top: none; padding-top: 0; }
+.tl-verify-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+}
+.tl-verify-attempt { color: var(--text-dim); letter-spacing: 0.06em; }
+.tl-verify-exit { color: var(--text-faint); }
+.tl-verify-cmd {
+    background: var(--bg);
+    border-radius: 3px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    padding: 2px 6px;
+    overflow-wrap: anywhere;
+}
+.tl-fold-head {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    color: var(--text-faint);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    user-select: none;
+}
+.tl-fold-head:hover { color: var(--accent); }
+.tl-fold-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tl-fold-body { padding-top: var(--sp-1); }
+
+/* The list tab's way across to the lane — one per turn header. */
+.tl-turn-story {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-faint);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    margin-left: auto;
+    padding: 0 6px;
+}
+.tl-turn-story:hover { color: var(--accent); border-color: var(--accent-dim); }
+
+/* ----------------------------------------------------------------------
+   Map tab — the state machine as one inline SVG
+
+   Every colour on this tab is a --state-<name>-{fg,bg} pair, matched by
+   class. The Mermaid diagram this replaced could not do that: a classDef is
+   a comma-separated string, so it cannot carry a `color-mix()` token and
+   every colour had to be resolved to #rrggbb in JavaScript first — which is
+   where "every state painted black in both themes" came from, twice. There
+   is no bridge here to get wrong, and a theme swap repaints the map with no
+   JS at all.
+   ---------------------------------------------------------------------- */
+.timeline-map-container {
+    width: 100%;
+    padding: var(--sp-3) 0;
+}
+/* The viewBox is the drawing's own size, so `width: 100%` is the whole of
+   the responsive behaviour: the map scales down to the modal rather than
+   overflowing it, and cannot be the thing that scrolls a 360px phone
+   sideways — which the diagram it replaced was. */
+.tl-map {
+    display: block;
+    width: 100%;
     height: auto;
 }
-.timeline-graph-status {
+.timeline-map-status {
     color: var(--text-faint);
     font-size: var(--text-xs);
     text-align: center;
     padding: var(--sp-2);
 }
-.timeline-graph-status:empty { display: none; }
-.timeline-graph-caption {
+.timeline-map-status:empty { display: none; }
+.timeline-map-caption {
     display: flex;
     flex-wrap: wrap;
     gap: var(--sp-3);
@@ -1573,11 +2807,106 @@
     border-top: 1px solid var(--border-subtle);
     margin-top: var(--sp-2);
 }
-.timeline-graph-caption:empty { display: none; }
-.tl-caption-current { color: #7ec4f0; }
+.timeline-map-caption:empty { display: none; }
+.tl-caption-current { color: var(--state-processing-fg); }
 .tl-caption-term { color: var(--text); }
-.tl-caption-warn { color: #e88080; }
+.tl-caption-warn { color: var(--state-cancelling-fg); }
 .tl-caption-stat { color: var(--text-faint); }
+
+/* A state box, before its own colours land. The fallback is a real surface
+   rather than the SVG default of solid black, so a state added to
+   state_v2.py before it is added here draws as an unpainted box instead of
+   an invisible label on a black one. */
+.tl-map-state {
+    fill: var(--bg-surface);
+    stroke: var(--line-faint);
+    stroke-width: 1;
+}
+.tl-map-label {
+    font-family: var(--font-mono, monospace);
+    font-size: 10px;
+    fill: var(--text-dim);
+    pointer-events: none;
+    user-select: none;
+}
+
+/* One pair per state, the same ten pairs the .state-badge and the lane's
+   segments read. idle_ready has its own here — under Mermaid it was the one
+   state with no classDef and drew in the library's default grey. */
+.tl-map-state.tl-map-idle_ready       { fill: var(--state-idle_ready-bg); stroke: var(--state-idle_ready-fg); }
+.tl-map-label.tl-map-idle_ready       { fill: var(--state-idle_ready-fg); }
+.tl-map-state.tl-map-scouting         { fill: var(--state-scouting-bg); stroke: var(--state-scouting-fg); }
+.tl-map-label.tl-map-scouting         { fill: var(--state-scouting-fg); }
+.tl-map-state.tl-map-processing       { fill: var(--state-processing-bg); stroke: var(--state-processing-fg); }
+.tl-map-label.tl-map-processing       { fill: var(--state-processing-fg); }
+.tl-map-state.tl-map-compacting       { fill: var(--state-compacting-bg); stroke: var(--state-compacting-fg); }
+.tl-map-label.tl-map-compacting       { fill: var(--state-compacting-fg); }
+.tl-map-state.tl-map-pause_requested  { fill: var(--state-pause_requested-bg); stroke: var(--state-pause_requested-fg); }
+.tl-map-label.tl-map-pause_requested  { fill: var(--state-pause_requested-fg); }
+.tl-map-state.tl-map-paused           { fill: var(--state-paused-bg); stroke: var(--state-paused-fg); }
+.tl-map-label.tl-map-paused           { fill: var(--state-paused-fg); }
+.tl-map-state.tl-map-cancelling       { fill: var(--state-cancelling-bg); stroke: var(--state-cancelling-fg); }
+.tl-map-label.tl-map-cancelling       { fill: var(--state-cancelling-fg); }
+.tl-map-state.tl-map-finalizing       { fill: var(--state-finalizing-bg); stroke: var(--state-finalizing-fg); }
+.tl-map-label.tl-map-finalizing       { fill: var(--state-finalizing-fg); }
+.tl-map-state.tl-map-awaiting_user    { fill: var(--state-awaiting_user-bg); stroke: var(--state-awaiting_user-fg); }
+.tl-map-label.tl-map-awaiting_user    { fill: var(--state-awaiting_user-fg); }
+.tl-map-state.tl-map-awaiting_workers { fill: var(--state-awaiting_workers-bg); stroke: var(--state-awaiting_workers-fg); }
+.tl-map-label.tl-map-awaiting_workers { fill: var(--state-awaiting_workers-fg); }
+
+/* Where the session is right now. */
+.tl-map-state.current { stroke: var(--accent); stroke-width: 2; }
+/* …and, while the turn is still running, the pulse the state badge in the
+   status bar carries, so the two say the same thing at the same rate. */
+.tl-map-state.current.live {
+    --pulse-dip: 0.45;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
+}
+
+.tl-map-edge {
+    fill: none;
+    stroke: var(--line-faint);
+    stroke-width: 1;
+    opacity: 0.45;
+}
+/* An edge the session actually took. */
+.tl-map-edge.used { stroke: var(--text-dim); stroke-width: 1.6; opacity: 1; }
+/* …and one it took that the transition table does not have. */
+.tl-map-edge.violation { stroke: var(--error); stroke-width: 1.6; opacity: 1; }
+.tl-map-arrowhead { fill: var(--line-faint); }
+.tl-map-arrowhead.on { fill: var(--text-dim); }
+.tl-map-arrowhead.bad { fill: var(--error); }
+.tl-map-count {
+    font-family: var(--font-mono, monospace);
+    font-size: 9px;
+    fill: var(--text-dim);
+    pointer-events: none;
+    user-select: none;
+}
+
+.tl-map-node { cursor: pointer; }
+.tl-map-node:hover .tl-map-state { stroke-width: 2; }
+.tl-map-node:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+
+/* The edge a live transition just travelled, for as long as it takes to see
+   which one it was. */
+@keyframes tlMapEdgeFlash {
+    0%   { stroke-width: 1.6; }
+    30%  { stroke-width: 4; stroke: var(--accent); }
+    100% { stroke-width: 1.6; }
+}
+.tl-map-edge.flash { animation: tlMapEdgeFlash 0.6s ease-out 1; }
+/* The global reduce block already collapses the duration; say both of these
+   outright so a running turn is a steady lit box and a taken edge simply
+   thickens into place rather than flashing once. */
+@media (prefers-reduced-motion: reduce) {
+    .tl-map-state.current.live { animation: none; }
+    .tl-map-edge.flash { animation: none; }
+}
 
 /* Turn header enrichment — secondary meta chips after the turn number */
 .tl-turn-meta {
@@ -1588,18 +2917,18 @@
 .tl-turn-meta::before { content: '·'; margin: 0 5px; opacity: 0.5; }
 .tl-turn-term {
     font-size: var(--text-xxs);
-    font-weight: 600;
+    font-weight: 500;
     padding: 1px 5px;
     border-radius: 3px;
     margin-left: 6px;
     vertical-align: middle;
 }
-.tl-turn-term-complete { color: #7ec4f0; background: rgba(126,196,240,0.12); }
+.tl-turn-term-complete { color: var(--state-processing-fg); background: var(--state-processing-bg); }
 .tl-turn-term-error,
-.tl-turn-term-scout-error { color: #e88080; background: rgba(232,128,128,0.12); }
-.tl-turn-term-cancelled { color: var(--text-faint); background: rgba(128,128,128,0.1); }
+.tl-turn-term-scout-error { color: var(--state-cancelling-fg); background: var(--state-cancelling-bg); }
+.tl-turn-term-cancelled { color: var(--text-faint); background: color-mix(in srgb, var(--line-faint) 40%, transparent); }
 .tl-turn-term-round-ceiling,
-.tl-turn-term-budget-exhausted { color: #d4a843; background: rgba(212,168,67,0.12); }
+.tl-turn-term-budget-exhausted { color: var(--state-paused-fg); background: var(--state-paused-bg); }
 .tl-turn-parent {
     font-size: var(--text-xxs);
     color: var(--accent-dim);
@@ -1622,10 +2951,10 @@
     line-height: 1.6;
     white-space: nowrap;
 }
-.tl-badge-compact { background: rgba(90,138,90,0.15); color: #7aaa7a; border: 1px solid rgba(90,138,90,0.25); }
-.tl-badge-retry   { background: rgba(212,168,67,0.15); color: #d4a843; border: 1px solid rgba(212,168,67,0.25); }
-.tl-badge-await   { background: rgba(126,166,200,0.15); color: #7ea6c8; border: 1px solid rgba(126,166,200,0.25); }
-.tl-badge-pause   { background: rgba(160,120,200,0.15); color: #a078c8; border: 1px solid rgba(160,120,200,0.25); }
+.tl-badge-compact { background: var(--state-compacting-bg); color: var(--state-compacting-fg); border: 1px solid color-mix(in srgb, var(--state-compacting-fg) 35%, var(--state-compacting-bg)); }
+.tl-badge-retry   { background: var(--accent-subtle); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+.tl-badge-await   { background: var(--state-awaiting_user-bg); color: var(--state-awaiting_user-fg); border: 1px solid color-mix(in srgb, var(--state-awaiting_user-fg) 35%, var(--state-awaiting_user-bg)); }
+.tl-badge-pause   { background: var(--state-paused-bg); color: var(--state-paused-fg); border: 1px solid color-mix(in srgb, var(--state-paused-fg) 35%, var(--state-paused-bg)); }
 
 /* Tool call tally — shown in graph tab between diagram and caption */
 .tl-tool-tally {
@@ -1651,29 +2980,29 @@
 .tl-tally-turn-label {
     font-size: var(--text-xxs);
     color: var(--accent-dim);
-    font-weight: 600;
+    font-weight: 500;
     min-width: 28px;
 }
 .tl-tally-chip {
     display: inline-block;
     font-size: var(--text-xxs);
     font-family: var(--font-mono, monospace);
-    background: rgba(126, 196, 240, 0.08);
-    border: 1px solid rgba(126, 196, 240, 0.2);
+    background: var(--state-processing-bg);
+    border: 1px solid color-mix(in srgb, var(--state-processing-fg) 30%, var(--state-processing-bg));
     color: var(--text-dim);
     border-radius: 3px;
     padding: 1px 6px;
     white-space: nowrap;
 }
 .tl-tally-chip.error {
-    background: rgba(232, 128, 128, 0.10);
-    border-color: rgba(232, 128, 128, 0.30);
-    color: #e88080;
+    background: var(--state-cancelling-bg);
+    border-color: color-mix(in srgb, var(--state-cancelling-fg) 40%, var(--state-cancelling-bg));
+    color: var(--state-cancelling-fg);
 }
 
 /* Timeline tab — turn headers + tool rows */
 .timeline-turn-header {
-    font-weight: 600;
+    font-weight: 500;
     color: var(--accent-dim);
     padding: var(--sp-2) var(--sp-2) 4px;
     border-bottom: 1px solid var(--border);
@@ -1691,7 +3020,7 @@
 .timeline-tool-row {
     margin: 2px 0;
     border-radius: var(--radius);
-    background: var(--bg-subtle, rgba(255,255,255,0.02));
+    background: var(--bg-subtle);
 }
 .timeline-tool-row .tool-item-body {
     display: none;
@@ -1701,7 +3030,7 @@
 .timeline-tool-row.expanded .tool-item-body { display: block; }
 /* In-flight (tool.start) row — upgraded in place when the result arrives. */
 .timeline-tool-row.running {
-    background: var(--bg-subtle, rgba(255, 255, 255, 0.04));
+    background: var(--bg-subtle);
     opacity: 0.85;
 }
 .tool-item-running-dot {
@@ -1709,8 +3038,9 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--accent, #4a9eff);
-    animation: dot-pulse 1.2s ease-in-out infinite;
+    background: var(--accent);
+    --pulse-dip: 0.2;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
     flex-shrink: 0;
 }
 .timeline-tool-row .tool-item-args {
@@ -1737,11 +3067,11 @@
     gap: 6px;
     align-items: center;
 }
-.timeline-row .tl-turn { color: var(--text-faint); font-weight: 600; }
+.timeline-row .tl-turn { color: var(--text-faint); font-weight: 500; }
 .timeline-row .tl-states { color: var(--text); }
 .timeline-row .tl-reason { color: var(--accent-dim); font-style: italic; font-size: var(--text-xxs); }
 .timeline-row .tl-elapsed { color: var(--text-dim); text-align: right; }
-.timeline-row.invariant-violation { background: #4a1f1a22; }
+.timeline-row.invariant-violation { background: var(--state-cancelling-bg); }
 .timeline-row > span { min-width: 0; overflow-wrap: anywhere; }
 
 /* Wall-clock time column (state rows + tool row headers) */
@@ -1772,24 +3102,14 @@
     position: sticky;
     top: 0;
     z-index: 2;
-    background: var(--bg-panel, var(--bg, #16161a));
+    background: var(--bg-panel);
     border-bottom: 1px solid var(--border-subtle);
     margin-bottom: 4px;
 }
-.tl-filter-btn {
-    font-size: var(--text-xxs);
-    padding: 2px 8px;
-    border-radius: 3px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-}
-.tl-filter-btn:hover { color: var(--text-bright); }
 .tl-filter-btn.active {
-    background: rgba(126, 196, 240, 0.12);
-    border-color: rgba(126, 196, 240, 0.4);
-    color: #7ec4f0;
+    background: var(--state-processing-bg);
+    border-color: color-mix(in srgb, var(--state-processing-fg) 45%, var(--state-processing-bg));
+    color: var(--state-processing-fg);
 }
 .tl-filter-input {
     flex: 1;
@@ -1806,13 +3126,13 @@
     font-size: var(--text-xxs);
     padding: 2px 8px;
     border-radius: 3px;
-    border: 1px solid rgba(232, 128, 128, 0.3);
+    border: 1px solid color-mix(in srgb, var(--state-cancelling-fg) 40%, transparent);
     background: transparent;
-    color: #e88080;
+    color: var(--state-cancelling-fg);
     cursor: pointer;
     white-space: nowrap;
 }
-.tl-next-error:hover { background: rgba(232, 128, 128, 0.1); }
+.tl-next-error:hover { background: var(--state-cancelling-bg); }
 
 /* Collapsible turn groups */
 .tl-turn-group .timeline-turn-header { cursor: pointer; user-select: none; }
@@ -1821,19 +3141,19 @@
     display: inline-block;
     margin-right: 5px;
     font-size: var(--text-xxs);
-    transition: transform 0.12s ease;
+    transition: transform var(--transition-fast);
 }
 .tl-turn-group.collapsed .tl-turn-chevron { transform: rotate(-90deg); }
 .tl-turn-group.collapsed .tl-turn-body { display: none; }
-.tl-turn-errors { color: #e88080; }
+.tl-turn-errors { color: var(--state-cancelling-fg); }
 
 /* Error-row flash on "next error" jump */
 .tl-flash { animation: tl-flash-anim 1.2s ease; }
 @keyframes tl-flash-anim {
-    0%, 40% { background: rgba(232, 128, 128, 0.25); }
+    0%, 40% { background: color-mix(in srgb, var(--state-cancelling-fg) 25%, transparent); }
     100% { background: transparent; }
 }
-.timeline-row.tl-error { background: #4a1f1a22; }
+.timeline-row.tl-error { background: var(--state-cancelling-bg); }
 
 /* Truncation notice + backward pagination */
 .tl-load-older {
@@ -1845,16 +3165,6 @@
     color: var(--text-faint);
     font-size: var(--text-xxs);
 }
-.tl-load-older button {
-    font-size: var(--text-xxs);
-    padding: 1px 8px;
-    border-radius: 3px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-}
-.tl-load-older button:hover:not(:disabled) { color: var(--text-bright); }
 
 /* Per-state dwell-time breakdown (graph tab) */
 .tl-dwell {
@@ -1876,7 +3186,14 @@
     overflow: hidden;
     margin-bottom: 6px;
 }
-.tl-dwell-seg { height: 100%; }
+/* box-sizing, because the segment carries its --state-*-fg as a 2px bottom
+   border inside an 8px bar — the same fg-under-bg pairing the lane uses, and
+   the only thing that keeps two adjacent -bg washes apart. */
+.tl-dwell-seg {
+    height: 100%;
+    box-sizing: border-box;
+    border-bottom: 2px solid transparent;
+}
 .tl-dwell-chips {
     display: flex;
     flex-wrap: wrap;
@@ -1895,19 +3212,11 @@
 }
 
 /* Copy JSON export button in the modal header */
+/* Only its place in the header row is local; the look is .btn--secondary. */
 #timeline-modal .tl-copy-btn {
-    font-size: var(--text-xxs);
-    padding: 2px 8px;
     margin-left: auto;
     margin-right: var(--sp-2);
-    border-radius: 3px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    white-space: nowrap;
 }
-#timeline-modal .tl-copy-btn:hover { color: var(--text-bright); }
 
 /* Browser status indicator */
 #browser-status {
@@ -1915,19 +3224,16 @@
     align-items: center;
     gap: var(--sp-1);
     font-size: var(--text-xxs);
-    color: var(--info, #5b9bd5);
+    color: var(--info);
     max-width: 240px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 #browser-status.active { display: inline-flex; }
-@keyframes browserPulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
 #browser-status.active .browser-icon {
-    animation: browserPulse 1.5s ease-in-out infinite;
+    --pulse-dip: 0.5;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
 }
 
 /* Tool activity indicator (non-browse tools) */
@@ -1944,11 +3250,12 @@
 }
 #tool-status.active { display: inline-flex; }
 #tool-status.active .tool-icon {
-    animation: browserPulse 1.5s ease-in-out infinite;
+    --pulse-dip: 0.5;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
 }
 
 /* Browse tool card enrichment */
-.tool-item.browse { border-left: 2px solid var(--info, #5b9bd5); }
+.tool-item.browse { border-left: 2px solid var(--info); }
 .tool-browse-header {
     display: flex;
     align-items: center;
@@ -1993,11 +3300,11 @@
     padding: var(--sp-2);
     transition: border-color var(--transition), box-shadow var(--transition);
     position: relative;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+    box-shadow: var(--shadow-sm);
 }
 #input-bar:focus-within {
     border-color: var(--accent-dim);
-    box-shadow: 0 0 0 1px var(--accent-dim), 0 2px 8px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 0 0 1px var(--accent-dim), var(--shadow-md);
 }
 
 #attach-btn {
@@ -2012,10 +3319,10 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: background var(--transition), color var(--transition), transform 0.1s ease;
+    transition: background var(--transition), color var(--transition), transform var(--transition-fast);
 }
 #attach-btn:hover {
-    background: var(--bg-soft, rgba(255, 255, 255, 0.05));
+    background: var(--bg-soft);
     color: var(--text-bright);
 }
 #attach-btn:active { transform: scale(0.92); }
@@ -2026,6 +3333,14 @@
 #attach-btn.has-files {
     color: var(--accent);
 }
+/* A read-only session turns the whole composer off, not just the textarea —
+   these two used to stay live and lead only to a server refusal. */
+#attach-btn:disabled,
+#voice-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+}
 #attach-btn svg {
     width: 18px;
     height: 18px;
@@ -2033,10 +3348,6 @@
 
 /* Mic button — same footprint as attach; recording state pulses red so a
    hot mic is never ambiguous. */
-#voice-btn[hidden] {
-    /* display:flex below would defeat the hidden attribute (voice_mode=off) */
-    display: none;
-}
 #voice-btn {
     background: transparent;
     color: var(--text-dim);
@@ -2049,10 +3360,10 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: background var(--transition), color var(--transition), transform 0.1s ease;
+    transition: background var(--transition), color var(--transition), transform var(--transition-fast);
 }
 #voice-btn:hover {
-    background: var(--bg-soft, rgba(255, 255, 255, 0.05));
+    background: var(--bg-soft);
     color: var(--text-bright);
 }
 #voice-btn:active { transform: scale(0.92); }
@@ -2065,12 +3376,12 @@
     height: 18px;
 }
 #voice-btn.recording {
-    color: var(--error, #e55);
-    background: rgba(229, 85, 85, 0.12);
+    color: var(--error);
+    background: color-mix(in srgb, var(--error) 12%, transparent);
     animation: voice-pulse 1.6s ease-in-out infinite;
 }
 @keyframes voice-pulse {
-    50% { box-shadow: 0 0 0 6px rgba(229, 85, 85, 0.18); }
+    50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--error) 18%, transparent); }
 }
 #voice-btn.busy {
     color: var(--accent);
@@ -2108,7 +3419,7 @@
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: background var(--transition), transform 0.1s ease, box-shadow var(--transition);
+    transition: background var(--transition), transform var(--transition-fast), box-shadow var(--transition);
 }
 #send-btn:hover {
     background: var(--text-bright);
@@ -2126,8 +3437,8 @@
     animation: none;
 }
 @keyframes stopPulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(194, 84, 80, 0.3); }
-    50% { box-shadow: 0 0 0 6px rgba(194, 84, 80, 0); }
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--error) 30%, transparent); }
+    50% { box-shadow: 0 0 0 6px transparent; }
 }
 
 /* SSE health indicator */
@@ -2140,12 +3451,8 @@
     transition: background 0.3s;
 }
 .sse-health.connected { background: var(--success); }
-.sse-health.reconnecting { background: var(--accent); animation: sse-pulse 1s infinite; }
+.sse-health.reconnecting { background: var(--accent); --pulse-dip: 0.3; animation: pulse var(--pulse-fast) infinite; }
 .sse-health.disconnected { background: var(--error); }
-@keyframes sse-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
-}
 #send-btn svg {
     width: 16px;
     height: 16px;
@@ -2190,6 +3497,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    /* A pending-attachment chip carries a file NAME, and the thing that
+       identifies it is the end of that name — "screenshot-2026-09-01…" told
+       the user nothing about which of five screenshots it was, and a long
+       extension (.component.test.tsx) vanished entirely. Head-truncate
+       instead, the same way file-panel.css does for paths (V10). */
+    direction: rtl;
+    text-align: left;
+    unicode-bidi: plaintext;
 }
 .file-chip-size {
     color: var(--text-faint);
@@ -2197,6 +3512,11 @@
 .file-chip-remove {
     background: none;
     border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-faint);
     cursor: pointer;
     font-size: var(--text-sm);
@@ -2232,7 +3552,7 @@
     content: 'Drop files anywhere';
     position: fixed;
     inset: 0;
-    background: rgba(14, 14, 14, 0.85);
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
     border: 2px dashed var(--accent);
     display: flex;
     align-items: center;
@@ -2280,11 +3600,12 @@
     :root { --sidebar-w: 220px; }
 }
 
-/* The touch overrides that used to live here moved to mobile.css. This copy of
+/* The touch overrides that used to live here moved to touch.css. This copy of
    `(max-width: 768px), (hover: none) and (pointer: coarse)` never matched on an
    iPad — iPadOS desktop-class browsing reports hover/fine and a width over
-   768px — and mobile.css is the only stylesheet whose gate JavaScript can
-   reach. See the header of mobile.css and touch-boot.js. */
+   768px — and touch.css is the only stylesheet whose gate JavaScript can
+   reach. The narrow-viewport half of those overrides lives in compact.css.
+   See the headers of both files and touch-boot.js. */
 
 
 /* ======================================================================
@@ -2314,7 +3635,7 @@
 .auth-logo {
     font-family: var(--mono);
     font-size: 2rem;
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: 0.15em;
     color: var(--accent);
 }
@@ -2346,24 +3667,14 @@
     color: var(--text-faint);
 }
 
+/* .btn--primary, full width, at the type size of the form it submits. */
 .auth-btn {
     width: 100%;
     padding: var(--sp-3);
-    background: var(--accent);
-    color: var(--bg);
-    border: none;
     border-radius: var(--radius);
-    font-family: var(--mono);
     font-size: var(--text-md);
-    font-weight: 600;
-    cursor: pointer;
-    transition: opacity var(--transition);
 }
-.auth-btn:hover { opacity: 0.9; }
-.auth-btn:disabled {
-    opacity: 0.5;
-    cursor: wait;
-}
+.auth-btn:disabled { cursor: wait; }
 
 .auth-hint {
     font-family: var(--mono);
@@ -2391,7 +3702,7 @@
     justify-content: center;
     gap: var(--sp-2);
     background: var(--bg-raised);
-    border-bottom: 1px solid var(--error, #e55);
+    border-bottom: 1px solid var(--error);
     color: var(--text-dim);
     font-size: var(--text-xs);
     padding: var(--sp-2) var(--sp-3);
@@ -2407,7 +3718,7 @@
     position: fixed;
     inset: 0;
     z-index: 2500;
-    background: rgba(0, 0, 0, 0.55);
+    background: var(--scrim);
     backdrop-filter: blur(4px);
     display: flex;
     align-items: center;
@@ -2442,7 +3753,7 @@
 }
 
 .offline-title {
-    font-weight: 600;
+    font-weight: 500;
     color: var(--fg);
 }
 
@@ -2459,6 +3770,37 @@
    sidebar attention/pin/rename, worker controls.
    =========================================================================== */
 
+/* Per-message provenance — "qwen3-27b · 4.2s" under an assistant answer.
+   Muted to the point of being scenery until you look for it: the reader
+   should be able to check which model wrote a reply without the transcript
+   turning into a telemetry readout. */
+.msg-chip {
+    margin-top: var(--sp-1);
+    padding-left: 2px;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    letter-spacing: 0.02em;
+    color: var(--text-faint);
+    user-select: text;
+}
+
+/* The meta row is the phone's handle for the chip (touch.css folds it away).
+   On a fine pointer nothing is hidden, so it stays an ordinary label. */
+.role-label--toggle { cursor: default; }
+
+/* The chevron that says the label is a control (C4). Hidden here, revealed
+   in touch.css: under a mouse the chip is never folded away, so a chevron
+   promising to reveal it would be a lie. This base rule cannot travel with
+   the touch ones — touch.css does not load under a mouse at all, and without
+   the display:none the caret would show on every desktop answer.         */
+.role-label-caret {
+    display: none;
+    vertical-align: -1px;
+    margin-left: 4px;
+    color: var(--text-faint);
+    transition: transform var(--transition);
+}
+
 /* Message timestamps — revealed on hover so the transcript stays quiet */
 .msg-time {
     font-size: var(--text-xxs);
@@ -2467,9 +3809,16 @@
     letter-spacing: 0;
     margin-left: var(--sp-2);
     opacity: 0;
-    transition: opacity 0.15s ease;
+    transition: opacity var(--transition);
 }
 .message:hover .msg-time { opacity: 1; }
+/* Hover-to-reveal is not a gesture a touch device has, so on one the
+   timestamps are simply always on — dimmed, but reachable. Keyed on
+   (hover: none) rather than on width: a touchscreen laptop has the same
+   problem as a phone and none of its narrowness. */
+@media (hover: none) {
+    .msg-time { opacity: 0.55; }
+}
 
 /* Idle-gap divider between messages far apart in time */
 .msg-gap-divider {
@@ -2490,20 +3839,14 @@
     display: flex;
     gap: 2px;
     opacity: 0;
-    transition: opacity 0.15s ease;
+    transition: opacity var(--transition);
 }
-.message:hover .msg-actions { opacity: 1; }
+.message:hover .msg-actions,
+.message:focus-within .msg-actions { opacity: 1; }
 .msg-action-btn {
     background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
-    border-radius: 3px;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: var(--text-xs);
-    line-height: 1.4;
-    padding: 1px 6px;
+    border-color: var(--border-subtle);
 }
-.msg-action-btn:hover { color: var(--text-bright); border-color: var(--border); }
 
 /* Queued-message remove button */
 .queued-remove {
@@ -2534,7 +3877,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 4px 6px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-md);
 }
 #transcript-search input {
     background: transparent;
@@ -2564,13 +3907,13 @@
 #transcript-search .ts-nav:hover,
 #transcript-search .ts-close:hover { color: var(--text-bright); }
 mark.ts-mark {
-    background: rgba(212, 168, 67, 0.35);
+    background: color-mix(in srgb, var(--accent) 35%, transparent);
     color: inherit;
     border-radius: 2px;
 }
 mark.ts-mark.current {
-    background: rgba(212, 168, 67, 0.8);
-    color: #111;
+    background: var(--accent);
+    color: var(--bg);
 }
 
 /* Ctrl+K session switcher palette */
@@ -2578,7 +3921,7 @@ mark.ts-mark.current {
     position: fixed;
     inset: 0;
     z-index: 200;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--scrim);
     display: flex;
     justify-content: center;
     align-items: flex-start;
@@ -2589,7 +3932,7 @@ mark.ts-mark.current {
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
 }
 .palette-card input {
@@ -2614,6 +3957,13 @@ mark.ts-mark.current {
     cursor: pointer;
 }
 .palette-item.selected { background: var(--bg-hover); }
+/* A verb is an action, not a place. The mono face is the same signal the rest
+   of the app uses for "this does something", and it keeps the two kinds of
+   row apart without a badge or a second colour. */
+.palette-item.verb .palette-title {
+    font-family: var(--mono);
+    color: var(--text-bright);
+}
 .palette-title {
     color: var(--text);
     overflow: hidden;
@@ -2644,7 +3994,7 @@ mark.ts-mark.current {
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow-lg);
     padding: var(--sp-2) 0;
 }
 .model-menu-header {
@@ -2693,33 +4043,34 @@ mark.ts-mark.current {
 .session-attn {
     flex: none;
     font-size: var(--text-xxs);
-    font-weight: 700;
+    font-weight: 500;
     border-radius: 8px;
     padding: 0 5px;
     margin-left: var(--sp-1);
     line-height: 1.5;
 }
 .session-attn.attn-input {
-    color: #d4a843;
-    background: rgba(212, 168, 67, 0.15);
-    border: 1px solid rgba(212, 168, 67, 0.35);
-    animation: attnPulse 2s ease-in-out infinite;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    --pulse-dip: 0.45;
+    animation: pulse var(--pulse-slow) ease-in-out infinite;
 }
 .session-attn.attn-done {
-    color: #7aaa7a;
-    background: rgba(90, 138, 90, 0.15);
-    border: 1px solid rgba(90, 138, 90, 0.3);
+    color: var(--success);
+    background: color-mix(in srgb, var(--success) 15%, transparent);
+    border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
 }
-@keyframes attnPulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.45; }
-}
-
 /* Sidebar pin + rename buttons — hover-revealed like the delete button */
 .session-pin,
 .session-rename {
     background: none;
     border: none;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     color: var(--text-faint);
     cursor: pointer;
     font-size: var(--text-xs);
@@ -2729,7 +4080,11 @@ mark.ts-mark.current {
     transition: var(--transition);
 }
 .session-item:hover .session-pin,
-.session-item:hover .session-rename { opacity: 1; }
+.session-item:hover .session-rename,
+.session-item:focus-within .session-pin,
+.session-item:focus-within .session-rename,
+.session-pin:focus-visible,
+.session-rename:focus-visible { opacity: 1; }
 .session-pin:hover,
 .session-rename:hover { color: var(--text-bright); }
 .session-pin.pinned { opacity: 1; color: var(--accent); }
@@ -2741,7 +4096,7 @@ mark.ts-mark.current {
 .session-rename-input {
     flex: 1;
     min-width: 0;
-    background: var(--bg-deep, #0a0a0a);
+    background: var(--bg-deep);
     border: 1px solid var(--border);
     border-radius: 3px;
     color: var(--text-bright);
@@ -2768,6 +4123,11 @@ mark.ts-mark.current {
 }
 .worker-chip-ctl:hover { color: var(--text-bright); border-color: var(--border); }
 .worker-chip.paused { opacity: 0.6; }
+/* Recently-finished workers: dimmed chip + gray dot, revivable via the ↻
+   control next to it (resume_worker). */
+.worker-chip.dead { opacity: 0.5; }
+.worker-chip.dead:hover { opacity: 0.8; }
+.worker-chip-dot.dead { background: var(--text-dim); animation: none; }
 
 /* ---------------------------------------------------------------------------
    RLM run viewer — read-only trace rendering in the chat area
@@ -2860,7 +4220,8 @@ mark.ts-mark.current {
     height: 8px;
     border-radius: 50%;
     background: var(--rlm);
-    animation: dot-pulse 1.2s ease-in-out infinite;
+    --pulse-dip: 0.2;
+    animation: pulse var(--pulse-fast) ease-in-out infinite;
 }
 .rlm-run-error {
     color: var(--error);
@@ -2993,3 +4354,501 @@ mark.ts-mark.current {
     margin-bottom: var(--sp-1);
 }
 .rlm-child-row:hover { color: var(--rlm); border-color: var(--rlm); }
+
+
+/* ======================================================================
+   Toasts (feedback.js) — F3
+   ----------------------------------------------------------------------
+   One stacked region for every transient message in the app. Bottom-right
+   on desktop; touch.css moves it above the composer. Tokens only.
+   ====================================================================== */
+.toast-region {
+    position: fixed;
+    right: var(--sp-4);
+    bottom: var(--sp-4);
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--sp-2);
+    /* The region spans a corner but must not swallow clicks between toasts. */
+    pointer-events: none;
+}
+.toast {
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sp-2);
+    max-width: min(92vw, 380px);
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--info);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-md);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    line-height: 1.45;
+    animation: toastIn 0.18s ease;
+}
+.toast-info    { border-left-color: var(--info); }
+.toast-success { border-left-color: var(--success); }
+.toast-warning { border-left-color: var(--warning); }
+.toast-error   { border-left-color: var(--error); }
+
+.toast-text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.toast-action {
+    flex-shrink: 0;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 var(--sp-2);
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: var(--transition);
+}
+.toast-action:hover {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+}
+.toast-dismiss {
+    flex-shrink: 0;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    font-size: var(--text-md);
+    line-height: 1;
+    cursor: pointer;
+    transition: var(--transition);
+}
+.toast-dismiss:hover { color: var(--text-bright); background: var(--bg-hover); }
+
+@keyframes toastIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+}
+/* The global reduce block already collapses the duration; state it outright
+   so a toast never slides for a user who asked for no motion. */
+@media (prefers-reduced-motion: reduce) {
+    .toast { animation: none; }
+}
+
+
+/* ======================================================================
+   Service-worker update pill (pwa.js) — N5
+   ====================================================================== */
+#sw-update-banner {
+    position: fixed;
+    left: 50%;
+    bottom: calc(var(--sp-4) + var(--safe-bottom));
+    transform: translateX(-50%);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1);
+    max-width: min(92vw, 420px);
+    padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-4);
+    background: var(--bg-raised);
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    box-shadow: var(--shadow-md);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+}
+.sw-update-action {
+    flex: 1;
+    min-height: 24px;
+    padding: var(--sp-1) 0;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.sw-update-action:hover { color: var(--text-bright); }
+.sw-update-dismiss {
+    flex-shrink: 0;
+    min-width: 24px;
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    border-radius: 50%;
+    color: var(--text-dim);
+    font-size: var(--text-md);
+    line-height: 1;
+    cursor: pointer;
+    transition: var(--transition);
+}
+.sw-update-dismiss:hover { color: var(--text-bright); background: var(--bg-hover); }
+
+/* ---- Phase 2B: sidebar / bell / confirm ---- */
+
+/* A1/N2 — sidebar rows and group headers are controls now (role=button +
+   tabindex), so they need a focus ring of their own; a bare tabindex div only
+   gets the UA outline, which is invisible against --bg-raised. */
+.session-item:focus-visible,
+.session-group-header:focus-visible,
+.session-group-header .sg-toggle:focus-visible,
+.space-bucket-header:focus-visible,
+.space-show-all:focus-visible,
+.worker-summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    border-radius: var(--radius-sm);
+}
+
+/* A space header holds three real buttons, so the disclosure control is an
+   inner element rather than the header itself. It takes the row's leading
+   space; the action buttons keep the trailing edge. */
+.session-group-header .sg-toggle {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+
+/* N8 — the search result count, so the list reads as "some of them", not all. */
+.search-count {
+    padding: 6px var(--sp-3) 4px;
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.search-meta .session-attn { margin-left: var(--sp-1); }
+.search-empty { text-wrap: pretty; }
+
+/* N4/F11 — empty states carry the next action, and the way to make the first
+   space once the Spaces header is no longer rendered unconditionally. */
+.sidebar-empty {
+    padding: var(--sp-4) var(--sp-3);
+    color: var(--text-faint);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    text-wrap: pretty;
+}
+.spaces-create-row {
+    padding: var(--sp-2) var(--sp-3) var(--sp-3);
+}
+.spaces-create-btn {
+    min-height: 24px;
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    font: inherit;
+    font-size: var(--text-xxs);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: var(--transition);
+}
+.spaces-create-btn:hover,
+.spaces-create-btn:focus-visible { color: var(--text-dim); }
+.bell-empty { text-wrap: pretty; line-height: 1.5; }
+
+/* N7 — the list stops at 500; say so under the last bucket. */
+.sidebar-truncated {
+    padding: var(--sp-3) var(--sp-3) var(--sp-2);
+    border-top: 1px solid var(--line-faint);
+    margin-top: var(--sp-2);
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+    line-height: 1.5;
+    text-wrap: pretty;
+}
+
+/* The way past the horizon. Full width so it reads as the end of the list
+   rather than as one more session in it. */
+.sidebar-load-older {
+    display: flex;
+    width: calc(100% - var(--sp-4));
+    justify-content: center;
+    margin: var(--sp-2) var(--sp-2) var(--sp-3);
+    border-top: 1px solid var(--line-faint);
+    border-radius: var(--radius-sm);
+    color: var(--text-faint);
+}
+.sidebar-load-older:hover:not(:disabled) { color: var(--accent); }
+
+/* N6/F9 — the shared confirm dialog. Everything else it needs (.modal-card,
+   .modal-header, .modal-footer, .btn) is already shared; only the width and
+   the body rhythm are its own. */
+.confirm-card { width: min(520px, 92vw); }
+.confirm-body p {
+    margin: 0 0 var(--sp-2);
+    line-height: 1.55;
+    text-wrap: pretty;
+}
+.confirm-body p:last-of-type { margin-bottom: 0; }
+
+/* F10 — urgency has to look like urgency. .notif-item lives in modals.css and
+   .jobs-indicator in jobs.css; both of these are new selectors, so nothing
+   there is overridden in place. The :hover companion is needed because
+   jobs.css loads after this file and its .jobs-indicator:hover would
+   otherwise repaint a failed job grey the moment you point at it. */
+.notif-item.urgent {
+    border-left: 2px solid var(--error);
+    padding-left: var(--sp-3);
+}
+.notif-item.urgent .notif-item-type {
+    color: var(--error);
+    font-weight: 600;
+}
+.jobs-indicator.has-error,
+.jobs-indicator.has-error:hover { color: var(--error); }
+
+/* ----------------------------------------------------------------------
+   The suggestion review sheet (v35)
+   ----------------------------------------------------------------------
+   Reuses the shared .modal-* chrome, plus the space modal's name/colour
+   pieces. The card selectors are compound (.modal-card.sugg-sheet-card)
+   because modals.css loads AFTER this file, so a bare .sugg-sheet-card
+   would lose every property .modal-card also sets.
+
+   It is a normal centred card on every tier — no resize, no Monaco. The
+   directive box is a plain textarea for the same reason the workspace
+   editor is one on touch: a thumb cannot drive a code editor. */
+.modal-card.sugg-sheet-card {
+    width: min(680px, 94vw);
+    max-width: 94vw;
+    max-height: 88vh;
+}
+.sugg-sheet-card .modal-header h2 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.sugg-sheet-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-4);
+    overflow-y: auto;
+}
+.sugg-why {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--text-sm);
+    line-height: 1.55;
+    text-wrap: pretty;
+}
+.sugg-section { display: flex; flex-direction: column; }
+.sugg-label-error {
+    margin-top: 4px;
+    color: var(--error);
+    font-size: var(--text-xxs);
+    line-height: 1.4;
+}
+
+/* The member checklist. Bounded height because a suggestion can hold ten
+   chats and the footer's buttons must never leave the card. */
+.sugg-members {
+    display: flex;
+    flex-direction: column;
+    max-height: 34vh;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+}
+.sugg-member {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: 6px var(--sp-3);
+    border-bottom: 1px solid var(--line-faint);
+    cursor: pointer;
+    min-height: 34px;
+}
+.sugg-member:last-child { border-bottom: none; }
+.sugg-member:hover { background: var(--bg-hover); }
+.sugg-member-box { flex-shrink: 0; }
+.sugg-member-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.sugg-member-title {
+    color: var(--text);
+    font-size: var(--text-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sugg-member-sub {
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sugg-member-date {
+    flex-shrink: 0;
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+}
+
+/* One tab per drafted file. The default is folded away by default — it is
+   context for the addition, not the thing being decided. */
+.sugg-dir-tabbar { padding: 0; }
+.sugg-dir-pane {
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    padding: var(--sp-3);
+}
+.sugg-dir-why {
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    margin-bottom: var(--sp-2);
+    text-wrap: pretty;
+}
+.sugg-dir-fold { margin-bottom: var(--sp-2); }
+.sugg-dir-fold > summary {
+    cursor: pointer;
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+    padding: 4px 0;
+}
+.sugg-dir-fold > summary:hover { color: var(--text-dim); }
+.sugg-dir-default {
+    max-height: 220px;
+    overflow: auto;
+    margin: var(--sp-2) 0 0;
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-faint);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+.sugg-dir-text {
+    width: 100%;
+    min-height: 200px;
+    resize: vertical;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    padding: var(--sp-3);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+    outline: none;
+    white-space: pre-wrap;
+}
+.sugg-dir-text:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+.sugg-dir-text.disabled { opacity: 0.45; }
+.sugg-dir-skip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: var(--sp-2);
+    min-height: 28px;
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    cursor: pointer;
+}
+.sugg-dir-hint {
+    margin-top: 4px;
+    color: var(--text-faint);
+    font-size: var(--text-xxs);
+    line-height: 1.5;
+    text-wrap: pretty;
+}
+
+/* Three buttons and a status line will not sit on one 360px row. */
+.sugg-sheet-footer { flex-wrap: wrap; }
+
+/* ----------------------------------------------------------------------
+   Settings → Autonomy & idle work → Space suggestions
+   ----------------------------------------------------------------------
+   The dry-run result and the declined list, hung off the declarative
+   section by _wireSpaceSuggestBlock. Here rather than in modals.css so the
+   whole feature's CSS reads in one place. */
+.sugg-note {
+    margin-top: var(--sp-2);
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+    text-wrap: pretty;
+}
+.sugg-prop {
+    margin-top: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--accent);
+    border-radius: var(--radius);
+    background: var(--bg-surface);
+}
+.sugg-prop-head {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+}
+.sugg-prop-label { color: var(--text-bright); font-size: var(--text-sm); }
+.sugg-prop-kind,
+.sugg-prop-count,
+.sugg-prop-files { color: var(--text-faint); font-size: var(--text-xxs); }
+.sugg-prop-count { margin-left: auto; }
+.sugg-prop-why {
+    margin-top: 2px;
+    color: var(--text-dim);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    text-wrap: pretty;
+}
+.sugg-prop-files { margin-top: 2px; }
+
+.sugg-declined { margin-top: var(--sp-4); }
+.sugg-declined-title {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0 0 var(--sp-1);
+}
+.sugg-declined-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    padding: var(--sp-2) 0;
+    border-bottom: 1px solid var(--line-faint);
+}
+.sugg-declined-label { flex: 1; min-width: 0; color: var(--text); font-size: var(--text-sm); }
+.sugg-declined-meta { color: var(--text-faint); font-size: var(--text-xxs); }
+.sugg-declined-all { margin-top: var(--sp-2); }

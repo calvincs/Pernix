@@ -92,9 +92,17 @@ def internal_recall(
 
         store = get_memory_store()
         if store is not None:
+            _slug = None
+            if current_session_id:
+                try:
+                    from core.spaces import space_slug_for_session
+
+                    _slug = space_slug_for_session(current_session_id)
+                except Exception:
+                    _slug = None
             # Automated augmentation (fires on search_web), not a deliberate
             # agent recall — don't inflate usage hit counts.
-            mem_results = store.search(query, mode="hybrid", limit=memory_limit, _track_hits=False)
+            mem_results = store.search(query, mode="hybrid", limit=memory_limit, _track_hits=False, space_slug=_slug)
             if mem_results:
                 # Score signal is computed before dedup so a strong-but-seen entry
                 # still nudges the agent ("[!] Strong internal match") even when

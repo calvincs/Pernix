@@ -81,6 +81,17 @@ async def lifespan(app: FastAPI):
     skill_count = skill_reg.scan(skills_dir)
     logger.info("Skills loaded: %d skills scanned from %s", skill_count, skills_dir)
 
+    # 2.7 MCP manager — connects the servers in data/mcp_servers.json in the
+    # background and registers their tools as each comes ready. start()
+    # only spawns supervisor tasks; a slow or dead server never blocks boot.
+    if settings.mcp_enabled:
+        try:
+            from core.extensions.mcp.manager import get_mcp_manager
+
+            await get_mcp_manager().start()
+        except Exception as e:
+            logger.warning("MCP manager start failed (continuing): %s", e)
+
     # 2.8 Orphan rlm_runs sweep — same reasoning: the RLM engine is synchronous
     # and its child self-reaps with the server, so a 'running' row across a
     # restart is dead. Retention later purges the dir + row.
@@ -106,7 +117,10 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.debug("Token estimator warm-up failed (falls back on first use): %s", e)
 
-    asyncio.create_task(_warm_token_estimator())
+    # Held on app.state: a bare create_task keeps no strong reference, so
+    # the loop is free to garbage-collect it mid-await. The codebase forbids
+    # the pattern everywhere else (SessionManager._spawn_detached).
+    app.state.warm_estimator_task = asyncio.create_task(_warm_token_estimator())
 
     # 2.5 Model registry — populate from provider APIs
     from core.llm.client import get_llm_client
@@ -200,14 +214,72 @@ async def lifespan(app: FastAPI):
         from core.extensions.scheduling import ensure_canary_schedule, ensure_telos_schedule, init_scheduler
 
         init_scheduler()
-        # Canary nightly sweep (plan 3.5): derived from settings each boot,
-        # never persisted — a no-op while canary_enabled is off.
+        # Canary nightly heartbeat: derived from settings each boot, never
+        # persisted — a no-op while canary_enabled is off.
         ensure_canary_schedule()
         # TELOS daily slow loops (ordo/binding + weekly audits): same
         # transient pattern — a no-op while telos_enabled is off.
         ensure_telos_schedule()
     except Exception as e:
         logger.warning("Scheduler init failed: %s", e)
+
+    # 4b. Deploy detection: a new version means new code drove the agent, so
+    # the whole canary suite re-baselines. APP_VERSION plus the git sha when
+    # one is obtainable (the baked image usually has no .git — the version
+    # string alone still catches releases). Never allowed to fail the boot.
+    try:
+        from core.extensions.scheduling import enqueue_full_sweep
+        from db import models as _db
+
+        _sha = ""
+        try:
+            import subprocess
+
+            _sha = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+        except Exception:
+            pass
+        if not _sha:
+            # No .git in the image (the deployment norm — code is baked via
+            # COPY and .dockerignore drops the repo). Version alone missed
+            # every same-version rebuild, so the box's "full sweep on deploy"
+            # trigger never fired between releases. Fall back to a content
+            # hash over the shipped code: it changes exactly when the code
+            # does — hand-patched containers included — and is deterministic
+            # across restarts of the same image.
+            _sha = _compute_code_hash()
+        _stamp = f"{APP_VERSION}+{_sha}" if _sha else APP_VERSION
+        _seen = _db.get_snooze_state("app_version_seen")
+        # Boot markers for the turn-boundary ledger: a session whose last
+        # turn predates this boot gets one line saying the platform
+        # restarted — or was UPDATED, when the stamp changed. Exhibit A of
+        # the agent-ergonomics plan: the agent asked for a feature that had
+        # deployed 12 days earlier, because no channel carried "the platform
+        # changed" to the platform's operator.
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        _db.set_snooze_state("app_last_boot_at", _dt.now(_tz.utc).isoformat())
+        _db.set_snooze_state("app_last_boot_was_deploy", "1" if (_seen and _seen != _stamp) else "0")
+        if _seen != _stamp:
+            _db.set_snooze_state("app_version_seen", _stamp)
+            # First boot ever (no stamp) is a fresh install, not a deploy.
+            if _seen and settings.canary_enabled:
+                logger.info("Deploy detected (%s -> %s): full canary sweep queued", _seen, _stamp)
+                enqueue_full_sweep("deploy", delay_s=300)
+    except Exception as e:
+        logger.warning("Deploy detection failed (continuing): %s", e)
+
+    # 4c. SYSTEM-MAP: the agent's machine-generated map of its own machinery
+    # (schema, routes, blocks, stores). Regenerated every boot so it can't
+    # drift; referenced from [SERVER CONTEXT]. Never allowed to fail the boot.
+    try:
+        from core.context.system_map import write_system_map
+
+        await asyncio.to_thread(write_system_map, app)
+    except Exception as e:
+        logger.warning("SYSTEM-MAP generation failed (continuing): %s", e)
 
     # 5. Maintenance heartbeat
     from maintenance import get_maintenance
@@ -262,12 +334,28 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
-    # 3. Cancel any running agent tasks
+    # 3. Cancel any running agent tasks.
+    #
+    # The flag goes up FIRST. Cancelling a parent cascades to its workers,
+    # whose completion callbacks resume the parent and dispatch its pending
+    # queue — starting a fresh turn against an LLM client that is about to
+    # close, and leaving a half-written SCOUTING row for the next boot to
+    # report as an interrupted session.
+    _mgr.shutting_down = True
+    cancelled = []
     for sid in _mgr.active_session_ids():
         s = _mgr.get(sid)
         if s and s.task and not s.task.done():
             s.task.cancel()
+            cancelled.append(s.task)
 
+    # Wait for the cancellations to actually land rather than guessing at a
+    # fixed delay; bounded so a wedged task cannot hold up the shutdown.
+    if cancelled:
+        try:
+            await asyncio.wait_for(asyncio.gather(*cancelled, return_exceptions=True), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("%d agent task(s) did not stop within 5s", len(cancelled))
     # Brief pause to let SSE generators finish their current iteration
     await asyncio.sleep(0.5)
 
@@ -298,6 +386,16 @@ async def lifespan(app: FastAPI):
         _kill_driver()
     except Exception:
         _kill_driver()
+    try:
+        # Kills stdio MCP children and closes HTTP transports. Bounded: a
+        # wedged server must not hold the whole shutdown hostage.
+        from core.extensions.mcp.manager import get_mcp_manager_if_started
+
+        _mcp = get_mcp_manager_if_started()
+        if _mcp is not None:
+            await asyncio.wait_for(_mcp.shutdown(), timeout=8)
+    except Exception:
+        pass
     try:
         from core.llm.client import get_llm_client
 
@@ -470,6 +568,7 @@ from api.routers import (
     context,
     health,
     jobs,
+    mcp,
     memory,
     models,
     push,
@@ -477,6 +576,8 @@ from api.routers import (
     rlm,
     sessions,
     skills,
+    spaces,
+    storage,
     telos,
     tools,
     voice,
@@ -487,6 +588,7 @@ app.include_router(health.router)
 app.include_router(adaptive.router)
 app.include_router(canary.router)
 app.include_router(sessions.router)
+app.include_router(spaces.router)
 app.include_router(chat.router)
 app.include_router(tools.router)
 app.include_router(models.router)
@@ -500,6 +602,8 @@ app.include_router(push.router)
 app.include_router(rlm.router)
 app.include_router(telos.router)
 app.include_router(voice.router)
+app.include_router(mcp.router)
+app.include_router(storage.router)
 
 
 @app.get("/")
@@ -554,6 +658,32 @@ def _compute_build_id() -> str:
 BUILD_ID = _compute_build_id()
 
 
+def _compute_code_hash() -> str:
+    """Content hash of the shipped code — the deploy-stamp fallback when the
+    image carries no .git. Contents only (no sizes/mtimes), sorted paths, so
+    the value is deterministic for a given code state and changes exactly
+    when the code does."""
+    import hashlib
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parent.parent
+    h = hashlib.sha256()
+    try:
+        trees = ["api", "core", "sessions", "db", "static"]
+        files: list[_Path] = [root / "config.py", root / "run.py", root / "maintenance.py"]
+        for tree in trees:
+            files.extend((root / tree).rglob("*.py"))
+        files.extend((root / "static").rglob("*.js"))
+        files.extend((root / "static").rglob("*.css"))
+        files.extend((root / "static").rglob("*.html"))
+        for p in sorted(f for f in files if f.is_file() and "__pycache__" not in f.parts):
+            h.update(str(p.relative_to(root)).encode())
+            h.update(p.read_bytes())
+    except OSError:
+        return ""
+    return h.hexdigest()[:12]
+
+
 @app.get("/sw.js")
 async def service_worker():
     import os
@@ -577,5 +707,23 @@ from pathlib import Path
 
 from fastapi.staticfiles import StaticFiles
 
+
+class _RevalidatingStatic(StaticFiles):
+    """Static assets with `Cache-Control: no-cache`.
+
+    Not "don't cache" — "revalidate before reuse". Without it the browser
+    picks a heuristic freshness lifetime from Last-Modified, so after a
+    deploy the service worker's precache could be satisfied from the HTTP
+    cache and stamp an old module beside a new one in the same versioned
+    cache. Revalidation is one conditional request that answers 304 on a
+    LAN, and it is what makes the SW's cache-busting reliable.
+    """
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers.setdefault("Cache-Control", "no-cache")
+        return resp
+
+
 if Path("static").exists():
-    app.mount("/static", StaticFiles(directory="static"), name="static")
+    app.mount("/static", _RevalidatingStatic(directory="static"), name="static")

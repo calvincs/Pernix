@@ -96,20 +96,6 @@ def test_load_skill_not_found(tmp_path, monkeypatch):
     assert "not found" in result.lower() or "Error" in result
 
 
-def test_get_tool_schema_basic():
-    from core.tools.builtin.discovery_tools import get_tool_schema
-
-    result = get_tool_schema("bash")
-    assert isinstance(result, str)
-
-
-def test_get_tool_schema_not_found():
-    from core.tools.builtin.discovery_tools import get_tool_schema
-
-    result = get_tool_schema("nonexistent_tool_xyz")
-    assert "Error" in result or "not found" in result.lower()
-
-
 # ===========================================================================
 # Discovery tools (builtin)
 # ===========================================================================

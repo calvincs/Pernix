@@ -7,7 +7,8 @@ import logging
 import httpx
 
 from config import settings
-from core.llm.errors import FALLBACK_REASONS, FailoverError, classify_http_error
+from core.llm.errors import FALLBACK_REASONS, FailoverError, FailoverReason, classify_http_error
+from core.llm.providers._shared import describe_exception
 from core.llm.providers.ollama import OllamaProvider
 from core.llm.providers.openrouter import OpenRouterProvider
 from core.llm.registry import ModelRegistry
@@ -122,6 +123,30 @@ class ProviderRouter:
         """Transient remote-provider failures fall back to local Ollama."""
         return getattr(provider, "name", "ollama") != "ollama"
 
+    def _can_fall_back(self, provider) -> bool:
+        """Router-level failover needs a remote primary AND a configured
+        fallback model. Without the model there is nowhere to go, and the
+        right answer is the provider's own classified error — the one the
+        ladder's backoff keys on — not a synthetic "no fallback" message that
+        matches no retryable marker and turns a 503 into a hard stop.
+        """
+        return bool(settings.fallback_model) and self._fallback_eligible(provider)
+
+    @staticmethod
+    def _http_failover(provider, e: httpx.HTTPStatusError) -> tuple[FailoverReason, FailoverError]:
+        """Classify an httpx status error and build the typed error whose text
+        names the status ("openrouter 503: ...") so the ladder can retry it."""
+        body = e.response.text if hasattr(e.response, "text") else ""
+        status = e.response.status_code
+        reason = classify_http_error(status, body)
+        return reason, FailoverError(reason, f"{provider.name} {status}: {body[:500]}", original=e)
+
+    @staticmethod
+    def _connect_failover(provider, e: httpx.ConnectError) -> FailoverError:
+        # describe_exception keeps the class name in the text: str(ConnectError)
+        # can be empty, and "ConnectError" is the ladder's retry marker.
+        return FailoverError(FailoverReason.UNKNOWN, f"{provider.name} {describe_exception(e)}", original=e)
+
     def get_provider(self, model: str = ""):
         """Select provider using the model registry."""
         model = model or settings.llm_model
@@ -199,25 +224,24 @@ class ProviderRouter:
         try:
             return await provider.chat(messages, **kwargs)
         except FailoverError as fe:
-            if fe.reason in FALLBACK_REASONS and self._fallback_eligible(provider):
+            if fe.reason in FALLBACK_REASONS and self._can_fall_back(provider):
                 sem.release()
                 released = True
                 return await self._fallback_chat(messages, sid, s_at, s_pri, **kwargs)
             raise
         except httpx.HTTPStatusError as e:
-            body = e.response.text if hasattr(e.response, "text") else ""
-            reason = classify_http_error(e.response.status_code, body)
-            if reason in FALLBACK_REASONS and self._fallback_eligible(provider):
+            reason, typed = self._http_failover(provider, e)
+            if reason in FALLBACK_REASONS and self._can_fall_back(provider):
                 sem.release()
                 released = True
                 return await self._fallback_chat(messages, sid, s_at, s_pri, **kwargs)
-            raise FailoverError(reason, str(e), original=e) from e
-        except httpx.ConnectError:
-            if self._fallback_eligible(provider):
+            raise typed from e
+        except httpx.ConnectError as e:
+            if self._can_fall_back(provider):
                 sem.release()
                 released = True
                 return await self._fallback_chat(messages, sid, s_at, s_pri, **kwargs)
-            raise
+            raise self._connect_failover(provider, e) from e
         finally:
             if not released:
                 sem.release()
@@ -245,7 +269,7 @@ class ProviderRouter:
                     emitted_output = True
                 yield event
         except FailoverError as fe:
-            if fe.reason in FALLBACK_REASONS and self._fallback_eligible(provider):
+            if fe.reason in FALLBACK_REASONS and self._can_fall_back(provider):
                 if emitted_output:
                     logger.error("%s %s after partial stream — not failing over", provider.name, fe.reason.value)
                     yield StreamEvent(type=StreamEventType.ERROR, error=fe.message)
@@ -258,9 +282,8 @@ class ProviderRouter:
             else:
                 raise  # let caller (agent loop) handle typed error
         except httpx.HTTPStatusError as e:
-            body = e.response.text if hasattr(e.response, "text") else ""
-            reason = classify_http_error(e.response.status_code, body)
-            if reason in FALLBACK_REASONS and self._fallback_eligible(provider) and not emitted_output:
+            reason, typed = self._http_failover(provider, e)
+            if reason in FALLBACK_REASONS and self._can_fall_back(provider) and not emitted_output:
                 logger.warning("%s %s, falling back to Ollama", provider.name, reason.value)
                 sem.release()
                 released = True
@@ -268,17 +291,20 @@ class ProviderRouter:
                     yield event
             elif emitted_output:
                 logger.error("%s %s after partial stream — not failing over", provider.name, reason.value)
-                yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
+                yield StreamEvent(type=StreamEventType.ERROR, error=typed.message)
             else:
-                raise FailoverError(reason, str(e), original=e) from e
+                raise typed from e
         except httpx.ConnectError as e:
-            if self._fallback_eligible(provider) and not emitted_output:
+            typed = self._connect_failover(provider, e)
+            if self._can_fall_back(provider) and not emitted_output:
                 sem.release()
                 released = True
                 async for event in self._fallback_stream(messages, sid, s_at, s_pri, **kwargs):
                     yield event
+            elif emitted_output:
+                yield StreamEvent(type=StreamEventType.ERROR, error=typed.message)
             else:
-                yield StreamEvent(type=StreamEventType.ERROR, error=str(e))
+                raise typed from e
         finally:
             if not released:
                 sem.release()

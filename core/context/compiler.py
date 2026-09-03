@@ -258,8 +258,7 @@ Use those offset and limit values EXACTLY. Do NOT invent your own pagination
 (no limit=1 to "probe", no random offsets). Do not assume partial output is complete.
 
 Core tools: file_read, file_write, file_edit, glob, grep, bash, remember, recall,
-ask_user, discover_tools, get_tool_schema, discover_skills, load_skill,
-read_skill_resource.
+ask_user, discover_tools, discover_skills, load_skill, read_skill_resource.
 
 ASKING THE USER A QUESTION: When you need a decision before continuing —
 confirmation before a destructive or large action, a yes/no, an A/B choice,
@@ -468,6 +467,9 @@ def _build_server_context() -> str:
             "",
             "SELF-INSPECTION — questions about Pernix's own state (notifications, adaptive",
             "proposals and batches, cron runs, dream, telos, canaries, other sessions):",
+            "- START at SYSTEM-MAP.md in the workspace: the machine-generated map of the DB",
+            "  schema, data layout, API routes, and context blocks. Read it BEFORE guessing a",
+            "  table name, path, or endpoint — it is regenerated every boot and cannot drift.",
             f"- The store is the SQLite file {db_path} (python3 sqlite3 from bash or repl) and this API.",
             f"- GET {base_url}/openapi.json lists every route with its query params and their DEFAULTS.",
             "  Read it before guessing an endpoint. A list route that defaults to one status hides the",
@@ -496,10 +498,23 @@ def _build_server_context() -> str:
 # at write time — per-turn context is the wrong place to absorb it.
 _DIRECTIVE_FILE_GUARD_CHARS = 32_000
 _directive_guard_warned: set[str] = set()
+# mtime-keyed content cache: compile_context runs once per TOOL ROUND (up
+# to max_tool_rounds per turn) and read these files fresh every time —
+# SOUL.md twice per compile (directives + temporal). The files change on
+# human edits, which mtime catches.
+_directive_cache: dict[str, tuple[float, str]] = {}
 
 
 def _read_directive_file(path: Path) -> str:
-    """Read one directive file, applying the accident guard with a loud log."""
+    """Read one directive file, mtime-cached, with the accident guard."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return ""
+    key = str(path)
+    cached = _directive_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
     content = path.read_text()
     if len(content) > _DIRECTIVE_FILE_GUARD_CHARS:
         if path.name not in _directive_guard_warned:
@@ -513,23 +528,36 @@ def _read_directive_file(path: Path) -> str:
                 _DIRECTIVE_FILE_GUARD_CHARS,
             )
         content = content[:_DIRECTIVE_FILE_GUARD_CHARS]
-    return content.strip()
+    content = content.strip()
+    _directive_cache[key] = (mtime, content)
+    return content
 
 
-def _build_agent_directives_block() -> str:
-    """[IDENTITY] + [RULES] + [INSTRUCTIONS] from data/agent/, whole and verbatim."""
+def _build_agent_directives_block(session_id: str = "") -> str:
+    """[IDENTITY] + [RULES] + [INSTRUCTIONS] from data/agent/, whole and verbatim.
+
+    A session in a space resolves each file through core.spaces.directive_path
+    — the space's override when one exists, else the shared default, per file
+    (v33). The mtime cache is path-keyed, so default and override coexist in
+    it; the exists() check inside directive_path runs fresh each compile, so
+    saving or reverting an override takes effect on the next tool round.
+    """
+    from core.spaces import directive_path
+
     parts = []
 
     for fname, label in (("SOUL.md", "IDENTITY"), ("RULES.md", "RULES")):
-        path = Path("data/agent") / fname
+        path = directive_path(fname, session_id)
         if path.exists():
             content = _read_directive_file(path)
             if content:
                 parts.append(f"[{label}]\n{content}")
 
-    # First of SESSIONS.md / INSTRUCTIONS.md wins (mirrors the old scout order).
+    # First wins: space SESSIONS.md override, else default SESSIONS.md, else
+    # default INSTRUCTIONS.md (mirrors the old scout order). directive_path
+    # handles the space-vs-default half; the loop keeps the legacy fallback.
     for fname in ("SESSIONS.md", "INSTRUCTIONS.md"):
-        path = Path("data/agent") / fname
+        path = directive_path(fname, session_id) if fname == "SESSIONS.md" else Path("data/agent") / fname
         if path.exists():
             content = _read_directive_file(path)
             if content:
@@ -588,6 +616,35 @@ def _build_available_skills_block(max_skills: int = 24, desc_chars: int = 180) -
     return "\n".join(lines)
 
 
+def _build_space_block(session_id: str) -> str:
+    """[SPACE] — membership + workspace-home orientation for space sessions.
+
+    States the soft-home semantics explicitly: without this the model reads
+    the bash [cwd: …spaces/<slug>] prefix as a sandbox and stops referencing
+    files elsewhere in the workspace. Empty string for non-space sessions.
+    """
+    try:
+        from core.spaces import get_session_space, space_memory_prefix
+
+        space = get_session_space(session_id)
+        if not space:
+            return ""
+        return (
+            f"[SPACE]\n"
+            f"This session belongs to the space \"{space['label']}\" (slug: {space['slug']}).\n"
+            f"- Your working folder is spaces/{space['slug']}/ inside the shared workspace: "
+            f"bash runs there, and relative paths resolve there first. Keep this space's "
+            f"files in it.\n"
+            f"- It is NOT a sandbox: the rest of the workspace stays readable and writable "
+            f"(existing files resolve wherever they live).\n"
+            f"- Route memories for this space's work to {space_memory_prefix(space)}* files; "
+            f"they are surfaced first in this space's searches."
+        )
+    except Exception as e:
+        logger.debug("space block unavailable for %s: %s", session_id[:12], e)
+        return ""
+
+
 def _build_adaptive_block(session_id: str) -> str:
     """Adaptive-layer prompt_notes + policies (plan 4e). Empty string while
     the layer is off or holds nothing — never shifts bytes on first deploy."""
@@ -597,27 +654,6 @@ def _build_adaptive_block(session_id: str) -> str:
         return build_adaptive_block(session_id)
     except Exception as e:
         logger.warning("Adaptive block unavailable: %s", e)
-        return ""
-
-
-def _build_worker_specs_block(session_id: str) -> str:
-    """[WORKER SPECS] catalog — empty for workers, disabled layer, or an
-    empty store. Never shifts bytes when there is nothing to show."""
-    try:
-        from config import settings as _settings
-
-        if not _settings.adaptive_enabled:
-            return ""
-        from db import models as _db
-
-        sess = _db.get_session(session_id) or {}
-        if sess.get("session_type") == "worker":
-            return ""
-        from core.adaptive.specs import build_worker_specs_block
-
-        return build_worker_specs_block()
-    except Exception as e:
-        logger.warning("Worker specs block unavailable: %s", e)
         return ""
 
 
@@ -635,7 +671,9 @@ def _build_temporal_context() -> str:
     try:
         soul = Path("data/agent/SOUL.md")
         if soul.exists():
-            m = _re.search(r"<!-- @birthdate:\s*(.+?)\s*-->", soul.read_text())
+            # Through the mtime cache — the directives block reads the same
+            # file in the same compile, and this used to be a second raw read.
+            m = _re.search(r"<!-- @birthdate:\s*(.+?)\s*-->", _read_directive_file(soul))
             if m:
                 dt = datetime.fromisoformat(m.group(1))
                 birthdate = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -726,6 +764,9 @@ def _build_goal_burn(session_id: str) -> str:
 # did an alarm open" exactly as well as a fresh one.
 _TELOS_BASELINE_TTL_S = 60
 _telos_baseline_cache: tuple[float, str] = (0.0, "")
+# (monotonic stamp, telos_dir, block) — dir-keyed so a redirected store
+# (tests, config change) never serves another store's stale block.
+_telos_drive_cache: tuple[float, str, str | None] = (0.0, "", None)
 
 
 def _telos_baseline_line(store) -> str:
@@ -771,9 +812,22 @@ def _build_telos_drive_block() -> str:
     tail (audit P5 port 3). The agent used to be unaware of its own drive
     state unless it voluntarily called telos_status. Byte-identical output
     (empty string) when telos is disabled; capped to three questions to bound
-    tail churn."""
+    tail churn.
+
+    The WHOLE block is behind the 60s TTL now, not just the baseline line:
+    the question and alarm scans used to run raw on every compile — up to
+    max_tool_rounds full directory globs + YAML parses per turn, for FYI
+    content where 60 seconds of staleness costs nothing.
+    """
     if not settings.telos_enabled:
         return ""
+    import time as _time
+
+    global _telos_drive_cache
+    stamp, cached_dir, cached = _telos_drive_cache
+    now = _time.monotonic()
+    if cached is not None and cached_dir == settings.telos_dir and now - stamp < _TELOS_BASELINE_TTL_S:
+        return cached
     try:
         from core.telos.store import TelosStore
 
@@ -793,8 +847,18 @@ def _build_telos_drive_block() -> str:
                     f"- ({q.id}, surprise {float(q.get('surprise') or 0):.2f}) {str(q.get('text') or '')[:180]}"
                 )
         if alarms:
-            lines.append(f"Open telos alarms: {len(alarms)} (see telos_status)")
-        return "\n".join(lines)
+            # Alarm TEXT, not just a count — the count alone sent the agent
+            # off to spend a telos_status call on exactly the turns where the
+            # user was asking about system state (first-person audit §2.4).
+            previews = []
+            for a in alarms[:2]:
+                label = str(a.get("text") or a.get("reason") or a.get("kind") or a.get("id") or "alarm")
+                previews.append(label[:80])
+            suffix = f" — {'; '.join(previews)}" if previews else ""
+            lines.append(f"Open telos alarms: {len(alarms)}{suffix} (see telos_status)")
+        block = "\n".join(lines)
+        _telos_drive_cache = (now, settings.telos_dir, block)
+        return block
     except Exception:
         return ""
 
@@ -831,8 +895,147 @@ def _build_watched_workers_block(session_id: str) -> str:
         return ""
 
 
+# Turn-boundary ledger cache: content is fixed for the life of a turn (keyed
+# on the turn's user-message id), so the up-to-ten queries behind it run once
+# per turn, not once per round — and the tail bytes stay stable within the
+# turn.
+_ledger_cache: dict[tuple[str, int], str] = {}
+_LEDGER_CACHE_MAX = 128
+# Ledger renders only for these session types. Canary sessions are excluded
+# by isolation (platform state leaking into a synthetic measurement turn
+# would contaminate it); workers stay lean (I5); dream/rlm views take no
+# turns.
+_LEDGER_SESSION_TYPES = ("normal", "cron")
+
+
+def _build_turn_ledger(session_id: str, turn_user_msg_id: int | None) -> str:
+    """[SINCE YOUR LAST TURN] — the delta the agent otherwise reconstructs
+    with tool calls (agent-ergonomics plan, Tier 1).
+
+    Every line answers "what happened while I wasn't looking": work that
+    finished, the verdict on the previous turn (deferred reflect lands ~300s
+    AFTER the turn — without this line the agent learns its grade one turn
+    late or never), self-modifications applied, canary regressions, platform
+    restarts. Delta-based: a quiet system renders nothing, and the block is
+    the empty string when disabled — the tail is then byte-identical to the
+    pre-ledger shape.
+    """
+    if not settings.turn_ledger_enabled or not session_id or not turn_user_msg_id:
+        return ""
+    key = (session_id, int(turn_user_msg_id))
+    cached = _ledger_cache.get(key)
+    if cached is not None:
+        return cached
+
+    block = ""
+    try:
+        sess = db.get_session(session_id) or {}
+        if (sess.get("session_type") or "normal") in _LEDGER_SESSION_TYPES:
+            anchor = db.ledger_anchor(session_id, int(turn_user_msg_id)) or sess.get("created_at") or ""
+            if anchor:
+                snap = db.ledger_snapshot(session_id, anchor)
+                block = _format_turn_ledger(snap, anchor, sess)
+    except Exception as e:
+        logger.debug("Turn ledger build failed (omitted): %s", e)
+        block = ""
+    if len(_ledger_cache) >= _LEDGER_CACHE_MAX:
+        _ledger_cache.clear()
+    _ledger_cache[key] = block
+    return block
+
+
+def _format_turn_ledger(snap: dict, anchor: str, sess: dict) -> str:
+    import json as _json
+
+    lines: list[str] = []
+
+    # Finished delegated work — each item names the collect call, so the
+    # discovery is a read instead of a check_workers/job_status round.
+    watched: set[str] = set()
+    try:
+        raw = sess.get("watched_worker_ids") or "[]"
+        watched = set(_json.loads(raw) if isinstance(raw, str) else list(raw))
+    except Exception:
+        pass
+    for w in snap.get("finished_workers", []):
+        if w["id"] in watched:
+            continue  # the watched-workers block already shows it, with state
+        lines.append(
+            f"- Finished: worker {w['id']} \"{(w.get('title') or '?')[:60]}\" — get_worker_result('{w['id']}')"
+        )
+    for j in snap.get("finished_jobs", []):
+        label = (j.get("name") or j.get("command") or "")[:50]
+        exit_code = j.get("exit_code")
+        lines.append(
+            f"- Finished: job {j['id']} ({label}) {j.get('state', '?')}"
+            f"{f' exit {exit_code}' if exit_code is not None else ''} — job_tail('{j['id']}')"
+        )
+    for r in snap.get("finished_rlm", []):
+        lines.append(f"- Finished: RLM run {r['run_id']} ({r.get('status', '?')})")
+
+    # The previous turn's grade — labeled as the grader's opinion, because
+    # reflect's non-pass rate has a measured over-strict component and the
+    # ledger must not teach the agent its grader's biases as its own.
+    lv = snap.get("last_verdict")
+    if lv and lv.get("verdict") and lv["verdict"] != "pass":
+        lesson = ""
+        try:
+            payload = _json.loads(lv.get("payload_json") or "{}")
+            lesson = str(payload.get("what_failed") or payload.get("diagnostic") or payload.get("reasoning") or "")
+        except Exception:
+            pass
+        lesson = " ".join(lesson.split())[:150]
+        lines.append(
+            f"- Reflect graded your previous turn: {lv['verdict']} (cause={lv.get('failure_cause', '?')})"
+            + (f' — "{lesson}"' if lesson else "")
+            + " [grader's opinion, not ground truth]"
+        )
+
+    for q in snap.get("open_questions", []):
+        lines.append(
+            f"- Unanswered question you asked earlier: \"{' '.join(str(q.get('question', '')).split())[:100]}\""
+        )
+    for p in snap.get("agent_proposals", []):
+        lines.append(f"- Your adaptive proposal #{p['id']} is still pending review")
+
+    changes = snap.get("adaptive_changes", [])
+    if changes:
+        parts = [f"{c['entry_id']} {c['action']} ({c.get('actor') or '?'})" for c in changes[:4]]
+        more = f" (+{len(changes) - 4} more)" if len(changes) > 4 else ""
+        lines.append(f"- Adaptive changes since your last turn: {', '.join(parts)}{more}")
+
+    fails = snap.get("canary_fails", [])
+    if fails:
+        names = sorted({str(f.get("task") or "?") for f in fails})
+        lines.append(f"- Canary regression(s) since your last turn: {', '.join(names)[:120]}")
+
+    boot = snap.get("boot") or {}
+    if boot.get("at") and boot["at"] > anchor:
+        if boot.get("was_deploy"):
+            lines.append(
+                f"- Platform UPDATED since your last turn (build {boot.get('stamp', '?')}) — "
+                "tool contracts may have changed; re-read a tool's schema before assuming its old shape"
+            )
+        else:
+            lines.append(f"- Platform restarted since your last turn (build {boot.get('stamp', '?')})")
+
+    inflight = snap.get("inflight") or {}
+    busy = {k: v for k, v in inflight.items() if v}
+    if busy:
+        lines.append("- In flight platform-wide: " + " · ".join(f"{v} {k}" for k, v in busy.items()))
+
+    if not lines:
+        return ""
+    header = f"[SINCE YOUR LAST TURN] (changes since {anchor[5:16]} UTC; ambient — verify before acting on it)"
+    return "\n".join([header] + lines[:25])
+
+
 def _build_volatile_tail(
-    resource_status: str, goal_burn: str = "", telos_block: str = "", workers_block: str = ""
+    resource_status: str,
+    goal_burn: str = "",
+    telos_block: str = "",
+    workers_block: str = "",
+    ledger_block: str = "",
 ) -> str:
     """Per-call state that goes in a trailing system message, NOT the head.
 
@@ -858,6 +1061,8 @@ def _build_volatile_tail(
         lines.append(telos_block)
     if workers_block:
         lines.append(workers_block)
+    if ledger_block:
+        lines.append(ledger_block)
     return "\n".join(lines)
 
 
@@ -979,11 +1184,19 @@ def compile_context(
     # Server URL — lets the agent open or examine workspace artifacts in a browser.
     system_parts.append(_build_server_context())
 
+    # Space workspace home (v33): per-session-constant, so it belongs in the
+    # fixed prefix — same cache argument as the directives below. Empty for
+    # non-space sessions (byte-identical output to pre-v33).
+    space_block = _build_space_block(session_id)
+    if space_block:
+        system_parts.append(space_block)
+
     # Agent directives (SOUL/RULES/SESSIONS) — deterministic, byte-stable, and
     # delivered whole. Lives in the fixed prefix, not the scout section, so the
     # prompt-prefix cache covers it and every turn (including scout-fallback
-    # and worker turns) gets identical directives.
-    directives_block = _build_agent_directives_block()
+    # and worker turns) gets identical directives. Space sessions resolve
+    # per-file overrides (v33) — still stable within the session.
+    directives_block = _build_agent_directives_block(session_id)
     if directives_block:
         system_parts.append(directives_block)
 
@@ -996,14 +1209,6 @@ def compile_context(
     adaptive_block = _build_adaptive_block(session_id)
     if adaptive_block:
         system_parts.append(adaptive_block)
-
-    # Approved worker_spec catalog (follow-on: worker_spec consumption).
-    # Suppressed for worker sessions — they can't spawn workers, and the
-    # extra bytes would fork their prefix from the parent's. Stable between
-    # idle-window applies like the adaptive block.
-    specs_block = _build_worker_specs_block(session_id)
-    if specs_block:
-        system_parts.append(specs_block)
 
     # Static skill catalog — cache-stable across turns; placed before the
     # per-turn scout report so prompt cache hits the same prefix every turn.
@@ -1041,6 +1246,7 @@ def compile_context(
         goal_burn=_build_goal_burn(session_id) if goal_block else "",
         telos_block=_build_telos_drive_block(),
         workers_block=_build_watched_workers_block(session_id),
+        ledger_block=_build_turn_ledger(session_id, turn_user_msg_id),
     )
     # Head is stable across the rounds of a turn — cached count. The tail is
     # tiny and changes per call, so it's counted raw.
@@ -1285,14 +1491,18 @@ def compile_context(
 
         # Internal metadata used by trim-notice generation and pin protection.
         # These keys are stripped before LLM dispatch (see _strip_private_fields).
-        entry["_db_id"] = msg["id"]
+        # `.get`, not `[...]`: history is not purely DB rows by this point —
+        # exclude_orphans splices in synthetic stubs that never had a row.
+        # Subscripting made one missing key a hard turn kill, and every
+        # `_db_id` reader downstream already tolerates None.
+        entry["_db_id"] = msg.get("id")
         entry["_created_at"] = msg.get("created_at")
         if tool_names:
             entry["_tool_names"] = tool_names
         # Pin the active turn's root user message so trim cannot drop the
         # user's actual ask. Without this, large parallel tool returns can
         # overflow history_budget and evict the prompt itself.
-        if turn_user_msg_id is not None and msg["id"] == turn_user_msg_id and msg["role"] == "user":
+        if turn_user_msg_id is not None and msg.get("id") == turn_user_msg_id and msg["role"] == "user":
             entry["_pinned"] = True
 
         messages.append(entry)

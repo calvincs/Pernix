@@ -9,13 +9,17 @@ import logging
 from fastapi import APIRouter, HTTPException, Query
 
 from api.streaming import sse_event, sse_response
-from core.events import get_event_bus
+from core.events import get_event_bus, queue_was_dropped
 from db import models as db
 
 logger = logging.getLogger("pernix.api.jobs")
 router = APIRouter(tags=["jobs"])
 
 HEARTBEAT_INTERVAL = 30
+
+# Strong refs for fire-and-forget test runs — asyncio holds only a weak
+# reference to running tasks, so a bare create_task can be GC'd mid-flight.
+_bg_tasks: set = set()
 
 
 @router.get("/api/jobs")
@@ -44,7 +48,9 @@ async def create_job(body: dict):
 
     from core.extensions.scheduling import schedule_job
 
-    result = schedule_job(name, cron_expr, prompt, model=model)
+    # API creation is explicit: no calling session to inherit a space from,
+    # so an absent/empty space_id means unbound ("none"), never "inherit".
+    result = schedule_job(name, cron_expr, prompt, model=model, space_id=body.get("space_id") or "none")
     if result.startswith("Error"):
         raise HTTPException(400, detail=result)
     return {"status": "created", "name": name, "message": result}
@@ -71,6 +77,7 @@ async def update_job(name: str, body: dict):
         cron_expr=body.get("cron_expr"),
         prompt=body.get("prompt"),
         model=body.get("model"),
+        space_id=body["space_id"] if "space_id" in body else None,
     )
     if result.startswith("Error"):
         raise HTTPException(400, detail=result)
@@ -97,6 +104,114 @@ async def resume_job_endpoint(name: str):
     if result.startswith("Error"):
         raise HTTPException(400, detail=result)
     return {"status": "resumed", "name": name}
+
+
+@router.post("/api/jobs/{name}/validate")
+async def validate_job_endpoint(name: str):
+    """Re-validate a stored job's spec. Persists the result on the job."""
+    from core.extensions.scheduling import _read_jobs_json, _update_job_field, validate_job_spec
+
+    job = next((j for j in _read_jobs_json() if j["name"] == name), None)
+    if job is None:
+        raise HTTPException(404, detail=f"Job '{name}' not found")
+    v = validate_job_spec(
+        job.get("cron_expr", ""),
+        job.get("prompt", ""),
+        model=job.get("model", ""),
+        allowed_tools=job.get("allowed_tools"),
+    )
+    _update_job_field(name, "validation", v)
+    return {"name": name, "validation": v}
+
+
+@router.post("/api/jobs/{name}/run")
+async def run_job_now(name: str):
+    """Fire a scheduled job once, right now, without touching its schedule.
+
+    Reuses the scheduler's own dispatch, so a manual run IS a run: same
+    claim-before-deliver row, same job.started / job.completed events, same
+    entry in History, same session type. Nothing here duplicates that logic.
+
+    The meta handed to the dispatcher is a COPY of the live job's, exactly as
+    the missed-run coalescer does it — ``_execute_cron_job`` writes
+    ``last_fired_at`` into whatever dict it is given, and a manual run must
+    not shift the schedule's missed-run grid. A paused job can still be run
+    this way; that is the point of a manual trigger.
+
+    Returns immediately: a run can take minutes, and its outcome arrives on
+    /api/jobs/events like every other run's.
+    """
+    from core.extensions.scheduling import _execute_cron_job, _get_scheduler, _read_jobs_json
+
+    meta = None
+    scheduler = _get_scheduler()
+    if scheduler is not None:
+        job = scheduler.get_job(name)
+        if job is not None:
+            meta = dict(job.kwargs.get("meta") or {})
+    if meta is None:
+        # No live scheduler (or no live job) — fall back to what is on disk.
+        stored = next((j for j in _read_jobs_json() if j.get("name") == name), None)
+        if stored is None:
+            raise HTTPException(404, detail=f"Job '{name}' not found")
+        meta = {k: v for k, v in stored.items() if k not in ("cron_trigger", "paused")}
+    meta["name"] = name
+    # Never persisted as a recurring job by a _save_jobs() the dispatcher runs.
+    meta["transient"] = True
+
+    task = asyncio.create_task(_execute_cron_job(meta))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return {"status": "run_started", "name": name}
+
+
+@router.post("/api/jobs/{name}/test")
+async def test_job_endpoint(name: str):
+    """Start an isolated dry-run of the job (spec Feature 7).
+
+    Returns immediately — a test can take minutes. The outcome arrives as a
+    `job.test_done` event on /api/jobs/events plus a bell notification, and
+    is stamped on the job as `last_test`."""
+    from core.extensions.scheduling import _read_jobs_json, run_job_test
+
+    if not any(j["name"] == name for j in _read_jobs_json()):
+        raise HTTPException(404, detail=f"Job '{name}' not found")
+
+    async def _run_and_notify():
+        from sessions.manager import get_manager
+
+        try:
+            result = await run_job_test(name)
+        except Exception as e:
+            logger.error("Job test '%s' crashed: %s", name, e)
+            return
+        try:
+            title = f"Job test {'passed' if result.get('ok') else 'FAILED'}: {name}"
+            body = (result.get("error") or result.get("answer_preview") or "completed cleanly")[:200]
+            nid = await asyncio.to_thread(
+                db.add_notification,
+                session_id=result.get("session_id") or "",
+                title=title,
+                body=body,
+                urgency="normal" if result.get("ok") else "high",
+            )
+            get_manager().broadcast(
+                {
+                    "type": "dialog.notification",
+                    "notification_id": nid,
+                    "title": title,
+                    "body": body,
+                    "urgency": "normal" if result.get("ok") else "high",
+                    "source_session_id": result.get("session_id") or "",
+                }
+            )
+        except Exception as e:
+            logger.debug("Job test notification failed: %s", e)
+
+    task = asyncio.create_task(_run_and_notify())
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    return {"status": "test_started", "name": name}
 
 
 @router.get("/api/jobs/runs")
@@ -178,11 +293,15 @@ async def job_events():
                     async with asyncio.timeout(HEARTBEAT_INTERVAL):
                         event = await queue.get()
                 except asyncio.TimeoutError:
+                    if queue_was_dropped(queue):
+                        return
                     yield ": heartbeat\n\n"
                     continue
                 event_type = event.get("type", "message")
                 clean = {k: v for k, v in event.items() if not k.startswith("_")}
                 yield sse_event(event_type, clean)
+                if queue_was_dropped(queue):
+                    return
         except (asyncio.CancelledError, GeneratorExit):
             pass
         finally:

@@ -114,6 +114,12 @@ class ScoutReport:
     recommended_model: str = ""
     model_rationale: str = ""
 
+    # Adaptive routing hints that shaped this plan, by entry id (the [id]
+    # prefixes in the [ADAPTIVE ROUTING HINTS] block). Feeds the
+    # adaptive_entry usage signal — the only per-entry evidence the layer
+    # has that a hint is worth its prompt space.
+    used_hints: list[str] = field(default_factory=list)
+
     # Session orientation
     session_state: str = ""  # Max ~200 tokens
     approach_guidance: str = ""  # Max ~500 tokens
@@ -137,6 +143,15 @@ class ScoutReport:
     # from this directive). Deferred until properly implemented.
     execution_mode: str = "inline"
 
+    # Task-type classification (the outcome-stats axis): research | coding |
+    # data_analysis | writing | ops | conversational, or "" when scout didn't
+    # classify. Purely an ANALYSIS label — nothing routes, switches models,
+    # or changes execution on it. Reflect stamps it into the post-mortem as
+    # task_category, so model_route counters and the [MODEL ROUTING INTEL]
+    # brief aggregate per real task type instead of per execution_mode
+    # (whose two live values made every category read "inline").
+    task_type: str = ""
+
     # Viability flag set by scout self-validation (Phase 2a).
     # "verified": passed the validator on first or second submit.
     # "unverified": submitted with outstanding issues — agent proceeds with caution.
@@ -148,6 +163,9 @@ class ScoutReport:
     scout_model: str = ""
     scout_latency_ms: int = 0
     scout_tokens: TokenUsage = field(default_factory=TokenUsage)
+    # LLM rounds the scout loop actually spent (1 = submitted immediately;
+    # >1 = searched first or needed a revision). Observability only.
+    scout_rounds: int = 0
     from_cache: bool = False
     from_fallback: bool = False
     # Why the deterministic fallback was used: "bypass" (cheap turn, scout

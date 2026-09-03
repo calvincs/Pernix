@@ -130,7 +130,21 @@ def _resolve_prior_run(continue_from: str) -> tuple[str | None, Path | None, dic
     rid = continue_from.strip().lower()
     if not _RUN_ID_RE.match(rid):
         return f"Error: continue_from must be an 8-hex-char RLM run id, got {continue_from!r}.", None, None
-    prior_dir = (Path(settings.workspace_dir) / "rlm" / rid).resolve()
+    # The registry row's run_dir (workspace-relative) is authoritative — it
+    # finds runs minted under a space home (spaces/<slug>/rlm/<id>, v33) as
+    # well as legacy root runs. The historical path probe stays as fallback
+    # for artifacts whose DB row is gone.
+    prior_dir = None
+    try:
+        row = db.get_rlm_run(rid)
+        if row and row.get("run_dir"):
+            candidate = (Path(settings.workspace_dir) / row["run_dir"]).resolve()
+            if candidate.is_relative_to(Path(settings.workspace_dir).resolve()) and candidate.exists():
+                prior_dir = candidate
+    except Exception:
+        prior_dir = None
+    if prior_dir is None:
+        prior_dir = (Path(settings.workspace_dir) / "rlm" / rid).resolve()
     try:
         manifest = json.loads((prior_dir / "manifest.json").read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -528,7 +542,11 @@ def rlm_process(task: str, source, model: str = "", continue_from: str = "", _co
             _proc_handles.append(session.register_process(popen, _proc_owner))
 
     try:
-        run_id, run_dir, run_rel = runs.mint_run_dir()
+        # Space sessions keep their run artifacts under the space's
+        # workspace home (v33) — visible in the space folder, listed under
+        # the space, continuable by any sibling session.
+        _space_home = (_context or {}).get("workspace_home")
+        run_id, run_dir, run_rel = runs.mint_run_dir(base_dir=Path(_space_home) if _space_home else None)
     except OSError as e:
         return f"Error: could not create RLM run dir: {e}"
 

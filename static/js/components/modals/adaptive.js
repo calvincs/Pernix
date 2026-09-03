@@ -4,7 +4,24 @@
 // dismiss tripwire flags.
 
 import { el, text, clear } from '../../render.js';
+import { icon } from '../../icons.js';
 import { del, get, post } from '../../api.js';
+import { makeDisclosure, resultLine, tabGlossary } from './telos.js';
+
+// Every action here ends in a refresh() that rebuilds the whole tab, so an
+// inline line written before it would be wiped a frame later. Park the message
+// and render it at the top of the next pass instead of firing an alert(). (S11)
+let _pendingNotice = null;
+
+export function setActionNotice(message, isError = false) {
+    _pendingNotice = message ? { message, isError } : null;
+}
+
+export function takeActionNotice() {
+    const notice = _pendingNotice;
+    _pendingNotice = null;
+    return notice ? resultLine(notice.message, notice.isError) : null;
+}
 
 function relTime(isoStr) {
     if (!isoStr) return '';
@@ -27,14 +44,14 @@ function badge(label, cls = '') {
     return el('span', { class: `adaptive-badge ${cls}` }, [text(label)]);
 }
 
-async function actionBtn(label, fn, refresh) {
+export async function actionBtn(label, fn, refresh) {
     const btn = el('button', { class: 'adaptive-btn' }, [text(label)]);
     btn.addEventListener('click', async () => {
         btn.disabled = true;
         try {
             await fn();
         } catch (e) {
-            alert(`Action failed: ${e.message || e}`);
+            setActionNotice(`Action failed: ${e.message || e}`, true);
         }
         await refresh();
     });
@@ -58,18 +75,32 @@ export async function renderAdaptiveTab(container) {
         return;
     }
 
+    container.appendChild(tabGlossary(
+        'Rules the agent writes about itself — routing hints and prompt notes it '
+        + 'may apply on its own, everything else waiting for your approval, and a '
+        + 'one-click rollback for all of it.',
+    ));
+
+    // Chips then buttons, in one row that wraps below 900px and on touch (E2).
     const head = el('div', { class: 'adaptive-head' }, [
         badge(entriesRes.enabled ? 'enabled' : 'disabled', entriesRes.enabled ? 'ok' : 'off'),
         badge(entriesRes.auto_apply ? 'auto-apply on' : 'auto-apply off', entriesRes.auto_apply ? 'ok' : 'warn'),
-        el('button', { class: 'adaptive-btn', onClick: refresh }, [text('↻ Refresh')]),
+        el('button', {
+            class: 'adaptive-btn',
+            title: 'Reload entries, proposals, batches and the journal',
+            'aria-label': 'Refresh the Adaptive tab',
+            onClick: refresh,
+        }, [icon('refresh', { size: 12 }), text('Refresh')]),
     ]);
     container.appendChild(head);
+    const notice = takeActionNotice();
+    if (notice) container.appendChild(notice);
 
     // --- Pending proposals (approve = apply) ---
     const proposals = proposalsRes.proposals || [];
     container.appendChild(section(`Proposals awaiting review (${proposals.length})`));
     if (!proposals.length) {
-        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No pending proposals.')]));
+        container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No proposals waiting — one appears here when the agent wants a change you have to allow, and applies itself if you do not veto it in time.')]));
     }
     for (const p of proposals) {
         let edits = [];
@@ -97,7 +128,54 @@ export async function renderAdaptiveTab(container) {
 
     // --- Active entries by kind ---
     const entries = (entriesRes.entries || []).filter(e => e.status === 'active');
+    const entriesHead = el('div', { class: 'adaptive-head' }, []);
+    const addBtn = el('button', { class: 'adaptive-btn' }, [text('+ New entry')]);
+    entriesHead.appendChild(addBtn);
     container.appendChild(section(`Active entries (${entries.length})`));
+    container.appendChild(entriesHead);
+    const formSlot = el('div');
+    container.appendChild(formSlot);
+    addBtn.addEventListener('click', () => {
+        clear(formSlot);
+        const kindSel = el('select', { class: 'adaptive-input' }, []);
+        for (const k of ['prompt_note', 'routing_hint', 'policy']) {
+            kindSel.appendChild(el('option', { value: k }, [text(k)]));
+        }
+        const titleIn = el('input', { class: 'adaptive-input', placeholder: 'short stable title (becomes the id)' });
+        const contentIn = el('textarea', {
+            class: 'adaptive-input',
+            placeholder: 'the instruction — what to do and when',
+            style: { width: '100%', minHeight: '80px' },
+        });
+        // The form stays open on failure, so its result belongs IN the form —
+        // where the text the user has to fix still is. (S11)
+        const formResult = el('div');
+        const save = el('button', { class: 'adaptive-btn' }, [text('Create')]);
+        save.addEventListener('click', async () => {
+            save.disabled = true;
+            clear(formResult);
+            try {
+                await post('/api/adaptive/entries', { kind: kindSel.value, title: titleIn.value, content: contentIn.value });
+                setActionNotice(`Entry "${titleIn.value}" created`);
+                await refresh();
+            } catch (err) {
+                formResult.appendChild(resultLine(`Create failed: ${err.message || err}`, true));
+                save.disabled = false;
+            }
+        });
+        const cancel = el('button', { class: 'adaptive-btn' }, [text('Cancel')]);
+        cancel.addEventListener('click', () => {
+            const typed = titleIn.value.trim() || contentIn.value.trim();
+            if (typed && !confirm('Discard this unsaved entry?')) return;
+            refresh();
+        });
+        formSlot.appendChild(el('div', { class: 'adaptive-card' }, [
+            el('div', { class: 'adaptive-card-head' }, [text('New adaptive entry (yours — applies immediately, journaled)')]),
+            kindSel, titleIn, contentIn,
+            el('div', { class: 'adaptive-card-actions' }, [save, cancel]),
+            formResult,
+        ]));
+    });
     const byKind = {};
     for (const e of entries) (byKind[e.kind] = byKind[e.kind] || []).push(e);
     for (const kind of Object.keys(byKind).sort()) {
@@ -106,12 +184,19 @@ export async function renderAdaptiveTab(container) {
             // Release valve: a soft delete frees the per-kind cap that
             // producers can only ever fill. Journaled, so it rolls back.
             const rm = await actionBtn('Delete', async () => {
-                if (!confirm(`Delete adaptive entry "${e.title}"? It is journaled and can be rolled back.`)) return;
+                if (!confirm(`Delete the adaptive entry "${e.title}" \u2014 it is journaled, so this can be rolled back.`)) return;
                 await del(`/api/adaptive/entries/${encodeURIComponent(e.id)}`);
             }, refresh);
+            // Usage badge: the per-entry usefulness signal. Zero-use is the
+            // highlighted state — those are the retirement sweep's targets.
+            const u = e.usage;
+            const usageBadge = u
+                ? badge(`used ${u.uses}${u.successes ? ` · ✓${u.successes}` : ''}${u.failures ? ` · ✗${u.failures}` : ''}`, 'ok')
+                : badge('unused', 'off');
             container.appendChild(el('div', { class: 'adaptive-card entry' }, [
                 el('div', { class: 'adaptive-card-head' }, [
                     badge(`v${e.version}`), badge(e.risk, e.risk === 'high' ? 'warn' : ''), badge(e.source),
+                    usageBadge,
                     text(` ${e.title}`),
                 ]),
                 el('div', { class: 'adaptive-entry-content' }, [text(e.content)]),
@@ -119,7 +204,7 @@ export async function renderAdaptiveTab(container) {
             ]));
         }
     }
-    if (!entries.length) container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No active entries.')]));
+    if (!entries.length) container.appendChild(el('div', { class: 'adaptive-empty' }, [text('No entries yet — routing hints and prompt notes land here once the agent starts writing rules about its own behaviour.')]));
 
     // --- Batches ---
     const batches = (batchesRes.batches || []).filter(b => b.status !== 'pending');
@@ -138,7 +223,7 @@ export async function renderAdaptiveTab(container) {
         const btns = el('div', { class: 'adaptive-card-actions' });
         if (b.status === 'applied' || b.status === 'suspect') {
             btns.appendChild(await actionBtn('Roll back', async () => {
-                if (!confirm(`Roll back batch ${b.batch_id}? Entries restore to their pre-batch snapshots.`)) return;
+                if (!confirm(`Roll back batch ${b.batch_id} \u2014 its entries restore to their pre-batch snapshots, and this is itself journaled.`)) return;
                 await post('/api/adaptive/rollback', { batch_id: b.batch_id });
             }, refresh));
         }
@@ -163,9 +248,12 @@ export async function renderAdaptiveTab(container) {
         const diff = el('pre', { class: 'adaptive-diff', style: 'display:none' });
         const fmt = (j) => { try { return JSON.stringify(JSON.parse(j), null, 1); } catch (_e) { return j || '(none)'; } };
         diff.textContent = `BEFORE:\n${fmt(ev.before_json)}\n\nAFTER:\n${fmt(ev.after_json)}\n\nEVIDENCE: ${ev.evidence_json || '[]'}`;
-        head.addEventListener('click', () => {
-            diff.style.display = diff.style.display === 'none' ? 'block' : 'none';
-        });
+        makeDisclosure(
+            head,
+            () => diff.style.display !== 'none',
+            () => { diff.style.display = diff.style.display === 'none' ? 'block' : 'none'; },
+        );
+        head.setAttribute('aria-label', `Event ${ev.id}: ${ev.action} on ${ev.entry_id}`);
         row.appendChild(head);
         row.appendChild(diff);
         container.appendChild(row);

@@ -35,6 +35,10 @@ omit = [
     # them. fail_under was re-baselined in the same commit; ratchet upward.
     "run.py",                   # app entrypoint (integration-level)
     "core/certs.py",            # SSL certificate generation
+    # Dev scripts, not application code: the UI gate drives a real browser
+    # against a booted server and is run by hand (tools/ui-gate/README.md).
+    # Without this, `source = ["."]` reports them as 0%-covered files.
+    "tools/*",
 ]
 
 [tool.coverage.report]

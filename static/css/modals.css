@@ -3,7 +3,7 @@
 .modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.65);
+    background: var(--scrim);
     backdrop-filter: blur(2px);
     display: flex;
     align-items: center;
@@ -23,6 +23,11 @@
     flex-direction: column;
     animation: slideUp 0.2s ease;
     box-shadow: var(--shadow-lg);
+    /* max-height without an overflow rule silently CLIPS: a card whose content
+       does not happen to live inside a scrolling .modal-body (the QR, token
+       and regenerate dialogs) simply lost whatever ran past 80vh, buttons
+       included. (V12) */
+    overflow: auto;
 }
 
 .modal-header {
@@ -67,7 +72,7 @@
 
 /* Expanded modal state */
 .modal-card {
-    transition: max-width 0.2s ease, max-height 0.2s ease, width 0.2s ease;
+    transition: max-width var(--transition), max-height var(--transition), width var(--transition);
 }
 .modal-card.expanded {
     max-width: 90vw;
@@ -87,6 +92,49 @@
     display: flex;
     justify-content: flex-end;
     gap: var(--sp-2);
+}
+
+/* Section description, opened in place. The `?` tooltip is hover-only and so
+   invisible on touch; this is the same text where a thumb can reach it. */
+.settings-section-desc-wrap {
+    margin: 0 0 var(--sp-2);
+}
+.settings-section-desc-toggle {
+    background: none;
+    border: none;
+    padding: 2px 0;
+    font-family: var(--mono);
+    font-size: var(--text-xxs);
+    color: var(--accent);
+    cursor: pointer;
+    opacity: 0.7;
+    transition: var(--transition);
+}
+.settings-section-desc-toggle:hover,
+.settings-section-desc-toggle:focus-visible {
+    opacity: 1;
+}
+.settings-section-desc {
+    margin-top: var(--sp-1);
+    padding-left: var(--sp-2);
+    border-left: 2px solid var(--line-faint);
+    font-size: var(--text-xs);
+    line-height: 1.6;
+    color: var(--text-dim);
+}
+
+/* The shell rendered when /api/settings could not be read at all. */
+.settings-load-error {
+    border-left: 3px solid var(--warning);
+    background: var(--warning-bg);
+    border-radius: var(--radius-sm);
+    padding: var(--sp-3) var(--sp-4);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+}
+.settings-load-error p {
+    margin-top: var(--sp-2);
+    color: var(--text-dim);
 }
 
 /* Settings sections */
@@ -122,10 +170,20 @@
     color: var(--text-faint);
     font-size: 9px;
     cursor: help;
-    font-weight: 600;
+    font-weight: 500;
     text-transform: none;
     letter-spacing: 0;
     line-height: 1;
+    position: relative;
+}
+/* A10: 24x24 pointer target without a 24px painted disc — the heading row is
+   11px uppercase text and a circle that size would dominate it. The
+   pseudo-element is part of the button's own hit area. */
+.section-help::after {
+    content: '';
+    position: absolute;
+    inset: -5px;
+    border-radius: 50%;
 }
 .section-help:hover,
 .section-help:focus {
@@ -148,7 +206,7 @@
     letter-spacing: normal;
     line-height: 1.5;
     z-index: 1100;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    box-shadow: var(--shadow-md);
     pointer-events: none;
 }
 .section-help-wrap:hover .section-help-tip,
@@ -241,7 +299,7 @@
    width (flex-shrink:0 + a 140px floor), which made long captions run out
    from under the label column and collide with the control. Inside the label
    cell the caption must be free to wrap instead. Specificity is deliberate:
-   mobile.css also targets `.setting-row label`. */
+   compact.css also targets `.setting-row label`. */
 .setting-row .setting-label-cell label {
     min-width: 0;
     flex-shrink: 1;
@@ -309,6 +367,42 @@
     background: var(--accent-glow);
 }
 .setting-row.setting-locked { opacity: 0.85; }
+
+/* The line under a control: what the default is, what range the server takes,
+   the reset, and the reason a value cannot be saved. Full width so it never
+   competes with the control for the row. (S4) */
+.setting-meta {
+    flex-basis: 100%;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    font-size: var(--text-xxs);
+    line-height: 1.4;
+}
+.setting-facts {
+    color: var(--text-faint);
+    font-family: var(--mono);
+}
+.setting-reset {
+    gap: 4px;
+    padding: 0 var(--sp-1);
+    color: var(--text-dim);
+}
+.setting-reset:hover { color: var(--text-bright); }
+.setting-error {
+    color: var(--error);
+    font-weight: 500;
+}
+/* An out-of-range value is dropped by the server without a word, so it has to
+   look wrong here before Save is ever pressed. */
+.setting-row.setting-invalid input[type="number"] {
+    border-color: var(--error);
+}
+.setting-row.setting-invalid input[type="number"]:focus {
+    border-color: var(--error);
+}
+
 .setting-locked-note {
     flex-basis: 100%;
     font-size: var(--text-xs);
@@ -355,40 +449,26 @@
     cursor: pointer;
 }
 
-/* Buttons */
-.btn {
-    font-family: var(--mono);
-    font-size: var(--text-sm);
-    padding: var(--sp-2) var(--sp-4);
-    border-radius: var(--radius);
-    cursor: pointer;
-    transition: var(--transition);
-    font-weight: 500;
+/* Buttons — the base, the roles and the sizes all live in buttons.css.
+   What is left here is the handful of places a button needs a position
+   rather than a look; each of these replaced an inline style attribute on
+   the element itself. (V7) */
+.settings-btn-row {
+    display: flex;
+    gap: var(--sp-2);
+    justify-content: flex-end;
+    margin-top: var(--sp-4);
 }
-
-.btn-primary {
-    background: var(--accent);
-    color: var(--bg);
-    border: none;
-}
-.btn-primary:hover { background: var(--text-bright); }
-
-.btn-secondary {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-}
-.btn-secondary:hover {
-    border-color: var(--text);
-    color: var(--text);
-}
-.btn-secondary.active {
-    background: var(--accent);
-    color: var(--bg);
-    border-color: var(--accent);
-}
-.btn-secondary.active:hover {
-    color: var(--bg);
+.settings-btn-row--flush { margin-top: 0; }
+/* A button that sits on its own line under the control it belongs to. */
+.settings-block-btn { margin-top: var(--sp-2); }
+/* The QR's quiet zone — see --qr-paper. */
+.settings-qr {
+    background: var(--qr-paper);
+    border-radius: var(--radius-lg);
+    padding: var(--sp-3);
+    display: inline-block;
+    margin: var(--sp-3) 0;
 }
 
 .save-status {
@@ -401,13 +481,6 @@
 .save-status.status-warn { color: var(--accent); }
 .save-status.status-error { color: var(--error); }
 .save-status.status-muted { color: var(--text-dim); }
-
-.btn-danger {
-    background: var(--error);
-    color: var(--bg);
-    border: none;
-}
-.btn-danger:hover { background: var(--error); filter: brightness(1.15); }
 
 /* Tabs */
 .tab-bar {
@@ -435,6 +508,65 @@
 }
 .tab-content { display: none; }
 .tab-content.active { display: block; }
+
+/* Settings carries six goal-named tabs rather than five subsystem-named ones,
+   so the card gets the width to show them and the strip scrolls instead of
+   stacking into a second row that pushes the first control off the screen.
+   Scoped to .settings-card: .tab-bar is shared with Spaces and the timeline,
+   which have two or three short tabs and want none of this. (S6) */
+.modal-card.settings-card { max-width: min(94vw, 880px); }
+.settings-tab-bar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 0 var(--sp-3);
+}
+.settings-tab-bar::-webkit-scrollbar { display: none; }
+/* A strip that can scroll has to look like one, or the tabs past the right
+   edge do not exist as far as the reader is concerned. Same sticky-flex-item
+   fade the Explorer's group strip uses, riding the right edge of the
+   scroller. Unlike that one it keeps its width (no negative margin): the
+   16px is trailing gutter, so a tab that fits is never read through a
+   gradient, and a tab that has to be scrolled to can be scrolled clear of
+   it. Invisible when nothing overflows — it is the card's own colour over
+   the card. */
+.settings-tab-bar::after {
+    content: '';
+    position: sticky;
+    right: 0;
+    flex: 0 0 16px;
+    align-self: stretch;
+    pointer-events: none;
+    background: linear-gradient(to left, var(--bg-raised), transparent);
+}
+.settings-tab-bar .tab-btn {
+    white-space: nowrap;
+    flex: 0 0 auto;
+    font-size: var(--text-xs);
+    padding: var(--sp-2) var(--sp-2);
+}
+/* Both labels are in the DOM; width picks one. */
+.settings-tab-bar .tab-label-short { display: none; }
+
+/* Below ~1024px the card is bounded by its 90% width, not by max-width, and
+   the six full labels stop fitting: at 900px the strip overflowed by 12px and
+   the last tab sat half off the edge. Tighten the gutters first — that alone
+   carries the band down to ~900 with the full names intact. */
+@media (max-width: 1024px) {
+    .settings-tab-bar { padding: 0 var(--sp-2); }
+    .settings-tab-bar .tab-btn { padding-left: 5px; padding-right: 5px; }
+}
+/* Narrower than that, tighter padding cannot buy 130px. Swap in the short
+   labels; `aria-label` and `title` keep the full name on every tab. */
+@media (max-width: 900px) {
+    .settings-tab-bar .tab-label-full { display: none; }
+    .settings-tab-bar .tab-label-short { display: inline; }
+}
+.settings-tab-loading {
+    padding: var(--sp-4);
+    color: var(--text-faint);
+    font-size: var(--text-sm);
+}
 
 /* OpenRouter model list */
 .or-hint {
@@ -478,11 +610,12 @@
     text-align: center;
     flex-shrink: 0;
 }
-.or-status.valid { color: #5a9a4a; }
+.or-status.valid { color: var(--success); }
 .or-status.invalid { color: var(--error); }
 .or-status.checking {
     color: var(--accent-dim);
-    animation: pulse 1.4s ease infinite;
+    --pulse-dip: 0.3;
+    animation: pulse var(--pulse-fast) ease infinite;
 }
 .or-remove {
     background: none;
@@ -512,20 +645,11 @@
     transition: border-color var(--transition);
 }
 .or-model-input:focus { border-color: var(--accent-dim); }
-.btn-sm {
-    padding: var(--sp-1) var(--sp-3);
-    font-size: var(--text-xs);
-}
 .or-empty {
     font-size: var(--text-xs);
     color: var(--text-faint);
     font-style: italic;
     padding: var(--sp-2) 0;
-}
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
 }
 
 /* Ollama model list */
@@ -632,42 +756,16 @@
     gap: var(--sp-2);
     margin-top: var(--sp-1);
 }
+/* Only the geometry is local: these three share the width of the row and are
+   a full-size target, not a toolbar chip. Their colours are the .btn--success
+   / .btn--danger / .btn--secondary roles in buttons.css. */
 .q-yes-btn,
 .q-no-btn,
 .q-other-btn {
     flex: 1;
     padding: var(--sp-3) var(--sp-2);
     font-size: var(--text-md);
-    font-weight: 600;
     border-radius: var(--radius);
-    border: 1px solid var(--border);
-    cursor: pointer;
-    transition: var(--transition);
-    font-family: var(--mono);
-}
-.q-yes-btn {
-    background: var(--success-subtle);
-    color: var(--success);
-    border-color: var(--success);
-}
-.q-yes-btn:hover {
-    background: color-mix(in srgb, var(--success) 22%, var(--bg));
-}
-.q-no-btn {
-    background: var(--error-subtle);
-    color: var(--error);
-    border-color: var(--error);
-}
-.q-no-btn:hover {
-    background: color-mix(in srgb, var(--error) 22%, var(--bg));
-}
-.q-other-btn {
-    background: var(--bg-hover);
-    color: var(--text-dim);
-}
-.q-other-btn:hover {
-    color: var(--text-bright);
-    background: var(--bg-raised);
 }
 .question-other-area {
     margin-top: var(--sp-3);
@@ -685,7 +783,7 @@
     background: var(--accent);
     color: var(--bg);
     font-size: var(--text-xxs);
-    font-weight: 600;
+    font-weight: 500;
     min-width: 18px;
     height: 18px;
     line-height: 18px;
@@ -729,7 +827,7 @@
 .question-bubble .q-inline-form { display: flex; flex-direction: column; gap: var(--sp-2); }
 .question-bubble .q-inline-input {
     width: 100%;
-    background: var(--bg, #1e1e1e);
+    background: var(--bg);
     color: var(--fg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -790,7 +888,7 @@
     background: var(--accent);
     color: var(--bg);
     font-size: 9px;
-    font-weight: 700;
+    font-weight: 500;
     min-width: 14px;
     height: 14px;
     line-height: 14px;
@@ -896,11 +994,6 @@
     margin-right: auto;
 }
 
-.btn-sm {
-    font-size: var(--text-xs);
-    padding: var(--sp-1) var(--sp-3);
-}
-
 /* Question item accent border */
 .notif-question {
     border-left: 3px solid var(--accent);
@@ -908,15 +1001,15 @@
 
 /* ── Security tab — warning block ──────────────────────────── */
 .security-warning-block {
-    background: color-mix(in srgb, var(--error, #c25450) 8%, var(--bg));
-    border: 1px solid var(--error, #c25450);
+    background: color-mix(in srgb, var(--error) 8%, var(--bg));
+    border: 1px solid var(--error);
     border-radius: var(--radius);
     padding: var(--sp-3);
     margin-bottom: var(--sp-4);
 }
 .security-warning-title {
-    font-weight: 700;
-    color: var(--error, #c25450);
+    font-weight: 500;
+    color: var(--error);
     margin-bottom: var(--sp-2);
     font-size: var(--text-sm);
     letter-spacing: 0.02em;
@@ -946,7 +1039,7 @@
 }
 .security-scopes-tool:last-child { border-bottom: none; }
 .security-scopes-tool-name {
-    font-weight: 600;
+    font-weight: 500;
     font-size: var(--text-xs);
     color: var(--text-dim);
     text-transform: uppercase;
@@ -976,7 +1069,7 @@
 .notif-session-link {
     font-family: var(--font-mono, monospace);
     font-size: 0.72rem;
-    color: var(--accent, #7aa2f7);
+    color: var(--accent);
     cursor: pointer;
     text-decoration: none;
     opacity: 0.85;
@@ -984,4 +1077,293 @@
 .notif-session-link:hover {
     text-decoration: underline;
     opacity: 1;
+}
+
+/* --- Spaces modal (v33) --- */
+/* The edit card is large and user-resizable: resize:both needs a non-visible
+   overflow, and the flex column lets the directive editor absorb whatever
+   height the user drags out. Monaco (automaticLayout) tracks the resize. */
+.space-modal-card {
+    width: min(1100px, 94vw);
+    height: min(82vh, 950px);
+    max-width: 96vw;
+    max-height: 94vh;
+    min-width: 560px;
+    min-height: 420px;
+    resize: both;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    transition: none; /* the base .modal-card animates max-width — fights resize */
+}
+.space-modal-card.compact {
+    height: auto;
+    min-height: 0;
+    width: min(560px, 94vw);
+    resize: none;
+}
+.space-modal-body {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+}
+.space-form-grid { display: flex; gap: var(--sp-5); align-items: flex-start; flex-wrap: wrap; }
+.space-form-name { flex: 1; min-width: 220px; }
+.space-field-label {
+    display: block;
+    font-size: var(--text-xxs);
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin: 0 0 4px;
+}
+.space-label-input {
+    width: 100%;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    padding: 7px 10px;
+    font-size: var(--text-sm);
+    font-family: var(--mono);
+    outline: none;
+    transition: border-color var(--transition);
+}
+.space-label-input:focus { border-color: var(--accent-dim); }
+.space-color-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-height: 32px; }
+.space-swatch {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    border: 2px solid transparent;
+    cursor: pointer;
+    padding: 0;
+}
+.space-swatch.selected { border-color: var(--text-bright); }
+.space-color-custom { width: 28px; height: 24px; border: none; background: none; cursor: pointer; padding: 0; }
+.space-slug-note { font-size: var(--text-xxs); color: var(--text-faint); margin-top: var(--sp-2); }
+
+/* Directive editor fills the rest of the card */
+.space-directives {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    margin-top: var(--sp-4);
+}
+.space-dir-tabbar { padding: 0; }
+.space-dir-ovr-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.space-dir-pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 var(--radius) var(--radius);
+    padding: var(--sp-3);
+}
+.space-dir-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    margin-bottom: var(--sp-2);
+    flex-shrink: 0;
+}
+.space-dir-mode { font-size: var(--text-xs); color: var(--text-dim); flex: 1; }
+.space-dir-size { font-size: var(--text-xxs); color: var(--text-faint); }
+.space-dir-size.over { color: var(--error); }
+.space-dir-action { flex-shrink: 0; }
+/* The mode selector and its label are one cell, so the toolbar's other
+   items lay out against the pair rather than against the <select>. */
+.space-dir-mode-cell {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2);
+    flex: 1;
+    min-width: 0;
+}
+.space-dir-hint { font-size: var(--text-xxs); color: var(--text-faint); margin-top: var(--sp-2); flex-shrink: 0; }
+.space-dir-default {
+    flex: 1;
+    min-height: 200px;
+    overflow: auto;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--sp-3) var(--sp-4);
+    font-size: 12px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    color: var(--text-dim);
+    margin: 0;
+}
+.space-dir-editor {
+    flex: 1;
+    min-height: 220px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+.space-dir-editor .ce-fallback {
+    width: 100%;
+    height: 100%;
+    background: var(--bg-raised);
+    color: var(--text);
+    border: none;
+    outline: none;
+    resize: none;
+    padding: var(--sp-3);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+}
+.space-dir-editor .ce-fallback:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+}
+
+/* Delete dialog */
+.space-cascade-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: var(--sp-3);
+    font-size: var(--text-sm);
+    color: var(--text);
+    cursor: pointer;
+}
+
+
+/* ======================================================================
+   Action sheet (components/modals/sheet.js)
+   ----------------------------------------------------------------------
+   A centred card here; compact.css turns every .modal-card into a bottom
+   sheet flush with the foot of a narrow screen, grab handle and all, so
+   this needs no media query of its own. Rows are 48px because they are
+   the whole point of the pattern — one comfortable target per action
+   instead of three cramped ones crowding a list row.
+   ====================================================================== */
+.sheet-card {
+    width: min(420px, 100%);
+    max-width: 420px;
+    padding: var(--sp-2);
+}
+.sheet-title {
+    padding: var(--sp-3) var(--sp-3) var(--sp-2);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
+    /* The title says what the actions are ABOUT — a session name, a file
+       path. It gets one line; the actions are what you came for. */
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.sheet-items {
+    display: flex;
+    flex-direction: column;
+}
+.sheet-item {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    width: 100%;
+    min-height: 48px;
+    padding: var(--sp-2) var(--sp-3);
+    background: none;
+    border: none;
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: var(--text-md);
+    text-align: left;
+    cursor: pointer;
+    transition: var(--transition);
+}
+.sheet-item:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-bright);
+}
+.sheet-item:focus-visible {
+    outline: 2px solid var(--accent-dim);
+    outline-offset: -2px;
+}
+.sheet-item > svg {
+    flex-shrink: 0;
+    color: var(--text-faint);
+}
+.sheet-item-label {
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+/* A shortcut or a count, kept quiet and out of the label's way. */
+.sheet-item-hint {
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+}
+.sheet-item--danger,
+.sheet-item--danger > svg {
+    color: var(--error);
+}
+.sheet-item--danger:hover:not(:disabled) {
+    background: var(--error-subtle);
+    color: var(--error);
+}
+/* Greyed rather than hidden: a list that changes shape between rows is a
+   list you have to re-read every time you open it. */
+.sheet-item:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+.sheet-cancel {
+    width: 100%;
+    margin-top: var(--sp-2);
+}
+
+/* ======================================================================
+   Model picker sheet (app.js — compact only)
+   ----------------------------------------------------------------------
+   The anchored #model-menu keeps the desktop and the wide tablet. Below
+   900px the same list is a bottom sheet built on the same .sheet-item rows
+   as sheet.js, so it inherits the 48px target, the ellipsis and the hint
+   column with nothing restated here. Only three things differ: the list
+   scrolls INSIDE the card (a thirty-model list must not push the title and
+   the way out off the top), the check sits in a fixed gutter so labels line
+   up whether or not a row is the current one, and the id stays monospaced.
+   Nothing in this block can match above 900px — the sheet is not built.
+   ====================================================================== */
+.model-sheet-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    /* A flick that runs past the end of the list must not scroll the
+       transcript underneath it. */
+    overscroll-behavior: contain;
+}
+/* A fixed gutter, present on every row: a check that only some rows have
+   would step every other label 16px to the left. */
+.model-sheet-check {
+    flex: none;
+    width: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+}
+.model-sheet-item.current .sheet-item-label {
+    color: var(--accent);
 }

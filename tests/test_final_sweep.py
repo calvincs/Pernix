@@ -132,22 +132,6 @@ def test_discover_skills_excludes_disabled(tmp_path, monkeypatch):
     assert "release-tool" not in out  # gone from agent-facing discovery
 
 
-def test_get_tool_schema_disabled_returns_clear_error(monkeypatch, tmp_path):
-    """Disabled tool's schema is hidden from get_tool_schema with a clear error."""
-    from core.tools.registry import ToolRegistry
-
-    monkeypatch.setattr("core.tools.registry.TOOLS_CONFIG_PATH", tmp_path / "tools.json")
-    reg = ToolRegistry()
-    reg.register(name="t1", func=lambda: "ok", description="t", parameters={"type": "object", "properties": {}})
-    reg.disable("t1")
-    monkeypatch.setattr("core.tools.registry._registry", reg)
-    from core.tools.builtin.discovery_tools import get_tool_schema
-
-    out = get_tool_schema("t1")
-    assert "disabled" in out.lower()
-    assert "Explorer" in out
-
-
 def test_discover_tools_excludes_disabled(monkeypatch, tmp_path):
     from core.tools.registry import ToolRegistry
 

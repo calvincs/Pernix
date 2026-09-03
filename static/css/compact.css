@@ -1,0 +1,511 @@
+/* Pernix — Compact layout (narrow viewports)
+   ----------------------------------------------------------------------
+   GATE: the media attribute on this file's <link> in index.html —
+
+       media="(max-width: 899px)"
+
+   Width only. No JavaScript is involved: unlike touch.css there is nothing
+   here an iPad in desktop mode could hide from a media query, because the
+   question this file answers — "is the viewport narrower than 900px?" — is
+   one the browser always answers honestly.
+
+   WHAT BELONGS HERE: fitting a narrow width. The sidebar as a modal drawer
+   with a scrim, the full-screen Explorer, bottom-sheet modals, the chat
+   column at 100%, stacked settings rows, wrapped toolbars. A rule that is
+   about INPUT MODALITY — a 44px target, a 16px input, a hover-revealed
+   control, a safe-area inset — belongs in touch.css instead. 900px is the
+   tablet line (D1): every iPad in landscape docks the sidebar and keeps
+   the desktop shapes; every iPad in portrait and every phone stays here.
+
+   Loaded BEFORE touch.css so touch wins ties, exactly as mobile.css did.
+   The --safe-* tokens are defined in tokens.css.                        */
+
+/* ======================================================================
+   Moved here from layout.css
+   ----------------------------------------------------------------------
+   These sat behind layout.css's own copy of the old `(max-width: 768px),
+   (hover: none) and (pointer: coarse)` query. Kept at the TOP: layout.css
+   loads before this file, so this is where they sat in the cascade, and
+   #sidebar and #input-wrapper are both re-declared further down. Moving
+   them lower would let `display: none` beat the drawer.
+
+   layout.css's `#sidebar-toggle { display: none }` is deliberately NOT
+   carried over. It was safe only because touch.css puts the hamburger
+   back with `display: flex !important`; in a narrow window with a MOUSE
+   touch.css does not load, and hiding it would leave the drawer with no
+   handle at all. layout.css already floats it over #main there.
+   ====================================================================== */
+/* from layout.css */
+#sidebar { display: none; }
+
+:root { --chat-max-w: 100%; }
+#input-wrapper { padding: var(--sp-2) var(--sp-3) var(--sp-3); }
+
+/* The chat column spans the viewport; there is no room for a measure. */
+:root {
+    --chat-max-w: 100% !important;
+}
+
+/* ------------------------------------------------------------------
+   Sidebar — slide-in drawer (overrides layout.css 768px display:none)
+   ------------------------------------------------------------------ */
+#sidebar {
+    display: flex !important;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 280px !important;
+    z-index: 500;
+    transform: translateX(-100%);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: none;
+    padding-top: var(--safe-top);
+    /* The drawer spans the full height, so its last row (the legend)
+       lands under the home indicator without this. */
+    padding-bottom: var(--safe-bottom);
+    padding-left: var(--safe-left);
+}
+#sidebar.collapsed {
+    width: 280px !important;
+    border-right-color: var(--border);
+    transform: translateX(-100%);
+}
+#sidebar.mobile-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px var(--shadow-color);
+}
+/* A drawer has no edge to drag: its width is the 280px above, !important,
+   and the strip would be left floating over the transcript. (touch.css hides
+   the same handle for the other reason — see the note by .fp-resize-handle.) */
+#sidebar-resizer {
+    display: none;
+}
+
+/* Scrim behind drawer */
+.mobile-scrim {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: var(--scrim);
+    z-index: 499;
+    touch-action: none;
+}
+.mobile-scrim.visible {
+    display: block;
+}
+
+/* ------------------------------------------------------------------
+   File panel — full-screen overlay
+   ------------------------------------------------------------------ */
+#file-panel.open {
+    position: fixed !important;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: 100% !important;
+    z-index: 400;
+}
+/* .fp-resize-handle is hidden in touch.css instead: a 4px col-resize strip is
+   a mouse affordance at EVERY width, so hiding it is a pointer question. */
+.fp-header {
+    padding-top: calc(var(--sp-3) + var(--safe-top));
+}
+/* Full-screen overlay: its last row would otherwise sit under the home
+   indicator, and its edges under the landscape notch. Insets go on the
+   container so every tab's content inherits them exactly once. */
+#file-panel.open {
+    padding-bottom: var(--safe-bottom);
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
+}
+
+/* ------------------------------------------------------------------
+   Messages area
+   ------------------------------------------------------------------ */
+#messages {
+    padding: var(--sp-3) 0;
+    min-height: 0;
+}
+.messages-inner {
+    padding-left: max(var(--sp-3), var(--safe-left));
+    padding-right: max(var(--sp-3), var(--safe-right));
+}
+
+/* ------------------------------------------------------------------
+   Worker strip — one 44px line, not three rows of 16px chips (P3)
+   ------------------------------------------------------------------ */
+/* app.js builds .worker-strip-summary instead of the chips below 900px, so
+   these rules have nothing to match above it; the body attribute is belt and
+   braces for the frame in which a tier flip is still being reconciled — and
+   keeping it is what leaves their specificity exactly as layout.css had it.
+   #worker-strip drops its own padding: the button carries the 44px, and 4px
+   of strip padding on top of it is what would push the line over the 48px
+   the phone can spare.                                                     */
+body[data-compact] #worker-strip {
+    padding: 0;
+    flex-wrap: nowrap;
+}
+body[data-compact] .worker-strip-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    width: 100%;
+    min-height: 44px;
+    padding-left: max(var(--sp-3), var(--safe-left));
+    padding-right: max(var(--sp-3), var(--safe-right));
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    text-align: left;
+    cursor: pointer;
+}
+/* The counts get the room; the chevron never wraps off the end. */
+body[data-compact] .worker-strip-summary-label {
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+body[data-compact] .worker-strip-summary > svg {
+    flex: none;
+    color: var(--text-faint);
+}
+body[data-compact] .worker-strip-summary:hover,
+body[data-compact] .worker-strip-summary:focus-visible {
+    color: var(--accent);
+}
+body[data-compact] .worker-strip-summary:hover > svg,
+body[data-compact] .worker-strip-summary:focus-visible > svg {
+    color: var(--accent);
+}
+
+/* ------------------------------------------------------------------
+   Modals — bottom-sheet pattern
+   ------------------------------------------------------------------ */
+.modal-overlay {
+    align-items: flex-end;
+    /* Landscape notch — insets go on the overlay so the sheet keeps
+       width:100% of the remaining space instead of overflowing it. */
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
+}
+.modal-card {
+    width: 100%;
+    max-width: 100%;
+    max-height: 92vh;
+    max-height: 92dvh;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    animation: slideUpMobile 0.25s ease;
+    /* Sheets sit flush against the bottom edge. A footer supplies its
+       own inset (below); footer-less sheets (timeline, signals) would
+       otherwise run their last row under the home indicator. */
+    padding-bottom: var(--safe-bottom);
+}
+/* A footer already pads for the home indicator — don't inset twice. */
+.modal-card:has(.modal-footer) {
+    padding-bottom: 0;
+}
+/* Grab handle indicator for bottom sheets */
+.modal-card::before {
+    content: '';
+    display: block;
+    width: 32px;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    margin: var(--sp-2) auto 0;
+    flex-shrink: 0;
+}
+.modal-card.expanded {
+    max-width: 100%;
+    width: 100%;
+    max-height: 100vh;
+    max-height: 100dvh;
+    border-radius: 0;
+}
+.modal-card.expanded::before {
+    display: none;
+}
+/* The one sheet that was never actually a sheet: modals.css sizes Settings
+   with `.modal-card.settings-card { max-width: min(94vw, 880px) }`, two
+   classes to the rule above's one, so the biggest dialog in the app kept a
+   6vw gutter down both sides of a phone and floated as a card with rounded
+   top corners over the transcript. Same specificity, so it wins on order. */
+.modal-card.settings-card {
+    max-width: 100%;
+}
+/* Same trap, same fix: layout.css sizes the suggestion sheet with
+   `.modal-card.sugg-sheet-card`, two classes to the bottom-sheet rule's one,
+   so without this it would float as a 680px card over the transcript instead
+   of rising from the bottom edge like every other sheet. */
+.modal-card.sugg-sheet-card {
+    width: 100%;
+    max-width: 100%;
+    max-height: 92dvh;
+}
+
+.modal-footer {
+    padding-bottom: max(var(--sp-3), var(--safe-bottom));
+}
+
+/* Scout Signals — bottom-sheet sizing + compact table */
+#signals-modal {
+    max-width: 100%;
+    width: 100%;
+    max-height: 92dvh;
+}
+#signals-modal table {
+    font-size: var(--text-xs);
+}
+#signals-modal th,
+#signals-modal td {
+    padding: 0.35rem 0.4rem;
+}
+
+/* Settings rows — stack vertically */
+.setting-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--sp-2);
+}
+.setting-row label {
+    min-width: auto;
+}
+/* The label column is the full row width once stacked, so nothing gets
+   squeezed into a two-character column. */
+.setting-label-cell {
+    min-width: 0;
+    max-width: 100%;
+    width: 100%;
+}
+
+/* Settings search — the primary way to find anything on a phone, so it
+   gets a full-width field and never triggers the iOS zoom. */
+/* Horizontal notch insets live on .modal-overlay (above), so the sheet's
+   own chrome only needs its normal padding here. */
+.settings-search {
+    padding: var(--sp-2) var(--sp-5);
+    flex-wrap: wrap;
+}
+
+.settings-search-count {
+    white-space: normal;
+}
+
+/* Save/Cancel stay reachable; a long status message (rejected values,
+   restart notices) wraps above them instead of shoving them off-screen. */
+.modal-footer {
+    flex-wrap: wrap;
+}
+.save-status {
+    flex-basis: 100%;
+    margin-right: 0;
+    margin-bottom: var(--sp-1);
+}
+
+/* Section help tooltip — flow-relative instead of fixed */
+.section-help-tip {
+    position: absolute !important;
+    left: 0 !important;
+    top: 100% !important;
+    right: auto !important;
+    bottom: auto !important;
+    width: min(280px, calc(100vw - 48px));
+    margin-top: 4px;
+}
+.section-help-wrap {
+    position: relative;
+}
+
+/* Five tabs wrapped onto two rows at 390px, costing ~45px of a sheet that
+   is already short. Keep them on one line and let the strip scroll if a
+   narrower phone still can't fit them. */
+.tab-bar {
+    padding: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.tab-bar::-webkit-scrollbar {
+    display: none;
+}
+
+/* ------------------------------------------------------------------
+   P8 — a scrolling tab strip has to say which way it scrolls
+
+   Four strips in the app hide their scrollbar and then run off the edge
+   of a narrow viewport: Settings' six tabs, the shared .tab-bar (Spaces,
+   timeline), and the Explorer's group and subtab rows. Two of them
+   already carry a permanent right-edge fade; the other two carry
+   nothing, and none of them says anything about the tabs behind you.
+
+   file-panel.js / modals.js (M2C) write data-scroll on the strip as it
+   scrolls: `start` (more to the right), `mid` (more both ways), `end`
+   (more to the left), `none` (it all fits). The fades follow, so an
+   edge with nothing past it is never greyed — which is what makes the
+   greying mean something.
+
+   Both fades are STICKY FLEX ITEMS, the idiom modals.css and
+   file-panel.css already use here, not absolutely positioned ones: an
+   absolute child of a scroller scrolls away with the content, and the
+   whole point is to stay pinned to the scrollport edge. Each takes 20px
+   and gives it straight back with a negative margin, so the strip's
+   measurement is unchanged and the gradient lies over the tab it is
+   telling you about.
+   ------------------------------------------------------------------ */
+.settings-tab-bar,
+.tab-bar,
+.fp-group-bar,
+.fp-subtab-bar {
+    /* proximity, not mandatory: these strips are also scrolled
+       programmatically (Settings brings the active tab into view) and a
+       mandatory snap fights that. */
+    scroll-snap-type: x proximity;
+    /* The strip's own ground, named once so the two gradients below can
+       be written without knowing which strip they are on. */
+    --strip-bg: var(--bg-raised);
+}
+.fp-subtab-bar {
+    --strip-bg: var(--bg-surface);
+}
+.settings-tab-bar .tab-btn,
+.tab-bar .tab-btn,
+.fp-group-bar .fp-tab-btn,
+.fp-subtab-bar .fp-subtab-btn {
+    scroll-snap-align: start;
+}
+
+.settings-tab-bar::before,
+.settings-tab-bar::after,
+.tab-bar::before,
+.tab-bar::after,
+.fp-group-bar::before,
+.fp-group-bar::after,
+.fp-subtab-bar::before,
+.fp-subtab-bar::after {
+    content: '';
+    position: sticky;
+    align-self: stretch;
+    flex: 0 0 20px;
+    pointer-events: none;
+    background: none;
+}
+.settings-tab-bar::before,
+.tab-bar::before,
+.fp-group-bar::before,
+.fp-subtab-bar::before {
+    left: 0;
+    margin-right: -20px;
+}
+.settings-tab-bar::after,
+.tab-bar::after,
+.fp-group-bar::after,
+.fp-subtab-bar::after {
+    right: 0;
+    margin-left: -20px;
+}
+/* More to the right. */
+.settings-tab-bar[data-scroll="start"]::after,
+.settings-tab-bar[data-scroll="mid"]::after,
+.tab-bar[data-scroll="start"]::after,
+.tab-bar[data-scroll="mid"]::after,
+.fp-group-bar[data-scroll="start"]::after,
+.fp-group-bar[data-scroll="mid"]::after,
+.fp-subtab-bar[data-scroll="start"]::after,
+.fp-subtab-bar[data-scroll="mid"]::after {
+    background: linear-gradient(to left, var(--strip-bg), transparent);
+}
+/* More to the left. */
+.settings-tab-bar[data-scroll="mid"]::before,
+.settings-tab-bar[data-scroll="end"]::before,
+.tab-bar[data-scroll="mid"]::before,
+.tab-bar[data-scroll="end"]::before,
+.fp-group-bar[data-scroll="mid"]::before,
+.fp-group-bar[data-scroll="end"]::before,
+.fp-subtab-bar[data-scroll="mid"]::before,
+.fp-subtab-bar[data-scroll="end"]::before {
+    background: linear-gradient(to right, var(--strip-bg), transparent);
+}
+
+@keyframes slideUpMobile {
+    from { opacity: 0; transform: translateY(30%); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.jobs-add-row {
+    flex-direction: column;
+}
+.jobs-history-header {
+    flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------------
+   Empty state
+   ------------------------------------------------------------------ */
+.empty-state {
+    padding: var(--sp-6);
+}
+.empty-state-figure {
+    width: 240px;
+    height: 240px;
+}
+.empty-state-title {
+    font-size: 44px;
+}
+.empty-state-kicker {
+    font-size: 11px;
+}
+.empty-state-kicker em {
+    font-size: 13px;
+}
+
+/* ------------------------------------------------------------------
+   Spaces modal — the desktop card is a fixed, user-resizable box
+   (min-width 560px, height min(82vh, 950px)); on a 360px phone that
+   overflowed the sheet sideways and could not be scrolled back.
+   ------------------------------------------------------------------ */
+.space-modal-card {
+    min-width: 0;
+    width: 100%;
+    height: auto;
+    resize: none;
+}
+
+/* ------------------------------------------------------------------
+   Space directive toolbar — stacked on a narrow card (E3)
+   ------------------------------------------------------------------ */
+body[data-compact] .space-dir-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--sp-2);
+}
+body[data-compact] .space-dir-action {
+    width: 100%;
+}
+body[data-compact] .space-dir-mode-cell {
+    justify-content: space-between;
+}
+
+/* ------------------------------------------------------------------
+   State timeline — the Lane tab in a bottom sheet
+
+   layout.css widens #timeline-modal to 820px so a turn's phase shares stay
+   legible on a desktop. That is an ID selector and .modal-card above is a
+   class one, so the sheet has to take its full width back by name or a
+   390px phone gets a 366px card floating inside a 390px overlay.
+
+   The label and duration columns give up what they can spare: at 390px the
+   bar itself is what has to survive, and it is the one part that cannot be
+   read at a glance if it is 140px wide.
+   ------------------------------------------------------------------ */
+#timeline-modal {
+    max-width: 100%;
+}
+.tl-lane-list {
+    --tl-lane-label-w: 84px;
+    --tl-lane-elapsed-w: 46px;
+}

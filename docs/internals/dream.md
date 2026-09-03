@@ -8,8 +8,9 @@ validated — and validated conclusions reach live behavior only through the
 [Adaptive Layer](canary-and-adaptive.md)'s governed promotion path (itself
 off by default).
 
-Off by default. Enable in Settings → Dream (Introspection); all settings apply
-hot. Runs as the final activity of the [Snooze ladder](reflect-and-snooze.md),
+Off by default. Enable in Settings → Autonomy & idle work → Dream
+(Introspection); all settings apply hot. Runs as the final activity of the
+[Snooze ladder](reflect-and-snooze.md),
 so it only ever spends idle time.
 
 ## The idea
@@ -43,6 +44,16 @@ One step per snooze cycle, one bounded background-model call:
    typed hypotheses, each required to cite evidence refs from the pack.
    Refs are pinned by content hash — if consolidation later moves or rewrites
    an entry, the hypothesis expires rather than guessing.
+
+   A second, targeted mint path bypasses the model call: Snooze watermarks
+   every enabled skill's `SKILL.md` + scripts with a sha256 hash
+   (`snooze_state['skill_content_hash:{name}']`), and when one changes — a
+   veto-window auto-apply, an in-session agent edit, or a human edit on disk
+   — memory entries that mention the skill are cited directly into
+   `memory_stale` hypotheses (hash-guarded refs, capped at 6 per skill,
+   deduped against what's already pending, one changed skill per cycle), so
+   claims like "the script lacks a CPU flag" get re-judged by the validator
+   below instead of contradicting the now-fixed skill for months.
 3. **Validate** (pending hypotheses, oldest first) — the check matches the kind:
    - *Tool patterns* are re-checked against Candor's numbers directly, no LLM.
    - *Contradictions / stale memory* get one LLM judge call over the
@@ -81,8 +92,8 @@ intra-file contradictions. With `dream_rlm_probe` enabled (requires
 **staged copies** of the whole memory corpus, hunting cross-file
 contradictions — at most once per `dream_rlm_probe_interval_days`, with caps
 sized from your observed completed RLM runs. The probe runs as a tracked
-background task outside the snooze cycle, shows up in the Jobs tab
-(Active while running, History when done) like any other run, and its
+background task outside the snooze cycle, shows up in the Automation → Jobs
+tab (Active while running, History when done) like any other run, and its
 candidates go through the same dedup and filters as
 cycle-generated hypotheses — no special write powers.
 
@@ -101,9 +112,17 @@ cycle-generated hypotheses — no special write powers.
   pending row self-approves after `adaptive_auto_approve_after_hours`
   (default 24 h) unless you veto it first; every application is journaled
   and rollback-able. Only *validated* hypotheses promote at all — dream is
-  the most speculative producer in the stack. With the adaptive layer off,
-  the dream's entire observable output remains the journal, the report,
-  and sidecar rows.
+  the most speculative producer in the stack — and since v3.1 the two
+  adaptive channels (`lesson_ineffective→policy`, `tool_pattern→routing_hint`)
+  additionally pass an **actionability gate**: one bounded judge call
+  rewrites the finding into an imperative rule, or rules honestly that none
+  exists (`reported:not-actionable`, terminal — the finding still renders
+  in the dream report). The gate exists because this channel shipped raw
+  hypothesis statements ("Despite ... the agent repeatedly fails ...") into
+  the agent's every-turn prompt; the mechanical adaptive lint backstops it.
+  A tool_pattern restating a live Candor hint is a terminal duplicate.
+  With the adaptive layer off, the dream's entire observable output remains
+  the journal, the report, and sidecar rows.
 - **No permanent shelf space.** Promoted entries are retired again when
   their evidence stops holding — the originating hypothesis is gone or
   unpromoted, the cited Candor facts recovered above the degradation line,

@@ -1,9 +1,18 @@
-"""Pernix — Apply a reviewed skill-improvement proposal to its target SKILL.md.
+"""Pernix — Apply a skill-improvement proposal to its target SKILL.md.
 
 Proposals are written by reflect and refine when a skill visibly under-performs
-(see core/refine.py). Applying one is always an explicit user action — POST
-/api/skills/proposals/{id}/apply, or the Apply button on the Skills tab. Nothing
-applies a proposal automatically: the review step is the point.
+(see core/refine.py). Two paths apply one:
+
+  1. Explicit user action — POST /api/skills/proposals/{id}/apply, or the
+     Apply button on the Skills tab (status 'applied').
+  2. The veto window — ``auto_apply_ripe_proposals`` (snooze Activity 13b)
+     applies pending proposals older than
+     ``skill_proposal_auto_apply_after_hours`` after machine validation,
+     with a timestamped backup under data/skill_backups/ (status
+     'auto_applied'). Same contract as the adaptive layer's
+     auto_approve_stale_proposals: a human can reject anything inside the
+     window; after it, the system applies its own validated learning and
+     rollback is a file copy away.
 
 Lived under core/workflows/ until the workflow engine was removed; proposals
 target SKILL.md files and never had anything to do with workflows beyond
@@ -14,10 +23,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+from config import settings
 from db import models as db
 
 logger = logging.getLogger("pernix.skills.proposals")
+
+# Machine-validation bound: a paste-ready SKILL.md addition is a paragraph
+# or a short section, not a rewrite. Anything bigger than this needs human
+# eyes regardless of age.
+AUTO_APPLY_MAX_CHANGE_CHARS = 4000
 
 
 class ProposalApplyError(Exception):
@@ -125,26 +142,44 @@ def _insert_under_section(body: str, section_name: str, change: str) -> tuple[st
     return new_body, True
 
 
-def apply_proposal(proposal_id: str) -> ApplyResult:
+def _backup_skill_md(skill_name: str, skill_md: Path) -> Path | None:
+    """Copy SKILL.md to data/skill_backups/<skill>/SKILL.md.<UTC ts> before an
+    apply mutates it. Returns the backup path, or None on failure (the apply
+    proceeds — the atomic write is still safe, the backup is the rollback
+    convenience, not the integrity mechanism)."""
+    try:
+        backup_root = Path(settings.skills_dir).parent / "skill_backups" / skill_name
+        backup_root.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        dest = backup_root / f"SKILL.md.{ts}"
+        dest.write_bytes(skill_md.read_bytes())
+        return dest
+    except OSError as e:
+        logger.warning("Skill backup failed for '%s': %s", skill_name, e)
+        return None
+
+
+def apply_proposal(proposal_id: str, status_label: str = "applied") -> ApplyResult:
     """Apply a proposal to its target SKILL.md.
 
     Steps:
       1. Load the proposal row from the DB.
       2. Locate the target skill via the skill registry.
-      3. Read SKILL.md, insert/append the proposed_change under the referenced
-         section (or append as a new section if the section is missing).
+      3. Back up SKILL.md, then insert/append the proposed_change under the
+         referenced section (or append as a new section if missing).
       4. Write the updated SKILL.md back to disk.
-      5. Mark the proposal status='applied' in the DB.
+      5. Mark the proposal with `status_label` ('applied' for the human
+         Apply button, 'auto_applied' for the veto-window sweep).
 
     Raises ProposalApplyError on missing proposal, unknown skill, or I/O error.
-    Never auto-retries anything — the user re-invokes explicitly.
+    Never auto-retries anything — the caller re-invokes explicitly.
     """
     proposal = db.get_skill_proposal(proposal_id)
     if not proposal:
         raise ProposalApplyError(f"Proposal '{proposal_id}' not found")
 
     status = proposal.get("status", "pending")
-    if status == "applied":
+    if status in ("applied", "auto_applied"):
         raise ProposalApplyError(f"Proposal '{proposal_id}' has already been applied")
 
     skill_name = proposal.get("skill_name") or ""
@@ -176,6 +211,8 @@ def apply_proposal(proposal_id: str) -> ApplyResult:
     if new_body == body:
         raise ProposalApplyError("No change would be made (empty proposed_change?)")
 
+    _backup_skill_md(skill_name, skill_md)
+
     # Atomic write: temp file + rename
     tmp = skill_md.with_suffix(".md.tmp")
     try:
@@ -190,19 +227,19 @@ def apply_proposal(proposal_id: str) -> ApplyResult:
             except OSError:
                 pass
 
-    # Mark applied in DB. "applied" is a new status — ensure the DB helper
-    # accepts it (resolve_skill_proposal whitelists a small set).
+    # Mark applied in DB. Ensure the DB helper accepts the label
+    # (resolve_skill_proposal whitelists a small set).
     try:
-        db.resolve_skill_proposal(proposal_id, "applied")
+        db.resolve_skill_proposal(proposal_id, status_label)
     except ValueError:
-        # Older DB helper versions reject "applied" — use a raw update.
-        logger.debug("resolve_skill_proposal rejected 'applied' — using raw update")
+        # Older DB helper versions reject the label — use a raw update.
+        logger.debug("resolve_skill_proposal rejected %r — using raw update", status_label)
         from db.models import _now, connect_sessions
 
         with connect_sessions() as conn:
             conn.execute(
                 "UPDATE skill_improvement_proposals SET status=?, resolved_at=? WHERE id=?",
-                ("applied", _now(), proposal_id),
+                (status_label, _now(), proposal_id),
             )
 
     # Reload the skill registry so the edit is visible to subsequent calls
@@ -221,3 +258,139 @@ def apply_proposal(proposal_id: str) -> ApplyResult:
         bytes_before=len(body),
         bytes_after=len(new_body),
     )
+
+
+def _validate_for_auto_apply(proposal: dict) -> str | None:
+    """Machine checks a proposal must pass before the veto-window sweep may
+    apply it. Returns None when valid, else a short skip/expire reason.
+
+    Reasons prefixed 'expire:' mean the proposal can never become valid
+    (target skill gone) — the sweep archives it. Everything else leaves the
+    row pending for a human or a later sweep.
+    """
+    skill_name = (proposal.get("skill_name") or "").strip()
+    if not skill_name:
+        return "expire:no skill_name"
+
+    change = (proposal.get("proposed_change") or "").strip()
+    if not change:
+        return "expire:empty proposed_change"
+    if len(change) > AUTO_APPLY_MAX_CHANGE_CHARS:
+        return f"skip:change exceeds {AUTO_APPLY_MAX_CHANGE_CHARS} chars (needs human review)"
+    if "\x00" in change:
+        return "expire:binary content"
+
+    # Refine floors confidence at 0.6 before persisting; enforce the same
+    # bar here so nothing below it ever applies unattended, whatever wrote
+    # the row.
+    try:
+        if float(proposal.get("confidence") or 0.0) < 0.6:
+            return "skip:confidence below 0.6 (needs human review)"
+    except (TypeError, ValueError):
+        return "skip:unparseable confidence"
+
+    from core.skills.registry import get_skill_registry
+
+    reg = get_skill_registry()
+    skill = reg.get(skill_name) if hasattr(reg, "get") else None
+    if skill is None:
+        return "expire:skill not in registry"
+    try:
+        if reg.is_disabled(skill_name):
+            return "skip:skill is disabled"
+    except Exception:
+        pass
+    if not (skill.path / "SKILL.md").exists():
+        return "expire:SKILL.md missing"
+    return None
+
+
+def auto_apply_ripe_proposals() -> dict:
+    """Apply pending skill proposals whose veto window has elapsed.
+
+    The proposals table held the same structural contradiction the adaptive
+    layer fixed with auto_approve_stale_proposals: refine emits proposals
+    with a confidence floor, application waited on a scarce human click —
+    and on the live box that click never came (zero proposals ever reached
+    the table, and had one landed it would have parked forever). The gate
+    becomes a veto window: a human can reject anything in the Skills tab
+    inside ``skill_proposal_auto_apply_after_hours``; after that the system
+    applies it itself — machine-validated, backed up under
+    data/skill_backups/, day-capped, idle-only.
+
+    Returns {"applied": [...], "archived": [...], "skipped": n,
+    "deferred": n, "summaries": [...]}.
+    """
+    out: dict = {"applied": [], "archived": [], "skipped": 0, "deferred": 0, "summaries": []}
+    window_hours = settings.skill_proposal_auto_apply_after_hours
+    if window_hours <= 0:
+        return out
+
+    pending = db.list_skill_proposals(status="pending", limit=500)
+    if not pending:
+        return out
+
+    # Idle-only: never mutate a skill out from under a session that might
+    # be reading it mid-task (same guard as adaptive's sweep).
+    try:
+        from sessions.manager import get_manager
+
+        if get_manager().has_active_work():
+            out["deferred"] = len(pending)
+            return out
+    except Exception:
+        pass
+
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(hours=window_hours)).isoformat()
+    ripe = sorted(
+        (p for p in pending if (p.get("created_at") or "") < cutoff),
+        key=lambda p: p.get("created_at") or "",
+    )
+    if not ripe:
+        return out
+
+    used = db.count_auto_applied_skill_proposals_since((now - timedelta(hours=24)).isoformat())
+    budget = max(0, settings.skill_proposal_max_auto_applies_per_day - used)
+    if budget <= 0:
+        out["deferred"] = len(ripe)
+        logger.info("Skill auto-apply deferred: daily cap reached (%d)", used)
+        return out
+
+    for prop in ripe:
+        if budget <= 0:
+            break
+        pid = str(prop.get("id"))
+        reason = _validate_for_auto_apply(prop)
+        if reason is not None:
+            if reason.startswith("expire:"):
+                db.resolve_skill_proposal(pid, "archived")
+                out["archived"].append(pid)
+                logger.info("Skill auto-apply archived %s: %s", pid, reason)
+            else:
+                out["skipped"] += 1
+                logger.info("Skill auto-apply skipped %s: %s", pid, reason)
+            continue
+        try:
+            result = apply_proposal(pid, status_label="auto_applied")
+            out["applied"].append(pid)
+            out["summaries"].append(
+                f"{result.skill_name} § {result.section}: "
+                f"{(prop.get('problem') or '')[:120]} "
+                f"(+{result.bytes_after - result.bytes_before}B, confidence "
+                f"{float(prop.get('confidence') or 0):.2f})"
+            )
+            budget -= 1
+        except ProposalApplyError as e:
+            out["skipped"] += 1
+            logger.warning("Skill auto-apply failed for %s: %s", pid, e)
+
+    out["deferred"] = max(0, len(ripe) - len(out["applied"]) - len(out["archived"]) - out["skipped"])
+    if out["applied"]:
+        logger.info(
+            "Skill proposals: auto-applied %d past the %dh veto window (%s)",
+            len(out["applied"]),
+            window_hours,
+            ", ".join(out["applied"]),
+        )
+    return out

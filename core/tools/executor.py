@@ -153,6 +153,20 @@ def _resolve_timeout(tool, arguments: dict | None) -> int:
     return min(max(requested, base), ceiling) + _DISPATCH_TIMEOUT_GRACE_S
 
 
+def _session_cancel_requested(context: dict | None) -> bool:
+    """Whether the session that owns this dispatch has asked to stop."""
+    sid = (context or {}).get("session_id", "")
+    if not sid:
+        return False
+    try:
+        from sessions.manager import get_manager
+
+        session = get_manager().get(sid)
+    except Exception:
+        return False
+    return bool(session is not None and getattr(session, "cancel_requested", False))
+
+
 def _kill_tool_subprocess(context: dict | None, call_id: str) -> None:
     """Kill the subprocesses spawned by ONE dispatch call after its timeout.
 
@@ -192,10 +206,14 @@ def _batch_timeout(indices: list[int], tool_calls: list[dict], registry: ToolReg
 
     Every _execute_single already enforces its own per-call timeout and
     degrades to a per-tool error result, so this outer bound exists only to
-    catch a gather that wedges outside those waits. Size it to the slowest
-    tool actually in the batch so it can never fire first — if it does, the
-    TimeoutError escapes execute_tool_round and destroys the whole round,
-    including the results of calls that already completed.
+    catch a gather that wedges outside those waits. It must never fire
+    first — if it does, the TimeoutError escapes execute_tool_round and
+    destroys the whole round, including the results of calls that already
+    completed. A call's worst case is the queue-wait ceiling (the per-call
+    clock only starts once a pool thread picks it up) plus the slowest
+    tool's timeout, so the backstop covers both; sizing it to the tool
+    timeout alone meant a batch that queued ~280s behind a saturated pool
+    and then ran normally tripped the backstop at 305s.
     """
     slowest = 0
     for i in indices:
@@ -203,7 +221,7 @@ def _batch_timeout(indices: list[int], tool_calls: list[dict], registry: ToolReg
         if tool is None:
             continue
         slowest = max(slowest, _resolve_timeout(tool, tool_calls[i].get("arguments", {})))
-    return max(settings.tool_timeout, slowest) + _DISPATCH_TIMEOUT_GRACE_S
+    return _QUEUE_WAIT_CEILING_S + max(settings.tool_timeout, slowest) + _DISPATCH_TIMEOUT_GRACE_S
 
 
 def _is_unattended_session(sid: str) -> bool:
@@ -264,6 +282,7 @@ async def _execute_single(
     sid = (context or {}).get("session_id", "")
     session_type = ""
     workspace_override: str | None = None
+    workspace_home: str | None = None
     if sid:
         from sessions.manager import get_manager
         from sessions.state import turn_state
@@ -271,6 +290,7 @@ async def _execute_single(
         s = get_manager().get(sid)
         session_type = (s.session_type or "") if s else ""
         workspace_override = getattr(s, "workspace_override", None) if s else None
+        workspace_home = getattr(s, "workspace_home", None) if s else None
     # Retry effector (audit P1f): reflect can mechanically disable tools for
     # the current retry attempt; the schema filter removes them, this guard
     # catches a model that calls one anyway.
@@ -283,17 +303,17 @@ async def _execute_single(
             "without it.",
         )
 
-    # Scheduled-job allow-list (E1): backstop for the schema-side intersection
-    # in core/agent.py — catches a model that fabricates a call to a tool its
-    # schema no longer offers. Same two-point enforcement as retry_excluded.
+    # Session allow-list (E1 scheduled-job charters, canary sandbox):
+    # backstop for the schema-side intersection in core/agent.py — catches a
+    # model that fabricates a call to a tool its schema no longer offers.
+    # Same two-point enforcement as retry_excluded.
     _allowlist = getattr(s, "tool_allowlist", None) if sid and s else None
     if _allowlist and name not in _allowlist:
         return _refusal(
             name,
-            f"Error: Tool '{name}' is not permitted in this scheduled run — the job's "
-            f"charter restricts this session to: {', '.join(sorted(_allowlist))}. "
-            "Complete the task with the permitted tools, or log the need in your "
-            "proposals instead of executing.",
+            f"Error: Tool '{name}' is not permitted in this constrained session — "
+            f"it is restricted to: {', '.join(sorted(_allowlist))}. "
+            "Complete the task with the permitted tools.",
         )
 
     if session_type and session_type in tool.denied_session_types:
@@ -333,9 +353,9 @@ async def _execute_single(
                             # Single-use approvals must actually cover this
                             # call: every significant string argument has to
                             # appear in the scope the user was shown. Without
-                            # this, approving "delete skill foo" unlocks
-                            # delete_skill(name="bar") — the gate would match
-                            # on tool name alone.
+                            # this, approving "remove server foo" unlocks
+                            # mcp_remove_server(name="bar") — the gate would
+                            # match on tool name alone.
                             _scope_text = " ".join(str(entry.get("scope", "")).lower().split())
                             _uncovered = [
                                 k
@@ -404,6 +424,8 @@ async def _execute_single(
         ctx["_call_id"] = call_id
         if workspace_override:
             ctx["workspace_override"] = workspace_override
+        if workspace_home:
+            ctx["workspace_home"] = workspace_home
 
         # Never asyncio.to_thread here: that is the default executor the API
         # depends on. See the pool comments at the top of this module.
@@ -506,12 +528,13 @@ async def _execute_single(
     except asyncio.CancelledError:
         latency = int((time.monotonic() - start) * 1000)
         registry.metrics[name].record_failure("cancelled", latency)
-        return ToolExecutionResult(
-            tool_name=name,
-            content=f"Error: Tool '{name}' was cancelled",
-            was_error=True,
-            latency_ms=latency,
-        )
+        # Returning an error result here swallowed the cancel: Task.cancel()
+        # was consumed by the awaited future, _must_cancel never set, and the
+        # sequential loop dispatched the NEXT tool while the user's bash
+        # child kept running to its own timeout. Kill the child and let the
+        # cancel unwind the round; the agent loop stubs the tool rows.
+        _kill_tool_subprocess(context, call_id)
+        raise
     except Exception as e:
         latency = int((time.monotonic() - start) * 1000)
         registry.metrics[name].record_failure(str(e), latency)
@@ -610,8 +633,12 @@ async def execute_tool_round(
             else:
                 results[i] = result
 
-    # Run sequential tools in order
+    # Run sequential tools in order. A cancel that landed between two
+    # calls (flag set, no CancelledError in flight) must stop the round
+    # here, not after the next tool has already had its side effects.
     for i in sequential_idx:
+        if _session_cancel_requested(context):
+            raise asyncio.CancelledError()
         results[i] = await _execute_single(
             tool_calls[i]["name"],
             tool_calls[i].get("arguments", {}),
@@ -691,8 +718,18 @@ async def _bind_large_results(tool_calls: list[dict], results: list[ToolExecutio
             # payloads dir — neither may run on the event loop.
             def _spill_and_bind(sid=session_id, c=content):
                 from core.kernel import get_kernel_registry
+                from core.spaces import kernel_key_for_session
 
-                k = get_kernel_registry().get_or_create(sid)
+                _s = None
+                try:
+                    from sessions.manager import get_manager
+
+                    _s = get_manager().get(sid)
+                except Exception:
+                    pass
+                k = get_kernel_registry().get_or_create(
+                    kernel_key_for_session(sid), cwd=getattr(_s, "workspace_home", None)
+                )
                 v = f"tool_result_{k.next_bind_ordinal()}"
                 p = k.payloads_dir / f"{v}.txt"
                 k.payloads_dir.mkdir(parents=True, exist_ok=True)
@@ -700,7 +737,11 @@ async def _bind_large_results(tool_calls: list[dict], results: list[ToolExecutio
                 k.bind_variable(v, c)
                 return v, p
 
-            var, payload_path = await asyncio.to_thread(_spill_and_bind)
+            # On the tool pool, not asyncio's default executor: a bind can
+            # block on a cold venv build or a shared space kernel's
+            # round-trip lock for minutes, and the default pool is what the
+            # API routes and every other to_thread in the process share.
+            var, payload_path = await asyncio.get_running_loop().run_in_executor(_get_tool_executor(), _spill_and_bind)
         except Exception as e:
             logger.warning("Result binding failed for %s: %s", tc.get("name"), e)
             continue

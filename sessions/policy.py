@@ -8,6 +8,12 @@ and the session payloads carry the verdict (read_only + read_only_reason),
 so the UI renders policy instead of re-deriving it.
 """
 
+# Archiving is not a session TYPE — a chat of any type can be archived and
+# restored — so it is a separate check ahead of the type table. It is also the
+# one read-only state the user can leave: every reason below is permanent for
+# the life of the session, and this one has a button.
+ARCHIVED_REASON = "Archived — restore it to continue"
+
 _READ_ONLY_REASONS = {
     # Dream journals: Pernix narrates them during snooze; user messages would
     # interleave into the narration and be destroyed by journal retention.
@@ -21,7 +27,10 @@ _READ_ONLY_REASONS = {
 
 def read_only_reason(session_row: dict | None) -> str | None:
     """Why this session rejects new messages, or None if it accepts them."""
-    return _READ_ONLY_REASONS.get(((session_row or {}).get("session_type")) or "")
+    row = session_row or {}
+    if row.get("archived_at"):
+        return ARCHIVED_REASON
+    return _READ_ONLY_REASONS.get((row.get("session_type")) or "")
 
 
 def annotate_read_only(session_row: dict) -> dict:

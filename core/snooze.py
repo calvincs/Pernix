@@ -44,6 +44,11 @@ from core.pools import run_background
 
 logger = logging.getLogger("pernix.snooze")
 
+# Activity 13c bound: max pending memory_stale hypotheses the skill-change
+# sweep may hold open at once (its own origin only — deliberately NOT the
+# global dream_max_pending, see _sweep_skill_content_changes).
+SKILL_SWEEP_MAX_PENDING = 30
+
 
 # Session types snooze looks straight through (plan §5, pass-3 F3): they
 # neither cancel a running cycle, nor block the idle gate, nor refresh the
@@ -400,12 +405,40 @@ class SnoozeRunner:
             self._running = False
             self._stats["cycles"] += 1
             self._stats["last_cycle"] = datetime.now(timezone.utc).isoformat()
-            self._activity_since_last_cycle = False
+            # Only clear on a cycle that actually ran to an end. A cycle that
+            # YIELDED was preempted by a user prompt, and the prompt sets this
+            # flag on its way in — clobbering it here made the interrupted
+            # rung wait out the 15-minute cadence gate instead of resuming at
+            # the next slot, while the log claimed it would resume.
+            if outcome != "yielded":
+                self._activity_since_last_cycle = False
             self._last_cycle_time = time.time()
             duration_ms = int((time.time() - _start) * 1000)
             bus.emit({"type": "snooze.done", "duration_ms": duration_ms, "outcome": outcome, "stats": {**self._stats}})
             logger.info("Snooze cycle complete (outcome=%s, stats: %s)", outcome, self._stats)
         return outcome
+
+    async def _rung(self, label: str, coro, *, default=None):
+        """Await one ladder activity, containing its failure to itself.
+
+        _do_cycle is a long sequence of awaits with no guard between them, so
+        an exception in an early rung — a permissions error on one RLM run
+        dir, a corrupt FTS row, one hand-created memory file with a space in
+        its name — ended the whole coroutine. Everything after it (refine,
+        skill auto-apply, dream, telos, adaptive) was then skipped on EVERY
+        cycle for as long as the fault persisted, and the only sign was a
+        single "Snooze cycle error" line.
+        """
+        try:
+            return await coro
+        except asyncio.CancelledError:
+            coro_close = getattr(coro, "close", None)
+            if coro_close:
+                coro_close()
+            raise
+        except Exception as e:
+            logger.error("Snooze activity %r failed (cycle continues): %s", label, e, exc_info=True)
+            return default
 
     async def _do_cycle(self) -> None:
         """Execute activities in priority order."""
@@ -420,12 +453,12 @@ class SnoozeRunner:
         # Activity 1: Catch-up distillation (max 1 LLM call)
         if not self._is_cancelled() and not did_llm and self._llm_ready():
             _announce(bus, "distill", "Catching up on un-reviewed sessions")
-            did_llm = await self._catchup_distill()
+            did_llm = await self._rung("catchup_distill", self._catchup_distill(), default=False)
 
         # Activity 2: User insight extraction (LLM, if distill didn't use it)
         if not self._is_cancelled() and not did_llm and self._llm_ready():
             _announce(bus, "user_insights", "Extracting user profile insights from conversations")
-            did_llm = await self._extract_user_insights()
+            did_llm = await self._rung("extract_user_insights", self._extract_user_insights(), default=False)
 
         # Activity 2c: Skill requirements install (no LLM). Hash-triggered:
         # a skill whose requirements.txt changed since the last successful
@@ -434,68 +467,81 @@ class SnoozeRunner:
         # skill per cycle to keep cycles short.
         if not self._is_cancelled():
             _announce(bus, "skill_requirements", "Installing changed skill requirements into workspace venv")
-            await self._install_skill_requirements()
+            await self._rung("install_skill_requirements", self._install_skill_requirements())
+
+        # Activity 2d: Space suggestions — group the last N days of ordinary
+        # chats by the kind of work they repeat and propose a space for the
+        # habit. Own budget (independent of did_llm) like refine and dream:
+        # one background call, and only when the user turned it on. Gated on
+        # space_suggest_enabled — the rung is absent from the ladder when
+        # off, so nothing reads the table or spends a call.
+        if not self._is_cancelled() and settings.space_suggest_enabled and self._llm_ready():
+            _announce(bus, "space_suggest", "Looking for recurring work that deserves a space")
+            await self._rung("space_suggest", self._space_suggest_step())
 
         # Activity 3: Dedup sweep (no LLM)
         if not self._is_cancelled():
             _announce(bus, "dedup", "Checking for duplicate memory entries")
-            await self._dedup_sweep()
+            await self._rung("dedup_sweep", self._dedup_sweep())
 
         # Activity 3b: Cross-file consolidation (trivial=no LLM, ambiguous=LLM)
         if not self._is_cancelled():
             _announce(bus, "consolidate", "Consolidating overlapping memory files")
-            did_llm = await self._consolidate_files(did_llm) or did_llm
+            did_llm = await self._rung("consolidate_files", self._consolidate_files(did_llm), default=False) or did_llm
 
         # Activity 3c: Entry re-routing (fix entries in the wrong file)
         if not self._is_cancelled():
             _announce(bus, "reroute", "Re-routing misplaced memory entries to correct files")
-            did_llm = await self._reroute_misplaced_entries(did_llm) or did_llm
+            did_llm = (
+                await self._rung("reroute_misplaced_entries", self._reroute_misplaced_entries(did_llm), default=False)
+                or did_llm
+            )
 
         # Activity 4: Tag enrichment (no LLM)
         if not self._is_cancelled():
             _announce(bus, "enrich_tags", "Enriching memory entry tags")
-            await self._enrich_tags()
+            await self._rung("enrich_tags", self._enrich_tags())
 
         # Activity 5: Index reconciliation (no LLM)
         if not self._is_cancelled():
             _announce(bus, "reconcile", "Reconciling memory index")
-            await self._reconcile_index()
+            await self._rung("reconcile_index", self._reconcile_index())
 
         # Activity 6: File splitting (LLM, maintenance budget — independent of did_llm)
         if not self._is_cancelled() and not did_maintenance_llm and self._llm_ready():
             _announce(bus, "split", "Splitting large memory files")
-            did_maintenance_llm = await self._split_file()
+            did_maintenance_llm = await self._rung("split_file", self._split_file(), default=False)
 
         # Activity 7: Cron cleanup (no LLM)
         if not self._is_cancelled():
-            await self._cleanup_cron(bus)
+            await self._rung("cleanup_cron", self._cleanup_cron(bus))
 
         # Activity 8: Staleness pruning (LLM, maintenance budget — runs even when distill used LLM)
         if not self._is_cancelled() and not did_maintenance_llm and self._llm_ready():
             _announce(bus, "stale_prune", "Pruning stale low-recall memory entries")
-            await self._prune_stale_entries()
+            await self._rung("prune_stale_entries", self._prune_stale_entries())
 
         # Activity 9: Skill cooccurrence update (no LLM)
         if not self._is_cancelled():
             _announce(bus, "skill_cooccurrence", "Updating skill co-occurrence map from memory")
-            await self._update_skill_cooccurrence()
+            await self._rung("update_skill_cooccurrence", self._update_skill_cooccurrence())
 
         # Activity 10: Synthesize post-mortems into tool/skill performance counters (no LLM)
         if not self._is_cancelled():
             _announce(bus, "synthesize_signals", "Synthesizing post-mortems into scout signals")
-            await self._synthesize_signals()
+            await self._rung("synthesize_signals", self._synthesize_signals())
 
         # Activity 11: Post-mortem TTL cleanup (no LLM)
         if not self._is_cancelled():
             _announce(bus, "cleanup_post_mortems", "Pruning old synthesized post-mortems")
-            await self._cleanup_post_mortems()
+            await self._rung("cleanup_post_mortems", self._cleanup_post_mortems())
 
         # Activity 12a: RLM run directory cleanup (no LLM). Age-based only —
         # runs are one-shot transient work products ("extract and discard"),
         # so there is no keep-N-per-name window.
         if not self._is_cancelled():
             _announce(bus, "cleanup_rlm_runs", "Pruning old RLM run directories")
-            await self._cleanup_rlm_runs()
+            await self._rung("cleanup_rlm_runs", self._cleanup_rlm_runs())
 
         # Activity 12b: Candor operational-memory maintenance (no LLM).
         # Runs the admission gate (the expensive sweep — this is its only
@@ -504,7 +550,7 @@ class SnoozeRunner:
         # cancellation is polled between phases and drain chunks.
         if not self._is_cancelled() and settings.candor_enabled:
             _announce(bus, "candor_gate", "Sweeping Candor operational memory (gate + buffer drain)")
-            await self._candor_maintenance()
+            await self._rung("candor_maintenance", self._candor_maintenance())
 
         # Activity 12c: Canary retention cleanup (no LLM). Prunes canary_runs
         # rows and the canary sessions behind them past canary_retention_days.
@@ -513,7 +559,21 @@ class SnoozeRunner:
         # snooze activity would cancel the cycle that produced the batch).
         if not self._is_cancelled() and settings.canary_enabled:
             _announce(bus, "cleanup_canary_runs", "Pruning old canary runs and sessions")
-            await self._cleanup_canary_runs()
+            await self._rung("cleanup_canary_runs", self._cleanup_canary_runs())
+
+        # Activity 12e: Session archive sweeps (no LLM). Archiving ordinary
+        # chats idle past the horizon is the one retention sweep that loses
+        # nothing — the transcript stays whole and searchable and one PATCH
+        # brings it back — so it runs unguarded by any of the delete side's
+        # caution. The prune behind it DOES delete, and is off by default.
+        # Two rungs rather than one: a failure in either must not cost the
+        # other its cycle.
+        if not self._is_cancelled() and settings.session_archive_idle_days > 0:
+            _announce(bus, "archive_idle_sessions", "Archiving chats idle past the horizon")
+            await self._rung("archive_idle_sessions", self._archive_idle_sessions())
+        if not self._is_cancelled() and settings.session_delete_archived_days > 0:
+            _announce(bus, "prune_archived_sessions", "Deleting sessions long past archiving")
+            await self._rung("prune_archived_sessions", self._prune_archived_sessions())
 
         # Activity 12d: Canary suite auto-maintenance (no LLM). Promotes
         # vetted auto-admitted canaries, tags flapping ones flaky, retires
@@ -522,14 +582,32 @@ class SnoozeRunner:
         # auto-mutated.
         if not self._is_cancelled() and settings.canary_enabled and settings.canary_auto_maintain:
             _announce(bus, "canary_maintain", "Maintaining the canary suite (promote/flaky/retire/purge)")
-            await self._canary_maintain()
+            await self._rung("canary_maintain", self._canary_maintain())
 
         # Activity 13: Refine pass — the single session-improvement rung.
         # Runs independent of did_llm: refine has its own budget, bounded to
-        # one session per cycle, watermarked refined:{sid}.
+        # one session per cycle, watermarked refined:{sid} (max message id —
+        # a session that grows past its watermark re-arms).
         if not self._is_cancelled() and self._llm_ready():
             _announce(bus, "refine", "Crystallizing skill/memory updates from an idle session")
-            await self._refine_one_session()
+            await self._rung("refine_one_session", self._refine_one_session())
+
+        # Activity 13b: Skill proposal veto-window auto-apply (no LLM).
+        # Pending SKILL.md proposals older than the veto window are
+        # machine-validated and applied with a timestamped backup — the
+        # skill-file counterpart of adaptive's auto_approve_stale_proposals.
+        if not self._is_cancelled() and settings.skill_proposal_auto_apply_after_hours > 0:
+            _announce(bus, "skill_auto_apply", "Applying skill proposals past the veto window")
+            await self._rung("auto_apply_skill_proposals", self._auto_apply_skill_proposals())
+
+        # Activity 13c: Skill content-change sweep (no LLM). When a skill's
+        # SKILL.md/scripts change (proposal apply, agent edit, human edit),
+        # memory entries that mention the skill are cited into memory_stale
+        # dream hypotheses so stale claims ("the script can't do X") get
+        # re-judged against the new reality instead of lingering.
+        if not self._is_cancelled():
+            _announce(bus, "skill_change_sweep", "Checking skills for content changes")
+            await self._rung("sweep_skill_content_changes", self._sweep_skill_content_changes())
 
         # Activity 14: Dream step — idle-time introspection (core/dream).
         # Runs independent of did_llm like refine: one bounded unit per cycle
@@ -545,7 +623,7 @@ class SnoozeRunner:
             # lines. A journal where every line carries content is the
             # feature; the cadence marker was noise.
             _announce(bus, "dream", "Dreaming: examining memory and outcome evidence for hypotheses")
-            await self._dream_step()
+            await self._rung("dream_step", self._dream_step())
 
         # Activity 14b: Distillation coverage audit — the feedback loop on
         # the memory lens itself (core/memory/audit.py). One sampled session
@@ -554,7 +632,7 @@ class SnoozeRunner:
         # did_llm.
         if not self._is_cancelled() and settings.distill_audit_enabled and self._llm_ready():
             _announce(bus, "distill_audit", "Auditing distillation coverage against a raw transcript")
-            await self._distill_audit()
+            await self._rung("distill_audit", self._distill_audit())
 
         # Activity 16 (runs before 15's store work so its LLM call sits in
         # the same cancellation window as dream's): TELOS fast loop — one
@@ -563,7 +641,7 @@ class SnoozeRunner:
         # 15% serendipity). Gated on telos_enabled — fully absent when off.
         if not self._is_cancelled() and settings.telos_enabled and self._llm_ready():
             _announce(bus, "telos", "TELOS: generating or evaluating hypotheses for open questions")
-            await self._telos_step()
+            await self._rung("telos_step", self._telos_step())
 
         # Activity 15: Adaptive layer — drain pending auto-applies, enqueue
         # post-batch canary sweeps, evaluate the tripwire (plan §6c). Runs
@@ -572,7 +650,16 @@ class SnoozeRunner:
         # No LLM — pure store work.
         if not self._is_cancelled() and settings.adaptive_enabled:
             _announce(bus, "adaptive_apply", "Applying pending adaptive edits and evaluating the tripwire")
-            await self._adaptive_step()
+            await self._rung("adaptive_step", self._adaptive_step())
+
+        # Activity 17: fallback-burn watch — pure store read + at most one
+        # notification/day. Encodes the 2026-08-19 silent-reroute incident
+        # signature (primary provider wedged → every call billed to the
+        # fallback tier) as a standing check. Watch-only: never touches
+        # routing. Gated inside check_fallback_burn (share=0 or no
+        # fallback_model configured → no-op).
+        if not self._is_cancelled():
+            await self._rung("fallback_burn_check", self._fallback_burn_check())
 
     # ------------------------------------------------------------------
     # Activity 1: Catch-up distillation
@@ -684,6 +771,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                    WHERE s.snooze_reviewed_at IS NOT NULL
                      AND {db.SQL_SESSION_IS_IDLE}
                      AND s.updated_at < ?
+                     AND s.archived_at IS NULL
                      AND s.session_type != 'worker'
                      AND (
                          SELECT COUNT(*) FROM messages m
@@ -828,8 +916,11 @@ Output valid JSON only. No markdown fences. /no_think"""
         Selects via :func:`db.get_unrefined_sessions` (10-min idle floor,
         watermark ``refined:{sid}``). Stamps the watermark unconditionally
         after the call so a session that produced nothing actionable, or
-        one whose LLM call failed, is never retried — matches the
-        mark-on-failure pattern used by ``_catchup_distill``.
+        one whose LLM call failed, is never retried at its current size —
+        matches the mark-on-failure pattern used by ``_catchup_distill``.
+        The stamp is the max message id captured AT SELECTION TIME, so a
+        session that grows (resumes, gets its ask_user answered, ends with
+        a workaround) re-arms and gets another pass over the full story.
 
         Returns True if the LLM was invoked (so stats reflect cycle work),
         False otherwise. Snooze does not gate any subsequent activity on
@@ -846,6 +937,9 @@ Output valid JSON only. No markdown fences. /no_think"""
 
         session = sessions[0]
         sid = session["id"]
+        # Stamp what was visible when we chose the session — messages that
+        # arrive mid-refine stay above the watermark and re-arm it.
+        watermark = str(int(session.get("refine_max_message_id") or 0))
 
         if self._is_cancelled():
             return False
@@ -865,12 +959,247 @@ Output valid JSON only. No markdown fences. /no_think"""
                 "insufficient_exchange",
                 "no_model_configured",
             )
-            db.set_snooze_state(f"refined:{sid}", datetime.now(timezone.utc).isoformat())
+            db.set_snooze_state(f"refined:{sid}", watermark)
             return bool(llm_used)
         except Exception as e:
             logger.warning("Snooze: refine pass failed for %s: %s", sid, e)
-            db.set_snooze_state(f"refined:{sid}", datetime.now(timezone.utc).isoformat())
+            db.set_snooze_state(f"refined:{sid}", watermark)
             return False
+
+    # ------------------------------------------------------------------
+    # Activity 13b: Skill proposal veto-window auto-apply
+    # ------------------------------------------------------------------
+
+    async def _auto_apply_skill_proposals(self) -> None:
+        """Apply pending skill proposals whose veto window has elapsed.
+
+        Thin wrapper over core.skills.proposals.auto_apply_ripe_proposals
+        (machine validation, backups, day cap, idle guard all live there).
+        Announces applied changes as a notification so a veto-after-the-fact
+        is one file restore away.
+        """
+        from db import models as db
+
+        try:
+            from core.skills.proposals import auto_apply_ripe_proposals
+
+            out = await asyncio.to_thread(auto_apply_ripe_proposals)
+        except Exception as e:
+            logger.warning("Snooze: skill proposal auto-apply failed: %s", e)
+            return
+
+        applied = out.get("applied") or []
+        if not applied:
+            return
+        self._bump("skill_proposals_auto_applied", len(applied))
+        lines = out.get("summaries") or [str(p) for p in applied]
+        try:
+            db.add_notification(
+                title="Skill proposals auto-applied",
+                body=(
+                    f"{len(applied)} skill proposal(s) past the "
+                    f"{settings.skill_proposal_auto_apply_after_hours}h veto window "
+                    "were validated and applied to SKILL.md.\n"
+                    + "\n".join(f"• {line}" for line in lines)
+                    + "\nBackups in data/skill_backups/<skill>/ — restore one to roll "
+                    "back; reject a pending proposal in the Skills tab to veto it "
+                    "inside the window."
+                ),
+                urgency="normal",
+            )
+        except Exception as e:
+            logger.debug("Snooze: skill auto-apply notification failed: %s", e)
+
+    # ------------------------------------------------------------------
+    # Activity 13c: Skill content-change sweep → memory re-validation
+    # ------------------------------------------------------------------
+
+    def _hash_skill_content(self, skill) -> str:
+        """Digest of a skill's SKILL.md + scripts/ tree (paths + bytes)."""
+        import hashlib
+
+        h = hashlib.sha256()
+        md = skill.path / "SKILL.md"
+        if md.exists():
+            h.update(b"SKILL.md\x00")
+            h.update(md.read_bytes())
+        scripts = skill.path / "scripts"
+        if scripts.is_dir():
+            for f in sorted(scripts.rglob("*")):
+                if f.is_file():
+                    h.update(str(f.relative_to(skill.path)).encode() + b"\x00")
+                    h.update(f.read_bytes())
+        return h.hexdigest()
+
+    async def _sweep_skill_content_changes(self) -> None:
+        """Detect skill content changes and queue memory re-validation.
+
+        Hash-watermarked via ``snooze_state['skill_content_hash:{name}']``
+        (same pattern as the requirements sweep). First sight of a skill
+        stores the baseline silently. On change: memory entries that mention
+        the skill are cited into ``memory_stale`` dream hypotheses, so the
+        dream validator re-judges claims like "the script can't do X"
+        against the skill's new reality — whoever made the edit (a veto-
+        window apply, an in-session agent edit, a human on disk). One
+        changed skill per cycle keeps the sweep bounded.
+        """
+        import json as _json
+
+        from core.skills.registry import get_skill_registry
+        from db import models as db
+
+        try:
+            registry = get_skill_registry()
+            skills = registry.enabled_skills()
+        except Exception as e:
+            logger.debug("Snooze: skill-change sweep registry unavailable: %s", e)
+            return
+
+        changed_skill = None
+        old_digest = new_digest = ""
+        for skill in skills:
+            if self._is_cancelled():
+                return
+            try:
+                digest = self._hash_skill_content(skill)
+            except OSError as e:
+                logger.debug("Snooze: could not hash skill '%s': %s", skill.name, e)
+                continue
+            key = f"skill_content_hash:{skill.name}"
+            prior = db.get_snooze_state(key)
+            if prior is None:
+                # Baseline: never treat first sight as a change, or a fresh
+                # deploy would flood dream with hypotheses for every skill.
+                db.set_snooze_state(key, digest)
+                continue
+            if prior != digest and changed_skill is None:
+                changed_skill, old_digest, new_digest = skill, prior, digest
+                db.set_snooze_state(key, digest)
+                # Keep scanning so unseen skills still get baselines this
+                # cycle; other CHANGED skills keep their old hash and are
+                # picked up one per subsequent cycle.
+
+        if changed_skill is None:
+            return
+
+        self._bump("skill_changes_detected", 1)
+        logger.info(
+            "Snooze: skill '%s' content changed (%s → %s)",
+            changed_skill.name,
+            old_digest[:8],
+            new_digest[:8],
+        )
+
+        if not settings.dream_enabled:
+            return
+
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if not store:
+            return
+
+        # Entries already cited by a pending memory_stale hypothesis don't
+        # need a second one. The backpressure gate counts only THIS sweep's
+        # own pending rows (origin=skill_change_sweep), not the global dream
+        # backlog: a flooded general queue must not starve the targeted
+        # re-validation of a skill that verifiably just changed — the live
+        # box sat at 310 pending (over dream_max_pending) the day this
+        # shipped, which would have parked every skill-change hypothesis
+        # indefinitely. Six rows per change against a bounded own-cap is
+        # noise to the validator either way.
+        covered: set[tuple] = set()
+        own_pending = 0
+        try:
+            for row in db.list_dream_hypotheses(kind="memory_stale", status="pending", limit=300):
+                if row.get("origin") == "skill_change_sweep":
+                    own_pending += 1
+                for ref in _json.loads(row.get("evidence_json") or "[]"):
+                    if isinstance(ref, dict) and ref.get("type") == "memory":
+                        covered.add((ref.get("file"), ref.get("epoch")))
+        except Exception:
+            pass
+        if own_pending >= SKILL_SWEEP_MAX_PENDING:
+            logger.info(
+                "Snooze: %d skill-change hypotheses already pending (cap %d) — skipping enqueue",
+                own_pending,
+                SKILL_SWEEP_MAX_PENDING,
+            )
+            return
+
+        # FTS phrase search on the skill's name tokens ("youtube-whisper" →
+        # "youtube whisper" matches the hyphenated name and the script stem).
+        tokens = [t for t in re.split(r"[^A-Za-z0-9]+", changed_skill.name) if t]
+        if not tokens:
+            return
+        phrase = '"' + " ".join(tokens) + '"'
+        try:
+            conn = store._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT file_name, epoch FROM memory_fts WHERE memory_fts MATCH ? LIMIT 12",
+                    (phrase,),
+                ).fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug("Snooze: stale-memory FTS failed for '%s': %s", changed_skill.name, e)
+            return
+
+        from core.dream.observe import content_hash
+
+        today = datetime.now(timezone.utc).date().isoformat()
+        change_ref = {
+            "type": "skill_change",
+            "quote": (
+                f"Skill '{changed_skill.name}' content (SKILL.md/scripts) changed on "
+                f"{today} (digest {old_digest[:8]} → {new_digest[:8]}). Claims recorded "
+                "against the old version may no longer hold."
+            ),
+        }
+        queued = 0
+        for row in rows:
+            if queued >= 6:
+                break
+            file_name = row["file_name"]
+            try:
+                # FTS stores epoch as text; get_entry and the validator's
+                # resolve_memory_ref match on the integer.
+                epoch = int(row["epoch"])
+            except (TypeError, ValueError):
+                continue
+            if (file_name, epoch) in covered:
+                continue
+            entry = store.get_entry(file_name, epoch)
+            if entry is None or not (entry.content or "").strip():
+                continue
+            mem_ref = {
+                "type": "memory",
+                "file": file_name,
+                "epoch": epoch,
+                "hash": content_hash(entry.content),
+                "quote": entry.content[:400],
+            }
+            db.add_dream_hypothesis(
+                kind="memory_stale",
+                statement=(
+                    f"Memory entry {file_name}@{epoch} may be stale: skill "
+                    f"'{changed_skill.name}' was updated on {today}, and the entry makes "
+                    "claims about that skill's behavior, flags, or limits."
+                ),
+                evidence_json=_json.dumps([mem_ref, change_ref]),
+                origin="skill_change_sweep",
+                confidence=0.6,
+            )
+            queued += 1
+
+        if queued:
+            self._bump("skill_stale_hypotheses", queued)
+            logger.info(
+                "Snooze: queued %d memory re-validation hypothesis(es) for changed skill '%s'",
+                queued,
+                changed_skill.name,
+            )
 
     # ------------------------------------------------------------------
     # Activity 2c: Skill requirements install (adaptation plan 1d)
@@ -1049,7 +1378,11 @@ Output valid JSON only. No markdown fences. /no_think"""
         if bus:
             _announce(bus, "cron_cleanup", "Pruning old cron runs and sessions")
 
-        counts = retention.prune_cron()
+        # Off-loop: prune_cron cascade-deletes every doomed cron session
+        # (each one an FTS delete plus a message cascade) and then walks
+        # session_state_log. A week of aged-out sessions froze every SSE
+        # stream for seconds when this ran inline.
+        counts = await asyncio.to_thread(retention.prune_cron)
         if any(counts.values()):
             logger.info(
                 "Snooze cron cleanup: %d runs pruned, %d sessions pruned, %d state_log rows pruned",
@@ -1064,10 +1397,12 @@ Output valid JSON only. No markdown fences. /no_think"""
         _db.set_snooze_state("last_cron_cleanup", str(time.time()))
 
     async def _cleanup_post_mortems(self) -> None:
-        """Activity 11 — drop synthesized post-mortems past their TTL."""
+        """Activity 11 — drop synthesized post-mortems past their TTL, and
+        notifications past theirs (the bell is a surface, not an archive)."""
         from core import retention
 
-        self._bump("post_mortems_pruned", retention.prune_post_mortems())
+        self._bump("post_mortems_pruned", await asyncio.to_thread(retention.prune_post_mortems))
+        self._bump("notifications_pruned", await asyncio.to_thread(retention.prune_notifications))
 
     async def _cleanup_canary_runs(self) -> None:
         """Activity 12c — canary run/session retention plus the staleness
@@ -1079,6 +1414,22 @@ Output valid JSON only. No markdown fences. /no_think"""
         await retention.nudge_stale_canaries()
         self._bump("worker_sessions_pruned", await retention.prune_worker_sessions())
         self._bump("dream_hypotheses_pruned", await asyncio.to_thread(retention.prune_dream_hypotheses))
+
+    async def _archive_idle_sessions(self) -> None:
+        """Activity 12e — ordinary chats idle past session_archive_idle_days
+        leave the sidebar. Nothing is deleted; see core/retention.py."""
+        from core import retention
+
+        result = await asyncio.to_thread(retention.archive_idle_sessions)
+        self._bump("sessions_archived", int(result.get("count") or 0))
+
+    async def _prune_archived_sessions(self) -> None:
+        """Activity 12e — sessions archived longer than
+        session_delete_archived_days are deleted for real. Off by default."""
+        from core import retention
+
+        result = await asyncio.to_thread(retention.prune_archived_sessions)
+        self._bump("archived_sessions_pruned", int(result.get("count") or 0))
 
     async def _canary_maintain(self) -> None:
         """Activity 12d — one canary auto-maintenance sweep. Never raises."""
@@ -1461,6 +1812,70 @@ Output valid JSON only. No markdown fences. /no_think"""
         except Exception as e:
             logger.warning("Adaptive proposal expiry failed: %s", e)
 
+        if self._is_cancelled():
+            return
+        # The usage sweep (v3.1): entries that rendered into prompts for the
+        # whole retire window without one recorded use go. Soft-deletes,
+        # journaled, one aggregated once-a-day notification with the undo.
+        try:
+            from core.adaptive.retire import retire_unused_entries
+            from db import models as db
+
+            swept = await asyncio.to_thread(retire_unused_entries)
+            if swept["retired"]:
+                self._bump("adaptive_unused_retired", len(swept["retired"]))
+                lines = [f"• {eid} — {swept['reasons'].get(eid, '')}" for eid in swept["retired"][:12]]
+                await asyncio.to_thread(
+                    db.add_notification,
+                    "",
+                    "Adaptive: value sweep retired entries",
+                    (
+                        "Retired by the value sweep — unused for the whole retire window, "
+                        "past a prompt_note TTL, or failure-dominated in attributed "
+                        "outcomes (the per-entry reason is listed). Each deletion is "
+                        "journaled — roll any back from the Adaptive tab.\n"
+                        + "\n".join(lines)
+                        + (f"\n(+{len(swept['retired']) - 12} more)" if len(swept["retired"]) > 12 else "")
+                    ),
+                    "normal",
+                    "adaptive_usage_sweep",
+                )
+        except Exception as e:
+            logger.warning("Adaptive usage sweep failed: %s", e)
+
+        if self._is_cancelled():
+            return
+        # The retro-lint sweep: re-examine the standing population whenever
+        # the content lint changes (watermarked on LINT_VERSION — a no-op on
+        # every cycle in between). The v3.1 lint only gated new mints, so
+        # narrative entries minted before it sat in the rendered slots
+        # indefinitely.
+        try:
+            from core.adaptive.retire import retire_lint_failures
+            from db import models as db
+
+            linted = await asyncio.to_thread(retire_lint_failures)
+            if linted["retired"]:
+                self._bump("adaptive_lint_retired", len(linted["retired"]))
+                lines = [f"• {eid} — {linted['reasons'].get(eid, '')}" for eid in linted["retired"][:12]]
+                await asyncio.to_thread(
+                    db.add_notification,
+                    "",
+                    "Adaptive: lint sweep retired entries",
+                    (
+                        "Retired by the retro content-lint sweep — machine-authored "
+                        "entries whose content fails the current actionability floor "
+                        "(narrative findings, bare negative claims). Each deletion is "
+                        "journaled — roll any back from the Adaptive tab.\n"
+                        + "\n".join(lines)
+                        + (f"\n(+{len(linted['retired']) - 12} more)" if len(linted["retired"]) > 12 else "")
+                    ),
+                    "normal",
+                    "adaptive_lint_sweep",
+                )
+        except Exception as e:
+            logger.warning("Adaptive lint sweep failed: %s", e)
+
         try:
             from core.adaptive.tripwire import evaluate_tripwire
 
@@ -1469,6 +1884,39 @@ Output valid JSON only. No markdown fences. /no_think"""
                 logger.info("Adaptive tripwire: %s %s (%s)", a["action"], a["batch_id"], a.get("detail", ""))
         except Exception as e:
             logger.warning("Adaptive tripwire failed: %s", e)
+
+    # ------------------------------------------------------------------
+    # Activity 17: fallback-burn watch
+    # ------------------------------------------------------------------
+
+    async def _fallback_burn_check(self) -> None:
+        """Notify (high urgency, daily dedup) when the fallback model is
+        carrying a threshold share of the trailing 24h's tokens. Never raises."""
+        try:
+            from core.llm.burnwatch import check_fallback_burn
+            from db import models as db
+
+            finding = await asyncio.to_thread(check_fallback_burn)
+            if not finding:
+                return
+            self._bump("fallback_burn_alerts")
+            await asyncio.to_thread(
+                db.add_notification,
+                "",
+                "Fallback model is carrying the load",
+                (
+                    f"{finding['model']} served {finding['share']:.0%} of all tokens in the last "
+                    f"{finding['window_hours']}h ({finding['tokens']:,} of {finding['total_tokens']:,} "
+                    f"tokens over {finding['calls']} calls). If this model is the paid tier, the "
+                    "primary provider is likely wedged and every turn is billing there — check the "
+                    "provider key/endpoint (the 2026-08-19 signature: container-local env keys die "
+                    "on rebuild; the durable copy belongs in the compose-level .env)."
+                ),
+                "high",
+                "fallback_burn",
+            )
+        except Exception as e:
+            logger.warning("Fallback-burn watch failed: %s", e)
 
     # ------------------------------------------------------------------
     # Activities 14/16: Dream + TELOS steps
@@ -1502,6 +1950,16 @@ Output valid JSON only. No markdown fences. /no_think"""
             self._bump("distill_audit_recovered", result.get("recovered", 0))
         except Exception as e:
             logger.warning("Snooze distill audit failed: %s", e)
+
+    async def _space_suggest_step(self) -> None:
+        """One space-suggestion scan. The scan itself decides whether this
+        cycle is the one that spends a call (interval floor, "anything new"
+        watermark, pending cap) and never raises, so this is only the stat
+        bump. Nothing it stores creates a space — that waits for a click."""
+        from core.space_suggest import scan
+
+        result = await scan()
+        self._bump("space_suggestions", len(result.get("kept") or []))
 
     async def _dream_step(self) -> None:
         """One bounded dream unit: validate a pending hypothesis or generate

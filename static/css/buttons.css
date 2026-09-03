@@ -1,0 +1,341 @@
+/* ======================================================================
+   Pernix — the button. (V7)
+
+   Before this file the app had eleven independent button systems — .btn /
+   .btn-primary / .btn-secondary / .btn-danger / .btn-sm in modals.css,
+   .fp-btn (+ .primary, .danger, .save-btn) and .fp-btn-xs / .fp-btn-danger /
+   .fp-icon-btn / .fp-mcp-add-btn in file-panel.css, .jobs-btn in jobs.css,
+   .adaptive-btn, .tl-filter-btn / .tl-copy-btn / .tl-load-older button,
+   .auth-btn, the .q-*-btn trio, .status-btn, .msg-action-btn and
+   .load-earlier-btn in layout.css — each re-declaring the same eight
+   properties with slightly different numbers. Three of them meant "this is
+   the affirmative action" in three different ways: gold fill (.btn-primary),
+   gold outline (.fp-btn.primary), accent-dim fill (.fp-mcp-add-btn.primary).
+
+   One base, a handful of modifiers, and thin aliases that map the legacy
+   class names onto them. New code should write `btn btn--primary`; the
+   aliases exist so nothing already in the app had to change in the same
+   commit.
+
+   This file is loaded FIRST (right after tokens.css) so a panel that still
+   needs a genuinely local rule — a width, a margin, a sticky offset — can
+   still say so in its own stylesheet and win.
+   ====================================================================== */
+
+/* ----------------------------------------------------------------------
+   1. Base — everything that is true of every button in the app.
+   ---------------------------------------------------------------------- */
+.btn,
+.btn-primary,
+.btn-secondary,
+.btn-danger,
+.btn-sm,
+.fp-btn,
+.fp-btn-xs,
+.fp-btn-danger,
+.fp-icon-btn,
+.fp-mcp-add-btn,
+.jobs-btn,
+.adaptive-btn,
+.tl-filter-btn,
+.tl-copy-btn,
+.tl-load-older button,
+.auth-btn,
+.q-yes-btn,
+.q-no-btn,
+.q-other-btn,
+.status-btn,
+.msg-action-btn,
+.load-earlier-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--sp-2);
+    /* The pointer-target floor. touch.css raises the ones that matter to
+       44px for touch; this is the desktop minimum, and it is why an
+       icon-only button is never a 14px glyph with nothing around it. */
+    min-height: 24px;
+    min-width: 24px;
+    padding: var(--sp-1) var(--sp-3);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    line-height: 1.3;
+    white-space: nowrap;
+    text-decoration: none;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    transition: background var(--transition), color var(--transition),
+                border-color var(--transition), opacity var(--transition);
+}
+
+/* ----------------------------------------------------------------------
+   2. Roles.
+   ---------------------------------------------------------------------- */
+
+/* --- primary: gold fill, page-coloured text. The ONE affirmative look. --- */
+.btn--primary,
+.btn-primary,
+.btn-secondary.active,
+.fp-btn.primary,
+.fp-mcp-add-btn.primary,
+.fp-btn.save-btn.dirty,
+.auth-btn {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+}
+/* Mixing toward --text-bright rather than to a fixed lighter gold: on the
+   dark theme that brightens, on paper it darkens, and either way the
+   --bg-coloured label stays legible. */
+.btn--primary:hover:not(:disabled),
+.btn-primary:hover:not(:disabled),
+.btn-secondary.active:hover:not(:disabled),
+.fp-btn.primary:hover:not(:disabled),
+.fp-mcp-add-btn.primary:hover:not(:disabled),
+.fp-btn.save-btn.dirty:hover:not(:disabled),
+.auth-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 70%, var(--text-bright));
+    border-color: color-mix(in srgb, var(--accent) 70%, var(--text-bright));
+    color: var(--bg);
+}
+
+/* --- secondary: outline. The default for anything that is not the one
+       affirmative action on the surface. Hover goes gold everywhere; that
+       used to be the Explorer's private idiom and the panels next to it
+       went grey instead. --- */
+.btn--secondary,
+.btn-secondary,
+.fp-btn,
+.fp-btn-xs,
+.fp-mcp-add-btn,
+.jobs-btn,
+.adaptive-btn,
+.tl-filter-btn,
+.tl-copy-btn,
+.msg-action-btn,
+.load-earlier-btn,
+.q-other-btn {
+    border-color: var(--border);
+    color: var(--text-dim);
+}
+.btn--secondary:hover:not(:disabled),
+.btn-secondary:hover:not(:disabled),
+.fp-btn:hover:not(:disabled),
+.fp-btn-xs:hover:not(:disabled),
+.fp-mcp-add-btn:hover:not(:disabled),
+.jobs-btn:hover:not(:disabled),
+.adaptive-btn:hover:not(:disabled),
+.tl-filter-btn:hover:not(:disabled),
+.tl-copy-btn:hover:not(:disabled),
+.msg-action-btn:hover:not(:disabled),
+.load-earlier-btn:hover:not(:disabled),
+.q-other-btn:hover:not(:disabled) {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-glow);
+}
+
+/* --- ghost: no border until you point at it. Icon buttons in a dense
+       toolbar, and anything sitting inside another control's chrome. --- */
+.btn--ghost,
+.status-btn,
+.fp-icon-btn,
+.tl-load-older button {
+    border-color: transparent;
+    background: none;
+    color: var(--text-faint);
+}
+.btn--ghost:hover:not(:disabled),
+.status-btn:hover:not(:disabled),
+.fp-icon-btn:hover:not(:disabled),
+.tl-load-older button:hover:not(:disabled) {
+    color: var(--accent);
+    background: var(--accent-glow);
+}
+
+/* --- danger: outline in --error, fills on hover. An outline by default
+       because a destructive button should not be the loudest thing on the
+       surface until the pointer is actually on it. --- */
+.btn--danger,
+.btn-danger,
+.fp-btn-danger,
+.fp-btn.danger,
+.jobs-btn.danger,
+.q-no-btn {
+    border-color: var(--error);
+    color: var(--error);
+    background: none;
+}
+.btn--danger:hover:not(:disabled),
+.btn-danger:hover:not(:disabled),
+.fp-btn-danger:hover:not(:disabled),
+.fp-btn.danger:hover:not(:disabled),
+.jobs-btn.danger:hover:not(:disabled),
+.q-no-btn:hover:not(:disabled) {
+    background: var(--error);
+    border-color: var(--error);
+    color: var(--bg);
+}
+
+/* --- success: the mirror of danger, for the one place the app offers an
+       explicit affirmative that is not "primary" (the yes/no answer row). --- */
+.btn--success,
+.q-yes-btn {
+    border-color: var(--success);
+    color: var(--success);
+    background: none;
+}
+.btn--success:hover:not(:disabled),
+.q-yes-btn:hover:not(:disabled) {
+    background: var(--success);
+    border-color: var(--success);
+    color: var(--bg);
+}
+
+/* ----------------------------------------------------------------------
+   3. Sizes. The minimum target does not shrink — only the padding and the
+      type do, so a dense toolbar stays clickable.
+   ---------------------------------------------------------------------- */
+.btn--sm,
+.btn-sm,
+.fp-btn,
+.fp-icon-btn,
+.fp-mcp-add-btn,
+.jobs-btn,
+.adaptive-btn,
+.msg-action-btn,
+.load-earlier-btn {
+    padding: 2px var(--sp-2);
+    font-size: var(--text-xs);
+}
+.btn--xs,
+.fp-btn-xs,
+.tl-filter-btn,
+.tl-copy-btn,
+.tl-load-older button {
+    padding: 1px var(--sp-2);
+    font-size: var(--text-xxs);
+}
+
+/* Square, for a button whose whole content is one icon. */
+.btn--icon,
+.fp-icon-btn {
+    padding: 0;
+    width: 24px;
+    flex-shrink: 0;
+}
+.btn--icon.btn--lg {
+    width: 32px;
+    min-height: 32px;
+}
+
+/* ----------------------------------------------------------------------
+   4. Icons. One shape for every icon in the app (static/js/icons.js), sized
+      by its width/height attributes and coloured by the control it is in.
+   ---------------------------------------------------------------------- */
+.pxi {
+    /* inline-block, not block: an icon has to work both as a flex item (where
+       it is blockified anyway and centred by the row) and inline beside a
+       word, where a block box would break the line. The nudge sits it on the
+       mono x-height instead of the baseline. */
+    display: inline-block;
+    vertical-align: -0.14em;
+    flex-shrink: 0;
+}
+/* Icon beside a word in a container that is not already a flex row. */
+.tl-badge,
+.tl-turn-meta,
+.tl-next-error,
+.fp-col-h {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+/* A status-bar button may carry a word beside its icon on a wide screen. An
+   icon alone is a guess; two of these open surfaces most users never find. */
+.status-btn-label {
+    display: none;
+    font-size: var(--text-xs);
+}
+@media (min-width: 900px) {
+    .status-btn-label { display: inline; }
+}
+
+/* ----------------------------------------------------------------------
+   5. States.
+   ---------------------------------------------------------------------- */
+.btn:disabled,
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-danger:disabled,
+.btn-sm:disabled,
+.fp-btn:disabled,
+.fp-btn-xs:disabled,
+.fp-btn-danger:disabled,
+.fp-icon-btn:disabled,
+.fp-mcp-add-btn:disabled,
+.jobs-btn:disabled,
+.adaptive-btn:disabled,
+.tl-filter-btn:disabled,
+.tl-copy-btn:disabled,
+.tl-load-older button:disabled,
+.auth-btn:disabled,
+.q-yes-btn:disabled,
+.q-no-btn:disabled,
+.q-other-btn:disabled,
+.status-btn:disabled,
+.msg-action-btn:disabled,
+.load-earlier-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* One ring, in the accent, on every button in the app. Several of these had
+   no visible focus state at all — the UA ring is invisible on a dark ground
+   in Chrome and absent on a <div role="button"> in Safari. */
+.btn:focus-visible,
+.btn-primary:focus-visible,
+.btn-secondary:focus-visible,
+.btn-danger:focus-visible,
+.btn-sm:focus-visible,
+.fp-btn:focus-visible,
+.fp-btn-xs:focus-visible,
+.fp-btn-danger:focus-visible,
+.fp-icon-btn:focus-visible,
+.fp-mcp-add-btn:focus-visible,
+.jobs-btn:focus-visible,
+.adaptive-btn:focus-visible,
+.tl-filter-btn:focus-visible,
+.tl-copy-btn:focus-visible,
+.tl-load-older button:focus-visible,
+.auth-btn:focus-visible,
+.q-yes-btn:focus-visible,
+.q-no-btn:focus-visible,
+.q-other-btn:focus-visible,
+.status-btn:focus-visible,
+.msg-action-btn:focus-visible,
+.load-earlier-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* The Explorer's save button is the one control that is deliberately inert
+   until there is something to save; it reads as disabled without being
+   disabled, because the editor still wants its keyboard shortcut. */
+.fp-btn.save-btn:not(.dirty) {
+    opacity: 0.5;
+    cursor: default;
+    color: var(--text-faint);
+    border-color: var(--border);
+}
+.fp-btn.save-btn:not(.dirty):hover {
+    color: var(--text-faint);
+    border-color: var(--border);
+    background: none;
+}

@@ -28,11 +28,11 @@ When both providers offer a model with the same name, **Ollama wins** (local, fr
 
 There used to be a DuckDuckGo fallback; it was removed because it produced unreliable results. The Tavily key is now the gate.
 
-### Why does the agent ask me to confirm things like web searches or deleting a skill?
+### Why does the agent ask me to confirm things like web searches or creating a skill?
 
-That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `delete_skill`) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
+That's the **dangerous-tool gate**. A handful of tools (`search_web`, `browse_web`, `create_skill`, and any MCP tool whose server marks it destructive) need explicit per-call confirmation. The agent first calls `ask_user` describing exactly what it intends to do; you confirm; it then calls `approve_dangerous_tool(tool_name, scope)` and proceeds.
 
-Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Security**.
+Approvals are remembered in `data/tool_approvals.json` keyed on the scope description, so identical actions in future sessions don't re-prompt. View and clear remembered approvals in **Settings → Tools & safety → Remembered Approvals**.
 
 ### How do I bypass the dangerous-tool gate for unattended cron jobs?
 
@@ -56,10 +56,10 @@ If you really want to skip it, set `scout_enabled = false` in Settings — but e
 
 A few possibilities:
 
-- **The agent is genuinely working.** Long tool calls (browser, big file edits) can take a while. Watch the timeline drawer in the UI for tool activity.
+- **The agent is genuinely working.** Long tool calls (browser, big file edits) can take a while. Tool calls stream into the transcript as they run; the state badge in the status bar opens the **State timeline** for the full step-by-step view.
 - **A boot-time crash didn't clean up.** On startup, the manager sweeps `PROCESSING` and `AWAITING_WORKERS` sessions stuck from a prior crash and resets them to `IDLE_READY`. If you started cleanly, this should already have happened.
 - **The reaper will free it.** A 5-minute reaper tick force-resets `PROCESSING` sessions that have no background tasks holding them. Just wait.
-- **Last resort:** click cancel in the UI, or restart the server (`POST /api/admin/restart` from localhost, or Ctrl+C and `python run.py`).
+- **Last resort:** press **Stop** in the UI — the send button becomes it while a turn is running — or restart the server (`POST /api/admin/restart` from localhost, or Ctrl+C and `python run.py`).
 
 For the full reaper rules and timeouts, see [internals/state-machine.md §0.7](internals/state-machine.md#07-reaper-rules-10-state).
 
@@ -70,7 +70,7 @@ Two safety nets:
 - **`max_tool_rounds`** (default 50) caps the number of tool-call cycles per turn. The loop ends with a `round_ceiling` outcome instead of looping forever. It is a backstop against a runaway loop, not a spending limit — goal token/time budgets and the stuck detector are what actually bound cost. (It defaulted to 10 before the 2026-08 refactor, which was low enough that ordinary long tasks tripped it and had to be papered over by goal continuations.)
 - **Reflect** runs after every turn. It compares the original request against what the agent produced, and can trigger up to 2 retries with corrective lessons (`reflect_max_retries = 2`). After that it escalates by surfacing the issue to you.
 
-If the agent is doing something destructive, hit the cancel button in the UI — that triggers a `CANCELLING → IDLE_READY` transition and tears down the loop within ~30 seconds.
+If the agent is doing something destructive, press **Stop** — the send button becomes it while a turn is running — which triggers a `CANCELLING → IDLE_READY` transition and tears down the loop within ~30 seconds.
 
 ### Why doesn't my Settings change take effect?
 
@@ -83,6 +83,26 @@ A handful of settings need a server restart — anything that changes the bind a
 Changing these in the UI marks them as restart-pending. Use `POST /api/admin/restart` (localhost-only) or stop and start the process.
 
 Everything else applies immediately on Save.
+
+---
+
+## Interface
+
+### Why did my chat disappear from the sidebar?
+
+It was probably **archived**, not deleted. A daily sweep archives ordinary chats idle for more than `session_archive_idle_days` (default 30) — pinned chats are exempt, but space chats aren't, since archiving loses nothing. Archiving keeps every message; it just leaves the sidebar's regular list. Turn on the **Archived (N)** entry in the sidebar legend to see the archived group, open the chat and click **Restore**, or find it by search first (archived hits carry an "archived" chip). See [guides/sessions-and-chat.md#archiving-instead-of-deleting](guides/sessions-and-chat.md#archiving-instead-of-deleting).
+
+### Where did the Graph tab go in the State timeline?
+
+It's now **Map**, alongside two new tabs: **Lane** (one row per turn, opens on that view) and the existing **Timeline** list. Map still draws the state machine and the edges a session took, without Mermaid — a hand-laid SVG replaced it, which also fixed the graph rendering solid black on the light theme. Nothing you could see on Graph is gone, it's just organized differently now.
+
+### How do I get the light theme?
+
+**Settings → Providers & models → This browser → Appearance**, then pick System, Dark or Light. It's stored in that browser only (not synced across devices), and applies before the page paints so there's no flash on load.
+
+### How do I add an MCP server?
+
+Explorer → Capabilities → Servers (MCP), or Settings → Integrations → MCP Servers — paste a server config in the same `mcpServers` shape Claude Code, Cursor, and VS Code use, test it, and save. MCP is on by default but does nothing until a server is configured. Full setup, transports, and safety model: [mcp.md](mcp.md).
 
 ---
 
@@ -115,11 +135,11 @@ Delete the relevant `data/memories/*.md` files, or wipe everything with `python 
 
 ### What's the "Dream" session in my sidebar?
 
-If you've enabled Dream (Settings → Dream (Introspection)), Pernix spends idle time examining its own memory and operational history — raising hypotheses about itself and testing them against recorded outcomes. Each day of dreaming keeps a journal as a read-only session in the sidebar (purple dot, titled like "Dream Jul 31"). You can't chat in it — Pernix writes it while dreaming — and it's excluded from search and memory distillation. Hide the whole category with the sidebar legend if you'd rather not see it, or turn `dream_enabled` off to stop dreaming entirely. Details: [internals/dream.md](internals/dream.md).
+If you've enabled Dream (Settings → Autonomy & idle work → Dream (Introspection)), Pernix spends idle time examining its own memory and operational history — raising hypotheses about itself and testing them against recorded outcomes. Each day of dreaming keeps a journal as a read-only session in the sidebar (purple dot, titled like "Dream Jul 31"). You can't chat in it — Pernix writes it while dreaming — and it's excluded from search and memory distillation. Hide the whole category with the sidebar legend if you'd rather not see it, or turn `dream_enabled` off to stop dreaming entirely. Details: [internals/dream.md](internals/dream.md).
 
 ### Where do the agent's file outputs land?
 
-`data/workspace/`. Subdirectories are organized by project. The file panel in the UI shows the tree; the REST API at `GET /api/workspace` lists it; `GET /workspace/{path}` downloads any file.
+`data/workspace/`. Subdirectories are organized by project. The Explorer's Files → Workspace tab shows the tree; the REST API at `GET /api/workspace` lists it; `GET /workspace/{path}` downloads any file.
 
 The agent can only write inside `data/workspace/` — protected paths like `.env`, `SOUL.md`, and `data/sessions.db` are blocked.
 
@@ -132,6 +152,14 @@ The agent can only write inside `data/workspace/` — protected paths like `.env
 Yes — turn on network mode. In Settings, set `network_enabled = true` and restart. Then `python run.py --qr` prints a QR code containing the LAN URL plus your auth token; scan it with your phone and you're logged in.
 
 For mobile without browser certificate warnings (and for Web Push notifications to work), set up trusted TLS via [deployment/mkcert.md](deployment/mkcert.md) instead of the default self-signed cert.
+
+### Does the UI work properly on a phone or a tablet?
+
+Yes, and it is not the desktop layout shrunk. Below 900px the sidebar becomes a drawer (swipe from the left edge or tap the hamburger), the Explorer and the modals become full-screen sheets, and each session row carries one `⋯` menu instead of hover-revealed icons. A tablet in landscape is treated as a big screen with a finger on it: the sidebar stays docked and the Explorer sits beside the conversation, at touch sizes. Dragging the sidebar's edge to resize it is a desktop affordance only — a phone and a tablet keep their own sidebar sizes.
+
+On touch, Enter adds a new line and the send button sends — the opposite of the desktop default, because Enter is the on-screen keyboard's newline key. **Ctrl+Enter / Cmd+Enter always sends**, which is the answer for a tablet with a keyboard attached, and you can flip the default under Settings → Providers & models → *This browser* → "Enter sends the message". That preference is stored in the browser you set it in and is not synced.
+
+How it works underneath — the two stylesheets, their gates, and why an iPad needs JavaScript to be recognised at all — is [internals/web-client.md](internals/web-client.md).
 
 ### Should I expose Pernix to the public internet?
 
@@ -193,6 +221,6 @@ Use the OpenRouter dashboard — Pernix doesn't have a built-in per-month limit.
 
 - `OPENROUTER_MODELS` whitelist — restrict which models the UI even shows.
 - `llm_session_timeout` — caps how long any single session can hold an LLM slot.
-- If RLM is enabled, it is the biggest single-call spend vector (one `rlm_process` run can fire up to `rlm_max_subcalls` sub-calls, default 50). Sub-calls run on the **Background** model (`background_model`; the root runs on Primary), so point that at a local/Ollama model to keep runs free, and tune `rlm_max_subcalls`, `rlm_max_concurrent_subcalls`, and `rlm_timeout_seconds` in Settings → General → RLM.
+- If RLM is enabled, it is the biggest single-call spend vector (one `rlm_process` run can fire up to `rlm_max_subcalls` sub-calls, default 50). Sub-calls run on the **Background** model (`background_model`; the root runs on Primary), so point that at a local/Ollama model to keep runs free, and tune `rlm_max_subcalls`, `rlm_max_concurrent_subcalls`, and `rlm_timeout_seconds` in Settings → Tools & safety → Large-input runs (RLM).
 
 For hard limits, configure them on OpenRouter's side.

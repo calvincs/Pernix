@@ -40,7 +40,7 @@ You can disable recall entirely with `memory_recall = false`. There is no releva
 
 ### Semantic retrieval
 
-By default memory search is purely lexical (BM25 over the FTS5 index) — an entry about "deploy credentials" won't match a query about "release passwords". Setting **`embedding_model`** to a local Ollama embedding model (e.g. `nomic-embed-text`, in Settings → Models) turns search **hybrid**: BM25 and vector cosine similarity each contribute their top matches, fused with reciprocal-rank fusion, so both exact-term and by-meaning matches surface.
+By default memory search is purely lexical (BM25 over the FTS5 index) — an entry about "deploy credentials" won't match a query about "release passwords". Setting **`embedding_model`** to a local Ollama embedding model (e.g. `nomic-embed-text`, in Settings → Providers & models) turns search **hybrid**: BM25 and vector cosine similarity each contribute their top matches, fused with reciprocal-rank fusion, so both exact-term and by-meaning matches surface.
 
 The mechanics stay true to the store's design:
 
@@ -48,6 +48,12 @@ The mechanics stay true to the store's design:
 - **Embedding is background work.** Writes never block on it: new or edited entries are embedded during Snooze's index-reconciliation sweep (`embedding_batch_size` texts per call, scheduled behind live turns so it can't stall your chat). Until an entry is embedded it simply doesn't participate in the vector channel yet.
 - **Degrades gracefully.** If Ollama or the embedding model is unavailable, search falls back to lexical with a logged warning.
 - **The vectors are a rebuildable sidecar** in `data/memories/_index.db`, like the FTS index — the markdown files remain the only source of truth. Changing the embedding model marks all vectors stale; they re-embed in the background.
+
+### Federated reads with `deep_recall`
+
+`deep_recall` doesn't stop at the memory store. Alongside its LLM-synthesized answer (or the raw fallback if that call fails) it appends a short, provenance-tagged **"related in other stores"** section pulled from wherever else Pernix keeps knowledge: active adaptive rules, Telos claims (when [Telos](../internals/telos.md) is enabled), matching skills, and raw session transcripts the curated memory store never saw. Each source is best-effort — one that's off or broken just contributes nothing, never an error — so you get one read surface instead of having to know which of six stores might hold the answer.
+
+If the session belongs to a [space](spaces.md), both `recall` and `deep_recall` also resolve that space and surface its `pernix.space.<slug>.*` entries first — ordering only, never an inflated score, so the same search from outside the space still finds them on merit.
 
 ### Wiki-links
 
@@ -116,16 +122,20 @@ curl -X POST http://localhost:8090/api/memory/maintenance
 
 ## Searching memory directly
 
-Two ways:
+Three ways:
 
-1. **REST:**
+1. **In the UI:** Explorer → **Knowledge → Memory**. The filter box narrows the file list by name, description or keyword; the search box above it searches *entries* across every file, ten at a time with a **Load more** at the bottom. Each result is labelled **strong / good / weak** rather than showing a raw relevance number — hover the label for the score and the scale it belongs to. Click a file to read it, or use the pencil to open it in the editor: memory files are plain markdown and save through the same conflict-aware path as the workspace (if the agent rewrote the file while you were typing, you are offered Reload or Overwrite rather than losing one of the two versions). That path is `PUT /api/memory/files/{name}` — send the `mtime` the matching `GET` handed you back as `base_mtime`, and a stale one gets a 409 with the current `mtime` instead of silently overwriting.
+
+2. **REST:**
 
    ```bash
    curl -G --data-urlencode 'q=what do I know about X' \
      http://localhost:8090/api/memory/search
    ```
 
-2. **Ask the agent.** "What do you know about X from prior sessions?" — the agent uses `recall` (or `deep_recall` for a harder dig) and reports back.
+   `limit` (default 10, max 100) and `offset` page the results; `has_more` says whether another page exists.
+
+3. **Ask the agent.** "What do you know about X from prior sessions?" — the agent uses `recall` (or `deep_recall` for a harder dig) and reports back.
 
 For full search syntax (phrase, AND/OR, exclude), see [../api.md](../api.md#memory).
 

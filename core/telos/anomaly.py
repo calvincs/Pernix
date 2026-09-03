@@ -29,7 +29,10 @@ from config import settings
 
 logger = logging.getLogger("pernix.telos.anomaly")
 
-_MAX_OPEN_QUESTIONS = 120
+# 24, down from 120 (v3.1): the live box abandoned 16 of its 18 questions —
+# a deep backlog of open questions is inventory nothing will ever service,
+# and every open file is hot-path scan weight.
+_MAX_OPEN_QUESTIONS = 24
 _MAX_QUESTIONS_PER_TURN = 2
 
 
@@ -76,9 +79,15 @@ def extract_turn_anomalies(
         if calls <= 0 or failures <= 0:
             continue
         prior = priors.get(tool)
-        if prior is not None and prior < 0.6:
-            continue  # known-flaky tool failing is not an anomaly — no violated prior
-        surprise = prior if prior is not None else 0.9
+        if prior is not None:
+            # Candor has ANY calibrated record for this tool → the failure is
+            # already tracked by the system that actually closes reliability
+            # loops (ledger, intel brief, degraded-tool hints). Re-asking
+            # "under what conditions does tool X fail" here produced the
+            # 16-abandoned-question class on the live box — TELOS's questions
+            # are for anomalies the rest of the system CANNOT explain.
+            continue
+        surprise = 0.9
         errors = s.get("errors") or []
         detail = f" ({str(errors[0])[:120]})" if errors else ""
         # Phrase the question against observables that are CONTINUOUSLY
@@ -93,7 +102,7 @@ def extract_turn_anomalies(
             {
                 "text": (
                     f"Under what conditions does tool '{tool}' fail? It just failed "
-                    f"{failures}/{calls} calls despite calibrated reliability ~{surprise:.2f}."
+                    f"{failures}/{calls} calls and Candor has no calibrated record for it yet."
                     f"{detail} Evaluable against the standing ledgers: tool_ok('{tool}') and "
                     f"tool_failure_mode('{tool}') record every call."
                 ),
@@ -153,22 +162,6 @@ async def on_post_task(session_id: str, session: dict, session_obj) -> None:
     failing_tools = [t for t, s in tool_summary.items() if int(s.get("calls", 0)) > 0 and int(s.get("failures", 0)) > 0]
     priors = await _candor_priors(failing_tools)
 
-    # Goal attribution (audit P5 port 1): bind minted questions to the goal
-    # the session is actually executing instead of hardcoding g_root.
-    goal_id = getattr(session_obj, "active_goal_id", None)
-    goal_objective = ""
-    if goal_id:
-        try:
-            from db import models as _db
-
-            row = await asyncio.to_thread(_db.get_active_goal, session_id)
-            if row and int(row.get("id", 0)) == int(goal_id):
-                goal_objective = str(row.get("objective") or "")
-            else:
-                goal_id = None
-        except Exception:
-            goal_id = None
-
     await asyncio.to_thread(
         _post_task_store_work,
         session_id,
@@ -178,8 +171,6 @@ async def on_post_task(session_id: str, session: dict, session_obj) -> None:
         termination,
         reflect_retry,
         priors,
-        goal_id,
-        goal_objective,
     )
 
 
@@ -191,19 +182,11 @@ def _post_task_store_work(
     termination,
     reflect_retry: bool,
     priors: dict[str, float],
-    goal_id: int | None = None,
-    goal_objective: str = "",
 ) -> None:
     """Synchronous store side of the post-task hook (runs in a thread)."""
     from core.telos.store import TelosStore
 
     store = TelosStore.open()
-    parent_goal = "g_root"
-    if goal_id:
-        try:
-            parent_goal = store.ensure_db_goal(goal_id, goal_objective).id
-        except Exception as e:
-            logger.debug("telos: db-goal mirror failed for %s: %s", goal_id, e)
 
     # 1) Trace: every turn lands in the record ("the story that is told of us").
     store.trace_append(
@@ -220,32 +203,34 @@ def _post_task_store_work(
         },
     )
 
-    # 2) Questions from anomalies, bounded and deduplicated.
-    open_count = len(store.list_questions(state="open"))
-    if open_count >= _MAX_OPEN_QUESTIONS:
+    # 2) Questions from anomalies, bounded and deduplicated. ONE corpus scan
+    # feeds every check below — this hook used to trigger up to six full
+    # directory scans per turn (open-count, serendipity share, per-anomaly
+    # remint + duplicate checks) inside its 10s teardown budget.
+    questions = store.list_questions()
+    if sum(1 for q in questions if q.get("state") == "open") >= _MAX_OPEN_QUESTIONS:
         return
-    serendipity_due = _serendipity_due(store)
+    serendipity_due = _serendipity_due(questions, store.serendipity_budget())
     minted = 0
     for a in extract_turn_anomalies(tool_summary, termination, reflect_retry, session_type, priors=priors):
         if minted >= _MAX_QUESTIONS_PER_TURN:
             break
-        if _recently_minted(store, a["derived_from"]):
+        if _recently_minted(questions, a["derived_from"]):
             continue
-        if store.question_is_duplicate(a["text"]):
+        if store.question_is_duplicate(a["text"], questions=questions):
             continue
         origin = "anomaly"
-        q_parent = parent_goal
         if serendipity_due and a["surprise"] >= 0.8:
             # High-surprise, deliberately unbound from any active goal.
             origin, serendipity_due = "serendipity", False
-            q_parent = "g_root"
-        store.add_question(
+        q = store.add_question(
             text=a["text"],
             surprise=a["surprise"],
             derived_from=a["derived_from"] + [f"session:{session_id}"],
-            parent_goal=q_parent,
+            parent_goal="g_root",
             origin=origin,
         )
+        questions.append(q)
         minted += 1
 
 
@@ -290,28 +275,30 @@ def record_gate_outcomes(
         store.trace_append("gates", event)
 
 
-def _recently_minted(store, derived_from: list[str]) -> bool:
-    """A question from the same source marker exists within the cooldown.
+def _recently_minted(questions: list, derived_from: list[str]) -> bool:
+    """A question from the same source marker exists within the cooldown —
+    or is still OPEN at any age (v3.1): one open line of inquiry per source,
+    full stop; a cooldown that expires while the question still sits open
+    just re-mints the backlog.
 
     Text dedup alone cannot do this job from either direction: the old
     per-turn wording varied by failure counts, so the same flaky tool minted
     a near-identical question every day; a stable wording would flip that
     into a forever-block against the abandoned corpus. The derived_from
     marker (tool:X, reflect:retry, termination:round_ceiling) is stable per
-    source, so it gives time-boxed suppression: one open line of inquiry per
-    source at a time, and a re-ask becomes possible once the cooldown passes.
+    source, so suppression keys on it.
     """
-    days = max(0, settings.telos_anomaly_remint_cooldown_days)
-    if not days:
-        return False
     markers = {m for m in derived_from if not m.startswith("session:")}
     if not markers:
         return False
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    for q in store.list_questions():
-        if str(q.get("created_at") or "") < cutoff:
+    days = max(0, settings.telos_anomaly_remint_cooldown_days)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ") if days else ""
+    for q in questions:
+        if not markers & set(q.get("derived_from") or []):
             continue
-        if markers & set(q.get("derived_from") or []):
+        if q.get("state") == "open":
+            return True
+        if cutoff and str(q.get("created_at") or "") >= cutoff:
             return True
     return False
 
@@ -319,16 +306,15 @@ def _recently_minted(store, derived_from: list[str]) -> bool:
 _SERENDIPITY_WINDOW = 30
 
 
-def _serendipity_due(store) -> bool:
+def _serendipity_due(questions: list, budget: float) -> bool:
     """Keep the serendipity share of *recent* minting near the budget.
 
     Measured over the last _SERENDIPITY_WINDOW questions rather than the
     lifetime corpus — a lifetime share stops serendipity permanently once the
     historical average crosses the budget, regardless of recent throughput.
     """
-    qs = store.list_questions()
-    if not qs:
+    if not questions:
         return False
-    recent = sorted(qs, key=lambda q: q.get("created_at") or "")[-_SERENDIPITY_WINDOW:]
+    recent = sorted(questions, key=lambda q: q.get("created_at") or "")[-_SERENDIPITY_WINDOW:]
     share = sum(1 for q in recent if q.get("origin") == "serendipity") / len(recent)
-    return share < store.serendipity_budget()
+    return share < budget

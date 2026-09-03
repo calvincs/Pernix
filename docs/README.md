@@ -17,6 +17,7 @@ This index is organized by what you're trying to do.
 How Pernix behaves day-to-day. Read the ones that match what you're trying to do.
 
 - [guides/sessions-and-chat.md](guides/sessions-and-chat.md) — sessions, the turn lifecycle, pausing/resuming
+- [guides/spaces.md](guides/spaces.md) — long-lived session groups with shared directives, memory, workspace, and kernel; off by default, Pernix can also suggest one for work you keep coming back to
 - [guides/workspace-and-files.md](guides/workspace-and-files.md) — where outputs land, file safety, retrieval
 - [guides/memory-and-recall.md](guides/memory-and-recall.md) — what Pernix remembers across sessions and how to manage it
 - [guides/using-skills.md](guides/using-skills.md) — installing and invoking skills
@@ -30,6 +31,7 @@ Authoring new capabilities — no Pernix code changes required.
 
 - [authoring/writing-skills.md](authoring/writing-skills.md) — the SKILL.md schema and how to write your own
 - [authoring/custom-tools.md](authoring/custom-tools.md) — author Python tools via the toolmaker extension
+- [mcp.md](mcp.md) — plug in external MCP tool servers (Model Context Protocol), local or remote, no code required
 
 ## I'm operating / deploying Pernix
 
@@ -50,14 +52,16 @@ Beyond the localhost-only default. Read these before exposing Pernix to anything
 - [architecture.md](architecture.md) — guided walkthrough of the agent loop, scout, reflect, snooze
 - [configuration.md](configuration.md) — every setting explained, with defaults
 - [internals/state-machine.md](internals/state-machine.md) — formal session state machine with file:line citations
-- [internals/extensions.md](internals/extensions.md) — the twelve extension modules and their gates
+- [internals/web-client.md](internals/web-client.md) — the web UI's three device tiers: the two stylesheets, their gates, and the JS that mirrors them
+- [mobile-device-checklist.md](mobile-device-checklist.md) — the phone/tablet checks that need real hardware (the automated gate covers the rest)
+- [internals/extensions.md](internals/extensions.md) — the thirteen extension modules and their gates
 - [internals/reflect-and-snooze.md](internals/reflect-and-snooze.md) — quality-gate retry and idle-time consolidation
 - [internals/rlm.md](internals/rlm.md) — recursive long-input processing (sandboxed REPL + sub-LLM broker)
 - [internals/candor.md](internals/candor.md) — calibrated operational memory: earned tool reliability from recorded outcomes
 - [internals/dream.md](internals/dream.md) — idle-time introspection: hypotheses about itself, falsified against the record
 - [internals/autonomy.md](internals/autonomy.md) — long-running autonomy: gates, goals, heartbeats, and the persistent session kernel
 - [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md) — the self-improvement loop: golden-task canaries and the governed adaptive policy store
-- [internals/telos.md](internals/telos.md) — the teleological layer: a non-convergent drive with correction machinery (questions, SOUP, ordo, binding, hevel, dual ledgers)
+- [internals/telos.md](internals/telos.md) — the operational question loop: turn-time anomalies become falsifiable hypotheses (questions, SOUP), evaluated against recorded evidence; the v3.0 goal-DAG (ordo, binding, hevel) was carved out in v3.1 as a no-op
 
 ## I want to contribute
 

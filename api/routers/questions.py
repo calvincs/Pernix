@@ -8,6 +8,7 @@ import json
 from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import StreamingResponse
 
+from core.events import queue_was_dropped
 from db import models as db
 
 router = APIRouter(tags=["questions"])
@@ -190,6 +191,8 @@ async def notification_events(request: Request):
                 except asyncio.TimeoutError:
                     if shutdown.is_set():
                         return
+                    if queue_was_dropped(queue):
+                        return
                     yield ": heartbeat\n\n"
                     continue
 
@@ -198,6 +201,8 @@ async def notification_events(request: Request):
                     return
                 data = {k: v for k, v in event.items() if not k.startswith("_")}
                 yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+                if queue_was_dropped(queue):
+                    return
 
         except (asyncio.CancelledError, GeneratorExit):
             pass

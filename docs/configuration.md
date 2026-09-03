@@ -8,7 +8,7 @@ Some settings (marked **requires restart**) only take effect when the server is 
 
 ## How Settings Work
 
-**Via the UI:** Open the gear icon in the sidebar → Settings. Changes save immediately.
+**Via the UI:** Click **Settings** in the status bar at the bottom of the main pane — the cog next to **Explorer**. Below 900px it is the cog on its own, and on a touch device the whole status bar sits at the top of the screen instead. Edits are held in the form until you press **Save** — closing the modal, pressing Escape or clicking the backdrop discards them (it asks first). After saving, controls marked with a **restart** badge report which of them need a server restart to take effect.
 
 **Via the API:**
 ```bash
@@ -20,6 +20,8 @@ curl -X POST http://localhost:8090/api/settings \
 **Via direct file edit:** Edit `data/settings.json` while the server is stopped. Unknown keys are silently ignored on load.
 
 **Via Swagger UI (try-it interactively):** Pernix is FastAPI-based, so a live API explorer is available at [`http://localhost:8090/docs`](http://localhost:8090/docs). The `POST /api/settings` endpoint is right there — click "Try it out", paste a JSON body, and execute. ReDoc lives at `/redoc` for a more reference-style view of the schema.
+
+**Not server settings:** the theme (System/Dark/Light, under Settings → Providers & models → Appearance) and the sidebar's drag-resized width live in the browser's `localStorage`, not in `data/settings.json` — they belong to the device, not the agent, and are not covered by this page.
 
 ---
 
@@ -36,6 +38,9 @@ These are the most important settings to configure before first use.
 | `llm_max_concurrent` | `1` | Maximum simultaneous requests to Ollama. Increase only if your hardware supports parallel inference. |
 | `llm_session_timeout` | `1800` | Maximum wall-clock seconds a session may hold an LLM slot. Prevents hung sessions from blocking others. Set to `0` for unlimited. |
 | `provider_quota_cooldown_s` | `600` | When a model 403s on an exhausted quota, failover *to* that model is refused for this many seconds — so a dead key can't mask the real error. |
+| `fallback_burn_alert_share` | `0.25` | Fallback-burn watch: when `fallback_model` serves at least this share (0–1) of the trailing 24h's tokens, a high-urgency notification fires once/day — the signature of a wedged primary provider silently billing everything to the paid tier. `0` disables the watch. |
+| `fallback_burn_min_tokens` | `50000` | The watch stays quiet unless the trailing 24h carried at least this many total tokens — a quiet day that happened to fail over is noise, not the incident. |
+| `model_prices` | `{}` | Optional per-model USD pricing for `token_usage.cost_estimate`: `{"model_id": {"in": $/1M prompt tokens, "out": $/1M completion tokens}}`, exact model-id match only. Unpriced/local models keep `cost_estimate` NULL. Display/telemetry only — nothing routes on cost. No Settings UI control; set via `POST /api/settings` or `data/settings.json`. |
 
 ### OpenRouter
 
@@ -51,7 +56,7 @@ These are the most important settings to configure before first use.
 
 ### OpenAI (and OpenAI-compatible servers)
 
-A native provider for the OpenAI API — and, because `openai_base_url` is overridable, for any OpenAI-compatible server (vLLM, LM Studio, llama.cpp server). The API key is **env-only**: set `OPENAI_API_KEY` in `.env` (or via Settings → LLM Providers → OpenAI API Key); it is deliberately never a `settings.json` field because that file is plaintext on disk.
+A native provider for the OpenAI API — and, because `openai_base_url` is overridable, for any OpenAI-compatible server (vLLM, LM Studio, llama.cpp server). The API key is **env-only**: set `OPENAI_API_KEY` in `.env` (or via Settings → Providers & models → LLM Providers → OpenAI API Key); it is deliberately never a `settings.json` field because that file is plaintext on disk.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -83,6 +88,7 @@ Context is **auto-managed by default** (`context_auto`): the harness reads each 
 | `compaction_keep_tokens` | `51000` | How many tokens to preserve verbatim after compaction. Recent messages and tool results are kept. |
 | `context_critical_threshold` | `0.85` | Show a visual warning in the UI when context fills to this fraction. |
 | `max_inline_attach_bytes` | `33554432` (32 MB) | Ceiling on the total base64 attachment bytes inlined into a single compile. Past it, the oldest attachments fall back to text markers. 32 MB fits audio (a 19 MB WAV expands to ~25 MB base64). |
+| `turn_ledger_enabled` | `true` | The `[SINCE YOUR LAST TURN]` block in the volatile tail: a delta of what changed since the agent's previous turn — finished workers/jobs/RLM runs, its last reflect verdict + lesson, adaptive changes, canary regressions, platform restarts/updates. Normal and cron sessions only (canaries excluded by isolation, workers stay lean). Renders nothing when nothing changed; `false` makes the tail byte-identical to the pre-ledger shape. |
 
 ### View pruning
 
@@ -106,6 +112,8 @@ This used to be an unconditional hardcode: every tool result over 300 characters
 |---|---|---|
 | `max_tool_rounds` | `50` | Maximum number of tool-call cycles in a single turn. A backstop against infinite tool loops — not a spend cap. Goal token/time budgets and the stuck detector are the real guards. (Raised from `10` in the 2026-08 refactor; ten rounds manufactured its own failures on ordinary long tasks.) |
 | `round_cap_auto_continue` | `1` | Fresh round budgets granted when a turn exhausts `max_tool_rounds` while healthy (tools ran, no errors, no stuck spiral). Each grant leaves a transcript notice. `0` restores the hard stop. |
+| `forced_followup_enabled` | `true` | When a reply ends by announcing more work ("Next, I'll…") with no tool calls, inject one in-turn nudge naming the unfinished item instead of ending the turn. The trigger is narrow: future-intent tail only, trailing questions and courtesy closers never fire it. |
+| `forced_followup_max_per_turn` | `1` | Cap on forced follow-up nudges per turn (bounds 0–5). Keeps a genuinely finished task from being looped. |
 
 ---
 
@@ -133,6 +141,7 @@ After each agent turn, a lightweight reflect pass verifies that the agent actual
 | `reflect_min_messages` | `3` | Minimum messages in a conversation before reflect runs. Short exchanges (e.g., a simple one-liner) skip it. |
 | `reflect_deferred_normal` | `true` | Interactive sessions finalize immediately and get their grade later, observe-only — lessons, post-mortems, and experience records are written exactly as before, but no verdict can retry the turn. Off restores synchronous, retry-capable reflect on interactive turns. Cron/worker/canary sessions always keep the synchronous, retry-capable path, and deterministic gates still run (and clamp) in-line. |
 | `reflect_defer_idle_s` | `300` | Quiet seconds before a deferred grade runs. Only the latest completed turn is graded — a turn superseded inside this window never is. |
+| `reflect_nonpass_confidence_floor` | `0.5` | Materiality floor (2026-08-27 calibration audit): a `retry`/`escalate` verdict the grader itself rates below this confidence (0–1) is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous," and ambiguity should not burn a retry or fire an escalation. Coerced/malformed grades are exempt and stay conservative. `0` disables. |
 | `reflect_experience` | `true` | Parse reflect's per-turn experience read (sentiment, friction, user observations) and feed it to Candor, post-mortems, and user-profile memory. |
 
 ---
@@ -150,7 +159,7 @@ During idle periods (no active sessions), Pernix runs background maintenance: de
 
 ## Candor (Operational Memory Add-on)
 
-Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Candor (Operational Memory). How it works: [internals/candor.md](internals/candor.md); design history: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
+Integration with the Candor memory substrate: calibrated reliability tracking for tools, turns, and reflect verdicts, with an auditable evidence ledger. The `candor` package installs with `pip install -r requirements.txt` (vendored wheel in `vendor/`; rebuild with `pip wheel --no-deps -w vendor/ /path/to/Candor` after upstream changes). Toggles live in Settings → Integrations → Operational memory (Candor). How it works: [internals/candor.md](internals/candor.md); design history: [dev/candor-integration-plan.md](dev/candor-integration-plan.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -167,7 +176,7 @@ The store lives at `data/candor/` (machine-local, not in `settings.json`).
 
 ## RLM (Recursive Processing Add-on)
 
-Recursive Language Models (arXiv 2512.24601): the agent processes inputs far beyond the context window — huge files, corpora, transcripts, log dumps — by writing code in a sandboxed child REPL that holds the input as a variable and delegates chunk work to budgeted sub-LLM calls. Adapted from the MIT-licensed reference implementation (no new dependency). Toggles live in Settings → General → RLM (Recursive Processing). RLM adds **no model roles of its own** — it reuses Primary and Background (see below). Architecture + security posture: [internals/rlm.md](internals/rlm.md).
+Recursive Language Models (arXiv 2512.24601): the agent processes inputs far beyond the context window — huge files, corpora, transcripts, log dumps — by writing code in a sandboxed child REPL that holds the input as a variable and delegates chunk work to budgeted sub-LLM calls. Adapted from the MIT-licensed reference implementation (no new dependency). Toggles live in Settings → Tools & safety → Large-input runs (RLM). RLM adds **no model roles of its own** — it reuses Primary and Background (see below). Architecture + security posture: [internals/rlm.md](internals/rlm.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -187,7 +196,7 @@ Recursive Language Models (arXiv 2512.24601): the agent processes inputs far bey
 
 ## Dream (Introspection Add-on)
 
-Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems; generates typed hypotheses about itself (contradictions, stale memory, ineffective lessons, tool patterns); validates them against recorded outcomes; and writes a periodic report to `workspace/dreams/`. Hypotheses influence nothing until validated. Each day of dreaming narrates itself into a read-only Dream journal session in the sidebar. Toggles live in Settings → Dream (Introspection); all apply hot. How it works: [internals/dream.md](internals/dream.md).
+Idle-time introspection: during snooze the agent examines its own memory, Candor evidence, and post-mortems; generates typed hypotheses about itself (contradictions, stale memory, ineffective lessons, tool patterns); validates them against recorded outcomes; and writes a periodic report to `workspace/dreams/`. Hypotheses influence nothing until validated. Each day of dreaming narrates itself into a read-only Dream journal session in the sidebar. Toggles live in Settings → Autonomy & idle work → Dream (Introspection); all apply hot. How it works: [internals/dream.md](internals/dream.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -202,15 +211,31 @@ Idle-time introspection: during snooze the agent examines its own memory, Candor
 
 ---
 
-## Telos (Teleological Layer Add-on)
+## Space Suggestions
 
-A non-convergent drive with correction machinery over the whole loop: turn anomalies mint Questions, an idle-time SOUP generates cross-domain hypotheses (only falsifiable ones execute; the rest wait in a speculation pool), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (Ordo), detecting Goodhart binding, measuring goal discharge (Hevel), reconciling the agent's self-story against its append-only trace ledger, and keeping exploration entropy above floor. All state is markdown+YAML under `data/telos/`. Toggles live in Settings → Telos (Teleological Layer); everything applies hot except tool registration (restart). How it works: [internals/telos.md](internals/telos.md); derivation: [dev/telos-spec.md](dev/telos-spec.md).
+Idle-time filing: during Snooze, Pernix reads the last few weeks of ordinary chats (archived ones included, machine sessions excluded) and makes one background-model call that groups them by the kind of work you keep coming back to — not the tool used or the day it happened. A group that clears the thresholds below becomes a suggestion, either a new space or a move into one you already have, surfaced as a row in the sidebar. Nothing is created, moved, or written to a directive file until you accept it in the review sheet; declining a topic remembers it (and near-synonyms of it) until you clear it from the **Declined** list. Off by default, and inert when off — the scan is absent from the idle ladder entirely. Toggles live in Settings → Autonomy & idle work → Space suggestions. Guide: [guides/spaces.md](guides/spaces.md#suggested-spaces).
 
 | Setting | Default | Description |
 |---|---|---|
-| `telos_enabled` | `false` | Master switch. Off: no directories created, snooze Activity 16 skipped, cron never installs, post-task hook inert. Registers the `telos_status` / `telos_ask` / `telos_goal_add` / `telos_goal_complete` tools (restart). |
+| `space_suggest_enabled` | `false` | Master switch. Off = no background call spent, no table read. |
+| `space_suggest_window_days` | `30` | How many days of chat history one scan looks back over. |
+| `space_suggest_min_sessions` | `5` | Chats a cluster needs before it is offered as a suggestion. |
+| `space_suggest_min_days` | `3` | Distinct calendar days those chats must span — a burst on one afternoon is not a habit. |
+| `space_suggest_scan_interval_hours` | `24` | Floor between scheduled scans (also gated on ten new chats having appeared since the last one). |
+| `space_suggest_ttl_days` | `14` | A pending suggestion nobody accepted or declined expires after this many days and may be offered again. |
+
+---
+
+## Telos (Teleological Layer Add-on)
+
+A non-convergent drive with correction machinery over the whole loop: turn anomalies mint Questions, an idle-time SOUP generates cross-domain hypotheses (only falsifiable ones execute; the rest wait in a speculation pool), and slow loops audit the goal hierarchy daily — re-ranking strayed goals (Ordo), detecting Goodhart binding, measuring goal discharge (Hevel), reconciling the agent's self-story against its append-only trace ledger, and keeping exploration entropy above floor. All state is markdown+YAML under `data/telos/`. Toggles live in Settings → Autonomy & idle work → Goals (Telos); everything applies hot except tool registration (restart). How it works: [internals/telos.md](internals/telos.md); derivation: [dev/telos-spec.md](dev/telos-spec.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `telos_enabled` | `false` | Master switch. Off: no directories created, snooze Activity 16 skipped, cron never installs, post-task hook inert. Registers the `telos_status` / `telos_ask` tools (restart). |
+| `telos_dir` | `data/telos` | Directory holding Telos state: SOUP hypotheses, ledgers, and the append-only JSONL trace, all markdown+YAML. No Settings UI control; set via `POST /api/settings` or `data/settings.json`. |
 | `telos_root_text` | `"What is actually going on here, and what is it for?"` | The root objective — a question with no satisfaction predicate. Re-expressing it is an operator-only edit. |
-| `telos_schedule` | `0 4 * * *` | Daily slow-loop cron (UTC): Ordo Pass + Binding Monitor, with weekly Hevel/reconciliation/entropy blocks watermarked inside it. |
+| `telos_schedule` | `0 4 * * *` | Daily slow-loop cron (UTC): retirement sweeps, with the weekly entropy-control block watermarked inside it. |
 | `telos_serendipity_budget` | `0.15` | Share of scheduler throughput reserved for high-surprise questions with no goal relevance. |
 | `telos_eig_floor` | `0.15` | Testability-gate admission floor on expected information gain. |
 | `telos_hypotheses_per_question` | `3` | SOUP output cap per generation pass. |
@@ -221,18 +246,12 @@ A non-convergent drive with correction machinery over the whole loop: turn anoma
 | `telos_soup_context_entries` | `10` | Memory entries in the band-sampled SOUP context. |
 | `telos_soup_retention_days` | `30` | Age after which an unexamined pooled hypothesis is archived `expired` into `soup/archive/` — moved out of the loop's scans, never deleted. 0 = keep it in the pool forever. |
 | `telos_soup_archive_retention_days` | `180` | Hard-delete horizon for `soup/archive/` — the only place a hypothesis file is unlinked. Long by design: the archive is the calibration review's forensic record. 0 = keep forever. |
-| `telos_budget_share_max` | `0.35` | Binding Monitor: 7-day budget share above which the Goodhart signature can fire. |
-| `telos_claims_floor_per_window` | `1` | Binding Monitor: new-claims floor — below it (with the other three conditions) the signature holds. |
-| `telos_divergence_max` | `0.15` | Ledger reconciliation: unsupported-autobiography-claims share that raises a divergence alarm. |
-| `telos_alarm_autoclose` | `true` | Let the discharge pass close alarms that survive repeated clean re-checks. |
-| `telos_alarm_autoclose_checks` | `3` | Consecutive clean re-checks required to discharge an alarm. |
-| `telos_alarm_autoclose_window_hours` | `24` | Minimum first-to-last clean-check span (hours) before autoclose. |
 
 ---
 
 ## Autonomy (Gates, Goals, Heartbeats, Session Kernel)
 
-The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, heartbeats steered into running work, and a persistent per-session Python REPL. All off by default; a goal + gates + a heartbeat compose into an autonomous task. Toggles live in Settings → Autonomy (Gates, Goals, Heartbeats, Kernel). How it works: [internals/autonomy.md](internals/autonomy.md).
+The long-running-autonomy substrate: deterministic gates Reflect cannot overrule, persistent cross-turn goals with budgets, heartbeats steered into running work, and a persistent per-session Python REPL. All off by default; a goal + gates + a heartbeat compose into an autonomous task. Toggles live in Settings → Autonomy & idle work → Autonomy. How it works: [internals/autonomy.md](internals/autonomy.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -250,29 +269,30 @@ The long-running-autonomy substrate: deterministic gates Reflect cannot overrule
 
 ## Canary Suite
 
-Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated temp workspaces on a nightly schedule. Measures whether the agent is getting better or worse — the Adaptive Layer's tripwire reads these results. Zero rows, zero behavior change while off. Toggles live in Settings → Canary Suite; runs surface in the Explorer's Canary tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+Golden-task canaries: canned tasks with deterministic gates, run headlessly through the full pipeline (scout → agent → gates → reflect) in isolated, tool-allowlisted temp workspaces. **Change-driven**: canaries run when something they cover changes — an adaptive batch (a targeted post-batch probe), a skill edit (via `covers:`/verify blocks), a model swap or a deploy (full sweeps) — plus a small nightly heartbeat that keeps every active canary's history warm. The Adaptive Layer's tripwire reads the post-batch results per task. Zero rows, zero behavior change while off. Toggles live in Settings → Autonomy & idle work → Canary Suite; runs and full CRUD (create, edit, park, retire, one-off probes) surface in the Explorer's Self-tuning → Self-checks tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
 
 | Setting | Default | Description |
 |---|---|---|
-| `canary_enabled` | `false` | Master switch for the suite: the scheduled sweep, the `canary_run` / `canary_status` tools, and the manual-run API. |
+| `canary_enabled` | `false` | Master switch for the suite: sweeps, the `canary_run` / `canary_status` tools, and the API. |
 | `canaries_dir` | `data/canaries` | Directory scanned for `<name>/CANARY.md` task definitions. |
-| `canary_schedule` | `0 3 * * *` | Cron expression for the scheduled sweep (default: nightly at 03:00). |
-| `canary_max_concurrent` | `1` | Canary sessions run at once during a sweep. |
+| `canary_schedule` | `0 3 * * *` | Cron expression for the nightly heartbeat (default: 03:00). |
+| `canary_heartbeat_per_night` | `2` | How many least-recently-run active (non-parked) canaries each heartbeat runs. |
+| `canary_post_batch_max` | `4` | Cap on canaries per post-batch probe: the ones covering the batch's edit kinds first, `sentinel`-tagged ones riding along. |
 | `canary_retention_days` | `30` | Age after which Snooze prunes `canary_runs` rows and their sessions. |
-| `canary_baseline_runs` | `3` | Trailing scheduled sweeps a post-batch sweep's pass rate is compared against. |
-| `canary_regression_delta` | `0.15` | Pass-rate drop (vs. the baseline) that counts as a regression and trips the Adaptive tripwire. |
+| `canary_baseline_runs` | `5` | The green precondition: a canary may testify against a batch only when this many trailing runs before the apply all passed. |
+| `canary_regression_delta` | `0.15` | Drift threshold for the **passive** post-mortem signal only (the canary signal is per-task, not a rate delta). |
 | `canary_auto_admit` | `true` | Auto-admit machine-proposed canaries whose gate commands pass an allowlist proof plus the vetting runs; specs the machine can't prove safe still queue for human review. |
-| `canary_auto_maintain` | `true` | Maintenance sweep: promotes vetted canaries, tags flapping ones flaky, retires long-green ones to `.retired/` quarantine. A canary whose latest run failed is never auto-mutated — only a pass streak or a human moves it. |
+| `canary_auto_maintain` | `true` | Maintenance sweep: promotes vetted canaries, tags flapping ones flaky, parks long-green ones, syncs skill verify blocks, retires exhausted probes. A canary whose latest run failed is never auto-mutated — except that a red run un-parks. |
 | `canary_vetting_runs` | `3` | Consistent runs required to promote a canary out of vetting. |
-| `canary_retire_after_passes` | `25` | Consecutive passes before a canary is auto-retired. |
-| `canary_purge_after_days` | `30` | Quarantined (retired) canaries older than this are deleted. |
+| `canary_park_after_passes` | `25` | Consecutive passes before a canary is parked (off the heartbeat, still in the suite; any red run un-parks it). Replaces `canary_retire_after_passes`. |
+| `canary_purge_after_days` | `30` | Retired canaries (DELETE API, exhausted probes) sit in `.retired/` this long before deletion — the undo window. |
 | `canary_max_suite` | `24` | Auto-admission stops at this suite size (the human path stays open). |
 
 ---
 
 ## Adaptive Layer
 
-A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies/worker specs that route through the proposal queue: a **veto window**, not an approval gate. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Adaptive Layer; entries, events, and proposals surface in the Explorer's Adaptive tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
+A governed, machine-editable policy store — routing hints and prompt notes the agent may auto-apply at idle (with full history and exact rollback), and policies that route through the proposal queue: a **veto window**, not an approval gate. Content is gated at the mouth (v3.1): every machine edit passes an actionability lint (instructions in, narrative out), per-entry usage is measured (scout and reflect citations), unused entries retire on their own, and both you and the agent have direct authorship paths. A pending proposal you don't reject applies itself after `adaptive_auto_approve_after_hours`; validation happens after application, on observed behavior (tripwire, post-batch canary sweeps), with rollback as your standing veto. While off: zero rows, compiler output byte-identical, no producer emits edits. Toggles live in Settings → Autonomy & idle work → Adaptive Layer; entries, events, and proposals surface in the Explorer's Self-tuning → Learning tab. How it works: [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md).
 
 | Setting | Default | Description |
 |---|---|---|
@@ -288,6 +308,23 @@ A governed, machine-editable policy store — routing hints and prompt notes the
 | `adaptive_proposal_ttl_days` | `30` | Pending proposals lapse (`expired`) after this — a proposal is a snapshot of evidence, and the producer re-raises it from current evidence if it still holds. `0` = never. |
 | `adaptive_auto_approve_after_hours` | `24` | The veto window. A proposal still pending after this many hours is approved by the system itself — same apply path as a human approval, journaled, swept, rollback-able, resolved as `auto_approved` for the audit trail. Canary-suite proposals are excluded (they keep their human gate; `canary_auto_admit` is their autonomy path). `0` = human approval only. |
 | `adaptive_max_auto_approvals_per_day` | `40` | Cap on veto-window auto-approvals per rolling 24h. |
+| `adaptive_usage_retire_days` | `45` | Entries with zero recorded uses over this many *instrumented* days (counted from the usage epoch, stamped on the sweep's first run) are retired — journaled soft-deletes, one aggregate notification, one-click rollback. Candor-owned and human-authored entries exempt. `0` disables. |
+| `adaptive_prompt_note_ttl_days` | `90` | Backstop TTL for `prompt_note` (the kind with no producer-side retirement loop). `0` = keep forever. |
+| `adaptive_harmful_retire_min_uses` | `5` | Failure-dominated retirement: an entry needs at least this many attributed outcomes (successes + failures, written by synthesis) before its success share is trusted enough to retire it. `0` disables the branch. |
+| `adaptive_harmful_retire_max_success` | `0.3` | Below this success share (0–1), a sufficiently-observed entry retires even though it is used — usage alone used to keep a provably harmful hint alive forever while an uncited good one died at the usage-retire window. Journaled soft-delete, one-click rollback; Candor- and user-authored entries are exempt. |
+| `adaptive_suspect_ttl_days` | `7` | A suspect flag raised by the passive post-mortem signal alone can never self-clear (its windows are frozen at the apply); it auto-clears with an annotation after this many days. Canary-confirmed flags are exempt. `0` = flags wait for your dismiss. |
+| `adaptive_agent_notes_enabled` | `false` | The `adaptive_note` tool: the live agent may mint `prompt_note`/`routing_hint` edits the moment it learns something — content lint applies, 2/day, normal pipeline + tripwire, never `policy`. Registration needs a restart. |
+
+---
+
+## Skill Self-Healing
+
+When a skill fails and the session running it finds a workaround, refine can fold that fix back into the skill's `SKILL.md` — the same veto-window contract as the Adaptive Layer's auto-approve: a pending proposal older than the window is machine-validated (skill exists and is enabled, change bounded, frontmatter preserved) and applied with a timestamped backup under `data/skill_backups/<skill>/`. Reject any proposal from the Explorer's Capabilities → Skills tab inside the window. No Settings UI control for these two knobs; set via `POST /api/settings` or `data/settings.json`.
+
+| Setting | Default | Description |
+|---|---|---|
+| `skill_proposal_auto_apply_after_hours` | `24` | Veto window before a pending SKILL.md proposal auto-applies. `0` disables auto-apply (manual Apply only). |
+| `skill_proposal_max_auto_applies_per_day` | `5` | Cap on auto-applied skill proposals per day. |
 
 ---
 
@@ -316,7 +353,7 @@ When `auto_approve_dangerous` is `false` (the default), every tool marked `dange
 
 Approvals are **per-invocation by default** — approving `bash` for `ps aux` does not cover a later `mv /etc/passwd`. Pass `persistent=True` only for genuinely repetitive low-risk actions (e.g. browsing several pages during research) where re-asking each call would be noise.
 
-**Previously approved scopes are remembered** in `data/tool_approvals.json`. The next time the agent calls `approve_dangerous_tool()` with the same scope, the `ask_user` step is skipped automatically. You can view and clear this file in **Settings → Security → Remembered Approvals**.
+**Previously approved scopes are remembered** in `data/tool_approvals.json`. The next time the agent calls `approve_dangerous_tool()` with the same scope, the `ask_user` step is skipped automatically. You can view and clear this file in **Settings → Tools & safety → Remembered Approvals**.
 
 ---
 
@@ -330,6 +367,30 @@ Detached long-compute processes via the `job_start` / `job_status` / `job_tail` 
 | `jobs_max_concurrent` | `3` | Running jobs per session. Further `job_start` calls are refused until one finishes. |
 | `jobs_default_timeout_s` | `7200` | Wall-clock cap when the caller doesn't pass one (2 h). |
 | `jobs_max_timeout_s` | `21600` | Ceiling for caller-supplied caps (6 h). |
+
+---
+
+## MCP Servers
+
+Connect external tool servers speaking the Model Context Protocol; each
+server's tools register as `mcp_<server>_<tool>` and flow through scout
+curation, the dangerous-tool gate, and per-tool health metrics like native
+tools. Servers themselves are configured per-item in the Explorer → Capabilities → Servers tab
+(or `data/mcp_servers.json`); these settings are the global knobs. Toggles in
+Settings → Integrations → MCP Servers. Full guide: [mcp.md](mcp.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `mcp_enabled` | `true` | Master switch, hot both ways. Inert until a server is configured — configuring one is the opt-in. Off kills local server processes but keeps tool names registered; their calls return a clear disabled error. |
+| `mcp_stdio_enabled` | `true` | Allow stdio (local subprocess) servers. `false` = remote-only mode — a stdio server is arbitrary local code running inside the Pernix process's container, so turn this off when all your servers are remote. |
+| `mcp_default_safety` | `caution` | Safety level stamped on MCP tools without a per-server override. Server-sent `destructiveHint` annotations escalate a tool to `dangerous`; annotations can never lower a level. |
+| `mcp_call_timeout` | `60` | Per-call ceiling (seconds); a server entry's own `timeout` overrides it. |
+| `mcp_connect_timeout` | `30` | Budget for transport open + initialize + tools/list on connect. |
+| `mcp_idle_seconds` | `900` | Idle stdio servers are suspended (child reaped, tools kept, next call respawns). `0` = never. HTTP connections are never reaped. |
+| `mcp_max_servers` | `10` | Configured-server cap — a sanity valve, not a quota. |
+| `mcp_max_tools_per_server` | `50` | Excess tools are skipped with a warning; use a per-server `tool_allowlist` to pick which. |
+| `mcp_max_description_chars` | `1024` | Server-supplied tool descriptions are untrusted text headed for the system prompt; capped before registration. |
+| `mcp_refresh_interval_s` | `900` | Periodic tools/list re-check for servers that never send listChanged. `0` = manual reload only. |
 
 ---
 
@@ -379,7 +440,7 @@ Detached long-compute processes via the `job_start` / `job_status` / `job_tail` 
 |---|---|---|
 | `web_search_enabled` | `true` | Enable the `search_web` tool. |
 
-`search_web` requires a Tavily API key. Add it in Settings → Web → Tavily API Key
+`search_web` requires a Tavily API key. Add it in Settings → Tools & safety → Web → Tavily API Key
 (free tier at tavily.com). Without it the tool returns a setup hint rather than
 silently degrading. `web_search_enabled` can be used to disable the tool entirely.
 
@@ -391,14 +452,14 @@ silently degrading. `web_search_enabled` can be used to disable the tool entirel
 |---|---|---|
 | `voice_mode` | `off` | Speech-to-text engine behind the chat mic button: `off`, `local_whisper`, `remote_whisper`, `model_direct`, or `web_speech`. |
 | `voice_whisper_model` | `base` | faster-whisper model size for `local_whisper`: `tiny`, `base`, `small`, `medium`, or `large-v3`. Downloads on first use (~150MB for `base`) — pre-fetch when baking images for offline boxes. |
-| `voice_remote_url` | *(empty)* | OpenAI-compatible base URL for `remote_whisper` (the server POSTs to `{url}/audio/transcriptions`). API key via the `VOICE_STT_API_KEY` env var (Settings → Voice Input → Remote STT API Key). |
+| `voice_remote_url` | *(empty)* | OpenAI-compatible base URL for `remote_whisper` (the server POSTs to `{url}/audio/transcriptions`). API key via the `VOICE_STT_API_KEY` env var (Settings → Integrations → Voice Input → Remote STT API Key). |
 | `voice_remote_model` | `whisper-1` | Model name sent to the remote transcription endpoint. |
 | `voice_language` | *(empty)* | ISO-639-1 language hint for the whisper engines and browser dictation. Empty = autodetect. |
 | `voice_auto_send` | `false` | Send the message automatically once dictation produces a non-empty transcript. Transcription engines only — an empty transcript (no speech detected) never sends, and `model_direct` voice notes stay manual. |
 | `voice_web_speech_fallback` | `false` | Fall back to browser dictation when the chosen engine is unavailable (whisper not installed, chat model can't hear audio). Off by default: enabling it is your acknowledgment that fallback audio is processed by your browser vendor's speech service, not your machines. |
 
 Each engine has a different privacy profile, shown as a disclaimer in
-Settings → Voice Input: `local_whisper` keeps audio on the Pernix server;
+Settings → Integrations → Voice Input: `local_whisper` keeps audio on the Pernix server;
 `remote_whisper` uploads recordings to the endpoint you configure;
 `model_direct` attaches the recording to your message so an audio-capable chat
 model hears it directly (local with Ollama, remote with cloud providers);
@@ -419,6 +480,99 @@ Esc cancels a recording without transcribing.
 | `vapid_private_key` | *(auto-generated)* | VAPID private key for Web Push. Auto-generated on first run. |
 | `vapid_public_key` | *(auto-generated)* | VAPID public key shared with service worker subscriptions. |
 | `vapid_subject` | `mailto:admin@localhost` | VAPID subject — typically a `mailto:` address or URL identifying the push sender. |
+
+---
+
+## Storage
+
+**Settings → Storage** is where the disk questions live: how many sessions there
+are and of what kind, how big the database is and how much of that size is
+reclaimable, what the backup directory holds, and the two controls that give
+space back. Session cleanup used to sit at the bottom of *Environment &
+network*, below the SSL settings, where it was hard to find and acted on
+numbers you could not see.
+
+**The ledger.** Sessions by kind, with pinned and in-space counts alongside
+(those are flags on a session, not kinds of their own). The database's size on
+disk, plus **reclaimable** — free pages that deleted rows have already given up
+*inside* the file. SQLite reuses those pages for new rows but never returns
+them to the filesystem, which is why deleting a thousand sessions can change
+nothing about the file size. Then the backup directory: how many snapshots,
+how much they weigh, the retention count, when the last one was taken, and any
+snapshots past the keep count named individually.
+
+**Archive.** Directly under the sessions ledger, because the *Archived* row is
+the number it moves. Archiving is the third answer to a finished conversation,
+between leaving it in the sidebar and deleting it: the chat leaves the list and
+its space group, keeps every message, stays searchable, and comes back on one
+click — see
+[Sessions and chat](guides/sessions-and-chat.md#archiving-instead-of-deleting).
+
+| Setting | Default | Description |
+|---|---|---|
+| `session_archive_idle_days` | `30` | Days a plain chat can go untouched before the idle sweep archives it. `0` never archives. Pinned chats are exempt; chats in a space are **not** — the rule that spares them from every delete sweep is about never losing a transcript, and archiving loses nothing. Range 0–3650. |
+| `session_delete_archived_days` | `0` | Days a chat can sit in the archive before it is hard-deleted, messages and all. `0` — the default — keeps archived chats forever, deliberately: the archive is what *not deleting* means, so putting a horizon on it is you opting back in to losing transcripts. Range 0–3650. |
+
+Each knob has a button beside it that runs the sweep it schedules, against the
+value **in the box right now** rather than the one on disk — so typing `60` and
+pressing the button answers "what does 60 catch here?" before 60 is saved to
+anything. **Archive idle chats now** previews with a dry run (`N chats idle for
+more than D days would be archived`, plus the first few titles) and then asks;
+**Delete archived chats older than…** does the same and says in the
+confirmation that the messages go too and there is no undo. Both re-read the
+ledger afterwards, so the *Archived* count and the session total move on
+screen. The buttons are for trying a horizon and for catching up a box that has
+never swept; leaving the knobs set is what makes it happen on its own.
+
+**Compact database** rebuilds the file so the reclaimable space goes back to
+the disk (`PRAGMA optimize`, then `VACUUM`, then a WAL checkpoint so the main
+file actually shrinks rather than waiting for the next one). It is refused
+while a turn is running: `VACUUM` holds a write lock for the whole rebuild,
+long enough for a live agent's next write to time out.
+
+**Rotate now** applies `backup_keep_count` to every snapshot in the directory.
+It always shows the dry run first — the exact filenames and the bytes they
+hold — and asks before deleting anything. Rotation recognises all three naming
+schemes past versions of `scripts/backup.py` have used
+(`sessions-<stamp>.db`, `sessions.<ISO>.db`, `sessions.db.<stamp>`); before
+that it globbed only for the one it was writing that day, so snapshots left by
+an earlier version were never counted and never removed. Non-database files in
+the directory are never candidates. From the shell:
+`python scripts/backup.py --dry-run` prints the same plan without taking a
+snapshot.
+
+**Two backup directories.** Snapshots live in `data/backups`, and on an
+instance that has been upgraded across the rename there is a second directory
+beside it: `data/.backups`, where they lived before. It is not a relic. A
+start-up path that predates the rename still drops a copy of the database and
+of `settings.json` into it every time the server boots, so it grows with your
+deploys, and until now nothing had ever applied a retention count to it — on a
+box redeployed for a year that is 2.7 GB against the live directory's 1.3 GB.
+Storage shows it as **Pre-deploy copies (legacy)** underneath the backups
+block, with its own **Rotate now**, and hides the block entirely on the
+instances that have no such directory. The two are counted and swept
+separately: `backup_keep_count` means "the newest N *in this directory*", never
+a budget shared across both, so rotating one never deletes from the other. The
+scheduled backup writes only to `data/backups`; sweeping the legacy directory
+is always something you ask for.
+
+**Session cleanup** permanently deletes old *plain chats*. Pinned sessions,
+anything filed in a space, and every automation session (workers, scheduled
+runs, canaries, idle work) are skipped — each of those has its own retention.
+**Preview** asks the server exactly what it would delete and reports the count,
+what is being left alone and why, and the first few titles; **Prune now**
+re-runs that preview and names the number in the confirmation before deleting.
+
+### Endpoints
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/storage` | The whole ledger: `sessions` (total, by type, pinned, in spaces, archived), `database` (path, bytes, WAL bytes, page size, `reclaimable_bytes`), `backups` (dir, count, bytes, keep, last backup, `beyond_keep`), `legacy_backups` (the same shape for `data/.backups`, or `null` when there is no such directory) and `sweeps` (what the idle-time retention sweeps have done since boot: every `*_pruned` counter, plus `sessions_archived`, which belongs there despite deleting nothing because it is the sweep that moves the `archived` count above). `archived` is `null` — not `0` — while the schema has no `archived_at` column. |
+| `POST /api/storage/backups/rotate` | Body `{"dry_run": true}` (the default) lists what rotation would remove; `{"dry_run": false}` removes it. `{"dir": "legacy"}` sweeps `data/.backups` instead of the primary directory — **404** when it does not exist, **400** for any other value. Returns `dir`, `removed`, `bytes_freed` and `kept`. |
+| `POST /api/storage/optimize` | `PRAGMA optimize` + `VACUUM` + WAL checkpoint. Returns `bytes_before` / `bytes_after`. Answers **409** while a turn is running. |
+| `POST /api/storage/prune-archived` | Hard-deletes every session that has been in the archive for more than `days` — the manual hand on the `session_delete_archived_days` sweep. Body `{"days": N, "dry_run": true}`; `dry_run` defaults to **true**, like rotation and for a harder version of the same reason, and the dry run selects exactly the set the real call then deletes. `days` is optional (it falls back to the setting, which is `0` — never) and must be a non-negative integer, else **400**; `0` is a no-op. Returns `{count, ids, sample, days, dry_run}`. Archiving in the other direction is `POST /api/sessions/archive-idle` — see [api.md](api.md). |
+
+Same authentication as every other endpoint: a Bearer token in network mode.
 
 ---
 
@@ -450,6 +604,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `reflect_digest_max_chars_per_excerpt` | `2000` | Per-call cap on each tool result excerpt inside the turn digest. Enforced at parse time. |
 | `reflect_full_transcript` | `false` | **Deprecated.** Reflect now always sees the per-attempt transcript; this flag is a no-op kept for back-compat. |
 | `post_mortem_retention_days` | `90` | Days to keep synthesized post-mortem records before snooze cleans them. |
+| `notification_retention_days` | `30` | Notifications older than this are pruned (snooze Activity 11 + the maintenance 24h tier) — the bell is a recent-events surface, not an archive. `0` = keep forever. |
 | `notify_webhook_timeout` | `10` | HTTP timeout for `notify_webhook_url` POST (seconds). |
 | `snooze_max_cycle_seconds` | `900` | Hang backstop per Snooze cycle — runaway protection, not a budget. Cycles run until the activity ladder completes; user activity cancels them instantly. Local (Ollama) background models get 4x headroom. |
 | `snooze_cooldown_minutes` | `5` | Minimum idle time before Snooze starts running. |
@@ -461,7 +616,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `max_file_write_size` | `104857600` | Max bytes per `file_write` / `file_edit` / `multiedit` call (100 MB). `0` disables. |
 | `max_edit_read_size` | `5242880` | Max file size for `file_edit`'s whole-file fuzzy-match path (5 MB). `0` disables. |
 | `audio_model_overrides` | *(empty list)* | Force `supports_audio = true` for models where auto-detection misses audio capability. |
-| `backup_keep_count` | `7` | Timestamped snapshots kept in `data/backups` by the 24h backup tier. Rotation is per-artifact (DB snapshots and memory corpora rotate independently), so a restore always has a matching pair. Clamped to 0–90 at use time; `0` disables scheduled backups. |
+| `backup_keep_count` | `7` | Timestamped snapshots kept in `data/backups` by the 24h backup tier. Rotation is per-artifact (DB snapshots and memory corpora rotate independently), so a restore always has a matching pair, and it counts every database snapshot in the directory whatever naming scheme wrote it — see [Storage](#storage). Clamped to 0–90 at use time; `0` disables scheduled backups (and rotation then removes nothing, rather than reading the zero as "delete what I have"). Edit it under Settings → Storage → Backup schedule. |
 | `tool_executor_workers` | `32` | Threads in the tool-call pool. Tools run on their own pool so they can never occupy asyncio's default executor, which every API route needs for its DB reads. Occupants are blocked on IO, so raising it costs memory and PIDs rather than throughput. |
 | `background_executor_workers` | `8` | Threads for long-running idle-time background work (dream deep probes, canary maintenance, synthesis, backups, memory dedup). Small on purpose: occupants are heavyweight and idle-time-only. |
 

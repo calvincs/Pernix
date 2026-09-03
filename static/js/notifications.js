@@ -43,6 +43,14 @@ export function showNotification(title, body, { session_id = null, urgency = 'no
         icon: '/static/img/app-icon-192.png',
         tag: session_id ? `pernix-session-${session_id}` : 'pernix-notify',
         data: { session_id },
+        // urgency was accepted and then thrown away. A high-urgency alert is
+        // the agent blocked on an answer or a job that failed — exactly the
+        // one that must not auto-dismiss into a notification centre while the
+        // phone is in a pocket. Normal ones still behave normally.
+        requireInteraction: urgency === 'high',
+        // Explicit rather than implied: a silent alert for something that
+        // needs a person is not an alert.
+        silent: false,
     };
 
     // Prefer SW-backed notifications so the notificationclick handler fires correctly

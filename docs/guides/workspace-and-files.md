@@ -42,13 +42,13 @@ Four file tools are always loaded:
 
 Size caps prevent runaway tool calls: `file_write` and `file_edit` honor `max_file_write_size` (default 100 MB), `file_edit` additionally caps how much it reads back with `max_edit_read_size` (default 5 MB), `file_read` truncates output at its own limit, and `view_image` is budgeted by `max_inline_attach_bytes`.
 
-**Protected paths** — the agent cannot write or edit any of these, regardless of where they appear:
+**Protected paths** — the agent cannot write or edit any of these:
 
-- `.env`
-- `data/sessions.db`
-- `data/settings.json`
-- `data/agent/SOUL.md`, `RULES.md`, `SESSIONS.md` (it can ask you to edit these via `ask_user`, but it won't edit them directly)
-- Anything outside the write roots — `data/workspace/` and `/tmp` (the other readable directories listed above are read-only)
+- `.env`, `data/sessions.db`, `data/settings.json`, `data/agent/SOUL.md`/`RULES.md`/`SESSIONS.md` — none of these live inside a write root at all, so they're unreachable the same way anything else outside `data/workspace/` and `/tmp` is (the agent can ask you to edit the identity files via `ask_user`, but it won't edit them directly).
+- A handful of reserved filenames (`soul.md`, `rules.md`, `sessions.md`, `instructions.md`, `safety.md`, `.env`, `settings.json` — case-insensitive) are additionally blocked *inside* the write roots, but only sitting directly at a root's top level, not in a subdirectory — so `data/workspace/notes/settings.json` is an ordinary file the agent can write, while `data/workspace/settings.json` is refused.
+- `.venv`, `.git` and `__pycache__` are blocked as path components anywhere — the workspace's own auto-managed venv (see above) can't be hand-edited through these tools.
+
+Anything else outside `data/workspace/` and `/tmp` is unreachable for writes regardless of name (the other readable directories listed above are read-only).
 
 If you ever see the agent claiming it edited a protected file, that's a bug — file an issue.
 
@@ -58,7 +58,7 @@ If you ever see the agent claiming it edited a protected file, that's a bug — 
 
 Three paths:
 
-- **In the UI:** the file panel shows the workspace tree. Click a file to open it; right-click to download or delete.
+- **In the UI:** the Explorer's Files → Workspace tab shows the tree. Click a file to open it; the viewer's toolbar carries **edit**, **open** (in a browser tab) and **download**. Delete is the `×` that appears on a row on hover; on touch each row carries a `⋯` button instead, whose sheet holds Open, Download and Delete (swiping a row left still deletes it). The toolbar at the top of the tab refreshes the listing and uploads into the folder you are currently looking at (`POST /api/upload` takes a `path` field so it lands where the Explorer is pointed). There is no right-click menu. On touch the editor is a plain `<textarea>` rather than Monaco — no line numbers or syntax highlighting, but native text selection and no horizontal-scroll trap for a thumb; desktop still gets the full editor.
 - **Direct filesystem:** `data/workspace/` is just a regular directory — open files in your editor of choice.
 - **REST API:**
 
@@ -69,6 +69,10 @@ Three paths:
   POST /api/upload                     # upload a file (multipart)
   DELETE /workspace/{path}             # delete a file
   ```
+
+  `PUT` is optimistic-concurrency: send back the mtime the matching `GET` returned in its `X-File-Mtime` header as `base_mtime`, and a save whose base is stale gets a 409 (`changed_on_disk`, current `mtime`) instead of silently clobbering whatever changed the file in between. The Explorer's own editor uses this and offers **Reload** or **Overwrite** on a 409 rather than dropping one of the two versions.
+
+  Deleting a directory walks it first and refuses any symlink that points outside the workspace (a 400, not a silent follow); a link that can't be resolved at all — a circular or self-referential one — is skipped rather than raising, so a folder that happens to contain one is no longer stuck undeletable.
 
   See [../api.md](../api.md) for full details.
 

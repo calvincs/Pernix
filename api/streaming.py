@@ -13,6 +13,7 @@ import time
 
 from starlette.responses import StreamingResponse
 
+from core.events import queue_was_dropped
 from sessions.state import AgentSession
 
 logger = logging.getLogger("pernix.api.streaming")
@@ -76,17 +77,22 @@ async def event_stream(session: AgentSession, last_event_id: int = 0):
     shutdown = get_shutdown_event()
 
     try:
-        # Replay buffered events if reconnecting
+        # Replay buffered events if reconnecting.
+        #
+        # Snapshot first, then yield. `session.events` is a live deque the
+        # agent appends to under `_event_lock`, and a yield inside the loop
+        # suspends the generator: a reconnect during an active turn with
+        # enough backlog to fill uvicorn's write buffer would hand control
+        # back to the loop mid-iteration and the next step raised
+        # "RuntimeError: deque mutated during iteration". The stream died,
+        # EventSource retried, and the same reconnect failed again.
         if last_event_id > 0:
-            replayed = 0
-            for event in session.events:
-                seq = event.get("_seq", 0)
-                if seq > last_event_id:
-                    event_type = event.get("type", "message")
-                    yield sse_event(event_type, _clean_event(event), event_id=seq)
-                    replayed += 1
-            if replayed:
-                logger.debug("Replayed %d events for session %s", replayed, session.session_id)
+            with session._event_lock:
+                backlog = [e for e in session.events if e.get("_seq", 0) > last_event_id]
+            for event in backlog:
+                yield sse_event(event.get("type", "message"), _clean_event(event), event_id=event.get("_seq", 0))
+            if backlog:
+                logger.debug("Replayed %d events for session %s", len(backlog), session.session_id)
 
         # Stream live events. Use asyncio.timeout() instead of wait_for() —
         # the latter wraps queue.get() in an inner Task that wasn't reliably
@@ -103,6 +109,8 @@ async def event_stream(session: AgentSession, last_event_id: int = 0):
             except asyncio.TimeoutError:
                 if shutdown.is_set():
                     return
+                if queue_was_dropped(queue):
+                    return
                 yield ": heartbeat\n\n"
                 continue
 
@@ -114,6 +122,12 @@ async def event_stream(session: AgentSession, last_event_id: int = 0):
 
             seq = event.get("_seq")
             yield sse_event(event_type, _clean_event(event), event_id=seq)
+
+            # Detached for being too slow: end the response so EventSource
+            # reconnects and replays from Last-Event-ID, instead of holding
+            # a live-looking connection that will never carry another event.
+            if queue_was_dropped(queue):
+                return
 
     except (asyncio.CancelledError, GeneratorExit):
         pass

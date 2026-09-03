@@ -27,10 +27,14 @@ from db import models as db
 
 logger = logging.getLogger("pernix.adaptive")
 
-KINDS = frozenset({"prompt_note", "routing_hint", "policy", "worker_spec"})
+# worker_spec was carved in v3.1: fully-built consumption, zero live rows,
+# and no reachable producer (high-risk gating meant a human approving YAML
+# refine would first have to spontaneously emit). Legacy rows are inert —
+# per-kind queries never ask for the kind again.
+KINDS = frozenset({"prompt_note", "routing_hint", "policy"})
 ACTIONS = frozenset({"create", "update", "delete"})
 SOURCES = frozenset({"refine", "dream", "candor", "telos", "user", "agent"})
-HIGH_RISK_KINDS = frozenset({"policy", "worker_spec"})
+HIGH_RISK_KINDS = frozenset({"policy"})
 
 PROMPT_NOTE_MAX_CHARS = 400
 CONTENT_MAX_CHARS = 2000
@@ -160,7 +164,7 @@ def slugify(title: str) -> str:
 def compute_risk(kind: str, scope: str, action: str, source: str, entry_source: str | None = None) -> str:
     """Risk tier from (kind, scope, action, source) — plan 4b, stored for audit.
 
-    High: policy/worker_spec always; any delete of ANOTHER producer's entry;
+    High: policy always; any delete of ANOTHER producer's entry;
     any global-scope edit originating from Dream.
     """
     if kind in HIGH_RISK_KINDS:
@@ -480,6 +484,10 @@ def _notify_capped(producer: str, rejected: list[dict]) -> None:
                 "or raise the cap; until then this producer's output is being discarded."
             ),
             urgency="normal",
+            # A wedged kind + a chatty producer used to mean one identical
+            # notification per drained batch, forever. Once per producer per
+            # day says the same thing without the pile.
+            dedup_key=f"adaptive_capped:{producer}",
         )
     except Exception as e:
         logger.warning("Adaptive cap notification failed: %s", e)
@@ -656,6 +664,15 @@ def approve_proposal(proposal_id: int, actor: str = "user", resolution: str = "a
     db.adaptive_create_batch(batch_id, prop["producer"], prop["payload_json"], status="pending")
     result = apply_batch(batch_id, actor=actor, proposal_id=proposal_id)
     db.adaptive_resolve_proposal(proposal_id, resolution)
+    if result.get("status") == "rejected":
+        # Audit honesty: the proposal row reads "approved" while the batch it
+        # minted applied nothing (every edit refused — cap, version fence).
+        # Annotate the rationale so "what did that approval actually do"
+        # stays answerable without cross-referencing the batch.
+        try:
+            db.adaptive_annotate_proposal(proposal_id, " [approved; no edit landed — all refused at apply]")
+        except Exception:
+            pass
 
     try:
         from core.extensions.scheduling import enqueue_post_batch_sweep
@@ -750,11 +767,78 @@ def auto_approve_stale_proposals() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Delete (human release valve)
+# Create (direct authorship) + Delete (human release valve)
 # ---------------------------------------------------------------------------
 
 
-def delete_entry(entry_id: str, actor: str = "human") -> dict:
+def create_entry(
+    kind: str,
+    title: str,
+    content: str,
+    scope: str = "global",
+    source: str = "user",
+    actor: str = "user",
+) -> dict:
+    """Create one active entry outside the batch machinery.
+
+    The authorship valve (v3.1): the layer's SOURCES always named `user`,
+    but no path ever minted one — a human could veto, reject, and delete,
+    never write. Same validation as producer edits (validate_edit), same
+    journaled create event, immediately active — the human IS the approval
+    step, so there is no proposal detour. Deliberately unlinted: the lint
+    substitutes for human judgment, not the other way around.
+    """
+    edit = {
+        "action": "create",
+        "kind": kind,
+        "scope": scope,
+        "title": title,
+        "content": content,
+        "evidence": [f"{source} authored via direct create"],
+    }
+    err = validate_edit(edit, source)
+    if err:
+        raise AdaptiveError(err)
+    entry_id = _entry_id_for(edit)
+    if db.adaptive_get_entry(entry_id) is not None:
+        raise AdaptiveError(f"entry '{entry_id}' already exists (titles slugify to ids — pick a distinct title)")
+    if db.adaptive_entry_count(kind) >= settings.adaptive_max_entries_per_kind:
+        raise AdaptiveError(
+            f"kind '{kind}' is at the {settings.adaptive_max_entries_per_kind}-entry cap — retire one first"
+        )
+
+    now = _now_iso()
+    row = {
+        "id": entry_id,
+        "kind": kind,
+        "scope": scope,
+        "title": title.strip(),
+        "content": content.strip(),
+        "risk": "low",
+        "version": 1,
+        "status": "active",
+        "source": source,
+        "created_at": now,
+        "updated_at": now,
+    }
+    db.adaptive_put_entry(row)
+    event_id = db.adaptive_add_event(
+        entry_id=entry_id,
+        action="create",
+        before_json=None,
+        after_json=_snapshot(row),
+        evidence_json=json.dumps(edit["evidence"]),
+        actor=actor,
+    )
+
+    from core.adaptive.render import render_mirror
+
+    render_mirror()
+    logger.info("Adaptive entry %s created by %s (event %s)", entry_id, actor, event_id)
+    return {"entry_id": entry_id, "status": "active", "version": 1, "event_id": event_id}
+
+
+def delete_entry(entry_id: str, actor: str = "human", reason: str = "") -> dict:
     """Soft-delete one entry outside the batch machinery.
 
     The valve for a wedged per-kind cap: producers can only ever add under
@@ -762,6 +846,12 @@ def delete_entry(entry_id: str, actor: str = "human") -> dict:
     Same status flip the engine's own delete action uses (version bumped,
     before_json journaled), so rollback restores it byte-for-byte and the
     entry drops out of the prompt blocks and the cap count immediately.
+
+    The journaled evidence names the ACTUAL actor — the text used to
+    hardcode "human delete … via /api/adaptive/entries" for every caller,
+    so the sweeps' deletions read as Calvin's clicks in the audit trail
+    (found by the agent live-validating the 2026-08-31 lint sweep: a
+    provenance bug inside the provenance feature).
     """
     existing = db.adaptive_get_entry(entry_id)
     if existing is None or existing.get("status") != "active":
@@ -772,14 +862,31 @@ def delete_entry(entry_id: str, actor: str = "human") -> dict:
     new_row["version"] = int(existing["version"]) + 1
     new_row["updated_at"] = _now_iso()
     db.adaptive_put_entry(new_row)
+    evidence = f"{actor} delete of {entry_id}"
+    if actor == "human":
+        evidence += " via /api/adaptive/entries"
+    if reason:
+        evidence += f" — {reason}"
     event_id = db.adaptive_add_event(
         entry_id=entry_id,
         action="delete",
         before_json=_snapshot(existing),
         after_json=_snapshot(new_row),
-        evidence_json=json.dumps([f"human delete of {entry_id} via /api/adaptive/entries"]),
+        evidence_json=json.dumps([evidence]),
         actor=actor,
     )
+
+    # Drop the outcome signal with the entry. It is keyed by entry id and
+    # survived the soft-delete, so a producer that re-minted the same slug
+    # (same title -> same id) got its predecessor's failure record: the
+    # usage sweep's failure-dominated branch has no age or epoch gate by
+    # design, so the fresh entry was retired again on the next cycle with
+    # zero new observations. Apply -> canary sweep -> retire -> re-mint,
+    # each turn of the loop spending a batch and two notifications.
+    try:
+        db.delete_signal("adaptive_entry", entry_id)
+    except Exception as e:
+        logger.warning("Could not clear the outcome signal for %s: %s", entry_id, e)
 
     from core.adaptive.render import render_mirror
 
@@ -831,6 +938,19 @@ def rollback(batch_id: str | None = None, event_id: int | None = None, actor: st
         _reverse_event(ev, actor)
         reversed_ids = [ev["id"]]
     else:
+        # Status guard: a batch is rollback-able exactly once. Its journal
+        # snapshots describe the world at apply time, and re-playing them
+        # over a batch that was already reversed clobbers whatever landed
+        # since — a later batch's create of the same id would be hard-
+        # deleted, a later update overwritten with the stale before_json.
+        # The API exposes this path with no other check.
+        batch = db.adaptive_get_batch(batch_id)
+        if batch is None:
+            raise AdaptiveError(f"unknown batch {batch_id}")
+        if batch.get("status") not in ("applied", "suspect"):
+            raise AdaptiveError(
+                f"batch {batch_id} is {batch.get('status')}, not applied/suspect — nothing to roll back"
+            )
         events = [e for e in db.adaptive_events_for_batch(batch_id) if e.get("action") != "rollback"]
         if not events:
             raise AdaptiveError(f"no events for batch {batch_id}")

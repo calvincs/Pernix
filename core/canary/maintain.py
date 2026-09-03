@@ -8,15 +8,16 @@ One idle-time sweep over the suite, all mechanical (no LLM):
             as established-flaky instead (informs forever, never trips).
   flaky   — an established canary flapping across recent runs (>= _MIN_FLIPS
             outcome changes in the last _FLAP_WINDOW) is tagged flaky.
-  demote  — a canary green for canary_retire_after_passes consecutive runs
-            gets its scheduled cadence doubled (run every Nth sweep) instead
-            of being retired. It stays in the scheduled pool because the
-            adaptive tripwire's baseline is computed from scheduled runs of
-            these same tasks; removing the stable ones shrinks the
-            denominator of the only signal allowed to auto-rollback.
-  purge   — quarantined canaries older than canary_purge_after_days are
-            deleted for good. Nothing in this sweep quarantines any more;
-            the pass drains what earlier versions (and humans) left behind.
+  park    — a canary green for canary_park_after_passes consecutive runs is
+            parked (parked: true): off the nightly heartbeat, still in the
+            suite. Coverage triggers, full sweeps and manual runs still fire
+            it, and a red run auto-unparks it. It is never removed — the
+            per-task tripwire's green precondition is built on exactly this
+            history, so deleting a stable canary would disarm the only
+            signal allowed to auto-rollback.
+  purge   — retired canaries older than canary_purge_after_days are deleted
+            for good. The `.retired/` quarantine is fed by the DELETE API
+            and by probe retirement; this pass drains it.
   review  — a healthy canary's last_reviewed is bumped (semantics under
             auto-maintenance: "last verified healthy by this sweep"), which
             keeps the retention staleness nudge quiet without a human.
@@ -40,7 +41,7 @@ from pathlib import Path
 import yaml
 
 from config import settings
-from core.canary.parser import MAX_CADENCE, CanaryDef, CanaryParseError, canaries_dir, parse_canary_md
+from core.canary.parser import CanaryDef, CanaryParseError, canaries_dir, parse_canary_md
 from core.skills.parser import parse_frontmatter_md
 from db import models as db
 
@@ -111,19 +112,19 @@ def _today() -> str:
 
 
 def _describe(item) -> str:
-    """Render one stats entry — demotions carry their new cadence."""
+    """Render one stats entry (dicts carry a detail worth showing)."""
     if isinstance(item, dict):
-        return f"{item.get('name')} (cadence {item.get('cadence')})"
+        return f"{item.get('name')} ({item.get('detail') or item.get('cadence')})"
     return str(item)
 
 
 def _purge_quarantine(base: Path) -> list[str]:
     """Delete quarantined canaries past canary_purge_after_days.
 
-    Auto-maintenance no longer quarantines anything (long-green canaries are
-    demoted to a reduced cadence instead), so this drains what earlier
-    versions of the sweep — and any human moving a directory into
-    `.retired/` — left behind.
+    The `.retired/` quarantine is fed by the DELETE API, probe retirement,
+    and any human moving a directory in by hand. Long-green canaries are
+    parked, never quarantined — this pass only drains what was deliberately
+    retired, after its grace window.
     """
     purged: list[str] = []
     root = retired_dir(base)
@@ -147,16 +148,101 @@ def _purge_quarantine(base: Path) -> list[str]:
     return purged
 
 
+def retire_canary(c: CanaryDef, base: Path, reason: str, by: str) -> bool:
+    """Move a canary into the `.retired/` quarantine with a dated marker.
+
+    Not deletion: the quarantine keeps the directory for
+    canary_purge_after_days (the purge pass drains it), so a retirement is
+    reversible by moving the directory back for the whole grace window.
+    """
+    if c.path is None:
+        return False
+    src = c.path.parent
+    dest = retired_dir(base) / c.name
+    try:
+        if dest.exists():
+            dest = retired_dir(base) / f"{c.name}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+        (dest / _RETIRED_MARKER).write_text(
+            json.dumps({"retired_at": datetime.now(timezone.utc).isoformat(), "reason": reason, "by": by})
+        )
+        return True
+    except Exception as e:
+        logger.warning("Canary retirement failed for '%s': %s", c.name, e)
+        return False
+
+
+def _retire_exhausted_probes(suite: list[CanaryDef], base: Path, stats: dict) -> None:
+    """Retire probes that have delivered: max_runs total runs recorded, or
+    the expires date passed.
+
+    Deliberately EXEMPT from the Goodhart lock (which guards the pass above,
+    not this one): a probe's contract is "run N times and report", and
+    retirement-with-a-summary IS the report — holding a probe open because
+    its last run was red would turn "occasionally test something" into
+    permanent suite residue. The tally in the notification carries the red
+    runs; nothing is silenced.
+    """
+    for c in suite:
+        if c.max_runs <= 0 and not c.expires:
+            continue
+        runs = db.list_canary_runs(task=c.name, limit=_RUN_SCAN_LIMIT)
+        exhausted = c.max_runs > 0 and len(runs) >= c.max_runs
+        expired = False
+        if c.expires:
+            try:
+                exp = datetime.fromisoformat(c.expires)
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                expired = datetime.now(timezone.utc) >= exp
+            except ValueError:
+                pass  # parser normally rejects this; never retire on a guess
+        if not (exhausted or expired):
+            continue
+        window = runs[: c.max_runs] if c.max_runs > 0 else runs
+        passed = sum(1 for r in runs if r.get("passed"))
+        why = f"probe exhausted ({len(runs)} runs)" if exhausted else f"probe expired ({c.expires})"
+        if retire_canary(c, base, reason=why, by="maintenance"):
+            stats["probes_retired"].append(c.name)
+            last = window[0] if window else None
+            try:
+                db.add_notification(
+                    title=f"Canary probe retired: {c.name}",
+                    body=(
+                        f"{why}: {passed}/{len(runs)} runs passed"
+                        + (
+                            f", final outcome {last.get('outcome') or ('pass' if last.get('passed') else 'fail')}"
+                            if last
+                            else ""
+                        )
+                        + f". The directory sits in .retired/ for {settings.canary_purge_after_days} days "
+                        "if you want it back."
+                    ),
+                    urgency="normal",
+                )
+            except Exception:
+                pass
+
+
 def _maintain_one(c: CanaryDef, base: Path, stats: dict) -> None:
     """Apply at most one mutation to one canary. The I-fail lock is the
     first check: nothing below it can ever touch a failing canary."""
     runs = db.list_canary_runs(task=c.name, limit=_RUN_SCAN_LIMIT)
     if not runs:
         return  # freshly admitted, vetting run still queued — nothing to say
-    if not runs[0].get("passed"):
-        return  # GOODHART LOCK: latest run failed → untouchable
 
     md = c.path
+    if not runs[0].get("passed"):
+        # GOODHART LOCK: latest run failed → untouchable. One exception that
+        # AMPLIFIES the alarm instead of silencing it: a parked canary that
+        # just went red revokes its own parking — parking is a statement
+        # that green stays green, and this run disproved it.
+        if c.parked and md is not None:
+            if _rewrite_frontmatter(md, {"parked": False}):
+                stats["unparked"].append(c.name)
+        return
+
     if md is None:
         return
 
@@ -182,23 +268,21 @@ def _maintain_one(c: CanaryDef, base: Path, stats: dict) -> None:
             stats["flaky_tagged"].append(c.name)
         return
 
-    # Demotion: a long-green canary is cheap to keep and expensive to lose.
+    # Parking: a long-green canary has made the point it exists to make.
     #
-    # It used to be retired here, on the reasoning that a canary green for 25
-    # consecutive runs carries no information. That is true of a test suite
-    # under active development and false of a regression tripwire, whose
-    # entire value is that green stays green: the adaptive tripwire computes
-    # its baseline from SCHEDULED runs of these same tasks
-    # (core/adaptive/tripwire.py), so retiring the stable ones shrinks the
-    # denominator of the only signal allowed to auto-rollback. Demoting to a
-    # reduced cadence keeps the canary in the scheduled pool — still
-    # producing baseline rows, still run in full by every post-batch sweep —
-    # at a fraction of the cost.
-    retire_after = max(1, settings.canary_retire_after_passes)
-    if len(runs) >= retire_after and all(r.get("passed") for r in runs[:retire_after]):
-        target = min(MAX_CADENCE, max(2, c.cadence * 2))
-        if target > c.cadence and _rewrite_frontmatter(md, {"cadence": target, "last_reviewed": _today()}):
-            stats["demoted"].append({"name": c.name, "cadence": target})
+    # It used to be retired here, then cadence-demoted; both were answers to
+    # "why keep testing what never fails?". Parking is the honest one: the
+    # canary leaves the heartbeat rotation entirely (no more scheduled
+    # churn) but stays in the suite — coverage triggers, full sweeps and
+    # manual runs still fire it, and the red-run exception above revokes the
+    # parking the moment green stops being green. It is never removed: the
+    # per-task tripwire only lets a canary testify against a batch when its
+    # trailing runs were green, so deleting the stable canaries would disarm
+    # exactly the signal they exist to feed.
+    park_after = max(1, settings.canary_park_after_passes)
+    if not c.parked and len(runs) >= park_after and all(r.get("passed") for r in runs[:park_after]):
+        if _rewrite_frontmatter(md, {"parked": True, "last_reviewed": _today()}):
+            stats["parked"].append(c.name)
         return
 
     # Healthy and quiet: keep the review clock current so the staleness
@@ -210,20 +294,34 @@ def _maintain_one(c: CanaryDef, base: Path, stats: dict) -> None:
 
 
 def _scheduled_runs(name: str, window: int) -> list[dict]:
-    """The trailing scheduled runs for one canary, newest first."""
-    rows = [r for r in db.list_canary_runs(task=name, limit=_RUN_SCAN_LIMIT) if r.get("trigger") == "scheduled"]
+    """The trailing heartbeat/full-sweep runs for one canary, newest first.
+
+    Both triggers are system-initiated whole-task probes, so both feed the
+    health window. Under the 2-per-night heartbeat a given canary is only
+    sampled every few nights, so a chronic failure takes on the order of a
+    week or two to accumulate _HEALTH_WINDOW rows — accepted: suite health
+    is a slow structural question, and a post-change failure surfaces
+    immediately through the tripwire instead.
+    """
+    rows = [
+        r for r in db.list_canary_runs(task=name, limit=_RUN_SCAN_LIMIT) if r.get("trigger") in ("scheduled", "full")
+    ]
     return rows[:window]
 
 
 def _is_noop_run(row: dict) -> bool:
     """True when the gates scored a workspace the agent never touched.
 
-    A real canary turn costs tokens and takes seconds. A run that consumed
-    zero tokens and finished in well under a second did not execute the
-    agent at all — the gates ran against the seeded fixtures and every one
-    of them 'failed'. That is a harness break, and it is worth separating
-    from an honest failure because the remedy is completely different.
+    Since v30 the runner records this directly as outcome='noop'. Rows from
+    before the column existed (outcome NULL) fall back to the original
+    heuristic: a real canary turn costs tokens and takes seconds, so zero
+    tokens and a sub-second finish mean the agent never executed — the gates
+    ran against the seeded fixtures and every one of them 'failed'. That is
+    a harness break, worth separating from an honest failure because the
+    remedy is completely different.
     """
+    if row.get("outcome"):
+        return row["outcome"] == "noop"
     return not row.get("passed") and int(row.get("tokens") or 0) == 0 and float(row.get("duration_s") or 0.0) < 1.0
 
 
@@ -310,7 +408,13 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
         "promoted": [],
         "settled_flaky": [],
         "flaky_tagged": [],
-        "demoted": [],
+        "parked": [],
+        "unparked": [],
+        "probes_retired": [],
+        "skills_changed": [],
+        "verify_synced": [],
+        "verify_retired": [],
+        "verify_unsafe": [],
         "purged": [],
         "reviewed": [],
         "unhealthy": [],
@@ -321,7 +425,31 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
 
     from core.canary.parser import scan_canaries
 
+    # Skills bridge first: watermark scan + verify-block sync may add,
+    # rewrite or retire canaries, and the rest of the sweep should see the
+    # post-sync suite.
+    if not is_cancelled():
+        try:
+            from core.canary.skill_verify import sync_and_detect
+
+            for k, v in sync_and_detect(canaries_base=base, is_cancelled=is_cancelled).items():
+                stats[k] = v
+        except Exception as e:
+            logger.warning("Skill verify-sync failed: %s", e)
+
     suite = list(scan_canaries(base))
+
+    # Probe retirement runs first and prunes the suite list — a retired
+    # probe must not be promoted/parked/reviewed in the same breath.
+    if not is_cancelled():
+        try:
+            _retire_exhausted_probes(suite, base, stats)
+            if stats["probes_retired"]:
+                gone = set(stats["probes_retired"])
+                suite = [c for c in suite if c.name not in gone]
+        except Exception as e:
+            logger.warning("Canary probe retirement failed: %s", e)
+
     for c in suite:
         if is_cancelled():
             return stats
@@ -349,16 +477,19 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
         summary = "; ".join(f"{k}: {', '.join(_describe(i) for i in v)}" for k, v in changed.items())
         logger.info("Canary maintenance: %s", summary)
     # 'unhealthy' is reported by _report_suite_health with its own urgency and
-    # its own dedupe; folding it in here would double-notify and bury a
-    # measurement outage under routine bookkeeping.
-    mutations = {k: v for k, v in changed.items() if k != "unhealthy"}
+    # its own dedupe, each retired probe already got its own summary
+    # notification, and unsafe verify blocks notify once per content hash;
+    # folding any of them in here would double-notify.
+    mutations = {k: v for k, v in changed.items() if k not in ("unhealthy", "probes_retired", "verify_unsafe")}
     if mutations:
         try:
             db.add_notification(
                 title="Canary suite auto-maintenance",
                 body="; ".join(f"{k}: {', '.join(_describe(i) for i in v)}" for k, v in mutations.items())
-                + ". Demoted canaries stay in the scheduled sweep at a "
-                "reduced cadence so the tripwire keeps its baseline.",
+                + ". Parked canaries leave the nightly heartbeat but stay in "
+                "the suite — coverage triggers, full sweeps and manual runs "
+                "still fire them, a red run unparks them, and the Canary tab "
+                "can unpark one any time.",
                 urgency="normal",
             )
         except Exception:

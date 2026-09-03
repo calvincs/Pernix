@@ -34,15 +34,23 @@ _spawn_lock = threading.Lock()
 _WORKER_INACTIVE_STATUSES = frozenset({"idle", "error", "deleted", "unknown"})
 
 
-def _count_active_workers(manager, parent) -> int:
+def _count_active_workers(manager, parent, *, ignore: str = "") -> int:
     """Workers of `parent` still occupying a slot.
 
     Single definition shared by both spawn gates below. They used to carry
     separate inline tuples that disagreed about "unknown", so the capacity
     warning and the max_concurrent_workers limit counted different things.
+
+    `ignore` excludes one worker that the caller has just cancelled but that
+    has not finished unwinding: retry_worker cancels the old worker and
+    immediately spawns its replacement, and at the cap the still-CANCELLING
+    original made the retry fail with "Max active workers reached" instead
+    of retrying.
     """
     return sum(
-        1 for wid in list(parent.worker_ids) if manager.get_status(wid).get("status") not in _WORKER_INACTIVE_STATUSES
+        1
+        for wid in list(parent.worker_ids)
+        if wid != ignore and manager.get_status(wid).get("status") not in _WORKER_INACTIVE_STATUSES
     )
 
 
@@ -50,18 +58,19 @@ def spawn_worker(
     task_description: str,
     title: str = "",
     model: str = "",
+    kind: str = "",
     auto_resume_parent: bool = False,
-    spec: str = "",
     _context: dict | None = None,
+    _replacing: str = "",
 ) -> str:
     """Spawn a worker session for a subtask. Returns worker session ID.
 
     If model is specified, the worker runs on that model instead of the default.
     Useful for delegating to specialized models (e.g. vision, code).
 
-    spec: optional worker_spec id from the [WORKER SPECS] catalog (an
-    approved adaptive-layer template). Supplies instructions, a model, and a
-    gate set; explicit model=/title= arguments override the spec's.
+    kind selects a typed worker bundle (role instructions, exclusive tool
+    allowlist, default model, verification criteria) — see kinds.py. An
+    explicit `model` argument overrides the kind's default model.
 
     auto_resume_parent: if True, this worker is added to the parent's watch-set
     so the parent auto-resumes when all watched workers complete. Use together
@@ -72,21 +81,22 @@ def spawn_worker(
     if not parent_id:
         return "Error: No parent session context"
 
+    # Resolve the kind FIRST — an unknown kind must fail before any session
+    # exists, with the valid names in the error so the model can self-correct
+    # in the same round.
+    from core.extensions.orchestration import kinds as _kinds
+
+    worker_kind = None
+    if kind:
+        worker_kind = _kinds.resolve_kind(kind)
+        if worker_kind is None:
+            return f"Error: Unknown worker kind '{kind}'. Valid kinds: {', '.join(_kinds.list_kind_names())}."
+        if not model:
+            model = _kinds.resolve_kind_model(worker_kind)
+
     from sessions.manager import get_manager
 
     manager = get_manager()
-
-    # Resolve the spec FIRST (plan follow-on: worker_spec consumption) so a
-    # spec-supplied model flows through the normal validation below and an
-    # unknown spec fails before any session exists.
-    spec_data = None
-    if spec:
-        from core.adaptive.specs import load_worker_spec
-
-        spec_data = load_worker_spec(spec)
-        if spec_data is None:
-            return f"Error: No active worker_spec '{spec}'. See the [WORKER SPECS] catalog for valid ids."
-        model = model or spec_data.get("model", "")
 
     # State precondition: spawning is only legal during an active agent
     # turn (PROCESSING). Any other state (AWAITING_WORKERS, FINALIZING,
@@ -110,7 +120,7 @@ def spawn_worker(
             from core.llm.client import _get_semaphore_stats
 
             stats = _get_semaphore_stats()
-            active_workers = _count_active_workers(manager, parent)
+            active_workers = _count_active_workers(manager, parent, ignore=_replacing)
             if active_workers >= stats["capacity"]:
                 return (
                     f"Warning: {active_workers} worker(s) already active but only "
@@ -151,27 +161,31 @@ def spawn_worker(
     with _spawn_lock:
         parent = manager.get(parent_id)
         if parent:
-            active_count = _count_active_workers(manager, parent)
+            active_count = _count_active_workers(manager, parent, ignore=_replacing)
             if active_count >= settings.max_concurrent_workers:
                 return f"Error: Max active workers ({settings.max_concurrent_workers}) reached. Wait for running workers to complete."
 
         # Create session inside the lock to atomically reserve the slot.
+        # Workers inherit the parent's space (v33): space_id is persisted so
+        # rehydration keeps membership, and create_session derives the
+        # workspace_home — the worker writes in the space folder, compiles
+        # space directives, routes memory to the space, shares its kernel.
         worker_id = manager.create_session(
             title=worker_title,
             system_prompt="",
             session_type="worker",
             parent_session_id=parent_id,
+            space_id=getattr(parent, "space_id", None) if parent else None,
         )
 
     summary_file = f".worker_{worker_id[:12]}_summary.md"
-    spec_instructions = ""
-    if spec_data and spec_data.get("instructions"):
-        spec_instructions = f"Your role (from the '{spec_data['entry_id']}' template):\n{spec_data['instructions']}\n\n"
     system_prompt = (
-        f"You are a focused worker agent. {spec_instructions}Your task:\n{task_description}\n\n"
+        f"You are a focused worker agent. Your task:\n{task_description}\n\n"
         "Complete the task using tools as needed.\n"
         f"When done, write a {summary_file} file in the workspace with what you accomplished.\n"
     )
+    if worker_kind is not None:
+        system_prompt += _kinds.kind_charter_block(worker_kind)
     if model:
         system_prompt += f"\nYou are running on model: {model}\n"
 
@@ -187,23 +201,6 @@ def spawn_worker(
             "kernel — variables survive across rounds and turns — and use "
             "bash only for one-shot commands and heavy subprocess compute.\n"
         )
-
-    # Spec gates attach to the worker session before its first prompt — the
-    # post-task hook path runs them like any session's gates, and the
-    # reflect clamp holds the worker to them (plan 3a machinery, unchanged).
-    if spec_data and spec_data.get("gates"):
-        gate_names = []
-        for g in spec_data["gates"]:
-            try:
-                db.add_gate(worker_id, g["name"], g["command"], watch_paths=g.get("watch_paths") or [], scope="session")
-                gate_names.append(g["name"])
-            except Exception as e:
-                logger.warning("Worker spec gate '%s' failed to attach: %s", g.get("name"), e)
-        if gate_names:
-            system_prompt += (
-                f"\nYour work is verified by deterministic gates: {', '.join(gate_names)}. "
-                "They must pass for the task to count as done.\n"
-            )
 
     # Attachment visibility: workers CAN read attachment bytes from the shared
     # workspace (file_read / bash), but images are only auto-inlined as vision
@@ -240,7 +237,15 @@ def spawn_worker(
                     )
     except Exception as _e:
         logger.debug("worker attachment hint skipped: %s", _e)
-    db.update_session(worker_id, system_prompt=system_prompt)
+    # Persist kind + model on the row (migration v31) so a rehydrated worker
+    # (server restart, idle reap, resume_worker) keeps its identity — the
+    # in-memory fields below die with the process.
+    db.update_session(
+        worker_id,
+        system_prompt=system_prompt,
+        worker_kind=(worker_kind.name if worker_kind is not None else None),
+        model_override=(model or None),
+    )
 
     # Set model override on worker session if specified. The "not yet done"
     # gate is now implicit in v2 — a freshly-created worker is in IDLE_READY
@@ -250,6 +255,10 @@ def spawn_worker(
     worker_session = manager.get(worker_id)
     if worker_session and model:
         worker_session.model_override = model
+    # Kind allowlist: EXCLUSIVE, enforced by the schema builder and the
+    # executor — the same two-point enforcement as scheduled-job charters.
+    if worker_session is not None and worker_kind is not None and worker_kind.tool_allowlist:
+        worker_session.tool_allowlist = frozenset(worker_kind.tool_allowlist)
     # Workers inherit the parent's live goal for token_usage stamping
     # (plan 3b): a goal's budget must see fan-out spend, and workers bill
     # to their own session_id — the flat goal_id SUM is what unifies them.
@@ -335,7 +344,7 @@ def spawn_worker(
 
     asyncio.run_coroutine_threadsafe(_start(), loop)
 
-    # Emit event to parent — include effective model so the UI can display it
+    # Emit event to parent — include effective model + kind so the UI can display them
     _effective_model = model or settings.llm_model
     manager.emit(
         parent_id,
@@ -344,10 +353,12 @@ def spawn_worker(
             "worker_id": worker_id,
             "title": worker_title,
             "model": _effective_model,
+            "kind": worker_kind.name if worker_kind is not None else "",
         },
     )
 
-    return f'Worker spawned: {worker_id} — "{worker_title}"'
+    _kind_note = f" [{worker_kind.name}]" if worker_kind is not None else ""
+    return f'Worker spawned: {worker_id} — "{worker_title}"{_kind_note}'
 
 
 def _worker_has_output(wid: str) -> bool:
@@ -386,7 +397,11 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
     wid_list = [w for w in parent.worker_ids if filter_set is None or w in filter_set]
     for wid in wid_list:
         worker_obj = manager.get(wid)
-        title = db.get_session(wid).get("title", "?") if db.get_session(wid) else "?"
+        _row = db.get_session(wid)
+        title = _row.get("title", "?") if _row else "?"
+        _kind = (_row or {}).get("worker_kind") or ""
+        if _kind:
+            title = f"{title} [{_kind}]"
 
         # v2 state is authoritative. IDLE_READY means "no active turn."
         # But a just-created worker is also IDLE_READY before its first
@@ -499,11 +514,49 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
     verdict = (reflect or {}).get("verdict")
     reflect_reason = (reflect or {}).get("reasoning", "")
 
+    # Typed-kind deterministic gate (Feature 4): a cheap, unambiguous check of
+    # the kind's core contract (e.g. research output names zero sources).
+    # Warning-only — reflect stays the real gate.
+    _kind_name = None
+    try:
+        _kind_name = (db.get_session(worker_id) or {}).get("worker_kind")
+    except Exception:
+        pass
+
+    def _kind_warn(body: str) -> str:
+        from core.extensions.orchestration.kinds import kind_gate_warning
+
+        return kind_gate_warning(_kind_name, body) or ""
+
     # Check worker termination state (cancelled, errored, round-capped).
+    # The in-memory object is the fresh source; after a restart or reap the
+    # durable state log answers instead — a round-capped worker must not
+    # read as clean just because the process cycled (field case
+    # c11530758fbc: an INCOMPLETE worker diagnosed three reflections late).
     from sessions.manager import get_manager as _get_mgr
 
     _worker_obj = _get_mgr().get(worker_id)
     term_reason = _worker_obj.termination_reason if _worker_obj else None
+    if term_reason is None and _worker_obj is None:
+        try:
+            _recent = db.recent_termination_reasons(worker_id, 1)
+            term_reason = _recent[0] if _recent else None
+        except Exception:
+            term_reason = None
+
+    def _ceiling_note() -> str:
+        """Cap warning that survives a 'pass' verdict. A worker that hit its
+        round ceiling ended mid-work by definition — reflect grading the
+        partial output as fine does not un-truncate it, and the parent is
+        the one who pays for believing it was complete."""
+        if term_reason not in ("round_ceiling", "budget_exhausted"):
+            return ""
+        return (
+            f"# NOTE: worker ended by {term_reason} (hard cap, not completion) — "
+            f"its final message should state what is unfinished; treat missing "
+            f"deliverables as NOT DONE, and use get_worker_transcript({worker_id[:12]!r}) "
+            f"or retry_worker to close the gap.\n\n"
+        )
 
     def _gate_header() -> str:
         """Build a header that reflects the worker's trust state. Empty when
@@ -564,18 +617,19 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
         # don't double up — just return as-is (the stamp already encodes state).
         if body.startswith(_SENTINELS):
             return _cap(body)
-        return _gate_header() + _cap(body)
+        return _gate_header() + _ceiling_note() + _kind_warn(body) + _cap(body)
 
     # Backward compat: shared summary.md from pre-fix workers
     legacy_path = workspace / "summary.md"
     if legacy_path.exists():
-        return _gate_header() + _cap(legacy_path.read_text())
+        _legacy_body = legacy_path.read_text()
+        return _gate_header() + _ceiling_note() + _kind_warn(_legacy_body) + _cap(_legacy_body)
 
     # Fallback: last assistant message, always wrapped in a quality header.
     messages = db.get_messages(worker_id)
     for m in reversed(messages):
         if m["role"] == "assistant" and m.get("content"):
-            return _gate_header() + _cap(m["content"])
+            return _gate_header() + _ceiling_note() + _kind_warn(m["content"]) + _cap(m["content"])
 
     # No output at all
     if _worker_obj and _worker_obj.error:
@@ -891,6 +945,15 @@ def await_workers(
             if v2 is sv2.SessionStateV2.IDLE_READY and has_started:
                 done_count += 1
                 continue
+            # A worker whose spawn FAILED never starts a turn, so has_started
+            # stays False and it sat here as "pending" until the caller's
+            # full max_wait (30 minutes by default) elapsed — even though
+            # spawn-time cleanup had already stamped it errored. The reaper
+            # and the suspend path both treat this as terminal; this was the
+            # one place that did not.
+            if v2 is sv2.SessionStateV2.IDLE_READY and (w.error or w.termination_reason):
+                done_count += 1
+                continue
             pending_count += 1
             if v2 in STALE_GATED_STATES:
                 idle = int(w.idle_seconds)
@@ -1039,10 +1102,17 @@ def cancel_worker(worker_id: str, _context: dict | None = None) -> str:
     session = manager.get(worker_id)
     if not session:
         return f"Worker {worker_id} not found in memory"
-    if session.task and not session.task.done():
-        session.task.cancel()
-        return f"Worker {worker_id[:8]} cancelled"
-    return f"Worker {worker_id[:8]} is not running"
+
+    # This tool runs on a worker thread; Task.cancel() and the process
+    # sweep are loop-affine, so marshal like pause_worker does.
+    def _cancel_on_loop() -> str:
+        if manager.cancel_session(session):
+            return f"Worker {worker_id[:8]} cancelled"
+        return f"Worker {worker_id[:8]} is not running"
+
+    from core.events import call_on_loop
+
+    return call_on_loop(_cancel_on_loop, loop=(_context or {}).get("_loop"))
 
 
 def pause_worker(worker_id: str, _context: dict | None = None) -> str:
@@ -1080,21 +1150,15 @@ def pause_worker(worker_id: str, _context: dict | None = None) -> str:
     return call_on_loop(_pause_on_loop, loop=(_context or {}).get("_loop"))
 
 
-def resume_worker(worker_id: str, _context: dict | None = None) -> str:
-    """Resume a paused (or pause-requested) worker.
+def _resume_paused(session, worker_id: str, _context: dict | None = None) -> str:
+    """Release a paused (or pause-requested) session — the original resume.
 
     Sets the pause_event. If the worker has already reached PAUSED, it will
     transition back to PROCESSING at its own pace (via the agent loop's
     resume branch). If still in PAUSE_REQUESTED (pause never observed),
     transition back directly here.
     """
-    from db import models as _m
     from sessions import state_v2 as sv2
-    from sessions.manager import get_manager
-
-    session = get_manager().get(worker_id)
-    if not session:
-        return f"Worker {worker_id} not found"
 
     # Loop-marshaled for the same reason as pause_worker: transition() is
     # loop-affine, and setting pause_event must not interleave with the
@@ -1113,6 +1177,182 @@ def resume_worker(worker_id: str, _context: dict | None = None) -> str:
     from core.events import call_on_loop
 
     return call_on_loop(_resume_on_loop, loop=(_context or {}).get("_loop"))
+
+
+def resume_worker(
+    worker_id: str,
+    note: str = "",
+    auto_resume_parent: bool = False,
+    _context: dict | None = None,
+) -> str:
+    """Resume a worker wherever it stopped (spec Feature 5).
+
+    Three cases, one mental model — "bring the worker back to life":
+      * PAUSED / PAUSE_REQUESTED → release the pause (original behavior).
+      * Mid-turn states → nothing to resume; reports the live state.
+      * Terminal (cancelled / errored / round-capped / reaped from memory /
+        lost to a server restart) → REVIVE: rehydrate the session from the DB
+        (message history, kind allowlist and pinned model persist), validate
+        the model still resolves, clear the stale summary stamp, re-attach to
+        the parent, and start a continuation turn carrying `note`.
+
+    Non-worker sessions only ever get the pause-release path — the generic
+    /resume API endpoint routes through here, and reviving an idle NORMAL
+    session would start an unrequested turn.
+    """
+    from sessions import state_v2 as sv2
+    from sessions.manager import get_manager
+
+    manager = get_manager()
+    session = manager.get(worker_id)
+    row = db.get_session(worker_id)
+
+    if session is not None and session.session_type != "worker":
+        return _resume_paused(session, worker_id, _context)
+
+    if session is not None:
+        current = sv2._current_state(session)
+        if current in (sv2.SessionStateV2.PAUSED, sv2.SessionStateV2.PAUSE_REQUESTED):
+            return _resume_paused(session, worker_id, _context)
+        if current is sv2.SessionStateV2.AWAITING_USER:
+            return (
+                f"Worker {worker_id[:8]} is waiting on a question, not paused. "
+                "Answer it with message_worker(worker_id, <answer>)."
+            )
+        if current is not sv2.SessionStateV2.IDLE_READY:
+            return f"Worker {worker_id[:8]} is {current.value} — already running; nothing to resume."
+        if getattr(session, "_turn_id", 0) == 0 and session.termination_reason is None:
+            return f"Worker {worker_id[:8]} is queued and has not started yet; nothing to resume."
+
+    if row is None:
+        return f"Worker {worker_id} not found"
+    if (row.get("session_type") or "") != "worker":
+        return f"Error: {worker_id[:8]} is not a worker session; resume_worker only revives workers."
+
+    # --- Revival path -----------------------------------------------------
+    ctx = _context or {}
+    loop = ctx.get("_loop")
+    if not loop:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return "Error: Cannot resume worker — no event loop available."
+
+    parent_id = row.get("parent_session_id") or ""
+    parent = manager.get(parent_id) if parent_id else None
+
+    # Respect the same concurrency cap as spawn — a revival occupies a slot.
+    if parent is not None:
+        active = _count_active_workers(manager, parent)
+        if active >= settings.max_concurrent_workers:
+            return (
+                f"Error: Max active workers ({settings.max_concurrent_workers}) reached — "
+                "await or cancel running workers before resuming this one."
+            )
+
+    from core.events import call_on_loop
+
+    def _revive_on_loop() -> str:
+        # Hydrate (or reuse) the in-memory session. get_or_create restores
+        # state_v2, model_override and the kind allowlist from the row.
+        w = manager.get_or_create(worker_id)
+        w_state = sv2._current_state(w)
+        # A crash can persist a mid-turn state; no task survives a restart,
+        # so forcing home is safe — mirrors the boot reconcile sweeps.
+        task_alive = w.task is not None and not w.task.done()
+        if w_state is not sv2.SessionStateV2.IDLE_READY:
+            if task_alive:
+                return f"Worker {worker_id[:8]} is {w_state.value} with a live turn; nothing to resume."
+            try:
+                sv2.transition(w, sv2.SessionStateV2.IDLE_READY, "reaper-unstick")
+            except Exception as _e:
+                return f"Error: could not reset worker state ({w_state.value}): {_e}"
+        w.cancel_requested = False
+        w.pause_event.set()
+        w.error = None
+
+        # Staleness guard: the pinned model may have been removed since the
+        # worker last ran. Fall back to the default rather than dying on the
+        # first LLM call — and say so.
+        model_note = ""
+        if w.model_override:
+            try:
+                from core.llm.client import get_llm_client
+
+                registry = get_llm_client().router.registry
+                resolved = registry.resolve_model_id(w.model_override)
+                if not registry.get_model_info(resolved):
+                    model_note = (
+                        f" NOTE: your previous model '{w.model_override}' is no longer "
+                        "available; you are on the default model now."
+                    )
+                    w.model_override = None
+                    db.update_session(worker_id, model_override=None)
+            except Exception as _e:
+                logger.debug("resume_worker model validation skipped: %s", _e)
+
+        # Re-attach to the parent so check_workers/await_workers see it.
+        if parent is not None and worker_id not in parent.worker_ids:
+            parent.worker_ids.append(worker_id)
+        # Watch-set parity with spawn_worker(auto_resume_parent=True): the
+        # revived worker's completion wakes the parent via the normal
+        # _on_watched_worker_done path.
+        if parent is not None and auto_resume_parent:
+            parent._watched_worker_ids.add(worker_id)
+            manager._persist_watched(parent)
+
+        # Clear the previous run's summary file — get_worker_result prefers
+        # it, so a stale INCOMPLETE/CANCELLED stamp (or an outdated real
+        # summary) would shadow everything the resumed run produces.
+        summary_path = Path(settings.workspace_dir) / f".worker_{worker_id[:12]}_summary.md"
+        try:
+            summary_path.unlink(missing_ok=True)
+        except OSError as _e:
+            logger.warning("resume_worker: could not clear stale summary %s: %s", summary_path, _e)
+
+        prior = w.termination_reason or ("unknown — memory was reaped or the server restarted")
+        w.termination_reason = None
+        if parent_id:
+            manager.emit(
+                parent_id,
+                {
+                    "type": "worker.resumed",
+                    "worker_id": worker_id,
+                    "title": row.get("title") or "worker",
+                    "kind": row.get("worker_kind") or "",
+                    "prior_termination": prior,
+                },
+            )
+        return prior + "|" + model_note
+
+    outcome = call_on_loop(_revive_on_loop, loop=loop)
+    if outcome.startswith(("Error:", "Worker ")):
+        return outcome
+    prior, _sep, model_note = outcome.partition("|")
+
+    # Budget parity with spawn_worker: a parent that revives a worker and then
+    # awaits it needs its LLM wall-clock extended past the child's runtime,
+    # or the synthesis turn dies on its first acquire.
+    if parent is not None:
+        try:
+            from core.llm.client import extend_session_budget as _extend
+
+            base = float(settings.llm_session_timeout) if settings.llm_session_timeout > 0 else 0.0
+            if base > 0:
+                _extend(parent_id, min(2 * base, 24 * 3600.0))
+        except Exception as _ext_err:
+            logger.debug("resume_worker: failed to extend parent budget: %s", _ext_err)
+
+    resume_msg = (
+        f"[resumed by resume_worker] Your previous run ended: {prior}.{model_note}\n"
+        + (f"Operator note: {note}\n" if note else "")
+        + "Your full prior transcript is above (compacted if long). Review what "
+        "is already done, then CONTINUE the original task to completion — do not "
+        "start over. The previous summary file was cleared; write a fresh "
+        f".worker_{worker_id[:12]}_summary.md when done."
+    )
+    asyncio.run_coroutine_threadsafe(get_manager().prompt(worker_id, resume_msg), loop)
+    return f"Worker {worker_id[:8]} revived (previous end: {prior}) — continuation turn started."
 
 
 def set_worker_state(worker_id: str, paused: bool, _context: dict | None = None) -> str:
@@ -1136,6 +1376,7 @@ def retry_worker(
     old_output = get_worker_result(worker_id)[:2000]
     old_session = db.get_session(worker_id)
     old_title = old_session.get("title", "worker") if old_session else "worker"
+    old_kind = (old_session or {}).get("worker_kind") or ""
 
     # Cancel old worker
     cancel_worker(worker_id)
@@ -1151,7 +1392,12 @@ def retry_worker(
     else:
         task += "\nPlease try again with a different approach.\n"
 
-    return spawn_worker(task, title=f"Retry: {old_title}", _context=_context)
+    # The replacement inherits the original's typed kind so its allowlist and
+    # verification gate survive the retry.
+    # _replacing: the worker we just cancelled is still unwinding, so at the
+    # cap it would otherwise count against its own replacement and the retry
+    # would fail with "Max active workers reached".
+    return spawn_worker(task, title=f"Retry: {old_title}", kind=old_kind, _context=_context, _replacing=worker_id)
 
 
 def cross_pollinate(_context: dict | None = None) -> str:
@@ -1334,12 +1580,17 @@ def register(reg) -> None:
     common = {"category": "orchestration", "source": "extension", "denied_session_types": {"worker"}}
     orch_tags = ["parallel", "worker", "orchestrate", "delegate", "concurrent", "spawn", "multi"]
 
+    from core.extensions.orchestration.kinds import builtin_kind_names
+
     reg.register(
         name="spawn_worker",
         func=spawn_worker,
         description=(
             "Spawn a worker agent for a subtask. Worker runs in fresh context with its own scout. "
             "Optionally runs on a specific model (e.g. vision model). Returns worker ID. "
+            f"kind selects a typed worker bundle ({', '.join(builtin_kind_names())}) — a role "
+            "preamble, a task-appropriate tool allowlist and a verification gate; prefer a kind "
+            "over a free-form charter when one fits. "
             "Set auto_resume_parent=True to add this worker to the parent watch-set so the parent "
             "auto-resumes when all watched workers finish (use with await_workers suspend=True). "
             "Concurrency cap: configurable via max_concurrent_workers (default 5). When the cap is "
@@ -1356,22 +1607,57 @@ def register(reg) -> None:
                     "type": "string",
                     "description": "Optional: specific model ID for the worker (e.g. a vision model). Leave empty to use default.",
                 },
+                "kind": {
+                    "type": "string",
+                    "description": (
+                        "Optional typed worker kind: "
+                        + ", ".join(builtin_kind_names())
+                        + " (or a custom kind from data/worker_kinds/). Empty = untyped."
+                    ),
+                },
                 "auto_resume_parent": {
                     "type": "boolean",
                     "description": "Add worker to parent watch-set for auto-resume (default false)",
                 },
-                "spec": {
-                    "type": "string",
-                    "description": (
-                        "Optional worker_spec id from the [WORKER SPECS] catalog. Supplies role "
-                        "instructions, a model, and verification gates; explicit model/title override it."
-                    ),
-                },
             },
             "required": ["task_description"],
         },
-        tags=orch_tags + ["spawn", "create", "start"],
+        tags=orch_tags + ["spawn", "create", "start", "kind", "typed"],
         timeout=60,
+        parallel_safe=False,
+        safety_level="safe",
+        **common,
+    )
+    reg.register(
+        name="resume_worker",
+        func=resume_worker,
+        description=(
+            "Resume a worker wherever it stopped. A paused worker is released; a "
+            "cancelled, errored, round-capped, reaped or restart-lost worker is REVIVED: "
+            "its persisted history, kind and model are rehydrated and a continuation "
+            "turn starts from where it left off (optionally carrying your note). "
+            "Cheaper than retry_worker when the prior partial work is worth keeping."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "worker_id": {"type": "string", "description": "Worker session ID"},
+                "note": {
+                    "type": "string",
+                    "description": "Optional guidance injected into the continuation turn",
+                },
+                "auto_resume_parent": {
+                    "type": "boolean",
+                    "description": (
+                        "Add the revived worker to the parent watch-set so the parent "
+                        "auto-resumes when it finishes (default false; same contract as spawn_worker)"
+                    ),
+                },
+            },
+            "required": ["worker_id"],
+        },
+        tags=orch_tags + ["resume", "revive", "continue", "rehydrate", "restart"],
+        timeout=30,
         parallel_safe=False,
         safety_level="safe",
         **common,
@@ -1524,7 +1810,10 @@ def register(reg) -> None:
     reg.register(
         name="set_worker_state",
         func=set_worker_state,
-        description="Pause or resume a worker. Pass paused=true to pause at next checkpoint, paused=false to resume.",
+        description=(
+            "Pause or resume a worker. Pass paused=true to pause at next checkpoint, "
+            "paused=false to resume (a terminated worker is revived — see resume_worker)."
+        ),
         parameters={
             "type": "object",
             "properties": {

@@ -40,25 +40,29 @@ It is **not** a polished commercial product. It is a working personal tool with 
 - **Workspace** — sandboxed file area the agent can read, write, and organize
 - **Worker orchestration** — spawn parallel sub-agents running on different models for complex multi-part work
 - **Skills system** — installable capability packs that teach the agent domain-specific procedures
+- **MCP client** ([docs](docs/mcp.md)) — plug in any Model Context Protocol server, local (stdio) or remote (Streamable HTTP); its tools register as first-class Pernix tools with scout curation, the safety gate, and health metrics, managed from the Explorer → Capabilities → Servers (MCP) tab with paste-compatible Claude Code / Cursor configs
 - **Cron scheduling** — run agents on a schedule for recurring tasks
 - **Reflect & retry** — a quality gate verifies each response and automatically retries if the agent missed the intent
 - **Session kernel** — an optional persistent per-session Python REPL (`repl` tool) whose variables survive turns, compaction, and restarts; huge tool results auto-bind as variables instead of flooding context
+- **Spaces** ([guide](docs/guides/spaces.md)) — named, colored groups of long-lived sessions that share directives, memory, workspace, and kernel; Pernix can also *suggest* one for work you keep coming back to (off by default) — a suggestion is a row you accept or decline, nothing is created without your click
 - **Background jobs** — detached long-running compute via `job_start` / `job_status` / `job_tail` / `job_kill`: output captured to a log, completion durable across server restarts, wall-clock caps, whole-group kill
 - **Vision on demand** — `view_image` lets the agent look at images it has rendered or downloaded (vision models), instead of reasoning blind about its own plots and screenshots
 - **Long-running autonomy** — deterministic gates (shell checks Reflect can't overrule), persistent goals with budgets and auto-continuations, and heartbeats steered into running work — composing into unattended multi-hour tasks ([docs](docs/internals/autonomy.md))
 
 ### Experimental Add-ons (all off by default)
-- **RLM — recursive processing** ([docs](docs/internals/rlm.md)) — analyze inputs far larger than any model's context window: a root model writes code in a sandboxed REPL that holds the input as a variable, delegating chunks to budgeted sub-model calls. No new model roles — the root runs on Primary and sub-calls on Background, sharing one concurrency limiter across every recursion depth. Adds a "Recent RLM runs" panel
+- **RLM — recursive processing** ([docs](docs/internals/rlm.md)) — analyze inputs far larger than any model's context window: a root model writes code in a sandboxed REPL that holds the input as a variable, delegating chunks to budgeted sub-model calls. No new model roles — the root runs on Primary and sub-calls on Background, sharing one concurrency limiter across every recursion depth. Each run gets a live chip above the composer, a read-only trace session nested in the sidebar, and a row in the Explorer's Automation → Jobs tab
 - **Candor — operational memory** ([docs](docs/internals/candor.md)) — the agent learns from recorded outcomes how reliable its own tools actually are; scout gets an exception-report intel brief where silence means healthy. Requires the separate `candor` package
 - **Dream — introspection** ([docs](docs/internals/dream.md)) — during idle time the agent raises typed hypotheses about its own memory and behavior, then tries to falsify them against recorded outcomes; keeps a read-only daily journal in the sidebar and writes a periodic dream report
-- **Canary suite** ([docs](docs/internals/canary-and-adaptive.md)) — golden tasks with deterministic gates run headlessly on a nightly schedule in isolated workspaces, measuring whether the agent is actually getting better or worse; the suite grows via human-approved proposals from real failed turns
-- **Adaptive layer** ([docs](docs/internals/canary-and-adaptive.md)) — a governed, machine-editable policy store: low-risk routing hints and prompt notes auto-apply at idle with full history and one-click rollback, high-risk edits wait for your approval, and a canary tripwire flags any batch that makes the agent measurably worse
-- **Telos — teleological layer** ([docs](docs/internals/telos.md)) — a non-convergent drive with correction machinery: turn anomalies mint questions, an idle-time cross-domain generator proposes falsifiable hypotheses (a testability gate keeps the untestable in a speculation pool), and slow loops re-rank strayed goals, detect Goodhart binding, measure whether completed goals actually discharged anything, and reconcile the agent's self-story against its append-only execution trace
+- **Canary suite** ([docs](docs/internals/canary-and-adaptive.md)) — golden tasks with deterministic gates run headlessly in isolated, tool-allowlisted workspaces, **when something they cover changes**: adaptive batches probe their covering canaries, skill edits re-test their embedded `verify:` blocks, model swaps and deploys re-baseline everything, and a small nightly heartbeat keeps history warm; full lifecycle control (create, edit, park, retire, one-off probes) from the Explorer → Self-tuning → Self-checks (Canary) tab
+- **Adaptive layer** ([docs](docs/internals/canary-and-adaptive.md)) — a governed, machine-editable policy store: low-risk routing hints and prompt notes auto-apply at idle with full history and one-click rollback, high-risk edits wait for your approval, and a per-task canary tripwire flags — and can automatically roll back — any batch that makes the agent measurably worse
+- **Telos — the operational question loop** ([docs](docs/internals/telos.md)) — turn-time anomalies the rest of the system can't explain become falsifiable hypotheses (a testability gate keeps the untestable in a speculation pool), evaluated against recorded evidence, with the strongest surviving claims feeding the scout's routing hints; the root is a never-satisfied question anchoring the whole tree. (v3.1 carved out the original goal-DAG — ordo/binding/hevel re-ranking and audits — after a live audit found it a structural no-op.)
 
 ### Access & UI
-- **Built-in web UI** — PWA with real-time streaming, Monaco code editor, file explorer, and mobile support
+- **Built-in web UI** — PWA with real-time streaming, a Monaco code editor, file explorer, a light/dark/system theme, accessibility as a floor (keyboard-operable, screen-reader announcements, visible focus), a real phone-and-tablet layout tier, and a resizable sidebar
+- **Archive, not delete** — a chat idle for a while archives itself instead of vanishing (restore it anytime); Settings → Storage shows database size, backup rotation, and a one-click compact
+- **State timeline** — every turn as a Lane row, the Story behind the one you pick told in the agent's own words, and a Map of the state machine, updating live as the turn runs
 - **REST API + SSE streaming** — build integrations, scripts, or custom clients using the same API the UI uses
-- **Interactive API explorer** — because Pernix is built on FastAPI, a live Swagger UI is available at [http://localhost:8090/docs](http://localhost:8090/docs) (and ReDoc at `/redoc`). Browse every endpoint, see schemas, and try requests directly from the browser
+- **Interactive API explorer** — a live Swagger UI at [http://localhost:8090/docs](http://localhost:8090/docs) (ReDoc at `/redoc`) to browse every endpoint and try requests from the browser
 - **Local mode** — binds to localhost with no auth (default)
 - **Network mode** — HTTPS + Bearer token for LAN access from other devices
 - **Push notifications** — browser push via service worker when the agent needs your attention
@@ -102,7 +106,7 @@ Open **http://localhost:8090** in your browser.
 
 ### First Configuration
 
-1. Click the gear icon → **Settings**
+1. Click **Settings** in the status bar at the bottom of the window (the cog next to **Explorer**) — it opens on the **Providers & models** tab
 2. Set **`llm_model`** — the name of your Ollama model (e.g. `qwen3:32b`) or an OpenRouter model ID (e.g. `anthropic/claude-sonnet-4.6`, `x-ai/grok-4.1-fast`)
 3. Optionally set **`background_model`** — a fast, cheap model for scout planning, auto-titling, and idle work. Something like `qwen3:8b` locally, or `anthropic/claude-haiku-4.5` on OpenRouter, works well. Leave it empty and everything runs on `llm_model`
 4. Click **Save**
@@ -168,12 +172,12 @@ Pernix ships with a full progressive web app (PWA) at the root URL. Key panels:
 
 | Panel | What it does |
 |---|---|
-| **Session sidebar** | Create, switch between, and manage sessions — full-text search, and a legend to filter by type (chat, cron, worker, Dream) |
+| **Session sidebar** | Create, switch between, and manage sessions — Spaces group long-lived work above the time buckets with their own color and directives; full-text search; a legend to filter by type (chat, cron, worker, Dream, Archived); drag the right edge to resize |
 | **Chat** | Real-time conversation with streamed responses and tool call visibility |
-| **Settings** | Configure all server settings without restarting |
-| **File explorer** | Browse, upload, and open files in the workspace |
-| **Jobs** | Cron jobs, live snooze activity, and recent RLM runs |
-| **Timeline** | Step-by-step view of the state machine and every tool call in a turn — including in-flight tool calls as they run |
+| **Settings** | Six tabs — Providers & models, Agent behaviour, Autonomy & idle work, Tools & safety, Integrations, Environment & network — plus Storage, with a search that spans all of them |
+| **Explorer** | One panel with a group strip and a tab strip: Files (Workspace), Knowledge (Memory), Capabilities (Skills, Tools, Servers (MCP)), Automation (Jobs), Self-tuning (Learning, Self-checks, Goals) |
+| **Jobs** | Explorer → Automation → Jobs: scheduled jobs, live snooze activity, and recent RLM runs |
+| **State timeline** | A Lane of turns, the Story behind the one you pick, and a Map of the state machine — opened from the state badge in the status bar |
 | **Notifications bell** | Alert when the agent is waiting for your input |
 
 The UI works on mobile when accessed via network mode. It can also be installed as a PWA for a native-app-like experience.
@@ -184,7 +188,7 @@ The UI works on mobile when accessed via network mode. It can also be installed 
 
 Pernix's behavior beyond raw LLM responses is shaped by three things:
 
-**Skills** (`data/skills/`) are capability packs you install. Each skill teaches the agent a specific procedure — how to call a particular API, process a specific file type, or follow a domain procedure. Skills are plain markdown with YAML frontmatter; the agent discovers them automatically and loads their instructions only when relevant.
+**Skills** (`data/skills/`) are capability packs you install. Each skill teaches the agent a specific procedure — how to call a particular API, process a specific file type, or follow a domain procedure. Skills are plain markdown with YAML frontmatter; the agent discovers them automatically and loads their instructions only when relevant. When a skill fails and a session works around it, Pernix can propose the fix back into the skill's own instructions — low-confidence edits wait for your review, safe ones apply automatically after a 24-hour veto window.
 
 **SOUL.md** (`data/agent/SOUL.md`) defines who Pernix is — its personality, communication style, and core traits. Edit it freely to match how you want the agent to talk to you.
 
@@ -257,7 +261,7 @@ Most-visited entry points:
 
 ## Credits
 
-Pernix is built by Calvin ([@calvincs](https://github.com/calvincs)) with **Claude** (Anthropic) as pair programmer — and with **Pernix itself** in the loop: the reference deployment runs the field campaigns, surfaces its own failures, and validates the fixes that shape each release. The v3.0.0 release is the work of all three.
+Pernix is built by Calvin ([@calvincs](https://github.com/calvincs)) with **Claude** (Anthropic) as pair programmer — and with **Pernix itself** in the loop: the reference deployment runs the field campaigns, surfaces its own failures, and validates the fixes that shape each release. The v3.1.0 release is the work of all three.
 
 ---
 

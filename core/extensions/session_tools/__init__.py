@@ -97,6 +97,127 @@ def read_session_summary(session_id: str, recent: int = 5, _context: dict | None
     return "\n".join(lines)
 
 
+def agent_state(_context: dict | None = None) -> str:
+    """One-call digest of platform state around the agent — the deep,
+    on-demand companion to the ambient [SINCE YOUR LAST TURN] ledger
+    (agent-ergonomics plan §4.2/§2.7: 'one observability query' instead of
+    6-10 per self-inspection turn). Composes existing tables; every section
+    is guarded so a missing feature yields a shorter digest, not an error."""
+    from datetime import datetime, timezone
+
+    sid = (_context or {}).get("session_id") or ""
+    lines = [f"AGENT STATE — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"]
+
+    busy_states = ("scouting", "processing", "compacting", "awaiting_workers")
+    with db.connect_sessions() as conn:
+        try:
+            marks = ",".join("?" for _ in busy_states)
+            rows = conn.execute(
+                f"SELECT session_type, COUNT(*) c FROM sessions WHERE state_v2 IN ({marks}) GROUP BY session_type",
+                busy_states,
+            ).fetchall()
+            busy = {r["session_type"]: r["c"] for r in rows}
+            jobs = conn.execute("SELECT COUNT(*) c FROM jobs WHERE state = 'running'").fetchone()["c"]
+            rlm = conn.execute("SELECT COUNT(*) c FROM rlm_runs WHERE status = 'running'").fetchone()["c"]
+            flight = ", ".join(f"{v} {k}" for k, v in sorted(busy.items())) or "none"
+            lines.append(f"IN FLIGHT: sessions busy: {flight}; jobs running: {jobs}; RLM runs: {rlm}")
+        except Exception:
+            pass
+        if sid:
+            try:
+                pms = conn.execute(
+                    "SELECT verdict, failure_cause, created_at FROM post_mortems "
+                    "WHERE session_id = ? ORDER BY created_at DESC LIMIT 3",
+                    (sid,),
+                ).fetchall()
+                if pms:
+                    verdicts = ", ".join(f"{p['verdict']}({p['failure_cause']}) {p['created_at'][:16]}" for p in pms)
+                    lines.append(f"THIS SESSION'S RECENT VERDICTS (grader's opinion): {verdicts}")
+            except Exception:
+                pass
+        try:
+            notes = conn.execute(
+                "SELECT title, urgency, created_at FROM notifications ORDER BY created_at DESC LIMIT 5"
+            ).fetchall()
+            if notes:
+                lines.append("RECENT NOTIFICATIONS:")
+                for n in notes:
+                    lines.append(f"  - [{n['urgency']}] {n['title']} ({(n['created_at'] or '')[:16]})")
+        except Exception:
+            pass
+        try:
+            kinds = conn.execute(
+                "SELECT kind, COUNT(*) c FROM adaptive_entries WHERE status = 'active' GROUP BY kind"
+            ).fetchall()
+            pending = conn.execute(
+                "SELECT COUNT(*) c, SUM(CASE WHEN producer = 'agent' THEN 1 ELSE 0 END) mine "
+                "FROM adaptive_proposals WHERE status = 'pending'"
+            ).fetchone()
+            # status is the authoritative field — flagged_reason survives a
+            # clear/expiry, and counting it over-reported 5 where 1 batch was
+            # actually suspect (found by the agent live-validating this tool).
+            suspect = conn.execute("SELECT COUNT(*) c FROM adaptive_batches WHERE status = 'suspect'").fetchone()["c"]
+            if kinds or (pending and pending["c"]):
+                kind_str = ", ".join(f"{k['c']} {k['kind']}" for k in kinds) or "none"
+                lines.append(
+                    f"ADAPTIVE: active entries: {kind_str}; pending proposals: "
+                    f"{pending['c'] if pending else 0} ({int(pending['mine'] or 0) if pending else 0} yours); "
+                    f"suspect batches: {suspect}"
+                )
+        except Exception:
+            pass
+        try:
+            fails = conn.execute(
+                "SELECT task, created_at FROM canary_runs WHERE outcome = 'gate_fail' "
+                "ORDER BY created_at DESC LIMIT 3"
+            ).fetchall()
+            if fails:
+                lines.append(
+                    "CANARY RECENT GATE-FAILS: "
+                    + "; ".join(f"{f['task']} ({(f['created_at'] or '')[:16]})" for f in fails)
+                )
+        except Exception:
+            pass
+        try:
+            crons = conn.execute(
+                "SELECT COUNT(*) c, SUM(CASE WHEN error IS NOT NULL AND error != '' THEN 1 ELSE 0 END) bad "
+                "FROM cron_runs WHERE started_at > datetime('now', '-3 days')"
+            ).fetchone()
+            if crons and crons["c"]:
+                lines.append(f"CRON (3d): {crons['c']} runs, {int(crons['bad'] or 0)} non-ok")
+        except Exception:
+            pass
+
+    try:
+        from pathlib import Path as _P
+
+        from config import settings as _s
+
+        mem_files = len(list(_P(_s.memory_dir).glob("*.md"))) if getattr(_s, "memory_dir", "") else 0
+        if mem_files:
+            lines.append(f"MEMORY STORE: {mem_files} files (recall/deep_recall to query)")
+    except Exception:
+        pass
+    try:
+        from config import settings as _s
+
+        if _s.telos_enabled:
+            from core.telos.store import TelosStore
+
+            store = TelosStore.open()
+            alarms = store.list_alarms(open_only=True)
+            qs = store.list_questions(state="open")
+            if alarms or qs:
+                lines.append(f"TELOS: {len(qs)} open questions, {len(alarms)} alarms (telos_status for detail)")
+    except Exception:
+        pass
+
+    if len(lines) == 1:
+        lines.append("(all quiet — nothing in flight, no recent verdicts or notifications)")
+    lines.append("Deeper: SYSTEM-MAP.md in the workspace maps every table, route, and store.")
+    return "\n".join(lines)
+
+
 def register(reg) -> None:
     common = {"category": "session", "source": "extension"}
     tags = ["session", "history", "recent", "previous", "past"]
@@ -113,6 +234,22 @@ def register(reg) -> None:
             "properties": {"limit": {"type": "integer", "description": "Max results (default 10)"}},
         },
         tags=tags + ["list", "all"],
+        timeout=15,
+        parallel_safe=True,
+        **common,
+    )
+    reg.register(
+        name="agent_state",
+        func=agent_state,
+        description=(
+            "One-call digest of platform state: work in flight (sessions, jobs, RLM), "
+            "this session's recent reflect verdicts, recent notifications, adaptive-layer "
+            "state (active entries, pending proposals, suspect batches), recent canary "
+            "gate-fails, cron health, memory-store size, telos alarms. Use INSTEAD of "
+            "querying each subsystem separately when asked about Pernix's own state."
+        ),
+        parameters={"type": "object", "properties": {}},
+        tags=["state", "status", "self", "platform", "health", "introspection", "observability"],
         timeout=15,
         parallel_safe=True,
         **common,

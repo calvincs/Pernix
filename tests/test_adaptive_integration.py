@@ -58,7 +58,15 @@ def test_queue_producer_edits_stamps_session_evidence():
     from core.adaptive.contract import queue_producer_edits
 
     result = queue_producer_edits(
-        [{"action": "create", "kind": "routing_hint", "title": "no refs", "content": "x", "evidence": []}],
+        [
+            {
+                "action": "create",
+                "kind": "routing_hint",
+                "title": "no refs",
+                "content": "prefer browse_web when pages are js-heavy",
+                "evidence": [],
+            }
+        ],
         "refine",
         session_id="sess-1234",
     )
@@ -87,9 +95,25 @@ def test_producer_prompt_suffix_gated_on_flag(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_dream_promotion_mapping():
+async def _gate_identity(row):
+    """Actionability-gate stand-in for tests that exercise the promotion
+    plumbing, not the gate itself (the gate has its own tests in
+    test_dream.py). Emits lint-passing imperative content."""
+    return {
+        "actionable": True,
+        "title": str(row.get("statement") or "")[:60],
+        "content": f"When relevant: {str(row.get('statement') or '')[:200]}",
+    }
+
+
+def _bypass_gate(monkeypatch):
+    monkeypatch.setattr("core.dream.promote._actionability_gate", _gate_identity)
+
+
+async def test_dream_promotion_mapping(monkeypatch):
     from core.dream.promote import promote_validated
 
+    _bypass_gate(monkeypatch)
     h_tool = db.add_dream_hypothesis("tool_pattern", "http_get fails on js-heavy sites; use browse_web", "[]")
     h_lesson = db.add_dream_hypothesis("lesson_ineffective", "lesson X never changes outcomes", "[]")
     h_stale = db.add_dream_hypothesis("memory_stale", "entry about API v1 is outdated", "[]")
@@ -271,17 +295,25 @@ def test_scout_search_adaptive_tool():
 # ---------------------------------------------------------------------------
 
 
-def _seed_canary_history(batch_id, baseline_pass=True, post_pass=False):
+def _seed_canary_history(batch_id, baseline_pass=True, post_pass=False, confirm=True):
     # Trailing scheduled baseline (3 runs) strictly BEFORE the batch, then
     # the batch's post_batch sweep (backdating avoids same-second ties).
+    # A failing sweep normally carries its confirm-rerun row too — two
+    # gate_fails is what the per-task tripwire calls a confirmed regression.
     from db.database import connect_sessions
 
     for _ in range(3):
-        db.add_canary_run("t1", "scheduled", None, "[]", baseline_pass)
+        db.add_canary_run(
+            "t1", "scheduled", None, "[]", baseline_pass, outcome="pass" if baseline_pass else "gate_fail"
+        )
     with connect_sessions() as conn:
         conn.execute("UPDATE canary_runs SET created_at = '2026-01-01T00:00:00+00:00' WHERE trigger = 'scheduled'")
     db.adaptive_create_batch(batch_id, "refine", "[]", status="applied")
-    db.add_canary_run("t1", "post_batch", None, "[]", post_pass, batch_id=batch_id)
+    db.add_canary_run(
+        "t1", "post_batch", None, "[]", post_pass, batch_id=batch_id, outcome="pass" if post_pass else "gate_fail"
+    )
+    if not post_pass and confirm:
+        db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id, outcome="gate_fail")
 
 
 def test_tripwire_flags_canary_regression(monkeypatch):
@@ -297,11 +329,13 @@ def test_tripwire_flags_canary_regression(monkeypatch):
 
 
 def test_tripwire_refuses_to_judge_against_a_zero_baseline(monkeypatch):
-    """A 0% baseline means the suite is broken, not that the bar is strict.
+    """A task that was already red before the apply cannot testify.
 
-    `drop = base - now` against base=0 can only come out <= 0, so every batch
-    would be certified clean by a suite measuring nothing — the exact state
-    the box was in for five days. The signal must report unavailable.
+    Under the old aggregate math a 0% baseline certified every batch clean
+    (drop could never go positive) — the exact state the box was in for five
+    days. The per-task form keeps the same guarantee via the green
+    precondition: no green history, no verdict, and the signal reports
+    unavailable rather than issuing a false all-clear.
     """
     from core.adaptive.tripwire import evaluate_tripwire
 
@@ -332,21 +366,104 @@ def test_tripwire_auto_rollback_when_enabled(monkeypatch):
 
     monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
     monkeypatch.setattr("config.settings.adaptive_auto_rollback", True)
-    # A real applied batch with an entry, then a regressing sweep.
+    # A real applied batch with an entry, then a CONFIRMED regressing sweep:
+    # the original gate_fail plus its confirm-rerun gate_fail.
     batch_id = _apply_hint(title="regressor", content="bad hint")
     for _ in range(3):
-        db.add_canary_run("t1", "scheduled", None, "[]", True)
+        db.add_canary_run("t1", "scheduled", None, "[]", True, outcome="pass")
     # Backdate the scheduled baseline strictly before the batch's created_at.
     from db.database import connect_sessions
 
     with connect_sessions() as conn:
         conn.execute("UPDATE canary_runs SET created_at = '2026-01-01T00:00:00+00:00' WHERE trigger = 'scheduled'")
-    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id)
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id, outcome="gate_fail")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id, outcome="gate_fail")
 
     actions = evaluate_tripwire()
     assert any(a["action"] == "auto_rolled_back" for a in actions)
     assert db.adaptive_get_entry("regressor") is None  # create reversed = hard delete
     assert db.adaptive_get_batch(batch_id)["status"] == "rolled_back"
+
+
+def test_passive_only_suspect_expires_after_ttl(monkeypatch):
+    """A passive-signal flag's comparison windows are frozen at the apply, so
+    it can never self-clear — 4 batches sat suspect 12 days on the live box.
+    Passive-only flags now age out; canary-confirmed flags never do."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    monkeypatch.setattr("config.settings.adaptive_suspect_ttl_days", 7)
+    from datetime import datetime, timedelta, timezone
+
+    old = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+
+    db.adaptive_create_batch("ab-passive", "dream", "[]", status="applied")
+    db.adaptive_update_batch("ab-passive", status="suspect", flagged_reason="post-mortem retry rate 25% vs 5%")
+    db.set_snooze_state("adaptive_suspect_since:ab-passive", old)
+
+    db.adaptive_create_batch("ab-canary-hit", "dream", "[]", status="applied")
+    db.adaptive_update_batch("ab-canary-hit", status="suspect", flagged_reason="canary regression: t1 (confirmed)")
+    db.set_snooze_state("adaptive_suspect_since:ab-canary-hit", old)
+
+    actions = evaluate_tripwire()
+    assert any(a["action"] == "suspect_expired" and a["batch_id"] == "ab-passive" for a in actions)
+    cleared = db.adaptive_get_batch("ab-passive")
+    assert cleared["status"] == "applied" and cleared["cleared_at"]
+    assert "auto-cleared" in cleared["flagged_reason"]
+    assert db.adaptive_get_batch("ab-canary-hit")["status"] == "suspect"  # exempt
+
+
+def test_legacy_suspect_without_marker_starts_its_clock_not_clears(monkeypatch):
+    """A pre-v3.1 suspect has no timestamp: first sight stamps one, and the
+    batch expires only after a full TTL from THEN — never instantly."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    monkeypatch.setattr("config.settings.adaptive_suspect_ttl_days", 7)
+    db.adaptive_create_batch("ab-legacy", "dream", "[]", status="applied")
+    db.adaptive_update_batch("ab-legacy", status="suspect", flagged_reason="post-mortem retry rate 50% vs 30%")
+
+    evaluate_tripwire()
+    assert db.adaptive_get_batch("ab-legacy")["status"] == "suspect"  # clock started, not cleared
+    assert db.get_snooze_state("adaptive_suspect_since:ab-legacy")
+
+
+def test_tripwire_unconfirmed_gate_fail_flags_but_never_rolls_back(monkeypatch):
+    """One gate_fail with no confirm-rerun row = the rerun itself died.
+    Suspicion is warranted; an automatic rollback is not."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    monkeypatch.setattr("config.settings.adaptive_auto_rollback", True)
+    _seed_canary_history("ab-lone", baseline_pass=True, post_pass=False, confirm=False)
+    actions = evaluate_tripwire()
+    assert any(a["action"] == "flagged" and a["batch_id"] == "ab-lone" for a in actions)
+    assert not any(a["action"] == "auto_rolled_back" for a in actions)
+    assert db.adaptive_get_batch("ab-lone")["status"] == "suspect"
+
+
+def test_tripwire_ignores_timeouts_errors_and_legacy_failures(monkeypatch):
+    """Timeout/error/noop outcomes and pre-v30 NULL-outcome failures are
+    suite-health trouble, never evidence against a batch — with nothing else
+    to judge, the signal reports unavailable instead of flagging."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    from db.database import connect_sessions
+
+    for _ in range(3):
+        db.add_canary_run("t1", "scheduled", None, "[]", True, outcome="pass")
+    with connect_sessions() as conn:
+        conn.execute("UPDATE canary_runs SET created_at = '2026-01-01T00:00:00+00:00' WHERE trigger = 'scheduled'")
+    db.adaptive_create_batch("ab-noise", "refine", "[]", status="applied")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id="ab-noise", outcome="timeout")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id="ab-noise", outcome="error")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id="ab-noise", outcome="noop")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id="ab-noise")  # legacy NULL
+
+    actions = evaluate_tripwire()
+    assert not [a for a in actions if a["batch_id"] == "ab-noise"]
+    assert db.adaptive_get_batch("ab-noise")["status"] == "applied"
 
 
 def _backdate(table, created_at, where, params=()):
@@ -401,9 +518,10 @@ def test_tripwire_anchors_on_apply_time_not_queue_time(monkeypatch):
     # Baseline runs land BETWEEN queue and apply — only an apply-anchored
     # boundary admits them, and without a baseline there is no signal at all.
     for _ in range(3):
-        db.add_canary_run("t1", "scheduled", None, "[]", True)
+        db.add_canary_run("t1", "scheduled", None, "[]", True, outcome="pass")
     _backdate("canary_runs", "2026-01-02T00:00:00+00:00", "trigger = 'scheduled'")
-    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id)
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id, outcome="gate_fail")
+    db.add_canary_run("t1", "post_batch", None, "[]", False, batch_id=batch_id, outcome="gate_fail")
 
     actions = evaluate_tripwire()
     assert any(a["action"] == "flagged" and a["batch_id"] == batch_id for a in actions)
@@ -729,12 +847,13 @@ def test_one_producer_cannot_own_the_whole_review_queue():
     )
 
 
-async def test_paraphrased_tool_findings_promote_once():
+async def test_paraphrased_tool_findings_promote_once(monkeypatch):
     """Eleven of the sixty-four live proposals were one fetch_ok finding
     restated. Lexical dedup cannot see a paraphrase; the Candor evidence key
     is the claim's semantic identity, and promotion must use it."""
     from core.dream.promote import promote_validated
 
+    _bypass_gate(monkeypatch)
     ev = json.dumps([{"type": "candor", "pred": "fetch_ok", "args": ["*"], "quote": "p=0.49"}])
     first = db.add_dream_hypothesis("tool_pattern", "fetch_ok succeeds only about half the time overall", ev)
     second = db.add_dream_hypothesis("tool_pattern", "Fetching is unreliable, working roughly 50% of the time", ev)
@@ -865,3 +984,22 @@ def test_zero_window_restores_the_human_gate(monkeypatch):
 
     assert auto_approve_stale_proposals()["approved"] == []
     assert db.adaptive_get_proposal(pid)["status"] == "pending"
+
+
+def test_routing_hints_ranked_by_outcome_share():
+    """When the cap bites, hints with the best smoothed success share render
+    first — a much-cited failing hint no longer crowds out a reliable one."""
+    from core.adaptive.render import build_routing_hints_block
+
+    filler = "x" * 900  # two hints alone exceed the 1600-char cap -> ranking runs
+    _apply_hint(title="loser", content=f"bad guidance {filler}")
+    _apply_hint(title="winner", content=f"good guidance {filler}")
+    hints = {h["title"]: h["id"] for h in db.adaptive_list_entries(kind="routing_hint")}
+    # loser: cited constantly, fails constantly. winner: cited less, succeeds.
+    db.upsert_signal("adaptive_entry", hints["loser"], delta_failures=6, delta_reinforcements=9)
+    db.upsert_signal("adaptive_entry", hints["winner"], delta_successes=3, delta_reinforcements=3)
+    block = build_routing_hints_block()
+    assert "winner" in block
+    # With the cap at 1600 chars only the top-ranked hint fits — the failing
+    # one is cut despite triple the reinforcements.
+    assert "loser" not in block

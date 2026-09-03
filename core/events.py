@@ -79,6 +79,30 @@ def call_on_loop(fn, *args, loop: asyncio.AbstractEventLoop | None = None, timeo
     return asyncio.run_coroutine_threadsafe(_wrapper(), target).result(timeout)
 
 
+_DROPPED_ATTR = "_pernix_dropped"
+
+
+def mark_queue_dropped(q) -> None:
+    """Flag a subscriber queue that was detached for being too slow.
+
+    Dropping the queue from the subscriber list stops the producer, but the
+    SSE generator is still awaiting that queue and still emitting
+    heartbeats, so the browser sees a healthy connection carrying nothing —
+    permanently, for the streams with no client-side staleness watchdog.
+    The generator checks this flag and returns instead, which ends the
+    response and lets EventSource reconnect (and replay).
+    """
+    try:
+        setattr(q, _DROPPED_ATTR, True)
+    except AttributeError:  # pragma: no cover - asyncio.Queue accepts attrs
+        pass
+
+
+def queue_was_dropped(q) -> bool:
+    """Whether this queue was detached by a slow-consumer drop."""
+    return bool(getattr(q, _DROPPED_ATTR, False))
+
+
 class JobEventBus:
     """Global pub/sub for background task lifecycle events."""
 
@@ -108,6 +132,7 @@ class JobEventBus:
             except asyncio.QueueFull:
                 dead.append(q)
         for q in dead:
+            mark_queue_dropped(q)
             if q in self._subscribers:
                 self._subscribers.remove(q)
 

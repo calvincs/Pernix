@@ -97,13 +97,29 @@ def test_update_and_delete_still_round_trip_through_the_index(store):
 
 
 # `with open(..., "w")` only — the prose in _write_locked's docstring names the
-# broken pattern on purpose and must not trip this.
-_TRUNCATING_OPEN = re.compile(r"""with\s+open\([^)]*["']w["']""")
+# broken pattern on purpose and must not trip this. A truncating open of a
+# `*_tmp`/`tmp_*` path is the ATOMIC pattern (write a sibling temp, fsync,
+# os.replace onto the target), which is what _write_locked does now: nothing
+# reads that temp file, and the destination is only ever swapped whole.
+_TRUNCATING_OPEN = re.compile(r"""with\s+open\((?![^)]*tmp)[^)]*["']w["']""")
 
 
 def test_no_truncating_open_remains_in_the_memory_write_paths():
-    """Pin the pattern: every rewrite goes through the locked primitive."""
+    """Pin the pattern: no rewrite truncates a file readers can see.
+
+    The original defect was `open(path, "w")` (truncates at open time) with
+    the flock taken afterwards, so a reader landing in the gap saw an empty
+    memory file. Writing a temp file and renaming has no such gap.
+    """
     root = Path(__file__).resolve().parents[2] / "core" / "memory"
     for name in ("store.py", "sweeps.py"):
         source = (root / name).read_text()
         assert not _TRUNCATING_OPEN.search(source), f"{name} reintroduced a truncate-then-lock rewrite"
+
+
+def test_the_atomic_temp_write_is_still_recognised_as_safe():
+    """The guard above must not be satisfied by simply deleting the write."""
+    root = Path(__file__).resolve().parents[2] / "core" / "memory"
+    source = (root / "store.py").read_text()
+    assert "os.replace(tmp_path, md_path)" in source, "the rewrite must land via an atomic rename"
+    assert "os.fsync(" in source, "the temp file must be flushed to disk before the rename"

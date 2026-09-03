@@ -269,16 +269,20 @@ def test_repl_clamps_a_runaway_timeout(monkeypatch):
     seen = {}
 
     class _FakeKernel:
-        def execute(self, code, timeout=None, cancel_check=None):
+        def execute(self, code, timeout=None, cancel_check=None, lock_timeout=None):
             seen["timeout"] = timeout
+            seen["lock_timeout"] = lock_timeout
             raise KernelError("stopped")
 
     monkeypatch.setattr(
         "core.kernel.get_kernel_registry",
-        lambda: type("R", (), {"get_or_create": lambda self, sid: _FakeKernel()})(),
+        lambda: type("R", (), {"get_or_create": lambda self, sid, cwd=None: _FakeKernel()})(),
     )
     repl_tool.repl("1", timeout=999999, _context={"session_id": "s"})
     assert seen["timeout"] == repl_tool._MAX_TIMEOUT_S
+    # The wait for a busy shared kernel is capped at the same clamped budget,
+    # so a sibling session's cell cannot park this call past its own timeout.
+    assert seen["lock_timeout"] == repl_tool._MAX_TIMEOUT_S
 
     repl_tool.repl("1", timeout=None, _context={"session_id": "s"})
     assert seen["timeout"] == repl_tool._DEFAULT_TIMEOUT_S

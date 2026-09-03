@@ -333,3 +333,70 @@ def test_attributions_payload_json_is_parseable_via_from_row():
     sig = from_row(row)
     assert sig.subject == "payload-check"
     assert sig.successes == 1
+
+
+# ---------------------------------------------------------------------------
+# Adaptive-entry usefulness attribution (v3.1)
+# ---------------------------------------------------------------------------
+
+
+def test_used_hints_pass_credits_without_recounting_usage():
+    """Usage was counted at scout submit-time — synthesis adds the OUTCOME
+    only (delta_reinforcements=0), or the denominator double-counts."""
+    row = _pm(scout_summary={"used_hints": ["yt-dlp-403-captions-fallback"], "from_fallback": False})
+    attrs = [a for a in synthesis.attribute(row) if a.signal_type == "adaptive_entry"]
+    assert len(attrs) == 1
+    a = attrs[0]
+    assert a.subject == "yt-dlp-403-captions-fallback"
+    assert a.delta_successes == 1 and a.delta_failures == 0 and a.delta_reinforcements == 0
+
+
+def test_used_hints_retry_blamed_on_scout_penalizes():
+    row = _pm(
+        verdict="retry",
+        failure_cause="scout",
+        scout_summary={"used_hints": ["bad-hint"], "from_fallback": False},
+    )
+    attrs = [a for a in synthesis.attribute(row) if a.signal_type == "adaptive_entry"]
+    assert len(attrs) == 1 and attrs[0].delta_failures == 1 and attrs[0].delta_reinforcements == 0
+
+
+def test_used_hints_retry_blamed_elsewhere_is_skipped():
+    row = _pm(
+        verdict="retry",
+        failure_cause="agent",
+        scout_summary={"used_hints": ["innocent-hint"], "from_fallback": False},
+    )
+    assert [a for a in synthesis.attribute(row) if a.signal_type == "adaptive_entry"] == []
+
+
+def test_cited_policies_count_usage_and_success_but_never_failure():
+    """A reflect citation is usage+outcome in one observation; a cited policy
+    on a failed turn is not evidence of fault — no failure attribution in v1."""
+    payload = {"scout_summary": {"from_fallback": False}, "cited_policies": ["verify-on-disk-before-completion"]}
+    row = {
+        "id": "pmY",
+        "verdict": "pass",
+        "failure_cause": "none",
+        "confidence": 0.9,
+        "execution_mode": "inline",
+        "scout_viability": "verified",
+        "payload_json": json.dumps(payload),
+    }
+    attrs = [a for a in synthesis.attribute(row) if a.signal_type == "adaptive_entry"]
+    assert len(attrs) == 1
+    assert attrs[0].delta_successes == 1 and attrs[0].delta_reinforcements == 1
+
+    row["verdict"] = "retry"
+    row["failure_cause"] = "agent"
+    attrs = [a for a in synthesis.attribute(row) if a.signal_type == "adaptive_entry"]
+    assert len(attrs) == 1
+    assert attrs[0].delta_successes == 0 and attrs[0].delta_failures == 0 and attrs[0].delta_reinforcements == 1
+
+
+def test_adaptive_entry_signal_upserts_with_zero_reinforcement_delta():
+    db.delete_signal("adaptive_entry", "zero-delta-check")
+    db.upsert_signal("adaptive_entry", "zero-delta-check")  # submit-time usage
+    db.upsert_signal("adaptive_entry", "zero-delta-check", delta_successes=1, delta_reinforcements=0)
+    row = db.get_signal("adaptive_entry", "zero-delta-check")
+    assert row["reinforcements"] == 1 and row["successes"] == 1

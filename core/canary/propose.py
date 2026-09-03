@@ -204,6 +204,42 @@ def _validate_spec(p: dict) -> str | None:
     return None
 
 
+def write_canary_md(name: str, text: str, base: Path | None = None, overwrite: bool = False) -> tuple[str | None, str]:
+    """Write raw CANARY.md text as data/canaries/<name>/CANARY.md, validated.
+
+    The shared write path for every canary producer (proposal
+    materialization, the CRUD API, skill verify-sync): render into a temp
+    dir, round-trip through the real parser, then move/replace — a broken
+    file never lands in the suite. Returns (name, "") or (None, error).
+    """
+    from core.canary.parser import canaries_dir, parse_canary_md
+
+    base = base or canaries_dir()
+    target_dir = base / name
+    if target_dir.exists() and not overwrite:
+        return None, f"canary '{name}' already exists"
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="canary-write-"))
+    try:
+        tmp_dir = tmp_root / name
+        tmp_dir.mkdir()
+        tmp_md = tmp_dir / "CANARY.md"
+        tmp_md.write_text(text, encoding="utf-8")
+        parsed = parse_canary_md(tmp_md)  # raises CanaryParseError on any invariant break
+        if parsed.name != name:
+            return None, f"frontmatter name '{parsed.name}' must match directory name '{name}'"
+        base.mkdir(parents=True, exist_ok=True)
+        if target_dir.exists():
+            (target_dir / "CANARY.md").write_text(text, encoding="utf-8")
+        else:
+            shutil.move(str(tmp_dir), str(target_dir))
+    except Exception as e:
+        return None, f"write failed: {e}"
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+    return name, ""
+
+
 def materialize_canary(spec: dict, base: Path | None = None, vetting: bool = False) -> tuple[str | None, str]:
     """Write an approved proposal as data/canaries/<name>/CANARY.md.
 
@@ -214,7 +250,7 @@ def materialize_canary(spec: dict, base: Path | None = None, vetting: bool = Fal
     vetting tags: the canary informs but cannot trip the tripwire until the
     maintenance sweep promotes it on consistent runs.
     """
-    from core.canary.parser import canaries_dir, parse_canary_md
+    from core.canary.parser import canaries_dir
 
     err = _validate_spec(spec)
     if err:
@@ -258,18 +294,8 @@ def materialize_canary(spec: dict, base: Path | None = None, vetting: bool = Fal
     body = f"{str(spec.get('rationale') or 'Proposed from a real failed turn.').strip()}\n\n{provenance}"
     text = f"---\n{yaml.safe_dump(fm, sort_keys=False, allow_unicode=True)}---\n\n{body}\n"
 
-    tmp_root = Path(tempfile.mkdtemp(prefix="canary-proposal-"))
-    try:
-        tmp_dir = tmp_root / name
-        tmp_dir.mkdir()
-        tmp_md = tmp_dir / "CANARY.md"
-        tmp_md.write_text(text, encoding="utf-8")
-        parse_canary_md(tmp_md)  # raises CanaryParseError on any invariant break
-        base.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(tmp_dir), str(target_dir))
-    except Exception as e:
-        return None, f"materialization failed: {e}"
-    finally:
-        shutil.rmtree(tmp_root, ignore_errors=True)
+    got, err = write_canary_md(name, text, base=base)
+    if err:
+        return None, f"materialization failed: {err}"
     logger.info("Canary '%s' materialized from approved proposal", name)
-    return name, ""
+    return got, ""

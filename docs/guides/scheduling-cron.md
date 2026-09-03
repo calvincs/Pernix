@@ -28,14 +28,14 @@ schedule_job(
 )
 ```
 
-Cron expression is the standard 5-field syntax: `minute hour day month weekday`. Examples:
+Cron expression is the standard 5-field syntax: `minute hour day month weekday`, evaluated in the server's **local** time zone, not UTC (details under [Limits and gotchas](#limits-and-gotchas)). Examples, assuming the server's local time:
 
 | Schedule | Meaning |
 |---|---|
-| `0 8 * * 1-5` | 8:00 UTC, Monday through Friday |
+| `0 8 * * 1-5` | 8:00 local time, Monday through Friday |
 | `*/15 * * * *` | Every 15 minutes |
-| `0 0 1 * *` | First of every month at midnight UTC |
-| `30 14 * * 0` | Sundays at 14:30 UTC |
+| `0 0 1 * *` | First of every month at midnight local time |
+| `30 14 * * 0` | Sundays at 14:30 local time |
 
 ---
 
@@ -63,6 +63,9 @@ Both behaviors live in `_is_unattended_session()` in `core/tools/executor.py`.
 | `POST /api/jobs` | Create a new job (same args as `schedule_job`) |
 | `POST /api/jobs/{name}/pause` | Pause an enabled job (won't fire until resumed) |
 | `POST /api/jobs/{name}/resume` | Resume a paused job |
+| `POST /api/jobs/{name}/run` | Fire the job immediately, outside its schedule |
+| `POST /api/jobs/{name}/validate` | Re-check the job's spec (cron, prompt, tools, model) |
+| `POST /api/jobs/{name}/test` | Dry-run the job once in an isolated workspace (result → notification) |
 | `DELETE /api/jobs/{name}` | Delete the job |
 
 Or via tools the agent can use:
@@ -70,9 +73,39 @@ Or via tools the agent can use:
 - `list_scheduled_jobs`
 - `update_scheduled_job` (change schedule or instructions)
 - `set_job_state` (pause/resume)
+- `test_job` (isolated dry-run — prove the job works before it fires)
 - `remove_scheduled_job`
 
-The UI's jobs panel shows the list with next-run times and status.
+The Explorer's Automation → Jobs tab has three sub-tabs — **Scheduled**,
+**Active** (whatever is running right now, including worker and RLM runs and
+snooze cycles) and **History** — plus a search box that filters the sub-tab you
+are on. A scheduled job shows its next-run time, its status, a spec badge
+(`valid` / `invalid` / `unvalidated`) and the last test outcome, with
+**validate**, **run now**, **test**, **edit** and **delete** on the row.
+
+### Validation and test-runs
+
+Creating or editing a job validates the spec first: an unparseable cron
+expression, a trivial prompt, or an unknown tool in `allowed_tools` is
+rejected at save time with the reasons spelled out — not discovered weeks
+later when the job silently fails on schedule. A model that isn't in the
+local registry is a warning, not a blocker (remote ids can still resolve at
+dispatch).
+
+`test_job` (or the panel's **test** button) then proves the job actually
+runs: the prompt fires once in a throwaway temp workspace under the job's own
+model and tool allow-list, bounded at 5 minutes. Nothing is recorded in the
+run history and the schedule is untouched. The transcript survives as a
+session titled `Job test: <name>`, and a job that calls `ask_user` is flagged
+— an unattended fire would hang on that question forever.
+
+---
+
+## Jobs and spaces
+
+A job can bind to a [space](spaces.md) — pick one in the Explorer's Automation → Jobs add form, pass `space_id` to `POST /api/jobs`, or just call `schedule_job` from inside a space session, which inherits that space automatically (`space_id="none"` opts out). Each firing then creates its `Cron:` session *inside* the space, so it picks up the space's directive overrides, memory routing, workspace home and shared kernel — a bound job behaves like any other member of the space, just triggered by the clock instead of by you.
+
+Binding to a space doesn't change the 7-day auto-prune covered under [Limits and gotchas](#limits-and-gotchas) — that still applies to every `Cron:` run session, space or not, and pinning is still what saves an individual run.
 
 ---
 
@@ -97,7 +130,7 @@ If you want to know when a cron job did something:
 
 - **Webhook** — set `notify_webhook_url` in Settings. The agent will POST to it whenever `ask_user` fires (which in unattended mode is rare, but happens for explicit user confirmation requests).
 - **Web Push** — if you've subscribed via the UI, push notifications fire on `ask_user`.
-- **Workspace files** — the agent can write a file the cron job creates; you find it in the file panel next time you check.
+- **Workspace files** — the agent can write a file the cron job creates; you find it in the Explorer's Files → Workspace tab next time you check.
 - **A follow-up cron job** — schedule a 9 AM "what did the 8 AM job produce?" session.
 
 ---
@@ -108,7 +141,8 @@ If you want to know when a cron job did something:
 - **`llm_session_timeout`** (default 1800 seconds) caps a cron session's total LLM time. A long-running cron session that would blow the budget gets terminated cleanly.
 - **No retry semantics** — if a cron job fails (network error, model down), it just fails for that run. The next run fires on schedule. Build retry into your prompt if you need it.
 - **Crash safety** — each run's row is claimed in the DB before the prompt is dispatched, and any ticks missed while the server was down are coalesced into a single catch-up run at startup rather than replayed one by one.
-- **Time zone** — cron times are UTC. The scheduler and every trigger are pinned to UTC regardless of the host's `TZ`, so convert your local times when writing expressions. `data/agent/SESSIONS.md` typically records your timezone for the agent's awareness, but the scheduler itself doesn't use it.
+- **Run sessions prune after 7 days** — each firing's `Cron:` session (transcript included) is auto-deleted a week after its last activity, whether or not it's bound to a space. **Pin** a run to keep it around, or make sure the job itself writes anything you'll want later into memory or a workspace file — those outlive the session either way.
+- **Time zone** — a job's cron expression is evaluated in the server process's **local** time zone (the container's `TZ`, or the host's if you're running bare — `docker-compose.yml` ships `TZ=America/Chicago` as a default you're expected to change), not UTC. A few internal schedules (the canary sweep, the Telos digest) are deliberately pinned to UTC instead, but user jobs created via `schedule_job` or `POST /api/jobs` follow local time. `data/agent/SESSIONS.md` typically records your timezone for the agent's awareness as well.
 
 ---
 

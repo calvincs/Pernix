@@ -65,6 +65,21 @@ function statusBadge(status) {
     return el('span', { class: `jobs-status ${status}` }, [text(status)]);
 }
 
+// Inline result line — an alert() cannot be read next to the row it is about,
+// steals focus from the panel, and is unreachable to a screen reader that was
+// somewhere else. Returns { el, set } so a row can own its own line. (S12)
+function resultLine() {
+    const node = el('div', { class: 'jobs-result', role: 'status' });
+    return {
+        el: node,
+        set(message, isError = false) {
+            node.textContent = message || '';
+            node.classList.toggle('err', !!isError);
+            node.setAttribute('role', isError ? 'alert' : 'status');
+        },
+    };
+}
+
 function _refreshPanel() {
     if (_refreshCallback) _refreshCallback();
 }
@@ -140,7 +155,7 @@ export async function buildActiveTab() {
         const snoozing = status.snooze?.running;
 
         if (running.length === 0 && rlmRunning.length === 0 && !snoozing) {
-            container.appendChild(el('div', { class: 'jobs-empty' }, [text('No active tasks')]));
+            container.appendChild(el('div', { class: 'jobs-empty' }, [text('Nothing is running — worker runs, RLM runs and snooze cycles appear here while they work.')]));
             return container;
         }
 
@@ -197,26 +212,28 @@ export async function buildScheduledTab() {
     const container = el('div', { class: 'jobs-tab-content' });
 
     try {
-        const [data, modelsData] = await Promise.all([
+        const [data, modelsData, spacesData] = await Promise.all([
             get('/api/jobs'),
             get('/api/models').catch(() => ({ models: [], current: '' })),
+            get('/api/spaces').catch(() => ({ items: [] })),
         ]);
         const jobs = data.items || [];
         const models = modelsData;
+        const spaces = spacesData.items || [];
 
         container.appendChild(el('div', {
             style: 'font-size:var(--text-xs); color:var(--text-faint); margin-bottom:var(--sp-2); padding:0 var(--sp-3);',
         }, [text('Cron expressions and next-run times are in UTC.')]));
 
         if (jobs.length === 0) {
-            container.appendChild(el('div', { class: 'jobs-empty' }, [text('No scheduled jobs')]));
+            container.appendChild(el('div', { class: 'jobs-empty' }, [text('No scheduled jobs — use + Add Job below, or ask the agent to schedule one for you.')]));
         } else {
             for (const job of jobs) {
-                container.appendChild(_buildJobRow(job, models));
+                container.appendChild(_buildJobRow(job, models, spaces));
             }
         }
 
-        container.appendChild(_buildAddSection(models));
+        container.appendChild(_buildAddSection(models, spaces));
     } catch (e) {
         container.appendChild(el('div', { class: 'jobs-empty' }, [text(`Error: ${e.message}`)]));
     }
@@ -224,47 +241,152 @@ export async function buildScheduledTab() {
     return container;
 }
 
-function _buildJobRow(job, models) {
+function _buildJobRow(job, models, spaces = []) {
     const wrapper = el('div');
 
     function renderView() {
         clear(wrapper);
+        const result = resultLine();
+        // Validation + last-test badges (spec Feature 7). A job saved before
+        // the feature has no validation record — shown as "unvalidated".
+        const v = job.validation;
+        const validBadge = !v
+            ? el('span', { style: { color: 'var(--text-faint)' }, title: 'Saved before spec validation existed — edit or validate to check it' }, [text('unvalidated')])
+            : v.ok
+                ? el('span', { style: { color: 'var(--ok)' }, title: (v.warnings || []).join('\n') || 'spec valid' }, [text((v.warnings || []).length ? 'valid ⚠' : 'valid')])
+                : el('span', { style: { color: 'var(--danger)' }, title: (v.errors || []).join('\n') }, [text('invalid')]);
+        const lt = job.last_test;
+        const testBadge = lt
+            ? el('span', {
+                style: { color: lt.ok ? 'var(--ok)' : 'var(--danger)' },
+                title: lt.error || `tested ${lt.at || ''} (${lt.duration_s || 0}s)`,
+            }, [text(lt.ok ? 'test ✓' : 'test ✗')])
+            : null;
         const item = el('div', { class: 'jobs-item' }, [
             statusBadge(job.status),
             el('div', { class: 'jobs-item-main' }, [
                 el('div', { class: 'jobs-item-name' }, [text(job.name)]),
                 el('div', { class: 'jobs-item-meta' }, [
+                    (() => {
+                        // Space binding chip (v33): the run lands in this space.
+                        if (!job.space_id) return null;
+                        const sp = spaces.find(s => s.id === job.space_id);
+                        return el('span', {
+                            class: 'space-chip-labeled',
+                            style: `--space-color: ${sp ? sp.color : 'var(--text-dim)'}`,
+                            title: sp ? `Runs in space "${sp.label}"` : 'Bound to a deleted space',
+                        }, [text(sp ? sp.label : 'space?')]);
+                    })(),
                     el('span', {}, [text(`${job.cron_expr} (UTC)`)]),
                     job.next_run ? el('span', {}, [text(`next: ${relativeTime(job.next_run)}`)]) : null,
                     job.model ? el('span', {}, [text(`model: ${job.model}`)]) : null,
                     el('span', {}, [text(`runs: ${job.run_count}`)]),
                     job.last_run_at ? el('span', {}, [text(`last: ${relativeTime(job.last_run_at)}`)]) : null,
+                    validBadge,
+                    testBadge,
                 ]),
                 el('div', { class: 'jobs-item-meta', style: { marginTop: '2px' } }, [
                     el('span', { style: { color: 'var(--text-faint)' } },
                         [text(job.prompt.length > 80 ? job.prompt.slice(0, 80) + '...' : job.prompt)]),
                 ]),
+                result.el,
             ]),
             el('div', { class: 'jobs-item-actions' }, [
+                // The endpoint already existed and nothing in the UI could
+                // reach it, so a job's "unvalidated" badge was a dead end
+                // short of editing and re-saving it. (S12)
                 el('button', {
                     class: 'jobs-btn',
+                    title: 'Re-check this job\u2019s cron expression, prompt and model against the spec',
+                    'aria-label': `Validate the job ${job.name}`,
+                    onClick: async (e) => {
+                        const btn = e.target;
+                        btn.disabled = true;
+                        result.set('Validating\u2026');
+                        try {
+                            const res = await post(`/api/jobs/${encodeURIComponent(job.name)}/validate`);
+                            const v = res.validation || {};
+                            job.validation = v;
+                            const warnings = v.warnings || [];
+                            const errors = v.errors || [];
+                            if (v.ok) {
+                                result.set(warnings.length
+                                    ? `Valid, with warnings: ${warnings.join(' \u00b7 ')}`
+                                    : 'Valid \u2014 cron, prompt and model all check out.');
+                            } else {
+                                result.set(`Invalid: ${errors.join(' \u00b7 ') || 'the spec was rejected'}`, true);
+                            }
+                        } catch (err) {
+                            result.set(`Validate failed: ${err.message}`, true);
+                        }
+                        btn.disabled = false;
+                    },
+                }, [text('validate')]),
+                el('button', {
+                    class: 'jobs-btn',
+                    title: 'Fire this job once now, for real \u2014 same session, history and notifications as a scheduled run',
+                    'aria-label': `Run the job ${job.name} now`,
+                    onClick: async (e) => {
+                        const btn = e.target;
+                        if (!confirm(
+                            `Run "${job.name}" now? This is a real run in a new session, `
+                            + 'not a dry run \u2014 use "test" for that. The schedule is unchanged.'
+                        )) return;
+                        btn.disabled = true;
+                        result.set('Starting\u2026');
+                        try {
+                            await post(`/api/jobs/${encodeURIComponent(job.name)}/run`);
+                            result.set('Started \u2014 follow it under Active, then History.');
+                        } catch (err) {
+                            result.set(`Could not start: ${err.message}`, true);
+                        }
+                        btn.disabled = false;
+                    },
+                }, [text('run now')]),
+                el('button', {
+                    class: 'jobs-btn',
+                    title: 'Dry-run this job once in an isolated workspace — result arrives as a notification',
+                    'aria-label': `Dry-run the job ${job.name}`,
+                    onClick: async (e) => {
+                        e.target.disabled = true;
+                        e.target.textContent = 'testing…';
+                        try {
+                            await post(`/api/jobs/${encodeURIComponent(job.name)}/test`);
+                            result.set('Test started \u2014 the outcome arrives as a notification.');
+                        } catch (err) {
+                            e.target.disabled = false;
+                            e.target.textContent = 'test';
+                            result.set(`Test failed to start: ${err.message}`, true);
+                        }
+                    },
+                }, [text('test')]),
+                el('button', {
+                    class: 'jobs-btn',
+                    'aria-label': `Edit the job ${job.name}`,
                     onClick: () => renderEdit(),
                 }, [text('edit')]),
                 el('button', {
                     class: 'jobs-btn',
+                    'aria-label': `${job.paused ? 'Resume' : 'Pause'} the job ${job.name}`,
                     onClick: async () => {
-                        if (job.paused) {
-                            await post(`/api/jobs/${encodeURIComponent(job.name)}/resume`);
-                        } else {
-                            await post(`/api/jobs/${encodeURIComponent(job.name)}/pause`);
+                        try {
+                            if (job.paused) {
+                                await post(`/api/jobs/${encodeURIComponent(job.name)}/resume`);
+                            } else {
+                                await post(`/api/jobs/${encodeURIComponent(job.name)}/pause`);
+                            }
+                        } catch (err) {
+                            result.set(`Could not ${job.paused ? 'resume' : 'pause'}: ${err.message}`, true);
+                            return;
                         }
                         _refreshPanel();
                     },
                 }, [text(job.paused ? 'resume' : 'pause')]),
                 el('button', {
                     class: 'jobs-btn danger',
+                    'aria-label': `Delete the job ${job.name}`,
                     onClick: async () => {
-                        if (confirm(`Remove job "${job.name}"?`)) {
+                        if (confirm(`Delete the scheduled job "${job.name}" \u2014 this cannot be undone. Its run history is kept.`)) {
                             await del(`/api/jobs/${encodeURIComponent(job.name)}`);
                             _refreshPanel();
                         }
@@ -294,8 +416,9 @@ function _buildJobRow(job, models) {
 
         const statusMsg = el('span', { style: { fontSize: 'var(--text-xs)', color: 'var(--text-dim)' } });
         const saveBtn = el('button', {
-            class: 'btn btn-primary',
-            style: { padding: '4px 12px', fontSize: 'var(--text-sm)', display: 'none' },
+            class: 'btn btn--primary',
+            type: 'button',
+            hidden: '',
         }, [text('Save')]);
 
         function checkDirty() {
@@ -305,7 +428,7 @@ function _buildJobRow(job, models) {
             const dirty = (newCron !== job.cron_expr) ||
                           (newPrompt !== job.prompt) ||
                           (newModel !== (job.model || ''));
-            saveBtn.style.display = dirty ? '' : 'none';
+            saveBtn.hidden = !dirty;
             if (dirty) statusMsg.textContent = '';
         }
 
@@ -327,7 +450,7 @@ function _buildJobRow(job, models) {
                 await apiJson('PUT', `/api/jobs/${encodeURIComponent(job.name)}`, body);
                 statusMsg.textContent = 'Saved';
                 statusMsg.style.color = 'var(--success)';
-                saveBtn.style.display = 'none';
+                saveBtn.hidden = true;
                 setTimeout(() => _refreshPanel(), 500);
             } catch (e) {
                 statusMsg.textContent = e.message;
@@ -430,7 +553,7 @@ function _cronHint(expr) {
     return '';
 }
 
-function _buildAddSection(models) {
+function _buildAddSection(models, spaces = []) {
     const wrapper = el('div');
     let editorInstance = null;
 
@@ -442,8 +565,8 @@ function _buildAddSection(models) {
             editorInstance = null;
         }
         const btn = el('button', {
-            class: 'jobs-btn',
-            style: { margin: 'var(--sp-3)', fontSize: 'var(--text-sm)' },
+            class: 'jobs-btn jobs-add-btn',
+            type: 'button',
             onClick: renderForm,
         }, [text('+ Add Job')]);
         wrapper.appendChild(btn);
@@ -485,6 +608,14 @@ function _buildAddSection(models) {
             modelSelect.appendChild(el('option', { value: m.id }, [text(label)]));
         }
 
+        // Space binding (v33): each firing runs in a fresh session inside
+        // the chosen space. Only rendered when spaces exist.
+        const spaceSelect = el('select', { title: 'Run this job inside a space' });
+        spaceSelect.appendChild(el('option', { value: '' }, [text('No space')]));
+        for (const sp of spaces) {
+            spaceSelect.appendChild(el('option', { value: sp.id }, [text(`Space: ${sp.label}`)]));
+        }
+
         const form = el('div', { class: 'jobs-add-form' }, [
             el('div', { style: { fontSize: 'var(--text-sm)', color: 'var(--text-dim)', marginBottom: '4px' } },
                 [text('Add Job — cron schedule is UTC')]),
@@ -493,9 +624,10 @@ function _buildAddSection(models) {
             editorHost,
             el('div', { class: 'jobs-add-row' }, [
                 modelSelect,
+                spaces.length ? spaceSelect : null,
                 el('button', {
-                    class: 'btn btn-primary',
-                    style: { padding: '4px 12px', fontSize: 'var(--text-sm)' },
+                    class: 'btn btn--primary',
+                    type: 'button',
                     onClick: async () => {
                         const name = nameInput.value.trim();
                         const cron_expr = cronInput.value.trim();
@@ -509,6 +641,7 @@ function _buildAddSection(models) {
                             await post('/api/jobs', {
                                 name, cron_expr, prompt,
                                 model: modelSelect.value,
+                                space_id: spaceSelect.value || null,
                             });
                             statusMsg.textContent = `Job "${name}" created`;
                             statusMsg.style.color = 'var(--success)';
@@ -571,21 +704,25 @@ export async function buildHistoryTab() {
             ...jobNames.map(n => el('option', { value: n }, [text(n)])),
         ]);
 
+        const historyResult = resultLine();
         const clearBtn = el('button', {
             class: 'jobs-btn danger',
+            'aria-label': 'Clear the run history shown by the current filter',
             onClick: async () => {
                 if (filter === 'rlm') {
-                    alert('RLM runs are purged automatically by retention (rlm_run_retention_days).');
+                    historyResult.set(
+                        'RLM runs are purged automatically by retention (rlm_run_retention_days).',
+                    );
                     return;
                 }
                 const target = filter || 'all';
-                if (!confirm(`Clear ${target} run history?`)) return;
+                if (!confirm(`Delete the ${target} run history \u2014 this cannot be undone.`)) return;
                 try {
                     const qs = filter ? `?job_name=${encodeURIComponent(filter)}` : '';
                     await del(`/api/jobs/runs${qs}`);
                     _refreshPanel();
                 } catch (e) {
-                    alert(`Error: ${e.message}`);
+                    historyResult.set(`Could not clear the history: ${e.message}`, true);
                 }
             },
         }, [text('clear')]);
@@ -601,6 +738,7 @@ export async function buildHistoryTab() {
             ]),
         ]);
         container.appendChild(header);
+        container.appendChild(historyResult.el);
 
         const listEl = el('div');
         container.appendChild(listEl);
@@ -640,7 +778,7 @@ export async function buildHistoryTab() {
             countEl.textContent = filter ? `${shown} of ${totalAll} runs` : `${totalAll} runs`;
 
             if (shown === 0) {
-                listEl.appendChild(el('div', { class: 'jobs-empty' }, [text('No runs yet')]));
+                listEl.appendChild(el('div', { class: 'jobs-empty' }, [text('No runs recorded yet — history fills in the first time a job fires.')]));
                 return;
             }
 

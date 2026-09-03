@@ -142,6 +142,26 @@ def test_batch_timeout_covers_the_slowest_tool_in_the_batch():
     assert _batch_timeout([0], calls, reg) > settings.tool_timeout
 
 
+def test_batch_timeout_covers_the_queue_wait_ceiling_too():
+    """A call's clock starts when a pool thread picks it up; the backstop
+    must also cover the time it may sit queued behind a saturated pool,
+    or a batch that queued ~280s and then ran normally loses the round."""
+    from config import settings
+    from core.tools.executor import _QUEUE_WAIT_CEILING_S, _batch_timeout
+
+    reg = ToolRegistry()
+    reg.register(
+        "par",
+        func=lambda: "ok",
+        description="p",
+        parameters={"type": "object", "properties": {}},
+        parallel_safe=True,
+        timeout=settings.tool_timeout,
+    )
+    calls = [{"name": "par", "arguments": {}}]
+    assert _batch_timeout([0], calls, reg) >= _QUEUE_WAIT_CEILING_S + settings.tool_timeout
+
+
 async def test_slow_parallel_tool_does_not_destroy_the_round():
     """Regression: one slow parallel call must not take its peers down.
 
@@ -280,8 +300,8 @@ def _make_approved_session(monkeypatch, tool_name, scope, persistent=False):
 
 async def test_dangerous_approval_scope_mismatch_blocks(monkeypatch):
     """A single-use approval whose scope doesn't mention the call's argument
-    values must not unlock the call (approve 'delete skill foo' must not
-    allow delete_skill(name='bar'))."""
+    values must not unlock the call (approving a scope naming 'foo' must not
+    allow the same tool called with name='bar')."""
 
     def dangerous_fn(name=""):
         return f"deleted {name}"

@@ -27,6 +27,56 @@ logger = logging.getLogger("pernix.retention")
 
 
 # ---------------------------------------------------------------------------
+# Distill-before-delete (agent-ergonomics plan, Tier 2.3)
+# ---------------------------------------------------------------------------
+
+_DIGEST_FILE = "retention.digested"
+_DIGEST_MAX_LINES = 15
+
+
+def _digest_pruned(label: str, lines: list[str]) -> None:
+    """One memory entry recording what a retention sweep erased.
+
+    The rationale "the worker's result already lives in the parent's
+    transcript" holds only when the parent actually collected it; when it
+    didn't, the transcript retention deletes is the last copy of the work.
+    This is the one-line-per-session floor under that: no LLM, one
+    skip-dedup entry per sweep, recallable by session id or title. Never
+    fatal — a digest failure must not block the prune.
+    """
+    if not lines:
+        return
+    try:
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if store is None:
+            return
+        shown = lines[:_DIGEST_MAX_LINES]
+        more = f"; +{len(lines) - len(shown)} more" if len(lines) > len(shown) else ""
+        content = (
+            f"Retention pruned {len(lines)} {label} session(s) on "
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}: " + "; ".join(shown) + more
+        )
+        store.add_entry(
+            content=content,
+            file_name=_DIGEST_FILE,
+            entry_type="note",
+            tags="retention",
+            source="retention",
+            skip_dedup=True,
+        )
+    except Exception as e:
+        logger.warning("Retention digest write failed (prune continues): %s", e)
+
+
+def _session_digest_line(row: dict) -> str:
+    title = " ".join(str(row.get("title") or "untitled").split())[:70]
+    last = str(row.get("updated_at") or "")[:10]
+    return f"{row.get('id', '?')} \"{title}\" (last active {last})"
+
+
+# ---------------------------------------------------------------------------
 # Cron runs, cron-created sessions, state log
 # ---------------------------------------------------------------------------
 
@@ -47,6 +97,13 @@ def prune_cron(
 
     Returns {"runs", "sessions", "state_log"} counts.
     """
+    # Digest before delete: cron sessions die at 7 days with no summary
+    # backfill — a failed overnight job's transcript was simply gone.
+    try:
+        doomed = db.list_cron_sessions_before(session_max_age_days)
+        _digest_pruned("cron", [_session_digest_line(r) for r in doomed])
+    except Exception as e:
+        logger.warning("Cron prune digest failed (prune continues): %s", e)
     return {
         "runs": db.prune_cron_runs(max_age_days=max_age_days, keep_per_job=keep_per_job),
         "sessions": db.prune_cron_sessions(max_age_days=session_max_age_days),
@@ -77,6 +134,26 @@ def prune_post_mortems(retention_days: int | None = None) -> int:
         return 0
     if deleted:
         logger.info("Snooze post-mortem cleanup: deleted %d rows older than %d days", deleted, days)
+    return deleted
+
+
+def prune_notifications(retention_days: int | None = None) -> int:
+    """Delete notification rows past the retention window (0 = keep forever).
+
+    The bell is a recent-events surface, not an archive: until v3.1 the
+    table had no pruner at all, and idle-loop producers refill it on a
+    fixed cadence while it only ever shrank by manual dismiss clicks.
+    """
+    days = int((retention_days if retention_days is not None else settings.notification_retention_days) or 0)
+    if days <= 0:
+        return 0
+    try:
+        deleted = db.prune_notifications(days)
+    except Exception as e:
+        logger.warning("Notification cleanup failed: %s", e)
+        return 0
+    if deleted:
+        logger.info("Notification cleanup: deleted %d rows older than %d days", deleted, days)
     return deleted
 
 
@@ -112,26 +189,46 @@ async def prune_canary_runs(retention_days: int | None = None) -> tuple[int, int
     return deleted, pruned_sessions
 
 
-async def prune_sessions_of_type(session_type: str, retention_days: int, *, keep: set[str] | None = None) -> int:
+async def prune_sessions_of_type(
+    session_type: str,
+    retention_days: int,
+    *,
+    keep: set[str] | None = None,
+    digest_label: str | None = None,
+) -> int:
     """Delete sessions of one type not updated within the retention window.
 
     A direct query by type and age — never a window over the newest rows.
     The old loop over list_sessions(500) could not see the oldest sessions
     once the table passed 500 rows (161 outside the window on the live box,
     one journal already past its retention with no way to be pruned).
+
+    With digest_label set, a one-line-per-session summary lands in memory
+    before deletion (distill-before-delete). Canary/journal callers pass
+    none — synthetic residue earns no memory entry.
     """
     days = max(int(retention_days or 0), 1)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     ids = await asyncio.to_thread(db.list_session_ids_by_type_before, session_type, cutoff)
     pruned = 0
+    digest_lines: list[str] = []
     for sid in ids:
         if keep and sid in keep:
             continue
+        if digest_label:
+            try:
+                row = await asyncio.to_thread(db.get_session, sid)
+                if row:
+                    digest_lines.append(_session_digest_line(row))
+            except Exception:
+                pass
         try:
             await asyncio.to_thread(db.delete_session, sid)
             pruned += 1
         except Exception as e:
             logger.warning("Retention: could not delete %s session %s: %s", session_type, sid, e)
+    if digest_label and pruned:
+        await asyncio.to_thread(_digest_pruned, digest_label, digest_lines)
     return pruned
 
 
@@ -142,7 +239,7 @@ async def prune_worker_sessions(retention_days: int | None = None) -> int:
     days = retention_days if retention_days is not None else settings.worker_session_retention_days
     try:
         keep = await asyncio.to_thread(db.watched_worker_ids)
-        pruned = await prune_sessions_of_type("worker", days, keep=keep)
+        pruned = await prune_sessions_of_type("worker", days, keep=keep, digest_label="worker")
     except Exception as e:
         logger.warning("Snooze worker-session cleanup failed: %s", e)
         return 0
@@ -211,6 +308,122 @@ async def nudge_stale_canaries(max_age_days: int = 90) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Archive — the sweep that hides a session instead of ending it
+# ---------------------------------------------------------------------------
+
+
+def _archive_sample(rows: list[dict]) -> list[dict]:
+    """The first ten rows, trimmed to what a confirmation dialog can show."""
+    return [{k: r.get(k) for k in ("id", "title", "updated_at", "space_id")} for r in rows[:10]]
+
+
+def archive_idle_sessions(
+    days: int | None = None,
+    *,
+    dry_run: bool = False,
+    space_id: str | None = None,
+) -> dict:
+    """Archive ordinary chats idle for longer than ``days``.
+
+    Archiving is not deletion, and this sweep does not inherit the delete
+    side's exemptions: every message stays, the session stays searchable,
+    and one PATCH puts it back. What it does is take a chat that stopped
+    being a live thread a month ago out of a sidebar the user reads daily.
+
+    Pinned sessions are exempt — pinning is the user saying keep this in
+    front of me. Space sessions are NOT exempt: the v33 "long-lived by
+    contract" rule spares them from every DELETE sweep because losing a
+    transcript is irreversible, and nothing here is.
+
+    ``days`` defaults to ``session_archive_idle_days``; 0 or less turns the
+    sweep off and returns an empty result. ``space_id`` narrows it to one
+    space, which is what a space header's "Archive idle sessions..." runs.
+    ``dry_run`` computes exactly the same set and writes nothing, so the
+    number in the confirmation is a promise the real run keeps.
+
+    Returns ``{"count", "ids", "sample", "days", "dry_run"}``.
+    """
+    days = int((days if days is not None else settings.session_archive_idle_days) or 0)
+    empty = {"count": 0, "ids": [], "sample": [], "days": days, "dry_run": dry_run}
+    if days <= 0:
+        return empty
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        rows = db.list_idle_sessions_to_archive(cutoff, space_id)
+    except Exception as e:
+        logger.warning("Idle-session archive: could not list candidates: %s", e)
+        return empty
+    if not rows:
+        return empty
+
+    ids = [r["id"] for r in rows]
+    if not dry_run:
+        archived = 0
+        for sid in ids:
+            try:
+                db.set_session_meta(sid, archived=True)
+                archived += 1
+            except Exception as e:
+                logger.warning("Idle-session archive: could not archive %s: %s", sid, e)
+        logger.info("Archived %d session(s) idle for more than %dd", archived, days)
+    return {"count": len(ids), "ids": ids, "sample": _archive_sample(rows), "days": days, "dry_run": dry_run}
+
+
+def prune_archived_sessions(days: int | None = None, *, dry_run: bool = False) -> dict:
+    """Delete sessions that have been archived for longer than ``days``.
+
+    The one sweep in this file that can end a conversation the user started,
+    so it is off by default (``session_delete_archived_days`` = 0) and it
+    only ever looks at rows the archive already holds: a session reaches it
+    by being archived and then left alone, never by age alone.
+
+    Deletion goes through the manager rather than ``db.delete_session`` so a
+    session's workspace summary, RLM artifacts and kernel state go with it —
+    the same path the bulk purge takes.
+
+    Returns ``{"count", "ids", "sample", "days", "dry_run"}``.
+    """
+    days = int((days if days is not None else settings.session_delete_archived_days) or 0)
+    empty = {"count": 0, "ids": [], "sample": [], "days": days, "dry_run": dry_run}
+    if days <= 0:
+        return empty
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    try:
+        rows = db.list_archived_sessions_before(cutoff)
+    except Exception as e:
+        logger.warning("Archived-session prune: could not list candidates: %s", e)
+        return empty
+    if not rows:
+        return empty
+
+    ids = [r["id"] for r in rows]
+    result = {"count": len(ids), "ids": ids, "sample": _archive_sample(rows), "days": days, "dry_run": dry_run}
+    if dry_run:
+        return result
+
+    # Distill before delete: past this point the transcript is gone.
+    try:
+        _digest_pruned("archived", [_session_digest_line(r) for r in rows])
+    except Exception as e:
+        logger.warning("Archived-session prune digest failed (prune continues): %s", e)
+
+    from sessions.manager import get_manager
+
+    manager = get_manager()
+    deleted = 0
+    for sid in ids:
+        try:
+            manager.delete_session(sid)
+            deleted += 1
+        except Exception as e:
+            logger.warning("Archived-session prune: could not delete %s: %s", sid, e)
+    if deleted:
+        logger.info("Deleted %d session(s) archived for more than %dd", deleted, days)
+    result["count"] = deleted
+    return result
+
+
+# ---------------------------------------------------------------------------
 # RLM run directories
 # ---------------------------------------------------------------------------
 
@@ -233,6 +446,21 @@ async def prune_rlm_runs(retention_days: int | None = None) -> int:
         return 0
     if not stale:
         return 0
+
+    # Digest before delete: the run row carries the task and the answer
+    # preview — enough to re-find or re-derive the work after the trace is
+    # gone (the continuation artifacts die with the run dir).
+    try:
+        lines = []
+        for run in stale:
+            task = " ".join(str(run.get("task") or "").split())[:80]
+            preview = " ".join(str(run.get("answer_preview") or "").split())[:100]
+            lines.append(
+                f"{run['run_id']} ({run.get('status', '?')}) task \"{task}\"" + (f' → "{preview}"' if preview else "")
+            )
+        _digest_pruned("RLM run", lines)
+    except Exception as e:
+        logger.warning("RLM prune digest failed (prune continues): %s", e)
 
     workspace_dir = Path(settings.workspace_dir)
     deleted = 0

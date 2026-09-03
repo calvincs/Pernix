@@ -129,7 +129,75 @@ def exclude_orphans(messages: list[dict]) -> list[dict]:
             if tcid and tcid not in valid_ids:
                 continue  # Orphan — exclude
         result.append(msg)
-    return result
+    return repair_unanswered_tool_calls(result)
+
+
+ABORTED_CALL_STUB = "Error: tool call aborted before it returned — no result was recorded."
+
+
+def _tool_call_ids(msg: dict) -> list[str]:
+    tcs = msg.get("tool_calls")
+    if isinstance(tcs, str):
+        try:
+            tcs = json.loads(tcs)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(tcs, list):
+        return []
+    return [tc.get("id", "") for tc in tcs if isinstance(tc, dict) and tc.get("id")]
+
+
+def repair_unanswered_tool_calls(messages: list[dict]) -> list[dict]:
+    """Give every assistant tool_call a tool row, stubbing the ones that never got one.
+
+    The reverse orphan of `exclude_orphans`: the assistant row with
+    `tool_calls` is persisted *before* the round executes, so a round that
+    dies mid-flight (cancel during a parallel batch, the executor backstop,
+    a DB error while recording results) leaves it with no answers.
+    OpenAI-format providers reject that transcript — "assistant message
+    with tool_calls must be followed by tool messages" — on every later
+    turn until compaction happens to fold the row; with an Ollama fallback
+    configured the turn silently ran there instead. The stub is inserted
+    after any results the round did record, so ordering stays intact.
+
+    Answers are matched by tool_call_id across the whole list, never by
+    adjacency. A tool that writes a message row of its own while it runs
+    (view_image stamps a synthetic user note) lands that row BETWEEN the
+    assistant row and its own tool result, because the note is persisted
+    first and gets the lower id. An adjacency scan read the note as the end
+    of the round, called a tool that HAD returned unanswered, and stubbed
+    it — and the stub carried no `id`, which the compiler dereferenced
+    (KeyError: 'id') before the round's first LLM call. The row order lives
+    in the DB, so every later turn in that session died the same way.
+    """
+    answered = {m.get("tool_call_id") for m in messages if m.get("role") == "tool" and m.get("tool_call_id")}
+    out: list[dict] = []
+    i, n = 0, len(messages)
+    while i < n:
+        msg = messages[i]
+        out.append(msg)
+        i += 1
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            continue
+        missing = [tcid for tcid in _tool_call_ids(msg) if tcid not in answered]
+        if not missing:
+            continue
+        # Keep whatever results this round did record ahead of the stubs.
+        while i < n and messages[i].get("role") == "tool":
+            out.append(messages[i])
+            i += 1
+        for tcid in missing:
+            # Carry the assistant's id: a stub has no row of its own, and
+            # the compiler stamps `_db_id` from this key for trim notices.
+            out.append(
+                {
+                    "id": msg.get("id"),
+                    "role": "tool",
+                    "tool_call_id": tcid,
+                    "content": ABORTED_CALL_STUB,
+                }
+            )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -211,11 +279,34 @@ def _active_turn_root_index(convo: list[dict]) -> int:
     return -1
 
 
+def _clamp_boundary_to_live_turn(convo: list[dict], boundary_idx: int, turn_user_msg_id: int | None) -> int:
+    """Never let the boundary advance past the live turn's root.
+
+    When the agent loop knows its turn root (`turn_user_msg_id`), that row
+    is authoritative. The positional guess in `_active_turn_root_index`
+    stays as the fallback for callers that do not know it (the manual
+    /compact endpoint), but on its own it picked an *injected* mid-turn
+    user message as the root — `/api/chat/inject` puts one between two
+    tool rounds — and folded the real ask and its earlier rounds into the
+    summary, so the agent resumed with no verbatim request.
+    """
+    root_idx = -1
+    if turn_user_msg_id is not None:
+        for i, m in enumerate(convo):
+            if m.get("id") == turn_user_msg_id and m.get("role") == "user":
+                root_idx = i
+                break
+    if root_idx < 0:
+        root_idx = _active_turn_root_index(convo)
+    return root_idx if 0 <= root_idx < boundary_idx else boundary_idx
+
+
 async def compact_with_llm(
     session_id: str,
     messages: list[dict],
     existing_summary: str | None = None,
     history_budget: int | None = None,
+    turn_user_msg_id: int | None = None,
 ) -> bool:
     """Run LLM summarization and append compaction marker. Never deletes messages.
 
@@ -268,15 +359,15 @@ async def compact_with_llm(
         total += tokens
 
     # Hard floor: whatever the token arithmetic says, the live turn stays.
-    root_idx = _active_turn_root_index(convo)
-    if root_idx >= 0 and boundary_idx > root_idx:
+    clamped = _clamp_boundary_to_live_turn(convo, boundary_idx, turn_user_msg_id)
+    if clamped != boundary_idx:
         logger.info(
             "Compaction boundary clamped from %d to %d to preserve the active turn (session %s)",
             boundary_idx,
-            root_idx,
+            clamped,
             session_id,
         )
-        boundary_idx = root_idx
+        boundary_idx = clamped
 
     to_summarize = convo[:boundary_idx]
     if len(to_summarize) < 4:
