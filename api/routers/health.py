@@ -193,6 +193,15 @@ _SETTING_BOUNDS = {
     # sweep that fills it.
     "session_archive_idle_days": (0, 3650),
     "session_delete_archived_days": (0, 3650),
+    # Space suggestions. The window has to be long enough for a habit to
+    # show up across days and short enough that the prompt stays readable;
+    # min_sessions/min_days are what "a habit" means, so they get real
+    # floors rather than 0.
+    "space_suggest_window_days": (7, 365),
+    "space_suggest_min_sessions": (2, 100),
+    "space_suggest_min_days": (1, 30),
+    "space_suggest_scan_interval_hours": (1, 720),
+    "space_suggest_ttl_days": (1, 365),
     # Session kernel. kernel_idle_seconds must stay under the 1800s session
     # reap in practice, but the hard ceiling is a day; below 60s the kernel
     # would be reaped between tool rounds and never persist anything.

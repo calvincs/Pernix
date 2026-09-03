@@ -571,6 +571,219 @@ def any_space_session_mid_turn(space_id: str) -> bool:
         return row is not None
 
 
+# ---------------------------------------------------------------------------
+# Space suggestions (migration v35) — proposals, never spaces on their own
+# ---------------------------------------------------------------------------
+
+# Statuses that end a suggestion's life, and so stamp resolved_at.
+SPACE_SUGGESTION_TERMINAL = ("accepted", "rejected", "expired")
+
+
+def _decode_space_suggestion(row) -> dict:
+    """Row → dict with session_ids/directives decoded.
+
+    The two JSON columns are written by this module and read by the API and
+    the sidebar, but the table is hand-editable like every other Pernix
+    store — a row whose JSON was mangled degrades to "no members / no
+    drafts" instead of breaking the whole listing.
+    """
+    out = dict(row)
+    try:
+        ids = json.loads(out.get("session_ids_json") or "[]")
+    except ValueError:
+        ids = []
+    out["session_ids"] = [str(i) for i in ids] if isinstance(ids, list) else []
+    directives = None
+    raw = out.get("directives_json")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            parsed = None
+        directives = parsed if isinstance(parsed, dict) else None
+    out["directives"] = directives
+    return out
+
+
+def add_space_suggestion(
+    kind: str,
+    topic_key: str,
+    label: str,
+    color: str,
+    why: str,
+    session_ids: list[str],
+    *,
+    existing_space_id: str | None = None,
+    directives: dict | None = None,
+) -> dict:
+    """Store one pending suggestion. Callers normalize topic_key/label/color
+    first — nothing model-supplied reaches a path or a slug from here."""
+    suggestion_id = _new_id()
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO space_suggestions (id, kind, topic_key, label, color, why,
+               existing_space_id, session_ids_json, directives_json, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+            (
+                suggestion_id,
+                kind,
+                topic_key,
+                label,
+                color,
+                why,
+                existing_space_id,
+                json.dumps(list(session_ids)),
+                json.dumps(directives) if directives else None,
+                _now(),
+            ),
+        )
+        row = conn.execute("SELECT * FROM space_suggestions WHERE id = ?", (suggestion_id,)).fetchone()
+    return _decode_space_suggestion(row)
+
+
+def get_space_suggestion(suggestion_id: str) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM space_suggestions WHERE id = ?", (suggestion_id,)).fetchone()
+    return _decode_space_suggestion(row) if row else None
+
+
+def list_space_suggestions(status: str | None = None) -> list[dict]:
+    """Newest first. status=None returns every row whatever its state."""
+    with connect_sessions() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM space_suggestions WHERE status = ? ORDER BY created_at DESC",
+                (status,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM space_suggestions ORDER BY created_at DESC").fetchall()
+    return [_decode_space_suggestion(r) for r in rows]
+
+
+def set_space_suggestion_status(suggestion_id: str, status: str, *, space_id: str | None = None) -> None:
+    """Advance a suggestion. Terminal statuses stamp resolved_at so the
+    declined list can say when the user turned it down."""
+    resolved = _now() if status in SPACE_SUGGESTION_TERMINAL else None
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE space_suggestions SET status = ?, resolved_at = ?, space_id = COALESCE(?, space_id) WHERE id = ?",
+            (status, resolved, space_id, suggestion_id),
+        )
+
+
+def delete_space_suggestion(suggestion_id: str) -> bool:
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM space_suggestions WHERE id = ?", (suggestion_id,))
+        return cur.rowcount > 0
+
+
+def delete_space_suggestions_by_status(status: str) -> int:
+    with connect_sessions() as conn:
+        cur = conn.execute("DELETE FROM space_suggestions WHERE status = ?", (status,))
+        return cur.rowcount
+
+
+def expire_space_suggestions(cutoff_iso: str) -> int:
+    """Pending rows older than the cutoff become 'expired'. They stay in the
+    table: an expired suggestion is history the user can still clear, and
+    the scan must not re-offer it as if it were new."""
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "UPDATE space_suggestions SET status = 'expired', resolved_at = ? "
+            "WHERE status = 'pending' AND created_at < ?",
+            (_now(), cutoff_iso),
+        )
+        return cur.rowcount
+
+
+def count_sessions_created_after(created_after_iso: str) -> int:
+    """Ordinary sessions created since a watermark — the "is there anything
+    new to look at" test the scheduled scan short-circuits on."""
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM sessions WHERE session_type = 'normal' AND created_at > ?",
+            (created_after_iso or "",),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def list_space_suggest_candidates(cutoff_iso: str) -> list[dict]:
+    """Sessions the space-suggestion scan may group, in two queries.
+
+    Two, not one per session: the box carries hundreds of sessions in a
+    30-day window and the scan runs on the idle loop, so the cost has to be
+    O(rows) rather than O(sessions) round trips. The correlated subqueries
+    all ride idx_messages_session.
+
+    Archived sessions are INCLUDED on purpose — a habit that has already
+    rolled off the sidebar is exactly the kind worth giving a home. Sessions
+    still called 'New session' with no subtitle are skipped: nothing has
+    named them yet, so the model would be clustering on nothing.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT s.id,
+                      s.title,
+                      COALESCE(s.subtitle, '') AS subtitle,
+                      s.space_id,
+                      COALESCE(sp.label, '') AS space_label,
+                      substr(s.created_at, 1, 10) AS day,
+                      (SELECT COUNT(*) FROM messages m
+                        WHERE m.session_id = s.id
+                          AND m.role IN ('user', 'assistant')
+                          AND m.content != '') AS messages,
+                      COALESCE((SELECT substr(m.content, 1, 400) FROM messages m
+                                 WHERE m.session_id = s.id
+                                   AND m.role = 'user'
+                                   AND m.content != ''
+                                 ORDER BY m.id LIMIT 1), '') AS first_user
+               FROM sessions s
+               LEFT JOIN spaces sp ON sp.id = s.space_id
+               WHERE s.session_type = 'normal'
+                 AND s.created_at >= ?
+                 AND NOT (s.title = 'New session' AND COALESCE(s.subtitle, '') = '')
+                 AND (SELECT COUNT(*) FROM messages m
+                       WHERE m.session_id = s.id
+                         AND m.role = 'user'
+                         AND m.content != '') >= 2
+               ORDER BY s.created_at""",
+            (cutoff_iso,),
+        ).fetchall()
+        candidates = [dict(r) for r in rows]
+        if not candidates:
+            return []
+        # Scout reports carry the task_type label; the majority over a
+        # session's rounds is the session's kind of work. One query for the
+        # whole window, tallied in Python.
+        scout_rows = conn.execute(
+            """SELECT m.session_id, m.content FROM messages m
+               WHERE m.role = 'scout'
+                 AND m.session_id IN (
+                     SELECT id FROM sessions
+                     WHERE session_type = 'normal' AND created_at >= ?
+                 )""",
+            (cutoff_iso,),
+        ).fetchall()
+
+    tallies: dict[str, dict[str, int]] = {}
+    for row in scout_rows:
+        try:
+            body = json.loads(row["content"])
+        except ValueError:
+            continue
+        if not isinstance(body, dict):
+            continue
+        task_type = str(body.get("task_type") or "").strip()
+        if not task_type:
+            continue
+        tallies.setdefault(row["session_id"], {})
+        tallies[row["session_id"]][task_type] = tallies[row["session_id"]].get(task_type, 0) + 1
+    for cand in candidates:
+        counts = tallies.get(cand["id"])
+        cand["task_type"] = max(counts, key=lambda k: (counts[k], k)) if counts else ""
+    return candidates
+
+
 # SQL predicate for "this session is not actively being worked on", for the
 # background selectors (snooze distillation, refine, distill-coverage audit)
 # that pick over old sessions. Requires the `sessions` table aliased as `s`.

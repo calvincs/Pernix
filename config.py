@@ -665,6 +665,20 @@ class Settings:
     # a horizon on it is the user opting back in to losing transcripts.
     session_delete_archived_days: int = 0
 
+    # --- Space suggestions ---
+    # Pernix scans the last N days of ordinary chats at idle and offers to
+    # turn a recurring kind of work into a space (or to move loose chats
+    # into one that already exists). Off by default, and inert when off:
+    # snooze Activity 2d is absent from the ladder entirely, so no
+    # background call is spent and no table is read. Nothing is ever
+    # created, moved or written to disk without the user clicking accept.
+    space_suggest_enabled: bool = False
+    space_suggest_window_days: int = 30  # how far back a scan looks
+    space_suggest_min_sessions: int = 5  # members a cluster needs to be offered
+    space_suggest_min_days: int = 3  # distinct calendar days a cluster needs
+    space_suggest_scan_interval_hours: int = 24  # floor between scheduled scans
+    space_suggest_ttl_days: int = 14  # pending suggestions expire after this
+
     # --- Backups (maintenance.py 24h tier; scripts/backup.py on demand) ---
     # How many timestamped snapshots to keep in data/backups. Rotation is
     # per-artifact (DB snapshots and memory corpora rotate independently), so
