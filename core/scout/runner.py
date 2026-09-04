@@ -1202,6 +1202,52 @@ def _count_hint_usage(report: ScoutReport) -> None:
         logger.debug("adaptive hint-usage count failed: %s", e)
 
 
+def _prior_turn_verdict_block(session_id: str) -> str:
+    """The immediately previous turn's non-pass grade, for the next scout.
+
+    Field failure (session 3dc5a307d751): reflect graded a turn `retry` and
+    wrote a concrete strategy for the next attempt; nothing carried it into
+    the following turn's planning, so the scout laid out a variant of the
+    approach that had just been rejected. Only the IMMEDIATELY previous turn
+    counts — an older grade describes work the session has already moved
+    past — and never a pass, which has no strategy by construction.
+    """
+    if not session_id:
+        return ""
+    try:
+        rows = db.list_post_mortems(session_id=session_id, limit=1)
+        if not rows:
+            return ""
+        pm = rows[0]
+        if pm.get("verdict") not in ("retry", "escalate"):
+            return ""
+        # Fresh = no completed turn since the grade. The current turn's own
+        # user row is already saved when the scout runs, so exactly one newer
+        # user message is expected; two or more means the grade is stale.
+        pm_at = str(pm.get("created_at") or "")
+        newer_users = sum(
+            1
+            for m in db.get_messages(session_id, last=60)
+            if m.get("role") == "user" and str(m.get("created_at") or "") > pm_at
+        )
+        if newer_users > 1:
+            return ""
+        payload = json.loads(pm.get("payload_json") or "{}")
+        what_failed = " ".join(str(payload.get("what_failed") or payload.get("diagnostic") or "").split())
+        strategy = " ".join(str(payload.get("strategy") or "").split())
+        if not what_failed and not strategy:
+            return ""
+        block = f"[PRIOR TURN GRADED {str(pm['verdict']).upper()} — grader's opinion, not ground truth]"
+        if what_failed:
+            block += f" what_failed: {what_failed}"
+        if strategy:
+            block += f" strategy: {strategy}"
+        return block[:600]
+    except Exception as e:
+        logger.debug("prior-turn verdict block failed: %s", e)
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Scout execution
 # ---------------------------------------------------------------------------
@@ -1233,6 +1279,11 @@ async def run_scout(
     if should_bypass_scout(message, brief.turn_count):
         logger.debug("Scout bypassed, using fallback for session %s", session_id)
         return _build_fallback_report(message, brief, reason="bypass")
+
+    # A retry/escalate grade on the turn just finished is planning input for
+    # this one. Kept out of `message` itself so memory/tool discovery still
+    # search the user's words, not the grader's.
+    prior_verdict_block = _prior_turn_verdict_block(session_id)
 
     # Run scout LLM with retry for transient errors (model loading, 500s, etc.)
     max_attempts = 3
@@ -1271,6 +1322,7 @@ async def run_scout(
                     session_id=session_id,
                     session_created_at=sched_created_at,
                     session_priority=sched_priority,
+                    prior_verdict_block=prior_verdict_block,
                 ),
                 timeout=settings.scout_timeout,
             )
@@ -1372,6 +1424,7 @@ async def run_scout(
                     session_id=session_id,
                     session_created_at=sched_created_at,
                     session_priority=sched_priority,
+                    prior_verdict_block=prior_verdict_block,
                 ),
                 timeout=settings.scout_timeout,
             )
@@ -1409,6 +1462,7 @@ async def _run_scout_llm(
     session_id: str = "",
     session_created_at: float = float("inf"),
     session_priority: int = PRIORITY_BACKGROUND,
+    prior_verdict_block: str = "",
 ) -> ScoutReport:
     """Execute the scout as a multi-turn tool-calling agent.
 
@@ -1444,6 +1498,12 @@ async def _run_scout_llm(
         "",
         f"SESSION CONTEXT:\n{brief.to_prompt_text()}",
     ]
+    # The previous turn's non-pass grade, when it is this turn's direct
+    # predecessor. Ahead of the user message on purpose: it frames what the
+    # plan has to do differently (session 3dc5a307d751).
+    if prior_verdict_block:
+        user_content_parts.insert(0, prior_verdict_block)
+        user_content_parts.insert(1, "")
 
     # Read instruction files — through the same space-aware resolution the
     # compiler uses (v33), so a space session's scout plans against the same
