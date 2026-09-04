@@ -1330,6 +1330,14 @@ class SessionManager:
                 _pre_saved = True
 
             sv2.transition(session, sv2.SessionStateV2.SCOUTING, start_reason)
+            # A worker-resume turn is the harness talking to itself. Tag the
+            # turn id (just incremented by the transition) so the deferred
+            # grader doesn't read it as the user moving past the real turn it
+            # is about to grade (session 3dc5a307d751).
+            if start_reason == "workers-complete" or (
+                isinstance(message, str) and message.startswith(_WORKER_RESUME_PREFIX)
+            ):
+                session._synthetic_turn_ids.add(getattr(session, "_turn_id", 0))
 
             await self._run_scout_and_process(
                 session,
@@ -2178,6 +2186,50 @@ class SessionManager:
         # synthesis turn.
         await self._resume_from_workers(parent)
 
+    def _worker_results_already_collected(self, parent: AgentSession) -> bool:
+        """True when the parent's current turn already read every worker's
+        result, so a resume message would only ask it to repeat itself.
+
+        Scans the assistant rows since the last real (non-resume) user message
+        for get_worker_result calls naming each id the resume message would
+        list. Blocking DB read — callers run it off the loop.
+        """
+        import json as _json
+
+        ids = list(parent.worker_ids or [])
+        if not ids:
+            return False
+        try:
+            rows = db.get_messages(parent.session_id, last=200)
+        except Exception as e:
+            logger.debug("resume-skip check failed for %s: %s", parent.session_id, e)
+            return False
+        start = 0
+        for idx in range(len(rows) - 1, -1, -1):
+            row = rows[idx]
+            if row.get("role") == "user" and not str(row.get("content") or "").startswith(_WORKER_RESUME_PREFIX):
+                start = idx
+                break
+        collected: set[str] = set()
+        for row in rows[start:]:
+            if row.get("role") != "assistant" or not row.get("tool_calls"):
+                continue
+            try:
+                raw = row["tool_calls"]
+                calls = _json.loads(raw) if isinstance(raw, str) else raw
+            except (ValueError, TypeError):
+                continue
+            for call in calls or []:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                if (fn.get("name") or call.get("name")) != "get_worker_result":
+                    continue
+                args = fn.get("arguments") if fn else call.get("arguments")
+                text = args if isinstance(args, str) else _json.dumps(args or {})
+                collected.update(wid for wid in ids if wid in text)
+        return all(wid in collected for wid in ids)
+
     def _build_resume_message(self, parent: AgentSession) -> str:
         """Compose the synthetic message a parent receives on resume.
 
@@ -2312,6 +2364,31 @@ class SessionManager:
         deferred_task: asyncio.Task | None = None
         async with parent.lock:
             current_v2 = sv2._current_state(parent)
+            # Gap 1 only: the parent went idle on its own, which usually means
+            # its turn already collected everything. Field case (session
+            # 3dc5a307d751): it had called get_worker_result for all four
+            # workers and answered, and the resume injected the "[Watched
+            # workers have completed" message anyway — a redundant turn that
+            # re-read the same results, and whose grade then superseded the
+            # real turn's. A parked (AWAITING_WORKERS) parent is never skipped:
+            # it is waiting precisely because it has not collected them.
+            if current_v2 is sv2.SessionStateV2.IDLE_READY and await asyncio.to_thread(
+                self._worker_results_already_collected, parent
+            ):
+                logger.info(
+                    "Session %s: worker resume skipped — results already collected this turn",
+                    parent.session_id[:12],
+                )
+                parent._watched_worker_ids.clear()
+                self._persist_watched(parent)
+                parent.emit_event(
+                    {
+                        "type": "workers.resume_skipped",
+                        "workers": list(parent.worker_ids),
+                        "reason": "results-already-collected",
+                    }
+                )
+                return
             # Off-loop: one 100-row transcript read per worker, under the
             # parent lock — an orchestrator with 20 workers stalled every
             # SSE stream for the duration when this ran inline.

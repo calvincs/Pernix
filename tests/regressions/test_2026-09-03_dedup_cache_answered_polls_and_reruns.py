@@ -23,9 +23,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from core.agent import StuckDetector, _MUTATING_TOOLS, _ToolCallGate
+from core.agent import _MUTATING_TOOLS, StuckDetector, _ToolCallGate
 from core.tools.registry import ToolRegistry
-
 
 # --- 1. polls are never served from the cache -------------------------------
 

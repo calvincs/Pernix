@@ -356,6 +356,11 @@ class AgentSession:
     _retry_index: int = field(default=0)
     _compaction_count: int = field(default=0)
     _state_entered_ms: int | None = field(default=None)
+    # Turn ids (the _turn_id counter above) belonging to HARNESS-initiated
+    # turns — today, worker-resume synthesis. The deferred grader reads this
+    # so a synthetic turn doesn't look like the user moving on from the real
+    # turn it is about to grade (field case, session 3dc5a307d751).
+    _synthetic_turn_ids: set = field(default_factory=set)
 
     def emit_event(self, event: dict) -> None:
         """Broadcast event to all subscribers and buffer it.
