@@ -210,6 +210,7 @@ def register(reg) -> None:
         parameters={"type": "object", "properties": {}},
         tags=tags + ["status", "check"],
         safety_level="safe",
+        idempotent=False,  # burn and gate state move between rounds — never dedup-cache it
         **common,
     )
     reg.register(

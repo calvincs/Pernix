@@ -1670,6 +1670,7 @@ def register(reg) -> None:
         tags=orch_tags + ["status", "check", "monitor"],
         timeout=15,
         parallel_safe=True,
+        idempotent=False,  # a poll's answer changes between rounds — never dedup-cache it
         **common,
     )
     reg.register(
@@ -1753,6 +1754,7 @@ def register(reg) -> None:
         timeout=1800,
         parallel_safe=False,
         long_poll=True,
+        idempotent=False,  # waiting again is a new wait, not a cached answer
         **common,
     )
     reg.register(
