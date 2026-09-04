@@ -528,9 +528,15 @@ _FUTURE_INTENT_RE = re.compile(
     r"|proceed(?:ing)? to|going to (?:start|run|write|create|implement|check|fix|update))\b",
     re.IGNORECASE,
 )
-# A reply that ends by offering help is a finished answer, not abandoned work.
+# A reply that ends by offering help — or by asking permission — is a finished
+# answer, not abandoned work. The consent phrasings ("say the word", "want me
+# to", "your call") come from session 3dc5a307d751: the agent offered the next
+# move and waited, and the forced follow-up answered for the user.
 _COURTESY_CLOSER_RE = re.compile(
-    r"let me know|feel free|if you (?:need|want|have|would like)|happy to help" r"|any (?:other )?questions",
+    r"let me know|feel free|if you (?:need|want|have|would like)|happy to help"
+    r"|any (?:other )?questions|say the word|just say|want me to|shall i|should i"
+    r"|your call|give me the (?:go|word|green light)|if you(?:'d| would) (?:like|prefer)"
+    r"|tell me (?:if|when|and)",
     re.IGNORECASE,
 )
 
@@ -544,7 +550,15 @@ def _announces_future_work(text: str) -> bool:
     deliberately.
     """
     stripped = (text or "").strip()
-    if not stripped or stripped.endswith("?"):
+    if not stripped:
+        return False
+    # A question in the closing stretch means the agent handed the turn back
+    # for a decision. Field case (session 3dc5a307d751): "Want me to actually
+    # go do it now — the side-condition solve? … Say the word and I'll start."
+    # ended on a statement, so the old endswith("?") test missed it and the
+    # nudge answered the consent question on the user's behalf.
+    closing = [s for s in re.split(r"(?<=[.!?\n])\s+", stripped) if s.strip()]
+    if any(s.rstrip().endswith("?") for s in closing[-3:]):
         return False
     sentences = re.split(r"(?<=[.!\n])\s+", stripped)
     tail = " ".join(sentences[-2:])[-300:]
