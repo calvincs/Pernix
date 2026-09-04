@@ -40,7 +40,11 @@ logger = logging.getLogger("pernix.agent")
 
 _FILE_TOOLS = {"file_edit", "file_write", "file_read", "file_append"}
 # Tools whose success changes what an identical follow-up call would do.
-_MUTATING_TOOLS = frozenset({"file_write", "file_edit", "multiedit", "repl"})
+# bash is in here because it edits too: `sed -i`, `>` redirection and any
+# script it runs mutate the workspace invisibly to the file tools (field
+# case, session 3dc5a307d751 — a sed-based edit between two identical runs
+# read as a tool cycle and drew a false "repeating tool calls" nudge).
+_MUTATING_TOOLS = frozenset({"file_write", "file_edit", "multiedit", "repl", "bash"})
 
 # Empirically-verified tool-name hallucinations with compatible argument schemas.
 # Rewrite silently (logged) instead of burning a round on the difflib hint path.
@@ -809,6 +813,20 @@ class _ToolCallGate:
             purged = _invalidate_bash_dedup(self._cross_round)
             if purged:
                 logger.info("Cross-round dedup: cleared %d cached bash result(s) after %s", purged, tool_name)
+        elif tool_name == "bash":
+            # bash mutates too — `sed -i`, redirection, any script it runs —
+            # and none of that reaches _STATE_MUTATING_TOOLS. Field case
+            # (session 3dc5a307d751): the agent fixed a script with sed, re-ran
+            # the identical command, and got the pre-edit failure back from the
+            # cache. A successful bash call therefore retires every OTHER
+            # cached bash result; only an exact back-to-back repeat with
+            # nothing in between still short-circuits.
+            self_key = f"bash:{_hash_args(raw_args)}"
+            stale = [k for k in self._cross_round if k.startswith("bash:") and k != self_key]
+            for key in stale:
+                del self._cross_round[key]
+            if stale:
+                logger.info("Cross-round dedup: cleared %d cached bash result(s) after bash", len(stale))
 
     # -- filters ------------------------------------------------------------
 
