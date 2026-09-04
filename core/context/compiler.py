@@ -979,15 +979,24 @@ def _format_turn_ledger(snap: dict, anchor: str, sess: dict) -> str:
     lv = snap.get("last_verdict")
     if lv and lv.get("verdict") and lv["verdict"] != "pass":
         lesson = ""
+        strategy = ""
         try:
             payload = _json.loads(lv.get("payload_json") or "{}")
             lesson = str(payload.get("what_failed") or payload.get("diagnostic") or payload.get("reasoning") or "")
+            strategy = str(payload.get("strategy") or "")
         except Exception:
             pass
         lesson = " ".join(lesson.split())[:150]
+        # The grader's concrete instruction for the next attempt. Field case
+        # (session 3dc5a307d751): reflect said retry and named the approach,
+        # the ledger showed only what_failed, and the agent re-ran a variant
+        # of the same thing. On retry/escalate the strategy IS the actionable
+        # half; a pass never has one.
+        strategy = " ".join(strategy.split())[:400] if lv["verdict"] in ("retry", "escalate") else ""
         lines.append(
             f"- Reflect graded your previous turn: {lv['verdict']} (cause={lv.get('failure_cause', '?')})"
             + (f' — "{lesson}"' if lesson else "")
+            + (f' — suggested next: "{strategy}"' if strategy else "")
             + " [grader's opinion, not ground truth]"
         )
 
