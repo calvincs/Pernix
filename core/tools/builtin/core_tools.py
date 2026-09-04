@@ -20,6 +20,9 @@ from core.tools.paths import (
     allowed_read_roots as _allowed_roots,
 )
 from core.tools.paths import (
+    build_shell_env as _build_shell_env,
+)
+from core.tools.paths import (
     safe_read_path as _safe_path,
 )
 from core.tools.paths import (
@@ -689,34 +692,9 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
     # output so the agent notices without us rewriting arbitrary shell.
     _path_hint = _detect_duplicate_workspace_prefix(command, workspace)
 
-    # Ensure workspace venv exists for Python/pip isolation
-    venv_dir = workspace / ".venv"
-    if not (venv_dir / "bin" / "python").exists():
-        import sys as _sys
-
-        subprocess.run([_sys.executable, "-m", "venv", str(venv_dir)], capture_output=True, timeout=60)
-
-    # Build environment based on configured mode
-    if settings.shell_env_mode == "passthrough":
-        env = dict(os.environ)
-    elif settings.shell_env_mode == "denylist":
-        denied = set(settings.shell_env_denylist)
-        env = {k: v for k, v in os.environ.items() if k not in denied}
-    else:  # allowlist
-        allowed = set(settings.shell_env_allowlist)
-        env = {k: v for k, v in os.environ.items() if k in allowed}
-    # Always override PATH and HOME for sandbox
-    # Prepend workspace venv bin so pip/python resolve to venv, not system
-    workspace_venv_bin = str(workspace / ".venv" / "bin")
-    env["PATH"] = f"{workspace_venv_bin}:/usr/local/bin:/usr/bin:/bin"
-    env["HOME"] = str(run_dir)
-    env["VIRTUAL_ENV"] = str(workspace / ".venv")
-    # Python block-buffers stdout when it isn't a tty, so a long-running
-    # script's progress prints sit in an unflushed buffer — and the
-    # [partial output before timeout] block comes back empty exactly when
-    # it matters most (field case c93232a0521b: a 30-minute search printed
-    # progress the whole way and the timeout returned none of it).
-    env["PYTHONUNBUFFERED"] = "1"
+    # Venv + env-mode filter + sandbox PATH/HOME/VIRTUAL_ENV, shared with
+    # job_start so a background job sees the same toolchain bash does.
+    env = _build_shell_env(workspace, run_dir)
 
     try:
         import resource
