@@ -243,10 +243,15 @@ def job_start(
     # wrapper's final echo makes completion durable across server restarts.
     wrapped = f"timeout -k 10 {timeout_s} bash -c {shlex.quote(command)}; " f"echo $? > {shlex.quote(str(exit_file))}"
 
-    from core.tools.paths import workspace
+    from core.tools.paths import build_shell_env, workspace
 
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
+    # Same environment bash gets — venv on PATH, VIRTUAL_ENV set, env-mode
+    # filter applied. A bare os.environ.copy() left jobs on the system
+    # python, so `python3 script.py` in a job failed to import packages the
+    # agent had just installed in bash (session 3dc5a307d751: sympy).
+    # HOME tracks the job's cwd below, which is the workspace root.
+    job_cwd = workspace()
+    env = build_shell_env(job_cwd, job_cwd)
 
     try:
         with open(log_path, "ab") as log_fh:
@@ -255,7 +260,7 @@ def job_start(
                 stdout=log_fh,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                cwd=str(workspace()),
+                cwd=str(job_cwd),
                 env=env,
                 start_new_session=True,  # own group; survives our cleanup paths
                 preexec_fn=_preexec,

@@ -343,6 +343,52 @@ def safe_write_path(path: str) -> Path:
     return _resolve_within(path, allowed_write_roots(), create_roots=True)
 
 
+def build_shell_env(workspace_root: Path | None = None, run_dir: Path | None = None) -> dict[str, str]:
+    """Environment for a shell the agent launches — the bash tool and the
+    background-job runner alike.
+
+    One builder for both because they had drifted: job_start used a bare
+    os.environ.copy(), so `python3 script.py` inside a job could not import
+    packages the bash tool had just installed into the workspace venv (field
+    case, session 3dc5a307d751: sympy imported fine in bash, ImportError in
+    the job). Applies the configured shell_env_mode filter, then always pins
+    the sandbox PATH/HOME/VIRTUAL_ENV.
+    """
+    import os
+    import subprocess
+    import sys
+
+    ws = workspace() if workspace_root is None else workspace_root
+    home = workspace_home() if run_dir is None else run_dir
+
+    # Ensure workspace venv exists for Python/pip isolation
+    venv_dir = ws / ".venv"
+    if not (venv_dir / "bin" / "python").exists():
+        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], capture_output=True, timeout=60)
+
+    # Build environment based on configured mode
+    if settings.shell_env_mode == "passthrough":
+        env = dict(os.environ)
+    elif settings.shell_env_mode == "denylist":
+        denied = set(settings.shell_env_denylist)
+        env = {k: v for k, v in os.environ.items() if k not in denied}
+    else:  # allowlist
+        allowed = set(settings.shell_env_allowlist)
+        env = {k: v for k, v in os.environ.items() if k in allowed}
+    # Always override PATH and HOME for sandbox
+    # Prepend workspace venv bin so pip/python resolve to venv, not system
+    env["PATH"] = f"{venv_dir / 'bin'}:/usr/local/bin:/usr/bin:/bin"
+    env["HOME"] = str(home)
+    env["VIRTUAL_ENV"] = str(venv_dir)
+    # Python block-buffers stdout when it isn't a tty, so a long-running
+    # script's progress prints sit in an unflushed buffer — and the
+    # [partial output before timeout] block comes back empty exactly when
+    # it matters most (field case c93232a0521b: a 30-minute search printed
+    # progress the whole way and the timeout returned none of it).
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
 def ensure_workspace_venv_on_path() -> None:
     """Add workspace venv site-packages to sys.path (idempotent).
 
