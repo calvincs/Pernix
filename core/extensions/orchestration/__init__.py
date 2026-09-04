@@ -367,6 +367,36 @@ def _worker_has_output(wid: str) -> bool:
     return any(m["role"] == "assistant" and m.get("content") for m in messages)
 
 
+def _worker_has_live_process(w) -> bool:
+    """True when the worker still has a subprocess of its own running."""
+    if w is None:
+        return False
+    try:
+        return any(proc is not None and proc.poll() is None for proc in w.all_processes())
+    except Exception:
+        return False
+
+
+def _worker_idle_seconds(w) -> int:
+    """Seconds since the worker last showed activity — 0 while one of its own
+    subprocesses is still running.
+
+    last_activity_time only moves on harness events (tool call start/finish,
+    stream chunks), so a worker that handed a 20-minute build or solve to bash
+    looked idle for the entire time it was working: check_workers reported
+    "idle 900s" and await_workers' stall test abandoned the wave (field case,
+    session 3dc5a307d751). A live child process is activity.
+    """
+    if w is None:
+        return 0
+    if _worker_has_live_process(w):
+        return 0
+    try:
+        return int(w.idle_seconds)
+    except Exception:
+        return 0
+
+
 def check_workers(_context: dict | None = None, _filter_ids: list | None = None) -> str:
     """Check status of all workers spawned by this session.
 
@@ -413,7 +443,7 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
             has_started = False
         else:
             v2 = sv2._current_state(worker_obj)
-            idle = int(worker_obj.idle_seconds)
+            idle = _worker_idle_seconds(worker_obj)
             # Only `_turn_id > 0` truly means a turn ran. AgentSession.task
             # is set the moment run_coroutine_threadsafe schedules the
             # task; using it here would mis-classify a freshly-spawned
@@ -447,7 +477,8 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
             parts.append("WARNING: no output produced")
             empty += 1
         if v2 not in (sv2.SessionStateV2.IDLE_READY, sv2.SessionStateV2.AWAITING_USER):
-            parts.append(f"idle {idle}s")
+            # A live subprocess is work in progress, not silence.
+            parts.append("running subprocess" if _worker_has_live_process(worker_obj) else f"idle {idle}s")
 
         lines.append(f"- {wid[:8]} \"{title}\": {' | '.join(parts)}")
 
@@ -956,7 +987,7 @@ def await_workers(
                 continue
             pending_count += 1
             if v2 in STALE_GATED_STATES:
-                idle = int(w.idle_seconds)
+                idle = _worker_idle_seconds(w)
                 if idle > stale_threshold:
                     stalled.append(wid)
 
