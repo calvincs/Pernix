@@ -1333,6 +1333,26 @@ def compile_context(
         except (json.JSONDecodeError, TypeError, ValueError):
             return False
 
+    # Stuck/repeat notices are advice about the round that provoked them.
+    # Stamped with metadata.ephemeral_turn by the agent loop, they drop out of
+    # every LATER turn's history — a stale "You are repeating tool calls" read
+    # as standing policy and steered turns it had nothing to do with (session
+    # 3dc5a307d751). The rows remain in the DB for the transcript UI.
+    def _is_stale_ephemeral(m: dict) -> bool:
+        if m.get("role") != "system":
+            return False
+        meta_raw = m.get("metadata")
+        if not meta_raw:
+            return False
+        try:
+            meta = json.loads(meta_raw) if isinstance(meta_raw, str) else meta_raw
+            owner = meta.get("ephemeral_turn") if isinstance(meta, dict) else None
+            if owner is None:
+                return False
+            return turn_user_msg_id is None or int(owner) != int(turn_user_msg_id)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return False
+
     history = [
         m
         for m in raw_messages
@@ -1341,6 +1361,7 @@ def compile_context(
         and not (
             turn_user_msg_id is not None and m["role"] == "user" and m["id"] > turn_user_msg_id and not _is_injected(m)
         )
+        and not _is_stale_ephemeral(m)
     ]
 
     # Reorder by logical turn group. Each non-user message tagged with

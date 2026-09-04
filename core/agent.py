@@ -1676,6 +1676,7 @@ async def run_agent(
             active_tools=active_tools,
             nudges_used=_stuck_ask_user_continues,
             nudge_limit=STUCK_ASK_USER_LIMIT,
+            turn_user_msg_id=_turn_user_msg_id,
         )
         if _stuck_action == "nudge-and-retry":
             # Don't break — let one more round run so the agent can ask.
@@ -2318,6 +2319,7 @@ async def _handle_stuck_signals(
     active_tools: list[str],
     nudges_used: int,
     nudge_limit: int,
+    turn_user_msg_id: int | None = None,
 ) -> tuple[str, int]:
     """Decide what a stuck score means for this round, and tell the model.
 
@@ -2335,6 +2337,14 @@ async def _handle_stuck_signals(
     before the agent self-corrected). Past the cap, fall through to the same
     "summarize and stop" path used when ask_user isn't available at all.
     """
+    # These notices are advice about THIS round's behavior. Stamped with the
+    # turn they belong to, the compiler drops them from every later turn's
+    # history — a stale "You are repeating tool calls" read as standing policy
+    # and steered turns that had nothing to do with it (session 3dc5a307d751:
+    # a notice from an earlier turn was still being obeyed rounds later). The
+    # rows stay in the DB for the transcript UI.
+    _ephemeral = json.dumps({"ephemeral_turn": int(turn_user_msg_id)}) if turn_user_msg_id is not None else None
+
     if repeats < 3:
         # Not stuck this round — reset the consecutive-nudge counter so a
         # later separate stuck episode gets the full nudge budget.
@@ -2347,6 +2357,7 @@ async def _handle_stuck_signals(
                 f"You are repeating tool calls ({', '.join(names) if names else 'unknown'}). "
                 "Do NOT retry the same operation. "
                 "Review what you have already accomplished and proceed to the next unfinished step.",
+                metadata=_ephemeral,
             )
         return "proceed", 0
 
@@ -2365,6 +2376,7 @@ async def _handle_stuck_signals(
             "clarifying question that names what you tried, what failed, and "
             "what you need from the user to proceed. After ask_user returns, "
             "use the answer to pick a new strategy.",
+            metadata=_ephemeral,
         )
         return "nudge-and-retry", nudges_used
 
@@ -2383,6 +2395,7 @@ async def _handle_stuck_signals(
             f"Stuck-detection nudged you {nudges_used} "
             "times to call ask_user and you did not. Summarize what "
             "you have so far and stop.",
+            metadata=_ephemeral,
         )
     else:
         await asyncio.to_thread(
@@ -2390,6 +2403,7 @@ async def _handle_stuck_signals(
             session_id,
             "system",
             "You appear to be stuck in a loop. Summarize your progress and stop.",
+            metadata=_ephemeral,
         )
     return "stop", nudges_used
 
