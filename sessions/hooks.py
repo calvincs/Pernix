@@ -681,8 +681,17 @@ def _deferred_grade_superseded(session_obj, snap: _DeferredGrade) -> str | None:
         return "session object was replaced (reaped and re-created)"
     if getattr(session_obj, "_deferred_reflect_seq", 0) != snap.ticket:
         return "a later turn scheduled its own grade"
-    if getattr(session_obj, "_turn_id", 0) != snap.turn_id:
-        return "turn counter advanced"
+    live_turn = getattr(session_obj, "_turn_id", 0)
+    if live_turn != snap.turn_id:
+        # A worker-resume turn is the harness talking to itself, not the user
+        # moving on — it must not cost the real turn its grade (field case,
+        # session 3dc5a307d751: the redundant resume turn superseded the grade
+        # of the turn that did the work). Any NON-synthetic turn in between is
+        # supersession as before.
+        synthetic = getattr(session_obj, "_synthetic_turn_ids", None) or set()
+        intervening = list(range(snap.turn_id + 1, live_turn + 1))
+        if not intervening or not all(t in synthetic for t in intervening):
+            return "turn counter advanced"
     if session_obj.current_turn_user_msg_id is not None:
         return "a turn is in flight"
     state = sv2._current_state(session_obj)
@@ -1060,6 +1069,12 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
     if _reflect_is_deferred(session):
         if gate_results:
             _apply_gate_retry_fallback(session_id, session, session_obj, gate_results, emit=emit)
+        # A worker-resume turn synthesizes results the graded turn produced.
+        # Grading it would bump _deferred_reflect_seq and cancel the pending
+        # grade of the turn that did the work (session 3dc5a307d751).
+        if getattr(session_obj, "_turn_id", 0) in (getattr(session_obj, "_synthetic_turn_ids", None) or set()):
+            logger.info("Deferred reflect skipped for %s: synthetic worker-resume turn", session_id)
+            return
         await _schedule_deferred_reflect(session_id, session, session_obj, gate_results, emit=emit)
         return
 

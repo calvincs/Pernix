@@ -52,6 +52,9 @@ const EVENT_TYPES = [
     'message.injected',
     // Workers
     'worker.started', 'worker.done', 'worker.failed', 'worker.resumed',
+    // Auto-resume declined because the parent already collected the results.
+    // No UI of its own — registered so the event does not stall seq tracking.
+    'workers.resume_skipped',
     // RLM runs (recursive processing — live progress on the parent's stream)
     'rlm.started', 'rlm.activity', 'rlm.heartbeat', 'rlm.done',
     // Partial save (mid-stream persistence)
