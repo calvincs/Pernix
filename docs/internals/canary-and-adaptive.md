@@ -773,6 +773,35 @@ this order:
    low-risk kinds, with the tripwire now grounded in a week-plus of
    baseline. `adaptive_auto_rollback` last, if ever.
 
+## The Trust tab
+
+The Explorer's **Self-tuning** group carries a fourth tab, **Trust**, beside
+Learning, Self-checks and Goals. The other three each show one subsystem doing
+its job; Trust answers the question underneath all three — how much of this is
+grounded in something that happened, and how much is the model agreeing with
+itself. It reads `GET /api/trust` and renders counts only, no charts:
+
+- **Grader agreement** — how often reflect's verdict matches the user's thumbs
+  on the same turn, over the number of turns that carry both; plus the
+  grader's hold-out accuracy against the fixture set when a run has recorded
+  one.
+- **Where outcomes come from** — turns whose outcome came from a thumbs, from
+  the user's next message, and from reflect alone, in that precedence order,
+  plus turns graded against turns sent in the last 7 days.
+- **Adaptive entries** — the count per status, and how many are *unfounded*:
+  no evidence reference that resolves to a recorded outcome. Those wait for a
+  human rather than auto-applying.
+- **Self-checks (14 days)** — runs, failures, and runs marked contaminated
+  (one that reached memory or a file outside its own workspace, and is
+  therefore excluded from every measurement).
+- **Trial arms** — per entry on trial: treated and control successes over
+  their arm sizes, and the two-proportion p-value. Empty until trial mode is
+  on, and it says so rather than going blank.
+
+The tab is read-only apart from its Refresh button, and every field is
+optional: a subsystem that is off reports zeros. On a server that predates the
+trust loop the endpoint is a 404 and the tab is one line saying so.
+
 ## Settings
 
 See [configuration.md](../configuration.md#canary-suite) and

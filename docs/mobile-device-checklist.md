@@ -43,6 +43,9 @@ passed in the other.
       above the composer rather than over it (`--bottom-stack`).
 - [ ] **Open the drawer and scroll the session list to the bottom.** It stops
       at the last row instead of dragging the whole page with it.
+- [ ] **Tap an answer's `⋯`, then *Not helpful*.** The note prompt opens as a
+      bottom sheet with the keyboard above it, the field is 16px so the page
+      does not zoom, and **Skip** leaves the thumbs-down saved.
 - [ ] **Home Screen app only:** the status bar area is not overlapped by the
       app's own header, and the composer clears the home indicator.
 
@@ -107,6 +110,9 @@ this repo verifies.
       screen, so the transcript behind it must be unreachable too.
 - [ ] **Open a session's `⋯` sheet.** It is announced as a dialog with the
       session's name, and every row is read as a button with a real label.
+- [ ] **Rate an answer from its `⋯` sheet.** *Helpful* and *Not helpful* are
+      read as buttons, the rating already given is read out as such, and the
+      result ("Marked helpful") is announced without focus moving.
 - [ ] **Send a message.** The turn finishing is announced, not silent.
 
 ## After a deploy

@@ -177,8 +177,11 @@ relayouting the shell for that is free of any visible benefit.
   and never zooms back out.
 - Safe-area insets, momentum scrolling, and the status bar moved to the *top*
   of the screen (`order: -1`).
-- One **`⋯` overflow control per row** — sessions, spaces, Explorer files —
-  opening an action sheet, replacing three or four hover-revealed icon buttons.
+- One **`⋯` overflow control per row** — sessions, spaces, Explorer files, and
+  an assistant reply — opening an action sheet, replacing three or four
+  hover-revealed icon buttons. An answer's mouse toolbar is *Copy message* plus
+  the two rating thumbs; on a finger those are 36px each and permanently
+  visible, so all three become sheet rows behind one target.
 - The **editor is a plain textarea**, never Monaco: `createEditor()` returns
   the `.ce-fallback` textarea when `isTouch()`. Monaco's own touch handling
   fights iOS text selection, and native selection handles are what a finger
