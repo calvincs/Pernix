@@ -292,7 +292,7 @@ def count_unfounded() -> int:
     from db import models as db
 
     try:
-        rows = db.adaptive_list_entries(status="active", limit=500)
+        rows = db.adaptive_list_entries(status=db.ADAPTIVE_LIVE_STATUS, limit=500)
     except Exception as e:
         logger.debug("receipts: entry listing failed: %s", e)
         return 0

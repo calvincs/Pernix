@@ -6,6 +6,14 @@ render ONLY into the scout's prompt (planning signal, agent prompt stays
 lean, I5). Both blocks are omitted entirely when empty so first deploy
 shifts no bytes. data/adaptive/ADAPTIVE.md is regenerated on change and
 NEVER read back — the DB is the store, the file is a window.
+
+Trial arms (W6): entries with status `trial` render on a deterministic half
+of the turns. Both blocks take the same `turn_key` and apply the same coin
+(core/adaptive/trial.renders_this_turn), so a turn either sees a trial entry
+in BOTH prompts or in neither — a split decision would measure nothing. With
+no turn key (a worker build, a script, the mirror) no trial entry renders at
+all: the pre-W6 behaviour, and the only honest one when no post-mortem will
+be able to say what was in the prompt.
 """
 
 from __future__ import annotations
@@ -14,6 +22,7 @@ import logging
 from pathlib import Path
 
 from config import settings
+from core.adaptive.trial import TRIAL_STATUS, in_arm
 from db import models as db
 
 logger = logging.getLogger("pernix.adaptive")
@@ -80,28 +89,41 @@ def _evidence_ref(entry: dict) -> str:
     return ref
 
 
-def build_adaptive_block(session_id: str = "") -> str:
-    """prompt_note one-liners + policy entries for the compiler prefix.
+def select_prompt_entries(session_id: str = "", turn_key: str = "") -> dict:
+    """What the compiler prefix will actually contain this turn.
+
+    Returns {"notes", "policies", "dropped", "trial_rendered", "trial_held_out"}.
+    Selection is separated from rendering because reflect has to grade against
+    the SAME set: its evidence list may only name entries the turn rendered,
+    and the post-mortem's treated/control record has to match what the agent
+    saw, cap drops included.
 
     Includes global entries plus this session's scoped ones. Deterministic
     ordering (kind, id) so identical state → identical bytes (I8).
     """
+    empty: dict = {"notes": [], "policies": [], "dropped": 0, "trial_rendered": [], "trial_held_out": []}
     if not settings.adaptive_enabled:
-        return ""
+        return empty
     try:
-        notes = db.adaptive_list_entries(kind="prompt_note")
-        policies = db.adaptive_list_entries(kind="policy")
+        notes = db.adaptive_list_entries(kind="prompt_note", status=db.ADAPTIVE_LIVE_STATUS)
+        policies = db.adaptive_list_entries(kind="policy", status=db.ADAPTIVE_LIVE_STATUS)
     except Exception as e:
         logger.warning("Adaptive block build failed: %s", e)
-        return ""
+        return empty
 
     scopes = {"global"}
     if session_id:
         scopes.add(f"session:{session_id}")
     notes = [n for n in notes if n.get("scope") in scopes]
     policies = [p for p in policies if p.get("scope") in scopes]
+    in_scope_trials = {e["id"] for e in notes + policies if e.get("status") == TRIAL_STATUS}
+    # The coin BEFORE the caps: being held out is the experiment's whole
+    # manipulation, so a held-out entry must not go on occupying a slot its
+    # absence is supposed to free.
+    notes = in_arm(notes, turn_key)
+    policies = in_arm(policies, turn_key)
     if not notes and not policies:
-        return ""
+        return {**empty, "trial_held_out": sorted(in_scope_trials)}
 
     # Cap selection is pure Python over stored fields ((source_rank, id)),
     # then the SELECTED subset renders in the query's (kind, id) order —
@@ -117,8 +139,29 @@ def build_adaptive_block(session_id: str = "") -> str:
         policies = [p for p in policies if p["id"] != lowest["id"]]
         dropped += 1
 
+    rendered_trials = {e["id"] for e in notes + policies if e.get("status") == TRIAL_STATUS}
+    return {
+        "notes": notes,
+        "policies": policies,
+        "dropped": dropped,
+        # Cap-dropped trial entries count as held out, not as treated: they
+        # were not in the prompt, whatever the coin said.
+        "trial_rendered": sorted(rendered_trials),
+        "trial_held_out": sorted(in_scope_trials - rendered_trials),
+    }
+
+
+def build_adaptive_block(session_id: str = "", turn_key: str = "") -> str:
+    """prompt_note one-liners + policy entries for the compiler prefix."""
+    selected = select_prompt_entries(session_id, turn_key)
+    notes, policies, dropped = selected["notes"], selected["policies"], selected["dropped"]
+    if not notes and not policies:
+        return ""
+
     # Entries carry their ids so reflect can cite which policies shaped a
-    # turn (cited_policies → the adaptive_entry usage signal).
+    # turn (cited_policies → the adaptive_entry usage signal). A trial entry
+    # is deliberately NOT marked as one here: the agent reading a rule that
+    # announces it is on probation is not the treatment being measured.
     parts = [_BLOCK_HEADER]
     for n in notes:
         parts.append(f"- [{n['id']}] ({n.get('source', '?')}) {n['title']}: {n['content']}")
@@ -133,17 +176,29 @@ def build_adaptive_block(session_id: str = "") -> str:
     return "\n".join(parts)
 
 
-def build_routing_hints_block() -> str:
-    """routing_hint entries for the scout prompt (beside [OPERATIONAL INTEL])."""
+def select_routing_hints(turn_key: str = "") -> dict:
+    """The routing hints the scout prompt will carry this turn.
+
+    Returns {"hints", "total", "trial_rendered", "trial_held_out"} — `hints`
+    already ranked and truncated exactly as the block renders them, so the
+    grade's treated/control record matches the prompt rather than the store.
+    """
+    empty: dict = {"hints": [], "total": 0, "trial_rendered": [], "trial_held_out": []}
     if not settings.adaptive_enabled:
-        return ""
+        return empty
     try:
-        hints = [h for h in db.adaptive_list_entries(kind="routing_hint") if h.get("scope") == "global"]
+        hints = [
+            h
+            for h in db.adaptive_list_entries(kind="routing_hint", status=db.ADAPTIVE_LIVE_STATUS)
+            if h.get("scope") == "global"
+        ]
     except Exception as e:
         logger.warning("Routing hints build failed: %s", e)
-        return ""
+        return empty
+    in_scope_trials = {h["id"] for h in hints if h.get("status") == TRIAL_STATUS}
+    hints = in_arm(hints, turn_key)
     if not hints:
-        return ""
+        return {**empty, "trial_held_out": sorted(in_scope_trials)}
     # The scout block lives in a per-turn user message — no prefix cache to
     # protect — so it CAN rank by live outcomes: best observed success share
     # first (the outcome half of the adaptive_entry signal synthesis writes),
@@ -169,25 +224,75 @@ def build_routing_hints_block() -> str:
         hints = sorted(hints, key=lambda h: int((sig.get(h["id"]) or {}).get("reinforcements") or 0), reverse=True)
         hints = sorted(hints, key=_smoothed_success, reverse=True)
 
+    chars = 0
+    shown: list[dict] = []
+    for h in hints:
+        line = f"- [{h['id']}] ({h.get('source', '?')}) {h['title']}: {h['content']}"
+        if len(shown) >= _HINTS_MAX_LINES or chars + len(line) > _HINTS_CHAR_CAP:
+            break
+        shown.append(h)
+        chars += len(line)
+    rendered_trials = {h["id"] for h in shown if h.get("status") == TRIAL_STATUS}
+    return {
+        "hints": shown,
+        "total": len(hints),
+        "trial_rendered": sorted(rendered_trials),
+        "trial_held_out": sorted(in_scope_trials - rendered_trials),
+    }
+
+
+def build_routing_hints_block(session_id: str = "", turn_key: str = "") -> str:
+    """routing_hint entries for the scout prompt (beside [OPERATIONAL INTEL]).
+
+    `session_id` is only ever used to look up the turn key when the caller has
+    not resolved it; routing hints themselves are global-scope by definition.
+    """
+    if not turn_key and session_id:
+        from core.adaptive.trial import turn_key_for_session
+
+        turn_key = turn_key_for_session(session_id)
+    selected = select_routing_hints(turn_key)
+    hints, total = selected["hints"], selected["total"]
+    if not hints:
+        return ""
+
     # Hints carry their ids so scout can echo which ones shaped the plan
     # (used_hints → the adaptive_entry usage signal).
     lines = ["[ADAPTIVE ROUTING HINTS] (learned tool/skill selection guidance; advisory, not binding):"]
-    total = 0
-    shown = 0
     for h in hints:
-        line = f"- [{h['id']}] ({h.get('source', '?')}) {h['title']}: {h['content']}"
-        if shown >= _HINTS_MAX_LINES or total + len(line) > _HINTS_CHAR_CAP:
-            break
-        lines.append(line)
-        total += len(line)
-        shown += 1
-    if shown < len(hints):
-        lines.append(f"(+{len(hints) - shown} more hints — use search_adaptive to query the rest)")
+        lines.append(f"- [{h['id']}] ({h.get('source', '?')}) {h['title']}: {h['content']}")
+    if len(hints) < total:
+        lines.append(f"(+{total - len(hints)} more hints — use search_adaptive to query the rest)")
     return "\n".join(lines)
 
 
+def turn_arms(session_id: str = "", turn_key: str = "") -> dict:
+    """Which trial entries this turn rendered, and which it held out.
+
+    Both prompt surfaces at once — a trial entry belongs to one arm per TURN,
+    not one per block. Only trial entries appear: an active entry renders on
+    every turn, so it has no control half and is not an experiment.
+
+    Recomputed at grading time rather than captured during the turn. The coin
+    is a pure function of (turn key, entry id), so the ARM cannot drift; only
+    the population can (an entry created or retired between the prompt and the
+    grade), and that costs one turn of one entry's evidence.
+    """
+    prompt = select_prompt_entries(session_id, turn_key)
+    hints = select_routing_hints(turn_key)
+    return {
+        "rendered": sorted(set(prompt["trial_rendered"]) | set(hints["trial_rendered"])),
+        "held_out": sorted(set(prompt["trial_held_out"]) | set(hints["trial_held_out"])),
+    }
+
+
 def render_mirror() -> None:
-    """Regenerate the human-readable mirror. Failure is never fatal."""
+    """Regenerate the human-readable mirror. Failure is never fatal.
+
+    Every non-active status is stamped on the heading, so a trial entry reads
+    as `### Title [trial]` — the file is where a human looks to see what the
+    machine is currently trying out.
+    """
     try:
         entries = db.adaptive_list_entries(status=None, limit=500)
         lines = [

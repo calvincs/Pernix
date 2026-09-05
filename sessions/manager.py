@@ -386,6 +386,7 @@ class SessionManager:
         # apart from never-started ones after rehydrate.
         try:
             session._turn_id = db.latest_turn_id(session_id)
+            session.turn_key = f"{session_id}:{session._turn_id}"
         except Exception as e:
             logger.debug("latest_turn_id lookup failed for %s: %s", session_id, e)
 

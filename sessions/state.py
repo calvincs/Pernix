@@ -369,6 +369,12 @@ class AgentSession:
     # so a synthetic turn doesn't look like the user moving on from the real
     # turn it is about to grade (field case, session 3dc5a307d751).
     _synthetic_turn_ids: set = field(default_factory=set)
+    # The turn's coin for adaptive trial arms (W6): "<session_id>:<turn_id>",
+    # restamped by state_v2.transition() at every turn boundary. Read by the
+    # compiler, the scout prompt and the grade, so all three agree on which
+    # half of the experiment this turn is in. Empty until the first
+    # transition — no live turn, no trial rendering.
+    turn_key: str = field(default="")
 
     def emit_event(self, event: dict) -> None:
         """Broadcast event to all subscribers and buffer it.

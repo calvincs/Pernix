@@ -230,6 +230,8 @@ _SETTING_BOUNDS = {
     "adaptive_usage_retire_days": (0, 365),
     "adaptive_prompt_note_ttl_days": (0, 365),
     "adaptive_suspect_ttl_days": (0, 90),
+    "adaptive_trial_min_arm": (5, 10_000),
+    "adaptive_trial_ttl_days": (1, 365),
     "notification_retention_days": (0, 365),
     "telos_serendipity_budget": (0.05, 0.5),
     "telos_eig_floor": (0.0, 1.0),

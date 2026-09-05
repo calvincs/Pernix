@@ -578,7 +578,7 @@ def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
 
             query = (args.get("query") or "").lower()
             words = [w for w in query.split() if len(w) >= 2]
-            entries = db.adaptive_list_entries(kind=args.get("kind") or None)
+            entries = db.adaptive_list_entries(kind=args.get("kind") or None, status=db.ADAPTIVE_LIVE_STATUS)
             scored = []
             for e in entries:
                 haystack = f"{e['title']} {e['content']}".lower()
@@ -1231,7 +1231,12 @@ def _count_hint_usage(report: ScoutReport, session_type: str = "normal") -> None
     if not report.used_hints or not settings.adaptive_enabled:
         return
     try:
-        live = {e["id"] for e in db.adaptive_list_entries(kind="routing_hint", status="active", limit=200)}
+        # Live includes trial entries (W6): a hint the scout only sees on half
+        # the turns is still a hint it saw on THIS one, and dropping its echo
+        # would starve exactly the entries whose effect is being measured.
+        live = {
+            e["id"] for e in db.adaptive_list_entries(kind="routing_hint", status=db.ADAPTIVE_LIVE_STATUS, limit=200)
+        }
         kept = [h for h in dict.fromkeys(h.strip("[] ") for h in report.used_hints) if h in live]
         report.used_hints = kept
         if session_type == "canary" or report.from_fallback:
@@ -1761,8 +1766,9 @@ async def _run_scout_llm(
             return None
         try:
             from core.adaptive.render import build_routing_hints_block
+            from core.adaptive.trial import turn_key_for_session
 
-            return build_routing_hints_block() or None
+            return build_routing_hints_block(session_id, turn_key_for_session(session_id)) or None
         except Exception as e:
             logger.debug("Scout adaptive hints failed: %s", e)
             return None

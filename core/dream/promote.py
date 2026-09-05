@@ -289,7 +289,7 @@ async def _promote_edit(row: dict, target_kind: str) -> str | None:
         tools = _candor_tools_from_evidence(row)
         live = {
             e["id"]
-            for e in db.adaptive_list_entries(kind="routing_hint", status="active", limit=200)
+            for e in db.adaptive_list_entries(kind="routing_hint", status=db.ADAPTIVE_LIVE_STATUS, limit=200)
             if e.get("source") == "candor"
         }
         if any(f"tool-{t}-degraded" in live for t in tools):
