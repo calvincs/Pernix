@@ -486,24 +486,25 @@ def test_tripwire_after_window_is_the_turns_right_after_the_apply(monkeypatch):
     from core.adaptive.tripwire import evaluate_tripwire
 
     monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
-    monkeypatch.setattr("config.settings.adaptive_tripwire_window_turns", 2)
+    monkeypatch.setattr("config.settings.adaptive_tripwire_window_turns", 30)
 
-    for t in ("2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"):
-        _post_mortem(t, "pass")
+    for h in range(30):
+        _post_mortem(f"2026-01-01T00:{h:02d}:00+00:00", "pass")
     batch_id = _apply_hint(title="drifter", content="x")
     _backdate("adaptive_batches", "2026-01-02T00:00:00+00:00", "batch_id = ?", (batch_id,))
     _backdate("adaptive_events", "2026-01-02T00:00:00+00:00", "batch_id = ?", (batch_id,))
-    # The two turns immediately after the apply regressed...
-    for t in ("2026-01-03T00:00:00+00:00", "2026-01-03T01:00:00+00:00"):
-        _post_mortem(t, "retry")
+    # The turns immediately after the apply regressed...
+    for h in range(30):
+        _post_mortem(f"2026-01-03T00:{h:02d}:00+00:00", "retry")
     # ...and the system later recovered. Slicing the newest-first feed would
     # score the recovery and miss the regression entirely.
-    for t in ("2026-01-09T00:00:00+00:00", "2026-01-09T01:00:00+00:00", "2026-01-09T02:00:00+00:00"):
-        _post_mortem(t, "pass")
+    for h in range(30):
+        _post_mortem(f"2026-01-09T00:{h:02d}:00+00:00", "pass")
 
     actions = evaluate_tripwire()
     flagged = [a for a in actions if a["action"] == "flagged" and a["batch_id"] == batch_id]
-    assert flagged and "post-mortem retry rate 100% vs 0%" in flagged[0]["detail"]
+    assert flagged, "the 30 regressed turns right after the apply should flag the batch"
+    assert "0/30 (0%) succeeded after the apply vs 30/30 (100%) before" in flagged[0]["detail"]
 
 
 def test_tripwire_anchors_on_apply_time_not_queue_time(monkeypatch):

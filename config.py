@@ -424,12 +424,22 @@ class Settings:
     # Promote a canary-regression tripwire hit to automatic rollback. Off
     # until the metric earns trust; a hit only flags the batch 'suspect'.
     adaptive_auto_rollback: bool = False
+    # The SECOND rollback trigger, gated separately: the passive post-mortem
+    # drift test (two-proportion z over graded turns before/after the apply)
+    # rolling a batch back at p<0.01. Needs adaptive_auto_rollback ON as
+    # well — this flag only widens that permission to the passive channel,
+    # which has never rolled anything back and has to earn it on its own.
+    adaptive_pm_drift_rollback: bool = False
     adaptive_max_entries_per_kind: int = 24
     adaptive_max_auto_applies_per_day: int = 24
     adaptive_edit_cooldown_hours: int = 24
-    # Passive tripwire: post-mortem retry drift over this many organic turns
-    # after a batch (canary-stamped post-mortems excluded).
-    adaptive_tripwire_window_turns: int = 20
+    # Passive tripwire: the MAXIMUM graded organic turns taken into each
+    # comparison window (before the apply, after the apply) for the
+    # post-mortem drift test; canary-stamped post-mortems are excluded.
+    # A window is never smaller than 30 turns whatever this says — below
+    # that the two-proportion test cannot separate drift from noise, which
+    # is exactly what the old 20-turn ratio kept doing.
+    adaptive_tripwire_window_turns: int = 100
     adaptive_max_pending_proposals: int = 200  # review queue cap (0 = unbounded)
     adaptive_max_pending_per_producer: int = 60  # one producer's share of it (0 = unbounded)
     adaptive_proposal_ttl_days: int = 30  # pending proposals lapse after this (0 = never)
