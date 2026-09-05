@@ -1481,6 +1481,12 @@ def _write_post_mortem(
             payload["cited_policies"] = list(result.cited_policies)
         if next_msg_correction is not None:
             payload["next_msg_correction"] = bool(next_msg_correction)
+        # Turn anchor: the only handle that ties this grade to the message the
+        # user can put a thumb on. The time-window match it replaces stopped
+        # being reliable the moment a grade could land after the next turn's
+        # own user message.
+        if turn_user_msg_id is not None:
+            payload["turn_user_msg_id"] = int(turn_user_msg_id)
 
         pm_id = db.add_post_mortem(
             session_id=session_id,
@@ -1493,6 +1499,7 @@ def _write_post_mortem(
             scout_viability=scout_viability,
             execution_mode=execution_mode,
             payload_json=json.dumps(payload, ensure_ascii=False),
+            outcome_source=outcome_source,
         )
         result.artifact_id = pm_id
     except Exception as e:

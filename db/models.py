@@ -3564,11 +3564,17 @@ def add_post_mortem(
     scout_viability: str | None,
     execution_mode: str | None,
     payload_json: str,
+    outcome_source: str = "llm",
 ) -> str:
     """Insert a post-mortem row and return its id.
 
     payload_json carries the full ReflectResult + scout-report summary so
     snooze can re-derive anything the indexed columns don't expose.
+
+    outcome_source is an indexed column as well as a payload key: the whole
+    point of it is to be countable ("what share of our outcomes is anything
+    better than the grader's own opinion?"), and that question should not
+    require parsing every payload in the table.
     """
     pm_id = _new_id()
     with connect_sessions() as conn:
@@ -3576,8 +3582,8 @@ def add_post_mortem(
             """INSERT INTO post_mortems (
                 id, session_id, created_at, attempt, verdict, failure_cause,
                 confidence, reflect_model, reflect_latency_ms,
-                scout_viability, execution_mode, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                scout_viability, execution_mode, payload_json, outcome_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pm_id,
                 session_id,
@@ -3591,6 +3597,7 @@ def add_post_mortem(
                 scout_viability,
                 execution_mode,
                 payload_json,
+                outcome_source or "llm",
             ),
         )
     return pm_id
@@ -3629,6 +3636,293 @@ def get_post_mortem(pm_id: str) -> dict | None:
             (pm_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Ground truth (2026-09-04): the user's own verdict on a turn
+# ---------------------------------------------------------------------------
+
+
+def _mid(message_id) -> str:
+    """Canonical string form of a message id.
+
+    message_feedback.message_id is TEXT (the API addresses messages by path
+    segment) while messages.id is an INTEGER, so "7" and 7 must not become two
+    different rows.
+    """
+    try:
+        return str(int(message_id))
+    except (TypeError, ValueError):
+        return str(message_id)
+
+
+def upsert_message_feedback(session_id: str, message_id, signal: str, note: str = "") -> dict:
+    """Record (or replace) the user's reaction to one assistant message."""
+    now = _now()
+    mid = _mid(message_id)
+    with connect_sessions() as conn:
+        conn.execute(
+            """INSERT INTO message_feedback (session_id, message_id, signal, note, created_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(message_id) DO UPDATE SET
+                   session_id = excluded.session_id,
+                   signal = excluded.signal,
+                   note = excluded.note,
+                   created_at = excluded.created_at""",
+            (session_id, mid, signal, note or "", now),
+        )
+    return {"message_id": mid, "signal": signal, "note": note or "", "created_at": now}
+
+
+def delete_message_feedback(session_id: str, message_id) -> bool:
+    """Remove a reaction. True when a row was actually there."""
+    with connect_sessions() as conn:
+        cur = conn.execute(
+            "DELETE FROM message_feedback WHERE session_id = ? AND message_id = ?",
+            (session_id, _mid(message_id)),
+        )
+    return cur.rowcount > 0
+
+
+def get_message_feedback(session_id: str, message_id) -> dict | None:
+    with connect_sessions() as conn:
+        row = conn.execute(
+            "SELECT * FROM message_feedback WHERE session_id = ? AND message_id = ?",
+            (session_id, _mid(message_id)),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_message_feedback(session_id: str) -> list[dict]:
+    """Every reaction in the session, oldest first — one page for the client."""
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT message_id, signal, note, created_at FROM message_feedback
+               WHERE session_id = ? ORDER BY id""",
+            (session_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def turn_user_msg_id_for_message(session_id: str, message_id) -> int | None:
+    """The id of the user message that opened the turn this message belongs to.
+
+    Assistant and tool rows carry `metadata.parent_user_msg_id`, stamped by
+    run_agent's _save_turn_msg; a user row is its own turn anchor.
+    """
+    row = get_message(int(message_id)) if str(message_id).lstrip("-").isdigit() else None
+    if not row or row.get("session_id") != session_id:
+        return None
+    if row.get("role") == "user":
+        return int(row["id"])
+    try:
+        meta = json.loads(row.get("metadata") or "{}")
+        parent = meta.get("parent_user_msg_id")
+        return int(parent) if parent is not None else None
+    except (ValueError, TypeError):
+        return None
+
+
+def latest_post_mortem_for_turn(session_id: str, turn_user_msg_id: int) -> dict | None:
+    """The post-mortem for one turn — its last attempt, if it was graded.
+
+    New rows carry the turn anchor in their payload. Rows written before
+    2026-09-04 don't, so they fall back to the window between this turn's user
+    message and the next one; that is exact for synchronous grades and for
+    deferred grades of turns nobody replied to, which is every pre-existing
+    row worth matching.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT * FROM post_mortems
+               WHERE session_id = ? AND json_extract(payload_json, '$.turn_user_msg_id') = ?
+               ORDER BY attempt DESC, created_at DESC LIMIT 1""",
+            (session_id, int(turn_user_msg_id)),
+        ).fetchone()
+        if row:
+            return dict(row)
+        anchor = conn.execute(
+            "SELECT created_at FROM messages WHERE id = ? AND session_id = ?",
+            (int(turn_user_msg_id), session_id),
+        ).fetchone()
+        if not anchor:
+            return None
+        nxt = conn.execute(
+            """SELECT created_at FROM messages
+               WHERE session_id = ? AND role = 'user' AND id > ?
+               ORDER BY id LIMIT 1""",
+            (session_id, int(turn_user_msg_id)),
+        ).fetchone()
+        if nxt:
+            row = conn.execute(
+                """SELECT * FROM post_mortems
+                   WHERE session_id = ? AND created_at >= ? AND created_at < ?
+                   ORDER BY attempt DESC, created_at DESC LIMIT 1""",
+                (session_id, anchor["created_at"], nxt["created_at"]),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT * FROM post_mortems
+                   WHERE session_id = ? AND created_at >= ?
+                   ORDER BY attempt DESC, created_at DESC LIMIT 1""",
+                (session_id, anchor["created_at"]),
+            ).fetchone()
+    return dict(row) if row else None
+
+
+def set_post_mortem_user_signal(session_id: str, message_id, signal: str | None) -> dict | None:
+    """Stamp a thumb onto the post-mortem of the turn `message_id` belongs to.
+
+    Returns the post-mortem row as it stood BEFORE the write (the caller needs
+    its payload to know which entries the turn cited, and what it had already
+    applied), or None when the turn was never graded — a thumb on an ungraded
+    turn is still recorded as feedback, it just has no verdict to contradict.
+
+    Clearing the signal restores the outcome_source the grade itself produced,
+    so removing a thumb is a real undo rather than a permanent 'user' stamp.
+    """
+    turn_id = turn_user_msg_id_for_message(session_id, message_id)
+    if turn_id is None:
+        return None
+    pm = latest_post_mortem_for_turn(session_id, turn_id)
+    if not pm:
+        return None
+    if signal:
+        source = "user"
+    else:
+        try:
+            source = (json.loads(pm.get("payload_json") or "{}") or {}).get("outcome_source") or "llm"
+        except (ValueError, TypeError):
+            source = "llm"
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE post_mortems SET user_signal = ?, outcome_source = ? WHERE id = ?",
+            (signal, source, pm["id"]),
+        )
+    return pm
+
+
+def update_post_mortem_payload(pm_id: str, payload: dict) -> None:
+    """Replace a post-mortem's payload. Used to record what a thumb applied."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE post_mortems SET payload_json = ? WHERE id = ?",
+            (json.dumps(payload, ensure_ascii=False), pm_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Trust surface counters (/api/trust)
+#
+# Every one of these answers with zeros rather than raising: the endpoint is a
+# dashboard, and a table another workstream has not created yet must read as
+# "nothing recorded", never as a 500.
+# ---------------------------------------------------------------------------
+
+
+def post_mortem_outcome_counts(since_iso: str) -> dict:
+    """Graded turns in the window, split by what their outcome rests on."""
+    counts = {"llm": 0, "next_turn": 0, "user": 0}
+    total = 0
+    try:
+        with connect_sessions() as conn:
+            rows = conn.execute(
+                """SELECT COALESCE(outcome_source, 'llm') AS src, COUNT(*) AS n
+                   FROM post_mortems WHERE created_at >= ? GROUP BY src""",
+                (since_iso,),
+            ).fetchall()
+    except sqlite3.Error as e:
+        logger.debug("outcome-source counts unavailable: %s", e)
+        return {"by_source": counts, "graded": 0}
+    for r in rows:
+        total += int(r["n"])
+        if r["src"] in counts:
+            counts[r["src"]] = int(r["n"])
+    return {"by_source": counts, "graded": total}
+
+
+def count_user_turns_since(since_iso: str) -> int:
+    """User messages in the window — the denominator "how many turns were there".
+
+    Harness-authored user rows (the worker-resume injection) are excluded: they
+    are the system talking to itself, and counting them would understate the
+    share of real turns that got graded.
+    """
+    try:
+        with connect_sessions() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS n FROM messages
+                   WHERE role = 'user' AND created_at >= ?
+                     AND COALESCE(content, '') NOT LIKE '[Watched workers have completed%'""",
+                (since_iso,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+    except sqlite3.Error as e:
+        logger.debug("user-turn count unavailable: %s", e)
+        return 0
+
+
+def post_mortems_with_user_signal(since_iso: str | None = None, limit: int = 1000) -> list[dict]:
+    """Graded turns the user reacted to — the grader's own report card."""
+    try:
+        with connect_sessions() as conn:
+            if since_iso:
+                rows = conn.execute(
+                    """SELECT verdict, user_signal FROM post_mortems
+                       WHERE user_signal IS NOT NULL AND created_at >= ?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (since_iso, int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT verdict, user_signal FROM post_mortems
+                       WHERE user_signal IS NOT NULL
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (int(limit),),
+                ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.Error as e:
+        logger.debug("user-signal post-mortems unavailable: %s", e)
+        return []
+
+
+def adaptive_entry_status_counts() -> dict:
+    """How many adaptive entries sit in each status."""
+    try:
+        with connect_sessions() as conn:
+            rows = conn.execute("SELECT status, COUNT(*) AS n FROM adaptive_entries GROUP BY status").fetchall()
+        return {str(r["status"]): int(r["n"]) for r in rows}
+    except sqlite3.Error as e:
+        logger.debug("adaptive status counts unavailable: %s", e)
+        return {}
+
+
+def canary_outcome_counts(since_iso: str) -> dict:
+    """Canary runs in the window: how many ran, failed, and were contaminated.
+
+    `contaminated` is written by the post-run contamination scan; until that
+    ships the count is honestly zero rather than absent.
+    """
+    zero = {"runs": 0, "fails": 0, "contaminated": 0}
+    try:
+        with connect_sessions() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) AS runs,
+                          SUM(CASE WHEN COALESCE(passed, 0) = 0 THEN 1 ELSE 0 END) AS fails,
+                          SUM(CASE WHEN outcome = 'contaminated' THEN 1 ELSE 0 END) AS contaminated
+                   FROM canary_runs WHERE created_at >= ?""",
+                (since_iso,),
+            ).fetchone()
+    except sqlite3.Error as e:
+        logger.debug("canary outcome counts unavailable: %s", e)
+        return zero
+    if not row:
+        return zero
+    return {
+        "runs": int(row["runs"] or 0),
+        "fails": int(row["fails"] or 0),
+        "contaminated": int(row["contaminated"] or 0),
+    }
 
 
 def list_unsynthesized_post_mortems(limit: int = 500) -> list[dict]:
