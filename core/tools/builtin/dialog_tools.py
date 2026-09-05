@@ -34,14 +34,19 @@ def ask_user(
     # job indefinitely (the reaper never reaps AWAITING_USER by design).
     # Mirrors the dangerous-tool gate in core/tools/executor.py, which skips
     # the ask_user → approve flow for the same reason.
-    from core.tools.executor import _is_unattended_session
+    # This is by-design unavailability, not a failure: nothing went wrong and
+    # the tool is working exactly as intended. It opened as "Error:" until
+    # 2026-09-04, which taught the whole trust loop that ask_user was a broken
+    # tool (see UNAVAILABLE_PREFIX in core/tools/executor.py).
+    from core.tools.executor import UNAVAILABLE_PREFIX, _is_unattended_session
 
     if _is_unattended_session(session_id):
         return (
-            "Error: This session runs unattended (cron-initiated) — no user is "
-            "present to answer, and waiting would stall the job indefinitely. "
-            "Make a reasonable decision autonomously and proceed with the task. "
-            "Use notify_user to tell the user what you decided and why."
+            f"{UNAVAILABLE_PREFIX} This session runs unattended (cron-initiated) — no "
+            "user is present to answer, and waiting would stall the job indefinitely. "
+            "Nothing has gone wrong: proceed without user input. Make a reasonable "
+            "decision autonomously and continue with the task. Use notify_user to tell "
+            "the user what you decided and why."
         )
 
     # Get session title for display

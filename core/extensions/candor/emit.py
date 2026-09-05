@@ -276,8 +276,14 @@ def build_turn_observations(
 
     new_emitted: dict = {}
     for tool, entry in (tool_summary or {}).items():
-        calls = int(entry.get("calls", 0))
-        failures = int(entry.get("failures", 0))
+        # A tool that was unavailable by design never ran, so it is evidence
+        # about the session, not about the tool: netted out of the calls
+        # denominator so it becomes neither a tool_ok success nor a failure.
+        # Without this, ask_user's unattended non-answers were emitted as
+        # tool_ok(ask_user)=False and the reliability producer minted a
+        # routing hint steering scout away from ever asking the user.
+        calls = max(0, int(entry.get("calls", 0)) - int(entry.get("unavailable") or 0))
+        failures = min(int(entry.get("failures", 0)), calls)
         errors = entry.get("errors") or []
         prev = already_emitted.get(tool, {"calls": 0, "failures": 0, "errors": 0})
 
