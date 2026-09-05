@@ -362,17 +362,22 @@ def test_used_hints_retry_blamed_on_scout_penalizes():
 
 
 def test_used_hints_retry_blamed_elsewhere_is_skipped():
+    """`env`/`task`/`skill` causes are not the hint's doing — no failure.
+
+    (`agent` and `scout` ARE charged now; see test_attribution_hardening.py.)
+    """
     row = _pm(
         verdict="retry",
-        failure_cause="agent",
+        failure_cause="env",
         scout_summary={"used_hints": ["innocent-hint"], "from_fallback": False},
     )
     assert [a for a in synthesis.attribute(row) if a.signal_type == "adaptive_entry"] == []
 
 
-def test_cited_policies_count_usage_and_success_but_never_failure():
-    """A reflect citation is usage+outcome in one observation; a cited policy
-    on a failed turn is not evidence of fault — no failure attribution in v1."""
+def test_cited_policies_count_usage_and_outcome():
+    """A reflect citation is usage+outcome in one observation: the use is
+    always booked, and the verdict lands as a success or — when the failure
+    is one the policy could have caused — as a failure (2026-09-04, W1)."""
     payload = {"scout_summary": {"from_fallback": False}, "cited_policies": ["verify-on-disk-before-completion"]}
     row = {
         "id": "pmY",
@@ -387,8 +392,15 @@ def test_cited_policies_count_usage_and_success_but_never_failure():
     assert len(attrs) == 1
     assert attrs[0].delta_successes == 1 and attrs[0].delta_reinforcements == 1
 
+    # A cause the policy could have caused: charged, and the use still books.
     row["verdict"] = "retry"
     row["failure_cause"] = "agent"
+    attrs = [a for a in synthesis.attribute(row) if a.signal_type == "adaptive_entry"]
+    assert len(attrs) == 1
+    assert attrs[0].delta_successes == 0 and attrs[0].delta_failures == 1 and attrs[0].delta_reinforcements == 1
+
+    # A cause it could not have caused: use booked, no verdict either way.
+    row["failure_cause"] = "env"
     attrs = [a for a in synthesis.attribute(row) if a.signal_type == "adaptive_entry"]
     assert len(attrs) == 1
     assert attrs[0].delta_successes == 0 and attrs[0].delta_failures == 0 and attrs[0].delta_reinforcements == 1
