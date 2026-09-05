@@ -1177,7 +1177,7 @@ def should_bypass_scout(message: str, turn_count: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _count_hint_usage(report: ScoutReport) -> None:
+def _count_hint_usage(report: ScoutReport, session_type: str = "normal") -> None:
     """Record which adaptive routing hints shaped a FRESH scout plan.
 
     Called at the fresh-report acceptance seams in run_scout (primary and
@@ -1189,6 +1189,15 @@ def _count_hint_usage(report: ScoutReport) -> None:
     Citations are sanitized against the live hint ids: the model can only
     credit hints that exist, and over-echo can at worst delay a retirement,
     never cause one. Never raises — counting is telemetry, not control flow.
+
+    The bump mirrors the filters in core.synthesis.attribute(), because a use
+    counted here is a denominator that only that function can ever fill in.
+    A canary session's post-mortem is dropped by attribute() and a fallback
+    report is not the model's claim about what shaped the plan, so in both
+    cases the outcome never arrives — bumping anyway would let uses accrue
+    without outcomes, which reads to the retention sweep as a live, earning
+    entry and to the retirement maths as a clean record. Sanitisation still
+    runs either way, so the report carries real ids into the post-mortem.
     """
     if not report.used_hints or not settings.adaptive_enabled:
         return
@@ -1196,6 +1205,13 @@ def _count_hint_usage(report: ScoutReport) -> None:
         live = {e["id"] for e in db.adaptive_list_entries(kind="routing_hint", status="active", limit=200)}
         kept = [h for h in dict.fromkeys(h.strip("[] ") for h in report.used_hints) if h in live]
         report.used_hints = kept
+        if session_type == "canary" or report.from_fallback:
+            logger.debug(
+                "adaptive hint-usage bump skipped (%s): %s",
+                "canary session" if session_type == "canary" else "fallback plan",
+                ", ".join(kept),
+            )
+            return
         for hid in kept:
             db.upsert_signal("adaptive_entry", hid)
     except Exception as e:
@@ -1363,7 +1379,7 @@ async def run_scout(
                 degraded_report = report
                 break
 
-            _count_hint_usage(report)
+            _count_hint_usage(report, brief.session_type)
             if attempt > 1:
                 logger.info("Scout succeeded on attempt %d for session %s", attempt, session_id)
             logger.info(
@@ -1436,7 +1452,7 @@ async def run_scout(
                 logger.warning("Scout fallback model produced no usable plan for session %s", session_id)
                 degraded_report = report
             else:
-                _count_hint_usage(report)
+                _count_hint_usage(report, brief.session_type)
                 logger.info(
                     "Scout fallback model succeeded for session %s in %dms", session_id, report.scout_latency_ms
                 )
