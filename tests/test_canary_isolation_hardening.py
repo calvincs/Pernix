@@ -1159,3 +1159,326 @@ def test_a_genuinely_new_proposal_still_materialises(monkeypatch, tmp_path):
         base=base,
     )
     assert err == "" and name == "tar-roundtrip"
+
+
+# ---------------------------------------------------------------------------
+# Skill rollback
+# ---------------------------------------------------------------------------
+
+_SKILL_BODY = "## Usage\nRun the script.\n\n## Common Failures\nNone known.\n"
+
+
+class _FakeSkillRegistry:
+    """Same shape as the one in tests/test_skill_self_healing.py."""
+
+    def __init__(self, skills: dict):
+        self._skills = skills
+
+    def get(self, name):
+        return self._skills.get(name)
+
+    def exists(self, name):
+        return name in self._skills
+
+    def is_disabled(self, name):
+        return False
+
+    def all_skills(self):
+        return list(self._skills.values())
+
+    def enabled_skills(self):
+        return list(self._skills.values())
+
+    def rescan(self, *a, **k):
+        return len(self._skills)
+
+
+def _skill(tmp_path: Path, name: str):
+    from types import SimpleNamespace
+
+    d = tmp_path / "skills" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(f"---\nname: {name}\n---\n\n{_SKILL_BODY}", encoding="utf-8")
+    return SimpleNamespace(name=name, path=d)
+
+
+def _skill_env(tmp_path, monkeypatch, name="heal-me"):
+    skill = _skill(tmp_path, name)
+    monkeypatch.setattr("core.skills.registry.get_skill_registry", lambda: _FakeSkillRegistry({name: skill}))
+    monkeypatch.setattr("config.settings.skills_dir", str(tmp_path / "skills"))
+    monkeypatch.setattr(
+        "sessions.manager.get_manager",
+        lambda: __import__("types").SimpleNamespace(has_active_work=lambda strict=False: False),
+    )
+    return skill
+
+
+def _auto_applied(skill_name: str, change: str = "Add: on GPU OOM use --device cpu.") -> str:
+    """A ripe proposal, auto-applied through the real veto-window sweep."""
+    from datetime import datetime, timedelta, timezone
+
+    from core.skills.proposals import auto_apply_ripe_proposals
+    from db.database import connect_sessions
+
+    pid = db.add_skill_proposal(
+        skill_name=skill_name,
+        section="Common Failures",
+        problem="OOM fallback undocumented",
+        proposed_change=change,
+        confidence=0.8,
+        source_origin="refine",
+    )
+    past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+    with connect_sessions() as conn:
+        conn.execute("UPDATE skill_improvement_proposals SET created_at = ? WHERE id = ?", (past, pid))
+    out = auto_apply_ripe_proposals()
+    assert out["applied"] == [pid], out
+    return pid
+
+
+def test_restore_skill_backup_undoes_an_auto_applied_proposal(tmp_path, monkeypatch):
+    from core.skills.proposals import restore_skill_backup
+
+    skill = _skill_env(tmp_path, monkeypatch)
+    before = (skill.path / "SKILL.md").read_text(encoding="utf-8")
+    pid = _auto_applied("heal-me")
+    assert "--device cpu" in (skill.path / "SKILL.md").read_text(encoding="utf-8")
+
+    out = restore_skill_backup(pid)
+
+    assert (skill.path / "SKILL.md").read_text(encoding="utf-8") == before
+    assert out["skill_name"] == "heal-me" and out["status"] == "rolled_back"
+    assert out["from_status"] == "auto_applied"
+    assert db.get_skill_proposal(pid)["status"] == "rolled_back"
+    # Journalled on both sides: the state the rollback replaced is recoverable,
+    # and it did NOT overwrite the apply-time backup it was restoring.
+    root = tmp_path / "skill_backups" / "heal-me"
+    applied_backup = sorted(root.glob("SKILL.md.*"))
+    pre_rollback = sorted(root.glob("SKILL.md.*.pre-rollback"))
+    assert len(pre_rollback) == 1
+    assert "--device cpu" in pre_rollback[0].read_text(encoding="utf-8")
+    assert len(applied_backup) == 2  # the apply-time copy plus the pre-rollback one
+    assert any(
+        "--device cpu" not in b.read_text(encoding="utf-8")
+        for b in applied_backup
+        if not b.name.endswith("pre-rollback")
+    )
+    assert any("rolled back" in (n.get("title") or "").lower() for n in db.get_notifications())
+
+
+def test_rollback_picks_the_backup_from_this_apply_not_the_newest(tmp_path, monkeypatch):
+    """Two applies, two backups. Rolling back the FIRST must not reinstate
+    the state that existed before the second."""
+    from core.skills.proposals import restore_skill_backup
+
+    skill = _skill_env(tmp_path, monkeypatch)
+    md = skill.path / "SKILL.md"
+    original = md.read_text(encoding="utf-8")
+
+    first = _auto_applied("heal-me", change="First change.")
+    after_first = md.read_text(encoding="utf-8")
+    assert "First change." in after_first
+
+    # A second, later backup that must NOT be the one restored.
+    from core.skills.proposals import _backup_skill_md
+
+    md.write_text(after_first + "\nSecond change.\n", encoding="utf-8")
+    later = _backup_skill_md("heal-me", md)
+    later = later.rename(later.with_name("SKILL.md.20991231-235959"))
+    assert "Second change." in later.read_text(encoding="utf-8")
+
+    out = restore_skill_backup(first)
+    assert md.read_text(encoding="utf-8") == original
+    assert "20991231" not in out["backup"]
+
+
+def test_rollback_refuses_a_proposal_that_was_never_applied(tmp_path, monkeypatch):
+    from core.skills.proposals import ProposalApplyError, restore_skill_backup
+
+    _skill_env(tmp_path, monkeypatch)
+    pid = db.add_skill_proposal("heal-me", "Common Failures", "p", "c", 0.8)
+    with pytest.raises(ProposalApplyError) as e:
+        restore_skill_backup(pid)
+    assert "only an applied proposal" in str(e.value)
+
+
+def test_rollback_is_not_repeatable(tmp_path, monkeypatch):
+    from core.skills.proposals import ProposalApplyError, restore_skill_backup
+
+    _skill_env(tmp_path, monkeypatch)
+    pid = _auto_applied("heal-me")
+    restore_skill_backup(pid)
+    with pytest.raises(ProposalApplyError) as e:
+        restore_skill_backup(pid)
+    assert "already been rolled back" in str(e.value)
+
+
+def test_rollback_reports_a_missing_backup_instead_of_guessing(tmp_path, monkeypatch):
+    import shutil
+
+    from core.skills.proposals import ProposalApplyError, restore_skill_backup
+
+    _skill_env(tmp_path, monkeypatch)
+    pid = _auto_applied("heal-me")
+    shutil.rmtree(tmp_path / "skill_backups")
+    with pytest.raises(ProposalApplyError) as e:
+        restore_skill_backup(pid)
+    assert "No backup" in str(e.value)
+
+
+def test_rollback_api_route_sits_next_to_approve_and_reject(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api.routers import skills as skills_router
+
+    skill = _skill_env(tmp_path, monkeypatch)
+    pid = _auto_applied("heal-me")
+
+    app = FastAPI()
+    app.include_router(skills_router.router)
+    client = TestClient(app)
+
+    resp = client.post(f"/api/skills/proposals/{pid}/rollback")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "rolled_back"
+    assert "--device cpu" not in (skill.path / "SKILL.md").read_text(encoding="utf-8")
+
+    # Second call is a 400, not a silent success.
+    assert client.post(f"/api/skills/proposals/{pid}/rollback").status_code == 400
+    assert client.post("/api/skills/proposals/nope/rollback").status_code == 404
+
+
+# --- verify-canary triggered auto-rollback ---------------------------------
+
+
+def _verify_canary(canaries_base: Path, skill_name: str) -> str:
+    from core.canary.skill_verify import VERIFY_TAG, verify_canary_name
+
+    name = verify_canary_name(skill_name)
+    d = canaries_base / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "CANARY.md").write_text(
+        f"---\nname: {name}\nprompt: run it\ngates:\n  - name: g\n    command: 'true'\n"
+        f"tags: [{VERIFY_TAG}]\ncovers: [skill:{skill_name}]\n---\nmanaged\n"
+    )
+    return name
+
+
+def _sweep(canaries_base: Path) -> dict:
+    from core.canary.skill_verify import check_verify_rollbacks
+
+    stats: dict = {}
+    check_verify_rollbacks(canaries_base, stats)
+    return stats
+
+
+def test_a_failing_verify_canary_rolls_back_the_auto_apply(tmp_path, monkeypatch):
+    skill = _skill_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("config.settings.skill_proposal_auto_rollback", True)
+    base = tmp_path / "canaries"
+    name = _verify_canary(base, "heal-me")
+
+    pid = _auto_applied("heal-me")
+    db.add_canary_run(name, "manual", None, "[]", False, outcome="gate_fail")
+
+    stats = _sweep(base)
+    assert stats.get("verify_rolled_back") == [pid]
+    assert db.get_skill_proposal(pid)["status"] == "rolled_back"
+    assert "--device cpu" not in (skill.path / "SKILL.md").read_text(encoding="utf-8")
+    assert any("auto-rolled-back" in (n.get("title") or "") for n in db.get_notifications())
+
+
+def test_auto_rollback_stays_off_behind_its_flag(tmp_path, monkeypatch):
+    skill = _skill_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("config.settings.skill_proposal_auto_rollback", False)
+    base = tmp_path / "canaries"
+    name = _verify_canary(base, "heal-me")
+    pid = _auto_applied("heal-me")
+    db.add_canary_run(name, "manual", None, "[]", False, outcome="gate_fail")
+
+    assert _sweep(base) == {}
+    assert db.get_skill_proposal(pid)["status"] == "auto_applied"
+    assert "--device cpu" in (skill.path / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_a_green_verify_canary_rolls_nothing_back(tmp_path, monkeypatch):
+    _skill_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("config.settings.skill_proposal_auto_rollback", True)
+    base = tmp_path / "canaries"
+    name = _verify_canary(base, "heal-me")
+    pid = _auto_applied("heal-me")
+    db.add_canary_run(name, "manual", None, "[]", True, outcome="pass")
+
+    assert _sweep(base).get("verify_rolled_back") is None
+    assert db.get_skill_proposal(pid)["status"] == "auto_applied"
+
+
+def test_a_failure_that_has_since_gone_green_rolls_nothing_back(tmp_path, monkeypatch):
+    """Only the LATEST run counts — the skill was already fixed."""
+    _skill_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("config.settings.skill_proposal_auto_rollback", True)
+    base = tmp_path / "canaries"
+    name = _verify_canary(base, "heal-me")
+    pid = _auto_applied("heal-me")
+    db.add_canary_run(name, "manual", None, "[]", False, outcome="gate_fail")
+    db.add_canary_run(name, "manual", None, "[]", True, outcome="pass")
+
+    assert _sweep(base).get("verify_rolled_back") is None
+    assert db.get_skill_proposal(pid)["status"] == "auto_applied"
+
+
+def test_a_contaminated_or_timed_out_verify_run_is_not_a_regression(tmp_path, monkeypatch):
+    _skill_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("config.settings.skill_proposal_auto_rollback", True)
+    base = tmp_path / "canaries"
+    name = _verify_canary(base, "heal-me")
+    pid = _auto_applied("heal-me")
+    db.add_canary_run(name, "manual", None, "[]", False, outcome="timeout")
+    db.add_canary_run(name, "manual", None, "[]", False, outcome="contaminated")
+
+    assert _sweep(base).get("verify_rolled_back") is None
+    assert db.get_skill_proposal(pid)["status"] == "auto_applied"
+
+
+def test_an_apply_older_than_the_window_is_not_blamed(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from db.database import connect_sessions
+
+    _skill_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("config.settings.skill_proposal_auto_rollback", True)
+    base = tmp_path / "canaries"
+    name = _verify_canary(base, "heal-me")
+    pid = _auto_applied("heal-me")
+
+    stale = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    with connect_sessions() as conn:
+        conn.execute("UPDATE skill_improvement_proposals SET resolved_at = ? WHERE id = ?", (stale, pid))
+    db.add_canary_run(name, "manual", None, "[]", False, outcome="gate_fail")
+
+    assert _sweep(base).get("verify_rolled_back") is None
+    assert db.get_skill_proposal(pid)["status"] == "auto_applied"
+
+
+def test_auto_rollback_runs_from_the_maintenance_sweep(tmp_path, monkeypatch):
+    """The wiring, not just the function: sync_and_detect is what the nightly
+    canary maintenance calls."""
+    from core.canary.skill_verify import sync_and_detect
+
+    skill = _skill_env(tmp_path, monkeypatch)
+    monkeypatch.setattr("config.settings.skill_proposal_auto_rollback", True)
+    # A real verify block, or the sync retires the managed canary before the
+    # rollback check can read it.
+    (skill.path / "SKILL.md").write_text(
+        "---\nname: heal-me\nverify:\n  prompt: run it\n  gates:\n"
+        "    - name: g\n      command: test -f out.txt\n---\n\n" + _SKILL_BODY,
+        encoding="utf-8",
+    )
+    base = tmp_path / "canaries"
+    name = _verify_canary(base, "heal-me")
+    pid = _auto_applied("heal-me")
+    db.add_canary_run(name, "manual", None, "[]", False, outcome="gate_fail")
+
+    stats = sync_and_detect(base=tmp_path / "skills", canaries_base=base)
+    assert stats["verify_rolled_back"] == [pid]
