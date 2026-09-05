@@ -359,11 +359,28 @@ const SECTIONS = [
             { key: 'reflect_deferred_normal', label: 'Defer Grading (Interactive)', type: 'bool' },
             { key: 'reflect_defer_idle_s', label: 'Defer Delay (seconds)', type: 'number' },
             {
+                key: 'reflect_next_turn_grading',
+                label: 'Grade on Your Next Message',
+                type: 'bool',
+                hint: 'A turn whose deferred grade is still pending when you send the next message is graded '
+                    + 'then, with that message as the evidence — a correction or a repeated request reads as a '
+                    + 'miss, moving on reads as a pass. Off, the grade is simply dropped.',
+            },
+            {
                 key: 'reflect_nonpass_confidence_floor',
                 label: 'Non-pass Confidence Floor (0–1 fraction)',
                 type: 'number', min: 0, max: 1, step: 0.05,
                 hint: 'A retry/escalate verdict the grader itself rates below this confidence is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous", and ambiguity should not burn a retry or fire an escalation. Malformed grades stay conservative. 0 disables.',
             },
+            {
+                key: 'grader_holdout_enabled',
+                label: 'Grader Hold-out Run',
+                type: 'bool',
+                hint: 'Runs the reflect grader nightly over the fixtures in data/eval/grader — cases with a known '
+                    + 'right answer that never reach memory or the workspace. Its accuracy is the only check on '
+                    + 'the grader itself, and it shows in the Explorer’s Self-tuning → Trust tab.',
+            },
+            { key: 'grader_holdout_schedule', label: 'Grader Hold-out Schedule (cron)', type: 'text' },
             { key: 'post_mortem_retention_days', label: 'Post-mortem retention (days)', type: 'number' },
             {
                 key: 'notification_retention_days',
@@ -465,6 +482,15 @@ const SECTIONS = [
             { key: 'adaptive_enabled', label: 'Adaptive Layer Enabled', type: 'bool', risk: 'autonomy' },
             { key: 'adaptive_auto_apply', label: 'Auto-apply Low-risk Edits', type: 'bool', risk: 'autonomy' },
             { key: 'adaptive_auto_rollback', label: 'Auto-rollback on Canary Regression', type: 'bool', risk: 'autonomy' },
+            {
+                key: 'adaptive_pm_drift_rollback',
+                label: 'Auto-rollback on Outcome Drift',
+                type: 'bool',
+                risk: 'autonomy',
+                hint: 'The second rollback trigger, and the stricter one: a two-proportion test on turn outcomes '
+                    + 'before and after the apply, at least 30 graded turns each side, p<0.01. Needs '
+                    + 'Auto-rollback on Canary Regression on — a weaker result only flags the batch suspect.',
+            },
             { key: 'adaptive_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number' },
             { key: 'adaptive_max_entries_per_kind', label: 'Max Entries / Kind', type: 'number' },
             { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (hours)', type: 'number' },
@@ -505,6 +531,22 @@ const SECTIONS = [
                 risk: 'autonomy',
                 restart: RESTART_TOOLS,
                 hint: 'Lets the live agent mint prompt notes and routing hints the moment it learns something — content lint applies, 2/day, normal pipeline + tripwire, never policy.',
+            },
+        ],
+    },
+    {
+        title: 'Skill Self-healing',
+        tab: 'autonomy',
+        description: 'When a skill fails and the session running it finds a workaround, refine can fold that fix back into the skill\'s SKILL.md — a veto window, not an approval gate, with a timestamped backup kept under data/skill_backups/. The window and the daily cap have no control here; set them through the API or data/settings.json. This is the undo.',
+        fields: [
+            {
+                key: 'skill_proposal_auto_rollback',
+                label: 'Auto-rollback on Verify Failure',
+                type: 'bool',
+                risk: 'autonomy',
+                hint: 'A skill whose verify canary fails within 7 days of an auto-apply is restored from the '
+                    + 'backup taken before that apply, and you are notified. Off, a bad auto-apply stays until '
+                    + 'you roll it back from the Explorer’s Capabilities → Skills tab.',
             },
         ],
     },
@@ -1042,6 +1084,27 @@ const _invalidKeys = new Map();       // key -> why it cannot be saved
 
 function _schemaFor(key) {
     return Object.prototype.hasOwnProperty.call(_schema, key) ? _schema[key] : null;
+}
+
+// The three field types the schema deliberately does NOT publish: an API key
+// and a write-only path are redacted by the server, so their absence says
+// nothing about whether the setting exists.
+const _UNPUBLISHED_TYPES = new Set(['apikey', 'certpath', 'writeonly']);
+
+/**
+ * Does this server actually have the setting behind this row?
+ *
+ * A control for a key the server does not know cannot be saved — the value
+ * is dropped — and, worse, it opens the modal permanently dirty: an unset
+ * key is `undefined`, an unticked box is `false`, and collectChanges() reads
+ * that difference as an edit, so Escape asks whether to discard changes
+ * nobody made. Rows for settings that arrive with a later release simply do
+ * not render until the server has them, and then they appear on their own.
+ */
+function _serverKnows(field) {
+    if (_UNPUBLISHED_TYPES.has(field.type)) return true;
+    if (_schemaFor(field.key)) return true;
+    return Object.prototype.hasOwnProperty.call(_original, field.key);
 }
 
 /** The bound to enforce: the server's when it has one, else the field's own. */
@@ -3510,7 +3573,11 @@ function _activateSettingsTab(key) {
 }
 
 function _buildSettingsSection(section, settings) {
-    const fields = section.fields.map(f => buildField(f, settings[f.key]));
+    const known = section.fields.filter(_serverKnows);
+    // A section whose every control belongs to a release this server does not
+    // have yet is a heading over nothing. Drop it whole.
+    if (!known.length) return null;
+    const fields = known.map(f => buildField(f, settings[f.key]));
     const heading = [text(section.title)];
     if (section.description) heading.push(buildHelpIcon(section.description));
     // `data-section` is a handle for a tab that has to place one of its
@@ -3526,7 +3593,10 @@ function _buildSettingsSection(section, settings) {
 }
 
 function buildTabs(settings) {
-    const sectionsFor = key => SECTIONS.filter(s => s.tab === key).map(s => _buildSettingsSection(s, settings));
+    const sectionsFor = key => SECTIONS
+        .filter(s => s.tab === key)
+        .map(s => _buildSettingsSection(s, settings))
+        .filter(Boolean);
 
     // The Security content is built async; it lands in Tools & safety, which
     // is where the rest of the sandbox lives.

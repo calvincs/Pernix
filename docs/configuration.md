@@ -144,6 +144,9 @@ After each agent turn, a lightweight reflect pass verifies that the agent actual
 | `reflect_defer_idle_s` | `300` | Quiet seconds before a deferred grade runs — the wait for a turn the user never answers. With `reflect_next_turn_grading` on, a reply inside this window triggers the grade early instead of cancelling it. |
 | `reflect_nonpass_confidence_floor` | `0.5` | Materiality floor (2026-08-27 calibration audit): a `retry`/`escalate` verdict the grader itself rates below this confidence (0–1) is downgraded to pass-with-lessons — the prompt defines <0.5 as "evidence is ambiguous," and ambiguity should not burn a retry or fire an escalation. Coerced/malformed grades are exempt and stay conservative. `0` disables. |
 | `reflect_experience` | `true` | Parse reflect's per-turn experience read (sentiment, friction, user observations) and feed it to Candor, post-mortems, and user-profile memory. |
+| `reflect_next_turn_grading` | `true` | A turn whose deferred grade is still pending when the user's next message arrives is graded *then*, with that message as evidence ("USER'S NEXT MESSAGE"): a correction, a repeat of the request or a complaint reads as a missed intent (non-pass, cause `agent`); moving on or thanking reads as a pass. A deterministic `next_msg_correction` pre-check is stored in the payload whatever the grader concludes. Off, the grade is dropped and the turn has no outcome at all. The 300 s idle grade still covers turns with no reply. |
+| `grader_holdout_enabled` | `true` | Nightly run of the reflect grader over the fixtures in `data/eval/grader/` — cases with a known verdict and failure cause, covering clean pass, phantom deliverable, refusal-as-completion, correct escalate and the over-strict trap. Fixtures are never written to memory or the workspace. The result (`{accuracy, n, by_case, ran_at, model}`) lands in snooze state as `trust.grader_holdout` and is what the Trust tab's hold-out accuracy reads. |
+| `grader_holdout_schedule` | `30 3 * * *` | Cron for that run. |
 
 ---
 
@@ -300,6 +303,7 @@ A governed, machine-editable policy store — routing hints and prompt notes the
 | `adaptive_enabled` | `false` | Master switch for the store, the producers, and the compiler/scout consumption. |
 | `adaptive_auto_apply` | `true` | Auto-apply low-risk kinds (`routing_hint`, `prompt_note`) during idle windows; high-risk kinds always route through the proposal queue. Run the canary suite for at least a week before relying on this. |
 | `adaptive_auto_rollback` | `false` | Promote a canary-regression tripwire hit to automatic rollback. Off until the metric earns trust — a hit otherwise only flags the batch `suspect`. |
+| `adaptive_pm_drift_rollback` | `false` | The tripwire's second, stricter rollback trigger: a two-proportion z-test on per-turn outcomes (the user's thumbs where there is one, else reflect's verdict) between up to 100 graded turns before the apply and the graded turns after it, minimum 30 each side. `p<0.05` flags the batch `suspect`; `p<0.01` rolls it back through the journal and notifies — and only when `adaptive_auto_rollback` is also on. Replaces the old 20-turn ratio, which could not tell a real regression from eight coin flips. |
 | `adaptive_max_entries_per_kind` | `24` | Cap on active entries per kind. |
 | `adaptive_max_auto_applies_per_day` | `24` | Cap on auto-applied batches per day. |
 | `adaptive_edit_cooldown_hours` | `24` | Minimum hours between machine edits to the same entry. |
@@ -320,12 +324,13 @@ A governed, machine-editable policy store — routing hints and prompt notes the
 
 ## Skill Self-Healing
 
-When a skill fails and the session running it finds a workaround, refine can fold that fix back into the skill's `SKILL.md` — the same veto-window contract as the Adaptive Layer's auto-approve: a pending proposal older than the window is machine-validated (skill exists and is enabled, change bounded, frontmatter preserved) and applied with a timestamped backup under `data/skill_backups/<skill>/`. Reject any proposal from the Explorer's Capabilities → Skills tab inside the window. No Settings UI control for these two knobs; set via `POST /api/settings` or `data/settings.json`.
+When a skill fails and the session running it finds a workaround, refine can fold that fix back into the skill's `SKILL.md` — the same veto-window contract as the Adaptive Layer's auto-approve: a pending proposal older than the window is machine-validated (skill exists and is enabled, change bounded, frontmatter preserved) and applied with a timestamped backup under `data/skill_backups/<skill>/`. Reject any proposal from the Explorer's Capabilities → Skills tab inside the window. The window and the daily cap have no Settings UI control; set them via `POST /api/settings` or `data/settings.json`. The rollback toggle does: Settings → Autonomy & idle work → **Skill Self-healing**.
 
 | Setting | Default | Description |
 |---|---|---|
 | `skill_proposal_auto_apply_after_hours` | `24` | Veto window before a pending SKILL.md proposal auto-applies. `0` disables auto-apply (manual Apply only). |
 | `skill_proposal_max_auto_applies_per_day` | `5` | Cap on auto-applied skill proposals per day. |
+| `skill_proposal_auto_rollback` | `false` | The undo for an auto-apply: a skill whose `verify:` canary fails within 7 days of one is restored from the backup taken before that apply, and you are notified. Off, a bad auto-apply stays until you roll it back by hand. |
 
 ---
 
