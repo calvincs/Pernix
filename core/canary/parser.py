@@ -21,6 +21,23 @@ Format (mirrors SKILL.md, reusing the same frontmatter helper):
     last_reviewed: 2026-08-06
     ---
     Free-form notes for humans reviewing this canary.
+
+GENERATED CANARIES (trust-loop hardening W5). A canary directory may carry a
+``generate.py`` next to its CANARY.md:
+
+    def generate(seed: int) -> dict:
+        return {"prompt": str, "files": {relpath: str}, "gates": [{...}]}
+
+The runner picks a fresh random seed per run and takes prompt/files/gates
+from that call, so a memorised answer cannot pass a sentinel. Such a file
+may omit ``prompt``, ``gates`` and ``files`` — everything else (name,
+timeout, tags, flaky, parked, covers, probe fields) is read normally.
+
+Detection is the sibling ``generate.py`` OR the frontmatter flag
+``generated: true``. Both, because maintenance rewrites (park, flaky, probe
+retirement) revalidate the new text in a bare temp directory where the
+sibling file does not exist — without the flag every generated canary would
+be frozen out of the maintenance sweep by a parse error.
 """
 
 from __future__ import annotations
@@ -36,6 +53,8 @@ from core.skills.parser import parse_frontmatter_md
 logger = logging.getLogger("pernix.canary")
 
 DEFAULT_TIMEOUT_S = 600
+# A canary directory carrying this file builds its fixture per run.
+GENERATOR_FILENAME = "generate.py"
 
 
 class CanaryParseError(Exception):
@@ -74,6 +93,13 @@ class CanaryDef:
     # the run's temp workspace before the prompt is sent, so gates have
     # deterministic fixtures to check (plan §5: fixtures over live URLs).
     files: dict = field(default_factory=dict)
+    # Generated fixtures (W5): True when the canary's prompt/files/gates come
+    # from a per-run `generate(seed)` call instead of the frontmatter.
+    # `generator_path` is the resolved generate.py, or None when the flag is
+    # set but the file is not on disk (a maintenance temp copy — parseable,
+    # not runnable).
+    generated: bool = False
+    generator_path: Path | None = None
 
 
 def canaries_dir() -> Path:
@@ -90,12 +116,18 @@ def parse_canary_md(path: Path) -> CanaryDef:
     if name != path.parent.name:
         logger.warning("Canary name '%s' doesn't match directory '%s'", name, path.parent.name)
 
+    # A generated canary's task IS the generator: prompt, files and gates are
+    # produced per run from a fresh seed, so requiring them in the frontmatter
+    # would mean writing down an answer the design exists to withhold.
+    generator_path = path.parent / GENERATOR_FILENAME
+    generated = bool(fm.get("generated")) or generator_path.is_file()
+
     prompt = str(fm.get("prompt") or "").strip()
-    if not prompt:
+    if not prompt and not generated:
         raise CanaryParseError(f"{path}: missing required field 'prompt'")
 
-    raw_gates = fm.get("gates")
-    if not isinstance(raw_gates, list) or not raw_gates:
+    raw_gates = fm.get("gates") or ([] if generated else None)
+    if not isinstance(raw_gates, list) or (not raw_gates and not generated):
         raise CanaryParseError(f"{path}: 'gates' must be a non-empty list — a canary without gates cannot be scored")
     gates: list[dict] = []
     for i, g in enumerate(raw_gates):
@@ -162,6 +194,8 @@ def parse_canary_md(path: Path) -> CanaryDef:
         body=body,
         path=path,
         files={str(k): str(v) for k, v in files.items()},
+        generated=generated,
+        generator_path=generator_path if generator_path.is_file() else None,
     )
 
 

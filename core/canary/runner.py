@@ -5,6 +5,11 @@ manager.prompt (the cron precedent) → wait for the turn to finish (including
 reflect retries) → score by re-running the canary's gates against the final
 workspace state → canary_runs row → cleanup (gates deleted, temp dir removed).
 
+A canary whose directory carries a generate.py builds its prompt, its seed
+files and its gates from a fresh random seed on every run (core/canary/
+fixtures.py) — the seed is recorded in gate_results_json and the expected
+value exists nowhere the agent can read it.
+
 Sweeps run canaries sequentially and one sweep runs at a time (the scheduler
 holds the lock) — a sweep is a background measurement, not a throughput
 problem. Selection is change-driven: the nightly `scheduled` trigger is a
@@ -94,6 +99,9 @@ class CanaryRunResult:
     error: str = ""
     run_id: int | None = None
     flaky: bool = False
+    # Generated fixtures (W5): the seed this run's prompt/files/gates were
+    # built from, or None for a hand-written canary.
+    seed: int | None = None
 
     @property
     def outcome(self) -> str:
@@ -125,6 +133,7 @@ class CanaryRunResult:
             "error": self.error,
             "run_id": self.run_id,
             "flaky": self.flaky,
+            "seed": self.seed,
         }
 
 
@@ -228,6 +237,18 @@ async def run_canary(
     turn_started = False
     turn_ended = False
     try:
+        # Generated fixture (W5): a fresh seed per run, so the prompt, the
+        # seed files and the expected answer are all different from last
+        # time. The seed is the only part that gets persisted — the expected
+        # value lives solely inside the gate command, which the canary
+        # session cannot read (list_gates is off CANARY_TOOL_ALLOWLIST).
+        if canary.generated:
+            from core.canary.fixtures import generate_variant, pick_seed
+
+            result.seed = pick_seed()
+            canary = generate_variant(canary, result.seed)
+            logger.info("Canary '%s' generated fixture with seed %d", canary.name, result.seed)
+
         _seed_workspace(canary, tmp)
 
         sid = manager.create_session(title=f"Canary: {canary.name}", session_type="canary")
@@ -261,6 +282,10 @@ async def run_canary(
         gate_results = await asyncio.to_thread(run_gates, sid, {}, 1)
         result.gate_results = [g.to_payload() for g in gate_results]
         result.passed = bool(gate_results) and all(g.passed for g in gate_results) and not result.error
+        if result.seed is not None:
+            from core.canary.fixtures import generation_record
+
+            result.gate_results.append(generation_record(result.seed))
         result.retries = int(turn_state(session).reflect_count or 0)
         try:
             result.tokens = int((db.get_session_usage(sid) or {}).get("total", 0))
