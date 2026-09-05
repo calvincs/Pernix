@@ -40,6 +40,18 @@ def _backdate(pid: int, hours: int) -> None:
         conn.execute("UPDATE adaptive_proposals SET created_at = ? WHERE id = ?", (old, pid))
 
 
+def _receipt_evidence() -> str:
+    """evidence_json with one ref that resolves.
+
+    Since 2026-09-04 the veto clock only takes proposals whose evidence
+    points at a recorded outcome (core/adaptive/receipts.py); these tests
+    are about the SUMMARY text, so they need to get past that gate.
+    """
+    sid = db.create_session(title="receipt-source")
+    pm_id = db.add_post_mortem(sid, 1, "retry", "agent", 0.8, "m", 1, None, None, "{}")
+    return json.dumps([f"pm:{pm_id}"])
+
+
 _POLICY = [
     {
         "action": "create",
@@ -125,7 +137,7 @@ def test_auto_approve_summary_for_a_memory_correction_says_there_is_no_batch(mon
         return list(files)
 
     monkeypatch.setattr(ingest_mod, "apply_memory_correction", _fake)
-    pid = db.adaptive_add_proposal("dream", json.dumps(_CORRECTION), "[]", "why")
+    pid = db.adaptive_add_proposal("dream", json.dumps(_CORRECTION), _receipt_evidence(), "why")
     _backdate(pid, 30)
 
     out = auto_approve_stale_proposals()
@@ -142,7 +154,7 @@ def test_auto_approve_summary_for_a_memory_correction_says_there_is_no_batch(mon
 def test_auto_approve_summary_for_a_batch_names_the_batch_to_roll_back():
     from core.adaptive import auto_approve_stale_proposals
 
-    pid = db.adaptive_add_proposal("refine", json.dumps(_POLICY), "[]", "why")
+    pid = db.adaptive_add_proposal("refine", json.dumps(_POLICY), _receipt_evidence(), "why")
     _backdate(pid, 30)
 
     out = auto_approve_stale_proposals()
