@@ -18,6 +18,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from db import models as db
 from db.database import connect_sessions
 
 
@@ -153,6 +154,31 @@ def compute(since_iso: str | None = None, until_iso: str | None = None, days: in
         report.signals_by_type = dict(by_type)
 
     return report
+
+
+def grader_agreement(since_iso: str | None = None) -> dict:
+    """How often the reflect grader and the user reached the same conclusion.
+
+    Over post-mortems carrying a user signal: `pass` agrees with a thumbs-up,
+    any non-pass verdict agrees with a thumbs-down. That is the grader's own
+    report card, and it is the number that decides whether self-grading can be
+    trusted at all — a loop whose verifier disagrees with the human half the
+    time is not measuring quality, it is generating noise.
+
+    Returns {"agreement": float, "n": int}. With no signals yet the answer is
+    an honest zero over n=0; read the share only once n is worth reading.
+    """
+    rows = db.post_mortems_with_user_signal(since_iso)
+    n = len(rows)
+    if not n:
+        return {"agreement": 0.0, "n": 0}
+    agreed = 0
+    for r in rows:
+        verdict = str(r.get("verdict") or "")
+        signal = str(r.get("user_signal") or "")
+        if (verdict == "pass" and signal == "up") or (verdict != "pass" and signal == "down"):
+            agreed += 1
+    return {"agreement": round(agreed / n, 4), "n": n}
 
 
 def _percentile(values: list[int | float], p: int) -> float:
