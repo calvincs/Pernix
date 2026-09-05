@@ -512,8 +512,13 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
         stats["skipped_reason"] = "session_not_found"
         return stats
 
-    if session.get("session_type") == "worker":
-        stats["skipped_reason"] = "worker_session"
+    # Canary isolation (trust-loop hardening W5): a canary transcript is eval
+    # data, so refine neither learns lessons nor proposes skill edits or new
+    # canaries from one. db.get_unrefined_sessions already excludes the type;
+    # this guard covers direct callers, which the selector cannot.
+    session_type = session.get("session_type") or "normal"
+    if session_type in ("worker", "canary"):
+        stats["skipped_reason"] = f"{session_type}_session"
         return stats
 
     messages = db.get_messages(session_id)

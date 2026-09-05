@@ -94,8 +94,9 @@ Canary sessions are deliberately hard synthetic tasks; letting them leak into
 the stores that shape live behavior would poison the very signals they exist
 to guard. The isolation is an enumerated predicate list, not a vibe:
 
-- **No memory writes** — the memory-write tools are denied to canary
-  sessions (reads stay: recall quality is part of what's measured).
+- **No memory at all** — writes *and* reads. The memory-write tools are
+  denied to the session type; `recall`/`deep_recall` are off the allowlist
+  and the scout does no memory preload (see *Canary isolation* below).
 - **Invisible to search** — canary messages are excluded from session FTS.
 - **Excluded from distill/refine sweeps** and from Candor's reliability
   ledger.
@@ -105,12 +106,50 @@ to guard. The isolation is an enumerated predicate list, not a vibe:
   block its idle gate, so the nightly sweep and idle housekeeping coexist.
 - **Hidden from the session sidebar** like Dream journals.
 - **Tool-allowlisted** — every canary session runs under
-  `CANARY_TOOL_ALLOWLIST` (computation and reads only: file/search/repl
-  tools, memory *recall*, read-only skill and tool discovery), enforced at
-  the same three points as scheduled-job charters. Canary prompts carry
+  `CANARY_TOOL_ALLOWLIST` (computation and workspace reads only: file/search/
+  repl tools plus read-only skill and tool discovery), enforced at the same
+  three points as scheduled-job charters. Canary prompts carry
   machine-authored content — auto-admitted tasks, injected SKILL.md bodies
   during skill-verify runs — so workers, jobs, notifications, and every
   skill/tool/memory mutation are fenced off for the whole session type.
+
+### Canary isolation
+
+The suite exists to measure one thing: how the pipeline performs **under the
+treatment** — the adaptive entries and skills in force right now. Anything
+that lets a canary read the learning stores measures the stores instead, and
+anything that lets the learning stores read a canary poisons the live agent
+with synthetic, deliberately-hard transcripts. The 2026-09-04 hardening
+audited every path in both directions and turned the list into assertions
+(`tests/test_canary_isolation_hardening.py`).
+
+**Nothing learns from a canary session.**
+
+| Path | Guarantee |
+|---|---|
+| Memory distillation | `distill_session` returns immediately for `session_type == "canary"` — the guard is on the funnel, not only on `sessions/hooks._maybe_distill`, so no future caller can reopen it. The snooze catch-up selector excludes the type in SQL. |
+| Refine | `run_for_session` skips with `skipped_reason="canary_session"`, so no lesson, no SKILL.md proposal, and no *canary* proposal is ever derived from a scored run. `db.get_unrefined_sessions` excludes the type as well. |
+| User-profile sweep | Snooze's insight extraction excludes canary sessions (it excluded workers only until W5). |
+| Distill-coverage audit | Excludes the type in SQL. |
+| Candor ledger, gate trace, dream observation, TELOS anomalies, model-routing aggregation | Early-return on the type; post-mortems are written but stamped `session_type='canary'` and skipped by the passive tripwire window. |
+| Space suggestions | The candidate query is `session_type = 'normal'`. |
+| Auto-title | The runner names every session `Canary: <name>` at creation, and the titler only fires on sessions still called `New session`. |
+| Cross-session search | `search_messages_fts` excludes canary rows, so a canary transcript cannot surface in another session's scout. |
+| Retention | Canary sessions are pruned with no distill-before-delete digest. |
+
+**No canary session learns from us.**
+
+| Path | Guarantee |
+|---|---|
+| Scout preload | For a canary brief, the memory baseline, deep-memory, cross-session and lessons gatherers all return `None` (`scout.runner.memory_recall_denied`). The non-memory preload — tools, skills, models, adaptive hints, candor intel, workspace state — is the treatment and stays. |
+| Scout tools | `search_memory` is removed from the scout's tool schema, and `_exec_scout_tool` refuses it as a backstop. |
+| Scout fallback | The deterministic fallback report skips its `store.recall` too. |
+| Agent tools | `recall` and `deep_recall` are off `CANARY_TOOL_ALLOWLIST`; the memory-write tools were already denied by `denied_session_types`. |
+| The answer key | `list_gates` is off the allowlist. It prints each gate's command verbatim, and a canary gate command *is* the expected answer (`grep -qx '13' answer.txt`) — one tool call used to turn every scored task into an open-book exam. |
+
+What a canary deliberately *keeps*: bash, the file/search/repl tools, skill
+discovery and loading, and every adaptive entry that renders into the prompt.
+Those are the treatment under measurement, not contamination.
 
 ### Triggers — change-driven, not wall-clock
 

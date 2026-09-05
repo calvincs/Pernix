@@ -40,13 +40,25 @@ _POLL_INTERVAL_S = 1.0
 # Canary prompts include machine-authored content — auto-admitted tasks,
 # skill-verify runs whose injected SKILL.md may instruct mutating actions —
 # so the session gets computation and reads only: workspace/file/search
-# tools, memory RECALL (recall quality is part of what's measured; writes
-# stay denied by the denied_session_types belt), and read-only skill/tool
-# discovery so a skill-verify canary can load the skill under test. No
-# workers, no jobs, no notifications, no skill/tool/memory mutation. Bash
-# remains — the seed tasks need it — so this is a strong fence, not a jail;
-# the verify-gate allowlist proof narrows what machine-authored canaries
-# can make of it.
+# tools plus read-only skill/tool discovery, so a skill-verify canary can
+# load the skill under test. No workers, no jobs, no notifications, no
+# skill/tool mutation. Bash remains — the seed tasks need it — so this is a
+# strong fence, not a jail; the verify-gate allowlist proof narrows what
+# machine-authored canaries can make of it.
+#
+# Three names were REMOVED by the 2026-09-04 trust-loop hardening (W5):
+#
+#   recall / deep_recall — memory reads. The suite's job is to measure the
+#     pipeline under the treatment (adaptive entries, skills), and "eval data
+#     stays out of memory, memory stays out of eval" is only half true while
+#     a canary can look its own answer up. The scout's preload recall is
+#     fenced at the same time (scout.runner.memory_recall_denied); memory
+#     WRITES were already denied by the denied_session_types belt.
+#   list_gates — it prints each gate's command verbatim, and a canary gate
+#     command *is* the answer key (`grep -qx '13' answer.txt`). One tool call
+#     turned every scored task into an open-book exam. Generated fixtures
+#     make this decisive: the expected value exists only inside the gate
+#     command, so the command must not be readable from inside the run.
 CANARY_TOOL_ALLOWLIST = frozenset(
     {
         "bash",
@@ -58,13 +70,10 @@ CANARY_TOOL_ALLOWLIST = frozenset(
         "grep",
         "repl",
         "view_image",
-        "recall",
-        "deep_recall",
         "discover_skills",
         "load_skill",
         "read_skill_resource",
         "discover_tools",
-        "list_gates",
     }
 )
 # Only used on the degraded no-task-handle path in _wait_for_turn_end: how long

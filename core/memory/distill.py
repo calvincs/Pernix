@@ -153,6 +153,14 @@ async def distill_session(
     session_type: str = "normal",
 ) -> None:
     """Extract and save key knowledge from a session."""
+    # Canary isolation (trust-loop hardening W5): eval transcripts never
+    # become memory. sessions/hooks._maybe_distill already returns early and
+    # every background selector excludes the type in SQL, but the guard lives
+    # HERE too — this is the only funnel every distill path passes through, so
+    # a future caller cannot reopen the leak by forgetting a WHERE clause.
+    if session_type == "canary":
+        return
+
     from core.llm.client import get_llm_client
     from core.memory.store import get_memory_store
 

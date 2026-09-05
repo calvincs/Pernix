@@ -794,7 +794,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                      AND {db.SQL_SESSION_IS_IDLE}
                      AND s.updated_at < ?
                      AND s.archived_at IS NULL
-                     AND s.session_type != 'worker'
+                     AND s.session_type NOT IN ('worker', 'canary')
                      AND (
                          SELECT COUNT(*) FROM messages m
                          WHERE m.session_id = s.id
