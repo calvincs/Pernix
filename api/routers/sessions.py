@@ -640,6 +640,87 @@ async def get_session_turns(session_id: str, before_turn: int = 0, limit: int = 
     return await _asyncio.to_thread(db.get_turns, session_id, before_turn=before_turn, limit=limit)
 
 
+# ---------------------------------------------------------------------------
+# Message feedback — the user's own verdict on a turn
+#
+# The one outcome in the loop nothing in the system authored, so it outranks
+# both the next-message reading and the reflect verdict. Writing it also
+# corrects the per-entry credit that verdict handed out (core/feedback.py).
+# ---------------------------------------------------------------------------
+
+_FEEDBACK_SIGNALS = ("up", "down")
+_FEEDBACK_NOTE_MAX = 2000
+
+
+def _feedback_message(session_id: str, message_id: str) -> dict:
+    """The assistant message a reaction may attach to, or the right HTTP error.
+
+    A thumb is a verdict on what the agent said, so it only lands on assistant
+    rows: a reaction on a tool result or on the user's own message would have
+    no turn outcome to argue with.
+    """
+    try:
+        mid = int(message_id)
+    except (TypeError, ValueError):
+        raise HTTPException(404, detail=f"Message {message_id} not found")
+    msg = db.get_message(mid)
+    if not msg or msg.get("session_id") != session_id:
+        raise HTTPException(404, detail=f"Message {message_id} not found in session {session_id}")
+    if msg.get("role") != "assistant":
+        raise HTTPException(400, detail="Feedback applies to assistant messages only")
+    return msg
+
+
+@router.post("/api/sessions/{session_id}/messages/{message_id}/feedback")
+async def set_message_feedback(session_id: str, message_id: str, body: dict = {}):
+    """Record, replace or withdraw the user's reaction to one assistant message.
+
+    `signal` is "up", "down", or null to withdraw. A reaction is a state, not
+    an event: pressing the other thumb replaces the row rather than appending
+    to it. The optional `note` rides along on a thumbs-down so "wrong" can say
+    what was wrong.
+    """
+    import asyncio as _asyncio
+
+    signal = body.get("signal")
+    if signal is not None and signal not in _FEEDBACK_SIGNALS:
+        raise HTTPException(400, detail="signal must be 'up', 'down', or null")
+    note = body.get("note") or ""
+    if not isinstance(note, str):
+        raise HTTPException(400, detail="note must be a string")
+    note = note.strip()[:_FEEDBACK_NOTE_MAX]
+
+    await _asyncio.to_thread(_feedback_message, session_id, message_id)
+
+    if signal is None:
+        await _asyncio.to_thread(db.delete_message_feedback, session_id, message_id)
+        stored = {"message_id": str(message_id), "signal": None, "note": ""}
+    else:
+        stored = await _asyncio.to_thread(db.upsert_message_feedback, session_id, message_id, signal, note)
+
+    # Ground truth beats self-grading: stamp the turn's post-mortem and undo
+    # or apply the credit its verdict handed the entries it used. Never fatal
+    # — the click is stored either way.
+    from core.feedback import apply_user_signal
+
+    await _asyncio.to_thread(apply_user_signal, session_id, message_id, signal)
+
+    return {"message_id": stored["message_id"], "signal": stored["signal"], "note": stored.get("note") or ""}
+
+
+@router.get("/api/sessions/{session_id}/feedback")
+async def list_session_feedback(session_id: str):
+    """Every reaction in this session — one call, so the transcript can render
+    its thumbs without a request per message."""
+    import asyncio as _asyncio
+
+    session = await _asyncio.to_thread(db.get_session, session_id)
+    if not session:
+        raise HTTPException(404, detail=f"Session {session_id} not found")
+    items = await _asyncio.to_thread(db.list_message_feedback, session_id)
+    return {"items": items}
+
+
 @router.post("/api/sessions/{session_id}/pause")
 async def http_pause_session(session_id: str):
     """Pause ANY session (not just workers) at its next pre-round checkpoint.
