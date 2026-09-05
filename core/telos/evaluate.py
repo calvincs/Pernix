@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from config import settings
 from core.telos.store import TelosObject, TelosStore
@@ -96,6 +97,36 @@ def _gather_evidence(store: TelosStore, h: TelosObject) -> str:
         except Exception as e:
             logger.debug("telos: candor evidence failed: %s", e)
     return "\n".join(lines[:16])
+
+
+# Candor's intel brief renders each fact key as "- pred(arg, ...): ..." and
+# post-mortem ids reach the blob as "pm:<id>" where the trace quotes one.
+_CANDOR_BRIEF_RE = re.compile(r"^\s*-\s+(\w+)\(([^)]*)\)\s*:", re.MULTILINE)
+_PM_REF_RE = re.compile(r"\bpm:([0-9a-fA-F-]{6,})\b")
+_MAX_RECEIPTS = 4
+
+
+def _receipts_from_evidence(evidence: str) -> list[str]:
+    """Receipt refs the gathered evidence blob actually carries.
+
+    `_gather_evidence` returns prose lines, not structured refs, so the only
+    honest way to stamp receipts on a TELOS hint is to read back the two
+    shapes the blob is known to contain: Candor brief lines and any quoted
+    post-mortem id. Bounded, deduped, and empty when the blob is all memory
+    and trace text — an unfounded hint waiting for a human is the correct
+    outcome in that case, not an invented ref.
+    """
+    refs: list[str] = []
+    for m in _CANDOR_BRIEF_RE.finditer(evidence or ""):
+        args = ", ".join(a.strip() for a in m.group(2).split(",") if a.strip())
+        ref = f"candor:{m.group(1)}({args})"
+        if ref not in refs:
+            refs.append(ref)
+    for m in _PM_REF_RE.finditer(evidence or ""):
+        ref = f"pm:{m.group(1)}"
+        if ref not in refs:
+            refs.append(ref)
+    return refs[:_MAX_RECEIPTS]
 
 
 def parse_verdict(raw: str) -> dict | None:
@@ -220,7 +251,16 @@ async def evaluate_one(store: TelosStore, gated: list[TelosObject], is_cancelled
                 "scope": "global",
                 "title": f"telos: {str(h.get('statement') or '')[:70]}",
                 "content": (f"{str(h.get('statement') or '').strip()[:280]} ({parsed['note'][:120]})"),
-                "evidence": [claim.id, h.id, str(h.get("question", ""))],
+                # Receipts first (core/adaptive/receipts.py), then the TELOS
+                # ids a reader follows back into the soup. The claim/question
+                # ids resolve nowhere the adaptive layer can see, so without
+                # the refs pulled out of the evidence blob this hint could
+                # never be grounded and would wait on a human forever.
+                "evidence": (
+                    [f"hypothesis:{h.id}"]
+                    + _receipts_from_evidence(evidence)
+                    + [claim.id, h.id, str(h.get("question", ""))]
+                ),
             }
             reason = lint_edit(edit)
             if reason:

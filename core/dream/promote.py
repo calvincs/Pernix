@@ -86,20 +86,36 @@ or
 
 
 def _evidence_refs(row: dict) -> list[str]:
-    """Flatten the hypothesis's content-hash-pinned evidence into string refs."""
-    refs: list[str] = [f"dream_hypothesis:{row['id']}"]
+    """Flatten the hypothesis's pinned evidence into refs, receipts first.
+
+    The receipt grammar (core/adaptive/receipts.py) leads: `hypothesis:<id>`
+    for the finding itself, then a `pm:` for every graded turn and a
+    `candor:` for every fact key the hypothesis was built on. Those are what
+    the auto-approval sweep can resolve. The older human-readable refs
+    (memory files, session ids) follow unchanged — they were never
+    resolvable, but they are what a person reads first in the panel.
+    """
+    refs: list[str] = [f"hypothesis:{row['id']}"]
+    tail: list[str] = [f"dream_hypothesis:{row['id']}"]
     try:
         for item in json.loads(row.get("evidence_json") or "[]"):
             if isinstance(item, dict):
-                ident = item.get("id") or item.get("session_id") or item.get("file") or ""
                 kind = item.get("type", "ref")
+                if kind == "pm" and item.get("id"):
+                    refs.append(f"pm:{item['id']}")
+                    continue
+                if kind == "candor" and item.get("pred"):
+                    args = ", ".join(str(a) for a in (item.get("args") or []))
+                    refs.append(f"candor:{item['pred']}({args})")
+                    continue
+                ident = item.get("id") or item.get("session_id") or item.get("file") or ""
                 if ident:
-                    refs.append(f"{kind}:{ident}")
+                    tail.append(f"{kind}:{ident}")
             elif item:
-                refs.append(str(item))
+                tail.append(str(item))
     except (TypeError, ValueError):
         pass
-    return refs
+    return refs + [r for r in tail if r not in refs]
 
 
 def _title_for(row: dict) -> str:
