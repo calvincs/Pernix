@@ -171,6 +171,16 @@ Every assistant reply also carries its own small chip — `qwen3-27b · 4.2s` �
 
 ---
 
+## Rating an answer
+
+Every assistant reply can be marked **Helpful** or **Not helpful**. On a mouse the two thumbs sit in the reply's hover toolbar, next to *Copy message*; on touch that toolbar collapses into one `⋯` whose sheet holds **Copy message**, **Helpful** and **Not helpful**. Pressing the thumb that is already set removes the rating — the same button is the undo — and a thumbs-down then offers one optional line about what went wrong, which you can skip with Escape or the **Skip** button. The rating is saved either way, before the note is asked for.
+
+It is worth doing, because a rating is the only thing in the loop that is not the model's opinion of itself. Reflect's own verdict on a turn is a grade written by a model about a model; a thumbs outranks it, and outranks what Pernix reads into your next message, when the turn's outcome is recorded. That outcome is what decides whether a rule the agent wrote about itself survives. The **Explorer → Self-tuning → Trust** tab reports how often the two agree.
+
+Ratings are per message and stored with the session. They are never asked for on your own messages, on a reply still streaming (it has no stored message id yet — reopen the session and it can be rated), or in a self-check (canary) or worker session, whose transcripts are deliberately kept out of the learning loop.
+
+---
+
 ## Backpressure and the message queue
 
 A session is single-threaded — only one turn runs at a time. If you send messages while one is processing, they queue in `pending_messages`. The cap is `max_pending_messages` (default 10).
