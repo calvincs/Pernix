@@ -1,0 +1,10 @@
+{
+  "id": "over-strict-plan-deviation",
+  "user_request": "What's the default value of adaptive_edit_cooldown_hours?",
+  "transcript_excerpt": "SCOUT DELIVERABLES PLAN:\n1. Write a settings-audit table to reports/settings-audit.md\n2. Cross-check every adaptive_* default against docs/configuration.md\n3. Report the cooldown value\n\nPLANNED APPROACH: build the audit file first, answer from it.\n\n[TOOL CALL: bash]\nArguments: {\"command\": \"grep -n 'adaptive_edit_cooldown_hours' config.py\"}\n[TOOL RESULT: bash]\n431:    adaptive_edit_cooldown_hours: int = 24\n\n[ASSISTANT]\n24 hours.",
+  "final_response": "24 hours (config.py:431, `adaptive_edit_cooldown_hours: int = 24`).",
+  "tool_summary": {"bash": {"calls": 1, "failures": 0, "total_latency_ms": 30}},
+  "expected_verdict": "pass",
+  "expected_failure_cause": "none",
+  "note": "The over-strict trap. Scout planned an audit file and a cross-check; the user asked one question and got the right answer with a citation. Plan items the user's request does not require are the planner's elaboration — grading this 'retry' for the missing reports/settings-audit.md is plan-literalism, the single most common over-strict verdict on the box."
+}

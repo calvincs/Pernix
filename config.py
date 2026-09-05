@@ -777,6 +777,14 @@ class Settings:
         # scout_timeout values from blocking retries when plenty of wall-clock time remains.
         # Formula is min(scout_timeout × 3 + 30, this cap). Raise to be more conservative.
     )
+    # Grader hold-out (core/reflect_holdout.py): nightly, the reflect grader
+    # is run against data/eval/grader/*.json — turns whose correct verdict is
+    # already known — and the score lands in snooze_state under
+    # `trust.grader_holdout`. Nothing else grades the grader, and its verdict
+    # mix has drifted before. The fixtures never enter memory, the workspace,
+    # or post_mortems; a hold-out the loop can learn from measures nothing.
+    grader_holdout_enabled: bool = True
+    grader_holdout_schedule: str = "30 3 * * *"  # cron expression, UTC
     post_mortem_retention_days: int = 90  # Days to keep synthesized post-mortems before snooze sweeps them
     # Notifications had NO retention at all — the table only ever shrank by
     # manual dismiss clicks, and idle-loop producers refill it on a fixed

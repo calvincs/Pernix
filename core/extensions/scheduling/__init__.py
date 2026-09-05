@@ -52,8 +52,18 @@ def _get_scheduler():
 
 
 def init_scheduler():
-    """Initialize the scheduler on the main event loop (call from app startup)."""
+    """Initialize the scheduler on the main event loop (call from app startup).
+
+    The grader hold-out installs itself here rather than from a second call
+    in api/app.py: it is transient like the canary heartbeat, derived from
+    settings each boot, and idempotent (replace_existing), so there is no
+    state for a caller to get wrong.
+    """
     _get_scheduler()
+    try:
+        ensure_grader_holdout_schedule()
+    except Exception as e:  # pragma: no cover — a schedule must never fail boot
+        logger.warning("Grader hold-out schedule skipped: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -1111,6 +1121,78 @@ def ensure_canary_schedule() -> None:
         logger.info("Canary heartbeat scheduled: %s", settings.canary_schedule)
     except Exception as e:
         logger.warning("Failed to schedule canary sweep: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Grader hold-out: nightly scoring of the reflect grader against known answers
+# ---------------------------------------------------------------------------
+
+_grader_holdout_lock = asyncio.Lock()
+
+
+async def _execute_grader_holdout_job(meta: dict):
+    """Nightly hold-out executor. Never raises.
+
+    Costs one grading call per fixture (nine, at this size) and writes
+    nothing but the score — no session, no post-mortem, no memory. The lock
+    is the same guard the other slow loops use: a second run while one is in
+    flight would double the spend to re-derive the same number.
+    """
+    if not settings.grader_holdout_enabled:
+        return
+    if _grader_holdout_lock.locked():
+        logger.info("Grader hold-out skipped: a run is already in flight")
+        return
+    async with _grader_holdout_lock:
+        try:
+            from core.reflect_holdout import run_holdout
+
+            report = await run_holdout()
+            logger.info("Grader hold-out: accuracy=%s over n=%s", report.get("accuracy"), report.get("n"))
+        except Exception as e:
+            logger.error("Grader hold-out failed: %s", e)
+
+
+def ensure_grader_holdout_schedule() -> None:
+    """Install the nightly hold-out job from settings (transient, like the
+    canary heartbeat above — config is the truth, never persisted to JSON)."""
+    if not settings.grader_holdout_enabled:
+        return
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+
+        scheduler.add_job(
+            _execute_grader_holdout_job,
+            trigger=CronTrigger.from_crontab(settings.grader_holdout_schedule, timezone="UTC"),
+            id="_grader_holdout",
+            replace_existing=True,
+            coalesce=True,
+            misfire_grace_time=3600,
+            kwargs={"meta": {"kind": "grader_holdout", "transient": True, "trigger": "scheduled"}},
+        )
+        logger.info("Grader hold-out scheduled: %s", settings.grader_holdout_schedule)
+    except Exception as e:
+        logger.warning("Failed to schedule the grader hold-out: %s", e)
+
+
+def enqueue_grader_holdout() -> bool:
+    """Run the hold-out ASAP without blocking the caller (manual trigger)."""
+    scheduler = _get_scheduler()
+    if not scheduler:
+        return False
+    from apscheduler.triggers.date import DateTrigger
+
+    scheduler.add_job(
+        _execute_grader_holdout_job,
+        trigger=DateTrigger(run_date=datetime.now(timezone.utc)),
+        id="_grader_holdout_manual",
+        replace_existing=True,
+        kwargs={"meta": {"kind": "grader_holdout", "transient": True, "trigger": "manual"}},
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------
