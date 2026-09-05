@@ -102,13 +102,24 @@ class CanaryRunResult:
     # Generated fixtures (W5): the seed this run's prompt/files/gates were
     # built from, or None for a hand-written canary.
     seed: int | None = None
+    # Post-run contamination findings (W5). Non-empty disqualifies the run:
+    # `passed` stays exactly as the gates scored it, `outcome` becomes
+    # 'contaminated', and the tripwire drops the row from both testimony and
+    # baselines. See core/canary/contamination.py.
+    contamination: list[str] = field(default_factory=list)
 
     @property
     def outcome(self) -> str:
-        """pass | gate_fail | timeout | error | noop — the honest failure
-        taxonomy. Only gate_fail means "the agent ran and the work was wrong";
-        the others are wall-clock or harness trouble and must never feed the
-        per-task tripwire."""
+        """contaminated | pass | gate_fail | timeout | error | noop — the
+        honest failure taxonomy. Only gate_fail means "the agent ran and the
+        work was wrong"; the others are wall-clock or harness trouble and
+        must never feed the per-task tripwire.
+
+        'contaminated' outranks every other value, pass included: a run that
+        broke isolation measured something other than the pipeline, so it can
+        neither convict a batch nor vouch for one."""
+        if self.contamination:
+            return "contaminated"
         if self.passed:
             return "pass"
         if self.error.startswith("timeout"):
@@ -134,6 +145,7 @@ class CanaryRunResult:
             "run_id": self.run_id,
             "flaky": self.flaky,
             "seed": self.seed,
+            "contamination": self.contamination,
         }
 
 
@@ -325,6 +337,26 @@ async def run_canary(
                 canary.name,
                 tmp,
             )
+
+    # Post-run contamination scan (W5). Deliberately outside the try/finally
+    # above: a timed-out or errored run is exactly the kind that wandered, and
+    # the scan needs only the session id and the workspace PATH, not its
+    # contents — which the finally block has already reclaimed.
+    if sid:
+        try:
+            from core.canary.contamination import contamination_record, notify, scan_session
+
+            result.contamination = scan_session(sid, str(tmp), canary.name)
+            if result.contamination:
+                logger.warning(
+                    "Canary '%s' run contaminated (%s)",
+                    canary.name,
+                    "; ".join(result.contamination),
+                )
+                result.gate_results.append(contamination_record(result.contamination))
+                notify(canary.name, sid, result.contamination)
+        except Exception as e:
+            logger.warning("Contamination scan failed for '%s': %s", canary.name, e)
 
     try:
         result.run_id = db.add_canary_run(

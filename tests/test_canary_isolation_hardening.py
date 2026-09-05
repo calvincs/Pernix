@@ -765,3 +765,242 @@ def test_a_static_canary_records_no_seed(monkeypatch):
 
     r = CanaryRunResult(task="file-create", passed=True, trigger="manual")
     assert r.seed is None and r.to_dict()["seed"] is None
+
+
+# ---------------------------------------------------------------------------
+# Post-run contamination scan
+# ---------------------------------------------------------------------------
+
+WS = "/tmp/canary-demo-1234"
+
+
+def _msg(content="", tool_calls=None):
+    import json as _json
+
+    row = {"role": "assistant", "content": content}
+    if tool_calls is not None:
+        row["tool_calls"] = _json.dumps(
+            [
+                {"id": f"c{i}", "type": "function", "function": {"name": n, "arguments": a}}
+                for i, (n, a) in enumerate(tool_calls)
+            ]
+        )
+    return row
+
+
+def _scan(messages, name="gen-grep-count", known=("file-create", "grep-count", "json-transform")):
+    from core.canary.contamination import scan_session
+
+    return scan_session("sid", WS, name, known_canaries=list(known), messages=messages)
+
+
+def test_a_well_behaved_canary_run_scans_clean():
+    assert (
+        _scan(
+            [
+                _msg("Counting ERROR lines.", [("bash", '{"command": "grep -c ERROR logs/app.log"}')]),
+                _msg("", [("file_write", '{"path": "answer.txt", "content": "7"}')]),
+                {"role": "tool", "content": "7"},
+            ]
+        )
+        == []
+    )
+
+
+def test_scan_catches_a_memory_tool_call():
+    findings = _scan([_msg("", [("recall", '{"query": "gen-grep-count answer"}')])])
+    assert findings and "memory tool called: recall" in findings[0]
+
+
+def test_scan_catches_every_memory_verb():
+    from core.canary.contamination import MEMORY_TOOL_NAMES
+
+    for verb in sorted(MEMORY_TOOL_NAMES):
+        assert _scan([_msg("", [(verb, "{}")])]), verb
+
+
+def test_scan_catches_a_read_outside_the_workspace():
+    findings = _scan([_msg("", [("file_read", '{"path": "/home/pernix/data/memories/user.profile"}')])])
+    assert any("outside the workspace" in f for f in findings)
+    assert any("/home/pernix/data/memories/user.profile" in f for f in findings)
+
+
+def test_scan_catches_a_bash_escape_from_the_workspace():
+    findings = _scan([_msg("", [("bash", '{"command": "cat /home/calvin/Pernix/data/adaptive/ADAPTIVE.md"}')])])
+    assert any("outside the workspace" in f for f in findings)
+
+
+def test_scan_accepts_the_workspace_toolchain_and_relative_paths():
+    assert (
+        _scan(
+            [
+                _msg("", [("file_read", '{"path": "' + WS + '/logs/app.log"}')]),
+                _msg("", [("bash", '{"command": "/usr/bin/env python3 -c \\"print(1/2)\\""}')]),
+                _msg("", [("bash", '{"command": "wc -l logs/*.log > answer.txt"}')]),
+                _msg("", [("bash", '{"command": "grep -c ERROR logs/app.log 2>/dev/null"}')]),
+            ]
+        )
+        == []
+    )
+
+
+def test_scan_catches_a_reference_to_the_suite_directory():
+    findings = _scan([{"role": "assistant", "content": "I will look in data/canaries for the expected answer."}])
+    assert any("data/canaries" in f for f in findings)
+
+
+def test_scan_catches_another_canarys_name_in_the_transcript():
+    findings = _scan([{"role": "assistant", "content": "This is the same task as grep-count, whose answer is 8."}])
+    assert any("names other canaries" in f for f in findings)
+
+
+def test_a_canarys_own_name_is_never_a_finding():
+    """gen-grep-count contains 'grep-count' as a substring; matching on bare
+    substrings would make every generated sentinel permanently contaminated."""
+    assert (
+        _scan(
+            [
+                {"role": "user", "content": "gen-grep-count: count the ERROR lines"},
+                {"role": "assistant", "content": "Done — gen-grep-count answered."},
+            ]
+        )
+        == []
+    )
+
+
+def test_scan_never_raises_on_junk():
+    assert _scan([{"role": "assistant", "tool_calls": "not json"}, {}, {"role": "tool", "content": None}]) == []
+
+
+def test_contamination_outranks_every_other_outcome():
+    from core.canary.runner import CanaryRunResult
+
+    r = CanaryRunResult(task="t", passed=True, trigger="manual", tokens=10, duration_s=5)
+    assert r.outcome == "pass"
+    r.contamination = ["memory tool called: recall"]
+    assert r.outcome == "contaminated"
+    r.passed = False
+    r.error = "timeout after 300s"
+    assert r.outcome == "contaminated"
+
+
+async def test_a_contaminated_run_is_recorded_and_notified(monkeypatch):
+    import json as _json
+
+    from core.canary.parser import CanaryDef
+    from core.canary.runner import run_canary
+
+    def solve(ws: Path, _message: str):
+        (ws / "hello.txt").write_text("hi\n")
+        sid = [s for s in db.list_sessions(limit=10) if s["session_type"] == "canary"][0]["id"]
+        db.add_message(
+            sid,
+            "assistant",
+            "Let me check what the answer used to be.",
+            tool_calls=_json.dumps(
+                [{"id": "c0", "type": "function", "function": {"name": "recall", "arguments": '{"query": "answer"}'}}]
+            ),
+        )
+
+    _fake_manager(monkeypatch, solve)
+    c = CanaryDef(
+        name="leaky",
+        prompt="write hello.txt",
+        gates=[{"name": "exists", "command": "grep -qx hi hello.txt", "watch_paths": []}],
+        timeout=60,
+    )
+    result = await run_canary(c, trigger="manual")
+
+    # The gates are honoured exactly as scored; only the verdict's standing changes.
+    assert result.passed is True
+    assert result.outcome == "contaminated"
+    assert result.contamination and "recall" in result.contamination[0]
+
+    row = db.list_canary_runs(task="leaky")[0]
+    assert row["passed"] == 1 and row["outcome"] == "contaminated"
+    stored = _json.loads(row["gate_results_json"])
+    assert any(g.get("kind") == "contamination" and not g["passed"] for g in stored)
+
+    notes = db.get_notifications()
+    assert len([n for n in notes if "contaminated" in (n.get("title") or "")]) == 1
+
+
+async def test_a_clean_run_is_not_flagged(monkeypatch):
+    from core.canary.parser import CanaryDef
+    from core.canary.runner import run_canary
+
+    _fake_manager(monkeypatch, lambda ws, msg: (ws / "hello.txt").write_text("hi\n"))
+    c = CanaryDef(
+        name="tidy",
+        prompt="write hello.txt",
+        gates=[{"name": "exists", "command": "grep -qx hi hello.txt", "watch_paths": []}],
+        timeout=60,
+    )
+    result = await run_canary(c, trigger="manual")
+    assert result.contamination == [] and result.outcome == "pass"
+    assert db.list_canary_runs(task="tidy")[0]["outcome"] == "pass"
+    assert not [n for n in db.get_notifications() if "contaminated" in (n.get("title") or "")]
+
+
+# ---------------------------------------------------------------------------
+# The tripwire ignores contaminated rows
+# ---------------------------------------------------------------------------
+
+
+def _seed_history(batch_id: str, *, baseline_outcomes: list[str], post_outcomes: list[str]) -> None:
+    from db.database import connect_sessions
+
+    for outcome in baseline_outcomes:
+        db.add_canary_run("t1", "scheduled", None, "[]", outcome in ("pass", "contaminated"), outcome=outcome)
+    with connect_sessions() as conn:
+        conn.execute("UPDATE canary_runs SET created_at = '2026-01-01T00:00:00+00:00' WHERE trigger = 'scheduled'")
+    db.adaptive_create_batch(batch_id, "refine", "[]", status="applied")
+    for outcome in post_outcomes:
+        db.add_canary_run("t1", "post_batch", None, "[]", outcome == "pass", batch_id=batch_id, outcome=outcome)
+
+
+def test_contaminated_post_batch_rows_cannot_convict_a_batch(monkeypatch):
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("config.settings.adaptive_enabled", True)
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    _seed_history(
+        "ab-dirty",
+        baseline_outcomes=["pass", "pass", "pass"],
+        post_outcomes=["contaminated", "contaminated"],
+    )
+    actions = evaluate_tripwire()
+    assert not [a for a in actions if a["batch_id"] == "ab-dirty"]
+    assert db.adaptive_get_batch("ab-dirty")["status"] == "applied"
+
+
+def test_the_same_rows_would_convict_if_they_were_clean(monkeypatch):
+    """The control for the test above: without the exclusion these two
+    gate_fails are a confirmed regression."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("config.settings.adaptive_enabled", True)
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    _seed_history(
+        "ab-real",
+        baseline_outcomes=["pass", "pass", "pass"],
+        post_outcomes=["gate_fail", "gate_fail"],
+    )
+    actions = evaluate_tripwire()
+    assert any(a["action"] == "flagged" and a["batch_id"] == "ab-real" for a in actions)
+
+
+def test_contaminated_rows_cannot_stand_in_a_green_baseline(monkeypatch):
+    """A contaminated run passed its gates, but it cannot vouch for the task:
+    without three clean green runs before the apply, nothing testifies."""
+    from core.adaptive.tripwire import evaluate_tripwire
+
+    monkeypatch.setattr("config.settings.adaptive_enabled", True)
+    monkeypatch.setattr("core.canary.scan_canaries", lambda *a, **k: [])
+    _seed_history(
+        "ab-thin",
+        baseline_outcomes=["pass", "pass", "contaminated"],
+        post_outcomes=["gate_fail", "gate_fail"],
+    )
+    actions = evaluate_tripwire()
+    assert not [a for a in actions if a["batch_id"] == "ab-thin"]

@@ -91,8 +91,16 @@ def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool,
     NULL) can only ever count as passes, never as evidence of regression.
     `confirmed` means the sweep's confirm-rerun also gate-failed (>= 2 rows);
     a single unconfirmed gate_fail flags but must never auto-roll-back.
+
+    outcome='contaminated' rows are dropped from BOTH windows (W5): a run that
+    broke canary isolation measured something other than the pipeline, so it
+    can neither testify against a batch nor stand in a green precondition.
     """
-    post = [r for r in db.list_canary_runs(batch_id=batch["batch_id"], limit=500) if r["task"] not in flaky]
+    post = [
+        r
+        for r in db.list_canary_runs(batch_id=batch["batch_id"], limit=500)
+        if r["task"] not in flaky and r.get("outcome") != "contaminated"
+    ]
     if not post:
         return None
 
@@ -110,7 +118,11 @@ def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool,
         ]
         if not usable:
             continue  # nothing but timeouts/errors/noops — measures the harness, not the batch
-        history = [r for r in db.list_canary_runs(task=task, limit=200) if (r.get("created_at") or "") < applied_at]
+        history = [
+            r
+            for r in db.list_canary_runs(task=task, limit=200)
+            if (r.get("created_at") or "") < applied_at and r.get("outcome") != "contaminated"
+        ]
         history = history[:window]  # newest-first
         if len(history) < min(3, window) or not all(r.get("passed") for r in history):
             continue  # no green precondition — this task cannot testify
