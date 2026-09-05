@@ -196,6 +196,34 @@ that never ships). Each generator's arithmetic is checked against its own
 rendered fixture across 20 seeds in `tests/test_canary_isolation_hardening.py`
 — the gate must pass a correct answer and fail an off-by-one.
 
+### The contamination scan
+
+Isolation enforced at three points is exactly the kind of claim that quietly
+stops being true — a new tool ships without `denied_session_types`, an MCP
+server exposes a memory-shaped verb, an injected `SKILL.md` steers the agent
+out of its workspace — and the suite keeps reporting green while measuring
+something other than the pipeline. So every run is read back afterwards
+(`core/canary/contamination.py`) and asked three questions:
+
+1. Did it call a **memory tool**? It has none on its allowlist, so one that
+   answered means the fence has a hole.
+2. Did a tool argument name an **absolute path outside the temp workspace**?
+   Toolchain paths (`/usr`, `/bin`, `/etc`, …) do not count; Pernix's own data
+   directory, another session's files, or the repository do.
+3. Does the transcript name **another canary**, or `data/canaries`? That is
+   the suite reading its own answer key, however it got there. Matching is
+   boundary-aware, so `gen-grep-count` naming itself is not a finding.
+
+A hit sets `canary_runs.outcome = 'contaminated'` and posts one notification.
+The scored `passed` value is preserved exactly as the gates returned it — the
+run is not rewritten, it is **disqualified**: the tripwire drops contaminated
+rows from both the post-batch testimony and the green-precondition baseline,
+so a compromised run can neither convict a batch nor vouch for one. The
+finding is appended to `gate_results_json` as an `isolation` row so the tab
+can say why. Detection, not prevention: bash is on the allowlist because the
+seed tasks need it, so the workspace is a fence — the scan is what makes it
+observable.
+
 ### Triggers — change-driven, not wall-clock
 
 Canaries run when something they cover **changes**; the only standing
