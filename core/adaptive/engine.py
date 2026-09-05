@@ -106,12 +106,20 @@ def describe_proposal(prop: dict) -> str:
 
 def annotate_proposal(prop: dict) -> dict:
     """The proposal row plus what a reader needs to predict the drain:
-    `summary` (describe_proposal), `auto_approve_exempt` (canary), and
-    `auto_approve_after` (when the veto window closes, pending rows only)."""
+    `summary` (describe_proposal), `auto_approve_exempt` (canary),
+    `auto_approve_after` (when the veto window closes, pending rows only),
+    and `evidence_grade` — "unfounded" means the clock will never take it,
+    so the panel can show WHY a ripe proposal is still sitting there."""
     row = dict(prop)
     exempt = is_canary_proposal(prop)
     row["auto_approve_exempt"] = exempt
     row["auto_approve_after"] = None
+    try:
+        from core.adaptive.receipts import grade_evidence_json
+
+        row["evidence_grade"] = grade_evidence_json(prop.get("evidence_json"))
+    except Exception:
+        row["evidence_grade"] = None  # decoration; never fails a listing
     window = settings.adaptive_auto_approve_after_hours
     if prop.get("status") == "pending" and not exempt and window > 0 and prop.get("created_at"):
         try:
@@ -685,6 +693,47 @@ def approve_proposal(proposal_id: int, actor: str = "user", resolution: str = "a
     return result
 
 
+def _hold_unfounded(prop: dict) -> bool:
+    """True when the veto clock must NOT take this proposal.
+
+    One notification per proposal, ever — the sweep runs nightly and this
+    row can sit pending for as long as it likes, so re-announcing it would
+    turn a held proposal into a nightly alarm. The marker is a snooze_state
+    key rather than a column: no migration, and re-graded from scratch if a
+    resolver later learns to see the evidence it cites.
+    """
+    from core.adaptive.receipts import UNFOUNDED, grade_evidence_json
+
+    try:
+        if grade_evidence_json(prop.get("evidence_json")) != UNFOUNDED:
+            return False
+    except Exception as e:  # pragma: no cover — grading must never gate on itself
+        logger.debug("Adaptive receipts grading failed for proposal %s: %s", prop.get("id"), e)
+        return False
+
+    pid = prop.get("id")
+    logger.info(
+        "Adaptive auto-approve held proposal %s: evidence cites no recorded outcome (unfounded) — waiting for a human",
+        pid,
+    )
+    key = f"adaptive_unfounded_notified:{pid}"
+    try:
+        if not db.get_snooze_state(key):
+            db.set_snooze_state(key, _now_iso())
+            db.add_notification(
+                title="Adaptive proposal held: no receipts",
+                body=(
+                    f"Proposal #{pid} ({prop.get('producer', '?')}) passed its veto window but its evidence "
+                    "resolves to nothing recorded — no post-mortem, candor fact, signal, feedback or "
+                    "hypothesis. It stays pending for human review in the Adaptive panel."
+                ),
+                urgency="normal",
+            )
+    except Exception as e:
+        logger.debug("Adaptive unfounded notice failed for proposal %s: %s", pid, e)
+    return True
+
+
 def auto_approve_stale_proposals() -> dict:
     """Approve pending proposals whose veto window has elapsed.
 
@@ -704,8 +753,21 @@ def auto_approve_stale_proposals() -> dict:
     counted via the distinct 'auto_approved' status). Canary-suite proposals
     are never taken — materializing a canary keeps its human invariant (I6)
     and its own graduated-autonomy path (canary_auto_admit).
+
+    The veto window is also where receipts bite. A proposal whose evidence
+    resolves to nothing the system recorded (core/adaptive/receipts.py) is
+    NOT taken by the clock: unfounded prose becoming permanent policy after
+    24 idle hours is exactly the failure the receipt grammar exists to stop.
+    It stays pending — a human can still approve it — and says so once.
     """
-    out: dict = {"approved": [], "skipped_canary": 0, "deferred": 0, "results": [], "summaries": []}
+    out: dict = {
+        "approved": [],
+        "skipped_canary": 0,
+        "skipped_unfounded": 0,
+        "deferred": 0,
+        "results": [],
+        "summaries": [],
+    }
     window_hours = settings.adaptive_auto_approve_after_hours
     if not settings.adaptive_enabled or window_hours <= 0:
         return out
@@ -747,6 +809,9 @@ def auto_approve_stale_proposals() -> dict:
         if isinstance(payload, dict) and payload.get("canary"):
             out["skipped_canary"] += 1
             continue
+        if _hold_unfounded(prop):
+            out["skipped_unfounded"] += 1
+            continue
         try:
             result = approve_proposal(int(prop["id"]), actor="auto", resolution="auto_approved")
             out["approved"].append(int(prop["id"]))
@@ -755,7 +820,7 @@ def auto_approve_stale_proposals() -> dict:
             budget -= 1
         except AdaptiveError as e:
             logger.warning("Adaptive auto-approve skipped proposal %s: %s", prop.get("id"), e)
-    out["deferred"] = len(ripe) - len(out["approved"]) - out["skipped_canary"]
+    out["deferred"] = len(ripe) - len(out["approved"]) - out["skipped_canary"] - out["skipped_unfounded"]
     if out["approved"]:
         logger.info(
             "Adaptive: auto-approved %d proposal(s) past the %dh veto window (%s)",
