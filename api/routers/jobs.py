@@ -249,20 +249,32 @@ async def jobs_status():
     snooze_stats = snooze.get_stats()
 
     next_runs = []
+    scheduled_count = 0
     scheduler = _get_scheduler()
     if scheduler:
         try:
             for job in scheduler.get_jobs():
-                meta = job.kwargs.get("meta", {})
+                meta = job.kwargs.get("meta", {}) or {}
                 try:
                     next_time = str(job.next_run_time) if job.next_run_time else None
                 except Exception:
                     next_time = None
+                # Transient jobs are the harness's own housekeeping (canary
+                # sweep, grader hold-out, catch-up one-shots): recreated each
+                # boot, never in cron_jobs.json, not something the user
+                # scheduled. They stay in next_runs for the Jobs view but do
+                # not count as the user's scheduled work — the status-bar
+                # indicator would otherwise light up on a fresh install the
+                # moment a default-on housekeeping job exists.
+                system = bool(meta.get("transient"))
+                if not system:
+                    scheduled_count += 1
                 next_runs.append(
                     {
                         "name": job.id,
                         "next_run": next_time,
                         "paused": job.next_run_time is None,
+                        "system": system,
                     }
                 )
         except Exception:
