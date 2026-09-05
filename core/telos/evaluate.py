@@ -99,9 +99,11 @@ def _gather_evidence(store: TelosStore, h: TelosObject) -> str:
     return "\n".join(lines[:16])
 
 
-# Candor's intel brief renders each fact key as "- pred(arg, ...): ..." and
-# post-mortem ids reach the blob as "pm:<id>" where the trace quotes one.
-_CANDOR_BRIEF_RE = re.compile(r"^\s*-\s+(\w+)\(([^)]*)\)\s*:", re.MULTILINE)
+# Candor's intel brief renders each fact key as "- pred(arg, ...): ...", and
+# _gather_evidence glues the whole brief onto one "[candor] " prefix — so the
+# first line's bullet is mid-line and the rest start their own. Both count.
+# Post-mortem ids reach the blob as "pm:<id>" where the trace quotes one.
+_CANDOR_BRIEF_RE = re.compile(r"(?:^|\[candor\]\s)\s*-\s+(\w+)\(([^)]*)\)\s*:", re.MULTILINE)
 _PM_REF_RE = re.compile(r"\bpm:([0-9a-fA-F-]{6,})\b")
 _MAX_RECEIPTS = 4
 
