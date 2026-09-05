@@ -1703,6 +1703,37 @@ def get_message(message_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def user_messages_after(session_id: str, after_id: int, limit: int = 3) -> list[dict]:
+    """The next few user-role messages strictly after `after_id`, oldest first.
+
+    The deferred grader reads this to find the message that followed the turn
+    it is grading — the user's own reaction is the cheapest ground truth the
+    loop has. Bounded by `limit` because the caller only ever wants the first
+    non-synthetic one; harness-authored user rows (worker-resume injections)
+    are filtered by the caller, which owns that vocabulary.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT * FROM messages
+               WHERE session_id = ? AND id > ? AND role = 'user'
+               ORDER BY id LIMIT ?""",
+            (session_id, int(after_id), int(limit)),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def last_message_id(session_id: str) -> int | None:
+    """Highest message id in the session, or None when it has no messages.
+
+    Used as the closing bound of a turn's message-id range: captured when a
+    deferred grade is scheduled so the evidence slice stays fixed even after
+    the next turn has appended to the transcript.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT MAX(id) AS m FROM messages WHERE session_id = ?", (session_id,)).fetchone()
+    return int(row["m"]) if row and row["m"] is not None else None
+
+
 def turn_has_final_answer(session_id: str, user_msg_id: int) -> bool:
     """True if the turn rooted at `user_msg_id` already wrote a text answer.
 

@@ -762,6 +762,17 @@ class Settings:
     # interaction cost. Deterministic gates still run (and still clamp)
     # in-line — they're cheap and material by construction.
     reflect_deferred_normal: bool = True
+    # A deferred grade used to be DROPPED the moment the user replied inside
+    # the quiet window — the "only the latest turn gets graded" rule. On the
+    # box that silently ungraded roughly a quarter of all turns, and it threw
+    # away the single best piece of ground truth there is: what the user said
+    # NEXT. With this on, turn N is graded anyway when a real turn N+1 starts,
+    # against the message-id range captured when the grade was scheduled, with
+    # the user's next message handed to the verifier as evidence ("did they
+    # correct us, or move on?"). Cost stays bounded by one in-flight deferred
+    # grade per session; turns with no reply keep the reflect_defer_idle_s
+    # path. Off restores the latest-turn-only rule.
+    reflect_next_turn_grading: bool = True
     reflect_defer_idle_s: int = (
         300  # Quiet period before a deferred grade runs. A turn superseded by a newer
         # one inside this window is never graded — only the latest completed turn is.

@@ -33,6 +33,19 @@ def mgr(monkeypatch):
     return fresh
 
 
+@pytest.fixture
+def legacy_supersession(monkeypatch):
+    """Pin the latest-turn-only rule these assertions were written against.
+
+    `_deferred_grade_superseded` still reports "turn counter advanced" — the
+    2026-09-04 change is that next-turn grading no longer treats that as a
+    reason to drop the grade (sessions/hooks.py `_grade_despite`). The
+    synthetic-turn exemption below is what this file exists to protect, and it
+    is load-bearing in both regimes.
+    """
+    monkeypatch.setattr("config.settings.reflect_next_turn_grading", False)
+
+
 def _parent_with_worker(mgr, *, collected: bool):
     parent_id = mgr.create_session(title="Orchestrator")
     worker_id = mgr.create_session(title="W", session_type="worker", parent_session_id=parent_id)
@@ -146,7 +159,7 @@ def test_a_synthetic_resume_turn_does_not_supersede_the_real_grade(mgr):
     assert _deferred_grade_superseded(session_obj, snap) is None
 
 
-def test_a_real_follow_up_turn_still_supersedes(mgr):
+def test_a_real_follow_up_turn_still_supersedes(mgr, legacy_supersession):
     sid = mgr.create_session(title="Graded")
     session_obj = mgr.get(sid)
     session_obj._turn_id = 4
@@ -157,7 +170,7 @@ def test_a_real_follow_up_turn_still_supersedes(mgr):
     assert _deferred_grade_superseded(session_obj, snap) == "turn counter advanced"
 
 
-def test_a_real_turn_after_a_synthetic_one_supersedes(mgr):
+def test_a_real_turn_after_a_synthetic_one_supersedes(mgr, legacy_supersession):
     sid = mgr.create_session(title="Graded")
     session_obj = mgr.get(sid)
     session_obj._turn_id = 4

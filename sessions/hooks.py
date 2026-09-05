@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -652,6 +653,13 @@ class _DeferredGrade:
     turn_id: int
     turn_user_msg_id: int | None
     attempt: int
+    # Closing bound of this turn's message-id window, read at scheduling time.
+    # With next-turn grading the grade can run while turn N+1 is already
+    # appending to the transcript, and reflect's "slice back to the last scout
+    # marker" would then land inside that newer turn. The pair
+    # (turn_user_msg_id, turn_last_msg_id) pins the slice to the turn that was
+    # actually snapshotted.
+    turn_last_msg_id: int | None = None
     tool_summary: dict = field(default_factory=dict)
     # Per-attempt breakdown (C2). Snapshotted like tool_summary: the deferred
     # grader runs ~minutes after the turn, when session.turn is long replaced.
@@ -666,38 +674,138 @@ class _DeferredGrade:
     session_kind: str = "normal"
 
 
+# The one staleness reason next-turn grading does NOT override: the session
+# object this snapshot belongs to is gone, so there is nothing left to grade
+# against or to hold a background ref on.
+SESSION_REPLACED = "session object was replaced (reaped and re-created)"
+
+# How often the waiting grade looks up to see whether the user has replied.
+# Two seconds is far below the 300s window it is embedded in and far above
+# the cost of reading two in-memory ints.
+_GRADE_POLL_S = 2.0
+
+
 def _deferred_grade_superseded(session_obj, snap: _DeferredGrade) -> str | None:
     """Reason this snapshot is stale, or None when it's still gradable.
 
     Rapid-fire policy: only the latest completed turn gets graded. A turn the
     user has already moved past is explicitly marked ungraded rather than
     graded late against a transcript that has since grown.
+
+    This is the LEGACY rule, and with ``reflect_next_turn_grading`` on it no
+    longer decides on its own — see `_grade_despite`. Its reasons are still
+    the honest description of what happened to the turn, so it keeps producing
+    them; only "the user moved on" stopped meaning "drop the grade".
     """
     from sessions import state_v2 as sv2
     from sessions.manager import get_manager
 
     live = get_manager().get(snap.session_id)
     if live is not None and live is not session_obj:
-        return "session object was replaced (reaped and re-created)"
+        return SESSION_REPLACED
     if getattr(session_obj, "_deferred_reflect_seq", 0) != snap.ticket:
         return "a later turn scheduled its own grade"
-    live_turn = getattr(session_obj, "_turn_id", 0)
-    if live_turn != snap.turn_id:
-        # A worker-resume turn is the harness talking to itself, not the user
-        # moving on — it must not cost the real turn its grade (field case,
-        # session 3dc5a307d751: the redundant resume turn superseded the grade
-        # of the turn that did the work). Any NON-synthetic turn in between is
-        # supersession as before.
-        synthetic = getattr(session_obj, "_synthetic_turn_ids", None) or set()
-        intervening = list(range(snap.turn_id + 1, live_turn + 1))
-        if not intervening or not all(t in synthetic for t in intervening):
-            return "turn counter advanced"
+    if _real_turn_started(session_obj, snap):
+        return "turn counter advanced"
     if session_obj.current_turn_user_msg_id is not None:
         return "a turn is in flight"
     state = sv2._current_state(session_obj)
     if state is not sv2.SessionStateV2.IDLE_READY:
         return f"session is {state.value}"
     return None
+
+
+def _real_turn_started(session_obj, snap: _DeferredGrade) -> bool:
+    """True when a turn the USER started has begun since this snapshot.
+
+    A worker-resume turn is the harness talking to itself, not the user moving
+    on (field case, session 3dc5a307d751: the redundant resume turn superseded
+    the grade of the turn that did the work). Synthetic turn ids are tagged at
+    the source in sessions/manager.py; every other advance of the counter is a
+    real turn, and a real turn is exactly the trigger next-turn grading waits
+    for.
+    """
+    live_turn = getattr(session_obj, "_turn_id", 0)
+    if live_turn == snap.turn_id:
+        return False
+    synthetic = getattr(session_obj, "_synthetic_turn_ids", None) or set()
+    return any(t not in synthetic for t in range(snap.turn_id + 1, live_turn + 1))
+
+
+def _grade_despite(stale: str) -> bool:
+    """True when a stale reason no longer justifies dropping the grade.
+
+    The old rule dropped a pending grade the moment the user replied inside
+    the quiet window — which is to say it threw the grade away precisely when
+    the best evidence for it had just arrived. On the box that left roughly a
+    quarter of turns permanently ungraded. With next-turn grading on, every
+    reason except a vanished session object is context for the grade rather
+    than a reason to skip it.
+    """
+    if not settings.reflect_next_turn_grading:
+        return False
+    return stale != SESSION_REPLACED
+
+
+def _grade_lock(session_obj) -> asyncio.Lock:
+    """The session's single in-flight-deferred-grade lock, created on demand.
+
+    This is what bounds the cost of "every real turn gets graded": a burst of
+    five rapid-fire turns queues five grades on one lock and spends them one
+    at a time, instead of firing five reflect calls into the same session at
+    once. The field is declared on AgentSession but left None there: an
+    asyncio.Lock binds to the loop that creates it, and sessions are built off
+    the event loop.
+    """
+    lock = getattr(session_obj, "_deferred_grade_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        session_obj._deferred_grade_lock = lock
+    return lock
+
+
+def _next_user_message(snap: _DeferredGrade) -> str:
+    """The user's first message after the graded turn, or "" if they never replied.
+
+    Harness-authored user rows (the worker-resume injection) are skipped: the
+    point of this text is that a HUMAN wrote it after reading the response.
+    """
+    from sessions.manager import _WORKER_RESUME_PREFIX
+
+    anchor = snap.turn_user_msg_id if snap.turn_user_msg_id is not None else snap.turn_last_msg_id
+    if anchor is None:
+        return ""
+    try:
+        rows = db.user_messages_after(snap.session_id, int(anchor), limit=4)
+    except Exception as e:
+        logger.debug("Next-message lookup failed for %s: %s", snap.session_id, e)
+        return ""
+    for row in rows:
+        content = (row.get("content") or "").strip()
+        if content and not content.startswith(_WORKER_RESUME_PREFIX):
+            return content
+    return ""
+
+
+async def _await_deferred_grade(session_obj, snap: _DeferredGrade) -> str:
+    """Wait for this turn's grading moment; return the user's next message.
+
+    Two triggers, whichever comes first: the quiet period elapses (the turn
+    the user never answered), or a real turn N+1 starts (the turn they did).
+    Either way the reply is looked up afterwards, so a message that landed in
+    the last second of the window is still evidence.
+    """
+    delay = max(0, int(settings.reflect_defer_idle_s))
+    if not settings.reflect_next_turn_grading:
+        await asyncio.sleep(delay)
+        return ""
+    deadline = time.monotonic() + delay
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or _real_turn_started(session_obj, snap):
+            break
+        await asyncio.sleep(min(_GRADE_POLL_S, remaining))
+    return await asyncio.to_thread(_next_user_message, snap)
 
 
 async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj, gate_results, emit=None) -> None:
@@ -709,6 +817,14 @@ async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj
     except Exception as e:
         logger.debug("Failed to fetch termination history for %s: %s", session_id, e)
         termination_history = []
+
+    # Closing bound of the turn's message window, read HERE rather than at
+    # grading time: by then the next turn may already have appended to it.
+    try:
+        turn_last_msg_id = await asyncio.to_thread(db.last_message_id, session_id)
+    except Exception as e:
+        logger.debug("Failed to read the turn's last message id for %s: %s", session_id, e)
+        turn_last_msg_id = None
 
     session_obj._deferred_reflect_seq += 1
     snap = _DeferredGrade(
@@ -725,6 +841,7 @@ async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj
         gate_results=list(gate_results or []),
         model=getattr(session_obj, "model_override", None) or settings.llm_model or "default",
         session_kind=session.get("session_type") or "normal",
+        turn_last_msg_id=turn_last_msg_id,
     )
 
     delay = max(0, int(settings.reflect_defer_idle_s))
@@ -746,26 +863,40 @@ async def _schedule_deferred_reflect(session_id: str, session: dict, session_obj
 
 
 async def _deferred_reflect_task(session_obj, snap: _DeferredGrade) -> None:
-    """Wait out the quiet period, then grade the turn if it's still the latest."""
-    await asyncio.sleep(max(0, int(settings.reflect_defer_idle_s)))
+    """Wait for the grading moment, then grade the turn — once per turn.
 
-    stale = _deferred_grade_superseded(session_obj, snap)
-    if stale:
-        logger.info("Deferred reflect skipped for %s: %s", snap.session_id, stale)
-        # Durable marker so the gap in graded turns is explainable later.
-        # "notice" rows are filtered from LLM context by the compiler.
-        try:
-            await asyncio.to_thread(
-                db.add_message,
+    The wait ends when the user replies or the quiet period runs out, and the
+    grade itself is serialized behind the session's single in-flight lock, so
+    a rapid-fire burst costs one reflect call at a time rather than one per
+    turn simultaneously.
+    """
+    next_user_message = await _await_deferred_grade(session_obj, snap)
+
+    async with _grade_lock(session_obj):
+        stale = _deferred_grade_superseded(session_obj, snap)
+        if stale and not _grade_despite(stale):
+            logger.info("Deferred reflect skipped for %s: %s", snap.session_id, stale)
+            # Durable marker so the gap in graded turns is explainable later.
+            # "notice" rows are filtered from LLM context by the compiler.
+            try:
+                await asyncio.to_thread(
+                    db.add_message,
+                    snap.session_id,
+                    "notice",
+                    "[reflect deferred — superseded by a newer turn, this turn ungraded]",
+                )
+            except Exception as e:
+                logger.debug("Deferred-reflect supersede notice insert skipped: %s", e)
+            return
+        if stale:
+            logger.info(
+                "Deferred reflect grading %s anyway (%s)%s",
                 snap.session_id,
-                "notice",
-                "[reflect deferred — superseded by a newer turn, this turn ungraded]",
+                stale,
+                " with the user's next message as evidence" if next_user_message else "",
             )
-        except Exception as e:
-            logger.debug("Deferred-reflect supersede notice insert skipped: %s", e)
-        return
 
-    await _run_deferred_reflect(session_obj, snap)
+        await _run_deferred_reflect(session_obj, snap, next_user_message=next_user_message)
 
 
 async def _deferred_candor(snap: _DeferredGrade, result) -> None:
@@ -860,13 +991,18 @@ def _deferred_verdict_notification(session_id: str, result) -> None:
         logger.warning("Deferred verdict notification failed for %s: %s", session_id, e)
 
 
-async def _run_deferred_reflect(session_obj, snap: _DeferredGrade) -> None:
+async def _run_deferred_reflect(session_obj, snap: _DeferredGrade, next_user_message: str = "") -> None:
     """Grade the snapshotted turn, observe-only.
 
     Writes exactly what the synchronous path writes — reflect row, post-mortem,
     lessons, experience, user observations, Candor — and nothing else. No retry flag,
     no state transition, no write to session.turn: by the time this runs the
     turn is finished, and a new one may already own the session.
+
+    Observe-only is now load-bearing in a second way: with next-turn grading
+    this can run WHILE turn N+1 is in flight. Nothing here may reach the live
+    turn, and the evidence is pinned to the snapshotted turn's message window
+    so the grade cannot drift forward into work it never saw.
     """
     import json
 
@@ -879,6 +1015,10 @@ async def _run_deferred_reflect(session_obj, snap: _DeferredGrade) -> None:
         from core.reflect import reflect_on_session
 
         messages = await asyncio.to_thread(db.get_messages, session_id, last=REFLECT_TAIL_MESSAGES)
+        # Lesson recall keys off "the last user message", which after a reply
+        # would be the NEXT turn's ask — clamp to this turn's window first.
+        if snap.turn_last_msg_id is not None:
+            messages = [m for m in messages if (m.get("id") or 0) <= snap.turn_last_msg_id]
         extra_evidence = await _recall_lesson_evidence(session_id, messages)
 
         result = await reflect_on_session(
@@ -894,6 +1034,8 @@ async def _run_deferred_reflect(session_obj, snap: _DeferredGrade) -> None:
             gate_results=snap.gate_results or None,
             reflect_mode="deferred",
             tool_summary_attempts=snap.tool_summary_attempts or None,
+            turn_msg_id_range=(snap.turn_user_msg_id, snap.turn_last_msg_id),
+            next_user_message=next_user_message,
         )
 
         reflect_event = {
@@ -911,15 +1053,25 @@ async def _run_deferred_reflect(session_obj, snap: _DeferredGrade) -> None:
             # Regime marker: this verdict never had the power to retry the
             # turn, so verdict rates across the two modes are not comparable.
             "reflect_mode": "deferred",
+            # What the verdict rests on: the grader alone, or the grader plus
+            # the user's own reply to this turn.
+            "outcome_source": "next_turn" if next_user_message else "llm",
         }
         await asyncio.to_thread(db.add_message, session_id, "reflect", json.dumps(reflect_event))
         await _deferred_candor(snap, result)
 
         session_obj.emit_event({"type": "reflect.deferred", **reflect_event})
-        _deferred_verdict_notification(session_id, result)
+        # The notification's whole ask is "reply in the session so the agent
+        # can act on this". When the grade already read the user's reply, they
+        # have; the strategy reaches the next scout through build_retry_context
+        # either way, and pushing them to answer a message they already
+        # answered is pure noise.
+        if not next_user_message:
+            _deferred_verdict_notification(session_id, result)
         logger.info(
-            "Deferred reflect verdict=%s for session %s (observe-only): %s",
+            "Deferred reflect verdict=%s (%s) for session %s (observe-only): %s",
             result.verdict,
+            reflect_event["outcome_source"],
             session_id,
             result.reasoning,
         )
