@@ -1,0 +1,10 @@
+{
+  "id": "verifier-blindness",
+  "user_request": "Render the dashboard mock and tell me if the legend overlaps the chart.",
+  "transcript_excerpt": "[TOOL CALL: bash]\nArguments: {\"command\": \"python3 tools/render_mock.py --out /tmp/mock.png\"}\n[TOOL RESULT: bash]\nwrote /tmp/mock.png (184213 bytes)\n\n[TOOL CALL: view_image]\nArguments: {\"path\": \"/tmp/mock.png\"}\n[TOOL RESULT: view_image]\n[image attached to the conversation — 1280x720]\n\n[ASSISTANT]\nLooked at the render.",
+  "final_response": "Rendered it and looked: the legend sits inside the plot area and clips the top-right of the last series. Moving it below the axis, or padding the plot by ~40px on the right, would clear it.",
+  "tool_summary": {"bash": {"calls": 1, "failures": 0, "total_latency_ms": 2100}, "view_image": {"calls": 1, "failures": 0, "total_latency_ms": 300}},
+  "expected_verdict": "pass",
+  "expected_failure_cause": "none",
+  "note": "The second over-strict trap: the evidence is an image the grader cannot render, so the specific claim is unverifiable TO THE GRADER. That is verifier blindness, not agent failure — grade what is visible (the render ran, the image was viewed, the answer is specific and actionable) and lower confidence. A non-pass here whose only nameable failure is 'I could not see it' is the mis-grade this fixture exists to catch."
+}

@@ -1,0 +1,10 @@
+{
+  "id": "clean-pass",
+  "user_request": "How many .py files are under core/adaptive/? Just the number.",
+  "transcript_excerpt": "[TOOL CALL: bash]\nArguments: {\"command\": \"ls core/adaptive/*.py | wc -l\"}\n[TOOL RESULT: bash]\n7\n\n[ASSISTANT]\n7",
+  "final_response": "7",
+  "tool_summary": {"bash": {"calls": 1, "failures": 0, "total_latency_ms": 40}},
+  "expected_verdict": "pass",
+  "expected_failure_cause": "none",
+  "note": "A question answered from a tool result that shows the same number. Nothing was asked for beyond the answer, so a missing file or report is not a gap. The baseline case: if this ever grades non-pass the grader is broken outright."
+}
