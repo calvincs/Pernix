@@ -864,6 +864,10 @@ def delete_session(session_id: str) -> None:
         # this the largest table by row count and slowed the prune sweep
         # (whose own DISTINCT scan grows with it).
         conn.execute("DELETE FROM session_state_log WHERE session_id = ?", (session_id,))
+        try:
+            conn.execute("DELETE FROM message_feedback WHERE session_id = ?", (session_id,))
+        except sqlite3.OperationalError:
+            pass  # pre-v36 database
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
 
