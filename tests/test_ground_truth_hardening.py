@@ -450,7 +450,7 @@ def _graded_turn_citing(entry_id: str, verdict: str, hint_id: str = "") -> tuple
     }
     if hint_id:
         payload["scout_summary"] = {"used_hints": [hint_id]}
-    db.add_post_mortem(
+    pm_id = db.add_post_mortem(
         session_id=sid,
         attempt=1,
         verdict=verdict,
@@ -462,6 +462,9 @@ def _graded_turn_citing(entry_id: str, verdict: str, hint_id: str = "") -> tuple
         execution_mode=None,
         payload_json=json.dumps(payload),
     )
+    # The counters these tests pre-seed are the credit synthesis handed out
+    # for this grade; a thumb corrects credit only once it exists.
+    db.mark_post_mortems_synthesized([pm_id])
     return sid, aid, entry_id
 
 
@@ -634,3 +637,115 @@ async def test_trust_survives_a_holdout_value_that_is_not_json():
     db.set_snooze_state("trust.grader_holdout", "not json at all")
 
     assert (await _trust())["grader"]["holdout"] is None
+
+
+# ---------------------------------------------------------------------------
+# Outcome precedence is one rule, not three (found live on 2026-09-04: a
+# thumb on turn 2's answer landed on turn 1's grade, because turn 1's
+# next-turn grade was written inside turn 2's time window)
+# ---------------------------------------------------------------------------
+
+
+def test_a_grade_written_during_the_next_turn_is_not_the_next_turns_grade():
+    """Turn 1 is graded once turn 2's message arrives, so its post-mortem is
+    created inside turn 2's window. The window fallback exists for rows
+    written before turn anchors existed; an anchored row is never a match
+    for a different turn."""
+    sid, uid1, _ = _turn()
+    uid2 = db.add_message(sid, "user", "No, that's wrong. Try again.")
+    meta2 = json.dumps({"parent_user_msg_id": uid2})
+    aid2 = db.add_message(sid, "assistant", "Sorry, here it is.", metadata=meta2)
+    db.add_post_mortem(
+        session_id=sid,
+        attempt=1,
+        verdict="retry",
+        failure_cause="agent",
+        confidence=0.7,
+        reflect_model="m",
+        reflect_latency_ms=1,
+        scout_viability=None,
+        execution_mode=None,
+        payload_json=json.dumps({"turn_user_msg_id": uid1, "outcome_source": "next_turn"}),
+        outcome_source="next_turn",
+    )
+
+    assert db.latest_post_mortem_for_turn(sid, uid1)["verdict"] == "retry"
+    assert db.latest_post_mortem_for_turn(sid, uid2) is None, "turn 2 has no grade yet"
+    assert db.set_post_mortem_user_signal(sid, aid2, "down") is None
+    assert db.latest_post_mortem_for_turn(sid, uid1)["user_signal"] is None, "turn 1's grade is untouched"
+
+
+def test_attribution_takes_the_thumb_over_the_grade():
+    """Synthesis is where credit is handed out, so the thumb has to win
+    there — not only in a correction applied afterwards."""
+    from core.synthesis import attribute
+
+    base = {
+        "confidence": 0.9,
+        "scout_viability": None,
+        "execution_mode": None,
+        "payload_json": json.dumps({"cited_policies": ["pol-x"], "scout_summary": {"used_hints": ["hint-x"]}}),
+    }
+    down_on_pass = attribute({**base, "verdict": "pass", "failure_cause": "none", "user_signal": "down"})
+    assert any(a.subject == "pol-x" and a.delta_failures == 1 for a in down_on_pass)
+    assert not any(a.subject == "pol-x" and a.delta_successes for a in down_on_pass)
+
+    up_on_low_confidence_retry = attribute(
+        {**base, "verdict": "retry", "failure_cause": "agent", "confidence": 0.2, "user_signal": "up"}
+    )
+    assert any(
+        a.subject == "pol-x" and a.delta_successes == 1 for a in up_on_low_confidence_retry
+    ), "the confidence floor guards the model's guess, not the user's"
+
+    untouched = attribute({**base, "verdict": "pass", "failure_cause": "none", "user_signal": None})
+    assert any(a.subject == "pol-x" and a.delta_successes == 1 for a in untouched)
+
+
+def test_a_thumb_before_synthesis_waits_for_synthesis():
+    """Correcting credit that was never handed out would count the thumb
+    twice once synthesis reads user_signal itself."""
+    from core.feedback import apply_user_signal
+
+    sid, uid, _ = _turn()
+    aid = [m["id"] for m in db.get_messages(sid) if m["role"] == "assistant"][0]
+    db.add_post_mortem(
+        session_id=sid,
+        attempt=1,
+        verdict="pass",
+        failure_cause="none",
+        confidence=0.8,
+        reflect_model="m",
+        reflect_latency_ms=1,
+        scout_viability=None,
+        execution_mode=None,
+        payload_json=json.dumps({"turn_user_msg_id": uid, "cited_policies": ["pol-y"]}),
+    )
+
+    report = apply_user_signal(sid, aid, "down")
+
+    assert report["applied"] == {}
+    assert db.get_signal("adaptive_entry", "pol-y") in (None, {}) or not (
+        db.get_signal("adaptive_entry", "pol-y") or {}
+    ).get("failures")
+    pm = db.list_post_mortems(session_id=sid)[0]
+    assert pm["user_signal"] == "down" and pm["outcome_source"] == "user", "the stamp is what synthesis will read"
+
+
+async def test_a_thumb_that_landed_before_the_grade_rides_on_it(mock_llm_client, monkeypatch, graded_now):
+    """The usual order: the user reacts right away, the grade arrives with
+    the next message or after the idle wait. The grade must pick the thumb
+    up, or most thumbs would never reach a post-mortem."""
+    from sessions.hooks import _deferred_reflect_task
+
+    sid, uid, last = _turn()
+    aid = [m["id"] for m in db.get_messages(sid) if m["role"] == "assistant"][0]
+    db.upsert_message_feedback(sid, aid, "down", "not it")
+    db.add_message(sid, "user", "Moving on — what about the logout flow?")
+    mock_llm_client.responses = [_verdict()]  # grader says pass
+
+    await _deferred_reflect_task(_session(sid), _snapshot(sid, uid, last))
+
+    pm = _post_mortem(sid)
+    assert pm["verdict"] == "pass"
+    assert pm["user_signal"] == "down"
+    assert pm["outcome_source"] == "user"

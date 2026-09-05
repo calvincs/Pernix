@@ -150,7 +150,11 @@ def apply_user_signal(session_id: str, message_id, signal: str | None) -> dict:
 
         # 2. Apply the new one, if it contradicts the verdict.
         applied: dict = {}
-        if signal:
+        # Deltas only correct credit that was already handed out. An
+        # unsynthesized grade has handed out nothing yet: synthesis reads
+        # user_signal itself (core.synthesis.attribute), so applying here
+        # would count the thumb twice.
+        if signal and pm.get("synthesized_at"):
             for entry_id in _entry_ids(payload):
                 deltas = _corrective_deltas(entry_id, verdict, signal)
                 if not deltas:

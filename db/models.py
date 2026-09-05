@@ -3782,6 +3782,7 @@ def latest_post_mortem_for_turn(session_id: str, turn_user_msg_id: int) -> dict 
             row = conn.execute(
                 """SELECT * FROM post_mortems
                    WHERE session_id = ? AND created_at >= ? AND created_at < ?
+                     AND json_extract(payload_json, '$.turn_user_msg_id') IS NULL
                    ORDER BY attempt DESC, created_at DESC LIMIT 1""",
                 (session_id, anchor["created_at"], nxt["created_at"]),
             ).fetchone()
@@ -3789,10 +3790,42 @@ def latest_post_mortem_for_turn(session_id: str, turn_user_msg_id: int) -> dict 
             row = conn.execute(
                 """SELECT * FROM post_mortems
                    WHERE session_id = ? AND created_at >= ?
+                     AND json_extract(payload_json, '$.turn_user_msg_id') IS NULL
                    ORDER BY attempt DESC, created_at DESC LIMIT 1""",
                 (session_id, anchor["created_at"]),
             ).fetchone()
     return dict(row) if row else None
+
+
+def feedback_for_turn(session_id: str, turn_user_msg_id) -> dict | None:
+    """The latest thumb on any assistant message of one turn, or None.
+
+    A thumb usually lands before the grade does — the grade waits for the
+    user's next message or a five-minute idle — so the grade has to look
+    for feedback that is already there, not the other way round.
+    """
+    if turn_user_msg_id is None:
+        return None
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT f.message_id, f.signal, f.note, f.created_at
+               FROM message_feedback f
+               JOIN messages m ON m.id = CAST(f.message_id AS INTEGER)
+               WHERE f.session_id = ? AND m.session_id = ?
+                 AND CAST(json_extract(m.metadata, '$.parent_user_msg_id') AS INTEGER) = ?
+               ORDER BY f.created_at DESC LIMIT 1""",
+            (session_id, session_id, int(turn_user_msg_id)),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def stamp_post_mortem_user_signal(pm_id, signal: str) -> None:
+    """Carry a thumb that arrived before the grade onto the grade itself."""
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE post_mortems SET user_signal = ?, outcome_source = 'user' WHERE id = ?",
+            (signal, pm_id),
+        )
 
 
 def set_post_mortem_user_signal(session_id: str, message_id, signal: str | None) -> dict | None:
