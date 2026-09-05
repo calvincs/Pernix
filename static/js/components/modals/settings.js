@@ -633,6 +633,13 @@ const SECTIONS = [
                     + 'notify_webhook_url in data/settings.json — the API refuses to blank a URL field.',
             },
             { key: 'notify_webhook_timeout', label: 'Webhook Timeout (seconds)', type: 'number', min: 1, max: 60 },
+            {
+                key: 'push_urgency_floor',
+                label: 'Push floor',
+                type: 'select',
+                options: ['low', 'normal', 'high', 'urgent'],
+                help: 'Only notifications at or above this urgency buzz a phone. Agent questions always push; the bell still shows everything.',
+            },
         ],
     },
 ];

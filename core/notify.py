@@ -12,6 +12,9 @@ import logging
 import urllib.request
 
 from config import settings
+
+# Notification urgencies in ascending order; the push floor compares ranks.
+_URGENCY_RANK = {"low": 0, "normal": 1, "high": 2, "urgent": 3}
 from core.events import get_event_bus
 
 logger = logging.getLogger("pernix.notify")
@@ -114,6 +117,11 @@ class NotificationDispatcher:
         if not subscriptions:
             return
         etype = event.get("type")
+        # A phone buzz is the most expensive notification there is. Questions
+        # always go through; the rest must clear the configured floor.
+        floor = _URGENCY_RANK.get(str(getattr(settings, "push_urgency_floor", "normal") or "normal"), 1)
+        if etype != "dialog.question" and _URGENCY_RANK.get(str(event.get("urgency") or "normal"), 1) < floor:
+            return
         if etype == "dialog.question":
             session_title = event.get("session_title") or ""
             title = f"Question: {session_title}" if session_title else "Agent Question"
