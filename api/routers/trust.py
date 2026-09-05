@@ -88,6 +88,24 @@ def _unfounded_entries() -> int:
         return 0
 
 
+def _trials() -> list:
+    """Entries on trial, plus the ones the sweep settled in the last 14 days.
+
+    Same posture as the rest of this surface: an empty list is the correct
+    answer for "nothing is under trial", and a store that predates trial arms
+    reports that rather than failing the whole dashboard.
+    """
+    try:
+        from core.adaptive.trial import list_trials
+    except ImportError:
+        return []
+    try:
+        return list_trials()
+    except Exception as e:
+        logger.debug("Trial listing failed: %s", e)
+        return []
+
+
 def _snapshot() -> dict:
     """Assemble the whole surface. Runs off-loop; every part fails to zeros."""
     from core.metrics import grader_agreement
@@ -124,9 +142,9 @@ def _snapshot() -> dict:
             "runs_14d": canaries["runs"],
             "fails_14d": canaries["fails"],
         },
-        # Filled once trial arms land (batch 2). An empty list is the correct
-        # answer for "no entry is currently under trial", not a placeholder.
-        "trials": [],
+        # Per-entry treated/control results: what an adaptation is worth,
+        # measured, rather than how recently it was written.
+        "trials": _trials(),
     }
 
 

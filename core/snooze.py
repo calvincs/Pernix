@@ -1926,6 +1926,42 @@ Output valid JSON only. No markdown fences. /no_think"""
         except Exception as e:
             logger.warning("Adaptive lint sweep failed: %s", e)
 
+        if self._is_cancelled():
+            return
+        # The trial sweep (W6): entries rendering on half the turns are
+        # promoted, retired, or left running on the measured difference
+        # between the halves — the only channel here that decides an entry's
+        # fate on an outcome rather than on a clock or a counter.
+        try:
+            from core.adaptive.trial import sweep_trials
+            from db import models as db
+
+            trials = await asyncio.to_thread(sweep_trials)
+            settled = trials["promoted"] + trials["retired"]
+            if settled:
+                self._bump("adaptive_trials_promoted", len(trials["promoted"]))
+                self._bump("adaptive_trials_retired", len(trials["retired"]))
+                lines = [
+                    f"• {eid} — {'promoted' if eid in trials['promoted'] else 'retired'}: "
+                    f"{trials['reasons'].get(eid, '')}"
+                    for eid in settled[:12]
+                ]
+                await asyncio.to_thread(
+                    db.add_notification,
+                    "",
+                    "Adaptive: trial arms settled",
+                    (
+                        "Entries that had been rendering on half the turns are now decided on "
+                        "their measured treated-vs-control outcomes. Every decision is "
+                        "journaled with its counts and p-value — roll any back from the "
+                        "Adaptive tab, or read the arms in the Trust tab.\n" + "\n".join(lines)
+                    ),
+                    "normal",
+                    "adaptive_trial_sweep",
+                )
+        except Exception as e:
+            logger.warning("Adaptive trial sweep failed: %s", e)
+
         try:
             from core.adaptive.tripwire import evaluate_tripwire
 
