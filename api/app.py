@@ -580,6 +580,7 @@ from api.routers import (
     storage,
     telos,
     tools,
+    trust,
     voice,
     workspace,
 )
@@ -604,6 +605,7 @@ app.include_router(telos.router)
 app.include_router(voice.router)
 app.include_router(mcp.router)
 app.include_router(storage.router)
+app.include_router(trust.router)
 
 
 @app.get("/")
