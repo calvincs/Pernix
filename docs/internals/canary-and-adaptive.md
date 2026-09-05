@@ -151,6 +151,35 @@ What a canary deliberately *keeps*: bash, the file/search/repl tools, skill
 discovery and loading, and every adaptive entry that renders into the prompt.
 Those are the treatment under measurement, not contamination.
 
+#### The holdout rule
+
+A canary tagged `holdout` is the suite's honest ground: a task the system
+cannot have trained itself against, because the learning loop is never
+allowed to see it.
+
+- **Never quoted into a producer prompt.** Nothing renders canary names into
+  a refine or dream prompt today; `core.canary.prompt_safe_canaries()` is the
+  list anything that starts must use, and a test fails the day a holdout name
+  appears in one.
+- **Never the target of a proposal-derived edit.** `materialize_canary`
+  refuses a spec that resembles a holdout, so an approved proposal cannot
+  land on one under a new name.
+- **Never re-described by a proposal.** Refine reads transcripts that may
+  contain a canary prompt verbatim; `queue_canary_proposals` drops a
+  lookalike outright rather than queueing it, because the reviewable artifact
+  would itself carry the answer. Resemblance is a normalised, windowed
+  substring check (`propose.resembles_holdout`): case, punctuation and
+  whitespace are folded away and a shared 10-word window against any holdout
+  prompt is a match — an exact-substring test never fires on a reworded copy,
+  and a bag-of-words test fires on everything. The proposal's seed files are
+  compared too, since a task can be copied into a fixture as easily as into a
+  prompt. A generated holdout's prompt is materialised from a fixed reference
+  seed for this comparison only; a scored run always draws a fresh one.
+- **Transcripts excluded like every canary's**, by the guarantees above.
+
+The three generated sentinels ship tagged `[sentinel, generated, holdout]`:
+they are the regression floor precisely because nothing can teach to them.
+
 ### Generated fixtures
 
 A saturated suite proves nothing, and every hand-written canary ships its

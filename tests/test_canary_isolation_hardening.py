@@ -1004,3 +1004,158 @@ def test_contaminated_rows_cannot_stand_in_a_green_baseline(monkeypatch):
     )
     actions = evaluate_tripwire()
     assert not [a for a in actions if a["batch_id"] == "ab-thin"]
+
+
+# ---------------------------------------------------------------------------
+# The holdout rule
+# ---------------------------------------------------------------------------
+
+
+def _holdout_dir(tmp_path: Path, prompt: str) -> Path:
+    d = tmp_path / "held-out-task"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "CANARY.md").write_text(
+        "---\nname: held-out-task\nprompt: |\n  "
+        + prompt.replace("\n", "\n  ")
+        + "\ngates:\n  - name: g\n    command: 'true'\ntags: [sentinel, holdout]\n---\nnotes\n"
+    )
+    return tmp_path
+
+
+def test_holdout_is_a_tag_not_a_convention():
+    from core.canary.parser import HOLDOUT_TAG
+
+    assert HOLDOUT_TAG == "holdout"
+    for name in GENERATED:
+        assert _real_canary(name).holdout is True
+    assert _real_canary("file-create").holdout is False
+
+
+def test_prompt_safe_canaries_drops_the_holdouts():
+    from core.canary import prompt_safe_canaries, scan_canaries
+
+    everything = {c.name for c in scan_canaries(Path("data/canaries"))}
+    safe = {c.name for c in prompt_safe_canaries(Path("data/canaries"))}
+    assert set(GENERATED) <= everything
+    assert not (set(GENERATED) & safe)
+    assert safe == {c.name for c in scan_canaries(Path("data/canaries")) if "holdout" not in c.tags}
+
+
+def test_producer_prompts_name_no_holdout_canary():
+    """Nothing quotes canary names into a refine or dream prompt today. This
+    fails the moment something starts — use core.canary.prompt_safe_canaries."""
+    from core.canary.propose import CANARY_PROPOSALS_PROMPT
+    from core.refine import REFINE_PROMPT
+
+    prompts = [REFINE_PROMPT, CANARY_PROPOSALS_PROMPT]
+    try:
+        from core.dream import hypothesize
+
+        prompts += [v for k, v in vars(hypothesize).items() if k.isupper() and isinstance(v, str)]
+    except ImportError:  # pragma: no cover — dream is optional
+        pass
+    blob = "\n".join(prompts)
+    for name in GENERATED:
+        assert name not in blob, name
+
+
+def test_holdout_prompts_materialise_generated_holdouts():
+    from core.canary.propose import holdout_prompts
+
+    prompts = holdout_prompts(Path("data/canaries"))
+    assert set(GENERATED) <= set(prompts)
+    assert all(p.strip() for p in prompts.values())
+    # The reference prompt is a comparison artefact, never a run.
+    assert "answer.txt" in prompts["gen-grep-count"]
+
+
+def test_a_proposal_that_re_describes_a_holdout_is_refused(tmp_path):
+    from core.canary.propose import resembles_holdout
+
+    base = _holdout_dir(
+        tmp_path,
+        "The logs/ directory in the workspace contains application log files. Count\n"
+        'how many lines across ALL files in logs/ contain the substring "ERROR".',
+    )
+    spec = {
+        "name": "count-errors",
+        "prompt": (
+            "the logs directory in the workspace contains application log files count "
+            "how many lines across all files in logs contain the substring ERROR!"
+        ),
+        "gates": [{"name": "g", "command": "true"}],
+    }
+    assert resembles_holdout(spec, base) == "held-out-task"
+
+
+def test_a_holdout_copied_into_the_seed_files_is_also_refused(tmp_path):
+    from core.canary.propose import resembles_holdout
+
+    base = _holdout_dir(tmp_path, "Produce output.json holding the sum of amount over shipped records only.")
+    spec = {
+        "name": "sum-orders",
+        "prompt": "Do the task described in task.md.",
+        "files": {"task.md": "produce output json holding the sum of amount over shipped records only"},
+        "gates": [{"name": "g", "command": "true"}],
+    }
+    assert resembles_holdout(spec, base) == "held-out-task"
+
+
+def test_an_unrelated_proposal_is_not_refused(tmp_path):
+    from core.canary.propose import resembles_holdout
+
+    base = _holdout_dir(tmp_path, "Count how many lines across all files in logs/ contain the substring ERROR.")
+    spec = {
+        "name": "tar-roundtrip",
+        "prompt": "Create a tar archive of src/ and verify it extracts without overwriting anything.",
+        "gates": [{"name": "g", "command": "true"}],
+    }
+    assert resembles_holdout(spec, base) is None
+
+
+def test_queue_canary_proposals_drops_a_holdout_lookalike(monkeypatch, tmp_path):
+    from core.canary import propose
+
+    monkeypatch.setattr("config.settings.canaries_dir", str(_holdout_dir(tmp_path, "Count the ERROR lines in logs/.")))
+    monkeypatch.setattr("config.settings.canary_enabled", True)
+    monkeypatch.setattr("config.settings.canary_auto_admit", False)
+
+    lookalike = {
+        "name": "error-count",
+        "prompt": "count the error lines in logs",
+        "gates": [{"name": "g", "command": "grep -qx '4' answer.txt"}],
+        "rationale": "r",
+    }
+    assert propose.queue_canary_proposals([lookalike], producer="refine") == 0
+    assert db.adaptive_list_proposals() == []
+
+
+def test_materialize_canary_refuses_a_holdout_lookalike(monkeypatch, tmp_path):
+    from core.canary.propose import materialize_canary
+
+    base = _holdout_dir(tmp_path, "Count the ERROR lines in logs/ and write the number to answer.txt.")
+    name, err = materialize_canary(
+        {
+            "name": "error-count",
+            "prompt": "count the error lines in logs and write the number to answer txt",
+            "gates": [{"name": "g", "command": "true"}],
+        },
+        base=base,
+    )
+    assert name is None and "holdout" in err
+    assert not (base / "error-count").exists()
+
+
+def test_a_genuinely_new_proposal_still_materialises(monkeypatch, tmp_path):
+    from core.canary.propose import materialize_canary
+
+    base = _holdout_dir(tmp_path, "Count the ERROR lines in logs/.")
+    name, err = materialize_canary(
+        {
+            "name": "tar-roundtrip",
+            "prompt": "Create a tar archive of src/ and verify it extracts without overwriting anything.",
+            "gates": [{"name": "g", "command": "test -f out.tar"}],
+        },
+        base=base,
+    )
+    assert err == "" and name == "tar-roundtrip"
