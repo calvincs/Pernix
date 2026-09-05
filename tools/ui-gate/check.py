@@ -1971,6 +1971,47 @@ def trust_loop_absent(browser):
     """m2: on a server without the 3.2 routes, neither surface breaks."""
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
     pg = ctx.new_page()
+
+    # This scenario must exercise the "no 3.2 backend" path whether or not the
+    # server under test ships the routes: the two trust-loop routes are made
+    # to 404 here and the pending settings keys are stripped from whatever the
+    # server publishes. On a 3.1 server every interceptor is a no-op.
+    def _gone(route, request=None):
+        route.fulfill(status=404, content_type="application/json", body='{"detail":"Not Found"}')
+
+    # Fetched once up front and served from memory: routing through
+    # route.fetch() adds a round trip per request, and the settings modal
+    # draws its rows from whichever payload has arrived by then.
+    def _stripped(path):
+        try:
+            data = pg.request.get(base + path).json()
+        except Exception:
+            return None
+        holders = [data] if isinstance(data, dict) else []
+        if isinstance(data, dict):
+            holders += [v for v in data.values() if isinstance(v, dict)]
+        for holder in holders:
+            for k in PENDING_SETTINGS:
+                holder.pop(k, None)
+        return json.dumps(data)
+
+    _canned = {"/api/settings/schema": _stripped("/api/settings/schema"), "/api/settings": _stripped("/api/settings")}
+
+    def _strip(route, request=None):
+        req = request or route.request
+        path = req.url.split("?", 1)[0]
+        path = path[path.index("/api/") :] if "/api/" in path else path
+        body = _canned.get(path) if req.method == "GET" else None
+        if body is None:
+            route.continue_()
+            return
+        route.fulfill(status=200, content_type="application/json", body=body)
+
+    pg.route("**/api/trust", _gone)
+    pg.route("**/api/sessions/*/feedback", _gone)
+    pg.route("**/api/sessions/*/messages/*/feedback", _gone)
+    pg.route("**/api/settings/schema", _strip)
+    pg.route("**/api/settings", _strip)
     pg.on("console", console_sink("absent"))
     pg.on("pageerror", lambda e: console_errors.append(f"[absent] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
