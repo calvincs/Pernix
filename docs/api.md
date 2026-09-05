@@ -1052,7 +1052,10 @@ DELETE /api/canary/{name}            → moves to .retired/ (purged after canary
 The governed policy store — see [internals/canary-and-adaptive.md](internals/canary-and-adaptive.md). Read endpoints work regardless of `adaptive_enabled`.
 
 ```
-GET  /api/adaptive/entries?kind=&status=active&limit=200   Entries by kind/status (+ enabled/auto_apply flags).
+GET  /api/adaptive/entries?kind=&status=active,trial&limit=200
+                                                           Entries by kind/status (+ enabled/auto_apply
+                                                           flags). status takes one status or a comma-list;
+                                                           empty = every status. Default is the live set.
                                                            Each row carries `usage` — the per-entry
                                                            usefulness counters (uses/successes/failures from
                                                            scout and reflect citations), null when never used
