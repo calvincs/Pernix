@@ -13,7 +13,15 @@ router = APIRouter(tags=["adaptive"])
 
 
 @router.get("/api/adaptive/entries")
-async def list_entries(kind: str = "", status: str = "active", limit: int = 200):
+async def list_entries(kind: str = "", status: str = db.ADAPTIVE_LIVE_STATUS, limit: int = 200):
+    """Entries by kind and status.
+
+    `status` takes one status or a comma-separated list; empty means every
+    status. The default is the LIVE set — `active,trial` — because a trial
+    entry (W6) is in the prompt on half the turns, and a listing that showed
+    only `active` would report the store as empty while the agent was reading
+    from it.
+    """
     rows = await _asyncio.to_thread(
         db.adaptive_list_entries, kind or None, None, status or None, max(1, min(limit, 500))
     )

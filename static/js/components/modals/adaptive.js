@@ -127,7 +127,9 @@ export async function renderAdaptiveTab(container) {
     }
 
     // --- Active entries by kind ---
-    const entries = (entriesRes.entries || []).filter(e => e.status === 'active');
+    // Trial entries (W6) are live too — they render on half the turns — so
+    // they belong in this list, badged, not hidden until they graduate.
+    const entries = (entriesRes.entries || []).filter(e => e.status === 'active' || e.status === 'trial');
     const entriesHead = el('div', { class: 'adaptive-head' }, []);
     const addBtn = el('button', { class: 'adaptive-btn' }, [text('+ New entry')]);
     entriesHead.appendChild(addBtn);
@@ -197,6 +199,7 @@ export async function renderAdaptiveTab(container) {
                 el('div', { class: 'adaptive-card-head' }, [
                     badge(`v${e.version}`), badge(e.risk, e.risk === 'high' ? 'warn' : ''), badge(e.source),
                     usageBadge,
+                    ...(e.status === 'trial' ? [badge('trial', 'warn')] : []),
                     text(` ${e.title}`),
                 ]),
                 el('div', { class: 'adaptive-entry-content' }, [text(e.content)]),
