@@ -41,6 +41,45 @@ results = []  # (viewport, name, ok, detail, level)
 console_errors = []
 
 
+# The two routes that legitimately 404 until the trust-loop backend (W2)
+# merges: the client asks ONCE per page load whether this server can store a
+# message rating, and the Trust tab asks for the metrics. Chromium logs a
+# fetch that comes back 404 as a console error, so an unfiltered gate would
+# fail on the exact degradation path the client is written to handle — the
+# one message_feedback() below asserts. Once the routes exist nothing matches
+# this and the allowance costs nothing.
+PENDING_ROUTES = ("/feedback", "/api/trust")
+
+# Their settings siblings: rows registered here in the browser whose keys the
+# 3.2 backend adds. Same rule — until the server publishes them, they do not
+# render at all.
+PENDING_SETTINGS = (
+    "adaptive_pm_drift_rollback",
+    "skill_proposal_auto_rollback",
+    "reflect_next_turn_grading",
+    "grader_holdout_enabled",
+    "grader_holdout_schedule",
+)
+
+
+def _pending_route_404(msg):
+    if "404" not in msg.text:
+        return False
+    url = ((msg.location or {}).get("url") or "").split("?")[0]
+    return any(url.endswith(suffix) for suffix in PENDING_ROUTES)
+
+
+def console_sink(prefix):
+    """Collect console errors for `prefix`, minus the expected 3.2 404s."""
+
+    def sink(msg):
+        if msg.type != "error" or _pending_route_404(msg):
+            return
+        console_errors.append(f"[{prefix}] {msg.text}")
+
+    return sink
+
+
 def check(vp, name, ok, detail="", level="m1"):
     results.append((vp, name, bool(ok), str(detail)[:220], level))
 
@@ -277,7 +316,7 @@ def suggestion_row_checks(pg, name):
 def run_vp(browser, name, w, h, opts):
     ctx = browser.new_context(viewport={"width": w, "height": h}, device_scale_factor=2, color_scheme="dark", **opts)
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[{name}] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink(name))
     pg.on("pageerror", lambda e: console_errors.append(f"[{name}] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
@@ -611,7 +650,7 @@ def run_vp(browser, name, w, h, opts):
 def desktop_layout(browser):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[desktop] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("desktop"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
     out = {}
@@ -874,7 +913,7 @@ def state_map_colours(browser):
 
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[state-map] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("state-map"))
     pg.on("pageerror", lambda e: console_errors.append(f"[state-map] pageerror: {e}"))
     vendor_reqs = []
     pg.on("request", lambda r: vendor_reqs.append(r.url) if "mermaid" in r.url else None)
@@ -1011,7 +1050,7 @@ def timeline_lane(browser, light=False):
     if light:
         ctx.add_init_script("try { localStorage.setItem('pernix_theme', 'light'); } catch (e) {}")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[lane-{theme}] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink(f"lane-{theme}"))
     pg.on("pageerror", lambda e: console_errors.append(f"[lane-{theme}] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
@@ -1085,7 +1124,7 @@ def timeline_lane_touch(browser):
         has_touch=True,
     )
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[lane-touch] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("lane-touch"))
     pg.on("pageerror", lambda e: console_errors.append(f"[lane-touch] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
@@ -1120,7 +1159,7 @@ def sidebar_resizer(browser):
     """
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[resizer] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("resizer"))
     pg.on("pageerror", lambda e: console_errors.append(f"[resizer] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
@@ -1236,7 +1275,7 @@ def sidebar_scale(browser):
         "try { localStorage.setItem('pernix:sidebar', JSON.stringify({showArchived: true})); } catch (e) {}"
     )
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[scale] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("scale"))
     pg.on("pageerror", lambda e: console_errors.append(f"[scale] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(1.8)
@@ -1398,7 +1437,7 @@ CLEAR_DECLINED_JS = r"""(label) => {
 def space_suggestions_flow(browser):
     ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
     pg = ctx.new_page()
-    pg.on("console", lambda m: console_errors.append(f"[suggest] {m.text}") if m.type == "error" else None)
+    pg.on("console", console_sink("suggest"))
     pg.on("pageerror", lambda e: console_errors.append(f"[suggest] pageerror: {e}"))
     pg.goto(base + "/", wait_until="load")
     time.sleep(2.0)
@@ -1518,6 +1557,471 @@ def space_suggestions_flow(browser):
     ctx.close()
 
 
+# ---------------------------------------------------------------------------
+# The thumbs on an assistant answer, and the Trust tab beside them
+# ---------------------------------------------------------------------------
+# Both surfaces call routes that arrive with the trust-loop backend (W2), so
+# these passes supply the routes themselves with page.route(). That is not a
+# workaround: stubbing is the only way to drive the whole loop — a stored
+# rating, a toggle, an undo, an optional note — deterministically, without a
+# turn actually running. The un-stubbed half (this server has neither route)
+# is asserted by trust_loop_absent() at the end, because "the controls are
+# simply not there" is what the client promises on an older server.
+
+TRUST_PAYLOAD = {
+    "grader": {
+        "agreement": 0.72,
+        "n": 25,
+        "holdout": {"accuracy": 0.9, "n": 10, "ran_at": "2026-09-04T00:00:00Z", "model": "qwen3-27b"},
+    },
+    "outcomes": {
+        "by_source": {"llm": 140, "next_turn": 31, "user": 9},
+        "graded_7d": 180,
+        "user_turns_7d": 190,
+    },
+    "entries": {"by_status": {"active": 12, "retired": 3}, "unfounded": 2},
+    "canaries": {"contaminated_14d": 0, "runs_14d": 44, "fails_14d": 1},
+    "trials": [
+        {
+            "entry_id": "prefer-rg",
+            "title": "Prefer ripgrep over find",
+            "treated": {"n": 41, "successes": 33},
+            "control": {"n": 39, "successes": 25},
+            "p": 0.0412,
+            "status": "running",
+        }
+    ],
+}
+
+# The toolbar (or sheet trigger) on the first assistant answer and the first
+# user message: what each carries, what it is named, and how big it is.
+ACTIONS_JS = r"""() => {
+  const read = (m) => m ? [...m.querySelectorAll('.msg-actions button')].map(b => {
+      const r = b.getBoundingClientRect();
+      const svg = b.querySelector('svg');
+      return {cls: b.className, label: b.getAttribute('aria-label'),
+              pressed: b.getAttribute('aria-pressed'),
+              icon: svg ? svg.getAttribute('class') : '',
+              w: Math.round(r.width), h: Math.round(r.height)};
+  }) : null;
+  const a = document.querySelector('#messages-inner .message.assistant[data-message-id]');
+  const u = document.querySelector('#messages-inner .message.user[data-message-id]');
+  return {mid: a ? a.dataset.messageId : null, assistant: read(a), user: read(u),
+          anyThumb: document.querySelectorAll('.msg-feedback-btn').length};
+}"""
+
+SHEET_ROWS_JS = r"""() => {
+  const card = document.querySelector('.sheet-card');
+  if (!card) return null;
+  return {title: (card.querySelector('.sheet-title')||{textContent:''}).textContent.trim(),
+          items: [...card.querySelectorAll('.sheet-item')].map(i =>
+              (i.querySelector('.sheet-item-label')||{textContent:''}).textContent.trim()),
+          hints: [...card.querySelectorAll('.sheet-item-hint')].map(h => h.textContent.trim())};
+}"""
+
+TRUST_JS = r"""() => {
+  const c = document.getElementById('fp-trust');
+  if (!c) return null;
+  const t = (n) => (n ? n.textContent.trim() : '');
+  // A number pushed against the panel's own edge is the shape of a tab that
+  // forgot to take the Explorer's padding — which is exactly what happened
+  // the first time this tab was written.
+  const panel = document.getElementById('file-panel');
+  const edge = panel ? panel.getBoundingClientRect().right : 0;
+  return {children: c.children.length,
+          cut: [...c.querySelectorAll('.trust-stat-row, .trust-trial')]
+                 .filter(r => r.getBoundingClientRect().right > edge - 2).length,
+          stats: [...c.querySelectorAll('.trust-stat')].map(s => ({
+              label: t(s.querySelector('.trust-stat-label')),
+              value: t(s.querySelector('.trust-stat-value')),
+              note: t(s.querySelector('.trust-stat-note'))})),
+          trials: [...c.querySelectorAll('.trust-trial')].map(x => x.textContent.replace(/\s+/g, ' ').trim()),
+          empties: [...c.querySelectorAll('.adaptive-empty')].map(x => x.textContent.trim()),
+          text: c.textContent}; }"""
+
+
+def _settle(probe, timeout=8.0, step=0.15):
+    """Poll `probe` until it answers with something truthy, or give up.
+
+    Every surface here waits on a fetch the page made, and a flat sleep long
+    enough to be safe on a loaded machine is a flat sleep wasted on every
+    other run. On a timeout the caller re-reads the raw state, so a genuine
+    failure still reports what was actually on screen.
+    """
+    deadline = time.time() + timeout
+    value = probe()
+    while not value and time.time() < deadline:
+        time.sleep(step)
+        value = probe()
+    return value
+
+
+def _actions(pg, thumbs=True):
+    """The message toolbar, once the transcript has actually rendered."""
+
+    def probe():
+        r = pg.evaluate(ACTIONS_JS)
+        if not r or not r["assistant"]:
+            return None
+        if thumbs and not r["anyThumb"]:
+            return None
+        return r
+
+    return _settle(probe) or pg.evaluate(ACTIONS_JS)
+
+
+def _writes(posts, n):
+    """Wait for the client's nth write to reach the stub."""
+    _settle(lambda: len(posts) >= n or None)
+    return posts
+
+
+def _stub_feedback(ctx, posts, items=None):
+    """Answer both feedback routes, and record every write the client makes."""
+    body = json.dumps({"items": items or []})
+
+    def handler(route):
+        req = route.request
+        if req.method != "POST":
+            route.fulfill(status=200, content_type="application/json", body=body)
+            return
+        try:
+            payload = json.loads(req.post_data or "{}")
+        except Exception:
+            payload = {"unparsed": req.post_data}
+        posts.append(payload)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "message_id": req.url.rstrip("/").split("/")[-2],
+                    "signal": payload.get("signal"),
+                    "note": payload.get("note"),
+                }
+            ),
+        )
+
+    ctx.route("**/feedback", handler)
+
+
+def _stub_trust(ctx, state):
+    ctx.route(
+        "**/api/trust",
+        lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(state["payload"])),
+    )
+
+
+def _open_trust_tab(pg):
+    pg.click("#files-btn")
+    time.sleep(0.9)
+    pg.evaluate("() => document.getElementById('fp-group-tuning')?.click()")
+    time.sleep(0.6)
+    pg.evaluate("() => document.getElementById('fp-tab-trust')?.click()")
+    time.sleep(1.0)
+
+
+def message_feedback(browser):
+    """m2 (mouse): the thumbs live in the hover toolbar, and they toggle."""
+    posts = []
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+    _stub_feedback(ctx, posts)
+    pg = ctx.new_page()
+    pg.on("console", console_sink("feedback"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[feedback] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    open_session(pg, MAIN, False)
+
+    a = _actions(pg)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-feedback-rest.png")
+    check(
+        "feedback",
+        "m2: an assistant answer carries copy plus both thumbs, unpressed",
+        bool(a)
+        and a["mid"]
+        and [b["label"] for b in a["assistant"]] == ["Copy message", "Helpful", "Not helpful"]
+        and [b["pressed"] for b in a["assistant"]] == [None, "false", "false"],
+        a,
+        "m2",
+    )
+    check(
+        "feedback",
+        "m2: a user message is never rated",
+        bool(a) and all("msg-feedback" not in b["cls"] for b in (a["user"] or [])),
+        a["user"] if a else None,
+        "m2",
+    )
+
+    pg.evaluate("() => document.querySelector('.msg-feedback-up').click()")
+    _writes(posts, 1)
+    up = _settle(lambda: (lambda r: r if r["assistant"][1]["pressed"] == "true" else None)(pg.evaluate(ACTIONS_JS)))
+    up = up or pg.evaluate(ACTIONS_JS)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-feedback-up.png")
+    check(
+        "feedback",
+        "m2: thumbs-up presses, fills its icon and posts signal=up",
+        up["assistant"][1]["pressed"] == "true"
+        and "thumb-up-filled" in up["assistant"][1]["icon"]
+        and up["assistant"][2]["pressed"] == "false"
+        and posts == [{"signal": "up"}],
+        {"btn": up["assistant"][1], "posts": posts},
+        "m2",
+    )
+
+    pg.evaluate("() => document.querySelector('.msg-feedback-up').click()")
+    _writes(posts, 2)
+    off = _settle(lambda: (lambda r: r if r["assistant"][1]["pressed"] == "false" else None)(pg.evaluate(ACTIONS_JS)))
+    off = off or pg.evaluate(ACTIONS_JS)
+    check(
+        "feedback",
+        "m2: pressing it again clears the rating and posts signal=null",
+        off["assistant"][1]["pressed"] == "false"
+        and "thumb-up-filled" not in off["assistant"][1]["icon"]
+        and posts[-1] == {"signal": None},
+        {"btn": off["assistant"][1], "posts": posts[-1:]},
+        "m2",
+    )
+
+    focusable = pg.evaluate(
+        "() => { const b=document.querySelector('.msg-feedback-down'); b.focus();"
+        " return document.activeElement === b; }"
+    )
+    check("feedback", "m2: a thumb takes keyboard focus", focusable, "", "m2")
+
+    pg.evaluate("() => document.querySelector('.msg-feedback-down').click()")
+    _writes(posts, 3)
+    note = _settle(
+        lambda: pg.evaluate(
+            "() => { const c=document.querySelector('.msg-note-card'); if(!c) return null;"
+            " return {heading: c.querySelector('h2').textContent.trim(),"
+            "  focused: document.activeElement === c.querySelector('.msg-note-input'),"
+            "  buttons: [...c.querySelectorAll('.modal-footer button')].map(b=>b.textContent.trim())}; }"
+        )
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-feedback-note.png")
+    check(
+        "feedback",
+        "m2: thumbs-down saves first, then offers a skippable note",
+        bool(note) and note["focused"] and note["buttons"] == ["Skip", "Save note"] and posts[-1] == {"signal": "down"},
+        {"note": note, "posts": posts[-1:]},
+        "m2",
+    )
+    pg.fill(".msg-note-input", "it answered a different question")
+    pg.evaluate(
+        "() => [...document.querySelectorAll('.msg-note-card .modal-footer button')]"
+        ".find(b => b.textContent.trim() === 'Save note').click()"
+    )
+    _writes(posts, 4)
+    gone = _settle(lambda: pg.evaluate("() => !document.querySelector('.msg-note-card')"))
+    check(
+        "feedback",
+        "m2: the note closes the prompt and rides a second write",
+        gone and posts[-1] == {"signal": "down", "note": "it answered a different question"},
+        {"posts": posts[-1:]},
+        "m2",
+    )
+    ctx.close()
+
+
+def message_feedback_touch(browser):
+    """m2 (finger): one overflow button instead of a toolbar, thumbs as rows."""
+    posts = []
+    ctx = browser.new_context(
+        viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True, color_scheme="dark"
+    )
+    _stub_feedback(ctx, posts)
+    pg = ctx.new_page()
+    pg.on("console", console_sink("feedback-touch"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[feedback-touch] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    open_session(pg, MAIN, True)
+
+    a = _actions(pg, thumbs=False)
+    check(
+        "feedback-touch",
+        "m2: an assistant answer collapses to one 36px overflow button",
+        bool(a)
+        and len(a["assistant"] or []) == 1
+        and "msg-menu-btn" in a["assistant"][0]["cls"]
+        and a["assistant"][0]["w"] >= 36
+        and a["assistant"][0]["h"] >= 36,
+        a["assistant"] if a else None,
+        "m2",
+    )
+    pg.evaluate("() => document.querySelector('.msg-menu-btn').click()")
+    sheet = _settle(lambda: pg.evaluate(SHEET_ROWS_JS))
+    pg.screenshot(path=f"{shots}/{tag}-phone-feedback-sheet.png")
+    check(
+        "feedback-touch",
+        "m2: its sheet holds copy and both thumbs, named in words",
+        bool(sheet) and sheet["items"] == ["Copy message", "Helpful", "Not helpful"],
+        sheet,
+        "m2",
+    )
+    pg.evaluate(
+        "() => [...document.querySelectorAll('.sheet-item')]"
+        ".find(i => i.textContent.trim().startsWith('Helpful')).click()"
+    )
+    _writes(posts, 1)
+    closed = _settle(lambda: pg.evaluate("() => !document.querySelector('.sheet-card')"))
+    check(
+        "feedback-touch",
+        "m2: picking Helpful writes the rating and closes the sheet",
+        posts == [{"signal": "up"}] and closed,
+        posts,
+        "m2",
+    )
+    pg.evaluate("() => document.querySelector('.msg-menu-btn').click()")
+    again = _settle(lambda: (lambda r: r if r and r["hints"] else None)(pg.evaluate(SHEET_ROWS_JS)))
+    again = again or pg.evaluate(SHEET_ROWS_JS)
+    check(
+        "feedback-touch",
+        "m2: the sheet marks the rating already given",
+        bool(again) and again["hints"] == ["your rating"],
+        again,
+        "m2",
+    )
+    pg.keyboard.press("Escape")
+    time.sleep(0.3)
+    ctx.close()
+
+
+def trust_tab(browser):
+    """m2: the Trust tab is counts, with a real empty state for the trials."""
+    state = {"payload": json.loads(json.dumps(TRUST_PAYLOAD))}
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+    _stub_trust(ctx, state)
+    _stub_feedback(ctx, [])
+    pg = ctx.new_page()
+    pg.on("console", console_sink("trust"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[trust] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    _open_trust_tab(pg)
+
+    t = _settle(lambda: (lambda r: r if r and r["stats"] else None)(pg.evaluate(TRUST_JS)))
+    t = t or pg.evaluate(TRUST_JS) or {}
+    pg.screenshot(path=f"{shots}/{tag}-desktop-trust.png")
+    want = [
+        ("Reflect agrees with the user", "72%"),
+        ("Hold-out accuracy", "90%"),
+        ("You said so", "9"),
+        ("Your next message", "31"),
+        ("Reflect said so", "140"),
+        ("Turns graded (7d)", "180"),
+        ("active", "12"),
+        ("retired", "3"),
+        ("Unfounded", "2"),
+        ("Runs", "44"),
+        ("Failures", "1"),
+        ("Contaminated", "0"),
+    ]
+    got = [(s["label"], s["value"]) for s in t.get("stats", [])]
+    check(
+        "trust",
+        "m2: every /api/trust number renders, with its sample size beside it",
+        got == want
+        and "25 turns" in t["stats"][0]["note"]
+        and "10 fixtures" in t["stats"][1]["note"]
+        and "190 turns you sent" in t["stats"][5]["note"],
+        {"got": got, "notes": [s["note"] for s in t.get("stats", [])][:6]},
+        "m2",
+    )
+    check(
+        "trust",
+        "m2: no number is pushed against the panel edge",
+        t.get("cut") == 0,
+        {"cut": t.get("cut")},
+        "m2",
+    )
+    check(
+        "trust",
+        "m2: a trial reports both arms and its p-value",
+        len(t.get("trials") or []) == 1
+        and "Prefer ripgrep over find" in t["trials"][0]
+        and "treated 33/41 \u00b7 control 25/39 \u00b7 p 0.041" in t["trials"][0],
+        t.get("trials"),
+        "m2",
+    )
+
+    # The batch that ships trial arms is later than the one that ships this
+    # tab, so the empty state is the state it will actually open in.
+    state["payload"]["trials"] = []
+    pg.evaluate(
+        "() => [...document.querySelectorAll('#fp-trust .adaptive-btn')]"
+        ".find(b => b.textContent.trim().endsWith('Refresh')).click()"
+    )
+    empty = _settle(lambda: (lambda r: r if r and r["stats"] and not r["trials"] else None)(pg.evaluate(TRUST_JS)))
+    empty = empty or pg.evaluate(TRUST_JS) or {}
+    check(
+        "trust",
+        "m2: with no trials the section says so rather than going blank",
+        empty.get("trials") == []
+        and any(e.startswith("No entries on trial") for e in empty.get("empties", []))
+        and "Trial arms (0)" in empty.get("text", ""),
+        empty.get("empties"),
+        "m2",
+    )
+    ctx.close()
+
+
+def trust_loop_absent(browser):
+    """m2: on a server without the 3.2 routes, neither surface breaks."""
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
+    pg = ctx.new_page()
+    pg.on("console", console_sink("absent"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[absent] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.6)
+    open_session(pg, MAIN, False)
+
+    a = _actions(pg, thumbs=False)
+    check(
+        "absent",
+        "m2: no rating store means no thumbs, and copy is untouched",
+        bool(a) and a["anyThumb"] == 0 and [b["label"] for b in a["assistant"]] == ["Copy message"],
+        a["assistant"] if a else None,
+        "m2",
+    )
+    _open_trust_tab(pg)
+    t = _settle(lambda: (lambda r: r if r and r["children"] else None)(pg.evaluate(TRUST_JS)))
+    t = t or pg.evaluate(TRUST_JS)
+    pg.screenshot(path=f"{shots}/{tag}-desktop-trust-absent.png")
+    check(
+        "absent",
+        "m2: the Trust tab says one line and draws nothing else",
+        bool(t) and t["children"] == 1 and t["text"].strip() == "Trust metrics need the 3.2 backend",
+        t,
+        "m2",
+    )
+
+    # The same question in Settings, and the sharper edge of it. A row for a
+    # key this server does not publish cannot be saved — and, because an unset
+    # key is undefined where an unticked box is false, collectChanges() reads
+    # it as an edit, so Escape asks whether to discard changes nobody made and
+    # the modal never closes. The rows land on their own once the server has
+    # the keys.
+    pg.evaluate("() => document.querySelector('.fp-close')?.click()")
+    time.sleep(0.4)
+    pg.click("#settings-btn")
+    time.sleep(1.2)
+    rows = pg.evaluate("() => [...document.querySelectorAll('.setting-row')].map(r => r.id)")
+    pg.keyboard.press("Escape")
+    time.sleep(0.7)
+    closed = pg.evaluate("() => !document.querySelector('.settings-card') && !document.querySelector('.confirm-card')")
+    pending = [r for r in rows if r.split("row-")[-1] in PENDING_SETTINGS]
+    check(
+        "absent",
+        "m2: Settings hides a row this server has no key for, and still closes",
+        closed and not pending and "row-reflect_enabled" in rows,
+        {"closed": closed, "pending_rows": pending, "rows": len(rows)},
+        "m2",
+    )
+    ctx.close()
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch()
     for name, w, h, opts in VPS:
@@ -1592,6 +2096,16 @@ with sync_playwright() as p:
             space_suggestions_flow(browser)
         except Exception as e:
             check("suggestions", "m2: suggestion pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
+        for fn, vp in (
+            (message_feedback, "feedback"),
+            (message_feedback_touch, "feedback-touch"),
+            (trust_tab, "trust"),
+            (trust_loop_absent, "absent"),
+        ):
+            try:
+                fn(browser)
+            except Exception as e:
+                check(vp, "m2: pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
     browser.close()
 
 check("all", "no console errors", len(console_errors) == 0, console_errors[:6])
