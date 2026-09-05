@@ -2129,10 +2129,17 @@ def record_tool_outcome(turn, result) -> None:
     all read `failures` as "the tool is unreliable", which a refusal is not.
     The stuck detector still sees refusals (a model that keeps calling a
     forbidden tool IS stuck) — that is handled by the caller.
+
+    By-design unavailability (core.tools.executor.is_unavailable — ask_user in
+    an unattended session) is counted as `unavailable` for the same reason and
+    is additionally netted out of the denominator by candor and synthesis: a
+    refusal at least means the model tried something it should not have, while
+    an unavailable tool simply cannot apply here and says so.
     """
-    from core.tools.executor import is_policy_refusal
+    from core.tools.executor import is_policy_refusal, is_unavailable
 
     refused = is_policy_refusal(result)
+    unavailable = (not refused) and is_unavailable(result)
     entry = turn.tool_summary.setdefault(
         result.tool_name,
         {"calls": 0, "failures": 0, "refusals": 0, "errors": [], "total_latency_ms": 0},
@@ -2146,6 +2153,8 @@ def record_tool_outcome(turn, result) -> None:
         previews = entry.setdefault("refusal_errors", [])
         if preview not in previews:
             previews.append(preview)
+    elif unavailable:
+        entry["unavailable"] = int(entry.get("unavailable") or 0) + 1
     elif result.was_error:
         entry["failures"] += 1
         err_preview = result.content[:500] if result.content else "unknown"
@@ -2164,6 +2173,8 @@ def record_tool_outcome(turn, result) -> None:
     a_entry["calls"] += 1
     if refused:
         a_entry["refusals"] += 1
+    elif unavailable:
+        a_entry["unavailable"] = int(a_entry.get("unavailable") or 0) + 1
     elif result.was_error:
         a_entry["failures"] += 1
 

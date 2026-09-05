@@ -95,10 +95,36 @@ _REFUSAL_CONTENT_HINTS = (
 )
 
 
+# By-design unavailability — a tool that cannot do its job in THIS kind of
+# session and says so without anything having gone wrong. `ask_user` in a
+# cron session is the case that motivated it: no user is present to answer,
+# so the tool returns advice instead of a question. That is not an error and
+# not a refusal (nothing was declined), but it opened as "Error:", so the
+# executor set was_error, tool_summary booked a failure, candor emitted
+# tool_ok(ask_user)=False, and the candor producer minted a live routing hint
+# telling every scout to "prefer an alternative" to asking the user — off 8
+# uses and 7 by-design non-answers.
+#
+# A tool signals it by prefixing its returned string with UNAVAILABLE_PREFIX.
+# The prefix stays on the content the model reads (it is a clear, honest
+# label) and is mirrored into metadata so downstream consumers test a flag
+# rather than a string. Health metrics record neither success nor failure:
+# a call that never ran is not evidence about the tool either way.
+UNAVAILABLE_MARKER = "unavailable"
+UNAVAILABLE_PREFIX = "[unavailable]"
+
+
 def _refusal(name: str, content: str) -> ToolExecutionResult:
     return ToolExecutionResult(
         tool_name=name, content=content, was_error=True, latency_ms=0, metadata={REFUSAL_MARKER: True}
     )
+
+
+def is_unavailable(result: ToolExecutionResult) -> bool:
+    """True when the tool was unavailable by design, not failing."""
+    if (result.metadata or {}).get(UNAVAILABLE_MARKER):
+        return True
+    return (result.content or "").startswith(UNAVAILABLE_PREFIX)
 
 
 def is_policy_refusal(result: ToolExecutionResult) -> bool:
@@ -496,9 +522,14 @@ async def _execute_single(
         else:
             result, metadata = raw, {}
 
-        was_error = (not result) or result.startswith("Error:") or _is_failure_verdict(result)
+        # By-design unavailability is neither a success nor a failure, so it
+        # is settled before the error test and leaves per-tool health alone.
+        unavailable = isinstance(result, str) and result.startswith(UNAVAILABLE_PREFIX)
+        was_error = (not unavailable) and ((not result) or result.startswith("Error:") or _is_failure_verdict(result))
 
-        if was_error:
+        if unavailable:
+            metadata = {**(metadata or {}), UNAVAILABLE_MARKER: True}
+        elif was_error:
             registry.metrics[name].record_failure(result, latency)
         else:
             registry.metrics[name].record_success(latency)
