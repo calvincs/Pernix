@@ -484,8 +484,37 @@ _SCOUT_SUBMIT_ONLY = [t for t in _SCOUT_TOOLS if t["function"]["name"] == "submi
 # ---------------------------------------------------------------------------
 
 
+def memory_recall_denied(brief: SessionBrief) -> bool:
+    """True when this session's scout must not read memory at all.
+
+    Canary isolation (trust-loop hardening W5, plan §5): eval sessions run
+    WITH the treatment under measurement — adaptive entries, skills — and
+    WITHOUT memory recall. A canary that can look up "the answer to
+    gen-grep-count" measures the memory index, not the pipeline, and the
+    generated sentinels exist precisely so a memorised answer cannot pass.
+    Enforced at three points, like the tool allowlist: the preload gatherers
+    below, the scout tool schema, and this executor backstop.
+    """
+    return (getattr(brief, "session_type", "") or "") == "canary"
+
+
+def scout_tools_for(brief: SessionBrief) -> list:
+    """The scout tool schema for this session — search_memory removed when
+    memory recall is denied, so the model is never offered a door it would
+    only be refused at."""
+    if not memory_recall_denied(brief):
+        return _SCOUT_TOOLS
+    return [t for t in _SCOUT_TOOLS if t.get("function", {}).get("name") != "search_memory"]
+
+
 def _exec_scout_tool(name: str, args: dict, brief: SessionBrief) -> str:
     """Execute a scout tool and return the result as a string."""
+
+    if name == "search_memory" and memory_recall_denied(brief):
+        return (
+            "Memory search is not available in this session. Plan from the "
+            "task description, the workspace, and your own tools."
+        )
 
     if name == "search_memory":
         try:
@@ -1562,7 +1591,15 @@ async def _run_scout_llm(
     except Exception:
         _space_slug = None
 
+    # Canary isolation (W5): the four memory-derived gatherers below are the
+    # scout's whole recall surface. A canary session gets none of them — the
+    # non-memory preload (tools, skills, models, adaptive hints, workspace
+    # state, candor intel) is the treatment being measured and stays.
+    _no_recall = memory_recall_denied(brief)
+
     def _gather_memory_baseline() -> str | None:
+        if _no_recall:
+            return None
         _step("memory", "Searching memory")
         try:
             from core.memory.store import get_memory_store
@@ -1595,6 +1632,8 @@ async def _run_scout_llm(
             return None
 
     def _gather_deep_memory() -> str | None:
+        if _no_recall:
+            return None
         try:
             from core.scout.search import gather_deep_memory
 
@@ -1607,6 +1646,8 @@ async def _run_scout_llm(
         return None
 
     def _gather_cross_session() -> str | None:
+        if _no_recall:
+            return None
         _step("sessions", "Searching other sessions")
         try:
             from core.scout.search import gather_cross_session_data
@@ -1661,6 +1702,8 @@ async def _run_scout_llm(
         return None
 
     def _gather_lessons() -> str | None:
+        if _no_recall:
+            return None
         # Relevant past lessons (entry_type='lesson') — workarounds extracted
         # by the refine pass from prior failed sessions, via hybrid search.
         try:
@@ -1783,7 +1826,7 @@ async def _run_scout_llm(
         # revision request lands there by construction, so scout was ordered to
         # call a tool that was no longer on offer. Text output is still parsed
         # as a fallback below for models that answer in prose anyway.
-        tools = _SCOUT_TOOLS if not is_last_round else _SCOUT_SUBMIT_ONLY
+        tools = scout_tools_for(brief) if not is_last_round else _SCOUT_SUBMIT_ONLY
 
         # On penultimate round, inject a reminder to submit next round
         if round_num == SCOUT_MAX_ROUNDS - 2 and report is None:
@@ -2198,16 +2241,18 @@ def _build_fallback_report(message: str, brief: SessionBrief, *, reason: str = "
     every turn, fallback or not — this report carries only what scout would
     have curated.
     """
-    # Basic memory recall
+    # Basic memory recall — skipped entirely for canary sessions (W5): the
+    # fallback path must not become the recall hole the LLM path just closed.
     memory_context = ""
-    try:
-        from core.memory.store import get_memory_store
+    if not memory_recall_denied(brief):
+        try:
+            from core.memory.store import get_memory_store
 
-        store = get_memory_store()
-        if store:
-            memory_context = store.recall(message, top=3) or ""
-    except Exception:
-        pass
+            store = get_memory_store()
+            if store:
+                memory_context = store.recall(message, top=3) or ""
+        except Exception:
+            pass
 
     # Default tools: core + recently used
     from core.tools.registry import get_registry
