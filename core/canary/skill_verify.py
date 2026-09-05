@@ -106,7 +106,14 @@ def _parse_verify_block(md: Path) -> tuple[dict | None, str]:
     return v, ""
 
 
-def _render_verify_canary(skill_name: str, v: dict, reviewed: str) -> str:
+def _render_verify_canary(skill_name: str, v: dict, reviewed: str, *, parked: bool = False, flaky: bool = False) -> str:
+    """The canonical file for a verify canary.
+
+    `parked` and `flaky` belong to maintenance, not to the skill: a sync
+    that dropped them would un-park the canary, maintenance would park it
+    again next cycle, and the two writers would trade the file (and a
+    notification) every twenty minutes — the 2026-09-05 storm.
+    """
     from core.canary.parser import DEFAULT_TIMEOUT_S
 
     fm: dict = {
@@ -125,6 +132,10 @@ def _render_verify_canary(skill_name: str, v: dict, reviewed: str) -> str:
         "covers": [f"skill:{skill_name}"],
         "last_reviewed": reviewed,
     }
+    if parked:
+        fm["parked"] = True
+    if flaky:
+        fm["flaky"] = True
     files = v.get("files") or {}
     if isinstance(files, dict) and files:
         fm["files"] = {str(k): str(v_) for k, v_ in files.items()}
@@ -135,6 +146,29 @@ def _render_verify_canary(skill_name: str, v: dict, reviewed: str) -> str:
         "sticks if the verify block is removed too."
     )
     return f"---\n{yaml.safe_dump(fm, sort_keys=False, allow_unicode=True)}---\n\n{body}\n"
+
+
+_MAINTENANCE_LINES = ("last_reviewed:", "parked:", "flaky:")
+
+
+def _same_verify_content(a: str, b: str) -> bool:
+    """Equal once the lines maintenance owns are ignored."""
+
+    def strip(text: str) -> str:
+        return "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith(_MAINTENANCE_LINES))
+
+    return strip(a) == strip(b)
+
+
+def _retired_copy_text(cname: str, canaries_base: Path) -> str | None:
+    """The CANARY.md of a retired copy of `cname`, when one is quarantined."""
+    from core.canary.maintain import retired_dir
+
+    try:
+        path = retired_dir(canaries_base) / cname / "CANARY.md"
+        return path.read_text(encoding="utf-8") if path.exists() else None
+    except OSError:
+        return None
 
 
 def _notify_unsafe_once(skill_name: str, digest: str, problem: str) -> None:
@@ -190,21 +224,29 @@ def _sync_verify_canary(skill_name: str, md: Path, digest: str, canaries_base: P
         return
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # A verify canary someone retired stays retired while the verify block
+    # it was built from is unchanged. Re-materialising it every sweep made
+    # retirement from the Canary tab impossible to keep.
+    if existing is None:
+        retired_text = _retired_copy_text(cname, canaries_base)
+        if retired_text is not None and _same_verify_content(retired_text, _render_verify_canary(skill_name, v, today)):
+            return
+
     # Compare with the EXISTING review date first: last_reviewed only
     # restamps on a real content change, otherwise every first sweep of a
-    # new day would rewrite the file just to move the date.
-    keep_date = (
-        existing.last_reviewed
-        if (existing is not None and VERIFY_TAG in existing.tags and existing.last_reviewed)
-        else today
-    )
+    # new day would rewrite the file just to move the date. Maintenance
+    # flags are carried over for the same reason.
+    managed = existing is not None and VERIFY_TAG in existing.tags
+    keep_date = existing.last_reviewed if (managed and existing.last_reviewed) else today
+    flags = {"parked": bool(getattr(existing, "parked", False)), "flaky": bool(getattr(existing, "flaky", False))}
     if existing is not None and existing.path is not None:
         try:
-            if existing.path.read_text(encoding="utf-8") == _render_verify_canary(skill_name, v, keep_date):
+            if existing.path.read_text(encoding="utf-8") == _render_verify_canary(skill_name, v, keep_date, **flags):
                 return  # already in sync
         except OSError:
             pass
-    text = _render_verify_canary(skill_name, v, today)
+    text = _render_verify_canary(skill_name, v, today, **flags)
     got, werr = write_canary_md(cname, text, base=canaries_base, overwrite=True)
     if werr:
         stats["verify_unsafe"].append(skill_name)

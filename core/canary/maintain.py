@@ -482,15 +482,21 @@ def run_maintenance(is_cancelled=lambda: False, base: Path | None = None) -> dic
     # folding any of them in here would double-notify.
     mutations = {k: v for k, v in changed.items() if k not in ("unhealthy", "probes_retired", "verify_unsafe")}
     if mutations:
+        import hashlib
+
+        summary = "; ".join(f"{k}: {', '.join(_describe(i) for i in v)}" for k, v in mutations.items())
         try:
+            # One notification per distinct set of mutations per day: the
+            # sweep runs every idle cycle, and a change that re-derives the
+            # same way twice is one piece of news, not twenty.
             db.add_notification(
                 title="Canary suite auto-maintenance",
-                body="; ".join(f"{k}: {', '.join(_describe(i) for i in v)}" for k, v in mutations.items())
-                + ". Parked canaries leave the nightly heartbeat but stay in "
+                body=summary + ". Parked canaries leave the nightly heartbeat but stay in "
                 "the suite — coverage triggers, full sweeps and manual runs "
                 "still fire them, a red run unparks them, and the Canary tab "
                 "can unpark one any time.",
                 urgency="normal",
+                dedup_key="canary_maintain:" + hashlib.sha1(summary.encode()).hexdigest()[:12],
             )
         except Exception:
             pass
