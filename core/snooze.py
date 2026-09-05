@@ -56,6 +56,28 @@ SKILL_SWEEP_MAX_PENDING = 30
 # sweep waits for idle while its own sessions keep snooze from being idle.
 SNOOZE_TRANSPARENT_TYPES = frozenset({"canary"})
 
+# Tools the candor reliability producer must never call "degraded". A dialog
+# tool's job is to reach the USER, so in an unattended session it reports
+# by-design unavailability rather than an answer — a property of the session,
+# not a fault in the tool. Those non-answers were emitted as tool_ok=false
+# until 2026-09-04 (see UNAVAILABLE_PREFIX in core/tools/executor.py), and the
+# historical counts they left behind are still in the ledger, so the exemption
+# is what stops the "tool ask_user degraded — prefer an alternative" hint from
+# being minted again off that history. A live one is retired by the same pass.
+# Matched by registered category first; the names are the fallback for when
+# the registry has not loaded.
+CANDOR_HINT_EXEMPT_CATEGORIES = frozenset({"dialog"})
+CANDOR_HINT_EXEMPT_TOOLS = frozenset({"ask_user", "notify_user", "approve_dangerous_tool"})
+
+# Receipt prefix for adaptive evidence that points at a Candor fact (W4 parses
+# `candor:<fact_key>`; the key is the predicate call the p/n was derived from).
+CANDOR_RECEIPT_PREFIX = "candor:"
+
+
+def candor_receipt(tool: str) -> str:
+    """The `candor:<fact_key>` receipt for a tool's reliability ledger."""
+    return f"{CANDOR_RECEIPT_PREFIX}tool_ok({tool})"
+
 
 def snooze_transparent(session) -> bool:
     """True when a session should be invisible to the idle gate.
@@ -1642,10 +1664,25 @@ Output valid JSON only. No markdown fences. /no_think"""
                 def _is_tool(name: str) -> bool:
                     return not known or registry.exists(name)
 
+                def _is_exempt(name: str) -> bool:
+                    """Dialog tools never earn a degraded hint (see the
+                    CANDOR_HINT_EXEMPT_* constants)."""
+                    tool = registry.get(name)
+                    if tool is not None:
+                        return getattr(tool, "category", "") in CANDOR_HINT_EXEMPT_CATEGORIES
+                    return name in CANDOR_HINT_EXEMPT_TOOLS
+
                 skipped = [d["tool"] for d in degraded if not _is_tool(d["tool"])]
                 if skipped:
                     logger.info("Candor: skipped %d degraded non-tool name(s): %s", len(skipped), ", ".join(skipped))
-                degraded = [d for d in degraded if _is_tool(d["tool"])]
+                exempt = [d["tool"] for d in degraded if _is_tool(d["tool"]) and _is_exempt(d["tool"])]
+                if exempt:
+                    logger.info(
+                        "Candor: skipped %d degraded dialog tool(s) — by-design unavailability " "is not a fault: %s",
+                        len(exempt),
+                        ", ".join(exempt),
+                    )
+                degraded = [d for d in degraded if _is_tool(d["tool"]) and not _is_exempt(d["tool"])]
                 degraded_ids = {f"tool-{d['tool']}-degraded" for d in degraded}
                 mints = []
                 for d in degraded:
@@ -1667,7 +1704,13 @@ Output valid JSON only. No markdown fences. /no_think"""
                                 f"{d['n']} observations — prefer an alternative or verify its "
                                 f"output; see why_reliability('tool_ok', '{d['tool']}')."
                             ),
-                            "evidence": [f"candor:tool_ok({d['tool']})"],
+                            # Receipt first: W4's resolver reads evidence[0]
+                            # as `candor:<fact_key>` and checks the ledger the
+                            # p/n above was actually derived from.
+                            "evidence": [
+                                candor_receipt(d["tool"]),
+                                f"calibrated p={d['p']:.3f} over n={d['n']} observations",
+                            ],
                         }
                     )
                 # Retirement: a hint whose tool has RECOVERED (calibrated p
@@ -1687,7 +1730,12 @@ Output valid JSON only. No markdown fences. /no_think"""
                     # or the name was never a tool and should not have minted
                     # a hint at all.
                     named = eid[len("tool-") : -len("-degraded")]
-                    why = "recovered" if _is_tool(named) else "not a registered tool"
+                    if not _is_tool(named):
+                        why = "not a registered tool"
+                    elif _is_exempt(named):
+                        why = "dialog tool — by-design unavailability is not a fault"
+                    else:
+                        why = "recovered"
                     retires.append(
                         {
                             "action": "delete",
@@ -1695,7 +1743,9 @@ Output valid JSON only. No markdown fences. /no_think"""
                             "scope": "global",
                             "entry_id": eid,
                             "baseline_version": row["version"],
-                            "evidence": [f"candor:tool_ok {why} ({eid})"],
+                            # Receipt first, same contract as the mint: the
+                            # ledger that no longer supports the hint.
+                            "evidence": [candor_receipt(named), f"hint retired: {why} ({eid})"],
                         }
                     )
                 edits = mints[:2] + retires[:2]
