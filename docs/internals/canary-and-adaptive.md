@@ -151,6 +151,51 @@ What a canary deliberately *keeps*: bash, the file/search/repl tools, skill
 discovery and loading, and every adaptive entry that renders into the prompt.
 Those are the treatment under measurement, not contamination.
 
+### Generated fixtures
+
+A saturated suite proves nothing, and every hand-written canary ships its
+answer in the repository: `grep-count`'s expected count is `8`, in the gate
+command, forever. A model that has seen the transcript once passes it without
+doing the work.
+
+So a canary directory may carry a `generate.py` beside its `CANARY.md`:
+
+```python
+def generate(seed: int) -> dict:
+    return {
+        "prompt": "...",                                     # the task
+        "files": {"logs/app.log": "..."},                    # workspace seed
+        "gates": [{"name": "...", "command": "grep -qx '13' answer.txt",
+                   "watch_paths": ["answer.txt"]}],          # the scoring
+    }
+```
+
+Such a `CANARY.md` omits `prompt`, `gates` and `files` and carries
+`generated: true`; everything else (name, timeout, tags, flaky, parked,
+covers, probe fields) is read normally. The runner draws a fresh seed per run
+(`core/canary/fixtures.py`), calls `generate(seed)` in-process — the same
+trust level as the gate shell commands it produces, so generated canaries are
+a hand-authored, repository-reviewed surface that auto-admission never writes
+— and takes the prompt, the seed files and the gates from that one call.
+
+**Where the expected value lives:** only inside the gate command, built at run
+time. Not in the workspace (input files only), not in the prompt, not in a
+tool result — `list_gates` is off the canary allowlist precisely because it
+printed gate commands verbatim. What *is* persisted is the seed, appended to
+`gate_results_json` as `{"seed": n, "generated": true}`: enough to reproduce a
+failed run by hand (`generate(seed)`), useless to a model that memorised last
+week's answer. A post-batch confirm-rerun therefore re-runs on a *different*
+fixture, which makes a confirmed failure stronger evidence, not weaker.
+
+Three ship with the suite, all tagged `[sentinel, generated, holdout]`:
+`gen-file-create` (random target filename and exact line, plus a near-miss
+decoy in the workspace), `gen-grep-count` (2-4 log files, random ERROR count,
+with the lowercase-`error` and `ERRORS-SUMMARY` traps guaranteed present), and
+`gen-json-transform` (random orders to aggregate, with at least one customer
+that never ships). Each generator's arithmetic is checked against its own
+rendered fixture across 20 seeds in `tests/test_canary_isolation_hardening.py`
+— the gate must pass a correct answer and fail an off-by-one.
+
 ### Triggers — change-driven, not wall-clock
 
 Canaries run when something they cover **changes**; the only standing

@@ -22,6 +22,9 @@ def _def_payload(d, stats=None) -> dict:
     return {
         "name": d.name,
         "tags": d.tags,
+        # Generated fixtures (W5): the task is built per run from a seed, so
+        # the tab must not offer to show a prompt or gates that do not exist.
+        "generated": d.generated,
         "covers": d.covers,
         "flaky": d.flaky,
         "parked": d.parked,

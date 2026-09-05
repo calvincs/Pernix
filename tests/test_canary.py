@@ -80,6 +80,12 @@ def test_seed_suite_parses():
     defs = scan_canaries(Path("data/canaries"))
     assert len(defs) >= 6
     for d in defs:
+        if d.generated:
+            # A generated canary builds its prompt and gates per run from a
+            # fresh seed (core/canary/fixtures.py), so the file carries
+            # neither — only the generator that produces them.
+            assert d.generator_path is not None, d.name
+            continue
         assert d.gates, d.name
         assert d.prompt, d.name
 
