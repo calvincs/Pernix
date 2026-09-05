@@ -27,6 +27,9 @@ import { setTheme, isLight } from './theme.js';
 import { notify } from './feedback.js';
 import { confirmDanger } from './components/modals/confirm.js';
 import { actionSheet } from './components/modals/sheet.js';
+import {
+    primeMessageFeedback, feedbackAvailable, feedbackButtons, feedbackItems, applyFeedbackChoice,
+} from './components/message-feedback.js';
 
 // ---------------------------------------------------------------------------
 // File uploads state
@@ -1243,7 +1246,15 @@ async function loadMessages(sid, { keepScroll = false } = {}) {
     ]);
     inner.appendChild(loadingRow);
     try {
-        const data = await get(`/api/sessions/${sid}?limit=${HISTORY_PAGE}`);
+        // The session's thumbs come with the transcript, not with each
+        // message: one call for the whole session, issued alongside the
+        // transcript fetch rather than after it so neither waits on the
+        // other, and settled before the first bubble is built so a rating
+        // never has to be painted on twice. It cannot reject.
+        const [data] = await Promise.all([
+            get(`/api/sessions/${sid}?limit=${HISTORY_PAGE}`),
+            primeMessageFeedback(sid, { sessionType: _knownSession(sid)?.session_type || '' }),
+        ]);
         loadingRow.remove();
         // A newer selectSession already cleared and re-rendered this
         // container; appending now would interleave two transcripts.
@@ -4471,23 +4482,87 @@ function _setMessageChip(msgEl, model, latencyMs) {
     return chip;
 }
 
-/** Hover action toolbar: copy on every message, edit-&-resend on user messages. */
+/** The raw markdown behind a bubble, as the clipboard should get it. */
+async function _copyMessageText(msgEl) {
+    const raw = msgEl._rawContent ?? msgEl.querySelector('.content')?.innerText ?? '';
+    try {
+        await navigator.clipboard.writeText(raw);
+        return true;
+    } catch {
+        return false;   // clipboard unavailable (non-secure context)
+    }
+}
+
+/**
+ * The touch half of an assistant message's actions.
+ *
+ * On a mouse the toolbar can hold three 24px buttons because it is only there
+ * while you point at it. On a finger those same buttons are 36px and
+ * permanently visible, and three of them over every single answer is the
+ * loudest thing on the screen — so they collapse into the one `⋯` the session
+ * rows and the Explorer's file rows already use, and the sheet names each
+ * action in words.
+ */
+function _messageMenuButton(msgEl, messageId) {
+    const btn = el('button', {
+        class: 'msg-action-btn msg-menu-btn',
+        type: 'button',
+        title: 'Actions',
+        'aria-label': 'Actions for this reply',
+        'aria-haspopup': 'dialog',
+    }, [icon('more', { size: 18 })]);
+    btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const items = [
+            { id: 'copy', label: 'Copy message', icon: 'copy' },
+            ...feedbackItems(messageId),
+        ];
+        const choice = await actionSheet({ title: 'This reply', items });
+        if (choice === 'copy') {
+            if (await _copyMessageText(msgEl)) notify('success', 'Copied to the clipboard.');
+            else notify('error', "Couldn't copy — the clipboard needs a secure page (https, or localhost).");
+            return;
+        }
+        await applyFeedbackChoice(messageId, choice);
+    });
+    return btn;
+}
+
+/**
+ * Hover action toolbar: copy on every message, edit-&-resend on user
+ * messages, and thumbs on an assistant answer that the server can store a
+ * rating for. On touch an assistant answer gets one `⋯` instead, holding the
+ * same actions as sheet rows.
+ */
 function _attachMessageActions(msgEl, role) {
     const actions = el('div', { class: 'msg-actions' });
+    // Set by appendMessage from the transcript row. A live stream has no row
+    // id until the transcript is next loaded, and a rating has to name the
+    // message it is about — so a still-arriving answer carries no thumbs.
+    const messageId = msgEl.dataset.messageId || null;
+    const gradable = role === 'assistant' && messageId != null && feedbackAvailable();
+
+    if (gradable && isTouch()) {
+        actions.appendChild(_messageMenuButton(msgEl, messageId));
+        msgEl.appendChild(actions);
+        return;
+    }
+
     const copyBtn = el('button', {
         class: 'msg-action-btn', title: 'Copy message', 'aria-label': 'Copy message',
     }, [icon('copy', { size: 12 })]);
     copyBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
-        const raw = msgEl._rawContent ?? msgEl.querySelector('.content')?.innerText ?? '';
-        try {
-            await navigator.clipboard.writeText(raw);
-            clear(copyBtn);
+        if (!(await _copyMessageText(msgEl))) return;
+        clear(copyBtn);
         copyBtn.appendChild(icon('check', { size: 12 }));
-            setTimeout(() => { clear(copyBtn); copyBtn.appendChild(icon('copy', { size: 12 })); }, 1200);
-        } catch { /* clipboard unavailable (non-secure context) */ }
+        setTimeout(() => { clear(copyBtn); copyBtn.appendChild(icon('copy', { size: 12 })); }, 1200);
     });
     actions.appendChild(copyBtn);
+
+    if (gradable) {
+        for (const btn of feedbackButtons(messageId)) actions.appendChild(btn);
+    }
 
     if (role === 'user') {
         // "Edit & resend" promised something this button does not do: it

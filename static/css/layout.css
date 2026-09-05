@@ -3847,6 +3847,22 @@ body.sidebar-resizing {
     background: var(--bg-surface);
     border-color: var(--border-subtle);
 }
+/* The thumbs on an assistant answer. Unrated they are the same quiet chrome
+   as copy; the rating you have actually given is the only one that takes a
+   colour, so a glance down a transcript reads as "these two I marked" rather
+   than as a column of buttons. Up borrows the accent (the app's own "yes"),
+   down the warning amber rather than the destructive red — a thumbs-down is
+   a judgement, not a deletion. */
+.msg-feedback-btn.on {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface));
+}
+.msg-feedback-down.on {
+    color: var(--warning);
+    border-color: var(--warning);
+    background: color-mix(in srgb, var(--warning) 12%, var(--bg-surface));
+}
 
 /* Queued-message remove button */
 .queued-remove {
@@ -4605,6 +4621,32 @@ mark.ts-mark.current {
     text-wrap: pretty;
 }
 .confirm-body p:last-of-type { margin-bottom: 0; }
+
+/* The optional line behind a thumbs-down. Same card, header and footer as
+   the confirm dialog — the only thing it owns is the width and the field. */
+.msg-note-card { width: min(460px, 92vw); }
+.msg-note-label {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+}
+.msg-note-input {
+    width: 100%;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    padding: 7px 10px;
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    outline: none;
+    transition: border-color var(--transition);
+}
+.msg-note-input:focus { border-color: var(--accent-dim); }
+.msg-note-input::placeholder { color: var(--text-faint); }
 
 /* F10 — urgency has to look like urgency. .notif-item lives in modals.css and
    .jobs-indicator in jobs.css; both of these are new selectors, so nothing

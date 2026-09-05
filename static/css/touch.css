@@ -111,6 +111,15 @@
     margin-bottom: 0;
 }
 
+/* The `⋯` an assistant answer carries instead of the mouse's toolbar: copy
+   and the two thumbs become sheet rows, so one 36px target replaces three.
+   It takes the 36px box and the outline from .msg-action-btn above; the only
+   thing of its own is the dot colour, which sits a step brighter than the
+   toolbar's icons because it is the row's only control. */
+.message .msg-menu-btn {
+    color: var(--text-dim);
+}
+
 /* The model/latency chip is a per-answer footnote. On a narrow screen a
    footnote under every single reply is just noise between the answers, so it
    folds away and the meta row (role + time) is the tap target that brings it
@@ -846,6 +855,12 @@ body[data-touch] .space-group-header .space-menu-btn {
     padding: var(--sp-3);
 }
 .fp-search-input {
+    min-height: 44px;
+    font-size: 16px;
+}
+/* The thumbs-down note field — 16px for the same iOS-zoom reason as every
+   other input on this tier. */
+.msg-note-input {
     min-height: 44px;
     font-size: 16px;
 }
