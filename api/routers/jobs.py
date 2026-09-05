@@ -282,7 +282,7 @@ async def jobs_status():
 
     return {
         "running_jobs": running_count,
-        "scheduled_count": len(next_runs),
+        "scheduled_count": scheduled_count,
         "snooze": snooze_stats,
         "next_runs": next_runs,
     }
