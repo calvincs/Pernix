@@ -18,6 +18,7 @@ import {
 import { renderAdaptiveTab } from './modals/adaptive.js';
 import { renderCanaryTab } from './modals/canary.js';
 import { renderTelosTab } from './modals/telos.js';
+import { renderTrustTab } from './modals/trust.js';
 
 // ---------------------------------------------------------------------------
 // Monaco Editor (vendored) with lightweight textarea fallback
@@ -249,6 +250,9 @@ export const EXPLORER_GROUPS = [
             { key: 'adaptive', label: 'Learning', term: 'Adaptive' },
             { key: 'canary', label: 'Self-checks', term: 'Canary' },
             { key: 'telos', label: 'Goals', term: 'Telos' },
+            // Last, and deliberately so: it reads across the other three
+            // rather than governing a subsystem of its own.
+            { key: 'trust', label: 'Trust' },
         ],
     },
 ];
@@ -621,6 +625,7 @@ function buildPanelDOM() {
     const adaptiveContent = el('div', { class: 'fp-tab-content', 'data-tab': 'adaptive', id: 'fp-adaptive' });
     const canaryContent = el('div', { class: 'fp-tab-content', 'data-tab': 'canary', id: 'fp-canary' });
     const telosContent = el('div', { class: 'fp-tab-content', 'data-tab': 'telos', id: 'fp-telos' });
+    const trustContent = el('div', { class: 'fp-tab-content', 'data-tab': 'trust', id: 'fp-trust' });
 
     _panel.appendChild(handle);
     _panel.appendChild(header);
@@ -634,6 +639,7 @@ function buildPanelDOM() {
     _panel.appendChild(adaptiveContent);
     _panel.appendChild(canaryContent);
     _panel.appendChild(telosContent);
+    _panel.appendChild(trustContent);
 
     renderTabs();
 }
@@ -829,6 +835,7 @@ async function loadTabData() {
     else if (_state.tab === 'adaptive') await renderAdaptiveTab(document.getElementById('fp-adaptive'));
     else if (_state.tab === 'canary') await renderCanaryTab(document.getElementById('fp-canary'));
     else if (_state.tab === 'telos') await renderTelosTab(document.getElementById('fp-telos'));
+    else if (_state.tab === 'trust') await renderTrustTab(document.getElementById('fp-trust'));
 }
 
 // ---------------------------------------------------------------------------

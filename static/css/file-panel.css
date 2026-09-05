@@ -1364,7 +1364,7 @@ body.fp-resizing #main { pointer-events: none; }
    Adaptive tab (plan 4f) — shared by the Canary and Telos tabs, which reuse
    this vocabulary rather than defining their own.
 --------------------------------------------------------------------------- */
-#fp-adaptive, #fp-canary, #fp-telos { overflow-y: auto; padding: 10px 14px; }
+#fp-adaptive, #fp-canary, #fp-telos, #fp-trust { overflow-y: auto; padding: 10px 14px; }
 .adaptive-head { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
 /* Six controls in a 360px column had nowhere to go: flex shrank every button
    until its label was unreadable, and on a phone the last one ran off the
@@ -1477,6 +1477,42 @@ body[data-touch] .adaptive-btn {
     background: color-mix(in srgb, var(--accent) 5%, var(--bg));
     padding: 8px; border-radius: var(--radius); overflow-x: auto;
     font-size: 0.9em; margin: 4px 0;
+}
+
+/* --- Trust tab ---
+   One measurement per row: the name on the left, the number hard right where
+   the eye can run down a column of them, and the sample size in a quiet line
+   underneath. Everything else on this tab is a shared .adaptive-* class, so
+   the Trust tab cannot drift away from the three it sits beside. */
+.trust-stat {
+    padding: 5px 0;
+    border-bottom: 1px dashed var(--border);
+}
+.trust-stat:last-child { border-bottom: none; }
+.trust-stat-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--sp-3);
+}
+.trust-stat-label { color: var(--text); }
+.trust-stat-value {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-bright);
+    white-space: nowrap;
+}
+.trust-stat-note {
+    color: var(--text-dim);
+    font-size: 0.85em;
+    margin-top: 2px;
+    line-height: 1.45;
+}
+.trust-trial-arms {
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 0.85em;
+    margin-top: 4px;
 }
 
 /* --- MCP tab --- */

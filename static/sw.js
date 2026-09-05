@@ -65,6 +65,7 @@ const SHELL_ASSETS = [
     '/static/js/components/modals/adaptive.js',
     '/static/js/components/modals/canary.js',
     '/static/js/components/modals/telos.js',
+    '/static/js/components/modals/trust.js',
     '/static/js/components/modals/sheet.js',
     '/static/img/favicon.png',
     '/static/img/app-icon-192.png',
