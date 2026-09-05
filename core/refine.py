@@ -328,6 +328,39 @@ def _latest_reflect_verdict(messages: list[dict]) -> dict | None:
     return None
 
 
+_RECEIPT_PM_LIMIT = 5
+
+
+def _stamp_post_mortem_receipts(edits: list[dict], session_id: str) -> list[dict]:
+    """Prefix each edit's evidence with `pm:` refs for the turns refine read.
+
+    Refine reads the session's graded turns (the reflect verdicts in the
+    transcript are the post-mortem payloads), but it emitted only the model's
+    own prose as evidence — which resolves to nothing, so the edit could
+    never be grounded (core/adaptive/receipts.py) and would sit waiting for a
+    human forever. The receipts go FIRST and the model's sentences stay
+    after them: a reviewer wants the pointer before the story.
+    """
+    try:
+        rows = db.list_post_mortems(session_id=session_id, limit=_RECEIPT_PM_LIMIT)
+    except Exception as e:
+        logger.debug("refine: post-mortem receipts unavailable for %s: %s", session_id, e)
+        return edits
+    receipts = [f"pm:{r['id']}" for r in rows if r.get("id")]
+    if not receipts:
+        return edits
+    stamped = []
+    for e in edits:
+        if not isinstance(e, dict):
+            continue
+        e = dict(e)
+        raw_evidence = e.get("evidence")
+        existing = [str(r) for r in raw_evidence] if isinstance(raw_evidence, list) else []
+        e["evidence"] = receipts + [r for r in existing if r not in receipts]
+        stamped.append(e)
+    return stamped
+
+
 def _parse_refine_output(raw: str) -> tuple[list[dict], list[dict], list[dict], list[dict], bool]:
     """Parse the LLM JSON into (proposals, lessons, adaptive_edits,
     canary_proposals, nothing_actionable). Tolerates fences. adaptive_edits
@@ -559,6 +592,7 @@ async def run_for_session(session_id: str) -> dict[str, Any]:
     if adaptive_edits:
         from core.adaptive.contract import queue_producer_edits
 
+        adaptive_edits = _stamp_post_mortem_receipts(adaptive_edits, session_id)
         q = queue_producer_edits(
             adaptive_edits,
             "refine",
