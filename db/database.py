@@ -1097,6 +1097,38 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_space_suggestions_status ON space_suggestions(status)",
         ],
     ),
+    (
+        36,
+        "ground truth: the user's own verdict on a turn, and where every outcome came from",
+        [
+            # One row per assistant message the user reacted to. message_id is
+            # UNIQUE because a thumb is a state, not an event log: pressing up
+            # after down replaces the row rather than appending to it, and
+            # removing the reaction deletes it. TEXT because the API addresses
+            # messages by path segment; rows store the canonical decimal form.
+            """CREATE TABLE IF NOT EXISTS message_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                message_id TEXT NOT NULL UNIQUE,
+                signal TEXT NOT NULL CHECK(signal IN ('up','down')),
+                note TEXT,
+                created_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_message_feedback_session ON message_feedback(session_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_message_feedback_signal ON message_feedback(signal)",
+            # The two columns that make self-grading auditable. user_signal is
+            # the thumb that landed on this turn, if any; outcome_source names
+            # what the recorded outcome actually rests on —
+            # 'llm' (the grader alone) < 'next_turn' (the grader plus the
+            # user's reply) < 'user' (the user said so). Precedence runs left
+            # to right, so the share of grounded outcomes is one GROUP BY.
+            "ALTER TABLE post_mortems ADD COLUMN user_signal TEXT",
+            "ALTER TABLE post_mortems ADD COLUMN outcome_source TEXT",
+            # Every existing row was graded by the model and nothing else.
+            "UPDATE post_mortems SET outcome_source = 'llm' WHERE outcome_source IS NULL",
+            "CREATE INDEX IF NOT EXISTS idx_postmortems_outcome_source ON post_mortems(outcome_source, created_at DESC)",
+        ],
+    ),
 ]
 
 
