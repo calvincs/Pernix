@@ -347,6 +347,29 @@ SKILL.md is machine-editable, so every gate must pass the same allowlist
 proof as canary auto-admission — a skill whose gates fail the proof gets a
 once-per-content notification and no canary.
 
+**Skill rollback** (trust-loop hardening W5). Skill auto-apply had a veto
+window and a timestamped backup, and an instruction telling a human to copy
+the file back by hand — which is not an undo. `restore_skill_backup()`
+restores the backup taken at *that* apply (not merely the newest: a skill
+with several applies would otherwise roll back to the wrong generation),
+marks the proposal `rolled_back`, and copies the state it replaced to
+`SKILL.md.<ts>.pre-rollback` first, so the rollback is itself reversible.
+Reachable three ways:
+
+| Trigger | Path |
+|---|---|
+| A human | `POST /api/skills/proposals/{id}/rollback`, beside approve/reject/apply |
+| Code | `core.skills.proposals.restore_skill_backup(proposal_id)` |
+| Measured regression | The skill's own `verify:` canary gate-failing within 7 days of an auto-apply, when `skill_proposal_auto_rollback` (default **off**) is on |
+
+The automatic path is deliberately narrow. Only the canary's **latest** run
+counts — a skill that failed and then went green has already been fixed, and
+rolling it back would undo the fix. Only an honest `gate_fail` implicates the
+edit: a timeout, a harness error, or a `contaminated` run measures the suite,
+not the skill. And only a proposal auto-applied inside the window is blamed.
+The flag stays off until the signal earns trust, exactly like
+`adaptive_auto_rollback`; manual rollback works either way.
+
 Staleness is curated, not automated away: 90 days past a canary's
 `last_reviewed` date, Snooze nudges you with a notification. Bump the date
 (the tab's *Reviewed ✓* button) after reviewing; the nudge re-arms when it

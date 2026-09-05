@@ -17,6 +17,13 @@ hand edits — the same reason `skill_reqs_hash:` lives there):
            and retired when the block (or the skill) goes away. The test
            lives next to what it tests; nothing extra to manage.
 
+ROLLBACK (trust-loop hardening W5): a skill's own verify canary failing
+shortly after that skill was edited by an auto-applied proposal is the
+closest thing to a measured regression this surface has. With
+``skill_proposal_auto_rollback`` on, that pairing restores the backup taken
+at apply time and marks the proposal 'rolled_back'. Off by default — the
+signal earns trust the way adaptive_auto_rollback does.
+
 SECURITY: verify-gate commands execute on the HOST (core/gates.py jails the
 cwd, not the command), and SKILL.md is machine-editable — update_skill, the
 API, proposal applies. So every gate must pass the same allowlist proof
@@ -30,7 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -42,6 +49,12 @@ logger = logging.getLogger("pernix.canary")
 
 VERIFY_PREFIX = "skill--"
 VERIFY_TAG = "skill-verify"
+# How long after an auto-apply a verify failure still implicates it. Long
+# enough that a nightly heartbeat gets several chances to notice, short
+# enough that an unrelated failure weeks later is not blamed on it.
+ROLLBACK_WINDOW_DAYS = 7
+# How many recent verify runs the rollback check reads per sweep.
+_ROLLBACK_RUN_SCAN = 50
 # _NAME_RE allows 2-49 chars; leave room for the prefix, truncate + hash the rest.
 _MAX_SKILL_CHARS = 49 - len(VERIFY_PREFIX)
 
@@ -201,6 +214,102 @@ def _sync_verify_canary(skill_name: str, md: Path, digest: str, canaries_base: P
     logger.info("Skill verify canary synced: %s (skill '%s')", cname, skill_name)
 
 
+def _covered_skill(canary_def) -> str:
+    """The skill a managed verify canary tests, from its `covers:` list."""
+    for ref in canary_def.covers:
+        if ref.startswith("skill:"):
+            return ref.split(":", 1)[1]
+    return ""
+
+
+def _recent_verify_failures(canaries_base: Path) -> dict[str, str]:
+    """{skill_name: created_at} for verify canaries whose LATEST run failed.
+
+    Only the latest run counts: a skill that failed and then went green again
+    has already been fixed, and rolling it back would undo the fix. A
+    contaminated run is not evidence of anything (W5), and only an honest
+    gate_fail implicates the edit — a timeout or a harness error is
+    suite health.
+    """
+    from core.canary.parser import scan_canaries
+
+    out: dict[str, str] = {}
+    for c in scan_canaries(canaries_base):
+        if VERIFY_TAG not in c.tags:
+            continue
+        skill = _covered_skill(c)
+        if not skill:
+            continue
+        runs = [
+            r for r in db.list_canary_runs(task=c.name, limit=_ROLLBACK_RUN_SCAN) if r.get("outcome") != "contaminated"
+        ]
+        if runs and runs[0].get("outcome") == "gate_fail":
+            out[skill] = runs[0].get("created_at") or ""
+    return out
+
+
+def check_verify_rollbacks(canaries_base: Path, stats: dict) -> None:
+    """Roll back an auto-applied skill proposal its own verify canary failed.
+
+    Flag-gated (``skill_proposal_auto_rollback``, default off) and bounded to
+    proposals auto-applied within ROLLBACK_WINDOW_DAYS of the failing run.
+    Idempotent by construction: a rolled-back proposal leaves the
+    'auto_applied' status, so it is never selected twice.
+    """
+    if not settings.skill_proposal_auto_rollback:
+        return
+    try:
+        failures = _recent_verify_failures(canaries_base)
+    except Exception as e:
+        logger.warning("Verify-failure scan failed: %s", e)
+        return
+    if not failures:
+        return
+
+    from core.skills.proposals import ProposalApplyError, restore_skill_backup
+
+    for skill, failed_at in sorted(failures.items()):
+        try:
+            when = datetime.fromisoformat(failed_at) if failed_at else datetime.now(timezone.utc)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+        except ValueError:
+            when = datetime.now(timezone.utc)
+        floor = (when - timedelta(days=ROLLBACK_WINDOW_DAYS)).isoformat()
+
+        candidates = [
+            p
+            for p in db.list_skill_proposals(skill_name=skill, status="auto_applied", limit=50)
+            if floor <= (p.get("resolved_at") or "") <= (failed_at or when.isoformat())
+        ]
+        if not candidates:
+            continue
+        newest = max(candidates, key=lambda p: p.get("resolved_at") or "")
+        pid = str(newest.get("id"))
+        try:
+            result = restore_skill_backup(pid, actor="skill-verify")
+        except ProposalApplyError as e:
+            logger.warning("Auto-rollback of skill proposal %s failed: %s", pid, e)
+            stats.setdefault("verify_rollback_failed", []).append(pid)
+            continue
+        stats.setdefault("verify_rolled_back", []).append(pid)
+        logger.info("Skill '%s' auto-rolled-back after its verify canary failed (proposal %s)", skill, pid)
+        try:
+            db.add_notification(
+                title=f"Skill auto-rolled-back: {skill}",
+                body=(
+                    f"The verify canary for '{skill}' gate-failed within "
+                    f"{ROLLBACK_WINDOW_DAYS} days of proposal {pid} being auto-applied, so "
+                    f"{result['skill_md_path']} was restored from {Path(result['backup']).name}. "
+                    "The state it replaced was backed up first. Turn this off with "
+                    "skill_proposal_auto_rollback."
+                ),
+                urgency="high",
+            )
+        except Exception as e:
+            logger.debug("Auto-rollback notification failed for '%s': %s", skill, e)
+
+
 def _retire(canary_def, canaries_base: Path, reason: str, stats: dict) -> None:
     from core.canary.maintain import retire_canary
 
@@ -212,7 +321,13 @@ def sync_and_detect(base: Path | None = None, canaries_base: Path | None = None,
     """One watermark + verify-sync pass. Mechanical, bounded, never raises."""
     from core.canary.parser import canaries_dir, scan_canaries
 
-    stats: dict = {"skills_changed": [], "verify_synced": [], "verify_retired": [], "verify_unsafe": []}
+    stats: dict = {
+        "skills_changed": [],
+        "verify_synced": [],
+        "verify_retired": [],
+        "verify_unsafe": [],
+        "verify_rolled_back": [],
+    }
     base = base or _skills_dir()
     canaries_base = canaries_base or canaries_dir()
     skills = _skill_files(base)
@@ -251,6 +366,16 @@ def sync_and_detect(base: Path | None = None, canaries_base: Path | None = None,
                     _retire(c, canaries_base, f"skill(s) {', '.join(sorted(covered))} no longer exist", stats)
                 except Exception as e:
                     logger.warning("Orphan verify-canary retirement failed for '%s': %s", c.name, e)
+
+    # Undo before re-measuring: a verify canary that is currently red for a
+    # skill an auto-applied proposal just edited rolls that proposal back
+    # (flag-gated). Runs after the sync so a freshly (re)materialized verify
+    # canary is on disk to be read.
+    if not is_cancelled():
+        try:
+            check_verify_rollbacks(canaries_base, stats)
+        except Exception as e:
+            logger.warning("Verify-failure rollback check failed: %s", e)
 
     # One targeted sweep for everything that changed — per-name enqueues at
     # the same instant would race the skip-not-queue sweep lock.

@@ -133,6 +133,24 @@ async def reject_proposal(proposal_id: str):
     return {"ok": True, "status": "rejected"}
 
 
+@router.post("/api/skills/proposals/{proposal_id}/rollback")
+async def rollback_proposal_route(proposal_id: str):
+    """Undo an applied proposal by restoring the backup taken at apply time.
+
+    The counterpart to apply: a veto window plus a timestamped backup is only
+    half an undo while restoring it means a human copying a file by hand.
+    Restores the backup stamped at or before THIS apply (not merely the
+    newest), marks the proposal 'rolled_back', and backs up the state it
+    replaced first, so the rollback is itself reversible.
+    """
+    from core.skills.proposals import ProposalApplyError, restore_skill_backup
+
+    try:
+        return {"ok": True, **restore_skill_backup(proposal_id, actor="user")}
+    except ProposalApplyError as e:
+        raise HTTPException(status_code=404 if "not found" in str(e) else 400, detail=str(e)) from None
+
+
 @router.post("/api/skills/proposals/{proposal_id}/apply")
 async def apply_proposal_route(proposal_id: str):
     """Apply a proposal to its target SKILL.md and mark it applied.

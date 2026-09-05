@@ -497,6 +497,14 @@ class Settings:
     # inside the window; 0 disables auto-apply (manual Apply only).
     skill_proposal_auto_apply_after_hours: int = 24
     skill_proposal_max_auto_applies_per_day: int = 5
+    # Every channel needs an undo (trust-loop hardening W5). A skill's own
+    # `verify:` canary failing within 7 days of an auto-apply is the closest
+    # thing to a measured regression this surface has, so with this on the
+    # backup taken at apply time is restored automatically and the proposal
+    # is marked 'rolled_back'. Off by default, like adaptive_auto_rollback:
+    # the signal earns trust first. Manual rollback (the Skills tab, POST
+    # /api/skills/proposals/{id}/rollback) works either way.
+    skill_proposal_auto_rollback: bool = False
 
     # --- Session kernel (persistent per-session REPL, off by default) ---
     # Adaptation plan Phase 2: a plain-scaffold ChildREPL per session whose
