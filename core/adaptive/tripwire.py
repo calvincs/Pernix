@@ -13,11 +13,20 @@ Two signals per applied batch:
                       (The old aggregate pass-rate-delta form had a dead
                       zone: one failure among 8 canaries was a 12.5% drop,
                       under the 15% delta, so the signal could never fire.)
-  secondary (passive) — organic post-mortem retry drift over
-                      adaptive_tripwire_window_turns turns after the apply
-                      vs. the same window before (canary-stamped rows
-                      excluded — §5 landed that stamp for exactly this);
-                      drift >= canary_regression_delta flags.
+  secondary (passive) — organic post-mortem OUTCOME drift across the apply,
+                      measured with a two-proportion z-test: up to
+                      adaptive_tripwire_window_turns graded turns before the
+                      apply vs. the graded turns after it, at least 30 per
+                      side, canary-stamped rows excluded (§5 landed that
+                      stamp for exactly this). Per-turn outcome is the user's
+                      own signal when one exists (post_mortems.user_signal,
+                      migration v36) and reflect's verdict otherwise.
+                      p<0.05 and worse flags; p<0.01 and worse may roll back.
+                      (The old form compared retry RATES over 20-turn
+                      windows. n=20 is noise: on the live box it flagged
+                      seven batches with lines like "retry rate 50% vs 30%"
+                      and rolled back none of them, because a 3-turn swing
+                      moves that ratio 15 points.)
 
 Either signal → status='suspect' + a notification. A later clean comparison
 clears the flag (status back to 'applied', cleared_at stamped) — the other
@@ -25,14 +34,17 @@ clear path is human dismiss via the API. cleared_at is TERMINAL either way:
 a cleared batch drops out of the sweep, so a dismiss is not re-litigated on
 the next cycle against the very evidence it dismissed. adaptive_auto_rollback
 promotes a CONFIRMED primary hit to automatic rollback; an unconfirmed hit
-(the rerun itself died) flags but never rolls back, and the passive signal
-never auto-rolls-back (too noisy by construction).
+(the rerun itself died) flags but never rolls back. The passive signal rolls
+back only when it is significant at p<0.01 AND both adaptive_auto_rollback
+and adaptive_pm_drift_rollback are on — one flag for "the tripwire may
+rollback", one for "this channel has earned it".
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 
 from config import settings
 from db import models as db
@@ -133,41 +145,98 @@ def _canary_signal(batch: dict, flaky: set[str], applied_at: str) -> tuple[bool,
     return (True, bool(confirmed_tasks), "canary regression: " + ", ".join(parts))
 
 
-def _post_mortem_signal(batch: dict, applied_at: str) -> tuple[bool, str] | None:
-    """(drifted, detail) from organic reflect-retry rates around the apply."""
-    window = max(1, settings.adaptive_tripwire_window_turns)
+# Post-mortem drift test. Both windows must reach MIN_N before the batch is
+# measured at all: the destructive action at the end of this chain is a
+# rollback, and a test that can be moved by three turns is not evidence.
+PM_DRIFT_MIN_N = 30
+PM_DRIFT_ALPHA_FLAG = 0.05
+PM_DRIFT_ALPHA_ROLLBACK = 0.01
+_PM_DRIFT_MAX_N_CEILING = 200
 
-    def _organic(rows: list[dict]) -> list[dict]:
-        out = []
-        for r in rows:
-            try:
-                if json.loads(r.get("payload_json") or "{}").get("session_type") == "canary":
-                    continue
-            except (TypeError, ValueError):
-                pass
-            out.append(r)
-        return out
+
+def two_proportion_z_test(successes_a: int, n_a: int, successes_b: int, n_b: int) -> tuple[float, float]:
+    """Pooled two-proportion z-test. Returns (z, two-sided p).
+
+    H0: the two samples share one underlying success rate. `z` is signed
+    from A's perspective — negative means A did worse than B — and `p` is
+    the two-sided normal tail, computed with erfc so nothing here needs
+    scipy. Degenerate inputs (an empty sample, or a pooled rate of exactly
+    0 or 1, which makes the variance zero) return (0.0, 1.0): no evidence,
+    rather than an infinity that would read as certainty.
+    """
+    if n_a <= 0 or n_b <= 0:
+        return (0.0, 1.0)
+    p_a = successes_a / n_a
+    p_b = successes_b / n_b
+    pooled = (successes_a + successes_b) / (n_a + n_b)
+    var = pooled * (1.0 - pooled) * (1.0 / n_a + 1.0 / n_b)
+    if var <= 0.0:
+        return (0.0, 1.0)
+    z = (p_a - p_b) / math.sqrt(var)
+    p = math.erfc(abs(z) / math.sqrt(2.0))
+    return (z, p)
+
+
+def _organic(rows: list[dict]) -> list[dict]:
+    """Drop canary-stamped post-mortems — a canary turn measures the suite."""
+    out = []
+    for r in rows:
+        try:
+            if json.loads(r.get("payload_json") or "{}").get("session_type") == "canary":
+                continue
+        except (TypeError, ValueError):
+            pass
+        out.append(r)
+    return out
+
+
+def _turn_succeeded(row: dict) -> bool:
+    """Ground truth for one graded turn: the user's signal outranks the LLM.
+
+    `post_mortems.user_signal` arrives with migration v36 and is NULL for
+    every turn nobody reacted to, so `.get` covers both the pre-migration
+    schema (key absent from the SELECT * row) and the common NULL — either
+    way the fallback is reflect's own verdict.
+    """
+    signal = (row.get("user_signal") or "").strip().lower()
+    if signal in ("up", "down"):
+        return signal == "up"
+    return row.get("verdict") == "pass"
+
+
+def _post_mortem_signal(batch: dict, applied_at: str) -> tuple[bool, bool, str] | None:
+    """(flagged, rollback_worthy, detail) from organic outcome drift, or None.
+
+    None means "not measurable yet" — fewer than PM_DRIFT_MIN_N graded
+    organic turns on one side of the apply. The caller leaves the batch
+    exactly as it found it in that case.
+    """
+    max_n = max(PM_DRIFT_MIN_N, min(_PM_DRIFT_MAX_N_CEILING, int(settings.adaptive_tripwire_window_turns or 0)))
 
     # ASCENDING feed: the window we want is the turns IMMEDIATELY after the
     # apply. list_post_mortems is newest-first, so slicing it would compare
     # the newest turns overall — a moving target that drifts away from the
     # batch as the system keeps running.
-    after = _organic(db.list_post_mortems_since(applied_at, limit=window * 3))[:window]
-    if len(after) < window:
+    after = _organic(db.list_post_mortems_since(applied_at, limit=max_n * 3))[:max_n]
+    if len(after) < PM_DRIFT_MIN_N:
         return None  # not enough organic turns yet — keep waiting
-    before = _organic([r for r in db.list_post_mortems(limit=window * 6) if (r.get("created_at") or "") < applied_at])[
-        :window
+    before = _organic([r for r in db.list_post_mortems(limit=max_n * 6) if (r.get("created_at") or "") < applied_at])[
+        :max_n
     ]
-    if len(before) < window:
+    if len(before) < PM_DRIFT_MIN_N:
         return None
 
-    def _retry_rate(rows: list[dict]) -> float:
-        return sum(1 for r in rows if r.get("verdict") != "pass") / len(rows)
-
-    rate_after, rate_before = _retry_rate(after), _retry_rate(before)
-    drift = rate_after - rate_before
-    detail = f"post-mortem retry rate {rate_after:.0%} vs {rate_before:.0%} over {window}-turn windows"
-    return (drift >= settings.canary_regression_delta, detail)
+    n_after, n_before = len(after), len(before)
+    ok_after = sum(1 for r in after if _turn_succeeded(r))
+    ok_before = sum(1 for r in before if _turn_succeeded(r))
+    z, p = two_proportion_z_test(ok_after, n_after, ok_before, n_before)
+    worse = (ok_after / n_after) < (ok_before / n_before)
+    detail = (
+        f"post-mortem outcome drift: {ok_after}/{n_after} ({ok_after / n_after:.0%}) succeeded after the apply "
+        f"vs {ok_before}/{n_before} ({ok_before / n_before:.0%}) before "
+        f"(two-proportion z={z:.2f}, p={p:.4f})"
+    )
+    return (worse and p < PM_DRIFT_ALPHA_FLAG, worse and p < PM_DRIFT_ALPHA_ROLLBACK, detail)
 
 
 def _now_iso() -> str:
@@ -246,10 +315,10 @@ def evaluate_tripwire() -> list[dict]:
             # every sweep re-derives the same verdict and only a human
             # dismiss ended it (4 batches sat suspect for 12 days on the
             # live box). Passive-only flags now expire after
-            # adaptive_suspect_ttl_days — the notification already fired,
-            # the passive signal never auto-rolls-back, and a canary-
-            # confirmed regression (reason starts "canary regression:") is
-            # exempt. The marker is stamped at flag time; a legacy suspect
+            # adaptive_suspect_ttl_days — the notification already fired, a
+            # passive flag rolls back only under its own extra flag, and a
+            # canary-confirmed regression (reason starts "canary regression:")
+            # is exempt. The marker is stamped at flag time; a legacy suspect
             # with no marker gets one on first sight and expires from then.
             if batch["status"] == "suspect" and _expire_stale_suspect(batch, actions):
                 continue
@@ -259,8 +328,17 @@ def evaluate_tripwire() -> list[dict]:
             pm = _post_mortem_signal(batch, applied_at)
             canary_regressed = canary is not None and canary[0]
             canary_confirmed = canary_regressed and canary[1]
-            regressed = canary_regressed or (pm is not None and pm[0])
-            details = "; ".join(d for d in ((canary[2] if canary else ""), (pm[1] if pm else "")) if d)
+            pm_regressed = pm is not None and pm[0]
+            # The passive channel's own permission: significant at the
+            # stricter alpha AND both flags on. adaptive_auto_rollback has
+            # only ever meant "a CONFIRMED canary regression may undo a
+            # batch"; widening it silently to a statistical signal that has
+            # never rolled anything back would be a different promise.
+            pm_rollback = (
+                pm is not None and pm[1] and settings.adaptive_auto_rollback and settings.adaptive_pm_drift_rollback
+            )
+            regressed = canary_regressed or pm_regressed
+            details = "; ".join(d for d in ((canary[2] if canary else ""), (pm[2] if pm else "")) if d)
 
             if regressed and batch["status"] == "applied":
                 db.adaptive_update_batch(bid, status="suspect", flagged_reason=details)
@@ -271,14 +349,19 @@ def evaluate_tripwire() -> list[dict]:
                     body=f"Batch {bid}: {details}. Review in the Adaptive panel.",
                     urgency="high",
                 )
+                why = ""
                 if settings.adaptive_auto_rollback and canary_confirmed:
+                    why = "canary regression"
+                elif pm_rollback:
+                    why = "post-mortem outcome drift"
+                if why:
                     from core.adaptive.engine import rollback
 
                     rollback(batch_id=bid, actor="tripwire")
                     actions.append({"batch_id": bid, "action": "auto_rolled_back", "detail": details})
                     db.add_notification(
                         title="Adaptive tripwire: batch auto-rolled-back",
-                        body=f"Batch {bid} rolled back on canary regression: {details}",
+                        body=f"Batch {bid} rolled back on {why}: {details}",
                         urgency="high",
                     )
             elif not regressed and batch["status"] == "suspect" and (canary is not None or pm is not None):
