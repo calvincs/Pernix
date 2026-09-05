@@ -98,12 +98,24 @@ def attribute(pm_row: dict) -> list[Attribution]:
     verdict = pm_row.get("verdict", "pass")
     failure_cause = pm_row.get("failure_cause", "none")
 
+    # Ground truth outranks the self-grade: a thumb on the turn decides the
+    # outcome the counters see. "up" is a pass. "down" keeps the grade's own
+    # non-pass verdict and cause when it named one, and otherwise reads as
+    # retry/agent — the turn missed and nothing else was blamed. The
+    # confidence floor below guards the model's guess, never the user's.
+    user_signal = pm_row.get("user_signal")
+    if user_signal == "up":
+        verdict, failure_cause = "pass", "none"
+    elif user_signal == "down":
+        if verdict == "pass" or failure_cause in (None, "", "none"):
+            verdict, failure_cause = "retry", "agent"
+
     # Very-low-confidence reflect outputs are too noisy to act on.
     try:
         confidence = float(pm_row.get("confidence") or 0.0)
     except (TypeError, ValueError):
         confidence = 0.0
-    if confidence < 0.5 and verdict != "pass":
+    if user_signal is None and confidence < 0.5 and verdict != "pass":
         return []
 
     attributions: list[Attribution] = []

@@ -1532,6 +1532,14 @@ def _write_post_mortem(
             outcome_source=outcome_source,
         )
         result.artifact_id = pm_id
+        # A thumb that landed before the grade did: carry it onto the grade
+        # now, so synthesis sees the user's verdict rather than the model's.
+        try:
+            fb = db.feedback_for_turn(session_id, payload.get("turn_user_msg_id"))
+            if fb and fb.get("signal"):
+                db.stamp_post_mortem_user_signal(pm_id, fb["signal"])
+        except Exception as fe:
+            logger.debug("feedback carry-over failed for %s: %s", session_id, fe)
     except Exception as e:
         logger.warning("Failed to persist post-mortem for session %s: %s", session_id, e)
 
