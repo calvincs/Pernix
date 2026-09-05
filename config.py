@@ -831,6 +831,10 @@ class Settings:
     # --- Notifications ---
     notify_webhook_url: str = ""  # POST here when ask_user fires (empty = disabled)
     notify_webhook_timeout: int = 10  # HTTP timeout in seconds
+    # Web Push floor: only notifications at or above this urgency buzz a
+    # phone (low | normal | high | urgent). Agent questions always push.
+    # The bell in the app still shows everything.
+    push_urgency_floor: str = "normal"
     vapid_private_key: str = ""  # EC P-256 PEM; auto-generated at first startup
     vapid_public_key: str = ""  # URL-safe base64; auto-generated at first startup
     vapid_subject: str = "mailto:admin@localhost"  # Identifies the push sender

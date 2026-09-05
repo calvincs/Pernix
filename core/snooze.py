@@ -1677,7 +1677,8 @@ Output valid JSON only. No markdown fences. /no_think"""
                     logger.info("Candor: skipped %d degraded non-tool name(s): %s", len(skipped), ", ".join(skipped))
                 exempt = [d["tool"] for d in degraded if _is_tool(d["tool"]) and _is_exempt(d["tool"])]
                 if exempt:
-                    logger.info(
+                    # Every idle cycle re-derives this; it is not news.
+                    logger.debug(
                         "Candor: skipped %d degraded dialog tool(s) — by-design unavailability " "is not a fault: %s",
                         len(exempt),
                         ", ".join(exempt),

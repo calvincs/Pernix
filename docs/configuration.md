@@ -615,6 +615,7 @@ These settings are advanced and rarely need adjusting. Listed here for completen
 | `post_mortem_retention_days` | `90` | Days to keep synthesized post-mortem records before snooze cleans them. |
 | `notification_retention_days` | `30` | Notifications older than this are pruned (snooze Activity 11 + the maintenance 24h tier) — the bell is a recent-events surface, not an archive. `0` = keep forever. |
 | `notify_webhook_timeout` | `10` | HTTP timeout for `notify_webhook_url` POST (seconds). |
+| `push_urgency_floor` | `normal` | Web Push floor: only notifications at or above this urgency (`low`, `normal`, `high`, `urgent`) reach a phone. Agent questions always push. The in-app bell still shows everything. |
 | `snooze_max_cycle_seconds` | `900` | Hang backstop per Snooze cycle — runaway protection, not a budget. Cycles run until the activity ladder completes; user activity cancels them instantly. Local (Ollama) background models get 4x headroom. |
 | `snooze_cooldown_minutes` | `5` | Minimum idle time before Snooze starts running. |
 | `snooze_dedup_interval_days` | `7` | Days between memory-dedup sweeps per file. |

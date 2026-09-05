@@ -405,6 +405,8 @@ async def update_settings(body: dict):
         # Validate ssl_mode enum
         if key == "ssl_mode" and value not in ("self_signed", "custom"):
             continue
+        if key == "push_urgency_floor" and value not in ("low", "normal", "high", "urgent"):
+            continue
         # Validate voice enums — a typo'd mode would silently kill the mic button
         if key == "voice_mode" and value not in (
             "off",
