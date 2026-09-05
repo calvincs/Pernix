@@ -1012,6 +1012,7 @@ async def _run_deferred_reflect(session_obj, snap: _DeferredGrade, next_user_mes
     # make every graded session look busy to snooze.
     session_obj.add_background_ref()
     try:
+        from core.adaptive import trial
         from core.reflect import reflect_on_session
 
         messages = await asyncio.to_thread(db.get_messages, session_id, last=REFLECT_TAIL_MESSAGES)
@@ -1036,6 +1037,11 @@ async def _run_deferred_reflect(session_obj, snap: _DeferredGrade, next_user_mes
             tool_summary_attempts=snap.tool_summary_attempts or None,
             turn_msg_id_range=(snap.turn_user_msg_id, snap.turn_last_msg_id),
             next_user_message=next_user_message,
+            # From the snapshot, not the session: with next-turn grading this
+            # runs while turn N+1 is in flight, and the live session's key has
+            # already moved to it. The arm the grade records has to be the one
+            # the graded turn's prompts were built from (W6).
+            turn_key=trial.turn_key(snap.session_id, snap.turn_id),
         )
 
         reflect_event = {
