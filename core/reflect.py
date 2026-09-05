@@ -93,6 +93,7 @@ RULES:
 - TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
 - CEILING LOOP → ESCALATE: If TERMINATION HISTORY shows the same blocking reason (e.g. round_ceiling, budget_exhausted, compaction_failed) on the current turn AND at least one prior turn, the agent is hitting the same hard wall — another retry will hit it again. Verdict MUST be 'escalate'. In `missing`, name the wall: e.g. 'round_ceiling on consecutive attempts; agent cannot finish within max_tool_rounds — split the task or raise the limit.'
 - THRASHING → ESCALATE: When a CURRENT ATTEMPT TOOL CALLS section is present (retry attempts), judge thrashing from THAT section only — the cumulative summary includes prior attempts' tools, and a focused retry must not inherit a scattered first attempt's diversity. If the (scoped) summary shows ≥4 distinct tools used with no forward progress (empty outputs repeated, same files re-read, error count growing, or the agent drifting across unrelated checks), the agent is thrashing, not pursuing a coherent-but-wrong strategy. Prefer "escalate" with a clear "missing" field over "retry" — another round of the same thrashing will not help. A single failing tool being tried with sibling tools is NOT thrashing; reserve "escalate" for cases where the agent lost the thread.
+- THE USER'S NEXT MESSAGE IS GROUND TRUTH ABOUT INTENT: when the evidence carries a "USER'S NEXT MESSAGE (arrived after this turn)" section, that is what the user said after reading the final response above, and on the question "was their intent met?" it outranks your own reading of the transcript. If that message corrects the agent, repeats or rephrases the same request, or complains ("no, ...", "that's wrong", "not what I asked", "you didn't ...", "still broken", "try again"), then THIS turn missed the intent: verdict "retry" — or "escalate" when the correction shows the turn cannot be finished without more from them — with failure_cause "agent" unless the transcript names a different, checkable cause. If the message moves on to new work, accepts, thanks the agent, or asks a follow-up that BUILDS on what was delivered, that is evidence of pass: it does not by itself excuse a deliverable that verifiably does not exist, but it settles an otherwise ambiguous grade as "pass". Adding scope ("now also do X") is moving on, not a correction. The section is absent on most turns; say nothing about it then.
 - For failure_cause attribution: if tools were hallucinated or the plan jumped straight to the wrong approach, lean "scout". If the plan was sensible but the agent used tools incorrectly or gave up early, lean "agent". Don't guess — use "none" with low confidence if unclear.
 
 EVIDENCE QUALITY (outcome vs. execution):
@@ -403,6 +404,43 @@ _GROUNDING_SLUG_PATTERN = re.compile(r"`([^`\n]{6,80})`")  # backticked names
 _GROUNDING_MAX_LISTED = 12
 
 
+# The user's next message, capped before it reaches the evidence blob AND
+# before the deterministic pre-check below — both read the same text, so a
+# post-mortem's `next_msg_correction` always describes what the verifier saw.
+NEXT_MSG_CHAR_CAP = 1200
+
+# Deliberately small and literal. This is a mechanical tripwire, not a
+# sentiment model: it exists so a post-mortem records "the user pushed back"
+# even when the LLM grade says otherwise, and a false positive here is a
+# wrong ground-truth label, so the list stays conservative and word-bounded.
+_NEXT_MSG_CORRECTION_PATTERNS = (
+    r"\bno,",
+    r"\bthat['’]s wrong\b",
+    r"\bnot what i asked\b",
+    r"\byou didn['’]t\b",
+    r"\btry again\b",
+    r"\bstill broken\b",
+    r"\bwrong\b",
+    r"\bincorrect\b",
+    r"\bredo\b",
+)
+
+_NEXT_MSG_CORRECTION_RE = re.compile("|".join(_NEXT_MSG_CORRECTION_PATTERNS), re.IGNORECASE)
+
+
+def next_msg_correction(text: str) -> bool:
+    """True when the user's next message reads as a correction or complaint.
+
+    Runs on the same `NEXT_MSG_CHAR_CAP`-truncated text the evidence blob
+    carries, independently of the reflect LLM, and is stored on the
+    post-mortem either way — so the share of turns the user pushed back on
+    is measurable without trusting the grader that graded them.
+    """
+    if not text:
+        return False
+    return bool(_NEXT_MSG_CORRECTION_RE.search(text[:NEXT_MSG_CHAR_CAP]))
+
+
 def _grounding_tokens(text: str) -> tuple[list[str], list[str]]:
     """(id-like tokens, slug-like tokens) cited in `text`, first-seen order, deduped."""
     ids: list[str] = []
@@ -634,6 +672,7 @@ def _build_compact_evidence(
     prior_termination_reasons: list[str] | None = None,
     turn_user_msg_id: int | None = None,
     grounding_out: dict | None = None,
+    next_user_message: str = "",
 ) -> str:
     """Build the evidence blob for reflect.
 
@@ -844,6 +883,17 @@ def _build_compact_evidence(
     if section:
         parts.append(section)
 
+    # Ground truth, when it exists: what the user said after reading the
+    # response above. Last, and after the mechanical flags, because it is the
+    # only line here the user wrote themselves — the reviewer reads the turn,
+    # then the machine's doubts, then the reaction that settles them. Absent
+    # on turns the user never replied to.
+    if next_user_message:
+        parts.append(
+            "USER'S NEXT MESSAGE (arrived after this turn — the user has read the response above):\n"
+            + next_user_message[:NEXT_MSG_CHAR_CAP]
+        )
+
     return "\n\n".join(parts)
 
 
@@ -857,6 +907,8 @@ def _build_evidence(
     prior_termination_reasons: list[str] | None = None,
     tool_summary_attempts: list | None = None,
     grounding_out: dict | None = None,
+    turn_msg_id_range: tuple[int | None, int | None] | None = None,
+    next_user_message: str = "",
 ) -> tuple[str, str]:
     """Build evidence for reflect verification.
 
@@ -872,11 +924,32 @@ def _build_evidence(
     `turn_user_msg_id` is used as a fallback boundary when no scout-role
     marker exists in the messages (older sessions, scout-skipped paths).
 
+    `turn_msg_id_range` is the inclusive (first, last) message-id window the
+    graded turn occupied, captured when the grade was scheduled. A deferred
+    grade can now run while the NEXT turn is already writing to the same
+    transcript, and the scout-marker slice would otherwise walk back to that
+    newer turn's marker and grade the wrong work. Clamping the message list
+    to the captured window first makes the slice stable no matter how much
+    has been appended since.
+
+    `next_user_message` is the user's reply to this turn, when there is one.
+
     Returns (user_request, evidence_summary).
     """
     messages = db.get_messages(session_id)
     if not messages:
         return "", ""
+
+    if turn_msg_id_range:
+        lo, hi = turn_msg_id_range
+        if lo is not None or hi is not None:
+            messages = [
+                m
+                for m in messages
+                if (lo is None or (m.get("id") or 0) >= lo) and (hi is None or (m.get("id") or 0) <= hi)
+            ]
+            if not messages:
+                return "", ""
 
     # Find the user message being verified. Prefer the explicit id (this turn's
     # user message). Fall back to the latest user message overall.
@@ -907,6 +980,7 @@ def _build_evidence(
         prior_termination_reasons=prior_termination_reasons,
         turn_user_msg_id=turn_user_msg_id,
         grounding_out=grounding_out,
+        next_user_message=next_user_message,
     )
     return user_request, evidence
 
@@ -1259,6 +1333,8 @@ def _write_post_mortem(
     reflect_mode: str = "sync",
     tool_summary_attempts: list | None = None,
     turn_user_msg_id: int | None = None,
+    outcome_source: str = "llm",
+    next_msg_correction: bool | None = None,
 ) -> None:
     """Persist a post-mortem artifact for this reflect invocation (Phase 2c).
 
@@ -1272,11 +1348,18 @@ def _write_post_mortem(
     blocking, retry-capable; "deferred" = observe-only background grade).
     The verdict sample now spans both, and a rate computed across the two
     without splitting them is meaningless.
+
+    outcome_source names what the verdict rests on: "llm" (the grader alone)
+    or "next_turn" (the grader plus the user's reply as evidence). A third
+    value, "user", is written later by core/feedback.py when a thumb lands on
+    the turn. next_msg_correction is the deterministic reading of that reply,
+    recorded whatever the grader concluded.
     """
     try:
         payload = {
             "verdict": result.verdict,
             "reflect_mode": reflect_mode,
+            "outcome_source": outcome_source,
             "reasoning": result.reasoning,
             "diagnostic": result.diagnostic,
             "what_worked": result.what_worked,
@@ -1396,6 +1479,8 @@ def _write_post_mortem(
             }
         if result.cited_policies:
             payload["cited_policies"] = list(result.cited_policies)
+        if next_msg_correction is not None:
+            payload["next_msg_correction"] = bool(next_msg_correction)
 
         pm_id = db.add_post_mortem(
             session_id=session_id,
@@ -1465,6 +1550,8 @@ async def reflect_on_session(
     gate_results: list | None = None,
     reflect_mode: str = "sync",
     tool_summary_attempts: list | None = None,
+    turn_msg_id_range: tuple[int | None, int | None] | None = None,
+    next_user_message: str = "",
 ) -> ReflectResult:
     """Analyze a completed session turn and decide if the task was fulfilled.
 
@@ -1483,10 +1570,21 @@ async def reflect_on_session(
         reflect_mode: "sync" (blocking, gates the retry loop) or "deferred"
             (observe-only background grade). Stamped on the post-mortem so the
             two regimes stay separable in verdict-rate analysis.
+        turn_msg_id_range: Inclusive (first, last) message-id window of the
+            graded turn. Required when the grade runs after the next turn has
+            started, so the evidence slice cannot drift forward into it.
+        next_user_message: The user's reply to this turn, when one arrived
+            before the grade ran. Handed to the verifier as evidence and
+            reduced to a deterministic correction flag on the post-mortem.
 
     Returns:
         ReflectResult with verdict and optional lessons
     """
+    # Ground-truth stamps, computed before the grade so every write path
+    # below records the same pair — including the parse-failure soft pass.
+    outcome_source = "next_turn" if next_user_message else "llm"
+    correction = next_msg_correction(next_user_message) if next_user_message else None
+
     # Off-loop: evidence assembly loads the full transcript from the DB.
     grounding: dict = {}
     user_request, evidence = await asyncio.to_thread(
@@ -1500,6 +1598,8 @@ async def reflect_on_session(
         prior_termination_reasons=prior_termination_reasons,
         tool_summary_attempts=tool_summary_attempts,
         grounding_out=grounding,
+        turn_msg_id_range=turn_msg_id_range,
+        next_user_message=next_user_message,
     )
     if not user_request or not evidence:
         r = ReflectResult(verdict="pass", reasoning="No user request found to verify")
@@ -1513,6 +1613,8 @@ async def reflect_on_session(
             reflect_mode=reflect_mode,
             tool_summary_attempts=tool_summary_attempts,
             turn_user_msg_id=turn_user_msg_id,
+            outcome_source=outcome_source,
+            next_msg_correction=correction,
         )
         return r
 
@@ -1758,6 +1860,8 @@ async def reflect_on_session(
                 reflect_mode=reflect_mode,
                 tool_summary_attempts=tool_summary_attempts,
                 turn_user_msg_id=turn_user_msg_id,
+                outcome_source=outcome_source,
+                next_msg_correction=correction,
             )
             await _save_user_observations(session_id, result)
             return result
@@ -1807,6 +1911,8 @@ async def reflect_on_session(
             reflect_mode=reflect_mode,
             tool_summary_attempts=tool_summary_attempts,
             turn_user_msg_id=turn_user_msg_id,
+            outcome_source=outcome_source,
+            next_msg_correction=correction,
         )
         return r
 
@@ -1823,5 +1929,7 @@ async def reflect_on_session(
             reflect_mode=reflect_mode,
             tool_summary_attempts=tool_summary_attempts,
             turn_user_msg_id=turn_user_msg_id,
+            outcome_source=outcome_source,
+            next_msg_correction=correction,
         )
         return r

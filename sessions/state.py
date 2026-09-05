@@ -319,6 +319,14 @@ class AgentSession:
     # and this counter's whole job is to outlive the turn it was issued for.
     _deferred_reflect_seq: int = 0
 
+    # One-at-a-time gate for this session's deferred grades (sessions/hooks.py).
+    # Next-turn grading means a rapid-fire burst schedules a grade per turn
+    # instead of one for the last of them; the lock is what keeps that queued
+    # rather than concurrent. Created on first use, not at construction: an
+    # asyncio.Lock binds to the loop that makes it, and sessions are built off
+    # the event loop. Typed Any so state.py stays import-cheap.
+    _deferred_grade_lock: Any = field(default=None)
+
     # Activity tracking
     last_activity_time: float = field(default_factory=time.time)
 

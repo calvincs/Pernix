@@ -636,13 +636,19 @@ async def test_sync_reflect_row_is_stamped_sync(mock_llm_client, monkeypatch):
 
 
 async def test_deferred_grade_skips_a_superseded_turn(mock_llm_client, monkeypatch):
-    """Rapid-fire policy: only the latest completed turn gets graded. A turn
-    the user has already moved past is marked ungraded, not graded late."""
+    """Legacy rapid-fire policy (reflect_next_turn_grading off): only the
+    latest completed turn gets graded, and a turn the user has already moved
+    past is marked ungraded rather than graded late.
+
+    With the flag ON this turn IS graded, against the user's next message —
+    see tests/test_ground_truth_hardening.py.
+    """
     from db import models as db
     from sessions.hooks import _deferred_reflect_task, _DeferredGrade
     from sessions.state import AgentSession
 
     monkeypatch.setattr("config.settings.reflect_defer_idle_s", 0)
+    monkeypatch.setattr("config.settings.reflect_next_turn_grading", False)
 
     sid, uid = _graded_turn("Superseded")
     session_obj = AgentSession(session_id=sid)
@@ -658,11 +664,14 @@ async def test_deferred_grade_skips_a_superseded_turn(mock_llm_client, monkeypat
 
 
 async def test_deferred_grade_skips_while_a_turn_is_in_flight(mock_llm_client, monkeypatch):
+    """Legacy rule again — under next-turn grading an in-flight turn is the
+    trigger to grade, not a reason to skip."""
     from db import models as db
     from sessions.hooks import _deferred_reflect_task, _DeferredGrade
     from sessions.state import AgentSession
 
     monkeypatch.setattr("config.settings.reflect_defer_idle_s", 0)
+    monkeypatch.setattr("config.settings.reflect_next_turn_grading", False)
 
     sid, uid = _graded_turn("In flight")
     session_obj = AgentSession(session_id=sid)
