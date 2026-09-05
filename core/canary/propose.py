@@ -51,6 +51,19 @@ _SAFE_PYTHON_MODULES = frozenset({"pytest", "unittest"})
 _SHELL_META_RE = re.compile(r"[;&|<>`$\n\\]")
 _AUTO_TIMEOUT_CAP_S = 900
 
+# Holdout resemblance (W5). Refine reads a transcript that may contain a
+# canary prompt verbatim — a canary session's own, or one a user pasted —
+# and proposing "a canary for this" would quietly re-admit a holdout task
+# under a new name, with the answer now written into a reviewable file.
+# Comparison is normalised (case, punctuation and whitespace folded away)
+# and windowed: an exact-substring test never fires on a reworded copy, and
+# a bag-of-words test fires on everything.
+_HOLDOUT_WINDOW_WORDS = 10
+# Fixed seed used only to materialise a generated holdout's prompt for this
+# comparison. Never used for a run — a scored run always draws a fresh one.
+_HOLDOUT_REFERENCE_SEED = 0
+_NORMALISE_RE = re.compile(r"[^a-z0-9]+")
+
 CANARY_PROPOSALS_PROMPT = """
 ADDITIONALLY output a "canary_proposals" array in the same JSON object
 (empty array when nothing qualifies). A canary proposal turns THIS
@@ -71,6 +84,72 @@ Only propose when the session exposed a REPEATABLE failure class (not a
 one-off env problem), the task can run offline against seeded fixture
 files, and the gates are deterministic. At most 1 proposal. A human
 reviews it before it joins the suite."""
+
+
+def _normalise(text: str) -> list[str]:
+    return [w for w in _NORMALISE_RE.sub(" ", (text or "").lower()).split() if w]
+
+
+def _windows(words: list[str], n: int = _HOLDOUT_WINDOW_WORDS) -> set[str]:
+    if len(words) < n:
+        return {" ".join(words)} if words else set()
+    return {" ".join(words[i : i + n]) for i in range(len(words) - n + 1)}
+
+
+def holdout_prompts(base: Path | None = None) -> dict[str, str]:
+    """{name: prompt} for every holdout canary.
+
+    A generated holdout has no prompt in its file, so one is materialised
+    from a fixed reference seed purely for comparison — the wording around
+    the seeded values is what a copy would reproduce.
+    """
+    from core.canary.parser import scan_canaries
+
+    out: dict[str, str] = {}
+    for c in scan_canaries(base):
+        if not c.holdout:
+            continue
+        prompt = c.prompt
+        if not prompt and c.generated:
+            try:
+                from core.canary.fixtures import generate_variant
+
+                prompt = generate_variant(c, _HOLDOUT_REFERENCE_SEED).prompt
+            except Exception as e:
+                logger.debug("Holdout prompt materialisation failed for '%s': %s", c.name, e)
+                continue
+        if prompt:
+            out[c.name] = prompt
+    return out
+
+
+def resembles_holdout(spec: dict, base: Path | None = None) -> str | None:
+    """The holdout canary this proposal re-describes, or None.
+
+    Compares the proposal's prompt AND its seed files against each holdout
+    prompt: a proposal can copy the task into either.
+    """
+    try:
+        holdouts = holdout_prompts(base)
+    except Exception as e:
+        logger.debug("Holdout listing failed: %s", e)
+        return None
+    if not holdouts:
+        return None
+
+    candidate = " ".join(
+        [str(spec.get("prompt") or "")]
+        + [str(k) for k in (spec.get("files") or {})]
+        + [str(v) for v in (spec.get("files") or {}).values()]
+    )
+    cand_words = _normalise(candidate)
+    cand_windows = _windows(cand_words)
+    if not cand_windows:
+        return None
+    for name, prompt in sorted(holdouts.items()):
+        if _windows(_normalise(prompt)) & cand_windows:
+            return name
+    return None
 
 
 def is_gate_command_safe(command: str) -> str | None:
@@ -144,6 +223,14 @@ def queue_canary_proposals(proposals: list, producer: str, session_id: str = "")
         err = _validate_spec(p)
         if err:
             logger.info("canary proposal rejected (%s): %s", producer, err)
+            continue
+
+        # Holdout rule (W5): never re-admit a holdout task under a new name.
+        # Refused outright — not queued for review — because the reviewable
+        # artifact would itself carry the answer.
+        twin = resembles_holdout(p)
+        if twin:
+            logger.info("canary proposal rejected (%s): resembles holdout canary '%s'", producer, twin)
             continue
 
         fallback_reason = auto_admissible(p)
@@ -260,6 +347,12 @@ def materialize_canary(spec: dict, base: Path | None = None, vetting: bool = Fal
     target_dir = base / name
     if target_dir.exists():
         return None, f"canary '{name}' already exists"
+
+    # Holdout rule (W5): a proposal-derived edit never lands on a holdout,
+    # even one whose directory was moved out from under the suite.
+    twin = resembles_holdout(spec, base)
+    if twin:
+        return None, f"resembles holdout canary '{twin}'"
 
     tags = [str(t) for t in (spec.get("tags") or ["proposed"])]
     if vetting:

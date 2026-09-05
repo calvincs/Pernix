@@ -55,6 +55,11 @@ logger = logging.getLogger("pernix.canary")
 DEFAULT_TIMEOUT_S = 600
 # A canary directory carrying this file builds its fixture per run.
 GENERATOR_FILENAME = "generate.py"
+# Tag marking a canary the learning loop may never see: not quoted into a
+# refine or dream prompt, not the target of a proposal-derived edit, and not
+# something a proposal may re-describe. A holdout is the suite's honest
+# ground: a task the system cannot have trained itself against.
+HOLDOUT_TAG = "holdout"
 
 
 class CanaryParseError(Exception):
@@ -100,6 +105,11 @@ class CanaryDef:
     # not runnable).
     generated: bool = False
     generator_path: Path | None = None
+
+    @property
+    def holdout(self) -> bool:
+        """True for a canary the learning loop must never touch (W5)."""
+        return HOLDOUT_TAG in self.tags
 
 
 def canaries_dir() -> Path:
