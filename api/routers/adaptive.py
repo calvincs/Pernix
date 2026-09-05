@@ -29,6 +29,17 @@ async def list_entries(kind: str = "", status: str = "active", limit: int = 200)
             )
     except Exception:
         pass  # counters are decoration; the listing must never fail over them
+    # Receipts: does this entry cite anything the system actually recorded?
+    # Graded from the creating event on read (no column), so it moves when a
+    # resolver lands rather than being frozen at create time.
+    try:
+        from core.adaptive.receipts import grade as _grade
+
+        grades = await _asyncio.to_thread(lambda: {r["id"]: _grade(r["id"]) for r in rows})
+        for r in rows:
+            r["evidence_grade"] = grades.get(r["id"])
+    except Exception:
+        pass  # same posture as the counters above
     return {"enabled": settings.adaptive_enabled, "auto_apply": settings.adaptive_auto_apply, "entries": rows}
 
 

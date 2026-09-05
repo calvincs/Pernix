@@ -919,12 +919,24 @@ _POLICY_EDIT = [
 ]
 
 
+def _grounded_evidence() -> str:
+    """evidence_json carrying one receipt that really resolves.
+
+    The veto clock only takes proposals whose evidence points at something
+    recorded (core/adaptive/receipts.py), so a bare "[]" now waits for a
+    human — which is what these tests would otherwise be measuring.
+    """
+    sid = db.create_session(title="receipt-source")
+    pm_id = db.add_post_mortem(sid, 1, "retry", "agent", 0.9, "m", 1, None, None, "{}")
+    return json.dumps([f"pm:{pm_id}"])
+
+
 def test_ripe_proposal_auto_approves_and_applies():
     """Past the veto window the system applies the proposal itself — same
     engine as a human approval, distinct terminal status for the audit trail."""
     from core.adaptive import auto_approve_stale_proposals
 
-    pid = db.adaptive_add_proposal("dream", json.dumps(_POLICY_EDIT), "[]", "why")
+    pid = db.adaptive_add_proposal("dream", json.dumps(_POLICY_EDIT), _grounded_evidence(), "why")
     _backdate_proposal(pid, hours=25)
 
     out = auto_approve_stale_proposals()
@@ -963,8 +975,8 @@ def test_auto_approvals_respect_the_daily_cap(monkeypatch):
     from core.adaptive import auto_approve_stale_proposals
 
     monkeypatch.setattr("config.settings.adaptive_max_auto_approvals_per_day", 1)
-    first = db.adaptive_add_proposal("dream", json.dumps([]), "[]", "older")
-    second = db.adaptive_add_proposal("dream", json.dumps([{"a": 1}]), "[]", "newer")
+    first = db.adaptive_add_proposal("dream", json.dumps([]), _grounded_evidence(), "older")
+    second = db.adaptive_add_proposal("dream", json.dumps([{"a": 1}]), _grounded_evidence(), "newer")
     _backdate_proposal(first, hours=48)
     _backdate_proposal(second, hours=30)
 
