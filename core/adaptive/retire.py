@@ -88,10 +88,19 @@ def retire_edit(row: dict, reason: str) -> dict:
 
 
 def producer_entries(producer: str, kinds: tuple[str, ...]) -> list[dict]:
-    """Active entries of the given kinds that this producer authored."""
+    """ACTIVE entries of the given kinds that this producer authored.
+
+    Trial entries are deliberately absent (W6): a producer's "does my evidence
+    still hold?" retirement is a value judgment, and a trial is the one
+    process allowed to decide an entry's fate on measurement. Every sweep here
+    follows the same rule — only the lint sweep touches trial entries, because
+    unactionable prose is unactionable in either arm.
+    """
     out: list[dict] = []
     for kind in kinds:
-        out.extend(r for r in db.adaptive_list_entries(kind=kind) if r.get("source") == producer)
+        out.extend(
+            r for r in db.adaptive_list_entries(kind=kind) if r.get("source") == producer and r["status"] == "active"
+        )
     return out
 
 
@@ -152,8 +161,11 @@ def retire_lint_failures() -> dict:
     from core.adaptive.engine import AdaptiveError, delete_entry
 
     for kind in sorted(_LINTED_KINDS):
-        for r in db.adaptive_list_entries(kind=kind):
-            if r.get("status") != "active" or r.get("source") == "user":
+        # Trial entries included (W6): the lint is a content floor, not a
+        # value judgment, and a narrative non-instruction measures nothing
+        # worth waiting 28 days for.
+        for r in db.adaptive_list_entries(kind=kind, status=db.ADAPTIVE_LIVE_STATUS):
+            if r.get("source") == "user":
                 continue
             reason = lint_edit({"action": "update", "kind": kind, "content": r.get("content")})
             if not reason:
@@ -202,6 +214,8 @@ def retire_unused_entries() -> dict:
         rows.extend(db.adaptive_list_entries(kind=kind))
     usage = {s["subject"]: s for s in db.get_signals_by_subjects([("adaptive_entry", r["id"]) for r in rows])}
     for r in rows:
+        # status != active covers trial entries (W6): a half-rendered entry
+        # would show half the uses and read as unused long before it is.
         if r.get("status") != "active" or r.get("source") in _USAGE_EXEMPT_SOURCES:
             continue
         age = entry_age_days(r)

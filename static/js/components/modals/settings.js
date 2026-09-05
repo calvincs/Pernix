@@ -491,6 +491,17 @@ const SECTIONS = [
                     + 'before and after the apply, at least 30 graded turns each side, p<0.01. Needs '
                     + 'Auto-rollback on Canary Regression on — a weaker result only flags the batch suspect.',
             },
+            {
+                key: 'adaptive_trial_enabled',
+                label: 'Trial New Entries Before Trusting Them',
+                type: 'bool',
+                risk: 'autonomy',
+                hint: 'A rule the agent writes for itself renders on half of the turns — the same half every '
+                    + 'time for a given turn — and is kept or dropped on the measured difference between the '
+                    + 'halves. Yours are never trialled. Results show in the Trust tab.',
+            },
+            { key: 'adaptive_trial_min_arm', label: 'Trial Min Turns / Arm', type: 'number', min: 5, max: 10000 },
+            { key: 'adaptive_trial_ttl_days', label: 'Trial Length (days)', type: 'number', min: 1, max: 365 },
             { key: 'adaptive_max_auto_applies_per_day', label: 'Max Auto-applies / Day', type: 'number' },
             { key: 'adaptive_max_entries_per_kind', label: 'Max Entries / Kind', type: 'number' },
             { key: 'adaptive_edit_cooldown_hours', label: 'Edit Cooldown (hours)', type: 'number' },

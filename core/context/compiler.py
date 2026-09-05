@@ -647,11 +647,17 @@ def _build_space_block(session_id: str) -> str:
 
 def _build_adaptive_block(session_id: str) -> str:
     """Adaptive-layer prompt_notes + policies (plan 4e). Empty string while
-    the layer is off or holds nothing — never shifts bytes on first deploy."""
+    the layer is off or holds nothing — never shifts bytes on first deploy.
+
+    The turn key is resolved here and handed down: trial entries (W6) render
+    on a deterministic half of the turns, and the scout prompt must be given
+    the SAME key so both prompts of one turn agree on the same half.
+    """
     try:
         from core.adaptive.render import build_adaptive_block
+        from core.adaptive.trial import turn_key_for_session
 
-        return build_adaptive_block(session_id)
+        return build_adaptive_block(session_id, turn_key_for_session(session_id))
     except Exception as e:
         logger.warning("Adaptive block unavailable: %s", e)
         return ""

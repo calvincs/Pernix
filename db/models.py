@@ -2813,12 +2813,24 @@ def adaptive_get_entry(entry_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+# Statuses an entry can hold and still be part of the live prompt population:
+# `active`, and `trial` (W6 — a trial entry renders on half the turns, counts
+# against the per-kind cap, and is updated and retired like any other). Pass
+# it as `status=` wherever "what is currently in play" is the question.
+ADAPTIVE_LIVE_STATUS = "active,trial"
+
+
 def adaptive_list_entries(
     kind: str | None = None,
     scope: str | None = None,
     status: str | None = "active",
     limit: int = 200,
 ) -> list[dict]:
+    """Entries by kind/scope/status, ordered (kind, id).
+
+    `status` takes one status, a comma-separated list of them
+    (`ADAPTIVE_LIVE_STATUS`), or a sequence; None means every status.
+    """
     clauses = []
     params: list = []
     if kind:
@@ -2828,8 +2840,17 @@ def adaptive_list_entries(
         clauses.append("scope = ?")
         params.append(scope)
     if status:
-        clauses.append("status = ?")
-        params.append(status)
+        wanted = (
+            [s.strip() for s in status.split(",") if s.strip()]
+            if isinstance(status, str)
+            else [str(s).strip() for s in status if str(s).strip()]
+        )
+        if len(wanted) == 1:
+            clauses.append("status = ?")
+            params.append(wanted[0])
+        elif wanted:
+            clauses.append(f"status IN ({', '.join('?' * len(wanted))})")
+            params.extend(wanted)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     params.append(int(limit))
     with connect_sessions() as conn:
@@ -2871,9 +2892,13 @@ def adaptive_remove_entry(entry_id: str) -> None:
 
 
 def adaptive_entry_count(kind: str) -> int:
+    """Live entries of this kind — the number the per-kind cap is checked
+    against. Trial entries count: they render (on half the turns), they hold a
+    slot, and leaving them out would let the cap be bypassed entirely by
+    turning trial mode on."""
     with connect_sessions() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS n FROM adaptive_entries WHERE kind = ? AND status = 'active'",
+            "SELECT COUNT(*) AS n FROM adaptive_entries WHERE kind = ? AND status IN ('active', 'trial')",
             (kind,),
         ).fetchone()
         return int(row["n"])

@@ -398,6 +398,10 @@ def transition(
     # 6. In-memory mutation (last — if anything above raised, state is unchanged)
     session._state_entered_ms = now_ms
     session._turn_id = turn_id
+    # Trial arms (W6) key off the turn, so the key is stamped exactly where
+    # the turn id is — one string per turn, computed once, read by the two
+    # prompt builders and by the grade that records what they rendered.
+    session.turn_key = f"{session.session_id}:{turn_id}"
     session._retry_index = retry_index
     session._compaction_count = compaction_count
     _set_state(session, to)

@@ -35,6 +35,10 @@ KINDS = frozenset({"prompt_note", "routing_hint", "policy"})
 ACTIONS = frozenset({"create", "update", "delete"})
 SOURCES = frozenset({"refine", "dream", "candor", "telos", "user", "agent"})
 HIGH_RISK_KINDS = frozenset({"policy"})
+# Statuses that mean "this entry is in play": it holds a per-kind slot, an id
+# collides with it, and it can be updated or retired. `trial` joined `active`
+# with the W6 trial arms — it renders on half the turns, not none.
+LIVE_STATUSES = frozenset({"active", "trial"})
 
 PROMPT_NOTE_MAX_CHARS = 400
 CONTENT_MAX_CHARS = 2000
@@ -330,10 +334,15 @@ def _snapshot(entry: dict | None) -> str | None:
 
 def _apply_one(edit: dict, producer: str, actor: str, batch_id: str, proposal_id: int | None) -> str | None:
     """Apply a single edit. Returns an error string or None on success."""
+    from core.adaptive.trial import status_for_new_entry
+
     entry_id = _entry_id_for(edit)
     action = edit["action"]
     existing = db.adaptive_get_entry(entry_id)
-    active = existing if existing and existing.get("status") == "active" else None
+    # "Live" is active OR trial: a trialled entry is in the prompt population
+    # on half the turns, so it collides with a create, and it must stay
+    # updatable and deletable like any other (W6).
+    active = existing if existing and existing.get("status") in LIVE_STATUSES else None
 
     # Plan/apply split: reject entries that moved since planning.
     baseline = edit.get("baseline_version")
@@ -370,7 +379,11 @@ def _apply_one(edit: dict, producer: str, actor: str, batch_id: str, proposal_id
             "content": (edit.get("content") or "").strip(),
             "risk": edit.get("risk", "low"),
             "version": 1,
-            "status": "active",
+            # Trial arm (W6): a producer's prompt entry starts half-rendered
+            # and has to earn `active` on measured outcomes. Flag off, or a
+            # kind/producer outside the experiment, and this is "active" —
+            # byte-identical to the pre-W6 path.
+            "status": status_for_new_entry(edit["kind"], producer),
             "source": producer,
             "created_at": now,
             "updated_at": now,
@@ -919,7 +932,7 @@ def delete_entry(entry_id: str, actor: str = "human", reason: str = "") -> dict:
     provenance bug inside the provenance feature).
     """
     existing = db.adaptive_get_entry(entry_id)
-    if existing is None or existing.get("status") != "active":
+    if existing is None or existing.get("status") not in LIVE_STATUSES:
         raise AdaptiveError(f"entry '{entry_id}' not found or not active")
 
     new_row = dict(existing)

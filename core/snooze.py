@@ -1719,7 +1719,7 @@ Output valid JSON only. No markdown fences. /no_think"""
                 # forever. Candor deleting its own entry is same-producer, so
                 # it stays low-risk (the 4b escalation is cross-producer).
                 retires = []
-                for row in db.adaptive_list_entries(kind="routing_hint"):
+                for row in db.adaptive_list_entries(kind="routing_hint", status=db.ADAPTIVE_LIVE_STATUS):
                     eid = row["id"]
                     if row.get("source") != "candor" or eid in degraded_ids:
                         continue

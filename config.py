@@ -430,6 +430,24 @@ class Settings:
     # well — this flag only widens that permission to the passive channel,
     # which has never rolled anything back and has to earn it on its own.
     adaptive_pm_drift_rollback: bool = False
+    # Every adaptation is an experiment (hardening W6). With this on, an entry
+    # a PRODUCER minted (policy/prompt_note/routing_hint, whether it
+    # auto-applied or a human declined to veto it) lands as `trial` instead of
+    # `active`: it renders on a deterministic half of the turns — the coin is
+    # sha1(session:turn + entry id), so the scout prompt and the compiled
+    # prompt always agree — and the idle sweep promotes or retires it on the
+    # measured difference between the halves rather than on the clock. Entries
+    # a human wrote are never trialled; the author is the evidence.
+    adaptive_trial_enabled: bool = False
+    # Graded turns required IN EACH ARM before a trial may be decided early.
+    # Below this the two-proportion test cannot separate a real effect from
+    # the coin flip that assigned the arms.
+    adaptive_trial_min_arm: int = 40
+    # A trial that has not separated by this age is promoted anyway, tagged
+    # `unproven` in the journal. Most entries will never reach significance
+    # (their effect is small and the traffic is thin), and an experiment that
+    # cannot conclude must not hold the entry in half-rendered limbo forever.
+    adaptive_trial_ttl_days: int = 28
     adaptive_max_entries_per_kind: int = 24
     adaptive_max_auto_applies_per_day: int = 24
     adaptive_edit_cooldown_hours: int = 24
