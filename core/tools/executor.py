@@ -120,6 +120,25 @@ def _refusal(name: str, content: str) -> ToolExecutionResult:
     )
 
 
+# A negative lookup. The tool answered correctly that the thing asked for
+# does not exist (a skill, a resource path, a memory entry) — the agent asked
+# for the wrong thing, the tool did not fail. The agent still sees an error
+# so it corrects course, but reliability accounting (tool_summary failures,
+# candor tool_ok, scout_signals) must not read it as an unreliable tool: on
+# the live box four such misses minted a "read_skill_resource degraded —
+# prefer an alternative" routing hint. A tool signals it by prefixing its
+# returned error string with MISS_PREFIX.
+MISS_MARKER = "miss"
+MISS_PREFIX = "[miss]"
+
+
+def is_miss(result: ToolExecutionResult) -> bool:
+    """True when the tool correctly reported that the target does not exist."""
+    if (result.metadata or {}).get(MISS_MARKER):
+        return True
+    return (result.content or "").startswith(MISS_PREFIX)
+
+
 def is_unavailable(result: ToolExecutionResult) -> bool:
     """True when the tool was unavailable by design, not failing."""
     if (result.metadata or {}).get(UNAVAILABLE_MARKER):
@@ -525,10 +544,16 @@ async def _execute_single(
         # By-design unavailability is neither a success nor a failure, so it
         # is settled before the error test and leaves per-tool health alone.
         unavailable = isinstance(result, str) and result.startswith(UNAVAILABLE_PREFIX)
-        was_error = (not unavailable) and ((not result) or result.startswith("Error:") or _is_failure_verdict(result))
+        miss = isinstance(result, str) and result.startswith(MISS_PREFIX)
+        was_error = miss or (
+            (not unavailable) and ((not result) or result.startswith("Error:") or _is_failure_verdict(result))
+        )
 
         if unavailable:
             metadata = {**(metadata or {}), UNAVAILABLE_MARKER: True}
+        elif miss:
+            # An error for the agent, but not a mark against the tool.
+            metadata = {**(metadata or {}), MISS_MARKER: True}
         elif was_error:
             registry.metrics[name].record_failure(result, latency)
         else:

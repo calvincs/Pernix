@@ -156,7 +156,7 @@ def attribute(pm_row: dict) -> list[Attribution]:
             # Calls the tool was unavailable for by design never ran, so they
             # are no evidence either way and leave the denominator (a tool
             # with nothing but unavailable calls drops out entirely).
-            calls = int(stats.get("calls") or 0) - int(stats.get("unavailable") or 0)
+            calls = int(stats.get("calls") or 0) - int(stats.get("unavailable") or 0) - int(stats.get("misses") or 0)
             failures = int(stats.get("failures") or 0)
         except (TypeError, ValueError):
             continue

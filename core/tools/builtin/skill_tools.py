@@ -68,7 +68,9 @@ def load_skill(
         registry.rescan(Path(settings.skills_dir))
         instructions = registry.load_instructions(name)
     if instructions is None:
-        return f"Error: Skill '{name}' not found. Use discover_skills to search."
+        from core.tools.executor import MISS_PREFIX
+
+        return f"{MISS_PREFIX} Error: Skill '{name}' not found. Use discover_skills to search."
 
     # Build response with instructions + resource manifest
     parts = []
@@ -127,8 +129,14 @@ def read_skill_resource(
 
     content = registry.read_resource(name, resource_path)
     if content is None:
+        # Negative lookups carry MISS_PREFIX: the agent asked for a skill or
+        # path that does not exist, the tool answered correctly. Reliability
+        # accounting must not read these as tool failures (see
+        # core.tools.executor.is_miss).
+        from core.tools.executor import MISS_PREFIX
+
         if not registry.exists(name):
-            return f"Error: Skill '{name}' not found. Use discover_skills to search."
+            return f"{MISS_PREFIX} Error: Skill '{name}' not found. Use discover_skills to search."
         if registry.is_disabled(name):
             return f"Error: Skill '{name}' is disabled. " "Enable it in Explorer > Skills before use."
 
@@ -139,9 +147,10 @@ def read_skill_resource(
                 for f in files:
                     available.append(f"{cat}/{f}")
             return (
-                f"Error: Resource '{resource_path}' not found in skill '{name}'. " f"Available: {', '.join(available)}"
+                f"{MISS_PREFIX} Error: Resource '{resource_path}' not found in skill '{name}'. "
+                f"Available: {', '.join(available)}"
             )
-        return f"Error: Resource '{resource_path}' not found in skill '{name}'. No resources available."
+        return f"{MISS_PREFIX} Error: Resource '{resource_path}' not found in skill '{name}'. No resources available."
 
     return content
 
