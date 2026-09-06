@@ -180,36 +180,87 @@
                 <button id="files-btn" class="status-btn" title="Explorer — files, skills, memory, jobs" aria-label="Explorer"><svg class="pxi pxi-folder" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3.5 6.5a2 2 0 0 1 2-2h3.6l2 2.4h7.4a2 2 0 0 1 2 2v9.6a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg><span class="status-btn-label">Explorer</span></button>
                 <button id="settings-btn" class="status-btn" title="Settings" aria-label="Settings"><svg class="pxi pxi-settings" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="status-btn-label">Settings</span></button>
             </div>
-            <div id="input-wrapper">
+            <!-- The composer. #input-wrapper is the group; #composer is the
+                 card, and its state classes — .is-focused, .is-multiline,
+                 .is-streaming, .is-rest-inline — are set in app.js and are what
+                 every layout rule keys off. Text on top, controls beneath, so
+                 the writing area gets the full width and the targets get their
+                 platform size. docs/dev/composer-plan.md is the contract this
+                 shares with the expand editor. -->
+            <div id="input-wrapper" role="group" aria-label="Message composer">
+                <!-- Above the chips, not inside the card: it is about the turn
+                     that is already running, not about what you are typing
+                     next. app.js fills and clears it. -->
+                <div id="queued-chip" hidden></div>
                 <div id="file-chips"></div>
-                <div id="input-bar">
+                <div id="composer">
                     <input type="file" id="attach-input" multiple hidden>
-                    <button id="attach-btn" type="button" title="Attach files" aria-label="Attach files">
-                        <svg class="pxi pxi-attach" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-                            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
-                        </svg>
-                    </button>
                     <!-- The placeholder is not a label: it disappears the moment
                          you type, and several screen readers never read it at
                          all. The one control the whole app exists for was
-                         announced as "edit text, blank". -->
-                    <textarea id="msg-input" placeholder="Message Pernix..." rows="1"
+                         announced as "edit text, blank". The key binding lives
+                         in #composer-hint and in aria-description now — a
+                         placeholder that carries it runs off the end of the
+                         box at any realistic width. -->
+                    <textarea id="msg-input" placeholder="Message Pernix…" rows="2"
                               aria-label="Message Pernix"></textarea>
-                    <!-- Hidden until /api/voice/status says a mode is configured (Settings → Integrations → Voice Input) -->
-                    <button id="voice-btn" type="button" title="Voice input — tap to toggle, hold to talk (Ctrl+Shift+M)" aria-label="Voice input" hidden>
-                        <svg class="pxi pxi-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-                            <path d="M12 1.5a3 3 0 0 0-3 3v7.5a3 3 0 0 0 6 0V4.5a3 3 0 0 0-3-3z"></path>
-                            <path d="M19 10.5V12a7 7 0 0 1-14 0v-1.5"></path>
-                            <path d="M12 19v3.5"></path>
-                            <path d="M8.5 22.5h7"></path>
-                        </svg>
-                    </button>
-                    <button id="send-btn" title="Send message" aria-label="Send message">
-                        <svg class="pxi pxi-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-                            <path d="M22 2L11 13"></path>
-                            <path d="M22 2l-7 20-4-9-9-4z"></path>
-                        </svg>
-                    </button>
+                    <!-- Long-paste offer. Hidden until a paste crosses the
+                         threshold; app.js writes the sentence and wires the
+                         two buttons. -->
+                    <div id="composer-banner" hidden>
+                        <span id="banner-text"></span>
+                        <span class="banner-actions">
+                            <button id="banner-attach" type="button">Attach as a file</button>
+                            <button id="banner-keep" type="button">Keep it here</button>
+                        </span>
+                    </div>
+                    <div id="composer-row">
+                        <!-- Stop is its own act, so it is its own button:
+                             sharing a slot with Send meant the control under
+                             your cursor changed meaning mid-turn. -->
+                        <button id="stop-btn" type="button" title="Stop the agent" aria-label="Stop the agent" hidden>
+                            <svg class="pxi pxi-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true" focusable="false">
+                                <rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none"></rect>
+                            </svg>
+                        </button>
+                        <button id="attach-btn" type="button" title="Attach files" aria-label="Attach files">
+                            <svg class="pxi pxi-attach" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                            </svg>
+                        </button>
+                        <!-- Hidden until the expand editor module is loaded
+                             (app.js re-checks lazily) — a control that opens
+                             nothing is worse than no control. -->
+                        <button id="expand-btn" type="button" title="Open a larger editor" aria-label="Open a larger editor" hidden>
+                            <svg class="pxi pxi-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                                <path d="M9.5 4.5H4.5V9.5"></path>
+                                <path d="M14.5 4.5h5v5"></path>
+                                <path d="M9.5 19.5H4.5v-5"></path>
+                                <path d="M14.5 19.5h5v-5"></path>
+                            </svg>
+                        </button>
+                        <!-- Hidden until /api/voice/status says a mode is configured (Settings → Integrations → Voice Input) -->
+                        <button id="voice-btn" type="button" title="Voice input — tap to toggle, hold to talk (Ctrl+Shift+M)" aria-label="Voice input" hidden>
+                            <svg class="pxi pxi-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                                <path d="M12 1.5a3 3 0 0 0-3 3v7.5a3 3 0 0 0 6 0V4.5a3 3 0 0 0-3-3z"></path>
+                                <path d="M19 10.5V12a7 7 0 0 1-14 0v-1.5"></path>
+                                <path d="M12 19v3.5"></path>
+                                <path d="M8.5 22.5h7"></path>
+                            </svg>
+                        </button>
+                        <span class="grow" aria-hidden="true"></span>
+                        <span id="composer-count" hidden></span>
+                        <!-- A button, not a caption: clicking it flips the
+                             Enter binding in place, which is the setting two
+                             menus away that nobody found. -->
+                        <button id="composer-hint" type="button"></button>
+                        <button id="send-btn" type="button" title="Send message" aria-label="Send message">
+                            <svg class="pxi pxi-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                                <path d="M22 2L11 13"></path>
+                                <path d="M22 2l-7 20-4-9-9-4z"></path>
+                            </svg>
+                        </button>
+                    </div>
                 </div>
             </div>
         </main>

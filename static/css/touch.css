@@ -985,6 +985,18 @@ body[data-touch] .ce-fallback {
 
 /* ------------------------------------------------------------------
    Input area (sole bottom element — compact, native-feeling)
+
+   Same card as the desktop composer, re-tuned through the four custom
+   properties layout.css puts on #composer: 16px text, 44px targets, a
+   slightly rounder corner for the bigger radius a phone wants.
+
+   The one structural difference is .is-rest-inline. An empty, unfocused
+   composer on a phone folds the control row back onto the text line —
+   attach, text, send, one row, 56px of the screen — because a phone with
+   the keyboard up has about 260px of usable height and a composer that
+   spends 125px of it before you have typed anything is the wrong trade.
+   The moment it has focus or a character in it the row drops beneath and
+   the writing area gets the full width. app.js owns the class.
    ------------------------------------------------------------------ */
 #input-wrapper {
     padding: var(--sp-1) var(--sp-3);
@@ -993,39 +1005,60 @@ body[data-touch] .ce-fallback {
     padding-right: max(var(--sp-3), var(--safe-right));
     background: var(--bg);
 }
-#input-bar {
-    border-radius: 1.25rem;
+#composer {
+    /* 16px prevents iOS auto-zoom on focus. 2 x 16px x 1.55 + 2 x 8px =
+       65.6px of textarea once it is focused; 40.8px at rest, under a 44px
+       row. 44px targets: Apple HIG 44pt, Material 48dp. */
+    --composer-size: 16px;
+    --composer-target: 44px;
+    border-radius: 14px;
     padding: 6px;
     gap: var(--sp-1);
     box-shadow: var(--shadow-sm);
 }
-#input-bar textarea {
-    font-size: 16px; /* prevents iOS auto-zoom on focus */
-    min-height: 22px;
-    padding: 5px 0;
-    line-height: 1.4;
+#composer textarea {
     /* P5 — a flat 120px cap was written against a portrait phone. With the
        keyboard up on a landscape phone the visible viewport is ~200px
        tall, and a composer that grows to 120px of it leaves two lines of
        the conversation you are replying to. dvh here is the VISUAL
        viewport on every browser that shrinks it for the keyboard, so the
-       cap tightens exactly when room runs out. */
-    max-height: min(120px, 30dvh);
+       cap tightens exactly when room runs out. The pixel half of the cap
+       is 200px rather than 120px because the box now starts at two lines:
+       the old number left barely a line of growth. */
+    max-height: min(200px, 30dvh);
 }
-/* Send is the most-tapped control in the app; 40px keeps it close to
-   the 44px guidance without making the composer bar taller. */
-#send-btn,
-#attach-btn,
-#voice-btn {
-    width: 40px;
-    height: 40px;
-    flex-shrink: 0;
-}
+#stop-btn svg,
 #attach-btn svg,
-#voice-btn svg {
+#expand-btn svg,
+#voice-btn svg,
+#send-btn svg {
     width: 20px;
     height: 20px;
 }
+/* The hint is a fine-pointer affordance: there is no Shift+Enter on a soft
+   keyboard, and the row has no width to spare. aria-description on the
+   textarea still carries the binding. */
+#composer-hint { display: none; }
+
+/* At rest: one line, controls inline. `display: contents` dissolves the
+   control row so its buttons become flex items of the card itself and can
+   be ordered around the textarea; everything the folded row has no room
+   for is hidden rather than wrapped. */
+#composer.is-rest-inline {
+    --composer-lines: 1;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-1);
+}
+#composer.is-rest-inline #composer-row { display: contents; }
+#composer.is-rest-inline #attach-btn { order: 1; }
+#composer.is-rest-inline #msg-input { order: 2; flex: 1 1 auto; }
+#composer.is-rest-inline #voice-btn { order: 3; }
+#composer.is-rest-inline #send-btn { order: 4; }
+#composer.is-rest-inline #expand-btn,
+#composer.is-rest-inline #stop-btn,
+#composer.is-rest-inline #composer-count,
+#composer.is-rest-inline #composer-row .grow { display: none; }
 
 .modal-body {
     -webkit-overflow-scrolling: touch;
