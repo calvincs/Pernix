@@ -32,11 +32,16 @@ The repo's own `.venv`, with Playwright and a Chromium browser:
 Also `curl` and `lsof`, which run.sh uses to wait for the server and to make
 sure the port is free afterwards.
 
+Running from a **git worktree** needs nothing extra: a worktree has no `.venv`
+of its own, so run.sh falls back to the one in the main checkout (found via
+`git rev-parse --git-common-dir`) and says so. Only the interpreter is shared;
+the code under test is still the worktree's.
+
 ## Knobs
 
 | | Default | What it does |
 |---|---|---|
-| `LEVEL` | `m2` | `m1` asserts the foundation only: the tier stamps, which stylesheet loaded, `inert` while the drawer or the Explorer covers the screen, the measured bottom stack, the model menu staying on screen, and the desktop baseline. `m2` adds everything else: the row sheets, the plain touch editor, the one-line worker strip, the 28px target floor, the 16px input floor, the landscape header hide, and the desktop sidebar's resize handle (which must be absent on every touch viewport). Can also be given as the second positional argument: `run.sh my-tag m1`. |
+| `LEVEL` | `m2` | `m1` asserts the foundation only: the tier stamps, which stylesheet loaded, `inert` while the drawer or the Explorer covers the screen, the measured bottom stack, the model menu staying on screen, and the desktop baseline. `m2` adds everything else: the row sheets, the plain touch editor, the one-line worker strip, the 28px target floor, the 16px input floor, the landscape header hide, the desktop sidebar's resize handle (which must be absent on every touch viewport), and the composer — its rest height, its width, its 44px touch targets, the hint, the counter, the long-paste offer, Stop, and the expand editor on both tiers. Can also be given as the second positional argument: `run.sh my-tag m1`. |
 | `PORT` | `8790` | Where the throwaway instance listens. Change it to run two gates at once, or if 8790 is taken. |
 | `REPO` | the checkout this script lives in | Which checkout to test. Useful from a worktree, or to point a gate at a branch you have checked out elsewhere. |
 
@@ -57,13 +62,13 @@ copies `data/agent` into its own tree and never opens your database.
 ## The desktop baseline
 
 `desktop-baseline.json` — next to this README, and **committed** — is the
-geometry of fourteen elements across five desktop states (home, a chat,
+geometry of sixteen elements across five desktop states (home, a chat,
 Settings open, the Explorer open, the sidebar collapsed) at 1280×800 with a
 mouse. For each: left, top, width, height, `position`, `display`, `font-size`
-and `padding` — of the sidebar, the main column, the status bar, the composer,
-the transcript and its inner column, the Explorer, the modal card, the sidebar
-toggle, the session header, the model chip, the message box, the first session
-row and the settings button.
+and `padding` — of the sidebar, the main column, the status bar, the composer
+wrapper, the composer card and its control row, the transcript and its inner
+column, the Explorer, the modal card, the sidebar toggle, the session header,
+the model chip, the message box, the first session row and the settings button.
 
 Every run compares against it and fails on any element that moved by more than
 a pixel. That is the check that makes a mobile change safe to land: a rule
@@ -99,6 +104,40 @@ moved the desktop, and say in the message what moved and why.
 | desktop | 1280×800, mouse | the baseline comparison |
 | `state-map` | 1280×800, mouse, reduced motion | one m1 check on the State timeline's Map tab, in its own context because it opens a session no other pass touches |
 | `timeline-lane` | 1280×900 dark and light, plus 390×844 touch | three m2 checks on the State timeline's Lane tab and the Story under it, and one on the phone |
+
+### The composer passes
+
+Two contexts of their own, after the baseline has been recorded, because both
+write things a shared profile would carry into it — `pernix:enter-sends`, a
+draft, a pending attachment.
+
+`composer` drives the mouse tier: the card rests at two lines and no more
+(`rows="2"` and a `min-height` of exactly two line boxes), it spans at least
+90% of `#main`, sixty lines of text grow it to no more than 40dvh and then
+scroll, `#composer-hint` states the binding and *flipping it by clicking* moves
+the preference, the hint text and `enterkeyhint` together, the hint disappears
+under 400px while `aria-description` keeps the binding, `#stop-btn` is hidden
+while nothing is running, `#composer-count` appears at exactly 20,000
+characters and not at 19,999, a 60,000-character paste offers the file instead
+and taking that offer leaves a `.txt` chip and an empty textarea, and
+`#expand-btn` opens a 70vw × 70vh dialog that hands its text back on close.
+
+`composer-run` is the one composer state the throwaway instance cannot reach on
+its own: it has no model configured, so no turn ever runs. The pass stubs
+`GET /api/sessions/*/status` to say `processing` — the same answer the client
+gets when it opens a session whose turn is already in flight — and replaces
+`EventSource` with an inert class so nothing from the real, idle server can
+clear the state again mid-assertion. It then asserts the card takes
+`.is-streaming`, Stop appears as its own button beside Send rather than in its
+slot, and the placeholder says where the text is going.
+
+The touch side rides inside `run_vp`, so it runs on all seven touch viewports:
+every visible composer button is at least 44px, `#composer-hint` is absent, and
+`#expand-btn` opens a full-screen sheet whose top bar reads Cancel · Compose ·
+Send at 44px with 16px text, which Cancel closes while keeping the draft. The
+pass types first on purpose — `.is-rest-inline` folds the control row back onto
+the text line on an untouched phone composer, and a folded row has no expand
+button to press.
 
 ### The state-map pass
 
