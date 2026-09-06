@@ -6,7 +6,8 @@ Normally driven by run.sh, which boots a throwaway instance and seeds it first:
   check.py <base_url> <shots_dir> <tag> <main_sid> <parent_sid> [LEVEL]
 
 LEVEL: m1 (foundation: tiers, inert, bottom stack, model menu on-screen, desktop unchanged)
-       m2 (everything: + row sheet, editor, worker strip, targets, inputs, header hide)
+       m2 (everything: + row sheet, editor, worker strip, targets, inputs,
+            header hide, the composer and its expand editor)
 
 Exit 1 on any failed check at the requested level. Writes <shots>/<tag>-*.png and
 <shots>/../check-<tag>.json. The desktop baseline is desktop-baseline.json NEXT TO
@@ -313,6 +314,99 @@ def suggestion_row_checks(pg, name):
     )
 
 
+# The composer's own floor is 44px, not the 28px the SMALL_JS sweep enforces
+# across the app: it is the control every session goes through, and Apple HIG
+# 44pt / Material 48dp is what a thumb actually needs. Measured on the real
+# card, so a control that is only 44px because nothing is beside it still
+# counts. .is-rest-inline folds the row away on an untouched phone composer,
+# so the pass types first — a folded row has no expand button to press and
+# hides the counter by design.
+COMPOSER_TOUCH_JS = r"""() => {
+  const row=document.getElementById('composer'); const out={small:[], n:0};
+  for (const id of ['stop-btn','attach-btn','expand-btn','voice-btn','send-btn']) {
+    const b=document.getElementById(id);
+    if(!b || b.hidden || !b.offsetParent) continue;
+    const r=b.getBoundingClientRect();
+    if(r.width===0||r.height===0) continue;
+    out.n++;
+    if(r.width<44||r.height<44) out.small.push(id+' '+Math.round(r.width)+'x'+Math.round(r.height));
+  }
+  const h=document.getElementById('composer-hint');
+  out.hint = !!(h && h.offsetParent && getComputedStyle(h).display !== 'none');
+  out.card = Math.round(row.getBoundingClientRect().width);
+  out.wrapper = Math.round(document.getElementById('input-wrapper').getBoundingClientRect().width);
+  return out; }"""
+
+
+def composer_touch(pg, name, shot):
+    """The composer and its expand sheet under a finger."""
+    # Typing drops .is-rest-inline, which is the state the controls are all
+    # in the row and the expand button exists.
+    pg.evaluate(
+        "() => { const t=document.getElementById('msg-input'); t.focus();"
+        " t.value='a draft worth expanding';"
+        " t.dispatchEvent(new Event('input', {bubbles: true})); }"
+    )
+    time.sleep(0.4)
+    m = pg.evaluate(COMPOSER_TOUCH_JS)
+    check(name, "m2: every composer button is >=44px on touch", m["n"] >= 3 and not m["small"], m, "m2")
+    check(name, "m2: no #composer-hint on touch (aria-description carries it)", not m["hint"], m, "m2")
+
+    pg.evaluate("() => document.getElementById('expand-btn').click()")
+    try:
+        pg.wait_for_selector("#compose-editor", timeout=4000)
+    except Exception:
+        check(name, "m2: expand opens the full-screen sheet", False, "no #compose-editor", "m2")
+        return
+    time.sleep(0.4)
+    sheet = pg.evaluate(
+        "() => { const c=document.getElementById('compose-editor'); const r=c.getBoundingClientRect();"
+        " const bar=[...c.querySelector('.compose-editor-top').children].map(n => n.textContent.trim());"
+        " const cl=document.getElementById('compose-editor-close').getBoundingClientRect();"
+        " const sd=document.getElementById('compose-editor-send').getBoundingClientRect();"
+        " return {sheet: c.classList.contains('compose-editor--sheet'), bar,"
+        "         w: Math.round(r.width), h: Math.round(r.height),"
+        "         vw: innerWidth, vh: innerHeight,"
+        "         value: document.getElementById('compose-editor-input').value,"
+        "         fs: parseFloat(getComputedStyle(document.getElementById('compose-editor-input')).fontSize),"
+        "         targets: [Math.round(cl.width)+'x'+Math.round(cl.height),"
+        "                   Math.round(sd.width)+'x'+Math.round(sd.height)]}; }"
+    )
+    shot("compose-editor")
+    check(
+        name,
+        "m2: expand opens a full-screen Cancel · Compose · Send sheet",
+        sheet["sheet"]
+        and sheet["bar"] == ["Cancel", "Compose", "Send"]
+        and sheet["w"] >= sheet["vw"] - 1
+        and sheet["h"] >= sheet["vh"] - 1
+        and sheet["value"] == "a draft worth expanding"
+        and sheet["fs"] >= 16
+        and all(int(t.split("x")[0]) >= 44 and int(t.split("x")[1]) >= 44 for t in sheet["targets"]),
+        sheet,
+        "m2",
+    )
+    # Cancel keeps the draft — the whole point of a shared buffer.
+    pg.evaluate("() => document.getElementById('compose-editor-close').click()")
+    time.sleep(0.4)
+    kept = pg.evaluate(
+        "() => ({gone: !document.getElementById('compose-editor'),"
+        "        value: document.getElementById('msg-input').value})"
+    )
+    check(
+        name,
+        "m2: Cancel closes the sheet and keeps the draft",
+        kept["gone"] and kept["value"] == "a draft worth expanding",
+        kept,
+        "m2",
+    )
+    pg.evaluate(
+        "() => { const t=document.getElementById('msg-input'); t.value='';"
+        " t.dispatchEvent(new Event('input', {bubbles: true})); t.blur(); }"
+    )
+    time.sleep(0.3)
+
+
 def run_vp(browser, name, w, h, opts):
     ctx = browser.new_context(viewport={"width": w, "height": h}, device_scale_factor=2, color_scheme="dark", **opts)
     pg = ctx.new_page()
@@ -482,6 +576,8 @@ def run_vp(browser, name, w, h, opts):
         bs,
     )
     shot("chat")
+    if LEVEL == "m2":
+        composer_touch(pg, name, shot)
     # model menu on screen
     pg.tap("#status-model") if opts.get("has_touch") else pg.click("#status-model")
     time.sleep(1.0)
@@ -658,7 +754,7 @@ def desktop_layout(browser):
     def grab(label):
         out[label] = pg.evaluate(
             """() => { const q=s=>{const e=document.querySelector(s); if(!e) return null; const r=e.getBoundingClientRect(); const cs=getComputedStyle(e); return [Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height), cs.position, cs.display, cs.fontSize, cs.padding];};
-            return {sidebar:q('#sidebar'), main:q('#main'), status:q('#status-bar'), input:q('#input-wrapper'), messages:q('#messages'), inner:q('.messages-inner'), fp:q('#file-panel'), modal:q('.modal-card'), toggle:q('#sidebar-toggle'), header:q('#session-header'), model:q('#status-model'), msg:q('#msg-input'), item:q('.session-item'), btn:q('#settings-btn'), sheets:[...document.styleSheets].map(s=>(s.href||'').split('/').pop()).filter(Boolean)}; }"""
+            return {sidebar:q('#sidebar'), main:q('#main'), status:q('#status-bar'), input:q('#input-wrapper'), composer:q('#composer'), row:q('#composer-row'), messages:q('#messages'), inner:q('.messages-inner'), fp:q('#file-panel'), modal:q('.modal-card'), toggle:q('#sidebar-toggle'), header:q('#session-header'), model:q('#status-model'), msg:q('#msg-input'), item:q('.session-item'), btn:q('#settings-btn'), sheets:[...document.styleSheets].map(s=>(s.href||'').split('/').pop()).filter(Boolean)}; }"""
         )
         pg.screenshot(path=f"{shots}/{tag}-desktop-{label}.png")
 
@@ -1147,6 +1243,327 @@ def timeline_lane_touch(browser):
         {"rowH": lane["rowH"], "overflow": lane["overflow"], "sheet": sheet},
         "m2",
     )
+    ctx.close()
+
+
+# ---------------------------------------------------------------------------
+# The composer — the control the whole app exists for
+# ---------------------------------------------------------------------------
+# The 3.2 redesign (docs/dev/composer-plan.md) moved every part of this: the
+# card spans the chat column instead of a 960px pill, it rests at two lines
+# instead of one, the controls sit beneath the text rather than in it, Stop is
+# its own button, and the bindings, the size and the long-paste offer are all
+# stated on screen rather than in a tooltip. None of that is visible to the
+# baseline diff — which only knows where #input-wrapper's box is — so it gets
+# its own pass, on its own context, after the baseline has been recorded.
+
+COMPOSER_GEOM = r"""() => {
+  const t=document.getElementById('msg-input'), c=document.getElementById('composer'),
+        m=document.getElementById('main'), cs=getComputedStyle(t);
+  const r=c.getBoundingClientRect();
+  return {lh: parseFloat(cs.lineHeight), fs: parseFloat(cs.fontSize),
+          padY: (parseFloat(cs.paddingTop)||0)+(parseFloat(cs.paddingBottom)||0),
+          client: Math.round(t.clientHeight), scroll: Math.round(t.scrollHeight),
+          rows: t.getAttribute('rows'),
+          cardW: Math.round(r.width), mainW: Math.round(m.getBoundingClientRect().width),
+          vh: innerHeight}; }"""
+
+# The bindings, everywhere the composer states them at once.
+COMPOSER_HINT = r"""() => {
+  const h=document.getElementById('composer-hint'), t=document.getElementById('msg-input');
+  let stored=null; try { stored=localStorage.getItem('pernix:enter-sends'); } catch(e) {}
+  return {text: h ? h.textContent.trim() : null,
+          shown: !!(h && h.offsetParent && getComputedStyle(h).display !== 'none'),
+          ekh: t.getAttribute('enterkeyhint'), stored,
+          aria: t.getAttribute('aria-description')}; }"""
+
+# A paste the browser will not perform for us. The handler measures what
+# landed AFTER the fact (line endings are normalised on the way in), so the
+# event and the insertion both have to be faked, in that order.
+PASTE_JS = r"""(n) => {
+  const t=document.getElementById('msg-input'), big='x'.repeat(n);
+  t.focus(); t.setSelectionRange(t.value.length, t.value.length);
+  const start=t.value.length, dt=new DataTransfer();
+  dt.setData('text/plain', big);
+  t.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true}));
+  t.value = t.value.slice(0, start) + big;
+  t.dispatchEvent(new Event('input', {bubbles: true}));
+  return start; }"""
+
+
+def composer_desktop(browser):
+    """Everything the redesigned composer promises under a mouse."""
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
+    pg = ctx.new_page()
+    pg.on("console", console_sink("composer"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[composer] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.5)
+    pg.evaluate(f"() => document.querySelector('[data-sid=\"{MAIN}\"]')?.click()")
+    time.sleep(1.4)
+
+    # --- size and presence -------------------------------------------------
+    g = pg.evaluate(COMPOSER_GEOM)
+    check(
+        "composer",
+        "m2: rests at two lines on desktop, not one and not three",
+        g["client"] + 1 >= 2 * g["lh"] and g["client"] < 3 * g["lh"] + g["padY"] and g["rows"] == "2",
+        g,
+        "m2",
+    )
+    check(
+        "composer",
+        "m2: composer spans >=90% of #main",
+        g["cardW"] >= 0.90 * g["mainW"],
+        f"{g['cardW']}px of {g['mainW']}px = {g['cardW'] / max(g['mainW'], 1):.0%}",
+        "m2",
+    )
+    # The expand editor is the answer to a long draft; the composer's own job
+    # is to stop growing and start scrolling before it eats the transcript.
+    pg.fill("#msg-input", "\n".join(f"line {i}" for i in range(60)))
+    time.sleep(0.3)
+    gf = pg.evaluate(COMPOSER_GEOM)
+    check(
+        "composer",
+        "m2: 60 lines grow to <=40dvh, then scroll",
+        gf["client"] <= 0.40 * gf["vh"] + 1 and gf["scroll"] > gf["client"] + 10,
+        {**gf, "cap": round(0.40 * gf["vh"])},
+        "m2",
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-composer-full.png")
+    pg.fill("#msg-input", "")
+    time.sleep(0.2)
+
+    # --- the bindings, stated and flippable in place -----------------------
+    h0 = pg.evaluate(COMPOSER_HINT)
+    check(
+        "composer",
+        "m2: #composer-hint states the binding beside Send",
+        h0["shown"] and "Enter to send" in (h0["text"] or ""),
+        h0,
+        "m2",
+    )
+    check("composer", "m2: enterkeyhint follows the preference (on)", h0["ekh"] == "send", h0, "m2")
+    pg.click("#composer-hint")
+    time.sleep(0.3)
+    h1 = pg.evaluate(COMPOSER_HINT)
+    check(
+        "composer",
+        "m2: clicking the hint flips the preference, the text and enterkeyhint",
+        h1["text"] != h0["text"]
+        and "Ctrl+Enter to send" in (h1["text"] or "")
+        and h1["stored"] == "0"
+        and h1["ekh"] == "enter",
+        {"before": h0, "after": h1},
+        "m2",
+    )
+    pg.click("#composer-hint")
+    time.sleep(0.3)
+    h2 = pg.evaluate(COMPOSER_HINT)
+    check(
+        "composer",
+        "m2: and back again",
+        h2["text"] == h0["text"] and h2["stored"] == "1" and h2["ekh"] == "send",
+        h2,
+        "m2",
+    )
+    # Under 400px the row has no width for a sentence and the hint goes; the
+    # binding survives on the textarea's aria-description, which is the only
+    # reason dropping it is allowed at all.
+    pg.set_viewport_size({"width": 380, "height": 800})
+    time.sleep(0.6)
+    hn = pg.evaluate(COMPOSER_HINT)
+    check(
+        "composer",
+        "m2: hint gone under 400px, binding kept in aria-description",
+        (not hn["shown"]) and "Enter" in (hn["aria"] or ""),
+        hn,
+        "m2",
+    )
+    pg.set_viewport_size({"width": 1280, "height": 800})
+    time.sleep(0.6)
+
+    # --- Stop is its own act ----------------------------------------------
+    check(
+        "composer",
+        "m2: #stop-btn hidden while the agent is idle",
+        pg.evaluate("() => document.getElementById('stop-btn').hidden === true"),
+        "",
+        "m2",
+    )
+
+    # --- size feedback ------------------------------------------------------
+    pg.fill("#msg-input", "y" * 19999)
+    time.sleep(0.3)
+    c19 = pg.evaluate("() => document.getElementById('composer-count').hidden")
+    pg.fill("#msg-input", "y" * 20000)
+    time.sleep(0.3)
+    c20 = pg.evaluate(
+        "() => { const c=document.getElementById('composer-count');"
+        " return {hidden: c.hidden, text: c.textContent, warn: c.classList.contains('warn')}; }"
+    )
+    check(
+        "composer",
+        "m2: #composer-count appears at 20,000 characters and not before",
+        c19 is True and c20["hidden"] is False and c20["text"] == "20,000 characters" and not c20["warn"],
+        {"at19999_hidden": c19, "at20000": c20},
+        "m2",
+    )
+    pg.fill("#msg-input", "")
+    time.sleep(0.2)
+
+    # --- the long-paste offer ----------------------------------------------
+    pg.evaluate(PASTE_JS, 60000)
+    time.sleep(0.5)
+    banner = pg.evaluate(
+        "() => { const b=document.getElementById('composer-banner');"
+        " return {hidden: b.hidden, text: (document.getElementById('banner-text').textContent||'').slice(0,80),"
+        "         attach: (document.getElementById('banner-attach').textContent||'').trim()}; }"
+    )
+    check(
+        "composer",
+        "m2: a 60,000-character paste offers the file instead of ballooning the request",
+        banner["hidden"] is False and "60,000" in banner["text"] and "Attach" in banner["attach"],
+        banner,
+        "m2",
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-composer-paste.png")
+    pg.click("#banner-attach")
+    time.sleep(0.6)
+    after = pg.evaluate(
+        "() => ({chips: document.querySelectorAll('#file-chips .file-chip').length,"
+        "        chip: (document.querySelector('#file-chips .file-chip')||{}).textContent || '',"
+        "        left: document.getElementById('msg-input').value.length,"
+        "        banner: document.getElementById('composer-banner').hidden})"
+    )
+    check(
+        "composer",
+        "m2: taking the offer makes a chip and empties the textarea",
+        after["chips"] == 1 and after["left"] == 0 and after["banner"] is True and ".txt" in after["chip"],
+        after,
+        "m2",
+    )
+    pg.evaluate("() => { const x=document.querySelector('#file-chips .file-chip button'); x && x.click(); }")
+    time.sleep(0.3)
+
+    # --- the expand editor, round trip -------------------------------------
+    pg.fill("#msg-input", "the brief so far")
+    time.sleep(0.3)
+    check(
+        "composer",
+        "m2: #expand-btn is offered once the editor module has loaded",
+        pg.evaluate("() => document.getElementById('expand-btn').hidden === false"),
+        "",
+        "m2",
+    )
+    pg.click("#expand-btn")
+    pg.wait_for_selector("#compose-editor", timeout=4000)
+    time.sleep(0.4)
+    ed = pg.evaluate(
+        "() => { const c=document.getElementById('compose-editor'), i=document.getElementById('compose-editor-input');"
+        " const r=c.getBoundingClientRect();"
+        " return {value: i.value, role: c.getAttribute('role'), modal: c.getAttribute('aria-modal'),"
+        "         focused: document.activeElement.id, w: Math.round(r.width), h: Math.round(r.height),"
+        "         count: document.getElementById('compose-editor-count').textContent,"
+        "         inert: document.getElementById('app').hasAttribute('inert')}; }"
+    )
+    check(
+        "composer",
+        "m2: expand opens a 70vw x 70vh modal holding the composer's text",
+        ed["value"] == "the brief so far"
+        and ed["role"] == "dialog"
+        and ed["modal"] == "true"
+        and ed["focused"] == "compose-editor-input"
+        and abs(ed["w"] - 896) <= 2
+        and abs(ed["h"] - 560) <= 2
+        and ed["inert"] is True,
+        ed,
+        "m2",
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-compose-editor.png")
+    pg.keyboard.type(" and a second sentence")
+    time.sleep(0.4)
+    pg.click("#compose-editor-close")
+    time.sleep(0.4)
+    back = pg.evaluate(
+        "() => ({gone: !document.getElementById('compose-editor'),"
+        "        value: document.getElementById('msg-input').value,"
+        "        focused: document.activeElement.id,"
+        "        inert: document.getElementById('app').hasAttribute('inert')})"
+    )
+    check(
+        "composer",
+        "m2: closing the editor keeps the text and hands focus back",
+        back["gone"]
+        and back["value"] == "the brief so far and a second sentence"
+        and back["focused"] == "msg-input"
+        and back["inert"] is False,
+        back,
+        "m2",
+    )
+    pg.fill("#msg-input", "")
+    ctx.close()
+
+
+def composer_streaming(browser):
+    """While a turn runs, the composer says where the text is going.
+
+    Its own context and its own stubs: /status is what tells the client a turn
+    was already in flight when the session opened, and EventSource is replaced
+    so nothing arriving from the real (idle) server can clear the state again
+    mid-assertion. This is the one composer state the seeded instance cannot
+    reach on its own — it has no model configured, so no turn ever runs.
+    """
+    ctx = browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark", reduced_motion="reduce")
+    ctx.add_init_script(
+        "window.EventSource = class { constructor(u){ this.url=u; this.readyState=1; }"
+        " addEventListener(){} removeEventListener(){} close(){ this.readyState=2; } };"
+    )
+    ctx.route(
+        "**/api/sessions/*/status",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"status": "processing", "state": "processing", "event_seq": 0}),
+        ),
+    )
+    pg = ctx.new_page()
+    pg.on("console", console_sink("composer-run"))
+    pg.on("pageerror", lambda e: console_errors.append(f"[composer-run] pageerror: {e}"))
+    pg.goto(base + "/", wait_until="load")
+    time.sleep(1.5)
+    pg.evaluate(f"() => document.querySelector('[data-sid=\"{MAIN}\"]')?.click()")
+    # Wait for the state, not for a stopwatch: opening a session is four awaited
+    # round trips (messages, context, workers, status) and only the last one
+    # carries the verdict. A fixed sleep here measured the composer mid-load and
+    # read the idle state a tenth of a second before it changed.
+    pg.wait_for_function(
+        "() => document.getElementById('composer')?.classList.contains('is-streaming')",
+        timeout=8000,
+    )
+    time.sleep(0.3)
+
+    st = pg.evaluate(
+        "() => { const c=document.getElementById('composer'), s=document.getElementById('stop-btn'),"
+        "        t=document.getElementById('msg-input');"
+        " const sr=s.getBoundingClientRect(), br=document.getElementById('send-btn').getBoundingClientRect();"
+        " return {streaming: c.classList.contains('is-streaming'), stopHidden: s.hidden,"
+        "         placeholder: t.placeholder, stopW: Math.round(sr.width), stopH: Math.round(sr.height),"
+        "         separate: Math.round(sr.left) !== Math.round(br.left)}; }"
+    )
+    check(
+        "composer-run",
+        "m2: a running turn shows Stop, marks the card and says where the text goes",
+        st["streaming"]
+        and st["stopHidden"] is False
+        and st["placeholder"].startswith("Reply now")
+        and st["separate"]
+        and st["stopW"] >= 28
+        and st["stopH"] >= 28,
+        st,
+        "m2",
+    )
+    pg.screenshot(path=f"{shots}/{tag}-desktop-composer-streaming.png")
     ctx.close()
 
 
@@ -2122,6 +2539,11 @@ with sync_playwright() as p:
             check(
                 "timeline-lane", "m2: lane touch pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2"
             )
+        for fn, vp in ((composer_desktop, "composer"), (composer_streaming, "composer-run")):
+            try:
+                fn(browser)
+            except Exception as e:
+                check(vp, "m2: composer pass completed", False, f"{e}\n{traceback.format_exc()[-400:]}", "m2")
         try:
             sidebar_resizer(browser)
         except Exception as e:
