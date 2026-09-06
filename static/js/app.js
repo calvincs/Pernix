@@ -680,36 +680,47 @@ function shouldSendOnKey(e, { enterSends = null, touch = false } = {}) {
 
 // Three sentences for three states, and the visible hint has to match what the
 // keys actually do — a phone that says "Enter to send" when its Enter makes a
-// new line is worse than saying nothing.
+// new line is worse than saying nothing. #composer-hint puts this in the open
+// on a fine pointer; aria-description carries it everywhere else.
 function _composerHint() {
-    if (enterSends()) return 'Enter to send · Shift+Enter for a new line';
-    return isTouch() ? 'Tap send' : 'Ctrl+Enter to send';
+    if (enterSends()) return 'Enter to send · Shift+Enter new line';
+    return isTouch() ? 'Tap send' : 'Ctrl+Enter to send · Enter new line';
 }
 
-// The fine-pointer placeholder used to carry both key bindings, which ran
-// past the end of the textarea at any realistic width — with the Explorer
-// open at 1280px it wrapped to a second line the composer clips, so it read
-// "…for a new lin". The second binding is a discovery, not an instruction:
-// it belongs in the tooltip and the accessible description, where it has as
-// much room as it needs. _composerHint() still carries both.
-// Below this the placeholder is the name alone. At 360px "Message Pernix —
-// tap send" wraps, so an EMPTY composer is two lines tall on the smallest
-// phone in the matrix — the widest thing on the screen saying the least. The
-// binding it drops is not lost: _composerHint() carries it in the title and
-// in aria-description, which have as much room as they need. (P7)
-const _NARROW_COMPOSER_PX = 400;
-
+// The placeholder is the name and nothing else. It used to carry the binding,
+// which ran past the end of the textarea at any realistic width — with the
+// Explorer open at 1280px it read "…for a new lin" — and on the smallest phone
+// in the matrix it made an EMPTY composer two lines tall, the widest thing on
+// the screen saying the least. The binding is not lost: #composer-hint states
+// it beside the send button, and the tooltip and aria-description have as much
+// room as they need. (P7)
 function _composerPlaceholder() {
-    if (window.innerWidth < _NARROW_COMPOSER_PX) return 'Message Pernix';
-    if (enterSends()) return 'Message Pernix… Enter to send';
-    return isTouch() ? 'Message Pernix — tap send' : 'Message Pernix… Ctrl+Enter to send';
+    // The class, not state.streaming: it is set by the same two functions that
+    // call this, so the border and the placeholder can never disagree about
+    // whether a turn is running.
+    if (document.getElementById('composer')?.classList.contains('is-streaming')) {
+        return 'Reply now — it goes to the running turn';
+    }
+    return 'Message Pernix…';
 }
 
-/** Re-read the width-dependent placeholder. Cheap, and a no-op on a session
- *  that is read-only: there the placeholder is saying why. */
+/** Re-state what the keys do, everywhere the composer says it. */
 function _refreshComposerText() {
+    const sends = enterSends();
+    const hint = document.getElementById('composer-hint');
+    if (hint) {
+        hint.textContent = _composerHint();
+        // The label is what makes it a control rather than a caption; the
+        // title says which way clicking it goes.
+        hint.setAttribute('aria-label', `${_composerHint()}. Click to change.`);
+        hint.title = sends ? 'Click for Ctrl+Enter to send' : 'Click for Enter to send';
+    }
     const t = document.getElementById('msg-input');
-    if (!t || t.disabled) return;
+    if (!t) return;
+    // What a soft keyboard labels its return key from. It said "return" while
+    // Enter was sending — on the one device where the label is the only clue.
+    t.setAttribute('enterkeyhint', sends ? 'send' : 'enter');
+    if (t.disabled) return;   // read-only: the placeholder is busy saying why
     t.placeholder = _composerPlaceholder();
     t.title = _composerHint();
     t.setAttribute('aria-description', t.title);
@@ -717,14 +728,13 @@ function _refreshComposerText() {
 
 function _setComposerReadOnly(readonly, reason, restoreSid = null) {
     const input = document.getElementById('msg-input');
-    const btn = document.getElementById('send-btn');
-    if (!input || !btn) return;
+    if (!input) return;
     input.disabled = readonly;
-    btn.disabled = readonly;
-    // The composer is more than the textarea. Attach and mic both feed a
-    // session the server will refuse, so leaving them live offered a path
+    _syncSendEnabled();
+    // The composer is more than the textarea. Attach, expand and mic all feed
+    // a session the server will refuse, so leaving them live offered a path
     // whose only possible ending was an error.
-    for (const id of ['attach-btn', 'voice-btn']) {
+    for (const id of ['attach-btn', 'expand-btn', 'voice-btn']) {
         const b = document.getElementById(id);
         if (b) b.disabled = readonly;
     }
@@ -1792,17 +1802,231 @@ function _navigateHistory(textarea, dir) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// The composer: growth, state classes, size feedback, the long-paste offer
+// ---------------------------------------------------------------------------
+
+// Both ends of the box live in CSS (layout.css #composer, re-tuned in
+// touch.css), so this reads them back instead of keeping a second copy that
+// drifts — the old cap was a hard-coded 200px next to a stylesheet that said
+// something else.
+//
+// Measuring the text is the fiddly part. `height: 0` on its own reports
+// whatever the min-height floor is holding the box to, and `height: auto` on
+// a textarea reports the `rows` attribute, which is 2. Collapsing both for one
+// read gives the height the TEXT needs; the floor comes straight back and wins
+// over the height we then set, so the box never falls under two lines.
+//
+// @returns {boolean} does the text occupy more than one line?
+function _growComposer(textarea) {
+    const t = textarea || document.getElementById('msg-input');
+    if (!t) return false;
+    const cs = getComputedStyle(t);
+    const cap = parseFloat(cs.maxHeight);
+    const lh = parseFloat(cs.lineHeight) || 20;
+    const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    t.style.minHeight = '0px';
+    t.style.height = '0px';
+    const content = t.scrollHeight;
+    t.style.minHeight = '';
+    t.style.height = Math.min(content, Number.isFinite(cap) ? cap : 200) + 'px';
+    return t.value.includes('\n') || content > pad + lh * 1.5;
+}
+
+// Size feedback long before the hard rejection at a million characters: a
+// count from 20,000, amber at 200,000, and a file offer for a paste over
+// 50,000. A ten-thousand-line paste used to balloon the request in silence.
+const _COUNT_FROM = 20000;
+const _COUNT_WARN = 200000;
+const _PASTE_OFFER_CHARS = 50000;
+
+let _composerMultiline = false;
+
+function _syncComposerCount(value) {
+    const counter = document.getElementById('composer-count');
+    if (!counter) return;
+    const n = (value || '').length;
+    if (n < _COUNT_FROM) {
+        counter.hidden = true;
+        counter.textContent = '';
+        return;
+    }
+    counter.textContent = `${n.toLocaleString()} characters`;
+    counter.classList.toggle('warn', n >= _COUNT_WARN);
+    counter.hidden = false;
+}
+
+/** Send is live only when there is something to send and nothing in flight. */
+function _syncSendEnabled() {
+    const btn = document.getElementById('send-btn');
+    if (!btn) return;
+    const input = document.getElementById('msg-input');
+    const empty = !input || !input.value.trim();
+    btn.disabled = !!(input && input.disabled)
+        || _sending
+        || (empty && _pendingFiles.length === 0);
+}
+
+/** #expand-btn is only real if the editor module loaded. Re-checked on every
+ *  composer event and on the click itself, so a module that arrives late is
+ *  not hidden until the next reload. */
+function _syncExpandButton() {
+    const btn = document.getElementById('expand-btn');
+    if (!btn) return;
+    const editor = window.PernixComposeEditor;
+    btn.hidden = !(editor && typeof editor.open === 'function');
+}
+
+/** The card's state classes. Everything the layout branches on is here. */
+function _syncComposerState() {
+    const card = document.getElementById('composer');
+    const t = document.getElementById('msg-input');
+    if (!card || !t) return;
+    const focused = document.activeElement === t;
+    card.classList.toggle('is-focused', focused);
+    card.classList.toggle('is-multiline', _composerMultiline);
+    // Only a finger folds the row back onto the text line, and only while the
+    // composer is untouched: a mouse always has the controls beneath the text.
+    card.classList.toggle('is-rest-inline', isTouch() && !t.value && !focused);
+    _syncExpandButton();
+}
+
+/** One pass over everything that follows from the textarea's value. */
+function _refreshComposer({ trusted = false } = {}) {
+    const t = document.getElementById('msg-input');
+    if (!t) return;
+    _composerMultiline = _growComposer(t);
+    _syncComposerState();
+    _syncComposerCount(t.value);
+    _syncSendEnabled();
+    if (trusted) {
+        // Typing (a real input event, not our synthetic ones from history
+        // navigation) ends history navigation and updates the draft.
+        _histIdx = -1;
+        _saveDraft(t.value);
+    }
+}
+
+/** yyyymmdd-hhmm, local time — the name a pasted block is filed under. */
+function _fileStamp(d = new Date()) {
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+        + `-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+// { start, inserted } — where a long paste landed and what it put there, so
+// the offer can take exactly that text back out again.
+let _pendingPaste = null;
+
+function _hidePasteBanner() {
+    _pendingPaste = null;
+    const banner = document.getElementById('composer-banner');
+    if (banner) banner.hidden = true;
+}
+
+function _showPasteBanner(n) {
+    const banner = document.getElementById('composer-banner');
+    const line = document.getElementById('banner-text');
+    if (!banner || !line) return;
+    line.textContent = `Pasted ${n.toLocaleString()} characters. Attach it as a file `
+        + 'instead? The model reads files whole and the message stays short.';
+    banner.hidden = false;
+}
+
+/** Take the pasted block out of the message and hand it over as a file. */
+function _pasteToFile() {
+    const t = document.getElementById('msg-input');
+    if (!t || !_pendingPaste) return;
+    const { start, inserted } = _pendingPaste;
+    const name = `pasted-${_fileStamp()}.txt`;
+    // Through addPendingFiles, exactly like a drag-and-drop: same chip, same
+    // upload with progress, same size guard.
+    addPendingFiles([new File([inserted], name, { type: 'text/plain' })]);
+    // Only if it is still where it was — the user may have typed since.
+    if (t.value.slice(start, start + inserted.length) === inserted) {
+        t.value = t.value.slice(0, start) + t.value.slice(start + inserted.length);
+    }
+    _hidePasteBanner();
+    _refreshComposer();
+    _saveDraft(t.value);
+    announce(`Pasted text attached as ${name}`);
+}
+
+/** Hand the composer's text to the expand editor, if that module is loaded. */
+function _openComposeEditor() {
+    const t = document.getElementById('msg-input');
+    if (!t) return;
+    const editor = window.PernixComposeEditor;
+    if (!editor || typeof editor.open !== 'function') {
+        _syncExpandButton();   // it went away, or never arrived
+        return;
+    }
+    editor.open({
+        value: t.value,
+        onChange: (v) => {
+            t.value = v;
+            _growComposer(t);
+            _saveDraft(v);
+            _syncComposerCount(v);
+            _syncSendEnabled();
+        },
+        onSend: () => send(),
+        onClose: () => t.focus(),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// What the composer's message said about the turn it was thrown into
+// ---------------------------------------------------------------------------
+// Typing while the agent runs injects the text into the running turn, which
+// used to happen with no visible sign — the message appeared in the transcript
+// as if sent normally and nothing said it was waiting.
+
+let _queuedChipShown = false;
+
+function _setQueuedChip(preview) {
+    const chip = document.getElementById('queued-chip');
+    if (!chip) return;
+    if (!preview) {
+        if (!_queuedChipShown) return;
+        _queuedChipShown = false;
+        chip.hidden = true;
+        clear(chip);
+        return;
+    }
+    const line = String(preview).replace(/\s+/g, ' ').trim().slice(0, 60);
+    clear(chip);
+    chip.appendChild(text(`Sent to the running turn · “${line}”`));
+    chip.hidden = false;
+    _queuedChipShown = true;
+}
+
 function setupInput() {
     const textarea = document.getElementById('msg-input');
     const btn = document.getElementById('send-btn');
 
-    btn.addEventListener('click', () => {
-        if (btn.classList.contains('stop-mode')) {
-            _cancelSession();
-        } else {
-            send();
-        }
+    // Send only sends. Stop is #stop-btn now: one slot that changed meaning
+    // mid-turn was two acts wearing one button.
+    btn.addEventListener('click', () => send());
+    document.getElementById('stop-btn')?.addEventListener('click', () => _cancelSession());
+    document.getElementById('expand-btn')?.addEventListener('click', _openComposeEditor);
+
+    // The binding, toggled where it is stated. Same key and same event as the
+    // Settings row, so the two places that say this can never disagree.
+    document.getElementById('composer-hint')?.addEventListener('click', () => {
+        const next = !enterSends();
+        _enterSendsCache = next;
+        try { localStorage.setItem(ENTER_SENDS_KEY, next ? '1' : '0'); }
+        catch { /* private mode — this session still gets the new behaviour */ }
+        window.dispatchEvent(new CustomEvent('pernix:enter-sends', { detail: next }));
+        announce(next
+            ? 'Enter sends the message'
+            : 'Enter adds a line; Ctrl or Cmd plus Enter sends');
     });
+
+    document.getElementById('banner-attach')?.addEventListener('click', _pasteToFile);
+    document.getElementById('banner-keep')?.addEventListener('click', _hidePasteBanner);
+
     textarea.addEventListener('keydown', (e) => {
         if (shouldSendOnKey(e, { enterSends: enterSends(), touch: isTouch() })) {
             e.preventDefault();
@@ -1819,15 +2043,23 @@ function setupInput() {
         }
     });
 
-    textarea.addEventListener('input', (e) => {
-        textarea.style.height = 'auto';
-        textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
-        // Typing (a real input event, not our synthetic ones from history
-        // navigation) ends history navigation and updates the draft.
-        if (e.isTrusted) {
-            _histIdx = -1;
-            _saveDraft(textarea.value);
-        }
+    textarea.addEventListener('input', (e) => _refreshComposer({ trusted: e.isTrusted }));
+
+    // A paste worth offering as a file. The insert is measured AFTER the
+    // browser has done it: line endings are normalised on the way in, so the
+    // clipboard string and what lands in the box are not the same length.
+    textarea.addEventListener('paste', (e) => {
+        const raw = e.clipboardData?.getData('text/plain') || '';
+        if (raw.length <= _PASTE_OFFER_CHARS) return;
+        const start = textarea.selectionStart;
+        const tail = textarea.value.length - textarea.selectionEnd;
+        setTimeout(() => {
+            const after = textarea.value;
+            const inserted = after.slice(start, after.length - tail);
+            if (inserted.length <= _PASTE_OFFER_CHARS) return;
+            _pendingPaste = { start, inserted };
+            _showPasteBanner(inserted.length);
+        }, 0);
     });
 
     // Top chrome is a quarter of a landscape phone and all of it once the
@@ -1835,32 +2067,40 @@ function setupInput() {
     // transcript 0px). Focus is the only signal that says the keyboard is
     // coming, so it is what sets the class; the CSS that folds the session
     // header away while it is set is compact-only. (P5)
-    textarea.addEventListener('focus', () => document.body.classList.add('composer-focused'));
-    textarea.addEventListener('blur', () => document.body.classList.remove('composer-focused'));
+    textarea.addEventListener('focus', () => {
+        document.body.classList.add('composer-focused');
+        _syncComposerState();
+    });
+    textarea.addEventListener('blur', () => {
+        document.body.classList.remove('composer-focused');
+        _syncComposerState();
+    });
 
-    // Settings → Appearance flips the Enter binding. Both the placeholder and
-    // the hint state it, so both are re-read the moment it changes. (T5)
+    // Settings → Providers & models → This browser flips the Enter binding, and
+    // so does #composer-hint. Everything that states it is re-read here. (T5)
     window.addEventListener('pernix:enter-sends', (e) => {
         _enterSendsCache = !!(e && e.detail);
         _refreshComposerText();
     });
 
-    // A rotation, or a desktop window dragged narrow, crosses the width the
-    // placeholder depends on (P7). Debounced: a drag fires this dozens of
-    // times a second and the answer changes at exactly one width.
-    let phTimer = null;
+    // A rotation, or a desktop window dragged narrow, crosses the width where
+    // the pointer verdict changes and the growth cap is a fraction of a
+    // viewport that just resized. Debounced: a drag fires this dozens of times
+    // a second and the answer changes at one width.
+    let composerTimer = null;
     window.addEventListener('resize', () => {
-        clearTimeout(phTimer);
-        phTimer = setTimeout(_refreshComposerText, 150);
+        clearTimeout(composerTimer);
+        composerTimer = setTimeout(() => _refreshComposer(), 150);
     });
 
-    textarea.placeholder = _composerPlaceholder();
-    textarea.title = _composerHint();
-    // The binding the placeholder no longer has room for. aria-description
-    // reaches a screen reader without needing a visible element to point at.
-    textarea.setAttribute('aria-description', _composerHint());
+    _refreshComposerText();
+    // A module that finishes loading after this one still gets its button.
+    _syncExpandButton();
+    setTimeout(_syncExpandButton, 0);
+    window.addEventListener('load', _syncExpandButton);
 
     _restoreDraft();
+    _refreshComposer();
 }
 
 // True from the moment a send starts until its POST resolves. Without it a
@@ -1870,10 +2110,7 @@ let _sending = false;
 
 function _setSendingState(sending, label) {
     _sending = sending;
-    const btn = document.getElementById('send-btn');
-    // _stopPending is checked too: a stop pressed between the upload finishing
-    // and the POST resolving must not have its button handed back here.
-    if (btn) btn.disabled = sending || _stopPending || !!document.getElementById('msg-input')?.disabled;
+    _syncSendEnabled();
     const infoEl = document.getElementById('status-info');
     if (!infoEl) return;
     if (sending && label) infoEl.textContent = label;
@@ -1904,8 +2141,8 @@ async function send() {
     const cmd = Object.keys(SLASH_COMMANDS).find(c => message.startsWith(c));
     if (cmd) {
         textarea.value = '';
-        textarea.style.height = 'auto';
         _clearDraft();
+        _refreshComposer();
         try {
             await SLASH_COMMANDS[cmd]();
         } catch (e) {
@@ -1917,8 +2154,8 @@ async function send() {
     if (state.streaming) {
         // Inject message into running session — agent picks it up next cycle
         textarea.value = '';
-        textarea.style.height = 'auto';
         _clearDraft();
+        _refreshComposer();
         _pushPromptHistory(message);
         _histIdx = -1;
         await _injectMessage(message);
@@ -1926,8 +2163,8 @@ async function send() {
     }
 
     textarea.value = '';
-    textarea.style.height = 'auto';
     _clearDraft();
+    _refreshComposer();
     _pushPromptHistory(message);
     _histIdx = -1;
 
@@ -2046,10 +2283,15 @@ async function _injectMessage(message) {
     _injectedMessages.push(msgEl);
     try {
         await post('/api/chat/inject', { session_id: state.sid, message });
+        // Two cues for one act: the chip above the composer for whoever is
+        // looking at it, and one polite announcement for whoever is not.
+        _setQueuedChip(message);
+        announce('Sent to the running turn');
     } catch (e) {
         const idx = _injectedMessages.indexOf(msgEl);
         if (idx !== -1) _injectedMessages.splice(idx, 1);
         msgEl.classList.remove('queued');
+        _setQueuedChip(null);
         appendMessage('system', `Inject failed: ${e.message}`);
     }
 }
@@ -2086,13 +2328,18 @@ function _addQueueRemoveButton(msgEl, messageId) {
 async function _markPendingQueued(sid) {
     try {
         const data = await get(`/api/sessions/${sid}/pending`);
-        for (const p of (data.pending || [])) {
+        const pending = data.pending || [];
+        for (const p of pending) {
             const msgEl = _messagesInner()?.querySelector(`.message[data-message-id="${p.message_id}"]`);
             if (msgEl) {
                 msgEl.classList.add('queued');
                 _addQueueRemoveButton(msgEl, p.message_id);
             }
         }
+        // The server's queue is the truth about the chip: a reload lands here,
+        // and so does every transcript render after one.
+        const last = pending.length ? pending[pending.length - 1] : null;
+        _setQueuedChip(last ? (last.preview || 'your message') : null);
     } catch { /* queue view is best-effort */ }
 }
 
@@ -2102,7 +2349,6 @@ async function _markPendingQueued(sid) {
 
 function setupFileDrop() {
     const app = document.getElementById('app');
-    const inputBar = document.getElementById('input-bar');
     let dragDepth = 0;
 
     // Prevent default on all drag events
@@ -2268,6 +2514,8 @@ function renderFileChips() {
     });
     const attachBtn = document.getElementById('attach-btn');
     if (attachBtn) attachBtn.classList.toggle('has-files', _pendingFiles.length > 0);
+    // An attachment with no text is a message: Send has to come back on.
+    _syncSendEnabled();
 }
 
 function formatSize(bytes) {
@@ -3354,6 +3602,9 @@ function handleEvent(event) {
     const type = event.type || '';
 
     if (type === 'stream.token' && event.content) {
+        // The answer has started: whatever was queued is either in this turn
+        // or is about to be, and the chip has said its piece.
+        _setQueuedChip(null);
         // Mid-reload: the container is being re-rendered under us. Keep the
         // text and let _softReload place it in the single bubble it creates.
         if (_reloading) {
@@ -3637,6 +3888,7 @@ function handleEvent(event) {
 
     else if (type === 'message.injected') {
         // Agent will see this message at the next tool round — clear queued indicator
+        _setQueuedChip(null);
         const msgEl = _injectedMessages.shift();
         if (msgEl) {
             msgEl.classList.remove('queued');
@@ -4089,6 +4341,7 @@ function handleEvent(event) {
             _showSendButton();
         }
         // Clear any remaining queued indicators — turn is over
+        _setQueuedChip(null);
         for (const el of _injectedMessages) {
             el.classList.remove('queued');
             el.querySelector('.queued-remove')?.remove();
@@ -4340,8 +4593,8 @@ let _stopPending = false;
 
 function _setStopPending(pending) {
     _stopPending = pending;
-    const btn = document.getElementById('send-btn');
-    if (btn) btn.disabled = pending || !!document.getElementById('msg-input')?.disabled;
+    const btn = document.getElementById('stop-btn');
+    if (btn) btn.disabled = pending;
     if (pending) {
         updateStatus('Stopping…');
         _applyStateBadge('cancelling', 'stop pressed');
@@ -4351,28 +4604,34 @@ function _setStopPending(pending) {
     }
 }
 
+// Stop and Send are two buttons now, so these two only ever raise and lower
+// the red one and put the composer into (or out of) its streaming state. Send
+// keeps sending throughout — that is the inject path, and it is why the
+// placeholder changes to say where the text is going.
 function _showStopButton() {
-    const btn = document.getElementById('send-btn');
-    btn.disabled = _stopPending;
-    btn.title = 'Stop generation';
-    btn.classList.add('stop-mode');
-    btn.setAttribute('aria-label', 'Stop generation');
-    clear(btn);
-    btn.appendChild(icon('stop'));
+    const stop = document.getElementById('stop-btn');
+    if (stop) {
+        stop.hidden = false;
+        stop.disabled = _stopPending;
+    }
+    document.getElementById('composer')?.classList.add('is-streaming');
+    _refreshComposerText();
+    _syncSendEnabled();
 }
 
 function _showSendButton() {
-    const btn = document.getElementById('send-btn');
-    // Back in send mode: whatever the stop press was waiting for has happened.
+    // Whatever the stop press was waiting for has happened.
     _stopPending = false;
+    const stop = document.getElementById('stop-btn');
+    if (stop) {
+        stop.hidden = true;
+        stop.disabled = false;
+    }
+    document.getElementById('composer')?.classList.remove('is-streaming');
+    _refreshComposerText();
     // A read-only session keeps its send button off through stop/send churn —
     // the composer input is the source of truth (_setComposerReadOnly).
-    btn.disabled = !!document.getElementById('msg-input')?.disabled;
-    btn.title = 'Send message';
-    btn.classList.remove('stop-mode');
-    btn.setAttribute('aria-label', 'Send message');
-    clear(btn);
-    btn.appendChild(icon('send'));
+    _syncSendEnabled();
 }
 
 async function _cancelSession() {
@@ -4396,7 +4655,7 @@ async function _cancelSession() {
             }
             // 404 = session not in memory (nothing running) — silently fall
             // through to a state sync. Other failures get surfaced; either
-            // way, don't leave the button stuck in stop-mode for up to 45s
+            // way, don't leave Stop on screen and greyed for up to 45s
             // until the reconcile loop notices.
             if (resp.status !== 404) {
                 const err = await resp.json().catch(() => ({}));
