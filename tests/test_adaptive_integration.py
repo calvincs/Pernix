@@ -675,6 +675,9 @@ async def test_candor_retires_recovered_hints(monkeypatch):
             return list(degraded)
 
     monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: _Bridge())
+    # 2026-09-05: the ledger alone no longer mints — the recent window must
+    # agree. These tests are about the ledger path, so the window agrees.
+    monkeypatch.setattr("db.models.recent_tool_outcomes", lambda tool, days=14: {"calls": 40, "failures": 12})
     runner = SnoozeRunner.__new__(SnoozeRunner)
     runner._is_cancelled = lambda: False
 
@@ -735,6 +738,9 @@ async def test_candor_does_not_mint_hints_for_names_that_are_not_tools(monkeypat
             ]
 
     monkeypatch.setattr("core.extensions.candor.bridge.get_candor_bridge", lambda: _Bridge())
+    # 2026-09-05: the ledger alone no longer mints — the recent window must
+    # agree. These tests are about the ledger path, so the window agrees.
+    monkeypatch.setattr("db.models.recent_tool_outcomes", lambda tool, days=14: {"calls": 40, "failures": 12})
     runner = SnoozeRunner.__new__(SnoozeRunner)
     runner._is_cancelled = lambda: False
     await SnoozeRunner._candor_maintenance(runner)
