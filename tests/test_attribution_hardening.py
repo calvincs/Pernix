@@ -259,11 +259,21 @@ class _FakeBridge:
         return list(self._degraded)
 
 
-def _producer_harness(monkeypatch, degraded, *, live_entries=()):
-    """Drive _candor_maintenance with a fake ledger and registry."""
+def _producer_harness(monkeypatch, degraded, *, live_entries=(), recent=None):
+    """Drive _candor_maintenance with a fake ledger and registry.
+
+    `recent` maps tool -> {calls, failures} for the recent-window
+    corroboration (2026-09-05); tools not listed look degraded recently too,
+    so the older tests keep exercising the ledger path they were written for.
+    """
     queued: list[list[dict]] = []
 
     monkeypatch.setattr("config.settings.adaptive_enabled", True)
+    recent = dict(recent or {})
+    monkeypatch.setattr(
+        "db.models.recent_tool_outcomes",
+        lambda tool, days=14: dict(recent.get(tool, {"calls": 40, "failures": 12})),
+    )
     monkeypatch.setattr(
         "core.extensions.candor.bridge.get_candor_bridge",
         lambda: _FakeBridge(degraded),
@@ -330,3 +340,48 @@ async def test_a_live_ask_user_hint_is_retired_with_a_receipt(monkeypatch):
     assert retired[0]["entry_id"] == "tool-ask_user-degraded"
     assert retired[0]["evidence"][0] == candor_receipt("ask_user")
     assert "dialog tool" in retired[0]["evidence"][1]
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-05: the ledger alone cannot mint a hint — the recent window must agree
+# ---------------------------------------------------------------------------
+
+
+async def test_a_degraded_ledger_with_a_clean_recent_window_mints_nothing(monkeypatch):
+    """The live `forget` hint: 7% over 26 observations in a ledger with no
+    decay, while the last 191 calls all succeeded."""
+    runner, queued = _producer_harness(
+        monkeypatch,
+        [{"tool": "bash", "p": 0.07, "n": 26}],
+        recent={"bash": {"calls": 191, "failures": 0}},
+    )
+    await runner._candor_maintenance()
+
+    assert [e for batch in queued for e in batch if e["action"] == "create"] == []
+
+
+async def test_too_few_recent_calls_is_not_corroboration(monkeypatch):
+    runner, queued = _producer_harness(
+        monkeypatch,
+        [{"tool": "bash", "p": 0.15, "n": 5}],
+        recent={"bash": {"calls": 3, "failures": 3}},
+    )
+    await runner._candor_maintenance()
+
+    assert [e for batch in queued for e in batch if e["action"] == "create"] == []
+
+
+async def test_a_live_hint_without_recent_corroboration_is_retired(monkeypatch):
+    live = [{"id": "tool-bash-degraded", "source": "candor", "version": 2, "kind": "routing_hint"}]
+    runner, queued = _producer_harness(
+        monkeypatch,
+        [{"tool": "bash", "p": 0.07, "n": 26}],
+        live_entries=live,
+        recent={"bash": {"calls": 60, "failures": 1}},
+    )
+    await runner._candor_maintenance()
+
+    retired = [e for batch in queued for e in batch if e["action"] == "delete"]
+    assert len(retired) == 1 and retired[0]["entry_id"] == "tool-bash-degraded"
+    assert "not corroborated" in retired[0]["evidence"][1]
+    assert "1/60" in retired[0]["evidence"][1]
