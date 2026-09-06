@@ -275,6 +275,13 @@
     <div id="a11y-live-assertive" class="visually-hidden" aria-live="assertive" aria-atomic="true"></div>
 
     <script src="/static/js/pwa.js"></script>
+    <!-- The composer's expand editor. Its own module <script> rather than an
+         import inside app.js, because the arrow only ever points one way: the
+         composer calls the editor, the editor never calls the composer. It
+         publishes window.PernixComposeEditor on load; app.js reads that global
+         when #expand-btn is pressed. Both are modules, so they share one
+         registry and one copy of a11y.js's overlay stack. -->
+    <script type="module" src="/static/js/components/compose-editor.js"></script>
     <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>

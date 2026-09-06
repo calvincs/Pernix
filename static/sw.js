@@ -52,6 +52,9 @@ const SHELL_ASSETS = [
     '/static/js/notifications.js',
     '/static/js/a11y.js',
     '/static/js/feedback.js',
+    // An entry script in its own right: index.html loads it directly, so an
+    // offline shell without it has an #expand-btn that opens nothing.
+    '/static/js/components/compose-editor.js',
     '/static/js/components/sidebar.js',
     '/static/js/components/file-panel.js',
     '/static/js/components/jobs-indicator.js',
