@@ -1,7 +1,7 @@
 # Composer (chat input) redesign plan — 2026-09-05
 
 Scope: the message input at the bottom of a chat on desktop, tablet and phone.
-Status: PLAN for discussion. Nothing built.
+Status: APPROVED 2026-09-05 with two changes from the mock (see §7). Building.
 
 ## 1. What exists today (audit)
 
@@ -148,3 +148,40 @@ app.js composer block, index.html markup, settings toggle wiring, ui-gate checks
 baseline. Two Opus agents (one for the composer, one for the gate) in one session,
 then a both-theme smoke and a real-device pass on Calvin's phone and iPad. Phases
 C and D ride in the same change where cheap, else follow next.
+
+## 7. Decisions taken (2026-09-05, from the mock review)
+
+Calvin reviewed the mock (artifact f3e7ae9b) and settled every open decision:
+
+1. Input typeface: monospace, 15px on desktop, 16px on touch.
+2. Rest height on desktop: **two lines**, not three. Growth to 40dvh, then scroll.
+3. Controls beneath the text, full-width writing area.
+4. Stop is its own red button while streaming; Send stays Send.
+5. Long-paste offer at 50,000 characters; counter from 20,000, amber at 200,000.
+6. Expand editor as shown: modal on desktop (70vw x 70vh), full-screen sheet on touch.
+7. **Width: the composer spans the chat column, not a 76ch measure.** Keep the
+   wrapper's side padding; drop the 960px cap on the composer itself, so it reads
+   "mostly full width" on wide screens. The transcript keeps its own measure.
+
+DOM contract (both agents build against this):
+
+    #input-wrapper[role=group][aria-label="Message composer"]
+      #queued-chip                (hidden unless an injected message is pending)
+      #file-chips
+      #composer                   (the card; state classes .is-focused .is-multiline .is-streaming .is-rest-inline)
+        textarea#msg-input        (rows=2 on fine pointer; enterkeyhint set by JS)
+        #composer-banner          (hidden; long-paste offer: text, #banner-attach, #banner-keep)
+        #composer-row
+          #stop-btn               (hidden unless streaming; aria-label "Stop the agent")
+          #attach-btn
+          #expand-btn             (aria-label "Open a larger editor")
+          #voice-btn              (hidden unless configured)
+          .grow
+          #composer-count         (hidden under 20,000 chars; .warn at 200,000)
+          #composer-hint          (fine pointer only, hidden under 400px; click flips Enter-sends)
+          #send-btn
+
+    window.PernixComposeEditor = { open({ value, onChange, onSend, onClose }), close(), isOpen() }
+      #compose-editor[role=dialog]  #compose-editor-input  #compose-editor-count
+      #compose-editor-close  #compose-editor-send
+      (touch: full-screen sheet with a top bar Cancel · Compose · Send)
