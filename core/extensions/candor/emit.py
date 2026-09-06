@@ -282,7 +282,10 @@ def build_turn_observations(
         # Without this, ask_user's unattended non-answers were emitted as
         # tool_ok(ask_user)=False and the reliability producer minted a
         # routing hint steering scout away from ever asking the user.
-        calls = max(0, int(entry.get("calls", 0)) - int(entry.get("unavailable") or 0))
+        # A negative lookup (is_miss) is the agent's wrong ask, netted out the
+        # same way: four "resource not found" answers must not read as an
+        # unreliable read_skill_resource.
+        calls = max(0, int(entry.get("calls", 0)) - int(entry.get("unavailable") or 0) - int(entry.get("misses") or 0))
         failures = min(int(entry.get("failures", 0)), calls)
         errors = entry.get("errors") or []
         prev = already_emitted.get(tool, {"calls": 0, "failures": 0, "errors": 0})

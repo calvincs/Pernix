@@ -2136,10 +2136,14 @@ def record_tool_outcome(turn, result) -> None:
     refusal at least means the model tried something it should not have, while
     an unavailable tool simply cannot apply here and says so.
     """
-    from core.tools.executor import is_policy_refusal, is_unavailable
+    from core.tools.executor import is_miss, is_policy_refusal, is_unavailable
 
     refused = is_policy_refusal(result)
     unavailable = (not refused) and is_unavailable(result)
+    # A negative lookup (core.tools.executor.is_miss) is the agent asking for
+    # something that does not exist: counted as `misses`, previewed so reflect
+    # can see the wrong ask, never a failure of the tool.
+    miss = (not refused) and (not unavailable) and is_miss(result)
     entry = turn.tool_summary.setdefault(
         result.tool_name,
         {"calls": 0, "failures": 0, "refusals": 0, "errors": [], "total_latency_ms": 0},
@@ -2155,6 +2159,12 @@ def record_tool_outcome(turn, result) -> None:
             previews.append(preview)
     elif unavailable:
         entry["unavailable"] = int(entry.get("unavailable") or 0) + 1
+    elif miss:
+        entry["misses"] = int(entry.get("misses") or 0) + 1
+        preview = result.content[:300] if result.content else "miss"
+        previews = entry.setdefault("miss_errors", [])
+        if preview not in previews:
+            previews.append(preview)
     elif result.was_error:
         entry["failures"] += 1
         err_preview = result.content[:500] if result.content else "unknown"
@@ -2232,7 +2242,19 @@ async def _record_round_results(
 
     for item, result in zip(parsed_calls, results):
         tc = item["tc"]
-        tool_meta = json.dumps({"was_error": result.was_error, "latency_ms": result.latency_ms})
+        # The tool name and the miss/unavailable flags ride along so a recent
+        # window of results can be read back per tool without joining the
+        # assistant's tool_calls (the candor hint producer corroborates its
+        # ledger against the last two weeks of these rows).
+        from core.tools.executor import is_miss as _is_miss
+        from core.tools.executor import is_unavailable as _is_unavail
+
+        _tm = {"was_error": result.was_error, "latency_ms": result.latency_ms, "tool": result.tool_name}
+        if _is_miss(result):
+            _tm["miss"] = True
+        if _is_unavail(result):
+            _tm["unavailable"] = True
+        tool_meta = json.dumps(_tm)
 
         # If the gate corrected this call (aliased name, coerced argument
         # types, dropped unknown params), prefix the notes onto the tool
