@@ -360,6 +360,64 @@ and `was_error` each mean.
 
 ---
 
+## The composer
+
+One card, two layouts, and a handful of state classes. The DOM is a contract:
+`app.js` drives it, `layout.css` and `touch.css` lay it out, and the expand
+editor is a separate module that may not be loaded at all.
+
+```
+#input-wrapper[role=group][aria-label="Message composer"]
+  #queued-chip                (hidden unless an injected message is pending)
+  #file-chips
+  #composer                   the card
+    textarea#msg-input        rows=2; enterkeyhint set by JS
+    #composer-banner          hidden; the long-paste offer, with
+                              #banner-text, #banner-attach, #banner-keep
+    #composer-row
+      #stop-btn  #attach-btn  #expand-btn  #voice-btn
+      .grow
+      #composer-count  #composer-hint  #send-btn
+```
+
+`#composer` carries four state classes, all set by `_syncComposerState()`:
+
+| Class | When | What it does |
+|---|---|---|
+| `.is-focused` | the textarea has focus | available to both stylesheets |
+| `.is-multiline` | the text wraps or holds a newline | available to both stylesheets |
+| `.is-streaming` | a turn is running | accent border, and the placeholder that says the text joins the running turn |
+| `.is-rest-inline` | **touch only**, empty and unfocused | folds the control row back onto the text line |
+
+`.is-rest-inline` is the one structural difference between the tiers. On a
+finger the controls sit under the text as soon as the composer is touched, but
+an untouched one is a single 56px row: `touch.css` puts `display: contents` on
+`#composer-row` so its buttons become flex items of the card itself and can be
+ordered around the textarea, and hides everything the folded row has no width
+for. `app.js` only ever sets the class when `isTouch()`.
+
+**The size numbers all live in CSS.** `#composer` carries `--composer-size`,
+`--composer-lh`, `--composer-pad-y`, `--composer-lines` and `--composer-target`;
+the textarea's `min-height` is computed from the first four, and `touch.css`
+re-tunes the same layout by overriding three of them. `_growComposer()` reads
+the *computed* `max-height` back rather than keeping its own copy of the cap —
+40dvh on a desktop, `min(200px, 30dvh)` on touch — so the ceiling is written
+down once.
+
+Measuring the text is the one subtle part. `height: auto` on a `textarea`
+reports the `rows` attribute (2), and `height: 0` alone reports whatever
+`min-height` is holding the box to, so `_growComposer()` collapses **both** for
+a single `scrollHeight` read and then restores the floor, which wins over the
+height it sets. That is also where the multi-line verdict comes from.
+
+**The expand editor is optional.** `#expand-btn` is hidden unless
+`window.PernixComposeEditor` is present, re-checked on every composer event and
+again on the click, and the module is called through
+`open({ value, onChange, onSend, onClose })` — nothing else in `app.js` knows
+about it.
+
+---
+
 ## Sending a message from a keyboard
 
 `shouldSendOnKey(e, { enterSends, touch })` in `app.js` is the whole decision,
@@ -380,10 +438,16 @@ payload or of Save — like Appearance, it belongs to the device.
 Its default differs by device, which is the point: on a desktop Enter has
 always sent and Shift+Enter is the newline everyone knows, but on a phone Enter
 *is* the on-screen keyboard's newline key with a send button an inch away. So
-the default is `!isTouch()`. The composer's visible hint follows the resolved
-state — "Enter to send · Shift+Enter for a new line", "Ctrl+Enter to send", or
-"Tap send" — because a phone that claims "Enter to send" while its Enter makes
-a new line is worse than a phone that says nothing.
+the default is `!isTouch()`. `#composer-hint` follows the resolved state —
+"Enter to send · Shift+Enter new line" or "Ctrl+Enter to send · Enter new line"
+— because a composer that claims "Enter to send" while its Enter makes a new
+line is worse than one that says nothing. On touch, where the hint is hidden,
+the same three sentences (including "Tap send") still reach `title` and
+`aria-description`, and `enterkeyhint` labels the soft keyboard's return key.
+
+The hint is also the switch: clicking it writes the same localStorage key and
+fires the same `pernix:enter-sends` event the Settings row does, so the two
+places that state this preference cannot drift apart.
 
 ---
 
