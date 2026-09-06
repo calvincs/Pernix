@@ -260,6 +260,57 @@ that the drawer row, the header title and anything else can share.
 
 ---
 
+## The expand editor
+
+`static/js/components/compose-editor.js`, opened by the composer's
+`#expand-btn`. The composer rests at two lines and grows to 40dvh; this is
+where a multi-paragraph brief actually gets written.
+
+```js
+window.PernixComposeEditor.open({
+    value: textarea.value,          // what to show — the editor never reads
+                                    // the composer itself
+    onChange: (v) => { ... },       // every keystroke, throttled to 80ms
+    onSend:   (v) => { ... },       // the user asked to send; closes after
+    onClose:  ()  => { ... },       // gone; put focus back in the composer
+});
+window.PernixComposeEditor.close();     // keeps the draft, fires onClose
+window.PernixComposeEditor.isOpen();    // -> boolean
+```
+
+**One copy of the text, not two.** `onChange` is the only channel out, and it
+is flushed before `onSend` and before `onClose` run — so a send fired 20ms
+after the last keystroke posts what is on screen, not what was there 20ms ago.
+Nothing is written back on close, which is why "Escape keeps the draft" needs
+no special case: the composer's textarea and its localStorage draft were never
+not the source of truth. A caller whose `onClose` writes text back will see a
+sent message reappear in the composer; that is the one thing it must not do.
+
+**Two shapes, one component**, chosen by the same verdict `mobile.js` reaches
+(`body[data-touch]`, ORed with `<html data-touch-ui>` and the touch media
+query, so it is right even before `initMobile()` has run). A fine pointer gets
+a centred dialog — 70vw x 70vh, floors of 560x360, a 1100px ceiling, bindings
+spelled out along the footer. A finger gets a full-screen sheet with a top bar
+of Cancel · Compose · Send at 44px, 16px text, safe-area insets, and the height
+pinned to `--vvh` / `--vv-top` so the keyboard cannot cover the line being
+typed. A window dragged across 768px while the editor is open rebuilds it in
+the other shape, carrying the text, the selection and the scroll across.
+
+It is deliberately **not** a `.modal-card`: `compact.css` rewrites that class
+into a bottom sheet and `touch.css` into a 44px-target sheet, and this dialog
+already has its own answer for a finger. It keeps `.modal-overlay` — a scrim
+and a centring context — and overrides it from an ID so the bottom-sheet
+alignment cannot reach it. `openOverlay()` supplies the dialog role, the name,
+the focus trap, Escape and focus restoration, exactly as it does for the action
+sheet.
+
+It publishes a **global** rather than being imported by `app.js` because the
+arrow only points one way: the composer calls the editor, the editor never
+calls the composer. `index.html` loads it as its own module `<script>`, so it
+shares one module registry — and one `a11y.js` overlay stack — with `app.js`.
+
+---
+
 ## The State timeline
 
 `static/js/components/modals/timeline.js`, opened by the state badge in the
