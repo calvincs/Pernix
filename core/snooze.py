@@ -68,6 +68,16 @@ SNOOZE_TRANSPARENT_TYPES = frozenset({"canary"})
 # the registry has not loaded.
 CANDOR_HINT_EXEMPT_CATEGORIES = frozenset({"dialog"})
 CANDOR_HINT_EXEMPT_TOOLS = frozenset({"ask_user", "notify_user", "approve_dangerous_tool"})
+# A degraded hint needs the recent window to agree with the ledger. Candor
+# keeps every observation forever with no decay, so one bad week months ago
+# pins a tool at "7% reliable" while the last 191 calls all succeeded (the
+# live `forget` hint, 2026-09-05). The last CANDOR_HINT_CORROBORATION_DAYS of
+# tool results, minus misses and by-design unavailability, must show at
+# least CANDOR_HINT_MIN_RECENT_CALLS calls with a failure share at or above
+# core.signals.POOR_PERFORMER_THRESHOLD — or no hint is minted, and a live
+# one is retired.
+CANDOR_HINT_CORROBORATION_DAYS = 14
+CANDOR_HINT_MIN_RECENT_CALLS = 5
 
 # Receipt prefix for adaptive evidence that points at a Candor fact (W4 parses
 # `candor:<fact_key>`; the key is the predicate call the p/n was derived from).
@@ -1684,6 +1694,37 @@ Output valid JSON only. No markdown fences. /no_think"""
                         ", ".join(exempt),
                     )
                 degraded = [d for d in degraded if _is_tool(d["tool"]) and not _is_exempt(d["tool"])]
+
+                from core.signals import POOR_PERFORMER_THRESHOLD
+
+                corroboration: dict[str, tuple[bool, str]] = {}
+
+                def _corroborated(name: str) -> tuple[bool, str]:
+                    """(recent window agrees, reason) — see the constants above."""
+                    if name not in corroboration:
+                        try:
+                            recent = db.recent_tool_outcomes(name, days=CANDOR_HINT_CORROBORATION_DAYS)
+                        except Exception as e:  # pragma: no cover - defensive
+                            recent = {"calls": 0, "failures": 0, "error": repr(e)}
+                        calls, fails = int(recent.get("calls") or 0), int(recent.get("failures") or 0)
+                        if calls < CANDOR_HINT_MIN_RECENT_CALLS:
+                            corroboration[name] = (
+                                False,
+                                f"only {calls} call(s) in the last {CANDOR_HINT_CORROBORATION_DAYS} days",
+                            )
+                        else:
+                            ok = (fails / calls) >= POOR_PERFORMER_THRESHOLD
+                            corroboration[name] = (ok, f"{fails}/{calls} recent calls failed")
+                    return corroboration[name]
+
+                stale = [(d["tool"], _corroborated(d["tool"])[1]) for d in degraded if not _corroborated(d["tool"])[0]]
+                if stale:
+                    logger.debug(
+                        "Candor: %d degraded tool(s) not corroborated by recent results: %s",
+                        len(stale),
+                        "; ".join(f"{t} ({why})" for t, why in stale),
+                    )
+                degraded = [d for d in degraded if _corroborated(d["tool"])[0]]
                 degraded_ids = {f"tool-{d['tool']}-degraded" for d in degraded}
                 mints = []
                 for d in degraded:
@@ -1735,6 +1776,8 @@ Output valid JSON only. No markdown fences. /no_think"""
                         why = "not a registered tool"
                     elif _is_exempt(named):
                         why = "dialog tool — by-design unavailability is not a fault"
+                    elif named in corroboration and not corroboration[named][0]:
+                        why = f"not corroborated by recent results — {corroboration[named][1]}"
                     else:
                         why = "recovered"
                     retires.append(

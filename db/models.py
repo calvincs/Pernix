@@ -4075,6 +4075,30 @@ def mark_post_mortems_synthesized(pm_ids: list[str]) -> int:
 # "execution_mode" rows may exist from prior runs — ignored going forward.
 
 
+def recent_tool_outcomes(tool: str, days: int = 14) -> dict:
+    """{calls, failures} for one tool over the last `days` of tool results.
+
+    Reads the per-result metadata the agent stamps on tool rows (tool name,
+    was_error, miss, unavailable). Misses and by-design unavailability are
+    not calls the tool could have got right, so they leave both counts.
+    Rows written before the tool name was stamped are invisible, which is
+    the point: this is the recent window, not the ledger.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS calls,
+                      COALESCE(SUM(CASE WHEN json_extract(metadata, '$.was_error') IN (1, 'true', 'True') THEN 1 ELSE 0 END), 0) AS failures
+               FROM messages
+               WHERE role = 'tool'
+                 AND created_at > datetime('now', ?)
+                 AND json_extract(metadata, '$.tool') = ?
+                 AND COALESCE(json_extract(metadata, '$.miss'), 0) NOT IN (1, 'true', 'True')
+                 AND COALESCE(json_extract(metadata, '$.unavailable'), 0) NOT IN (1, 'true', 'True')""",
+            (f"-{int(days)} days", tool),
+        ).fetchone()
+    return {"calls": int(row["calls"] or 0), "failures": int(row["failures"] or 0)}
+
+
 def upsert_signal(
     signal_type: str,
     subject: str,
