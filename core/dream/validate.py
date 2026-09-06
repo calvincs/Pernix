@@ -311,6 +311,12 @@ async def _validate_lesson_ineffective(row: dict) -> str:
         return _bump_attempts(
             row, f"replay needs exactly one user turn (found {len(user_msgs)}) and a live post-mortem"
         )
+    if str(pm.get("verdict") or "") == "pass":
+        # A counterfactual plan can only be judged against a failure. On the
+        # live box 15 of 105 replays were judged against a passing turn and
+        # 8 of those became policies — "the plan now addresses the failure"
+        # when there was none.
+        return _finish(row, "expired", "scout_replay", "cited post-mortem passed — nothing to replay against")
 
     original_request = str(user_msgs[0].get("content", ""))[:4000]
     try:
