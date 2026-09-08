@@ -311,6 +311,16 @@ def _resolve_within(path: str, roots: list[Path], create_roots: bool = False) ->
     # Applies to writes too, deliberately: edits land on the file where it
     # lives; only genuinely new files default into the home. Without a home
     # the historical rule stands unchanged: first root wins outright.
+    # The doubled-prefix check runs BEFORE any root scan, deliberately. Once
+    # the mistake has been made even once, the nested tree EXISTS, so both
+    # "this candidate exists" and "this candidate's parent exists" point at
+    # the orphan and every later write compounds it. The prefix is the
+    # stronger signal precisely because the wrong directory may be real.
+    redirected = _redirect_doubled_home_path(path, roots)
+    if redirected is not None:
+        check_protected(redirected, roots)
+        return redirected
+
     prefer_existing = WORKSPACE_HOME.get() is not None and WORKSPACE_OVERRIDE.get() is None
     # ...but only across the two workspace-ish roots. Scanning EVERY root for
     # an existing file let a bare name be captured by a later root that has
@@ -344,10 +354,6 @@ def _resolve_within(path: str, roots: list[Path], create_roots: bool = False) ->
         check_protected(parent_exists, roots)
         return parent_exists
     if first_valid is not None:
-        redirected = _redirect_doubled_home_path(path, roots)
-        if redirected is not None:
-            check_protected(redirected, roots)
-            return redirected
         check_protected(first_valid, roots)
         return first_valid
 
