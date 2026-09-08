@@ -238,13 +238,16 @@ def add_gate(
     # so a row that reached the table by any other route is still checked.
     from core.gates import check_gate_command, check_gate_cwd
     from core.tools.paths import workspace as _workspace
+    from core.tools.paths import workspace_home as _default_root
 
     command = command.strip()
     blocked = check_gate_command(command)
     if blocked:
         return f"{blocked} (gate '{name}' not registered)"
     cwd = cwd.strip()
-    bad_cwd = check_gate_cwd(cwd, _workspace())
+    # Validate against the root the gate will actually run in — the session's
+    # working root — with the workspace still the fence it may not escape.
+    bad_cwd = check_gate_cwd(cwd, _default_root(), _workspace())
     if bad_cwd:
         return f"{bad_cwd} (gate '{name}' not registered)"
 

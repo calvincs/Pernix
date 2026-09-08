@@ -41,6 +41,10 @@ class GateResult:
     # resolve on this host. That is a broken gate, not failing work, and it
     # must not be graded as if the agent's turn had failed a check.
     broken: bool = False
+    # Where it ran. Reported because a gate that verifies the wrong copy of a
+    # project is the one failure mode nothing downstream can detect: reflect
+    # treats a gate as host evidence it cannot overrule.
+    cwd: str = ""
 
     @property
     def state(self) -> str:
@@ -66,6 +70,7 @@ class GateResult:
             "reused": self.reused,
             "error": self.error,
             "broken": self.broken,
+            "cwd": self.cwd,
         }
 
 
@@ -180,11 +185,14 @@ def _fingerprint(watch_paths: list[str], base: Path) -> str:
     return h.hexdigest()
 
 
-def _gate_env(workspace: Path) -> dict:
-    venv_bin = workspace / ".venv" / "bin"
+def _gate_env(venv_root: Path, home: Path) -> dict:
+    """Split the same way build_shell_env splits it for bash and jobs: the
+    toolchain is shared, so PATH keeps pointing at the containment root's venv,
+    while HOME follows the session's working root."""
+    venv_bin = venv_root / ".venv" / "bin"
     return {
         "PATH": f"{venv_bin}:/usr/local/bin:/usr/bin:/bin",
-        "HOME": str(workspace),
+        "HOME": str(home),
         "LANG": "C.UTF-8",
     }
 
@@ -206,31 +214,37 @@ def check_gate_command(command: str) -> str | None:
     return _check_command_security(command)
 
 
-def resolve_gate_cwd(cwd: str, workspace: Path) -> Path:
-    """Resolve a gate's working directory inside the workspace.
+def resolve_gate_cwd(cwd: str, base: Path, containment: Path | None = None) -> Path:
+    """Resolve a gate's working directory.
 
     add_gate takes cwd from the model, and gates run with shell=True, so an
     unconstrained cwd relocates the whole policy surface (`cwd="/"`). Mirrors
-    safe_read_path's rule: a relative path is taken against the workspace (not
-    the server's process cwd, which is the source tree), resolve() collapses
-    `..` and symlinks, then containment is required.
+    safe_read_path's rule: a relative path is taken against the session's
+    working root (not the server's process cwd, which is the source tree),
+    resolve() collapses `..` and symlinks, then containment is required.
 
-    Raises ValueError when the result escapes the workspace.
+    base is the default cwd — the space home for a space session — and
+    containment is the root nothing may escape, which stays the global
+    workspace. They are separate arguments because they are separate ideas: a
+    space is a default, not a sandbox.
+
+    Raises ValueError when the result escapes both.
     """
-    base = workspace.resolve()
+    base = base.resolve()
+    root = containment.resolve() if containment is not None else base
     if not cwd:
         return base
     candidate = Path(cwd)
     resolved = (candidate if candidate.is_absolute() else base / candidate).resolve()
-    if not resolved.is_relative_to(base):
-        raise ValueError(f"Error: gate cwd must be inside the workspace ({base}); got {resolved}")
+    if not (resolved.is_relative_to(root) or resolved.is_relative_to(base)):
+        raise ValueError(f"Error: gate cwd must be inside the workspace ({root}); got {resolved}")
     return resolved
 
 
-def check_gate_cwd(cwd: str, workspace: Path) -> str | None:
+def check_gate_cwd(cwd: str, base: Path, containment: Path | None = None) -> str | None:
     """Validation-only wrapper over resolve_gate_cwd. Returns an error or None."""
     try:
-        resolve_gate_cwd(cwd, workspace)
+        resolve_gate_cwd(cwd, base, containment)
     except ValueError as e:
         return str(e)
     except OSError as e:
@@ -258,7 +272,12 @@ def _gate_child_setup() -> None:
         pass
 
 
-def run_gates(session_id: str, prior: dict[str, tuple[str, "GateResult"]], attempt: int) -> list[GateResult]:
+def run_gates(
+    session_id: str,
+    prior: dict[str, tuple[str, "GateResult"]],
+    attempt: int,
+    session_obj=None,
+) -> list[GateResult]:
     """Run every enabled gate for the session. Blocking — call via to_thread.
 
     prior: {gate_name: (fingerprint, GateResult)} from earlier attempts this
@@ -266,31 +285,40 @@ def run_gates(session_id: str, prior: dict[str, tuple[str, "GateResult"]], attem
     fingerprint is reused, never on the first retry (attempt <= 2 always
     re-runs) — turns whose deliverable isn't a watched file must be able to
     clear a stale failure by actually changing something.
+
+    session_obj: the live session, when the caller already holds it. The path
+    contract comes off it directly then; the manager lookup is only a fallback
+    for callers that have the id alone.
     """
-    from core.tools.paths import workspace as _workspace
+    from core.tools.paths import roots_for_context
     from db import models as db
 
     rows = db.get_gates(session_id)
     if not rows:
         return []
-    ws = _workspace()
-    # Honor the session's workspace override (plan 1g). Gates run from
-    # post-hooks, outside the per-tool-call ContextVar window that
-    # execute_sync sets — so resolve the override from the session directly
-    # (canary runs execute in a temp workspace; their gates must too).
-    try:
-        from sessions.manager import get_manager
+    # Gates run from post-hooks, outside the per-tool-call ContextVar window
+    # that execute_sync sets, so both halves of the path contract have to be
+    # read off the session directly: the workspace override (plan 1g — canary
+    # runs execute in a temp workspace and their gates must too), and the space
+    # home. Only the override was restored before, so a space session's gate
+    # ran in the global tree while every edit and every foreground test landed
+    # in the space — the gate then certified a project nobody had touched.
+    _s = session_obj
+    if _s is None:
+        try:
+            from sessions.manager import get_manager
 
-        _s = get_manager().get(session_id)
-        _ov = getattr(_s, "workspace_override", None) if _s else None
-        if _ov:
-            ws = Path(_ov).resolve()
-    except Exception:
-        pass
+            _s = get_manager().get(session_id)
+        except Exception:
+            _s = None
+    _override = getattr(_s, "workspace_override", None)
+    _home = getattr(_s, "workspace_home", None)
+    ws, base = roots_for_context(_override, _home)
+    base.mkdir(parents=True, exist_ok=True)
     results: list[GateResult] = []
     for row in rows:
         name = row["name"]
-        fp = _fingerprint(row.get("watch_paths") or [], ws)
+        fp = _fingerprint(row.get("watch_paths") or [], base)
         if attempt > 2 and fp:
             prev = prior.get(name)
             if prev is not None and prev[0] == fp and not prev[1].passed:
@@ -309,11 +337,12 @@ def run_gates(session_id: str, prior: dict[str, tuple[str, "GateResult"]], attem
                     fingerprint=fp,
                     scope=row.get("scope", "session"),
                     broken=prev[1].broken,
+                    cwd=prev[1].cwd,
                 )
                 results.append(reused)
                 logger.info("Gate '%s' not re-run: no changes under watch_paths since last failure", name)
                 continue
-        results.append(_run_one(row, ws, fp))
+        results.append(_run_one(row, ws, base, fp))
     return results
 
 
@@ -336,7 +365,7 @@ def _refused(row: dict, fingerprint: str, reason: str) -> GateResult:
     )
 
 
-def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
+def _run_one(row: dict, workspace: Path, base: Path, fingerprint: str) -> GateResult:
     name, command = row["name"], row["command"]
     # Re-validate at execution time, not only at add_gate: rows persist in the
     # DB, so gates registered before validation existed (or written by any
@@ -345,7 +374,7 @@ def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
     if blocked:
         return _refused(row, fingerprint, blocked)
     try:
-        cwd = str(resolve_gate_cwd(row.get("cwd") or "", workspace))
+        cwd = str(resolve_gate_cwd(row.get("cwd") or "", base, workspace))
     except (ValueError, OSError) as e:
         return _refused(row, fingerprint, str(e))
     start = time.monotonic()
@@ -367,7 +396,7 @@ def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
                 command,
                 shell=True,
                 cwd=cwd,
-                env=_gate_env(workspace),
+                env=_gate_env(workspace, base),
                 stdout=out_f,
                 stderr=err_f,
                 preexec_fn=_gate_child_setup,
@@ -385,6 +414,7 @@ def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
             fingerprint=fingerprint,
             scope=row.get("scope", "session"),
             broken=_looks_unrunnable(proc.returncode, tail, command),
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired:
         # Kill the group, not just the shell: gates run unattended every turn,
@@ -400,6 +430,7 @@ def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
             error=f"timed out after {GATE_TIMEOUT_S}s",
             fingerprint=fingerprint,
             scope=row.get("scope", "session"),
+            cwd=cwd,
         )
     except OSError as e:
         # The spawn itself failed — a cwd that does not exist, a command that
@@ -424,13 +455,15 @@ def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
             error=f"{type(e).__name__}: {e}",
             fingerprint=fingerprint,
             scope=row.get("scope", "session"),
+            cwd=cwd,
         )
     logger.info(
-        "Gate '%s': %s (exit=%s, %.1fs)",
+        "Gate '%s': %s (exit=%s, %.1fs, cwd=%s)",
         name,
         "PASS" if result.passed else "FAIL",
         result.exit_code,
         time.monotonic() - start,
+        cwd,
     )
     return result
 
@@ -491,7 +524,8 @@ def format_evidence(results: list[GateResult]) -> str:
         status = "PASS" if r.passed else ("BROKEN" if r.broken else "FAIL")
         detail = f"exit={r.exit_code}" if r.exit_code is not None else (r.error or "no result")
         reused = " [reused prior failure — watch_paths unchanged]" if r.reused else ""
-        lines.append(f"- {r.name}: {status} ({detail}){reused}  cmd: {r.command}")
+        where = f"  [cwd: {r.cwd}]" if r.cwd else ""
+        lines.append(f"- {r.name}: {status} ({detail}){reused}  cmd: {r.command}{where}")
         if not r.passed and r.output_tail:
             lines.append(f"  output tail:\n  {r.output_tail[-800:]}")
     return "\n".join(lines)
@@ -544,6 +578,6 @@ def run_gates_for_turn(session_id: str, session_obj, attempt: int) -> list[GateR
     history: GateHistory = turn.gate_history or GateHistory()
     turn.gate_history = history
     history.reset_if_new_turn(getattr(session_obj, "current_turn_user_msg_id", None))
-    results = run_gates(session_id, history.prior, attempt)
+    results = run_gates(session_id, history.prior, attempt, session_obj=session_obj)
     history.record(results)
     return results

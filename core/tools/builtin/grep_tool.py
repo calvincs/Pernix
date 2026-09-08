@@ -5,10 +5,9 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-from pathlib import Path
 
-from core.tools.paths import root_mismatch_hint
-from core.tools.paths import workspace as _workspace
+from core.tools.paths import owning_root, resolve_workspace_path, root_mismatch_hint
+from core.tools.paths import workspace_home as _default_root
 from core.tools.truncation import truncate_output
 
 logger = logging.getLogger("pernix.tools.grep")
@@ -30,17 +29,20 @@ def grep(pattern: str, path: str = "", include: str = "") -> str:
     if not pattern or not pattern.strip():
         return "Error: pattern is required"
 
-    workspace = _workspace()
+    # One relative-path root for every tool (2026-09-08): `impl` names the same
+    # directory here that it names to file_read and to bash's cwd. grep used to
+    # resolve against the global workspace while a space session edited and
+    # tested inside its own home, so a search could report confidently on a
+    # different copy of the project than the one being worked on.
     if path:
-        search_path = Path(path)
-        if not search_path.is_absolute():
-            search_path = workspace / path
-        search_path = search_path.resolve()
-        # Security: must be within workspace
-        if not search_path.is_relative_to(workspace):
-            return f"Error: Path not within workspace: {path}{root_mismatch_hint(path)}"
+        try:
+            search_path = resolve_workspace_path(path)
+        except ValueError as e:
+            return f"Error: {e}{root_mismatch_hint(path)}"
     else:
-        search_path = workspace
+        search_path = _default_root()
+    root = owning_root(search_path)
+    scope = f"[root: {root}]"
 
     if not search_path.exists():
         return f"Error: Path not found: {search_path}{root_mismatch_hint(path)}"
@@ -78,11 +80,11 @@ def grep(pattern: str, path: str = "", include: str = "") -> str:
             capture_output=True,
             text=True,
             timeout=30,
-            cwd=str(workspace),
+            cwd=str(root),
         )
 
         if result.returncode == 1:
-            return "No matches found."
+            return f"{scope}\nNo matches found."
 
         if result.returncode not in (0, 1, 2) and not result.stdout:
             return f"Error: Search failed (exit {result.returncode}): {result.stderr[:200]}"
@@ -100,8 +102,9 @@ def grep(pattern: str, path: str = "", include: str = "") -> str:
                 line = line[:MAX_LINE_LENGTH] + "..."
             output_lines.append(line)
 
-        # Make paths relative to workspace for readability
-        ws_str = str(workspace) + "/"
+        # Relative to the effective root, so a path copied out of these results
+        # resolves back to the file it came from.
+        ws_str = str(root) + "/"
         output_lines = [l.replace(ws_str, "") for l in output_lines]
 
         result_text = "\n".join(output_lines)
@@ -124,7 +127,7 @@ def grep(pattern: str, path: str = "", include: str = "") -> str:
         else:
             result_text += f"\n\n[{total} matches]"
 
-        return result_text
+        return f"{scope}\n{result_text}"
 
     except subprocess.TimeoutExpired:
         return "Error: Search timed out after 30s"
@@ -144,7 +147,11 @@ def register(reg) -> None:
                 "pattern": {"type": "string", "description": "Regex pattern to search for"},
                 "path": {
                     "type": "string",
-                    "description": "Directory or file to search (relative to workspace). Default: workspace root",
+                    "description": (
+                        "Directory or file to search. A relative path resolves the same way it "
+                        "does for file_read and bash. Default: your working root (shown as "
+                        "[root: ...] in the result)."
+                    ),
                 },
                 "include": {"type": "string", "description": "Glob pattern to filter files, e.g. '*.py', '*.{js,ts}'"},
             },
