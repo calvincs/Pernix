@@ -468,13 +468,17 @@ async def compact(session_id: str):
 
     import asyncio as _asyncio
 
-    from core.context.compaction import compact_with_llm
+    from core.context.compaction import CompactionOutcome, compact_with_llm
 
     messages = await _asyncio.to_thread(db.get_messages, session_id)
     msg_dicts = [dict(m) for m in messages]
 
-    did_compact = await compact_with_llm(session_id, msg_dicts)
-    return {"compacted": did_compact}
+    # `reason` separates "nothing older than the live turn to fold" from "the
+    # summarizer tried and failed". They are identical from the boolean
+    # alone, and only one of them is worth trying again.
+    outcome = CompactionOutcome()
+    did_compact = await compact_with_llm(session_id, msg_dicts, outcome=outcome)
+    return {"compacted": did_compact, "reason": outcome.reason, "messages_covered": outcome.covered}
 
 
 @router.get("/api/usage/{session_id}")

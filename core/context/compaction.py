@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass, field
 
 from config import settings
 from core.context.tokens import get_estimator
+from core.llm.types import extract_tool_call_fields, is_rejected_call
 from db import models as db
 
 logger = logging.getLogger("pernix.context.compaction")
@@ -301,17 +303,259 @@ def _clamp_boundary_to_live_turn(convo: list[dict], boundary_idx: int, turn_user
     return root_idx if 0 <= root_idx < boundary_idx else boundary_idx
 
 
+# ---------------------------------------------------------------------------
+# Coverage-aware serialization
+# ---------------------------------------------------------------------------
+
+# What ONE summarizer call may be handed. The slice is split into as many of
+# these as it takes; a group past a cutoff is summarized by the next call
+# rather than dropped. The old single 60,000-char pass dropped ~70% of every
+# steady-state slice and advanced the marker over it anyway.
+_CHUNK_CHARS = 60_000
+# Per-body clips. Whatever they cut is written down with the row's id — a
+# prefix is not the message, and the coverage record has to say so.
+_BODY_CLIP_CHARS = 4_000
+_TOOL_CLIP_CHARS = 2_000
+_ARG_CLIP_CHARS = 400
+# A compaction stalls the turn that called it, so bound the calls it may
+# make. Groups past the last chunk stay in the live window for the next one.
+_MAX_CHUNKS = 8
+# Clip pointers named in the stored summary's coverage footer / kept in the
+# marker's metadata. The footer is read by the model, the metadata by us.
+_FOOTER_CLIPS = 8
+_META_CLIPS = 50
+
+# Reasons a compaction did not write a marker. Only FAILED means the
+# compactor tried and could not do it; NOTHING_TO_SUMMARIZE means there was
+# nothing it was allowed to touch, which no caller should treat as an error.
+COMPACTION_PERFORMED = "performed"
+COMPACTION_FAILED = "failed"
+NOTHING_TO_SUMMARIZE = "nothing_to_summarize"
+
+
+@dataclass
+class CompactionOutcome:
+    """Why a compaction run ended the way it did.
+
+    Filled in by `compact_with_llm` when a caller hands one in. The return
+    value stays a plain bool — every caller that only asks "did it compact?"
+    is unchanged — and this carries the part the agent loop needs: a refusal
+    and a failure are both False, and only one of them may end a turn.
+
+    The default is FAILED so an unpopulated outcome (a stub in a test, a
+    caller that never passed one) reads as the cautious answer.
+    """
+
+    reason: str = COMPACTION_FAILED
+    covered: int = 0
+    chunks: int = 0
+
+
+@dataclass
+class _Chunk:
+    """One summarizer call's worth of COMPLETE message groups."""
+
+    text: str = ""
+    msg_ids: list[int] = field(default_factory=list)
+    clips: list[dict] = field(default_factory=list)
+
+
+def _text_of(content) -> str:
+    """Message content as text, flattening the vision list form."""
+    if isinstance(content, list):
+        return " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return content if isinstance(content, str) else ("" if content is None else str(content))
+
+
+def _clip(text: str, limit: int, msg_id, role: str, clips: list[dict]) -> str:
+    """Clip a body, recording the omission and where to get the rest.
+
+    The point of the record is that the summarizer's view and the boundary
+    stop agreeing to disagree: the marker may advance over this row, but
+    what the summarizer actually saw of it is written down, with a pointer
+    the agent can follow.
+    """
+    if len(text) <= limit:
+        return text
+    clips.append({"msg_id": msg_id, "role": role, "kept": limit, "total": len(text)})
+    where = f"session_read({msg_id})" if msg_id is not None else "search_sessions(query)"
+    return f"{text[:limit]} … [clipped {len(text) - limit} chars — {where} for the full body]"
+
+
+def _tool_calls_of(msg: dict) -> list[dict]:
+    """The assistant row's tool calls, whether stored as JSON text or a list."""
+    tcs = msg.get("tool_calls")
+    if isinstance(tcs, str):
+        try:
+            tcs = json.loads(tcs)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if not isinstance(tcs, list):
+        return []
+    return [tc for tc in tcs if isinstance(tc, dict)]
+
+
+def _call_identity(tc: dict) -> str:
+    """`bash(command='pytest -q', cwd='/srv')` — tool plus the arguments that
+    say what it touched.
+
+    An assistant tool round stores content "" and puts everything in
+    `tool_calls`, which the old serializer never read: the whole round
+    reached the summarizer as the twelve characters "[assistant] ", and the
+    path or command it ran existed nowhere else in the input.
+    """
+    _id, name, args = extract_tool_call_fields(tc)
+    parsed = args
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            parsed = {"_raw_arguments": args}
+    if not isinstance(parsed, dict):
+        parsed = {"_raw_arguments": parsed}
+    rendered = []
+    for key, value in parsed.items():
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+        if len(text) > _ARG_CLIP_CHARS:
+            text = text[:_ARG_CLIP_CHARS] + "…"
+        rendered.append(f"{key}={text!r}")
+    return f"{name or '?'}({', '.join(rendered)})"
+
+
+def _call_status(tc: dict, results: dict) -> str:
+    """Execution status for one proposed call.
+
+    A refused call (`_rejected`, shipped in 8a1cd17) never ran; saying so is
+    the difference between a summary that records an attempt and one that
+    records a result the harness never produced.
+    """
+    if is_rejected_call(tc):
+        return "REJECTED — never executed"
+    row = results.get(tc.get("id", ""))
+    if row is None:
+        return "no result recorded"
+    body = _text_of(row.get("content")).lstrip()
+    return "error" if body.startswith(("Error:", "ERROR", "error:")) else "ok"
+
+
+def _serialize_group(group: list[dict], clips: list[dict]) -> str:
+    """Render one atomic group: its rows, its tool identities, its ids."""
+    head = group[0]
+    calls = _tool_calls_of(head) if head.get("role") == "assistant" else []
+    names = {tc.get("id", ""): extract_tool_call_fields(tc)[1] for tc in calls}
+    results = {m.get("tool_call_id", ""): m for m in group if m.get("role") == "tool"}
+
+    lines: list[str] = []
+    for msg in group:
+        role = msg.get("role", "")
+        mid = msg.get("id")
+        tag = f"#{mid}" if mid is not None else "#?"
+        body = _text_of(msg.get("content"))
+        if msg is head and calls:
+            if body.strip():
+                lines.append(f"[assistant {tag}] {_clip(body, _BODY_CLIP_CHARS, mid, role, clips)}")
+            for tc in calls:
+                lines.append(f"[tool_call {tag}] {_call_identity(tc)} -> {_call_status(tc, results)}")
+        elif role == "tool":
+            name = names.get(msg.get("tool_call_id", "")) or "tool"
+            lines.append(f"[tool_result {tag} {name}] {_clip(body, _TOOL_CLIP_CHARS, mid, role, clips)}")
+        else:
+            lines.append(f"[{role} {tag}] {_clip(body, _BODY_CLIP_CHARS, mid, role, clips)}")
+    return "\n".join(lines)
+
+
+def _group_messages(messages: list[dict]) -> list[list[dict]]:
+    """Split the slice into atomic units a chunk boundary may not fall inside.
+
+    An assistant row that made tool calls travels with the tool rows that
+    answered it — the `_rejected` stubs from 8a1cd17 included, since a
+    rejection without its parent reads as work that ran.
+    """
+    groups: list[list[dict]] = []
+    i, n = 0, len(messages)
+    while i < n:
+        msg = messages[i]
+        group = [msg]
+        i += 1
+        if msg.get("role") == "assistant" and _tool_calls_of(msg):
+            while i < n and messages[i].get("role") == "tool":
+                group.append(messages[i])
+                i += 1
+        groups.append(group)
+    return groups
+
+
+def _chunk_slice(
+    messages: list[dict],
+    chunk_chars: int = _CHUNK_CHARS,
+    max_chunks: int = _MAX_CHUNKS,
+) -> list[_Chunk]:
+    """Serialize the slice into bounded chunks of complete groups.
+
+    Returns the chunks in transcript order. Each carries the ids it
+    represents and the clips it had to make, so the caller can advance the
+    boundary over exactly what a summarizer accepted and no further.
+    """
+    chunks: list[_Chunk] = []
+    current = _Chunk()
+    for group in _group_messages(messages):
+        clips: list[dict] = []
+        text = _serialize_group(group, clips)
+        ids = [m["id"] for m in group if m.get("id") is not None]
+        if current.text and len(current.text) + len(text) + 1 > chunk_chars:
+            chunks.append(current)
+            if len(chunks) >= max_chunks:
+                return chunks
+            current = _Chunk()
+        current.text = f"{current.text}\n{text}" if current.text else text
+        current.msg_ids.extend(ids)
+        current.clips.extend(clips)
+    if current.text:
+        chunks.append(current)
+    return chunks[:max_chunks]
+
+
+def _coverage_footer(covered: list[int], clips: list[dict], chunks_used: int, groups_left: int) -> str:
+    """What the summary does and does not stand for, in the summary itself.
+
+    The marker's metadata holds the authoritative record; this is the part
+    the model reads, so a clipped body stays reachable from the context the
+    agent is actually holding.
+    """
+    if not covered:
+        return ""
+    lines = [
+        f"\n\n[Coverage] Summarized msgs {min(covered)}–{max(covered)} "
+        f"({len(covered)} messages) in {chunks_used} summarizer call(s)."
+    ]
+    if clips:
+        shown = ", ".join(f"{c['msg_id']} ({c['kept']} of {c['total']} chars)" for c in clips[:_FOOTER_CLIPS])
+        more = f", +{len(clips) - _FOOTER_CLIPS} more" if len(clips) > _FOOTER_CLIPS else ""
+        lines.append(f"Bodies clipped before summarizing — session_read(msg_id) for the full text: {shown}{more}.")
+    if groups_left:
+        lines.append(f"{groups_left} later message group(s) were NOT summarized and remain in the live window.")
+    return "\n".join(lines)
+
+
 async def compact_with_llm(
     session_id: str,
     messages: list[dict],
     existing_summary: str | None = None,
     history_budget: int | None = None,
     turn_user_msg_id: int | None = None,
+    outcome: CompactionOutcome | None = None,
 ) -> bool:
     """Run LLM summarization and append compaction marker. Never deletes messages.
 
-    Returns True if compaction was performed.
+    Returns True if compaction was performed. Pass an `outcome` to learn WHY
+    a False came back — a refusal with nothing to summarize is not a failure.
+
+    The boundary this records never runs ahead of what a summarizer actually
+    accepted: rows are serialized in complete groups, chunked across as many
+    calls as the slice needs, and `compacted_up_to` stops at the first row no
+    accepted chunk covered.
     """
+    outcome = outcome if outcome is not None else CompactionOutcome()
     from core.llm.client import get_llm_client
 
     estimator = get_estimator()
@@ -371,17 +615,18 @@ async def compact_with_llm(
 
     to_summarize = convo[:boundary_idx]
     if len(to_summarize) < 4:
-        logger.debug("Too few messages to summarize (%d)", len(to_summarize))
+        # Not a failure: there is nothing older than the live turn that this
+        # compactor is permitted to fold. Callers must not read this as the
+        # compactor having tried and lost (see _CompactionController).
+        logger.debug("Nothing compaction may summarize (%d row(s) behind the live turn)", len(to_summarize))
+        outcome.reason = NOTHING_TO_SUMMARIZE
         return False
 
-    # Build summarization prompt
-    if existing_summary:
-        prompt = COMPACTION_UPDATE_PROMPT.format(
-            existing_summary=existing_summary,
-            new_content=_serialize_messages(to_summarize),
-        )
-    else:
-        prompt = COMPACTION_PROMPT + "\n\nCONVERSATION:\n" + _serialize_messages(to_summarize)
+    all_groups = _group_messages(to_summarize)
+    chunks = _chunk_slice(to_summarize)
+    if not chunks:
+        outcome.reason = NOTHING_TO_SUMMARIZE
+        return False
 
     # Call LLM. The agent loop synchronously awaits this call mid-turn, so it
     # must queue with the session's own scheduling identity — the default
@@ -394,61 +639,126 @@ async def compact_with_llm(
     # silently-weaker background model.
     model = settings.llm_model or settings.background_model
     sched_created_at, sched_priority = sched_identity(session_id)
-    # Carrying the session_id subjects this call to the session's wall-clock
-    # budget; guarantee headroom so a budget-exhausted turn can still compact
-    # instead of dying with compaction_failed.
-    ensure_session_budget(session_id, 120)
-    try:
-        response = await chat_with_backup(
-            client,
-            messages=[
-                {"role": "system", "content": "You are a conversation summarizer."},
-                {"role": "user", "content": prompt},
-            ],
-            model=model,
-            max_tokens=4000,
-            session_id=session_id,
-            session_created_at=sched_created_at,
-            session_priority=sched_priority,
-        )
-        summary = response.content.strip()
-    except Exception as e:
-        logger.error("Compaction LLM call failed: %s", e)
-        return False
 
-    # Quality gates
-    summary_tokens = estimator.count(summary)
-    if summary_tokens < 20:
-        logger.warning("Compaction summary too short (%d tokens), rejected", summary_tokens)
-        return False
-    if summary_tokens > 5000:
-        summary = summary[:20000]  # ~5000 tokens
-        logger.warning("Compaction summary truncated to ~5000 tokens")
-
-    # H7: Compression ratio quality gate — reject summaries > 35% of original size
-    original_tokens = sum(estimator.count_message(m) for m in to_summarize)
-    if original_tokens > 0:
-        compression_ratio = summary_tokens / original_tokens
-        if compression_ratio > 0.35:
-            logger.warning(
-                "Compaction summary has poor compression (%.0f%% of original), rejected", compression_ratio * 100
+    # One call per chunk, each one updating the running summary so prior
+    # continuity survives across chunks as well as across compactions. A
+    # chunk is only "covered" once its own summary passed the gates below;
+    # the loop stops at the first one that did not, and the boundary stops
+    # with it.
+    summary = existing_summary or ""
+    covered: list[int] = []
+    clips: list[dict] = []
+    chunks_used = 0
+    for index, chunk in enumerate(chunks):
+        if summary:
+            prompt = COMPACTION_UPDATE_PROMPT.format(existing_summary=summary, new_content=chunk.text)
+        else:
+            prompt = COMPACTION_PROMPT + "\n\nCONVERSATION:\n" + chunk.text
+        # Carrying the session_id subjects this call to the session's
+        # wall-clock budget; guarantee headroom so a budget-exhausted turn
+        # can still compact instead of dying with compaction_failed.
+        ensure_session_budget(session_id, 120)
+        try:
+            response = await chat_with_backup(
+                client,
+                messages=[
+                    {"role": "system", "content": "You are a conversation summarizer."},
+                    {"role": "user", "content": prompt},
+                ],
+                model=model,
+                max_tokens=4000,
+                session_id=session_id,
+                session_created_at=sched_created_at,
+                session_priority=sched_priority,
             )
-            return False
+            candidate = response.content.strip()
+        except Exception as e:
+            logger.error("Compaction LLM call failed on chunk %d/%d: %s", index + 1, len(chunks), e)
+            break
 
-    # Real DB id of the newest message folded into this summary. `to_summarize`
-    # rows come straight from db.get_messages, so `id` is always present.
-    last_summarized_id = to_summarize[-1]["id"]
+        # Quality gates, measured against the input this call was actually
+        # given. The old gate divided by the whole slice — including the ~70%
+        # the summarizer never saw — which made it 4.8x too lenient to ever
+        # catch a bloated summary of a small prefix.
+        before_tokens = estimator.count(summary) if summary else 0
+        candidate_tokens = estimator.count(candidate)
+        if candidate_tokens < 20:
+            logger.warning("Compaction summary too short (%d tokens), chunk %d rejected", candidate_tokens, index + 1)
+            break
+        supplied_tokens = estimator.count(chunk.text)
+        growth = candidate_tokens - before_tokens
+        if supplied_tokens > 0 and growth > 0 and growth / supplied_tokens > 0.35:
+            logger.warning(
+                "Compaction chunk %d has poor compression (%.0f%% of the input supplied), rejected",
+                index + 1,
+                growth / supplied_tokens * 100,
+            )
+            break
 
-    # Append compaction marker (NEVER delete original messages)
+        if candidate_tokens > 5000:
+            candidate = candidate[:20000]  # ~5000 tokens
+            logger.warning("Compaction summary truncated to ~5000 tokens")
+        summary = candidate
+        covered.extend(chunk.msg_ids)
+        clips.extend(chunk.clips)
+        chunks_used += 1
+
+    if not covered:
+        outcome.reason = COMPACTION_FAILED
+        return False
+
+    # Advance across covered rows ONLY. Walking the slice in order and
+    # stopping at the first uncovered row is what makes a mid-slice chunk
+    # failure safe: everything from there on stays in the live window.
+    covered_set = set(covered)
+    last_summarized_id = 0
+    original_count = 0
+    for m in to_summarize:
+        mid = m.get("id")
+        if mid is None or mid not in covered_set:
+            break
+        last_summarized_id = mid
+        original_count += 1
+    if last_summarized_id <= prev_compacted_up_to:
+        logger.warning("Compaction covered nothing new (boundary would not advance), rejected")
+        outcome.reason = COMPACTION_FAILED
+        return False
+
+    covered_prefix = [m["id"] for m in to_summarize[:original_count]]
+    kept_clips = [c for c in clips if c.get("msg_id") in covered_set]
+    groups_left = len(all_groups) - len(_group_messages(to_summarize[:original_count]))
+    summary += _coverage_footer(covered_prefix, kept_clips, chunks_used, groups_left)
+    summary_tokens = estimator.count(summary)
+
+    # Append compaction marker (NEVER delete original messages). The coverage
+    # record travels with it: what was summarized, in how many calls, and
+    # every body that reached the summarizer clipped.
     await asyncio.to_thread(
         db.add_compaction,
         session_id=session_id,
         summary=summary,
         compacted_up_to=last_summarized_id,
-        original_count=len(to_summarize),
+        original_count=original_count,
+        coverage={
+            "covered_from": covered_prefix[0] if covered_prefix else 0,
+            "covered_to": last_summarized_id,
+            "covered_count": original_count,
+            "chunks_used": chunks_used,
+            "chunks_planned": len(chunks),
+            "groups_deferred": groups_left,
+            "clipped": kept_clips[:_META_CLIPS],
+            "clipped_total": len(kept_clips),
+        },
     )
 
-    logger.info("Compaction complete: summarized %d messages (%d tokens)", len(to_summarize), summary_tokens)
+    logger.info(
+        "Compaction complete: summarized %d of %d messages in %d call(s) (%d tokens, %d clipped bodies)",
+        original_count,
+        len(to_summarize),
+        chunks_used,
+        summary_tokens,
+        len(kept_clips),
+    )
 
     try:
         from sessions.manager import get_manager
@@ -458,29 +768,16 @@ async def compact_with_llm(
             session.emit_event(
                 {
                     "type": "context.compacted",
-                    "summarized_messages": len(to_summarize),
+                    "summarized_messages": original_count,
                     "summary_tokens": summary_tokens,
+                    "chunks": chunks_used,
+                    "deferred_groups": groups_left,
                 }
             )
     except Exception as e:
         logger.debug("context.compacted emit skipped: %s", e)
 
+    outcome.reason = COMPACTION_PERFORMED
+    outcome.covered = original_count
+    outcome.chunks = chunks_used
     return True
-
-
-def _serialize_messages(messages: list[dict], max_chars: int = 60000) -> str:
-    """Serialize messages for LLM summarization prompt."""
-    lines = []
-    total = 0
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
-        line = f"[{role}] {content[:2000]}"
-        if total + len(line) > max_chars:
-            lines.append("[... truncated ...]")
-            break
-        lines.append(line)
-        total += len(line)
-    return "\n".join(lines)
