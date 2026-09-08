@@ -394,6 +394,7 @@ def update_session(session_id: str, **kwargs) -> None:
         "watched_worker_ids",
         "model_override",
         "worker_kind",
+        "worker_run",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
