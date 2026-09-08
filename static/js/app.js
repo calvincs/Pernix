@@ -810,14 +810,39 @@ async function _restoreSession(sid) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ownership — the one contract behind every "did this arrive too late?" check
+// ---------------------------------------------------------------------------
+//
 // Monotonic token for session switches. Every await in selectSession (and
 // loadMessages) is a chance for a second click to overtake the first: the
 // slower chain used to finish last and write its own _lastSeq, badge and
 // connectSSE over the newer session's, leaving a mixed transcript wired to
 // the wrong stream. file-panel.js already guards its loads this way.
+//
+// The same token now scopes EVERY piece of asynchronous work in this file —
+// a submission, a snapshot, a soft reload, a scheduled paint, a status probe.
+// Each of them is started for one view of one session and has awaits inside
+// it; _viewOwner() stamps the work with the view it was started for, and
+// _ownsView() is the single question it must ask again after each await,
+// before it touches anything shared.
+//
+// The generation is what makes A → B → A safe: session-id equality alone
+// cannot tell the second A from the first, so a result belonging to the first
+// would pass an id check and be applied to a transcript that has since been
+// torn down and rebuilt.
 let _selectSeq = 0;
 
+function _viewOwner() {
+    return { sid: state.sid, seq: _selectSeq };
+}
+
+function _ownsView(owner) {
+    return !!owner && owner.seq === _selectSeq && owner.sid === state.sid;
+}
+
 async function selectSession(sid) {
+    const prevSid = state.sid;
     const mySeq = ++_selectSeq;
     if (isCompact()) closeSidebar();
     // Land any half-typed draft for the session we are LEAVING before state.sid
@@ -827,6 +852,15 @@ async function selectSession(sid) {
     _expandedKeys = new Set();     // open tool rows are remembered per session
     _recentlyFinished.delete(sid);  // visiting clears the "done" attention tick
     _restoreDraft();
+    // An attachment list with a submission already in flight belongs to that
+    // submission, not to the composer. Detach it on the way out so this
+    // session starts empty and the in-flight send's clean-up can never delete
+    // attachments added over here — clearPendingFiles() used to run on
+    // whatever list was installed by the time a slow upload finished.
+    if (prevSid !== sid && _pendingFiles._sending) {
+        _pendingFiles = [];
+        renderFileChips();
+    }
     // The previous session's context reading is wrong the moment you switch,
     // and loadContextInfo only lands after the transcript fetch — several
     // hundred ms of "ctx: 84%" belonging to a session you already left.
@@ -840,7 +874,14 @@ async function selectSession(sid) {
     _toolGroupErrors = 0;
     _toolGroupLatency = 0;
     _clearRunningTools();
-    if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+    _cancelStreamPaint();
+    // A recovery transaction belonging to the session we are leaving owns
+    // neither the transcript nor the buffer any more. Its own ownership checks
+    // will make it stand down; clearing the slots here stops events for THIS
+    // session being buffered into a reload that will discard them.
+    _reloadOwner = null;
+    _reloadBuffer = [];
+    _joinedMidTurn = false;
     closeRlmViewer();
     renderSidebar(state.sessions, state.sid, state.spaces);
     _renderSessionHeader();
@@ -881,6 +922,46 @@ async function selectSession(sid) {
         return;
     }
 
+    // ── the snapshot/live handoff ────────────────────────────────────────
+    // One contract, used here and in _softReload: a view's content is
+    //
+    //     snapshot(B)  ⊕  every event with seq > B
+    //
+    // where B is an event-sequence boundary read BEFORE the transcript, so
+    // everything the server had persisted at B is inside the snapshot. The
+    // events after B reach the view either by server replay (this path: the
+    // subscription is opened with B as its cursor) or through an ordered
+    // client buffer (_softReload's path, where the connection stays open).
+    //
+    // The old order was transcript → status → cursor-less subscribe, which is
+    // three separate reads pretending to be one snapshot. Nothing covered the
+    // window between the transcript read and the status read, and _lastSeq was
+    // then set *to* the server's counter — so an answer that completed inside
+    // that window was missing from the view AND invisible to every later
+    // drift check, which compares the same two numbers that had just been
+    // made equal. It survived until the user re-selected the session.
+    state.streaming = false;
+    _showSendButton();
+    updateStatus('');
+    _clearToolStatus();
+    _applyStateBadge('idle_ready', '');  // reset badge before fetching real state
+    _sessionModelOverride = null;
+    _renderModelBadge();
+
+    // null means "no boundary we trust", which is a different request from
+    // "boundary zero" — see _cursorQuery in sse.js. Asking for a replay from a
+    // cursor we guessed would replay a whole session's events over a
+    // transcript that already contains them.
+    let boundary = null;
+    let status = null;
+    try {
+        status = await get(`/api/sessions/${sid}/status`);
+        if (mySeq !== _selectSeq) return;
+        boundary = typeof status.event_seq === 'number' ? status.event_seq : null;
+    } catch {
+        if (mySeq !== _selectSeq) return;
+    }
+
     await loadMessages(sid);
     if (mySeq !== _selectSeq) return;
     await loadContextInfo(sid);
@@ -892,20 +973,8 @@ async function selectSession(sid) {
     // leave, so it is the one that gets a control.
     _setComposerReadOnly(!!_sess?.read_only, _sess?.read_only_reason, _sess?.archived_at ? sid : null);
 
-    // Fetch session status to get event_seq and streaming state BEFORE connecting SSE
-    state.streaming = false;
-    _showSendButton();
-    updateStatus('');
-    _clearToolStatus();
-    _applyStateBadge('idle_ready', '');  // reset badge before fetching real state
-    _sessionModelOverride = null;
-    _renderModelBadge();
-    try {
-        const status = await get(`/api/sessions/${sid}/status`);
-        if (mySeq !== _selectSeq) return;
-        // Set _lastSeq to server's current event_seq so SSE dedup skips
-        // events already rendered from DB — prevents the load+replay race
-        _lastSeq = status.event_seq || 0;
+    _lastSeq = boundary || 0;
+    if (status) {
         _applyStateBadge(status.state || 'idle_ready', '');
         _sessionModelOverride = status.model_override || null;
         _renderModelBadge();
@@ -915,15 +984,20 @@ async function selectSession(sid) {
             _showStopButton();
             _streamingEl = appendMessage('assistant', '');
             _collected = '';
+            // We are joining a turn already in progress. Its tokens up to the
+            // boundary are in neither place we can read: not in the
+            // transcript (the assistant row is written when the round ends)
+            // and not in the replay (they are before the cursor). A cursor
+            // alone cannot recover an in-flight prefix, so what renders live
+            // here is a suffix — and the completed answer is re-read from the
+            // database once the turn ends rather than left as a half-answer.
+            _joinedMidTurn = true;
         }
-    } catch {
-        if (mySeq !== _selectSeq) return;
-        _lastSeq = 0;
     }
 
     await loadPendingQuestions(sid);
     if (mySeq !== _selectSeq) return;
-    connectSSE(sid, handleEvent);
+    connectSSE(sid, handleEvent, { cursor: boundary });
 
 }
 
@@ -1755,6 +1829,14 @@ function _restoreDraft() {
     textarea.dispatchEvent(new Event('input'));
 }
 
+/** Write a draft under a SPECIFIC session's key. A submission that fails
+ *  after the user has moved on belongs to the session it was typed in — the
+ *  text has to go back there, not into whatever composer is on screen now. */
+function _saveDraftFor(sid, value) {
+    if (!value || !value.trim()) return;
+    try { localStorage.setItem(_DRAFT_PREFIX + (sid || 'new'), value); } catch { /* unavailable */ }
+}
+
 function _clearDraft() {
     clearTimeout(_draftTimer);
     _draftTimer = null;
@@ -1863,7 +1945,7 @@ function _syncSendEnabled() {
     const input = document.getElementById('msg-input');
     const empty = !input || !input.value.trim();
     btn.disabled = !!(input && input.disabled)
-        || _sending
+        || _sendingSids.has(_sendKey(state.sid))
         || (empty && _pendingFiles.length === 0);
 }
 
@@ -2103,22 +2185,37 @@ function setupInput() {
     _refreshComposer();
 }
 
-// True from the moment a send starts until its POST resolves. Without it a
-// second Enter during a slow upload started the whole loop again on the same
-// _pendingFiles — uploading every attachment twice and sending two messages.
-let _sending = false;
+// Destination sessions with a submission in flight, from the moment a send
+// starts until its POST resolves. Without it a second Enter during a slow
+// upload started the whole loop again on the same attachment list — uploading
+// every attachment twice and sending two messages.
+//
+// Per-session, not a single module-level flag: the flag was set for the whole
+// app, so a slow upload in A made B unsendable too. send() returned at its
+// first line with the button disabled and nothing on screen to say why.
+const _sendingSids = new Set();
 
-function _setSendingState(sending, label) {
-    _sending = sending;
+/** The key a submission's in-flight state is filed under. A send started
+ *  before any session exists is keyed on '', which is exactly the collision
+ *  the flag existed to prevent: two Enters on the same empty composer. */
+function _sendKey(sid) { return sid || ''; }
+
+function _setSendingState(sending, label, sid) {
+    const key = _sendKey(sid);
+    if (sending) _sendingSids.add(key);
+    else _sendingSids.delete(key);
     _syncSendEnabled();
     const infoEl = document.getElementById('status-info');
     if (!infoEl) return;
+    // The status line describes what is on screen, not whichever submission
+    // happens to be finishing somewhere else.
+    if (key !== _sendKey(state.sid)) return;
     if (sending && label) infoEl.textContent = label;
     else if (!sending && /^Uploading /.test(infoEl.textContent || '')) infoEl.textContent = '';
 }
 
 async function send() {
-    if (_sending) return;
+    if (_sendingSids.has(_sendKey(state.sid))) return;
     // A dictation session still running would keep writing into the input
     // after we clear it below.
     stopVoice();
@@ -2168,35 +2265,74 @@ async function send() {
     _pushPromptHistory(message);
     _histIdx = -1;
 
+    // Everything below belongs to ONE submission aimed at ONE session, and
+    // every step of it sits behind an await. The owner is captured once, here.
+    // Every post-await UI mutation asks whether it still holds the view before
+    // touching anything, and the POST names the destination captured here
+    // rather than whatever state.sid says by the time the upload finishes —
+    // reading state.sid at POST time is what filed A's message and A's
+    // attachment under session B.
+    let owner = _viewOwner();
+    // The attachment list is owned by value from this point. It stays
+    // installed in the composer, so the chips keep showing upload progress,
+    // for exactly as long as the user is still looking at this session:
+    // selectSession detaches a list marked _sending on the way out.
+    const myFiles = _pendingFiles;
+    myFiles._sending = true;
+
     if (!state.sid) {
         try {
             const data = await post('/api/sessions', { title: 'New session' });
-            state.sid = data.session_id;
-            _lastSeq = 0;  // fresh session, seqs start at 1 (see deleteSession)
-            await loadSessions();
-            connectSSE(state.sid, handleEvent);
+            if (_ownsView(owner)) {
+                // Adopting a newly created session IS a selection: bump the
+                // generation so anything still in flight for the previous
+                // (empty) view cannot apply itself to this one.
+                state.sid = data.session_id;
+                owner = { sid: data.session_id, seq: ++_selectSeq };
+                _lastSeq = 0;  // fresh session, seqs start at 1 (see deleteSession)
+                await loadSessions();
+                // cursor 0 — "replay everything you still retain" — is exactly
+                // right for a session that has emitted nothing yet, and is a
+                // different request from sending no cursor at all.
+                if (_ownsView(owner)) connectSSE(state.sid, handleEvent, { cursor: 0 });
+            } else {
+                // The user navigated while the session was being created. The
+                // message still goes to the session they asked for; it just
+                // does not drag the view back. Assigning state.sid here moved
+                // the composer, the SSE connection and the event cursor to a
+                // session nobody had picked while the other transcript stayed
+                // on screen — a silent session swap.
+                // seq null can never equal _selectSeq, so this submission
+                // owns no view from here on and touches no UI.
+                owner = { sid: data.session_id, seq: null };
+                loadSessions();
+            }
         } catch (e) {
-            appendMessage('system', `Failed to create session: ${e.message}`);
+            myFiles._sending = false;
+            if (_ownsView(owner)) appendMessage('system', `Failed to create session: ${e.message}`);
+            else notify('error', `Couldn't start a new chat — ${humanizeError(e)}`);
             return;
         }
     }
 
+    const destSid = owner.sid;
+
     // Upload pending files first (XHR for per-chip progress — a 100MB file
     // on phone Wi-Fi used to look like a hang).
-    _setSendingState(true);
+    _setSendingState(true, '', destSid);
     try {
         const uploadedFiles = [];
-        if (_pendingFiles.length > 0) {
+        if (myFiles.length > 0) {
             let failed = 0;
             let index = 0;
-            const total = _pendingFiles.length;
-            for (const pf of _pendingFiles) {
+            const total = myFiles.length;
+            for (const pf of myFiles) {
                 index++;
                 if (pf.uploaded && pf.serverName) {
                     uploadedFiles.push(pf.serverName);
                     continue;
                 }
-                _setSendingState(true, `Uploading ${index}/${total}…`);
+                _setSendingState(true, `Uploading ${index}/${total}…`, destSid);
                 try {
                     pf.uploading = true;
                     const result = await _uploadWithProgress(pf);
@@ -2207,23 +2343,35 @@ async function send() {
                 } catch (e) {
                     failed++;
                     pf.uploading = false;
-                    appendMessage('system', `Upload failed: ${pf.name} — ${e.message}`);
+                    if (_ownsView(owner)) appendMessage('system', `Upload failed: ${pf.name} — ${e.message}`);
+                    else notify('error', `Upload failed in another chat — ${pf.name}: ${humanizeError(e)}`);
                 }
             }
             if (failed > 0) {
                 // Don't silently send a message missing its attachments — keep
                 // the chips (successful ones stay marked uploaded) and restore
                 // the text so the user can remove the failed file or retry.
-                appendMessage('system', `${failed} upload(s) failed — message not sent. Remove the failed file(s) or try again.`);
-                if (!textarea.value) {
-                    textarea.value = message;
-                    textarea.dispatchEvent(new Event('input'));
-                    _saveDraft(message);
+                // Both belong to the session the message was typed in: dropped
+                // into whatever is on screen now, they append a failure notice
+                // to someone else's transcript and overwrite their draft.
+                if (_ownsView(owner)) {
+                    appendMessage('system', `${failed} upload(s) failed — message not sent. Remove the failed file(s) or try again.`);
+                    if (!textarea.value) {
+                        textarea.value = message;
+                        textarea.dispatchEvent(new Event('input'));
+                        _saveDraft(message);
+                    }
+                    renderFileChips();
+                } else {
+                    notify('error', `${failed} upload(s) failed in another chat — the message was not sent, its text is saved there as a draft.`);
+                    _saveDraftFor(destSid, message);
                 }
-                renderFileChips();
                 return;
             }
-            clearPendingFiles();
+            // Only this submission's own list is cleared, and only while it is
+            // still the composer's. Clearing unconditionally is what deleted
+            // attachments the user had added to the session they moved to.
+            if (_pendingFiles === myFiles) clearPendingFiles();
         }
 
         // Build final message with file references
@@ -2233,16 +2381,23 @@ async function send() {
             finalMessage = finalMessage ? `${finalMessage}\n\n${fileRefs}` : fileRefs;
         }
 
-        // Remove empty state if present
-        const emptyEl = document.querySelector('.empty-state');
-        if (emptyEl) emptyEl.remove();
+        // The optimistic bubbles are a property of the VIEW, not of the
+        // submission: draw them only if this submission's session is the one
+        // being read. If it is not, the message still goes; the user sees it
+        // when they come back, rendered from the database.
+        let userBubble = null;
+        if (_ownsView(owner)) {
+            // Remove empty state if present
+            const emptyEl = document.querySelector('.empty-state');
+            if (emptyEl) emptyEl.remove();
 
-        const userBubble = appendMessage('user', finalMessage);
-        state.streaming = true;
-        _showStopButton();
-        _streamingEl = appendMessage('assistant', '');
-        _collected = '';
-        _toolGroup = null;
+            userBubble = appendMessage('user', finalMessage);
+            state.streaming = true;
+            _showStopButton();
+            _streamingEl = appendMessage('assistant', '');
+            _collected = '';
+            _toolGroup = null;
+        }
 
         // All events arrive via the persistent SSE connection.
         // POST /api/chat just accepts the message and returns JSON.
@@ -2252,8 +2407,16 @@ async function send() {
             // network failure. A hand-rolled fetch here surfaced an expired
             // session as an inline "failed to send" that no amount of retrying
             // could fix.
-            await post('/api/chat', { session_id: state.sid, message: finalMessage });
+            await post('/api/chat', { session_id: destSid, message: finalMessage });
         } catch (e) {
+            if (!_ownsView(owner)) {
+                // A late rejection from a session the user has left must not
+                // remove the live bubble in front of them, clear their stop
+                // button, or write this message into their composer.
+                notify('error', `Message not sent in another chat — ${humanizeError(e)}`);
+                _saveDraftFor(destSid, message);
+                return;
+            }
             appendMessage('system', `Error: ${e.message}`);
             // The optimistic bubble was never persisted — mark it so it doesn't
             // read as sent (it vanishes on reload), restore the text so the user
@@ -2264,6 +2427,7 @@ async function send() {
                 textarea.dispatchEvent(new Event('input'));
                 _saveDraft(message);
             }
+            _cancelStreamPaint();
             if (_streamingEl) _streamingEl.remove();
             state.streaming = false;
             _showSendButton();
@@ -2271,7 +2435,8 @@ async function send() {
             _toolGroup = null;
         }
     } finally {
-        _setSendingState(false);
+        myFiles._sending = false;
+        _setSendingState(false, '', destSid);
     }
     // Streaming cleanup happens in handleEvent() on stream.done / stream.error / turn.complete
 }
@@ -2579,13 +2744,20 @@ let _toolGroupCount = 0;
 let _toolGroupErrors = 0;      // failures in the OPEN group (drives the header)
 let _toolGroupLatency = 0;     // summed ms in the open group
 let _toolGroupRunning = 0;     // announced-but-unfinished calls in the open group
-let _parseTimer = null;
 let _activityTimer = null;
 let _lastSeq = 0;  // track last processed event seq for dedup on SSE reconnect
-// Set while _softReload re-renders the transcript: stream tokens are buffered
-// rather than written into a container that is about to be replaced.
-let _reloading = false;
-let _bufferedDuringReload = '';
+// The view generation that owns the recovery transaction in flight, and the
+// ORDERED events held for it while the transcript is re-read. Both belong to
+// that reload, not to the app: a reload of A that straddled a session switch
+// used to install B's cursor, open a bubble in B and render A's buffered text
+// into B's transcript, because neither was scoped to anything and
+// selectSession reset neither.
+let _reloadOwner = null;
+let _reloadBuffer = [];
+// True when this view joined a turn already in progress, so what it rendered
+// live is a suffix of the answer rather than the answer. Cleared by the one
+// authoritative re-read that repairs it.
+let _joinedMidTurn = false;
 let _reconcileTimer = null;
 let _toolStatusTimer = null;
 
@@ -2610,15 +2782,139 @@ const _TOOL_ICONS = {
 };
 
 /**
+ * Fence bookkeeping for the streaming render, carried on the bubble's content
+ * element and advanced only over text that has never been scanned:
+ *
+ *   _scanLen    chars already scanned for fences
+ *   _fenceChar  '`' or '~' while a fence is open, '' when none is
+ *   _fenceLen   the open fence's marker length — a closer has to use the same
+ *               character and be at least as long (GFM)
+ *   _fenceAt    offset of the open fence's opening line
+ *   _boundary   offset of the last blank line seen OUTSIDE any fence, i.e.
+ *               the furthest point that can safely be frozen
+ *
+ * The old code asked "are we inside a code block?" with
+ * `prefix.match(/```/g).length % 2`, re-scanning the whole stable prefix on
+ * every boundary advance. That is unconditional, not a property of code-heavy
+ * answers: 232 million characters scanned for a 113 KB answer containing no
+ * code at all.
+ *
+ * It was also wrong three ways, and because the stable boundary only ever
+ * moves forward, one wrong answer freezes into the transcript for the rest of
+ * the stream:
+ *   - `~~~` fences (valid GFM, and supported by the vendored marked v15) were
+ *     not counted at all, so the prefix froze mid-fence;
+ *   - a ``` mentioned INLINE in prose flipped the parity, because the regex
+ *     was not anchored to a line start;
+ *   - a six-backtick fence counted as two, closing a block that was open.
+ * Scanning by line fixes all three by agreeing with how marked itself decides.
+ */
+function _advanceFenceScan(contentEl, buf) {
+    if (contentEl._scanLen == null) {
+        contentEl._scanLen = 0;
+        contentEl._fenceChar = '';
+        contentEl._fenceLen = 0;
+        contentEl._fenceAt = -1;
+        contentEl._boundary = 0;
+    }
+    // Whole lines only. A partial last line can still grow into a fence
+    // marker, so it stays unscanned until its newline arrives — which is also
+    // why "a fence marker split across two tokens" cannot mis-parse here.
+    const end = buf.lastIndexOf('\n') + 1;
+    let i = contentEl._scanLen;
+    while (i < end) {
+        const nl = buf.indexOf('\n', i);
+        if (nl < 0 || nl >= end) break;
+        const line = buf.slice(i, nl);
+        const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+        if (m) {
+            const ch = m[1][0];
+            const len = m[1].length;
+            if (!contentEl._fenceChar) {
+                contentEl._fenceChar = ch;
+                contentEl._fenceLen = len;
+                contentEl._fenceAt = i;
+            } else if (ch === contentEl._fenceChar && len >= contentEl._fenceLen && !line.slice(m[1].length).trim()) {
+                // A closing fence carries no info string.
+                contentEl._fenceChar = '';
+                contentEl._fenceLen = 0;
+                contentEl._fenceAt = -1;
+            }
+        } else if (!contentEl._fenceChar && !line.trim() && i > 0) {
+            contentEl._boundary = i;
+        }
+        i = nl + 1;
+    }
+    contentEl._scanLen = i;
+}
+
+/** Forget the open-fence view built into `tail`, so the next paint rebuilds. */
+function _resetOpenFence(tail) {
+    tail._fenceAt = -1;
+    tail._fenceCode = null;
+    tail._fenceBodyLen = 0;
+}
+
+/**
+ * Render the tail while a code fence is open, WITHOUT parsing markdown.
+ *
+ * Inside an unclosed fence marked produces a <pre><code> holding the raw text
+ * anyway, so build exactly that out of text nodes and append only the delta.
+ * Nothing here emits markup, so nothing is sanitized away and nothing needs to
+ * be — and _finalizeStreamingBubble() still re-renders the complete answer
+ * through renderMarkdown(), which stays the authoritative output.
+ *
+ * This is the part of the quadratic that actually costs anything: a 64 KB code
+ * block re-parsed on every paint is ~128 million characters of markdown input
+ * over a stream. Note the honest scale — measured at 4,000 paints that was
+ * ~304 ms of parser CPU on a desktop, worst single paint 1.5 ms, so it was
+ * never a dropped frame; bounding the paint cadence (S12) already removes most
+ * of it. This removes the rest, and more importantly it removes the rescan.
+ */
+function _renderOpenFence(tail, head, buf, fenceAt) {
+    const nl = buf.indexOf('\n', fenceAt);
+    if (tail._fenceAt !== fenceAt) {
+        clear(tail);
+        _resetOpenFence(tail);
+        tail._fenceAt = fenceAt;
+        // Everything above the fence is bounded by the last stable boundary
+        // and cannot change while the fence stays open, so it is parsed once.
+        if (head.trim()) tail.appendChild(renderMarkdown(head));
+        const openLine = nl < 0 ? buf.slice(fenceAt) : buf.slice(fenceAt, nl);
+        const info = openLine.replace(/^ {0,3}(`{3,}|~{3,})/, '').trim().split(/\s+/)[0] || '';
+        const lang = info.replace(/[^\w+-]/g, '').slice(0, 32);
+        const code = el('code', lang ? { class: `language-${lang}` } : {});
+        const pre = el('pre', { class: 'stream-open-fence' });
+        pre.appendChild(code);
+        tail.appendChild(pre);
+        tail._fenceCode = code;
+    }
+    const code = tail._fenceCode;
+    if (!code) return;
+    const body = nl < 0 ? '' : buf.slice(nl + 1);
+    const shown = tail._fenceBodyLen || 0;
+    if (body.length < shown) {
+        clear(code);
+        code.appendChild(text(body));
+    } else if (body.length > shown) {
+        const delta = body.slice(shown);
+        const node = code.firstChild;
+        if (node && node.nodeType === 3 && typeof node.appendData === 'function') node.appendData(delta);
+        else code.appendChild(text(delta));
+    }
+    tail._fenceBodyLen = body.length;
+}
+
+/**
  * Incremental render of the streaming response. The old path re-parsed the
- * ENTIRE accumulated buffer with marked on every 100ms tick and rebuilt the
- * whole DOM subtree — O(response length) per tick, quadratic over a long
- * answer, with visible jank past ~10k chars. Instead: blocks behind the last
- * blank-line boundary are parsed ONCE into a stable container (boundary only
- * advances outside an open ``` fence), and only the small active tail is
+ * ENTIRE accumulated buffer with marked on every tick and rebuilt the whole
+ * DOM subtree — O(response length) per tick, quadratic over a long answer,
+ * with visible jank past ~10k chars. Instead: blocks behind the last
+ * blank-line boundary are parsed ONCE into a stable container (the boundary
+ * only advances outside an open fence), and only the small active tail is
  * re-parsed per tick. Cross-chunk artifacts (split lists etc.) are cosmetic
- * and transient — the finalize paths (stream.done / tool.call) still do one
- * full clean re-parse of the complete text.
+ * and transient — the finalize paths (stream.done / tool.call / every terminal
+ * event) still do one full clean re-parse of the complete text.
  */
 function _renderStreamIncremental(contentEl) {
     let stable = contentEl.querySelector(':scope > .stream-stable');
@@ -2630,24 +2926,123 @@ function _renderStreamIncremental(contentEl) {
         contentEl.appendChild(stable);
         contentEl.appendChild(tail);
         contentEl._stableLen = 0;
+        contentEl._scanLen = null;
     }
+    _advanceFenceScan(contentEl, _collected);
     const done = contentEl._stableLen || 0;
-    const boundary = _collected.lastIndexOf('\n\n');
+    const boundary = contentEl._boundary || 0;
     if (boundary > done) {
-        const prefix = _collected.slice(0, boundary);
-        const fenceCount = (prefix.match(/```/g) || []).length;
-        if (fenceCount % 2 === 0) {  // never freeze the middle of a code block
-            const chunk = _collected.slice(done, boundary);
-            if (chunk.trim()) {
-                stable.appendChild(renderMarkdown(chunk));
-                addCopyButtons(stable);
-            }
-            contentEl._stableLen = boundary;
+        const chunk = _collected.slice(done, boundary);
+        if (chunk.trim()) {
+            // Only the fragment just parsed is walked for copy buttons.
+            // addCopyButtons(stable) re-walked every <pre> already frozen into
+            // the transcript, on every single advance.
+            const frag = renderMarkdown(chunk);
+            stable.appendChild(frag);
+            addCopyButtons(frag);
         }
+        contentEl._stableLen = boundary;
     }
+    const from = contentEl._stableLen || 0;
+    const fenceAt = contentEl._fenceChar ? contentEl._fenceAt : -1;
+    if (fenceAt >= from) {
+        _renderOpenFence(tail, _collected.slice(from, fenceAt), _collected, fenceAt);
+        return;
+    }
+    _resetOpenFence(tail);
     clear(tail);
-    const tailText = _collected.slice(contentEl._stableLen || 0);
+    const tailText = _collected.slice(from);
     if (tailText.trim()) tail.appendChild(renderMarkdown(tailText));
+}
+
+// ---------------------------------------------------------------------------
+// Streaming paint cadence
+// ---------------------------------------------------------------------------
+//
+// The old scheduler was a TRAILING-edge debounce: every token cleared the
+// pending timer and set a new one, so a stream with no 100 ms gap in it never
+// painted at all. Measured: 500 tokens 20 ms apart produced ZERO incremental
+// paints in ten seconds; 2,000 at 8 ms produced zero in sixteen. It is a
+// cliff rather than a gradient — at exactly 100 ms gaps it painted every
+// token — and it is inverted: the faster the model answers, the longer the
+// transcript sits empty. What the reader saw was the pulsing "···"
+// placeholder (layout.css `.message.assistant .content:empty::after`), so it
+// read as thinking rather than as a hang, while the sidebar preview — a
+// separate 500 ms timer that was never reset per token — showed text the
+// transcript did not.
+//
+// Bounded cadence instead: leading edge, then at most one paint per
+// PAINT_INTERVAL_MS. The first token paints immediately, a steady stream
+// paints on a fixed cadence, and a sparse stream paints every token because
+// no timer is ever pending.
+const PAINT_INTERVAL_MS = 100;
+let _paintTimer = null;
+let _paintDirty = false;
+let _paintOwner = null;
+
+function _schedulePaint() {
+    _paintOwner = _viewOwner();
+    if (_paintTimer) { _paintDirty = true; return; }
+    _paintStreamNow();
+    _paintTimer = setTimeout(_paintTick, PAINT_INTERVAL_MS);
+}
+
+function _paintTick() {
+    _paintTimer = null;
+    if (!_paintDirty) return;
+    _paintDirty = false;
+    _paintStreamNow();
+    _paintTimer = setTimeout(_paintTick, PAINT_INTERVAL_MS);
+}
+
+function _paintStreamNow() {
+    // A paint scheduled for one session must never land in another's bubble.
+    if (!_ownsView(_paintOwner)) return;
+    if (!_streamingEl) return;
+    const contentEl = _streamingEl.querySelector('.content');
+    if (!contentEl) return;
+    _renderStreamIncremental(contentEl);
+    // Follow the growing answer while the user is pinned to the bottom
+    // (a reader scrolled up is left alone).
+    scrollToBottom();
+}
+
+/** Drop any pending paint. Every reset, terminal event and session switch has
+ *  to call this, or a queued paint lands in a bubble that has moved on. */
+function _cancelStreamPaint() {
+    if (_paintTimer) { clearTimeout(_paintTimer); _paintTimer = null; }
+    _paintDirty = false;
+    _paintOwner = null;
+}
+
+/**
+ * Paint the accumulated answer into the open bubble and make it that bubble's
+ * authoritative content. EVERY terminal path has to call this before it drops
+ * _collected, and two did not: stream.error and stream.budget_exhausted ended
+ * the turn with no final render at all.
+ *
+ * With a bounded cadence that would merely be a missing last frame. With the
+ * old trailing-edge debounce it was silent text loss: a turn that errored
+ * after 1,500 streamed characters had painted NONE of them, and
+ * _dropEmptyStreamingBubble() declines to remove a bubble whose _collected is
+ * non-empty — so the reader was left with an empty assistant card above an
+ * error line, and _rawContent was never set either, so copy-message copied
+ * nothing.
+ */
+function _finalizeStreamingBubble() {
+    _cancelStreamPaint();
+    if (!_streamingEl || !_collected) return false;
+    _streamingEl._rawContent = _collected;  // copy-message reads the raw markdown
+    const contentEl = _streamingEl.querySelector('.content');
+    if (contentEl) {
+        clear(contentEl);
+        contentEl.appendChild(renderMarkdown(_collected));
+        addCopyButtons(contentEl);
+        processFileRefs(contentEl);
+        contentEl._stableLen = 0;
+        contentEl._scanLen = null;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -3581,6 +3976,19 @@ function handleEvent(event) {
     // Guard: reject events from other sessions
     if (event.session_id && event.session_id !== state.sid) return;
 
+    // A recovery transaction is installing a snapshot: hold ORDERED events
+    // until it finishes, rather than letting them mutate a transcript that is
+    // about to be thrown away. Buffering only stream.token — what the old code
+    // did, and only inside its own branch — let tool.call, stream.done and
+    // every notice run their normal branches against a DOM loadMessages was
+    // about to discard, gluing two rounds into one bubble. Events synthesised
+    // by the transport (sse.reconnected, sse.session_gone) carry no seq, take
+    // part in no snapshot, and must not be delayed.
+    if (event.seq != null && _reloadOwner && _ownsView(_reloadOwner)) {
+        _reloadBuffer.push(event);
+        return;
+    }
+
     // Dedup: skip already-processed events (SSE reconnect replay)
     const seq = event.seq;
     if (seq != null && seq <= _lastSeq) return;
@@ -3605,12 +4013,6 @@ function handleEvent(event) {
         // The answer has started: whatever was queued is either in this turn
         // or is about to be, and the chip has said its piece.
         _setQueuedChip(null);
-        // Mid-reload: the container is being re-rendered under us. Keep the
-        // text and let _softReload place it in the single bubble it creates.
-        if (_reloading) {
-            _bufferedDuringReload += event.content;
-            return;
-        }
         closeToolGroup();
         // Recover streaming state if page was refreshed mid-stream
         if (!_streamingEl) {
@@ -3632,39 +4034,15 @@ function handleEvent(event) {
                 _activityTimer = null;
             }, 500);
         }
-        // Debounce markdown parse (100ms)
-        if (_parseTimer) clearTimeout(_parseTimer);
-        _parseTimer = setTimeout(() => {
-            if (_streamingEl) {
-                const contentEl = _streamingEl.querySelector('.content');
-                if (contentEl) {
-                    _renderStreamIncremental(contentEl);
-                    // Follow the growing answer while the user is pinned to
-                    // the bottom (a reader scrolled up is left alone).
-                    scrollToBottom();
-                }
-            }
-        }, 100);
+        _schedulePaint();
     }
 
     else if (type === 'stream.done') {
         closeToolGroup();
         _clearScoutStatus();
         if (_activityTimer) { clearTimeout(_activityTimer); _activityTimer = null; }
-        // Clear pending debounce before final render
-        if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
-        // Final render
-        if (_streamingEl && _collected) {
-            _streamingEl._rawContent = _collected;  // copy-message reads the raw markdown
-            const contentEl = _streamingEl.querySelector('.content');
-            if (contentEl) {
-                clear(contentEl);
-                const rendered = renderMarkdown(_collected);
-                contentEl.appendChild(rendered);
-                addCopyButtons(contentEl);
-                processFileRefs(contentEl);
-            }
-        }
+        // Final render (also cancels any pending paint).
+        _finalizeStreamingBubble();
         // Stamp the answer with what produced it while the bubble is still in
         // hand. The event names the model that actually answered, which is not
         // necessarily the session's — a failover swaps it mid-turn.
@@ -3677,6 +4055,17 @@ function handleEvent(event) {
         }
         _collected = '';
         _streamingEl = null;
+        // stream.done carries {usage, model} — it is not an authoritative copy
+        // of the answer. When this view joined the turn after it had started,
+        // the prefix it never saw exists in neither the transcript it loaded
+        // nor the events it was replayed, so the bubble on screen is a suffix.
+        // The database has the whole thing by now: re-read it once, by
+        // identity, rather than leaving a half-answer that no later drift
+        // check can detect (event_seq is level — it was set from the server).
+        if (_joinedMidTurn) {
+            _joinedMidTurn = false;
+            _softReload({ notice: false, reconcile: true });
+        }
         announce('Pernix finished responding');
         // Agent finished generating — re-enable input (post-hooks still running)
         state.streaming = false;
@@ -3689,8 +4078,11 @@ function handleEvent(event) {
     }
 
     else if (type === 'stream.error') {
-        if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
         _clearScoutStatus();
+        // Paint what did arrive before the turn broke. Without this the reader
+        // was left with an empty assistant card above the error line even
+        // though 1,500 characters had been received.
+        _finalizeStreamingBubble();
         _dropEmptyStreamingBubble();
         const streamMsg = humanizeError(event.error || 'Unknown error');
         // A stream.error ends the turn, so say how to get back: the exception
@@ -3715,17 +4107,10 @@ function handleEvent(event) {
         // Each tool round's text gets its own div, matching the DB layout that
         // loadMessages() renders on page refresh.
         if (_streamingEl && _collected) {
-            if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
             if (_activityTimer) { clearTimeout(_activityTimer); _activityTimer = null; }
-            _streamingEl._rawContent = _collected;
-            const contentEl = _streamingEl.querySelector('.content');
-            if (contentEl) {
-                clear(contentEl);
-                contentEl.appendChild(renderMarkdown(_collected));
-                addCopyButtons(contentEl);
-                processFileRefs(contentEl);
-            }
+            _finalizeStreamingBubble();
         } else if (_streamingEl && !_collected) {
+            _cancelStreamPaint();
             _streamingEl.remove();
         }
         _collected = '';
@@ -4224,12 +4609,18 @@ function handleEvent(event) {
         // (a retry, or the fallback model). Drop the partial we already
         // rendered, or the viewer reads <partial><full answer> while the
         // database stores only the second one.
-        if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+        _cancelStreamPaint();
         _collected = '';
-        _bufferedDuringReload = '';
         if (_streamingEl) {
             const contentEl = _streamingEl.querySelector('.content');
-            if (contentEl) clear(contentEl);
+            if (contentEl) {
+                clear(contentEl);
+                // The incremental renderer's cursors describe text that no
+                // longer exists; left in place they would freeze the re-stream
+                // behind a boundary it never reaches.
+                contentEl._stableLen = 0;
+                contentEl._scanLen = null;
+            }
             _streamingEl._rawContent = '';
         }
     }
@@ -4255,7 +4646,9 @@ function handleEvent(event) {
     }
 
     else if (type === 'stream.budget_exhausted') {
-        if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+        // Same silent-loss shape as stream.error: the turn ends, so whatever
+        // streamed before the budget ran out has to be painted first.
+        _finalizeStreamingBubble();
         _dropEmptyStreamingBubble();
         appendMessage('system', `LLM budget exhausted: ${event.message || 'no further retries'}`);
         updateStatus('');
@@ -4380,7 +4773,7 @@ function handleEvent(event) {
     }
 
     else if (type === 'session.cancelled') {
-        if (_parseTimer) { clearTimeout(_parseTimer); _parseTimer = null; }
+        _finalizeStreamingBubble();
         _dropEmptyStreamingBubble();
         _setStopPending(false);
         appendMessage('system', 'Session cancelled by user.');
@@ -4388,6 +4781,30 @@ function handleEvent(event) {
         state.streaming = false;
         _showSendButton();
         if (state.sid) updateSessionActivity(state.sid, '');
+    }
+
+    else if (type === 'stream.resume') {
+        // The server's answer to a replay cursor (api/streaming.py). Three
+        // outcomes are worth telling apart and the old client could see none
+        // of them, because it never sent a cursor on the initial connection
+        // and the server never said anything about the one it did send.
+        const from = event.from_seq || 0;
+        if (event.server_seq != null && event.server_seq < from) {
+            // The counter went backwards: the server restarted and its
+            // in-memory seq began again near zero. Left alone, every future
+            // event fails the `seq <= _lastSeq` dedup and the view goes dead.
+            console.warn(`SSE: replay reports a server restart (server=${event.server_seq}, cursor=${from}) — resyncing`);
+            _lastSeq = event.server_seq;
+            _softReload();
+        } else if (event.complete === false) {
+            // The retained buffer no longer reaches back to the cursor, so the
+            // gap between snapshot and live stream cannot be filled from
+            // events at all. Re-read the transcript instead of pretending it
+            // was — a partial replay that looks complete is the whole reason
+            // this frame exists.
+            console.warn(`SSE: replay buffer expired (cursor=${from}, oldest retained=${event.oldest_retained}) — refreshing transcript`);
+            _softReload();
+        }
     }
 
     else if (type === 'sse.reconnected') {
@@ -4411,8 +4828,13 @@ function handleEvent(event) {
 
 async function _syncStreamingState() {
     if (!state.sid) return;
+    // Captured before the await and re-checked after it: this used to read
+    // state.sid on both sides, so a status response for a session the user had
+    // left rewired the CURRENT session's controls, badge and event cursor.
+    const owner = _viewOwner();
     try {
-        const status = await get(`/api/sessions/${state.sid}/status`);
+        const status = await get(`/api/sessions/${owner.sid}/status`);
+        if (!_ownsView(owner)) return;
         // Server restart detection: the event_seq counter is in-memory and
         // restarts near 0. If the server's seq is *behind* ours, every future
         // event would be silently dropped by the `seq <= _lastSeq` dedup and
@@ -4488,31 +4910,55 @@ function _lastMessageIsUnanswered() {
         && !last.classList.contains('rejected');
 }
 
-async function _softReload() {
+/**
+ * Re-read the transcript from the database as ONE generation-scoped recovery
+ * transaction, and hand back to the live stream without losing what arrived
+ * in between.
+ *
+ * The old version held its guard for exactly one of its two awaits: `_reloading`
+ * was cleared in a `finally` around loadMessages(), before the status request
+ * that follows it. Tokens landing in that unguarded window built a bubble and
+ * filled _collected, and the status branch then opened a SECOND bubble and
+ * assigned the (still empty) buffer over the text — so an answer could be
+ * split across two bubbles in REVERSE order, or replaced outright by "". It
+ * also buffered token strings only, so tool.call and stream.done inside the
+ * window ran their normal branches against a DOM about to be discarded.
+ *
+ * And it had no session token at all: it re-read state.sid after its awaits,
+ * and selectSession reset neither the guard nor the buffer, so a reload of A
+ * that straddled a session switch installed B's cursor, opened a bubble in B
+ * and rendered A's buffered text into B's transcript.
+ *
+ * `reconcile: true` marks the one re-read that repairs a mid-turn join, so it
+ * cannot re-arm the flag that asked for it.
+ */
+async function _softReload({ notice = true, reconcile = false } = {}) {
     if (!state.sid || _isRlmView()) return;
-    if (_reloading) return;  // a second gap during the fetch is the same reload
+    if (_reloadOwner) return;  // a second gap during the fetch is the same reload
+    const owner = _viewOwner();
     console.info('SSE: soft reload triggered (gap detected or reconciliation)');
     // loadMessages() clears and re-renders the DOM, which detaches any live
     // _streamingEl reference. Reset it unconditionally so the next stream.token
     // event creates a fresh element rather than updating a ghost node.
-    //
-    // _reloading holds the token handler off the DOM until the re-render
-    // lands. Without it, tokens arriving during the fetch built a bubble in
-    // the just-emptied container, the history was appended UNDER it, and the
-    // status branch below then made a second empty bubble — so the answer's
-    // tail ended up split across two bubbles with the history wedged between.
-    _reloading = true;
+    _reloadOwner = owner;
+    _reloadBuffer = [];
+    _joinedMidTurn = false;
+    _cancelStreamPaint();
     _streamingEl = null;
     _collected = '';
     state.streaming = false;
+    let installed = false;
     try {
-        await loadMessages(state.sid);
-    } finally {
-        _reloading = false;
-    }
-    // Re-fetch server state to re-wire streaming controls and badge.
-    try {
-        const status = await get(`/api/sessions/${state.sid}/status`);
+        // Boundary BEFORE transcript — the same order selectSession uses, and
+        // the reason it is that way round: read the other way, an answer that
+        // is persisted between the two reads is in neither the transcript nor
+        // the events the boundary lets through.
+        const status = await get(`/api/sessions/${owner.sid}/status`);
+        if (!_ownsView(owner)) return;
+        // keepScroll: a recovery must not throw a reader who is not pinned to
+        // the bottom back down to the end of the transcript.
+        await loadMessages(owner.sid, { keepScroll: true });
+        if (!_ownsView(owner)) return;
         // Take the server's value even when it's 0/absent — after a server
         // restart keeping the old high _lastSeq would drop all future events.
         _lastSeq = status.event_seq || 0;
@@ -4520,15 +4966,10 @@ async function _softReload() {
         if (status.status === 'processing' || status.status === 'scouting') {
             state.streaming = true;
             _showStopButton();
-            // Carry whatever arrived while the transcript was being fetched
-            // into the one bubble, instead of discarding it and opening a
-            // second empty one.
-            _streamingEl = appendMessage('assistant', '');
-            _collected = _bufferedDuringReload;
-            if (_collected) {
-                const contentEl = _streamingEl.querySelector('.content');
-                if (contentEl) _renderStreamIncremental(contentEl);
-            }
+            // No bubble is opened here. Whatever was buffered replays through
+            // the token handler below, which opens exactly one — opening a
+            // second, empty one up front is how the answer used to end up
+            // split with the history wedged between the halves.
         } else {
             _showSendButton();
             updateStatus('');
@@ -4541,15 +4982,39 @@ async function _softReload() {
                 appendMessage('system', 'Your last message was not answered — /retry to resend.');
             }
         }
-    } catch {}
-    _bufferedDuringReload = '';
-    // Say so. The transcript is re-read from the database, so no *message* is
-    // lost — but the live events that were dropped (tool chips, scout steps,
-    // partial tokens) are gone for good, and the view visibly jumping without
-    // explanation reads as a glitch. The server's replay buffer holds 2000
-    // events and a reaped session comes back with an empty one, so this path
-    // is reachable in normal operation, not just after an outage.
-    _showNotice('reconnected — transcript refreshed');
+        installed = true;
+    } catch {
+        // The snapshot fetch failed. Fall through: the guard is released, the
+        // buffered events are dropped rather than replayed into a transcript
+        // that was never refreshed, and the next gap or the 45s reconciler
+        // tries again.
+    } finally {
+        const buffered = _reloadBuffer;
+        // Object identity, not truthiness. A newer reload may already own the
+        // slot by now, and nulling it blindly would strip that one's guard.
+        if (_reloadOwner === owner) {
+            _reloadOwner = null;
+            _reloadBuffer = [];
+        }
+        if (installed && _ownsView(owner)) {
+            // Ordered replay, deduped by handleEvent against the boundary just
+            // installed: anything at or before it is already represented by
+            // the transcript, anything after it is not. Each event is isolated
+            // exactly as sse.js isolates a live one — a handler that throws
+            // must cost its own event, not every event queued behind it.
+            for (const ev of buffered) {
+                try {
+                    handleEvent(ev);
+                } catch (err) {
+                    console.error('SSE replay handler failed', ev && ev.type, err);
+                }
+            }
+            // Live content applied on top of a fresh snapshot means this view
+            // is showing a suffix of a turn it did not see the start of.
+            if (!reconcile && _streamingEl && _collected) _joinedMidTurn = true;
+        }
+    }
+    if (notice && _ownsView(owner)) _showNotice('reconnected — transcript refreshed');
 }
 
 async function _reconcile() {
@@ -4559,8 +5024,10 @@ async function _reconcile() {
     // check was why a deleted-then-recreated session or a mid-turn server
     // restart left the UI stuck with a stop button and no tokens.
     if (!state.sid || _isRlmView()) return;  // no transcript to reconcile
+    const owner = _viewOwner();
     try {
-        const status = await get(`/api/sessions/${state.sid}/status`);
+        const status = await get(`/api/sessions/${owner.sid}/status`);
+        if (!_ownsView(owner)) return;
         // A session reaped from memory reports in_memory:false and a null
         // seq. That is "nothing to reconcile", not "the counter reset".
         if (status.in_memory === false || status.event_seq == null) return;
