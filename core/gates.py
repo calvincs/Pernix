@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -41,12 +42,25 @@ class GateResult:
     # must not be graded as if the agent's turn had failed a check.
     broken: bool = False
 
+    @property
+    def state(self) -> str:
+        """passed | failed | unavailable — three states, never two.
+
+        `unavailable` is a gate that never ran. It is not a failure of the
+        work and it is not evidence the check would have passed: whatever it
+        was supposed to verify stays unverified.
+        """
+        if self.passed:
+            return "passed"
+        return "unavailable" if self.broken else "failed"
+
     def to_payload(self) -> dict:
         return {
             "kind": "gate",
             "name": self.name,
             "command": self.command,
             "passed": self.passed,
+            "state": self.state,
             "exit_code": self.exit_code,
             "output_tail": self.output_tail[-1500:],
             "reused": self.reused,
@@ -55,22 +69,59 @@ class GateResult:
         }
 
 
-# Shell exit codes and messages that mean "the command never ran", as opposed
-# to "the command ran and reported a failure".
-_UNRUNNABLE_EXIT_CODES = frozenset({126, 127})
-_UNRUNNABLE_MARKERS = (
-    "can't cd to",
-    "cannot cd to",
-    "no such file or directory",
-    "command not found",
-    "not found",
-    "permission denied",
-    "is a directory",
+# Launch diagnostics: the shell reporting that it never got as far as running
+# the command. Each is anchored to the launcher's own wording, because every
+# one of these phrases as a bare substring also appears in ordinary
+# application output — "404 Not Found", "config key not found", "expected
+# output file not found", a FileNotFoundError traceback.
+#
+# `sh: 1: foo: not found` / `bash: line 1: foo: command not found`
+_NOT_FOUND_RE = re.compile(r"(?:^|:\s)(?P<word>[^\s:]+):\s*(?:command not found|not found)\.?$", re.I)
+# `sh: 1: ./x.sh: Permission denied` / `... : Is a directory`
+_NOT_EXECUTABLE_RE = re.compile(
+    r"(?:^|:\s)(?P<word>[^\s:]+):\s*(?:permission denied|is a directory|cannot execute)", re.I
 )
+# `/bin/sh: 1: cd: can't cd to /x` / `/bin/bash: line 1: cd: /x: No such file or directory`
+_CD_ERROR_RE = re.compile(
+    r"(?:^|[:\s])(?:cd|chdir):\s.*?(?:can'?t cd to|cannot cd to|no such file or directory|not a directory|permission denied)",
+    re.I,
+)
+_SEGMENT_SPLIT_RE = re.compile(r"\|\||&&|;|\||\n")
 
 
-def _looks_unrunnable(exit_code: int | None, output_tail: str) -> bool:
-    """True when a non-zero exit means the gate could not start.
+def _command_words(command: str) -> set[str]:
+    """The words this gate actually asks the shell to launch.
+
+    First token of each `&&` / `||` / `;` / pipe segment, plus its basename, so
+    a diagnostic can be checked against the command it claims to name.
+    """
+    words: set[str] = set()
+    for segment in _SEGMENT_SPLIT_RE.split(command or ""):
+        for token in segment.split():
+            if "=" in token and not token.startswith(("-", "/", ".")):
+                continue  # leading VAR=value assignment
+            words.add(token)
+            words.add(os.path.basename(token))
+            break
+    return {w for w in words if w}
+
+
+def _names_the_command(match: re.Match[str] | None, words: set[str]) -> bool:
+    """Whether a launch diagnostic names one of this gate's own command words.
+
+    An empty `words` means the caller has only the output (the classifier is
+    also called directly in tests): the shell-shaped diagnostic stands alone.
+    """
+    if match is None:
+        return False
+    if not words:
+        return True
+    word = match.group("word")
+    return word in words or os.path.basename(word) in words
+
+
+def _looks_unrunnable(exit_code: int | None, output_tail: str, command: str = "") -> bool:
+    """True when a non-zero exit is LAUNCH evidence: the gate never started.
 
     A gate registered against a directory that does not exist yet exits 2 with
     `/bin/sh: 1: cd: can't cd to <path>`. Treating that as a failing check made
@@ -78,19 +129,30 @@ def _looks_unrunnable(exit_code: int | None, output_tail: str) -> bool:
     middle of an active build and graded three turns of real progress as
     escalate — for a gate that had verified nothing at all.
 
-    Deliberately narrow: only a SHORT output is scanned, because a real test
-    run that happens to print "no such file or directory" somewhere in its
-    output is a genuine failure, not a broken gate.
+    The evidence has to come from the launcher, not from the application: a
+    smoke check that exits 1 saying "expected output file ... not found" ran
+    perfectly and found the work wanting, and an application is free to exit
+    126 or 127 for its own reasons. So 127 must carry a shell-shaped
+    `command not found` naming this gate's own command word, 126 a permission
+    or not-executable message about that same word, and a cd failure must be
+    the shell's `cd:` diagnostic. Only the first and last lines are scanned —
+    the launcher speaks before anything else runs, or is all there is.
     """
     if exit_code == 0 or exit_code is None:
         return False
-    if exit_code in _UNRUNNABLE_EXIT_CODES:
-        return True
     tail = (output_tail or "").strip()
-    if not tail or len(tail) > 400:
-        return False
-    lowered = tail.lower()
-    return any(marker in lowered for marker in _UNRUNNABLE_MARKERS)
+    if not tail:
+        return False  # a bare non-zero exit is a failing check, not a broken one
+    lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+    words = _command_words(command)
+    for line in {lines[0], lines[-1]}:
+        if _CD_ERROR_RE.search(line):
+            return True
+        if exit_code == 127 and _names_the_command(_NOT_FOUND_RE.search(line), words):
+            return True
+        if exit_code == 126 and _names_the_command(_NOT_EXECUTABLE_RE.search(line), words):
+            return True
+    return False
 
 
 def _fingerprint(watch_paths: list[str], base: Path) -> str:
@@ -232,6 +294,10 @@ def run_gates(session_id: str, prior: dict[str, tuple[str, "GateResult"]], attem
         if attempt > 2 and fp:
             prev = prior.get(name)
             if prev is not None and prev[0] == fp and not prev[1].passed:
+                # The full prior state, including broken/error: reusing the
+                # exit code and output but dropping the classification turned
+                # a gate that never ran back into a FAILING check on attempt
+                # 3, forcing exactly the retries the classification prevents.
                 reused = GateResult(
                     name=name,
                     command=row["command"],
@@ -239,8 +305,10 @@ def run_gates(session_id: str, prior: dict[str, tuple[str, "GateResult"]], attem
                     exit_code=prev[1].exit_code,
                     output_tail=prev[1].output_tail,
                     reused=True,
+                    error=prev[1].error,
                     fingerprint=fp,
                     scope=row.get("scope", "session"),
+                    broken=prev[1].broken,
                 )
                 results.append(reused)
                 logger.info("Gate '%s' not re-run: no changes under watch_paths since last failure", name)
@@ -316,7 +384,7 @@ def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
             output_tail=tail.strip(),
             fingerprint=fingerprint,
             scope=row.get("scope", "session"),
-            broken=_looks_unrunnable(proc.returncode, tail),
+            broken=_looks_unrunnable(proc.returncode, tail, command),
         )
     except subprocess.TimeoutExpired:
         # Kill the group, not just the shell: gates run unattended every turn,
@@ -333,7 +401,22 @@ def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
             fingerprint=fingerprint,
             scope=row.get("scope", "session"),
         )
+    except OSError as e:
+        # The spawn itself failed — a cwd that does not exist, a command that
+        # is not executable. Structured launch evidence: no exit code, no
+        # output, and nothing about the work was checked.
+        result = GateResult(
+            name=name,
+            command=command,
+            passed=False,
+            error=f"{type(e).__name__}: {e}",
+            fingerprint=fingerprint,
+            scope=row.get("scope", "session"),
+            broken=True,
+        )
     except Exception as e:
+        # Anything else is ours, not the gate's: leave it a failure so it is
+        # not quietly excused as a gate the user has to fix.
         result = GateResult(
             name=name,
             command=command,
@@ -401,7 +484,8 @@ def format_evidence(results: list[GateResult]) -> str:
         "A gate marked BROKEN never ran — its command or working directory does not "
         "resolve. That is a defect in the gate, NOT a failure of this turn's work: do "
         "not hold it against the agent, and do not treat it as an unmet deliverable "
-        "unless registering a working gate was itself the ask.",
+        "unless registering a working gate was itself the ask. Whatever it was meant "
+        "to check is UNVERIFIED — a BROKEN gate is never evidence that it passed.",
     ]
     for r in results:
         status = "PASS" if r.passed else ("BROKEN" if r.broken else "FAIL")
