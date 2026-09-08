@@ -620,6 +620,30 @@ def _read_text_nofollow(resolved: Path) -> str:
         return f.read()
 
 
+# How far a preview will walk a file purely to report its line count. A number
+# that is a floor is still useful; walking 4 GB of log to make it exact is not.
+_LINE_COUNT_CEILING = 1_000_000
+
+
+def _read_one_line_head(resolved: Path, index: int, cap: int) -> tuple[str, int]:
+    """(first ``cap`` chars of line ``index``, that line's full length).
+
+    A line wider than the preview budget has no line boundary to stop at, so
+    the choice is between returning a bounded slice of it and returning
+    nothing. The old code returned nothing — and then advised an offset that
+    re-ran the same call.
+    """
+    try:
+        with _open_nofollow(resolved, "r") as f:
+            for i, line in enumerate(f):
+                if i == index:
+                    body = line.rstrip("\n")
+                    return body[:cap], len(body)
+    except OSError:
+        pass
+    return "", 0
+
+
 def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
     """Read a file from the workspace.
 
@@ -669,21 +693,45 @@ def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
             lines = []
             total_lines = 0
             total_chars = 0
+            size_truncated = False
             with _open_nofollow(resolved, "r") as f:
                 for i, line in enumerate(f):
                     total_lines = i + 1
                     if i < offset:
                         continue
-                    if limit > 0 and len(lines) >= limit:
+                    if size_truncated or (limit > 0 and len(lines) >= limit):
                         continue  # keep counting total lines
                     if total_chars + len(line) > MAX_OUTPUT:
-                        lines.append("[truncated by size]")
-                        break
+                        # Not `lines.append("[truncated by size]"); break`. That
+                        # put a harness string where the file's content goes,
+                        # counted it as a source line, and abandoned the count —
+                        # so a 3,001-line minified file came back as
+                        # "[lines 1-1 of 1]" holding nothing but the marker,
+                        # with a continuation that pointed back at itself.
+                        size_truncated = True
+                        continue
                     lines.append(line.rstrip("\n"))
                     total_chars += len(line)
-            end_line = offset + len(lines)
+            shown = len(lines)
+            end_line = offset + shown
             remaining = total_lines - end_line
-            header = f"[lines {offset + 1}-{end_line} of {total_lines}]"
+            header = f"[lines {offset + 1}-{end_line} of {total_lines:,}]"
+            if size_truncated and shown == 0:
+                # Line `offset` alone is wider than the whole preview budget.
+                # An offset cannot address inside a line, so hand over a
+                # bounded slice of it and name the route to the remainder,
+                # instead of returning nothing and advising the same call.
+                head, line_len = _read_one_line_head(resolved, offset, MAX_OUTPUT)
+                header = (
+                    f"[line {offset + 1} of {total_lines:,} is {line_len:,} chars — longer than the "
+                    f"{MAX_OUTPUT:,}-char preview budget; showing its first {len(head):,} chars. "
+                    f"Read the rest with bash(command=\"sed -n '{offset + 1}p' {path} | cut -c "
+                    f'{len(head) + 1}-"), or skip it with '
+                    f'file_read(path="{path}", offset={offset + 1}, limit=200)]'
+                )
+                return header + "\n" + head
+            if size_truncated:
+                header += f" ⚠ stopped at the {MAX_OUTPUT:,}-char preview cap."
             if remaining > 0:
                 header += (
                     f" ⚠ {remaining:,} lines remaining. "
@@ -701,16 +749,49 @@ def file_read(path: str, offset: int = 0, limit: int = 0) -> str:
         if size > MAX_OUTPUT:
             lines: list[str] = []
             total_chars = 0
+            total_lines = 0
+            count_floor = False
+            size_truncated = False
             with _open_nofollow(resolved, "r") as f:
                 for line in f:
-                    if total_chars + len(line) > MAX_OUTPUT:
+                    total_lines += 1
+                    if total_lines > _LINE_COUNT_CEILING:
+                        # Bounded so a multi-GB log is not walked to its end
+                        # just to print a number; past here the total is a
+                        # floor and says so.
+                        count_floor = True
                         break
+                    if size_truncated:
+                        continue  # keep counting, but the preview stays contiguous
+                    if total_chars + len(line) > MAX_OUTPUT:
+                        # Stop APPENDING here, not counting. A preview that
+                        # skipped over the line it could not fit and resumed
+                        # with the next one would be a silent gap in the middle
+                        # of what looks like a contiguous head.
+                        size_truncated = True
+                        continue
                     lines.append(line.rstrip("\n"))
                     total_chars += len(line)
+            approx = "at least " if count_floor else ""
             shown = len(lines)
+            if shown == 0:
+                # The measured dead end: the first line alone exceeds the cap,
+                # so the loop broke before appending anything — "showing first
+                # 0 lines", zero source content, and `offset=0`, which re-runs
+                # this exact call. Return part of line 1 and a cursor that
+                # moves.
+                head, line_len = _read_one_line_head(resolved, 0, MAX_OUTPUT)
+                header = (
+                    f"⚠ Large file ({size:,} bytes, {approx}{total_lines:,} lines) — line 1 is "
+                    f"{line_len:,} chars, longer than the {MAX_OUTPUT:,}-char preview budget; showing "
+                    f"its first {len(head):,} chars. Read the rest with "
+                    f'bash(command="head -1 {path} | cut -c {len(head) + 1}-"), or continue with: '
+                    f'file_read(path="{path}", offset=1, limit=200)'
+                )
+                return header + "\n" + head
             header = (
-                f"⚠ Large file ({size:,} bytes) — showing first {shown} lines "
-                f"({total_chars:,} of ~{size:,} bytes). "
+                f"⚠ Large file ({size:,} bytes, {approx}{total_lines:,} lines) — showing first "
+                f"{shown} lines ({total_chars:,} of ~{size:,} bytes). "
                 f'Continue with: file_read(path="{path}", offset={shown}, limit=200)'
             )
             numbered = [f"{idx + 1:6d}\t{l}" for idx, l in enumerate(lines)]
