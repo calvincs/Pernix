@@ -14,12 +14,22 @@ construction, taken by SQLite from inside a read transaction) plus a copy of
 the markdown memory corpus, and rotates to settings.backup_keep_count.
 maintenance.py's 24h tier calls it — first in the tier, before the sweeps that
 mutate data.
+
+Extended 2026-09-08 (3.2.2 audit S08): a backup path that produces a
+generation nothing can tell apart from a finished one is not a recovery path
+either. The publication tests below pin the boundary — a snapshot appears
+under its recognized name only after it has been validated and its corpus is
+whole — and the full failure-injection suite is in
+tests/regressions/test_2026-09-08_a_half_written_backup_counted_as_the_newest_one.py.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
+
+import pytest
 
 from config import settings
 from db import models as db
@@ -98,6 +108,50 @@ def test_keep_count_is_bounds_checked(monkeypatch):
     monkeypatch.setattr(settings, "backup_keep_count", 0)
     assert backup.run_backup()["skipped"]
     assert not backup.backups_dir().exists()
+
+
+def test_a_snapshot_only_exists_once_the_whole_generation_does():
+    """The recovery path is a generation, not a file.
+
+    The snapshot is built under staging and renamed into its recognized name
+    last, after the corpus is copied and the manifest written — so there is
+    no interval in which a restore could pick a database whose memories are
+    still being copied.
+    """
+    (Path(settings.memory_dir) / "note.md").parent.mkdir(parents=True, exist_ok=True)
+    (Path(settings.memory_dir) / "note.md").write_text("# durable\n")
+
+    result = backup.run_backup(keep=3)
+    root = backup.backups_dir()
+
+    assert Path(result["db"]).parent == root, "published beside the others, not inside staging"
+    assert not list(root.glob(f"{backup._STAGING_PREFIX}*")), "staging is cleared on the way out"
+
+    manifest = json.loads(Path(result["manifest"]).read_text())
+    assert manifest["complete"] is True
+    assert manifest["db"] == Path(result["db"]).name
+    assert manifest["memories"] == Path(result["memories"]).name
+    assert manifest["integrity"] == "ok"
+
+
+def test_a_backup_that_never_finished_leaves_the_path_open(monkeypatch):
+    """A failed attempt must not read as the backup it failed to take.
+
+    Freshness is the only thing standing between a failure and a 24-hour
+    silence: maintenance retries on `age is None or age >= 24.0`, and a
+    half-written generation used to answer 0.0001.
+    """
+
+    def _dies_mid_snapshot(dest: Path) -> Path:
+        dest.write_bytes(b"")  # what a full disk leaves inside VACUUM INTO
+        return dest
+
+    monkeypatch.setattr(backup, "_snapshot_db", _dies_mid_snapshot)
+    with pytest.raises(backup.BackupIncomplete):
+        backup.run_backup(keep=3)
+
+    assert backup.hours_since_last_backup() is None, "still no backup, so still overdue"
+    assert backup.list_snapshots() == []
 
 
 async def test_maintenance_24h_tier_takes_a_backup(monkeypatch):

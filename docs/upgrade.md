@@ -48,9 +48,14 @@ Snapshots land in `data/backups/`:
 ```
 data/backups/sessions-20260807-031500.db     # the database
 data/backups/memories-20260807-031500/       # the markdown corpus
+data/backups/backup-20260807-031500.json     # the generation's manifest
 ```
 
 The database snapshot is taken with SQLite's `VACUUM INTO`, which runs inside a read transaction and writes a fresh, fully-checkpointed database file. It is consistent by construction and safe to take while the server is serving traffic. The result is an ordinary SQLite file: open it with `sqlite3`, copy it anywhere, restore it by putting it back.
+
+Those three files are one **generation**, and a generation is published all at once. The run builds it in a hidden `data/backups/.staging-<stamp>/` directory, checks the snapshot really is a readable SQLite database (`PRAGMA quick_check`), copies the corpus, writes the manifest, and only then renames the pieces into place — the database **last**. So `sessions-<stamp>.db` existing is the guarantee that everything else beside it is finished: a run killed by a full disk leaves nothing that freshness, the ledger, retention or a restore will treat as a backup, and the next hourly check simply takes it again. A `.staging-*` directory left by a crash is swept on a later run. Snapshots from older versions have no manifest and are still recognized as backups, exactly as before.
+
+What a generation does *not* promise is a single instant across both stores. The database snapshot is transactionally consistent on its own; the markdown corpus is copied immediately afterwards, so a memory written in between is in the corpus and not in the database. Publication makes a generation whole, not instantaneous.
 
 Pernix also runs this automatically. `maintenance.py`'s 24-hour tier calls the same function, **first** in that tier — before the memory health check and the retention prunes, so the snapshot is the one that can undo a bad sweep. Retention is `backup_keep_count` (Settings, default **7**, clamped to 0–90). Setting it to `0` disables the scheduled backup; the CLI still works.
 

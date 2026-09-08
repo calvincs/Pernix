@@ -18,6 +18,13 @@ from datetime import datetime, timedelta, timezone
 
 from scripts import backup
 
+# Stand-in bytes for a snapshot this test does not need to be a real database.
+# Non-empty on purpose: since the 2026-09-08 completion-boundary fix a
+# zero-length `sessions-*.db` is an unpublished generation, not a backup, and
+# neither freshness nor rotation counts one. These tests are about the NAME
+# stamp, so they need a file that is otherwise unremarkable.
+_PLACEHOLDER = b"a snapshot, as far as this test is concerned"
+
 
 class _StubManager:
     def reap_dead_subscribers(self):
@@ -45,8 +52,8 @@ def test_age_reads_the_name_stamp_not_the_mtime():
     root = backup.backups_dir()
     root.mkdir(parents=True, exist_ok=True)
     stamp = (datetime.now(timezone.utc) - timedelta(hours=30)).strftime("%Y%m%d-%H%M%S")
-    (root / f"sessions-{stamp}.db").write_bytes(b"")  # fresh mtime, old name
-    (root / "sessions-not-a-stamp.db").write_bytes(b"")  # malformed: ignored
+    (root / f"sessions-{stamp}.db").write_bytes(_PLACEHOLDER)  # fresh mtime, old name
+    (root / "sessions-not-a-stamp.db").write_bytes(_PLACEHOLDER)  # malformed: ignored
     age = backup.hours_since_last_backup()
     assert age is not None and 29.5 < age < 30.5
 
@@ -56,7 +63,7 @@ async def test_hourly_tick_takes_the_backup_when_overdue(monkeypatch):
     root = backup.backups_dir()
     root.mkdir(parents=True, exist_ok=True)
     stamp = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime("%Y%m%d-%H%M%S")
-    (root / f"sessions-{stamp}.db").write_bytes(b"")
+    (root / f"sessions-{stamp}.db").write_bytes(_PLACEHOLDER)
 
     await _run_tick(monkeypatch, tick=60)  # one hour of uptime — not 24
     assert len(sorted(root.glob("sessions-*.db"))) == 2, "overdue backup did not run on the hourly check"

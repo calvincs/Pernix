@@ -792,12 +792,12 @@ GET /api/storage
 {
   "sessions": { "total": 1032, "by_type": {"normal": 310, "worker": 47, "...": 0}, "pinned": 12, "in_spaces": 84, "archived": 41 },
   "database": { "path": "/app/data/sessions.db", "bytes": 176160768, "wal_bytes": 0, "page_size": 4096, "reclaimable_bytes": 8912896 },
-  "backups": { "dir": "data/backups", "count": 7, "bytes": 734003200, "keep": 7, "last_backup_at": "2026-09-02T18:37:03Z", "beyond_keep": [] },
+  "backups": { "dir": "data/backups", "count": 7, "bytes": 734003200, "keep": 7, "last_backup_at": "2026-09-02T18:37:03Z", "beyond_keep": [], "incomplete": [] },
   "legacy_backups": { "dir": "data/.backups", "...": "same shape as backups, or null if this instance never had one" },
   "sweeps": { "sessions_pruned": 307, "sessions_archived": 41, "...": 0, "last_cycle": "2026-09-02T22:00:00Z" }
 }
 ```
-`sessions.archived` is `null` on a pre-v34 database rather than `0` — a build that cannot archive is not the same fact as zero archived sessions. `database.reclaimable_bytes` is the SQLite freelist (`freelist_count * page_size`) — what a `POST /api/storage/optimize` would give back. `backups`/`legacy_backups.bytes` is the whole directory (snapshots plus any memory corpora beside them); `beyond_keep` lists the snapshots rotation would remove, each with `name`, `bytes`, `mtime`, `scheme`. `legacy_backups` is `null` on an instance that never wrote to the pre-rename `data/.backups` directory. `sweeps` is present only when the snooze runner has stats to report — every `*_pruned` counter it tracks, plus `sessions_archived` and `last_cycle`.
+`sessions.archived` is `null` on a pre-v34 database rather than `0` — a build that cannot archive is not the same fact as zero archived sessions. `database.reclaimable_bytes` is the SQLite freelist (`freelist_count * page_size`) — what a `POST /api/storage/optimize` would give back. `backups`/`legacy_backups.bytes` is the whole directory (snapshots plus any memory corpora beside them); `beyond_keep` lists the snapshots rotation would remove, each with `name`, `bytes`, `mtime`, `scheme`. `count` and `last_backup_at` describe **completed** generations only; a snapshot left behind by a run that never finished is reported separately under `incomplete` (same shape as `beyond_keep`) so it is visible and deletable without ever being counted as a backup. `legacy_backups` is `null` on an instance that never wrote to the pre-rename `data/.backups` directory. `sweeps` is present only when the snooze runner has stats to report — every `*_pruned` counter it tracks, plus `sessions_archived` and `last_cycle`.
 
 ### Rotate Backups
 ```
