@@ -91,7 +91,7 @@ RULES:
 - EVIDENCE PRIMACY. The transcript's tool RESULTS are ground truth. When a tool result body in the transcript supports or contradicts a claim in the agent's final response, that body outranks your priors about the topic. If the agent fetched URL X and the transcript shows the fetch returned real content, do NOT call hallucination just because your training data doesn't recognize X. Verify against what the tools actually returned, not what you "know" about the topic. The verifier-side failure mode this prevents: dismissing a fact as fabricated when the session contains real evidence for it.
 - GROUNDING CHECK IS A FLAG, NOT A VERDICT: when the evidence ends with a GROUNDING CHECK section, it lists (a) identifiers the final response cites that appear in NO tool result this attempt and not in the user's message, and (b) markdown table rows that pair an identifier with a name or id that no SINGLE tool result shows together. A factual table or id→content mapping whose rows are flagged under (b) is "factually false" under the materiality bar — verdict retry, failure_cause agent, and quote the flagged rows verbatim in what_failed — UNLESS the response itself labels those cells as inferred / not retrieved. One incidental token under (a) (an example, a typo, a name the agent coined) is NOT a retry; name it in what_failed. Never grade a reconstructed mapping above confidence 0.6 while any of its rows is flagged.
 - TOOL EXHAUSTION: If the summary shows a high number of calls across many different tools, the agent may have run out of tool rounds rather than used the wrong approach. Prefer "pass" with partial results if real progress was made — UNLESS the user named a specific deliverable (file, report, message sent) and that deliverable does not exist. The deliverable-missing rule above ALWAYS overrides this exhaustion clause; "we made progress" is not a substitute for "we produced what was asked for."
-- CEILING LOOP → ESCALATE: If TERMINATION HISTORY shows the same blocking reason (e.g. round_ceiling, budget_exhausted, compaction_failed) on the current turn AND at least one prior turn, the agent is hitting the same hard wall — another retry will hit it again. Verdict MUST be 'escalate'. In `missing`, name the wall: e.g. 'round_ceiling on consecutive attempts; agent cannot finish within max_tool_rounds — split the task or raise the limit.'
+- CEILING LOOP → ESCALATE: If TERMINATION HISTORY shows the same blocking reason (e.g. round_ceiling, stuck_loop, budget_exhausted, compaction_failed) on the current turn AND at least one prior turn, the agent is hitting the same hard wall — another retry will hit it again. Verdict MUST be 'escalate'. In `missing`, name the wall: e.g. 'round_ceiling on consecutive attempts; agent cannot finish within max_tool_rounds — split the task or raise the limit.' The walls are different problems: round_ceiling means the task did not fit the round budget, while stuck_loop means the stuck detector force-broke a repetition loop (it fires at ANY round number, so never advise raising max_tool_rounds for it — advise a different approach or a narrower step).
 - THRASHING → ESCALATE: When a CURRENT ATTEMPT TOOL CALLS section is present (retry attempts), judge thrashing from THAT section only — the cumulative summary includes prior attempts' tools, and a focused retry must not inherit a scattered first attempt's diversity. If the (scoped) summary shows ≥4 distinct tools used with no forward progress (empty outputs repeated, same files re-read, error count growing, or the agent drifting across unrelated checks), the agent is thrashing, not pursuing a coherent-but-wrong strategy. Prefer "escalate" with a clear "missing" field over "retry" — another round of the same thrashing will not help. A single failing tool being tried with sibling tools is NOT thrashing; reserve "escalate" for cases where the agent lost the thread.
 - THE USER'S NEXT MESSAGE IS GROUND TRUTH ABOUT INTENT: when the evidence carries a "USER'S NEXT MESSAGE (arrived after this turn)" section, that is what the user said after reading the final response above, and on the question "was their intent met?" it outranks your own reading of the transcript. If that message corrects the agent, repeats or rephrases the same request, or complains ("no, ...", "that's wrong", "not what I asked", "you didn't ...", "still broken", "try again"), then THIS turn missed the intent: verdict "retry" — or "escalate" when the correction shows the turn cannot be finished without more from them — with failure_cause "agent" unless the transcript names a different, checkable cause. If the message moves on to new work, accepts, thanks the agent, or asks a follow-up that BUILDS on what was delivered, that is evidence of pass: it does not by itself excuse a deliverable that verifiably does not exist, but it settles an otherwise ambiguous grade as "pass". Adding scope ("now also do X") is moving on, not a correction. The section is absent on most turns; say nothing about it then.
 - For failure_cause attribution: if tools were hallucinated or the plan jumped straight to the wrong approach, lean "scout". If the plan was sensible but the agent used tools incorrectly or gave up early, lean "agent". Don't guess — use "none" with low confidence if unclear.
@@ -1821,30 +1821,39 @@ async def reflect_on_session(
 
             result.grounding = dict(grounding)
 
-            # Defensive ceiling-loop guard: if the agent hit round_ceiling on
-            # this turn AND on at least one prior turn, retry is provably
-            # hopeless against the same hard wall. Override the LLM's verdict.
-            # Only round_ceiling is guarded; other terminal reasons (compaction,
-            # budget) often have legitimate retries — they get the prompt rule
-            # but not this code-level override.
+            # Defensive ceiling-loop guard: if the agent hit the SAME hard
+            # wall on this turn AND on at least one prior turn, retry is
+            # provably hopeless against it. Override the LLM's verdict.
+            # Only the two loop walls are guarded; other terminal reasons
+            # (compaction, budget) often have legitimate retries — they get the
+            # prompt rule but not this code-level override.
+            _loop_walls = ("round_ceiling", "stuck_loop")
             if (
-                termination_reason == "round_ceiling"
-                and any(r == "round_ceiling" for r in (prior_termination_reasons or []))
+                termination_reason in _loop_walls
+                and any(r == termination_reason for r in (prior_termination_reasons or []))
                 and result.verdict == "retry"
             ):
                 logger.info(
-                    "Reflect ceiling-loop guard: forcing escalate (was %s) for session %s",
+                    "Reflect ceiling-loop guard: forcing escalate (was %s) for session %s (%s)",
                     result.verdict,
                     session_id,
+                    termination_reason,
                 )
                 result.verdict = "escalate"
-                # The wall is the task's shape against the round budget, not a
-                # bad plan or a bad execution of one.
+                # The wall is the task's shape against the loop, not a bad plan
+                # or a bad execution of one.
                 result.failure_cause = _forced_cause(result.failure_cause, "task")
                 if not result.missing:
+                    # Distinct advice per wall: raising max_tool_rounds does
+                    # nothing for a stuck loop, which fires on repetition at
+                    # any round number.
                     result.missing = (
                         "Agent hit round_ceiling on consecutive attempts. Either split "
                         "the task into smaller pieces or raise max_tool_rounds in settings."
+                        if termination_reason == "round_ceiling"
+                        else "Agent was force-broken out of a repetition loop on consecutive "
+                        "attempts. The round budget is not the constraint — the approach is. "
+                        "Change tool or source, or narrow the step."
                     )
 
             # Gate clamp (plan 3a): a failing deterministic gate makes `pass`

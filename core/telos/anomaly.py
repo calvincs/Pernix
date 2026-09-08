@@ -129,6 +129,16 @@ def extract_turn_anomalies(
                 "derived_from": ["termination:round_ceiling"],
             }
         )
+    if termination_reason == "stuck_loop":
+        anomalies.append(
+            {
+                "text": "What made the stuck detector force-break this turn, and did the agent "
+                "still produce its deliverable? A repetition loop was cut short; the transcript's "
+                "system nudges record what it was repeating and what it was told to do instead.",
+                "surprise": 0.85,
+                "derived_from": ["termination:stuck_loop"],
+            }
+        )
     anomalies.sort(key=lambda a: -a["surprise"])
     return anomalies
 

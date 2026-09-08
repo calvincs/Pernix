@@ -580,7 +580,7 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
         round ceiling ended mid-work by definition — reflect grading the
         partial output as fine does not un-truncate it, and the parent is
         the one who pays for believing it was complete."""
-        if term_reason not in ("round_ceiling", "budget_exhausted"):
+        if term_reason not in ("round_ceiling", "stuck_loop", "budget_exhausted"):
             return ""
         return (
             f"# NOTE: worker ended by {term_reason} (hard cap, not completion) — "
@@ -611,7 +611,7 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
         # No reflect row (cancelled / crashed before post-hooks)
         if term_reason == "cancelled":
             return "# CANCELLED (worker stopped before reflect ran)\n\n"
-        if term_reason in ("error", "round_ceiling", "compaction_failed"):
+        if term_reason in ("error", "round_ceiling", "stuck_loop", "compaction_failed"):
             return f"# INCOMPLETE (worker terminated: {term_reason})\n\n"
         return "# UNVERIFIED (no reflect verdict recorded — quality not gated)\n\n"
 

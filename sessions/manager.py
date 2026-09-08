@@ -165,6 +165,10 @@ def _map_termination_to_v2_reason(tr: str | None) -> tuple[str, sv2.TerminationR
     mapping = {
         "complete": ("loop-complete", sv2.TerminationReason.COMPLETE),
         "round_ceiling": ("round-ceiling", sv2.TerminationReason.ROUND_CEILING),
+        # The stuck detector force-breaking a repetition loop is its own wall:
+        # it fires at any round number, so it must not be logged as the round
+        # budget running out.
+        "stuck_loop": ("stuck-loop", sv2.TerminationReason.STUCK_LOOP),
         "compaction_failed": ("compaction-failed", sv2.TerminationReason.COMPACTION_FAILED),
         # agent.py uses `return` (not `raise`) for stream/failover errors, so no
         # exception propagates to _run_agent_safe's except block. The finally's
@@ -695,9 +699,12 @@ class SessionManager:
         budget_exhausted} — the latter two ARE the long-running case (the
         turn ran out of rounds or LLM session budget mid-goal, not out of
         work). Never on cancelled/error/compaction_failed (a human is
-        needed), never in AWAITING_USER (waiting on a human is a legitimate
-        block — push notifications alert them), never over queued user
-        messages (the user's words outrank the machine's).
+        needed), and never on stuck_loop: the turn was force-broken out of a
+        repetition loop, so handing it a fresh turn on the same approach is
+        the one case where continuing reliably repeats the loop. Never in
+        AWAITING_USER (waiting on a human is a legitimate block — push
+        notifications alert them), never over queued user messages (the
+        user's words outrank the machine's).
         """
         from sessions import state_v2 as sv2
         from sessions.state import PendingMessage
@@ -1849,8 +1856,8 @@ class SessionManager:
         except Exception as _e:
             logger.debug("Worker finalize: reflect lookup failed: %s", _e)
 
-        if reason in ("round_ceiling", "compaction_failed"):
-            header = "# INCOMPLETE (worker hit round ceiling / compaction failed)\n"
+        if reason in ("round_ceiling", "stuck_loop", "compaction_failed"):
+            header = f"# INCOMPLETE (worker terminated: {reason})\n"
         elif reason == "cancelled":
             header = "# CANCELLED (worker was cancelled before completion)\n"
         elif reason == "error" or (reason is None and session.error):

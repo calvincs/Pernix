@@ -418,7 +418,27 @@ async def test_finalize_worker_header_round_ceiling():
     await mgr._finalize_worker(w)
     text = (Path(_s.workspace_dir) / f".worker_{w.session_id[:12]}_summary.md").read_text()
     assert text.startswith("# INCOMPLETE")
-    assert "round ceiling" in text
+    # The header names the reason it actually got, so the parent can tell a
+    # round ceiling from a stuck loop from a failed compaction.
+    assert "round_ceiling" in text
+
+
+async def test_finalize_worker_header_stuck_loop():
+    """A worker force-broken out of a repetition loop is incomplete too, and
+    must not be reported as the round budget running out (Agent Mesh build:
+    four research workers died at single-digit round numbers)."""
+    from pathlib import Path
+
+    from config import settings as _s
+
+    mgr = _make_manager()
+    w = _make_worker_with_assistant(mgr, "going in circles")
+    w.termination_reason = "stuck_loop"
+    await mgr._finalize_worker(w)
+    text = (Path(_s.workspace_dir) / f".worker_{w.session_id[:12]}_summary.md").read_text()
+    assert text.startswith("# INCOMPLETE")
+    assert "stuck_loop" in text
+    assert "round_ceiling" not in text
 
 
 async def test_finalize_worker_header_cancelled():
