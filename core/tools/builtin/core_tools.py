@@ -565,6 +565,31 @@ def _check_command_security(command: str) -> str | None:
     return None
 
 
+def check_shell_command(command: str) -> str | None:
+    """Admission every shell launcher shares. Returns an error string or None.
+
+    This is the whole of `bash`'s command policy, lifted out so a second
+    launcher cannot become the way around it. `job_start` runs the same shell
+    with the same environment and a much longer leash, so admitting there what
+    bash refuses would make the policy advisory. The wording is the error the
+    agent already knows, so a refusal reads the same whichever tool it used.
+
+    The two modes differ deliberately: permissive runs the denylist scan,
+    strict is a first-word allowlist. `core.gates.check_gate_command` is the
+    third launcher and takes only the denylist half, for the reason documented
+    there.
+    """
+    if not command or not command.strip():
+        return "Error: Empty command"
+    if settings.shell_security_mode == "permissive":
+        return _check_command_security(command)
+    if settings.shell_security_mode == "strict":
+        first_word = command.strip().split()[0]
+        if first_word not in settings.shell_allowlist:
+            return f"Error: Command '{first_word}' not in allowlist. Allowed: {', '.join(sorted(settings.shell_allowlist)[:10])}..."
+    return None
+
+
 def _is_binary(resolved: Path) -> bool:
     """Check if file is binary by sampling first 512 bytes for null bytes."""
     try:
@@ -828,17 +853,9 @@ def bash(command: str, timeout: int | None = None, _context: dict | None = None)
     Capped at 30 minutes to prevent runaway agents from holding the worker
     indefinitely. Defaults to settings.shell_timeout when omitted.
     """
-    if not command or not command.strip():
-        return "Error: Empty command"
-
-    if settings.shell_security_mode == "permissive":
-        blocked = _check_command_security(command)
-        if blocked:
-            return blocked
-    elif settings.shell_security_mode == "strict":
-        first_word = command.strip().split()[0] if command.strip() else ""
-        if first_word not in settings.shell_allowlist:
-            return f"Error: Command '{first_word}' not in allowlist. Allowed: {', '.join(sorted(settings.shell_allowlist)[:10])}..."
+    blocked = check_shell_command(command)
+    if blocked:
+        return blocked
 
     workspace = _workspace()
     workspace.mkdir(parents=True, exist_ok=True)

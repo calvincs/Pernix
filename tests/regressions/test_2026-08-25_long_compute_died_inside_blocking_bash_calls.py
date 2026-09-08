@@ -51,11 +51,25 @@ def test_job_runs_detached_and_completes_with_output():
 
 
 def test_job_kill_terminates_the_group():
+    """The delay is the test. Killing microseconds after job_start hits the
+    window before the leader has even forked `timeout`, and this passed for
+    years on that accident alone (2026-09-08: at delay 0.25 the pre-fix kill
+    left 2 survivors). The full story is in
+    test_2026-09-08_a_detached_job_skipped_shell_policy_and_survived_its_kill.
+    """
     ctx = _ctx()
     job_id = _extract_id(jobs_tool.job_start("sleep 60", _context=ctx))
+    leader = db.get_job(job_id)["pid"]
+    time.sleep(0.5)
+    workload = [pid for pid, _ in jobs_tool._live_members(jobs_tool._read_containment(db.get_job(job_id)))]
+    assert len(workload) >= 3, f"expected leader + timeout + sleep, got {workload}"
+
     out = jobs_tool.job_kill(job_id, _context=ctx)
+
     assert "killed" in out
     assert db.get_job(job_id)["state"] == "killed"
+    assert [pid for pid in workload if jobs_tool._pid_alive(pid)] == [], out
+    assert not jobs_tool._pid_alive(leader)
 
 
 def test_wall_clock_cap_reads_as_timeout():
@@ -79,17 +93,26 @@ def test_vanished_pid_without_exit_file_reads_as_lost():
     ctx = _ctx()
     job_id = _extract_id(jobs_tool.job_start("sleep 60", _context=ctx))
     job = db.get_job(job_id)
-    # Simulate a server restart racing the wrapper: kill the group directly
-    # (no exit sidecar gets written by us) and blank the sidecar if any.
+    # Simulate a server restart racing the wrapper: kill the job's whole
+    # containment unit directly (no exit sidecar gets written by us) and blank
+    # the sidecar if any. Killing only the leader's group is not this case —
+    # since 2026-09-08 a job whose wrapper died while its work continues stays
+    # 'running', which is the truth.
     import os
     import signal as _signal
 
-    try:
-        os.killpg(job["pid"], _signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    time.sleep(0.5)  # let the wrapper fork `timeout`, or we only kill the shell
+    rec = jobs_tool._read_containment(job)
     deadline = time.time() + 5
-    while time.time() < deadline and jobs_tool._pid_alive(job["pid"]):
+    while time.time() < deadline:
+        members = jobs_tool._live_members(rec)
+        if not members:
+            break
+        for pid, _ in members:
+            try:
+                os.kill(pid, _signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         time.sleep(0.05)
     from pathlib import Path
 

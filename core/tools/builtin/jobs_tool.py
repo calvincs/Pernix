@@ -14,16 +14,32 @@ output"). These tools make that shape first-class:
 - job_status / job_tail are cheap polls: state, elapsed, CPU, RSS, and paged
   output. Their results carry a timestamp line so identical-looking polls
   never collapse into the cross-round dedup cache.
-- job_kill terminates the whole process group.
+- job_kill terminates the job's containment unit.
+
+A job is admitted by the same policy as a foreground bash call
+(`check_shell_command`): same shell, same environment, a much longer leash,
+so the same command rules — otherwise job_start is the way around bash.
+
+Containment: the leader is launched with start_new_session, so it opens a
+SESSION of its own and everything the job spawns inherits it. That session is
+the job's containment unit, and it is what job_kill targets. The leader's own
+process GROUP is not: `timeout` calls setpgid on itself, so the workload runs
+in timeout's group, not the leader's, and killing the leader's group killed
+the bookkeeping while the work ran on. Only a descendant that calls setsid
+itself leaves the unit, and that case is reported as unresolved rather than
+claimed as killed.
 
 Durability: rows live in the sessions DB. The exit code is written by the
 wrapper shell to a sidecar file, so completion is detectable even after a
-server restart (when the Popen handle is long gone). A job whose pid vanished
-without an exit file reads as 'lost'.
+server restart (when the Popen handle is long gone), and the containment
+identity is written beside it so a kill after a restart still knows what it
+may signal. A job is 'lost' only when its containment unit is empty and no
+exit code was recorded.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shlex
@@ -41,6 +57,8 @@ logger = logging.getLogger("pernix.tools.jobs")
 _LOG_READ_CAP = 50_000  # chars per job_tail call, mirroring bash output cap
 _STATUS_TAIL_LINES = 5
 _KILL_GRACE_S = 2.0
+_KILL_HARD_GRACE_S = 1.0
+_CONTAINMENT_FILE = "containment"
 
 
 def _now_iso() -> str:
@@ -116,6 +134,187 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _proc_ident(pid: int) -> dict | None:
+    """Identity fields from /proc/<pid>/stat, or None when the pid is gone.
+
+    `start` is field 22, the process's start time in clock ticks since boot.
+    A pid on its own is not an identity — the kernel hands the number out
+    again — but (pid, start) is, which is what lets a kill refuse to signal a
+    stranger. comm can contain spaces and parens, so the split is on the last
+    ')' rather than on whitespace.
+    """
+    if not pid:
+        return None
+    try:
+        raw = open(f"/proc/{pid}/stat").read()
+        fields = raw.rsplit(")", 1)[1].split()
+        return {
+            "state": fields[0],
+            "ppid": int(fields[1]),
+            "pgid": int(fields[2]),
+            "sid": int(fields[3]),
+            "start": int(fields[19]),
+        }
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _record_containment(job_dir: Path, leader_pid: int) -> dict:
+    """Write the job's containment identity beside its log, at launch.
+
+    Durable on purpose: the kill can come from a different server process
+    than the launch, and by then the Popen handle is long gone. The session
+    id is knowable immediately (start_new_session makes the leader its own
+    session leader, so sid == pid), while the process group that ends up
+    holding the workload is not — `timeout` re-groups itself microseconds
+    after Popen returns, and job_start promises to return instantly rather
+    than wait for it. The group is therefore derived from this identity at
+    kill time, when it can be read instead of guessed.
+    """
+    ident = _proc_ident(leader_pid)
+    rec = {
+        "leader_pid": leader_pid,
+        "sid": leader_pid,
+        "leader_start": ident["start"] if ident else None,
+    }
+    try:
+        (job_dir / _CONTAINMENT_FILE).write_text(json.dumps(rec))
+    except OSError:
+        pass
+    return rec
+
+
+def _read_containment(job: dict) -> dict:
+    """The job's recorded containment identity, or one rebuilt from the row.
+
+    Jobs launched before the record existed still resolve: they were started
+    with start_new_session too, so their leader pid is their session id. Only
+    the recycle guard is weaker, because no start time was captured.
+    """
+    try:
+        rec = json.loads((Path(job["log_path"]).parent / _CONTAINMENT_FILE).read_text())
+        if isinstance(rec, dict) and rec.get("leader_pid"):
+            rec.setdefault("sid", rec["leader_pid"])
+            rec.setdefault("leader_start", None)
+            return rec
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    pid = int(job.get("pid") or 0)
+    return {"leader_pid": pid, "sid": pid, "leader_start": None}
+
+
+def _identity_ok(rec: dict) -> bool:
+    """False when the recorded pid now belongs to somebody else.
+
+    A leader that is simply gone does not fail this: while any member of the
+    session is alive the kernel keeps the number reserved as that session's
+    id, so nobody else can be holding it. What fails is a live process on
+    that pid with the wrong start time, or in a different session — that is
+    the number having been handed on, and signalling it would hit a stranger.
+    """
+    if not rec.get("sid"):
+        return False
+    ident = _proc_ident(rec["leader_pid"])
+    if ident is None:
+        return True
+    if ident["sid"] != rec["sid"]:
+        return False
+    return rec.get("leader_start") is None or ident["start"] == rec["leader_start"]
+
+
+def _live_members(rec: dict | None) -> list[tuple[int, dict]]:
+    """Live processes in the job's containment unit — its session.
+
+    Everything a job spawns inherits that session: `timeout`'s own group, the
+    inner shell, grandchildren, and orphans that outlived the leader and were
+    reparented to init. Zombies are not live, and a process that started
+    before the leader cannot be ours.
+    """
+    if not rec or not _identity_ok(rec):
+        return []
+    sid = rec["sid"]
+    floor = rec.get("leader_start")
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        # No procfs (non-Linux dev boxes): fall back to the leader's own
+        # group, which is all a kill could reach before this record existed.
+        if _pid_alive(rec["leader_pid"]):
+            return [(rec["leader_pid"], {"pgid": rec["leader_pid"], "sid": sid, "state": "R", "start": 0})]
+        return []
+    members = []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        ident = _proc_ident(int(entry))
+        if ident is None or ident["sid"] != sid or ident["state"] == "Z":
+            continue
+        if floor is not None and ident["start"] < floor:
+            continue
+        members.append((int(entry), ident))
+    return sorted(members, key=lambda m: m[0])
+
+
+def _terminate_containment(rec: dict) -> tuple[int, list[int]]:
+    """SIGTERM the group(s) holding the workload, escalate to SIGKILL on
+    whatever is left, and report anything still standing.
+
+    Escalation waits on the containment unit being empty, not on the leader
+    being gone — the same rule foreground `_kill_process_tree` applies to its
+    group, which is the check this file was missing. Returns
+    (processes_signalled, leftover_pids).
+    """
+    members = _live_members(rec)
+    if not members:
+        return 0, []
+    leader = rec["leader_pid"]
+    groups = {ident["pgid"] for _, ident in members}
+    # The wrapper shell sits alone in the leader's group; the workload sits in
+    # the group `timeout` made for itself. Spare the leader on the first pass
+    # so it outlives its child and still runs `echo $? > exit_code` — that is
+    # the only way a killed job keeps an exit code. If the workload turned out
+    # to share the leader's group there is nothing to spare.
+    workload = groups - {leader} or groups
+    for pgid in sorted(workload):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    deadline = time.time() + _KILL_GRACE_S
+    while time.time() < deadline and _live_members(rec):
+        time.sleep(0.05)
+    left = _live_members(rec)
+    if left:
+        for pgid in sorted({ident["pgid"] for _, ident in left}):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        deadline = time.time() + _KILL_HARD_GRACE_S
+        while time.time() < deadline and _live_members(rec):
+            time.sleep(0.05)
+    _pid_alive(leader)  # reap the wrapper if it is our zombie
+    return len(members), [pid for pid, _ in _live_members(rec)]
+
+
+def _unresolved_note(leftovers: list[int]) -> str:
+    pids = ", ".join(str(p) for p in leftovers[:8])
+    more = "" if len(leftovers) <= 8 else f" (+{len(leftovers) - 8} more)"
+    return (
+        f"\nCLEANUP UNRESOLVED: {len(leftovers)} process(es) outlived SIGKILL: "
+        f"pid(s) {pids}{more}. They are no longer tracked — check them with ps "
+        f"before reusing a port, file or lock this job held."
+    )
+
+
+def _exit_sidecar(job: dict) -> int | None:
+    """The exit code the wrapper recorded, or None if it never got that far."""
+    try:
+        return int((Path(job["log_path"]).parent / "exit_code").read_text().strip())
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def _proc_stats(pid: int) -> tuple[str, str]:
     """(rss_human, cpu_human) for a live pid; empty strings when unreadable."""
     rss = cpu = ""
@@ -154,8 +353,13 @@ def _refresh(job: dict) -> dict:
         job.update(state=state, exit_code=code)
         return job
     if not _pid_alive(job["pid"]):
-        # Died without writing an exit code — killed externally or lost to a
-        # server restart racing the wrapper's last write.
+        # The wrapper is gone, which is not the same as the job being gone: a
+        # command that backgrounds its work outlives its own shell, and those
+        # descendants stay in the job's session. Only an empty containment
+        # unit with no exit code is genuinely lost — killed externally, or
+        # lost to a server restart racing the wrapper's last write.
+        if _live_members(_read_containment(job)):
+            return job
         db.update_job(job["id"], state="lost", finished_at=_now_iso())
         job.update(state="lost")
     return job
@@ -230,10 +434,21 @@ def job_start(
     _context: dict | None = None,
 ) -> str:
     """Start a detached background job."""
+    from core.tools.builtin.core_tools import check_shell_command
     from db import models as db
 
     if not settings.jobs_enabled:
         return "Error: background jobs are disabled (settings.jobs_enabled)."
+
+    # Same admission as foreground bash, in whichever mode is configured, and
+    # before the concurrency cap so a refusal says what is actually wrong. A
+    # job runs the same shell in the same environment for two hours instead of
+    # ten minutes; if the policy did not follow it here, job_start would be
+    # the documented way around bash.
+    blocked = check_shell_command(command)
+    if blocked:
+        return blocked
+
     session_id = (_context or {}).get("session_id", "") or "unknown"
 
     running = [j for j in db.list_jobs(session_id=session_id, limit=50) if _refresh(j)["state"] == "running"]
@@ -303,6 +518,7 @@ def job_start(
     except OSError as e:
         return f"Error: failed to start job: {e}"
 
+    _record_containment(job_dir, proc.pid)
     db.create_job(
         job_id=job_id,
         session_id=session_id,
@@ -367,34 +583,45 @@ def job_tail(job_id: str, offset: int = 0, _context: dict | None = None) -> str:
 
 
 def job_kill(job_id: str, _context: dict | None = None) -> str:
-    """Terminate a job's whole process group (SIGTERM, then SIGKILL)."""
+    """Terminate a job's containment unit (SIGTERM, then SIGKILL)."""
     from db import models as db
 
     job = db.get_job(job_id)
     if job is None:
         return f"Error: no job '{job_id}'"
     job = _refresh(job)
+    rec = _read_containment(job)
+
+    if not _identity_ok(rec):
+        # The recorded pid belongs to somebody else now. There is nothing of
+        # ours left to signal, and signalling anyway would hit a stranger.
+        if job["state"] == "running":
+            db.update_job(job_id, state="lost", finished_at=_now_iso())
+        return f"Job {job_id} could not be terminated: its process identity was reused, so nothing was signalled."
+
+    signalled, leftovers = _terminate_containment(rec)
+
     if job["state"] != "running":
-        return f"Job {job_id} is not running (state={job['state']})."
-    pid = job["pid"]
-    try:
-        os.killpg(pid, signal.SIGTERM)  # start_new_session → pgid == pid
-    except ProcessLookupError:
+        # A finished row can still have live descendants: a command that
+        # backgrounds its work lets the wrapper exit and write exit 0 while
+        # the work runs on. Sweep them rather than report nothing to do.
+        if not signalled:
+            return f"Job {job_id} is not running (state={job['state']})."
+        note = (
+            f"Job {job_id} is not running (state={job['state']}) — killed {signalled} process(es) it had left behind."
+        )
+        return note + (_unresolved_note(leftovers) if leftovers else "")
+
+    if not signalled:
         db.update_job(job_id, state="lost", finished_at=_now_iso())
         return f"Job {job_id} was already gone."
-    except PermissionError as e:
-        return f"Error: could not signal job {job_id}: {e}"
-    deadline = time.time() + _KILL_GRACE_S
-    while time.time() < deadline and _pid_alive(pid):
-        time.sleep(0.1)
-    if _pid_alive(pid):
-        try:
-            os.killpg(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    db.update_job(job_id, state="killed", finished_at=_now_iso())
-    logger.info("job %s killed (pid %d)", job_id, pid)
-    return f"Job {job_id} killed."
+
+    code = _exit_sidecar(job)
+    db.update_job(job_id, state="killed", exit_code=code, finished_at=_now_iso())
+    logger.info("job %s killed (%d process(es), %d leftover)", job_id, signalled, len(leftovers))
+    msg = f"Job {job_id} killed ({signalled} process(es) terminated"
+    msg += f", exit {code})." if code is not None else ", exit code unrecorded)."
+    return msg + (_unresolved_note(leftovers) if leftovers else "")
 
 
 def register(reg) -> None:
@@ -410,8 +637,9 @@ def register(reg) -> None:
             "builds, dataset crunching. The job survives the end of your turn; "
             "output streams to a log file. Returns a job_id — keep working and "
             "poll job_status(job_id) or job_tail(job_id). Wall-clock capped "
-            "(default 2h, exit 124 on timeout); same memory cap as bash. Print "
-            "progress lines in your command so polls show advancement."
+            "(default 2h, exit 124 on timeout); same memory cap and same "
+            "command policy as bash. Print progress lines in your command so "
+            "polls show advancement."
         ),
         parameters={
             "type": "object",
@@ -477,7 +705,11 @@ def register(reg) -> None:
     reg.register(
         name="job_kill",
         func=job_kill,
-        description="Terminate a running background job (whole process group; SIGTERM then SIGKILL).",
+        description=(
+            "Terminate a running background job and every process it spawned "
+            "(SIGTERM, then SIGKILL). Reports anything it could not prove "
+            "stopped rather than claiming a clean kill."
+        ),
         parameters={
             "type": "object",
             "properties": {
