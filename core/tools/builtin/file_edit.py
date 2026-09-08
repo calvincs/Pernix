@@ -6,7 +6,7 @@ import difflib
 import logging
 import re
 from pathlib import Path
-from typing import Generator
+from typing import NamedTuple
 
 from config import settings
 from core.tools.atomic import TargetBusy, WriteOutcome, atomic_write, target_lock
@@ -120,71 +120,152 @@ def _normalize_eol(text: str, eol: str) -> str:
 
 # ---------------------------------------------------------------------------
 # Replacer strategies (cascade from most precise to most lenient)
+#
+# Each strategy reports what it found, rather than yielding one candidate at a
+# time. The generators this replaced did loop over their matches when
+# replace_all was set, but every candidate was rebuilt from the untouched
+# original lines, so each one carried exactly one replacement and the cascade
+# took the first — which is how `replace_all=True` migrated one call site of
+# three and reported success (2026-09-08).
 # ---------------------------------------------------------------------------
 
 
-def _exact_replace(content: str, old: str, new: str, replace_all: bool) -> Generator[str, None, None]:
-    """Strategy 1: Direct string match."""
-    if old in content:
-        if replace_all:
-            yield content.replace(old, new)
+class _Attempt(NamedTuple):
+    """What one strategy made of an (old_string, new_string) pair.
+
+    `refusal` is not "no match". It means the strategy found matches it will
+    not choose between, and the cascade must stop: falling through to a more
+    lenient strategy after an ambiguous precise one widens the guess instead
+    of narrowing it.
+    """
+
+    content: str | None = None
+    count: int = 0
+    refusal: str | None = None
+    note: str | None = None
+
+
+_NO_MATCH = _Attempt()
+
+
+class EditResult(NamedTuple):
+    """The cascade's verdict, including the count the caller has to be told."""
+
+    content: str | None
+    strategy: str | None
+    count: int
+    error: str | None = None
+    notes: tuple[str, ...] = ()
+
+
+def _normalize_ws(s: str) -> str:
+    """Collapse runs of spaces and tabs, for whitespace-insensitive matching."""
+    return re.sub(r"[ \t]+", " ", s)
+
+
+def _splice(content_lines: list[str], hits: list[tuple[int, int, list[str]]]) -> str:
+    """Apply (start, span, replacement_lines) hits in one cursor walk.
+
+    Hits arrive sorted and non-overlapping, and the output is built once from
+    a single cursor, so nothing drifts when a replacement is a different
+    length from the block it replaces.
+    """
+    out: list[str] = []
+    cursor = 0
+    for start, span, new_lines in hits:
+        out.extend(content_lines[cursor:start])
+        out.extend(new_lines)
+        cursor = start + span
+    out.extend(content_lines[cursor:])
+    return "\n".join(out)
+
+
+def _resolve(
+    content_lines: list[str],
+    hits: list[tuple[int, int, list[str]]],
+    replace_all: bool,
+    label: str,
+) -> _Attempt:
+    """Turn a line-based strategy's hits into an attempt, refusing to guess."""
+    if not hits:
+        return _NO_MATCH
+    if not replace_all and len(hits) > 1:
+        where = ", ".join(str(h[0] + 1) for h in hits[:6])
+        more = "" if len(hits) <= 6 else f" (and {len(hits) - 6} more)"
+        return _Attempt(
+            refusal=(
+                f"{len(hits)} {label} matches, at lines {where}{more}. These are "
+                f"near-matches, so picking one of them is a guess. Add surrounding "
+                f"context to old_string until only the intended occurrence matches, "
+                f"or pass replace_all=True to change all {len(hits)}."
+            )
+        )
+    return _Attempt(_splice(content_lines, hits), len(hits))
+
+
+def _exact_replace(content: str, old: str, new: str, replace_all: bool) -> _Attempt:
+    """Strategy 1: Direct string match.
+
+    Character-based rather than line-based, and first-match-wins stays the
+    contract when replace_all is off: an exact match is precise, so there is
+    nothing to guess between.
+    """
+    if old not in content:
+        return _NO_MATCH
+    if replace_all:
+        # str.count and str.replace agree on non-overlapping occurrences.
+        return _Attempt(content.replace(old, new), content.count(old))
+    idx = content.index(old)
+    return _Attempt(content[:idx] + new + content[idx + len(old) :], 1)
+
+
+def _whitespace_normalized_starts(content_lines: list[str], old_lines: list[str]) -> list[int]:
+    """Start index of every non-overlapping whitespace-insensitive match."""
+    span = len(old_lines)
+    if span == 0 or span > len(content_lines):
+        return []
+    norm_content = [_normalize_ws(line) for line in content_lines]
+    norm_old = [_normalize_ws(line) for line in old_lines]
+
+    starts: list[int] = []
+    i = 0
+    while i <= len(content_lines) - span:
+        if norm_content[i : i + span] == norm_old:
+            starts.append(i)
+            i += span  # a match consumes its own lines; an overlap is not a match
         else:
-            idx = content.index(old)
-            yield content[:idx] + new + content[idx + len(old) :]
+            i += 1
+    return starts
 
 
-def _whitespace_normalized_replace(content: str, old: str, new: str, replace_all: bool) -> Generator[str, None, None]:
+def _whitespace_normalized_replace(content: str, old: str, new: str, replace_all: bool) -> _Attempt:
     """Strategy 2: Collapse whitespace before matching."""
-
-    def normalize(s: str) -> str:
-        return re.sub(r"[ \t]+", " ", s)
-
-    norm_content = normalize(content)
-    norm_old = normalize(old)
-
-    if norm_old not in norm_content:
-        return
+    if _normalize_ws(old) not in _normalize_ws(content):
+        return _NO_MATCH
 
     content_lines = content.split("\n")
     old_lines = old.split("\n")
-    norm_old_lines = [normalize(l) for l in old_lines]
-
-    for i in range(len(content_lines) - len(old_lines) + 1):
-        chunk = content_lines[i : i + len(old_lines)]
-        norm_chunk = [normalize(l) for l in chunk]
-        if norm_chunk == norm_old_lines:
-            new_lines = new.split("\n")
-            result_lines = content_lines[:i] + new_lines + content_lines[i + len(old_lines) :]
-            yield "\n".join(result_lines)
-            if not replace_all:
-                return
+    new_lines = new.split("\n")
+    hits = [(start, len(old_lines), new_lines) for start in _whitespace_normalized_starts(content_lines, old_lines)]
+    return _resolve(content_lines, hits, replace_all, "whitespace-normalized")
 
 
-def _indentation_flexible_replace(content: str, old: str, new: str, replace_all: bool) -> Generator[str, None, None]:
-    """Strategy 3: Strip common leading indentation, then match."""
-    old_lines = old.split("\n")
-    if not old_lines:
-        return
+def _indentation_flexible_starts(content_lines: list[str], old_lines: list[str]) -> list[tuple[int, int]]:
+    """(start, block indent) for every non-overlapping indentation-shifted match."""
+    span = len(old_lines)
+    if span == 0 or span > len(content_lines):
+        return []
 
-    indents = []
-    for line in old_lines:
-        if line.strip():
-            indents.append(len(line) - len(line.lstrip()))
+    indents = [len(line) - len(line.lstrip()) for line in old_lines if line.strip()]
     if not indents:
-        return
+        return []
     min_indent = min(indents)
+    stripped_old = [line[min_indent:] if line.strip() else "" for line in old_lines]
 
-    stripped_old_lines = []
-    for line in old_lines:
-        if line.strip():
-            stripped_old_lines.append(line[min_indent:])
-        else:
-            stripped_old_lines.append("")
-
-    content_lines = content.split("\n")
-
-    for i in range(len(content_lines) - len(old_lines) + 1):
-        chunk = content_lines[i : i + len(old_lines)]
+    found: list[tuple[int, int]] = []
+    i = 0
+    while i <= len(content_lines) - span:
+        chunk = content_lines[i : i + span]
         chunk_indent = 0
         for line in chunk:
             if line.strip():
@@ -198,41 +279,64 @@ def _indentation_flexible_replace(content: str, old: str, new: str, replace_all:
             else:
                 stripped_chunk.append("")
 
-        if stripped_chunk == stripped_old_lines:
-            new_lines = new.split("\n")
-            new_indents = [len(l) - len(l.lstrip()) for l in new_lines if l.strip()]
-            new_min_indent = min(new_indents) if new_indents else 0
-
-            reindented = []
-            for line in new_lines:
-                if line.strip():
-                    reindented.append(" " * chunk_indent + line[new_min_indent:])
-                else:
-                    reindented.append("")
-
-            result_lines = content_lines[:i] + reindented + content_lines[i + len(old_lines) :]
-            yield "\n".join(result_lines)
-            if not replace_all:
-                return
+        if stripped_chunk == stripped_old:
+            found.append((i, chunk_indent))
+            i += span
+        else:
+            i += 1
+    return found
 
 
-def _block_anchor_replace(content: str, old: str, new: str, replace_all: bool) -> Generator[str, None, None]:
+def _reindent(new_lines: list[str], chunk_indent: int) -> list[str]:
+    """Re-hang the replacement at the indent the matched block was found at."""
+    new_indents = [len(line) - len(line.lstrip()) for line in new_lines if line.strip()]
+    new_min_indent = min(new_indents) if new_indents else 0
+    return [(" " * chunk_indent + line[new_min_indent:]) if line.strip() else "" for line in new_lines]
+
+
+def _indentation_flexible_replace(content: str, old: str, new: str, replace_all: bool) -> _Attempt:
+    """Strategy 3: Strip common leading indentation, then match.
+
+    Each match keeps its own indent, so three copies of a block at three
+    nesting depths all come back at the depth they were found at.
+    """
+    old_lines = old.split("\n")
+    if not old_lines:
+        return _NO_MATCH
+
+    content_lines = content.split("\n")
+    new_lines = new.split("\n")
+    hits = [
+        (start, len(old_lines), _reindent(new_lines, indent))
+        for start, indent in _indentation_flexible_starts(content_lines, old_lines)
+    ]
+    return _resolve(content_lines, hits, replace_all, "indentation-flexible")
+
+
+def _block_anchor_replace(content: str, old: str, new: str, replace_all: bool) -> _Attempt:
     """Strategy 4: Match first+last lines as anchors, fuzzy-match middle.
 
     Requires middle-line similarity >= BLOCK_ANCHOR_MIN_SIMILARITY. Below
-    that threshold the strategy yields nothing rather than risk a silent
+    that threshold the strategy matches nothing rather than risk a silent
     edit to the wrong block.
+
+    Single-match by definition: it anchors on one first/last line pair and
+    scores the middle, so "all the matches" is not a thing it can mean.
+    replace_all does not widen it, and rather than honour the flag in silence
+    the attempt carries a note saying so. Two blocks that score identically
+    are refused — sorting and taking the first is a coin flip dressed up as a
+    match.
     """
     old_lines = old.split("\n")
     if len(old_lines) < 3:
-        return
+        return _NO_MATCH
 
     first_anchor = old_lines[0].strip()
     last_anchor = old_lines[-1].strip()
     middle_old = [l.strip() for l in old_lines[1:-1]]
 
     if not first_anchor or not last_anchor:
-        return
+        return _NO_MATCH
 
     content_lines = content.split("\n")
     candidates: list[tuple[int, int, float]] = []
@@ -263,21 +367,36 @@ def _block_anchor_replace(content: str, old: str, new: str, replace_all: bool) -
 
             candidates.append((i, j, score))
 
-    if not candidates:
-        return
+    viable = [c for c in candidates if c[2] >= BLOCK_ANCHOR_MIN_SIMILARITY]
+    if not viable:
+        return _NO_MATCH
 
-    candidates.sort(key=lambda x: -x[2])
-    best_start, best_end, best_score = candidates[0]
+    viable.sort(key=lambda c: (-c[2], c[0]))
+    best_start, best_end, best_score = viable[0]
 
-    if best_score < BLOCK_ANCHOR_MIN_SIMILARITY:
-        return
+    tied = [c for c in viable[1:] if c[0] != best_start and abs(c[2] - best_score) < 1e-9]
+    if tied:
+        where = ", ".join(str(c[0] + 1) for c in [viable[0], *tied[:5]])
+        return _Attempt(
+            refusal=(
+                f"{1 + len(tied)} blocks match the anchors equally well, at lines {where}. "
+                f"Give old_string a line that only the intended block has — an anchor match "
+                f"scores the middle, so a tie means the two blocks are indistinguishable to it."
+            )
+        )
 
-    new_lines = new.split("\n")
-    result_lines = content_lines[:best_start] + new_lines + content_lines[best_end + 1 :]
-    yield "\n".join(result_lines)
+    result_lines = content_lines[:best_start] + new.split("\n") + content_lines[best_end + 1 :]
+    note = None
+    if replace_all:
+        note = (
+            "[note: block-anchor matched a single block. It anchors on one first/last "
+            "line pair, so replace_all does not widen it — run the edit again if there "
+            "are more blocks to change.]"
+        )
+    return _Attempt("\n".join(result_lines), 1, note=note)
 
 
-# The cascade: try each strategy in order, return first success.
+# The cascade: try each strategy in order, take the first that matched.
 # Named so we can report which strategy fired (exact is silent; fuzzy is annotated).
 REPLACERS = [
     ("exact", _exact_replace),
@@ -287,15 +406,52 @@ REPLACERS = [
 ]
 
 
-def _apply_edit(content: str, old_string: str, new_string: str, replace_all: bool) -> tuple[str | None, str | None]:
-    """Try each replacer strategy in cascade.
+def _variants_left(content: str, old: str) -> list[int]:
+    """1-based lines still holding a near-match of `old` after an exact pass.
 
-    Returns (new_content, strategy_name) or (None, None) if no strategy matched.
+    The fuzzy strategies only run when exact matching finds nothing, so a
+    single byte-identical occurrence is enough to make every whitespace or
+    indentation variant beside it invisible: exact replaces what it matched,
+    the cascade stops, and the migration is half done. Run against the
+    RESULT, not the original, because what matters is what survived.
+    """
+    content_lines = content.split("\n")
+    old_lines = old.split("\n")
+    starts = set(_whitespace_normalized_starts(content_lines, old_lines))
+    starts.update(start for start, _ in _indentation_flexible_starts(content_lines, old_lines))
+    return sorted(start + 1 for start in starts)
+
+
+def _apply_edit(content: str, old_string: str, new_string: str, replace_all: bool) -> EditResult:
+    """Run the cascade, most precise strategy first.
+
+    Returns the first strategy that matched, with the number of replacements
+    it actually made — the count belongs in the caller's result string so a
+    refactor can be compared against what it expected. A strategy that
+    refuses ends the cascade rather than handing the work to a looser one.
     """
     for name, replacer in REPLACERS:
-        for result in replacer(content, old_string, new_string, replace_all):
-            return result, name
-    return None, None
+        attempt = replacer(content, old_string, new_string, replace_all)
+        if attempt.refusal:
+            return EditResult(None, name, 0, attempt.refusal)
+        if attempt.content is None:
+            continue
+
+        notes = [attempt.note] if attempt.note else []
+        if name == "exact" and replace_all:
+            leftover = _variants_left(attempt.content, old_string)
+            if leftover:
+                where = ", ".join(str(n) for n in leftover[:6])
+                more = "" if len(leftover) <= 6 else f" (and {len(leftover) - 6} more)"
+                plural = "es were" if len(leftover) != 1 else " was"
+                notes.append(
+                    f"[warning: {len(leftover)} near-match{plural} NOT changed — line {where}{more}. "
+                    f"An exact match existed, so only exact matches were replaced. Edit those "
+                    f"lines with an old_string that matches them, or check them by hand.]"
+                )
+        return EditResult(attempt.content, name, attempt.count, None, tuple(notes))
+
+    return EditResult(None, None, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +629,15 @@ def _file_edit_locked(
     old_normalized = _normalize_eol(old_string, eol) if eol != "\n" else old_string
     new_normalized = _normalize_eol(new_string, eol) if eol != "\n" else new_string
 
-    result, strategy = _apply_edit(original_normalized, old_normalized, new_normalized, replace_all)
+    edit = _apply_edit(original_normalized, old_normalized, new_normalized, replace_all)
+    strategy = edit.strategy
+    result = edit.content
+
+    if edit.error:
+        return (
+            f"Error: ambiguous {strategy} match in {path} — {edit.error}\n\n"
+            f"Nothing was written; the file is exactly as it was."
+        )
 
     if result is None:
         lines = original_normalized.split("\n")
@@ -504,20 +668,33 @@ def _file_edit_locked(
         return stale
 
     try:
-        outcome = atomic_write(resolved, result)
+        written = atomic_write(resolved, result)
     except Exception as e:
         return f"Error writing file: {e}"
 
     added = sum(1 for l in diff_text.split("\n") if l.startswith("+") and not l.startswith("+++"))
     removed = sum(1 for l in diff_text.split("\n") if l.startswith("-") and not l.startswith("---"))
 
-    logger.info("file_edit path=%s strategy=%s mode=%o +%d/-%d", resolved, strategy, outcome.mode, added, removed)
+    logger.info(
+        "file_edit path=%s strategy=%s replacements=%d mode=%o +%d/-%d",
+        resolved,
+        strategy,
+        edit.count,
+        written.mode,
+        added,
+        removed,
+    )
 
     strategy_note = ""
     if strategy and strategy != "exact":
         strategy_note = f" [fuzzy: {strategy}]"
+    notes = "".join(f"\n{n}" for n in edit.notes)
+    plural = "" if edit.count == 1 else "s"
 
-    return f"Edited {resolved}{strategy_note} (+{added}/-{removed} lines){_mode_note(outcome)}\n\n{diff_text}"
+    return (
+        f"Edited {resolved}{strategy_note} ({edit.count} replacement{plural}, "
+        f"+{added}/-{removed} lines){notes}{_mode_note(written)}\n\n{diff_text}"
+    )
 
 
 def multiedit(path: str, edits: list[dict]) -> str:
@@ -569,12 +746,14 @@ def _multiedit_locked(resolved: Path, path: str, edits: list[dict]) -> str:
 
     original = content
     applied = 0
+    replacements = 0
     strategies: list[str] = []
+    notes: list[str] = []
 
-    for i, edit in enumerate(edits):
-        old_str = edit.get("old_string", "")
-        new_str = edit.get("new_string", "")
-        replace_all = edit.get("replace_all", False)
+    for i, spec in enumerate(edits):
+        old_str = spec.get("old_string", "")
+        new_str = spec.get("new_string", "")
+        replace_all = spec.get("replace_all", False)
 
         if old_str == new_str:
             continue
@@ -583,18 +762,25 @@ def _multiedit_locked(resolved: Path, path: str, edits: list[dict]) -> str:
             old_str = _normalize_eol(old_str, eol)
             new_str = _normalize_eol(new_str, eol)
 
-        result, strategy = _apply_edit(content, old_str, new_str, replace_all)
-        if result is None:
+        edit = _apply_edit(content, old_str, new_str, replace_all)
+        if edit.error:
+            return (
+                f"Error: Edit {i + 1} refused — ambiguous {edit.strategy} match: {edit.error} "
+                f"{applied}/{len(edits)} edits matched in memory; aborted, no file changes written."
+            )
+        if edit.content is None:
             return (
                 f"Error: Edit {i + 1} failed — old_string not found. "
                 f"{applied}/{len(edits)} edits matched in memory; aborted, no file changes written.\n\n"
                 f"The file may have changed since you last read it. "
                 f"Call file_read(path='{path}') to see the current content before retrying."
             )
-        content = result
+        content = edit.content
         applied += 1
-        if strategy:
-            strategies.append(strategy)
+        replacements += edit.count
+        if edit.strategy:
+            strategies.append(edit.strategy)
+        notes.extend(f"[edit {i + 1}] {n}" for n in edit.notes)
 
     if content == original:
         return "No changes made (all edits were no-ops)."
@@ -610,7 +796,7 @@ def _multiedit_locked(resolved: Path, path: str, edits: list[dict]) -> str:
         return stale
 
     try:
-        outcome = atomic_write(resolved, final)
+        written = atomic_write(resolved, final)
     except Exception as e:
         return f"Error writing file: {e}"
 
@@ -619,21 +805,24 @@ def _multiedit_locked(resolved: Path, path: str, edits: list[dict]) -> str:
     removed = sum(1 for l in diff_text.split("\n") if l.startswith("-") and not l.startswith("---"))
 
     logger.info(
-        "multiedit path=%s edits=%d strategies=%s mode=%o +%d/-%d",
+        "multiedit path=%s edits=%d replacements=%d strategies=%s mode=%o +%d/-%d",
         resolved,
         applied,
+        replacements,
         ",".join(strategies) or "-",
-        outcome.mode,
+        written.mode,
         added,
         removed,
     )
 
     fuzzy_used = [s for s in strategies if s != "exact"]
     strategy_note = f" [fuzzy: {','.join(sorted(set(fuzzy_used)))}]" if fuzzy_used else ""
+    plural = "" if replacements == 1 else "s"
+    note_text = "".join(f"\n{n}" for n in notes)
 
     return (
-        f"Applied {applied}/{len(edits)} edits to {path}{strategy_note}: "
-        f"+{added}/-{removed} lines{_mode_note(outcome)}\n\n{diff_text}"
+        f"Applied {applied}/{len(edits)} edits ({replacements} replacement{plural}) "
+        f"to {path}{strategy_note}: +{added}/-{removed} lines{note_text}{_mode_note(written)}\n\n{diff_text}"
     )
 
 
@@ -650,7 +839,10 @@ def register(reg) -> None:
         description=(
             "Edit a file by finding and replacing text. More efficient than file_write for small changes — "
             "only specify the text to find and its replacement. Uses fuzzy matching to handle whitespace "
-            "and indentation differences. Returns a unified diff of the change. "
+            "and indentation differences. Returns the number of replacements made and a unified diff. "
+            "Compare that count against what you expected. When a fuzzy match is ambiguous — several "
+            "near-matches and replace_all off, or two blocks the anchors cannot tell apart — the edit is "
+            "refused and the file left alone; add context to old_string or set replace_all. "
             "Idempotent: if old_string == new_string the call is a no-op success, not an error."
         ),
         parameters={
@@ -659,7 +851,13 @@ def register(reg) -> None:
                 "path": {"type": "string", "description": "Relative path within workspace"},
                 "old_string": {"type": "string", "description": "Text to find in the file (exact or fuzzy match)"},
                 "new_string": {"type": "string", "description": "Text to replace it with"},
-                "replace_all": {"type": "boolean", "description": "Replace all occurrences. Default: false"},
+                "replace_all": {
+                    "type": "boolean",
+                    "description": (
+                        "Replace every non-overlapping occurrence, fuzzy matches included. "
+                        "The result says how many. Default: false"
+                    ),
+                },
             },
             "required": ["path", "old_string", "new_string"],
         },
