@@ -310,16 +310,17 @@ async def cancel_session(session_id: str):
         worker = manager.get(wid)
         if worker:
             worker.cancel_requested = True
-            worker.pending_messages.clear()
+            manager.drop_pending_for_cancel(worker)
             if worker.task and not worker.task.done():
                 worker.task.cancel()
 
-    # 3. Clear pending message queue (prevent re-processing after cancel).
+    # 3. Clear pending message queue (prevent re-processing after cancel) and
+    # stamp the dropped rows so the next prompt's orphan sweep doesn't put the
+    # cancelled work back — the manager's own cancel path shares that helper.
     # Record the dropped count as a transcript-visible notice so readers can
     # tell the queue was abandoned (not silently lost). The "notice" role is
     # filtered from LLM context by core/context/compiler.py.
-    dropped = len(session.pending_messages)
-    session.pending_messages.clear()
+    dropped = manager.drop_pending_for_cancel(session)
     if dropped > 0:
         try:
             db.add_message(

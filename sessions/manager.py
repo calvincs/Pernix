@@ -837,7 +837,7 @@ class SessionManager:
         Returns True when a running task was cancelled.
         """
         session.cancel_requested = True
-        session.pending_messages.clear()
+        self.drop_pending_for_cancel(session)
         kill_session_processes(session)
         if cascade:
             for wid in list(getattr(session, "worker_ids", []) or []):
@@ -848,6 +848,52 @@ class SessionManager:
             session.task.cancel()
             return True
         return False
+
+    def drop_pending_for_cancel(self, session: AgentSession) -> int:
+        """Empty the queue and record, in the DB, that a cancel dropped it.
+
+        Returns the number of queued messages dropped, for the caller's notice.
+
+        Clearing pending_messages only retires the in-memory copy. The rows are
+        still in the transcript, unanswered, so the next prompt()'s Window B
+        sweep read them as work a restart had lost and dispatched them — the
+        user's cancelled operation ran anyway, ahead of the unrelated request
+        that triggered the sweep. The stamp gives them a disposition orphan
+        recovery can see; the text stays, so the transcript still shows what
+        was asked and that it was stopped.
+
+        The running turn's own user row goes too, when nothing has answered it
+        yet. That is the worse half of the same bug: cancel during scout or the
+        first stream leaves a user row with no assistant row behind it, which is
+        precisely the orphan shape, so the cancelled prompt itself came back.
+        Once any assistant row exists the turn is on the record as having
+        started, the sequence no longer reads as orphaned, and we leave it be.
+
+        Both cancel paths (this manager's cancel_session and the /cancel route)
+        call this, so neither can drift from the other again.
+        """
+        # Synthetic entries (worker resume, worker timeout) carry no row, and
+        # neither does anything in the deque that isn't a PendingMessage at
+        # all; one odd entry must not cost the caller its cancel.
+        dropped_ids: list[int] = []
+        for raw in session.pending_messages:
+            try:
+                entry = PendingMessage.coerce(raw)
+            except Exception:
+                continue
+            if entry.msg_id is not None:
+                dropped_ids.append(entry.msg_id)
+        dropped = len(session.pending_messages)
+        session.pending_messages.clear()
+        running = session.current_turn_user_msg_id
+        try:
+            if running is not None and not db.turn_has_assistant_row(session.session_id, running):
+                dropped_ids.append(running)
+            if dropped_ids:
+                db.mark_messages_cancelled(dropped_ids)
+        except Exception as e:
+            logger.warning("Cancel stamp failed for %s: %s", session.session_id[:12], e)
+        return dropped
 
     def delete_session(self, session_id: str) -> None:
         """Delete session from both memory and DB (cascades workers).
