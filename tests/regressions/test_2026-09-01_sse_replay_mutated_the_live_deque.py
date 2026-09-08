@@ -8,6 +8,12 @@ generator, the agent appended, and the next iteration raised
 EventSource retried, and the same reconnect failed again.
 
 The existing test only passed last_event_id=0, which skips the branch.
+
+2026-09-08 (audit 3.2.2 / S02): a replay now opens with one `stream.resume`
+control frame stating what it actually replayed, so the client can tell a
+clean resume from a server restart or an expired buffer. It is the first
+frame and carries no event id; the assertions below skip past it. The
+snapshot-before-yield guard this file exists for is unchanged.
 """
 
 from api.streaming import event_stream
@@ -24,6 +30,8 @@ async def test_replay_survives_an_append_between_yields():
     _seed(session, 50)
 
     gen = event_stream(session, last_event_id=10)
+    resume = await gen.__anext__()
+    assert "event: stream.resume" in resume
     first = await gen.__anext__()
     assert "tok11" in first
 
@@ -45,6 +53,7 @@ async def test_replay_sends_only_events_after_the_last_seen_id():
     session = AgentSession(session_id="s-window")
     _seed(session, 5)
     gen = event_stream(session, last_event_id=3)
+    assert "event: stream.resume" in await gen.__anext__()
     out = [await gen.__anext__() for _ in range(2)]
     await gen.aclose()
     assert "tok4" in out[0] and "tok5" in out[1]

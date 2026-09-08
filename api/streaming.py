@@ -65,13 +65,34 @@ def sse_response(generator) -> StreamingResponse:
     )
 
 
-async def event_stream(session: AgentSession, last_event_id: int = 0):
+async def event_stream(session: AgentSession, last_event_id: int | None = None):
     """Persistent event stream for GET /sessions/{id}/events.
 
     Stays open across turns. Does NOT break on done/error.
     Sends heartbeat after 30s of silence.
     Supports Last-Event-ID reconnection.
     Exits cleanly on server shutdown via shutdown event.
+
+    `last_event_id` is three-valued, and the three are NOT interchangeable:
+
+      None  no replay requested. The caller holds no boundary it trusts, so
+            it is asking to be joined to the live stream and nothing else.
+      0     cursor zero: "I have seen nothing, send everything still
+            retained". Answerable only while the buffer still holds the very
+            first event — otherwise the reply is a partial history that looks
+            complete, which is the failure this signalling exists to name.
+      N     everything after N.
+
+    Collapsing None and 0 into a single int (what the old signature did) is
+    what left an initial connection with no way to ask for replay at all: the
+    client had a boundary from /status, passed it, and the server read the
+    absent-cursor default as "nothing to replay" and skipped the branch.
+
+    Whenever a cursor IS supplied the stream opens with a `stream.resume`
+    control frame stating what was actually replayed, so the client can tell
+    a clean resume from a server restart (server_seq below the cursor) and
+    from an expired buffer (complete=false) instead of assuming continuity it
+    does not have.
     """
     queue = session.subscribe()
     shutdown = get_shutdown_event()
@@ -86,9 +107,36 @@ async def event_stream(session: AgentSession, last_event_id: int = 0):
         # back to the loop mid-iteration and the next step raised
         # "RuntimeError: deque mutated during iteration". The stream died,
         # EventSource retried, and the same reconnect failed again.
-        if last_event_id > 0:
+        if last_event_id is not None:
             with session._event_lock:
+                oldest_retained = session.events[0].get("_seq", 0) if session.events else 0
+                server_seq = session.event_seq
                 backlog = [e for e in session.events if e.get("_seq", 0) > last_event_id]
+            # Sequence numbers start at 1, so 0 here is the empty-ring
+            # sentinel, not a real event: either nothing was ever emitted, or
+            # the session was reaped from memory and rebuilt with a fresh
+            # buffer. Only the first of those is a complete answer to a cursor.
+            if oldest_retained == 0:
+                complete = server_seq <= last_event_id
+            else:
+                # The ring still reaches back to (or past) the event right
+                # after the cursor, so the backlog is the whole gap.
+                complete = oldest_retained <= last_event_id + 1
+            yield sse_event(
+                "stream.resume",
+                {
+                    # Restated in the payload as well as the SSE event name so
+                    # the backend↔frontend listener audit
+                    # (tests/test_sse_event_sync.py) can see this emitter.
+                    "type": "stream.resume",
+                    "session_id": session.session_id,
+                    "from_seq": last_event_id,
+                    "replayed": len(backlog),
+                    "oldest_retained": oldest_retained,
+                    "server_seq": server_seq,
+                    "complete": complete,
+                },
+            )
             for event in backlog:
                 yield sse_event(event.get("type", "message"), _clean_event(event), event_id=event.get("_seq", 0))
             if backlog:

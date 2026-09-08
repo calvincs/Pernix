@@ -14,6 +14,20 @@ let _healthTimer = null;
 // `Last-Event-ID` is unreachable for JS-driven reconnects.
 let _lastSeq = 0;
 
+// Monotonic connection generation. Session-id equality alone cannot answer
+// "does this late result still belong to the live stream?" — A → B → A puts
+// the same id back on screen behind a *different* connection, and a probe
+// issued for the first A passes an id check while owning nothing. Every
+// EventSource this module opens is stamped with the generation that created
+// it, and every recovery request re-checks BOTH the generation and the source
+// it owns after each await, before disconnecting, rebuilding, moving the
+// cursor or announcing a deletion.
+let _connGen = 0;
+// Aborts in-flight recovery fetches whose connection has gone away. Abort
+// races resolution, so it is an optimisation on top of the generation check,
+// never a replacement for it.
+let _recoveryAbort = null;
+
 // Single source of truth for every event type the server may emit on the
 // per-session SSE stream. EventSource only dispatches to listeners registered
 // by exact `event:` name — the API has no wildcard listener, so the client
@@ -29,6 +43,9 @@ let _lastSeq = 0;
 const EVENT_TYPES = [
     // Stream lifecycle
     'stream.token', 'stream.done', 'stream.error',
+    // Replay control frame: the server's answer to a cursor, carrying whether
+    // the replay it just performed was complete (see api/streaming.py).
+    'stream.resume',
     'stream.fallback', 'stream.retry', 'stream.reset', 'stream.length_continuation',
     'stream.budget_exhausted',
     // Tools / context / scout
@@ -95,7 +112,13 @@ window.addEventListener('pernix:offline', () => {
 window.addEventListener('pernix:online', () => {
     if (_sessionId && _onEvent && !_source) {
         const handler = _onEvent;
-        connectSSE(_sessionId, handler);
+        // The offline handler closed the socket without calling
+        // disconnectSSE(), so _lastSeq still names the last event we saw:
+        // hand it back as a replay cursor instead of silently starting a new
+        // stream from "now" and losing whatever arrived while we were away.
+        const cursor = _lastSeq > 0 ? _lastSeq : null;
+        const sid = _sessionId;
+        connectSSE(sid, handler, { cursor });
         // connectSSE opens a brand-new source, so its own "first open" is
         // not a reconnect from EventSource's point of view — but it is one
         // for us: we were disconnected and may have missed a whole turn.
@@ -150,17 +173,40 @@ function _attachListeners(source, handler) {
 
 let _consecutiveErrors = 0;
 
-export function connectSSE(sessionId, onEvent) {
-    disconnectSSE();
-    _onEvent = onEvent;
-    _sessionId = sessionId;
-    if (!isOnline()) return;
-    _lastEventTime = Date.now();
-    _consecutiveErrors = 0;
-    _source = new EventSource(`/api/sessions/${sessionId}/events`);
+/**
+ * The replay cursor, as it appears on the wire. Three requests, deliberately
+ * distinguishable by the server (api/streaming.event_stream):
+ *
+ *   (no parameter)     no replay requested — the caller holds no boundary it
+ *                      trusts, so asking for one would be a guess
+ *   last_event_id=0    cursor zero — "I have seen nothing; send everything
+ *                      you still retain", which the server can answer only if
+ *                      its buffer has not evicted the beginning
+ *   last_event_id=N    everything after N
+ *
+ * Collapsing the first two (what the old code did by defaulting to "0") is
+ * what made an initial connection un-replayable: the server saw a cursor of
+ * zero, read it as "nothing to replay", and skipped the branch entirely.
+ */
+function _cursorQuery(cursor) {
+    if (cursor == null || !Number.isFinite(cursor) || cursor < 0) return '';
+    return `?last_event_id=${Math.floor(cursor)}`;
+}
 
-    let _opened = false;
-    _source.onopen = () => {
+/**
+ * Wire up one EventSource. Shared by the initial connect and the watchdog's
+ * rebuild so both get the SAME recovery behaviour: the watchdog used to
+ * install a bare onerror that neither counted consecutive failures nor probed
+ * for a deleted session, so after any watchdog-driven reconnect the dot could
+ * spin on "reconnecting" forever with no probe ever fired.
+ *
+ * `gen` and `source` together are the ownership token: a handler that fires
+ * for a connection the module has already replaced does nothing.
+ */
+function _installHandlers(source, gen, handler, { announceFirstOpen = false } = {}) {
+    let opened = false;
+    source.onopen = () => {
+        if (gen !== _connGen || source !== _source) { try { source.close(); } catch { /* already closed */ } return; }
         _connectionState = 'connected';
         _lastEventTime = Date.now();
         _consecutiveErrors = 0;
@@ -172,11 +218,12 @@ export function connectSSE(sessionId, onEvent) {
         // server restart or an offline→online bounce left the app with a
         // stale event cursor: every post-restart event failed the dedup and
         // the stop button never cleared.
-        if (_opened) onEvent({ type: 'sse.reconnected' });
-        _opened = true;
+        if (opened || announceFirstOpen) handler({ type: 'sse.reconnected' });
+        opened = true;
     };
 
-    _source.onerror = () => {
+    source.onerror = () => {
+        if (gen !== _connGen || source !== _source) return;
         _connectionState = 'reconnecting';
         _updateHealthIndicator('reconnecting');
         console.warn('SSE error, reconnecting...');
@@ -185,34 +232,69 @@ export function connectSSE(sessionId, onEvent) {
         // on "reconnecting" forever. After a few consecutive failures, probe
         // the status endpoint and stop for good if the session is gone.
         _consecutiveErrors++;
-        if (_consecutiveErrors === 3) _probeSessionExists();
+        if (_consecutiveErrors === 3) _probeSessionExists(gen, source);
     };
 
-    _attachListeners(_source, onEvent);
+    _attachListeners(source, handler);
+}
+
+export function connectSSE(sessionId, onEvent, { cursor = null } = {}) {
+    disconnectSSE();
+    const gen = ++_connGen;
+    _onEvent = onEvent;
+    _sessionId = sessionId;
+    if (!isOnline()) return;
+    _lastEventTime = Date.now();
+    _consecutiveErrors = 0;
+    _recoveryAbort = new AbortController();
+    // Seed the watchdog's cursor from the caller's boundary. It used to start
+    // at 0 on every connect, which is why _checkStale could not compare it
+    // against the server's counter until a live event happened to arrive —
+    // a silently dead stream on a quiet session looked exactly like a healthy
+    // one. Starting from the boundary the snapshot was taken at makes the
+    // comparison meaningful from the first health tick.
+    _lastSeq = (cursor != null && Number.isFinite(cursor) && cursor > 0) ? Math.floor(cursor) : 0;
+    _source = new EventSource(`/api/sessions/${sessionId}/events${_cursorQuery(cursor)}`);
+    _installHandlers(_source, gen, onEvent);
 
     // Start health monitoring
     _startHealthCheck();
 }
 
-async function _probeSessionExists() {
+async function _probeSessionExists(gen, source) {
     const sid = _sessionId;
     const handler = _onEvent;
+    const signal = _recoveryAbort ? _recoveryAbort.signal : undefined;
     if (!sid) return;
+    let resp;
     try {
         // The probe carries the header, not just the cookie: a client whose
         // cookie is blocked (cross-site, third-party cookie policy, a private
         // window) got a 401 here, read it as "not a 404, keep trying", and the
         // dot span on "reconnecting" forever with no diagnosis.
-        const resp = await fetch(`/api/sessions/${sid}/status`, { headers: authHeaders() });
-        if (resp.status === 404) {
-            console.warn(`SSE: session ${sid} no longer exists — stopping reconnect attempts`);
-            disconnectSSE();
-            if (handler) handler({ type: 'sse.session_gone', session_id: sid });
-        }
-    } catch { /* network issue — keep retrying as before */ }
+        resp = await fetch(`/api/sessions/${sid}/status`, { headers: authHeaders(), signal });
+    } catch { return; /* network issue (or aborted) — keep retrying as before */ }
+    // Ownership, re-checked after the await. A 404 for a session the user has
+    // already left used to call the GLOBAL disconnectSSE(), closing whatever
+    // stream was live by then — and the sse.session_gone that followed was
+    // stamped with the OLD session id, so the app dropped it as foreign. The
+    // newly selected session was left with no source, no health timer and no
+    // explanation, and nothing ever reconnected it.
+    if (gen !== _connGen || source !== _source) return;
+    if (resp.status !== 404) return;
+    console.warn(`SSE: session ${sid} no longer exists — stopping reconnect attempts`);
+    disconnectSSE();
+    if (handler) handler({ type: 'sse.session_gone', session_id: sid });
 }
 
 export function disconnectSSE() {
+    // Orphan every recovery request already in flight before anything else:
+    // whatever they resolve to, they no longer own the connection.
+    _connGen++;
+    if (_recoveryAbort) {
+        try { _recoveryAbort.abort(); } catch { /* nothing in flight */ }
+        _recoveryAbort = null;
+    }
     if (_source) {
         _source.close();
         _source = null;
@@ -251,6 +333,16 @@ async function _checkStale() {
     const elapsed = Date.now() - _lastEventTime;
     if (elapsed <= STALE_THRESHOLD) return;
 
+    // Everything this function may act on is captured BEFORE the await, and
+    // re-checked after it. Reading _sessionId again on the far side is how a
+    // probe started for A ended up rebuilding B's connection, telling B it had
+    // been deleted, and flipping a healthy stream to "reconnecting".
+    const gen = _connGen;
+    const source = _source;
+    const sid = _sessionId;
+    const handler = _onEvent;
+    const signal = _recoveryAbort ? _recoveryAbort.signal : undefined;
+
     // Silence alone is not evidence of a dead stream — most sessions spend
     // most of their time idle. Blindly reconnecting here tore down and rebuilt
     // a perfectly healthy connection every 45s for any open-but-idle session,
@@ -260,12 +352,11 @@ async function _checkStale() {
     _staleProbeInFlight = true;
     let behind;
     try {
-        const resp = await fetch(`/api/sessions/${_sessionId}/status`, { headers: authHeaders() });
+        const resp = await fetch(`/api/sessions/${sid}/status`, { headers: authHeaders(), signal });
+        if (gen !== _connGen || source !== _source) return;
         if (resp.status === 404) {
             // Session deleted elsewhere — same terminal case _probeSessionExists
             // handles for hard errors. Stop pretending it might come back.
-            const sid = _sessionId;
-            const handler = _onEvent;
             console.warn(`SSE: session ${sid} no longer exists — stopping reconnect attempts`);
             disconnectSSE();
             if (handler) handler({ type: 'sse.session_gone', session_id: sid });
@@ -273,11 +364,12 @@ async function _checkStale() {
         }
         if (!resp.ok) throw new Error(String(resp.status));
         const status = await resp.json();
-        // _lastSeq is 0 until a live event arrives on THIS connection, so it
-        // cannot be compared against the server's counter yet — a session with
-        // history would always look "behind" and reconnect forever. Nothing has
-        // been received, so nothing has been missed; app.js's own reconciler
-        // owns the "transcript is behind the server" case.
+        if (gen !== _connGen || source !== _source) return;
+        // _lastSeq is seeded from the boundary the caller connected at, so it
+        // can be compared against the server's counter from the first tick.
+        // It is still 0 for a connection made with no cursor at all — nothing
+        // has been received, so nothing has been missed, and app.js's own
+        // reconciler owns the "transcript is behind the server" case.
         behind = _lastSeq > 0 && (status.event_seq || 0) > _lastSeq;
     } catch {
         // Server unreachable or the probe failed — treat as a dead stream and
@@ -287,6 +379,9 @@ async function _checkStale() {
         _staleProbeInFlight = false;
     }
 
+    // The catch path skips the checks above, and a rejection is exactly when
+    // the connection is most likely to have been replaced under us.
+    if (gen !== _connGen || source !== _source) return;
     if (!_source) return;  // disconnected while the probe was in flight
 
     if (!behind) {
@@ -305,27 +400,18 @@ async function _checkStale() {
     // Close and reopen. Pass last seen seq as a query param so the
     // server replays anything we missed — EventSource won't let us
     // set the Last-Event-ID header on a JS-instantiated reconnect.
-    const sid = _sessionId;
-    const handler = _onEvent;
-    _source.close();
-    const replayQuery = _lastSeq > 0 ? `?last_event_id=${_lastSeq}` : '';
-    _source = new EventSource(`/api/sessions/${sid}/events${replayQuery}`);
+    const rebuildGen = ++_connGen;
+    source.close();
+    _consecutiveErrors = 0;
+    if (_recoveryAbort) {
+        try { _recoveryAbort.abort(); } catch { /* nothing in flight */ }
+    }
+    _recoveryAbort = new AbortController();
+    _source = new EventSource(`/api/sessions/${sid}/events${_cursorQuery(_lastSeq > 0 ? _lastSeq : null)}`);
     _lastEventTime = Date.now();
-
-    _source.onopen = () => {
-        _connectionState = 'connected';
-        _lastEventTime = Date.now();
-        _updateHealthIndicator('connected');
-        console.debug('SSE reconnected');
-        // Notify app to check session status (button state recovery)
-        handler({ type: 'sse.reconnected' });
-    };
-    _source.onerror = () => {
-        _connectionState = 'reconnecting';
-        _updateHealthIndicator('reconnecting');
-    };
-
-    _attachListeners(_source, handler);
+    // The SAME handlers as a fresh connect, so error counting and
+    // deleted-session probing survive the rebuild.
+    _installHandlers(_source, rebuildGen, handler, { announceFirstOpen: true });
 }
 
 // A brief reconnect is normal and not worth interrupting anyone over; a long
