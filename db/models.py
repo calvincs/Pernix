@@ -1767,6 +1767,26 @@ def turn_has_final_answer(session_id: str, user_msg_id: int) -> bool:
         return row is not None
 
 
+def turn_has_assistant_row(session_id: str, user_msg_id: int) -> bool:
+    """True if any assistant row was written after `user_msg_id`.
+
+    The exact condition get_orphaned_user_messages walks the sequence for, asked
+    about one message: a user row with an assistant row behind it is answered
+    work, one without is an orphan. Weaker than turn_has_final_answer, which
+    wants a *text* answer tagged to this turn — a mid-round tool_calls row
+    satisfies this and not that, which is the right split for cancellation:
+    once the turn has said anything at all, recovery leaves it alone.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT 1 FROM messages
+               WHERE session_id = ? AND role = 'assistant' AND id > ?
+               LIMIT 1""",
+            (session_id, int(user_msg_id)),
+        ).fetchone()
+        return row is not None
+
+
 def get_orphaned_user_messages(session_id: str) -> list[dict]:
     """Return user messages that have no subsequent assistant response.
 
@@ -1778,6 +1798,10 @@ def get_orphaned_user_messages(session_id: str) -> list[dict]:
 
     Injected user messages (metadata.injected=true) are skipped because they
     were inserted for mid-turn context, not as new conversation turns.
+
+    Cancelled user messages (metadata.cancelled=true, stamped by
+    mark_messages_cancelled) are skipped too: they were dropped on purpose,
+    and recovery exists for work the harness lost, not work the user stopped.
     """
     import json as _json
 
@@ -1794,7 +1818,7 @@ def get_orphaned_user_messages(session_id: str) -> list[dict]:
         if role == "user":
             try:
                 meta = _json.loads(m.get("metadata") or "{}")
-                if meta.get("injected"):
+                if meta.get("injected") or meta.get("cancelled"):
                     continue
             except Exception:
                 pass
@@ -1806,6 +1830,40 @@ def get_orphaned_user_messages(session_id: str) -> list[dict]:
     if pending_user is not None:
         orphans.append(pending_user)
     return orphans
+
+
+def mark_messages_cancelled(message_ids: list[int]) -> int:
+    """Stamp metadata.cancelled=true on each message. Returns rows changed.
+
+    The stamp is the durable record that a message was dropped by a cancel
+    rather than lost — orphan recovery reads it, and the transcript keeps the
+    text either way. Merges into whatever metadata the row already carries
+    (parent_user_msg_id, injected, model/cost stamps) instead of replacing it;
+    a row whose metadata is NULL or unparseable starts from an empty object,
+    which is the same thing every reader of this column already assumes.
+    """
+    if not message_ids:
+        return 0
+    import json as _json
+
+    changed = 0
+    with connect_sessions() as conn:
+        for mid in message_ids:
+            row = conn.execute("SELECT metadata FROM messages WHERE id = ?", (int(mid),)).fetchone()
+            if row is None:
+                continue
+            try:
+                meta = _json.loads(row["metadata"] or "{}")
+            except Exception:
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            if meta.get("cancelled"):
+                continue
+            meta["cancelled"] = True
+            conn.execute("UPDATE messages SET metadata = ? WHERE id = ?", (_json.dumps(meta), int(mid)))
+            changed += 1
+    return changed
 
 
 def delete_message(message_id: int) -> None:
