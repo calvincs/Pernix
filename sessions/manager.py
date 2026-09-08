@@ -1096,6 +1096,13 @@ class SessionManager:
                     if existing is not None and self._can_absorb_rapid_fire(session, target_id):
                         combined = _combine_rapid_fire(existing.get("content", "") or "", message)
                         db.update_message_content(target_id, combined)
+                        if target_id == session.current_turn_user_msg_id:
+                            # Under the session lock, so the agent either
+                            # compiled before this bump or sees it. The loop
+                            # re-reads the row each tool round; the version is
+                            # what tells a turn already writing its final
+                            # answer that the row moved beneath it.
+                            session.turn.user_row_version += 1
                         session.last_user_msg_at = now
                         # If the target is a queued entry (not the running one),
                         # update its in-memory tuple too so the agent runs with

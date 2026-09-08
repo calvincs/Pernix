@@ -135,6 +135,15 @@ class TurnState:
     # core.telos.anomaly.on_post_task per-turn dedup marker.
     telos_turn_traced: Any = None
 
+    # --- Late edits to this turn's user row ---
+    # Bumped by the manager's rapid-fire combiner every time it rewrites the
+    # running turn's user message in place. The agent loop re-reads that row
+    # when it compiles a round, so a combine mid-loop is picked up for free —
+    # but a text-only final answer needs no further round, and the appended
+    # text was read by nobody. Comparing this against the version the agent
+    # last compiled is how that case is caught.
+    user_row_version: int = 0
+
 
 def turn_state(session_obj) -> TurnState:
     """Read a session-like object's TurnState, tolerating objects that have none.

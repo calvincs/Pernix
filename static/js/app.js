@@ -4064,6 +4064,13 @@ function handleEvent(event) {
         appendMessage('system', `⟳ Forced follow-up ${event.attempt}/${event.max} — the agent announced more work but stopped; the harness told it to continue.`);
     }
 
+    else if (type === 'turn.late_correction') {
+        // A rapid-fire message was folded into the running turn after its
+        // final request was already compiled. The harness runs one more pass
+        // so the answer above does not silently ignore the correction.
+        appendMessage('system', '⟳ Late correction — your follow-up arrived after the answer was drafted; the agent is reading it now.');
+    }
+
     else if (type === 'tool.call.intercepted') {
         // Gate-level corrections. Rejections already surface as error rows on
         // tool.call; alias rewrites are worth a visible line so users learn

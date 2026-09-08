@@ -80,6 +80,8 @@ const EVENT_TYPES = [
     'turn.complete',
     // Forced follow-up (harness kept an idling agent working in-turn)
     'turn.forced_followup', 'turn.forced_followup_outcome',
+    // Late correction (a rapid-fire edit landed after the answer was compiled)
+    'turn.late_correction',
 ];
 
 window.addEventListener('pernix:offline', () => {
