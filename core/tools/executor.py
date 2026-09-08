@@ -196,6 +196,14 @@ def _resolve_timeout(tool, arguments: dict | None) -> int:
     `max_timeout` at registration; otherwise asyncio.wait_for below caps the
     call at the tool's default and the caller's override does nothing at all.
 
+    The same agreement runs the other way for a tool with an internal deadline
+    of its own: whatever it registers is what this function enforces, so a
+    registration SMALLER than the tool's own budget means dispatch gives up on
+    work the tool was still authorised to do. http_get registered 15 against a
+    60s whole-exchange deadline and lost valid 25-second fetches at 20s, with
+    the pool thread finishing them for nobody. Tools with an internal deadline
+    derive their registered timeout from it rather than typing it twice.
+
     The grace is added on EVERY path, not just the caller-override one. A
     default `bash` call gives dispatch and the tool the same budget
     (shell_timeout), but the dispatch clock starts before setup the tool does
@@ -539,6 +547,13 @@ async def _execute_single(
     timeout = _resolve_timeout(tool, arguments)
     start = time.monotonic()
     call_id = f"{name}@{next(_call_id_counter)}"
+    # Cooperative cancellation for tools with nothing to kill. _kill_tool_
+    # subprocess is the only lever this module has once a worker thread is
+    # inside a tool, and it does nothing at all for pure-Python work: an
+    # http_get whose dispatch timed out kept fetching, holding a pool slot and
+    # an open socket, long after the model was told the call had ended. Tools
+    # that can unwind read this flag at their own safe points.
+    cancel_event = threading.Event()
     try:
         # Capture the running event loop so tools on worker threads can
         # schedule coroutines back onto it via run_coroutine_threadsafe().
@@ -548,6 +563,7 @@ async def _execute_single(
         # Identifies this dispatch to any subprocess the tool registers, so a
         # timeout kills this call's children and nobody else's.
         ctx["_call_id"] = call_id
+        ctx["_cancel_event"] = cancel_event
         if workspace_override:
             ctx["workspace_override"] = workspace_override
         if workspace_home:
@@ -598,6 +614,7 @@ async def _execute_single(
             # it at the pool thread even when fut.cancel() loses the race to
             # a dequeue.
             gate.cancel()
+            cancel_event.set()
             fut.cancel()
             latency = int((time.monotonic() - start) * 1000)
             registry.metrics[name].record_timeout(latency)
@@ -682,7 +699,9 @@ async def _execute_single(
         _credit_long_call(context, latency)
         # The worker thread is still blocked in the tool and cannot be
         # cancelled. Kill any subprocess it spawned so it unwinds instead of
-        # holding a tool-executor thread for the child's full runtime.
+        # holding a tool-executor thread for the child's full runtime, and
+        # raise the cooperative flag for tools with no subprocess to kill.
+        cancel_event.set()
         _kill_tool_subprocess(context, call_id)
         return ToolExecutionResult(
             tool_name=name,
@@ -702,6 +721,7 @@ async def _execute_single(
         # queued. Only if the tool really was already running is there a
         # child to kill or anything to record against the tool.
         was_running = gate.cancel()
+        cancel_event.set()
         fut.cancel()
         if was_running:
             registry.metrics[name].record_failure("cancelled", latency)

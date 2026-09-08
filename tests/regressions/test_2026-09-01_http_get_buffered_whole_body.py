@@ -8,6 +8,9 @@ server dripping a byte at a time held a tool-executor thread forever.
 http_get now streams, stops at the cap, refuses an oversize
 Content-Length or a non-text Content-Type up front, and bounds the whole
 exchange with a wall-clock deadline.
+
+2026-09-08 (H17): it also returns (text, status) rather than a bare string,
+so why a fetch ended is a field and not a sentence to be pattern-matched.
 """
 
 import pytest
@@ -50,7 +53,7 @@ def _client_returning(resp):
         def __exit__(self, *a):
             return False
 
-        def stream(self, method, url):
+        def stream(self, method, url, timeout=None):
             return resp
 
     return _C
@@ -69,7 +72,8 @@ def test_streaming_stops_reading_once_past_the_cap(offline, monkeypatch):
     resp = _Resp([b"x" * 8192 for _ in range(int(cap / 8192) + 200)])
     monkeypatch.setattr("httpx.Client", _client_returning(resp))
 
-    out = web.http_get("https://example.com/huge.bin")
+    out, status = web.http_get("https://example.com/huge.bin")
+    assert status["fetch_status"] == "capped" and status["source_complete"] is False
     # 2026-09-08 (H15): the old marker read "[truncated at {cap} bytes]" on
     # BOTH the cap and the deadline path, so a short deadline-cut body claimed
     # it had filled the cap. Each limit now names itself, and the body that
@@ -84,8 +88,8 @@ def test_an_oversize_content_length_is_refused_before_reading(offline, monkeypat
     resp = _Resp([b"never read"], headers={"content-length": str(cap * 1000)})
     monkeypatch.setattr("httpx.Client", _client_returning(resp))
 
-    out = web.http_get("https://example.com/huge.iso")
-    assert "over the fetch cap" in out
+    out, status = web.http_get("https://example.com/huge.iso")
+    assert "over the fetch cap" in out and status["fetch_status"] == "refused"
     assert resp.read_chunks == 0
 
 
@@ -93,18 +97,20 @@ def test_a_binary_content_type_is_refused(offline, monkeypatch):
     resp = _Resp([b"\x00\x01"], headers={"content-type": "application/octet-stream"})
     monkeypatch.setattr("httpx.Client", _client_returning(resp))
 
-    out = web.http_get("https://example.com/blob")
-    assert "is not text" in out
+    out, status = web.http_get("https://example.com/blob")
+    assert "is not text" in out and status["fetch_status"] == "refused"
     assert resp.read_chunks == 0
 
 
 def test_ordinary_text_still_comes_back_whole(offline, monkeypatch):
     resp = _Resp([b"a normal ", b"page"], headers={"content-type": "text/html; charset=utf-8"})
     monkeypatch.setattr("httpx.Client", _client_returning(resp))
-    assert web.http_get("https://example.com/") == "a normal page"
+    body, status = web.http_get("https://example.com/")
+    assert body == "a normal page" and status["fetch_status"] == "ok"
 
 
 def test_json_is_treated_as_text(offline, monkeypatch):
     resp = _Resp([b'{"ok": true}'], headers={"content-type": "application/json"})
     monkeypatch.setattr("httpx.Client", _client_returning(resp))
-    assert web.http_get("https://example.com/api") == '{"ok": true}'
+    body, status = web.http_get("https://example.com/api")
+    assert body == '{"ok": true}' and status["source_complete"] is True

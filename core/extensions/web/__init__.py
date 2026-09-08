@@ -374,7 +374,39 @@ def _fetch_domain(url: str) -> str | None:
 # A whole-exchange deadline for http_get. httpx's timeout is per-read, so a
 # server that drips one byte at a time satisfies it forever while holding a
 # tool-executor thread.
+#
+# This is the ONE number that governs the fetch, and the registration below
+# derives its tool timeout from it rather than repeating it. They disagreed
+# before — 15 registered against 60 internal — and the executor enforces the
+# registered one, so a 25s fetch this deadline permitted was killed at 20s
+# while the thread that had nearly finished it kept going unwatched.
 _HTTP_GET_DEADLINE_S = 60.0
+
+# Per-operation ceiling: connect, or one read. Bounded again by whatever is
+# left of the total, so no single operation can outlive the deadline it is
+# supposed to sit inside.
+_HTTP_OP_TIMEOUT_S = 15.0
+
+
+def _http_op_timeout(remaining: float) -> float | None:
+    """The timeout for the next operation, or None when the total is spent."""
+    if remaining <= 0:
+        return None
+    return min(_HTTP_OP_TIMEOUT_S, remaining)
+
+
+def _fetch_cancelled(ctx: dict | None) -> bool:
+    """Whether the dispatch that owns this call has asked it to stop.
+
+    A worker thread cannot be cancelled from outside, and the executor's only
+    lever — killing the call's subprocesses — does nothing for a pure-Python
+    fetch. So the executor sets a flag and the acquisition loop reads it. This
+    is the whole difference between "the model was told the call ended" and
+    "the call ended".
+    """
+    ev = (ctx or {}).get("_cancel_event")
+    return bool(ev is not None and ev.is_set())
+
 
 # Content-Length headroom before refusing outright: the body is streamed and
 # capped anyway, this just avoids starting an obviously hopeless download.
@@ -467,7 +499,22 @@ def _reliability_reroute(domain: str | None) -> str | None:
     )
 
 
-def _finish_fetch(url: str, content: str, cap: int, stop_reason: str, declared: str | None) -> str:
+def _fetch_outcome(text: str, status: str, url: str, *, source_complete: bool, extra: dict | None = None):
+    """Every http_get return, as (text, status).
+
+    One structured channel instead of prefix-sniffing. "Error fetching X: ..."
+    covered a transport failure, a policy refusal and a deadline alike, so the
+    only way to tell a retryable timeout from a permanent content-type refusal
+    was to read English. `fetch_status` is the fact; the prose stays for the
+    model.
+    """
+    meta = {"fetch_status": status, "url": url, "source_complete": source_complete}
+    if extra:
+        meta.update(extra)
+    return text, meta
+
+
+def _finish_fetch(url: str, content: str, cap: int, stop_reason: str, stop_status: str, declared: str | None):
     """Clip a fetched body to the cap and say honestly what happened to it.
 
     A partial fetch also earns a durable artifact. Without one there is no
@@ -504,7 +551,13 @@ def _finish_fetch(url: str, content: str, cap: int, stop_reason: str, declared: 
     if not meta["source_complete"] or len(kept) > MAX_OUTPUT:
         meta["artifact"] = write_artifact(kept, "http_get", meta=meta)
     note = acquisition_note(meta)
-    return kept + ("\n" + note if note else "")
+    return _fetch_outcome(
+        kept + ("\n" + note if note else ""),
+        stop_status or "ok",
+        url,
+        source_complete=bool(meta["source_complete"]),
+        extra={"captured_bytes": meta["captured"], "artifact": meta.get("artifact", "")},
+    )
 
 
 def _clip_html_for_extraction(html: str, url: str, cap: int | None = None) -> tuple[str, dict]:
@@ -530,37 +583,57 @@ def _clip_html_for_extraction(html: str, url: str, cap: int | None = None) -> tu
     )
 
 
-def http_get(url: str, force: bool = False, _context: dict | None = None) -> str:
-    """Fetch content from a URL. Returns plain text, max 100KB."""
+def http_get(url: str, force: bool = False, _context: dict | None = None):
+    """Fetch content from a URL. Returns (text, status), body max 100KB.
+
+    The status dict carries `fetch_status` (ok / capped / deadline / cancelled
+    / refused / error), `source_complete` and the final URL. Callers that need
+    to know WHY a fetch ended read that, not the shape of the prose.
+    """
     allow_loopback = _loopback_allowed()
     try:
         url = _validate_url(url, allow_loopback=allow_loopback)
     except ValueError as e:
-        return f"Error: {e}"
+        return _fetch_outcome(f"Error: {e}", "refused", url, source_complete=False)
     domain = _fetch_domain(url)
     if not force:
         rerouted = _reliability_reroute(domain)
         if rerouted:
-            return rerouted
+            return _fetch_outcome(rerouted, "refused", url, source_complete=False)
     import httpx
 
     try:
         # Follow redirects manually so every hop goes through _validate_url —
         # httpx's automatic following would happily land on a private/metadata
         # address after the initial URL passed the SSRF check.
-        # timeout is per-read, so a slow-drip server could hold the thread
-        # indefinitely under the old single value; bound the whole exchange.
         deadline = time.monotonic() + _HTTP_GET_DEADLINE_S
         cap = int(settings.max_fetch_size)
-        with httpx.Client(timeout=15.0, follow_redirects=False) as client:
+        with httpx.Client(follow_redirects=False) as client:
             for _ in range(10):
-                if time.monotonic() > deadline:
+                if _fetch_cancelled(_context):
+                    return _fetch_outcome(
+                        f"Error fetching {url}: cancelled before the request was sent",
+                        "cancelled",
+                        url,
+                        source_complete=False,
+                    )
+                # Each operation gets the smaller of its own ceiling and what
+                # is left of the total. httpx's timeout is per-read, so a
+                # single fixed value let a slow-drip server satisfy it forever
+                # from inside an exchange the deadline had already ended.
+                op = _http_op_timeout(deadline - time.monotonic())
+                if op is None:
                     _record_fetch(domain, False, method="http")
-                    return f"Error fetching {url}: exceeded {_HTTP_GET_DEADLINE_S}s overall deadline"
+                    return _fetch_outcome(
+                        f"Error fetching {url}: exceeded the {_HTTP_GET_DEADLINE_S:.0f}s overall fetch deadline",
+                        "deadline",
+                        url,
+                        source_complete=False,
+                    )
                 # stream(), not get(): get() reads and decodes the ENTIRE body
                 # before max_fetch_size is applied, so one `http_get` of a
                 # multi-GB file took the whole container's memory with it.
-                with client.stream("GET", url) as resp:
+                with client.stream("GET", url, timeout=op) as resp:
                     if resp.is_redirect:
                         location = resp.headers.get("location")
                         if not location:
@@ -572,12 +645,22 @@ def http_get(url: str, force: bool = False, _context: dict | None = None) -> str
                     declared = resp.headers.get("content-length")
                     if declared and declared.isdigit() and int(declared) > cap * _OVERSIZE_FACTOR:
                         _record_fetch(domain, False, method="http")
-                        return f"Error fetching {url}: response is {int(declared)} bytes, over the fetch cap"
+                        return _fetch_outcome(
+                            f"Error fetching {url}: response is {int(declared)} bytes, over the fetch cap",
+                            "refused",
+                            url,
+                            source_complete=False,
+                        )
 
                     ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
                     if ctype and not (ctype.startswith("text/") or ctype in _TEXTUAL_CONTENT_TYPES):
                         _record_fetch(domain, False, method="http")
-                        return f"Error fetching {url}: content-type {ctype} is not text"
+                        return _fetch_outcome(
+                            f"Error fetching {url}: content-type {ctype} is not text",
+                            "refused",
+                            url,
+                            source_complete=False,
+                        )
 
                     chunks: list[bytes] = []
                     total = 0
@@ -588,29 +671,46 @@ def http_get(url: str, force: bool = False, _context: dict | None = None) -> str
                     # cap — a fetch that should be retried reading as a fetch
                     # that returned everything worth having.
                     stop_reason = ""
+                    stop_status = ""
                     for chunk in resp.iter_bytes():
                         chunks.append(chunk)
                         total += len(chunk)
                         if total > cap:
-                            stop_reason = f"the {cap:,}-byte fetch cap"
+                            stop_reason, stop_status = f"the {cap:,}-byte fetch cap", "capped"
                             break
                         if time.monotonic() > deadline:
                             stop_reason = f"the {_HTTP_GET_DEADLINE_S:.0f}s whole-exchange deadline"
+                            stop_status = "deadline"
+                            break
+                        if _fetch_cancelled(_context):
+                            # Checked every chunk, so the thread unwinds within
+                            # one read of the cancel rather than running the
+                            # body out with nobody awaiting it.
+                            stop_reason = "cancellation by the dispatcher"
+                            stop_status = "cancelled"
                             break
                     raw = b"".join(chunks)
                     content = raw.decode(resp.encoding or "utf-8", errors="replace")
 
-                _record_fetch(domain, not _WALL_RE.search(content[:8000]), method="http")
+                if stop_status != "cancelled":
+                    _record_fetch(domain, not _WALL_RE.search(content[:8000]), method="http")
                 if len(content) > cap and not stop_reason:
-                    stop_reason = f"the {cap:,}-byte fetch cap"
-                return _finish_fetch(url, content, cap, stop_reason, declared)
+                    stop_reason, stop_status = f"the {cap:,}-byte fetch cap", "capped"
+                return _finish_fetch(url, content, cap, stop_reason, stop_status, declared)
             _record_fetch(domain, False, method="http")
-            return f"Error fetching {url}: too many redirects"
+            return _fetch_outcome(f"Error fetching {url}: too many redirects", "error", url, source_complete=False)
     except ValueError as e:
-        return f"Error: redirect blocked: {e}"
+        return _fetch_outcome(f"Error: redirect blocked: {e}", "refused", url, source_complete=False)
     except Exception as e:
+        if _fetch_cancelled(_context):
+            # A socket torn down by our own unwind is not a fact about the
+            # domain, and must not count against its fetch_ok rate.
+            return _fetch_outcome(
+                f"Error fetching {url}: cancelled during acquisition ({e})", "cancelled", url, source_complete=False
+            )
         _record_fetch(domain, False, method="http")
-        return f"Error fetching {url}: {e}"
+        status = "deadline" if isinstance(e, httpx.TimeoutException) else "error"
+        return _fetch_outcome(f"Error fetching {url}: {e}", status, url, source_complete=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1066,7 +1166,13 @@ def register(reg) -> None:
         },
         category="web",
         tags=["http", "fetch", "url", "get", "download", "web", "page", "content"],
-        timeout=15,
+        # Derived, never retyped: the executor enforces this number and the
+        # fetch obeys _HTTP_GET_DEADLINE_S, so a literal here can only drift
+        # into the shape the audit found — 15 registered against 60 internal,
+        # killing valid fetches at 20s and abandoning the threads still making
+        # them. _resolve_timeout adds its grace on top, so the fetch's own
+        # deadline still fires first and the model gets its diagnostic.
+        timeout=int(_HTTP_GET_DEADLINE_S),
         parallel_safe=True,
         source="extension",
         safety_level="safe",
