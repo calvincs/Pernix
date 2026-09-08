@@ -270,10 +270,26 @@ def _batch_timeout(indices: list[int], tool_calls: list[dict], registry: ToolReg
 
 
 def _is_unattended_session(sid: str) -> bool:
-    """Return True for cron/canary sessions and workers spawned from them.
+    """Return True for sessions that cannot reach a human.
 
-    These run without a user present, so the ask_user → approve_dangerous_tool
-    flow is not viable and the dangerous gate is skipped.
+    Three cases, all the same rule: the dangerous gate exists to put a question
+    in front of a person, so where no person is reachable the gate is not a
+    protection — it is a dead end that turns a granted tool into an unusable
+    one.
+
+      1. cron/canary sessions — nobody is watching.
+      2. workers spawned from them — same, one level down.
+      3. any session whose EXCLUSIVE tool_allowlist omits `ask_user` — the
+         harness itself removed the ability to ask. Worker kinds
+         (orchestration/kinds.py) and scheduled-job charters both set that
+         allowlist, and the schema builder intersects it AFTER the builtin
+         force-add, so `ask_user` really is gone from the surface.
+
+    Case 3 is a field fix (Agent Mesh build, 2026-09-07): the `research` worker
+    kind grants `browse_web` (safety_level="dangerous") while its allowlist
+    drops `ask_user`, so all four research workers hit 11 approval refusals on
+    a tool the harness had deliberately handed them, with no move available
+    that could ever clear the gate.
     """
     if not sid:
         return False
@@ -286,7 +302,11 @@ def _is_unattended_session(sid: str) -> bool:
         return True
     if s.session_type == "worker" and s.parent_session_id:
         parent = get_manager().get(s.parent_session_id)
-        return bool(parent and parent.session_type in ("cron", "canary"))
+        if parent and parent.session_type in ("cron", "canary"):
+            return True
+    allowlist = getattr(s, "tool_allowlist", None)
+    if allowlist and "ask_user" not in allowlist:
+        return True
     return False
 
 
