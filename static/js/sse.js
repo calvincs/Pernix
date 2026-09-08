@@ -82,6 +82,8 @@ const EVENT_TYPES = [
     'turn.forced_followup', 'turn.forced_followup_outcome',
     // Late correction (a rapid-fire edit landed after the answer was compiled)
     'turn.late_correction',
+    // Round-budget renewal (the harness opened a fresh window of tool rounds)
+    'turn.round_renewal',
 ];
 
 window.addEventListener('pernix:offline', () => {
