@@ -100,6 +100,13 @@ async def test_session_purge():
         "candidates",
         "would_delete",
         "purged",
+        # 2026-09-08 (S16): a purge that fails partway through used to raise
+        # and throw away the count of what it HAD deleted. These four are the
+        # partial-completion contract that replaced that.
+        "failed",
+        "failures",
+        "skipped_at_delete",
+        "complete",
         "sample",
         "skipped",
     }

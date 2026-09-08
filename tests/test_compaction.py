@@ -433,7 +433,10 @@ _DB_GUARDED_PATHS = ("sessions/hooks.py", "core/context/compaction.py", "core/ag
 # sessions/manager.py (4, mostly notice writes in _finalize_turn) with the
 # rest spread across api/routers, core/refine.py and core/snooze.py.
 # 2026-09-08: 11 → 10, the cancelled-parent notice in the worker-resume path.
-_KNOWN_ON_LOOP_DB_CALLS = 10
+# 2026-09-08: 10 → 9, the second full-history read in /api/context/{id} — it
+# was there purely to count messages and compaction markers, and both are one
+# indexed aggregate now (S14).
+_KNOWN_ON_LOOP_DB_CALLS = 9
 
 
 def test_no_new_on_loop_db_calls_are_introduced():
