@@ -106,7 +106,8 @@ def test_reflect_advises_a_different_approach_for_a_stuck_loop():
 def test_the_stuck_loop_transition_is_legal():
     """A reason string missing from the graph would make the turn's own exit
     an illegal transition."""
-    from sessions.state_v2 import TRANSITIONS, SessionStateV2 as S
+    from sessions.state_v2 import TRANSITIONS
+    from sessions.state_v2 import SessionStateV2 as S
 
     assert TRANSITIONS[(S.PROCESSING, "stuck-loop")] is S.FINALIZING
 

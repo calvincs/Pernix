@@ -47,9 +47,7 @@ def patch_manager(monkeypatch):
 
 def test_worker_whose_allowlist_drops_ask_user_is_unattended(patch_manager):
     """The exact Agent Mesh shape: a research worker of a normal session."""
-    research_allowlist = frozenset(
-        {"file_read", "file_write", "glob", "grep", "search_web", "browse_web", "http_get"}
-    )
+    research_allowlist = frozenset({"file_read", "file_write", "glob", "grep", "search_web", "browse_web", "http_get"})
     patch_manager(
         {
             "w1": _session(
