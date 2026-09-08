@@ -42,8 +42,8 @@ def ask_user(
 
     if _is_unattended_session(session_id):
         return (
-            f"{UNAVAILABLE_PREFIX} This session runs unattended (cron-initiated) — no "
-            "user is present to answer, and waiting would stall the job indefinitely. "
+            f"{UNAVAILABLE_PREFIX} This session runs unattended — no "
+            "user is present to answer, and waiting would stall it indefinitely. "
             "Nothing has gone wrong: proceed without user input. Make a reasonable "
             "decision autonomously and continue with the task. Use notify_user to tell "
             "the user what you decided and why."
