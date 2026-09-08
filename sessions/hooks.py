@@ -393,6 +393,23 @@ async def _run_turn_gates(session_id: str, session: dict, session_obj, emit=None
     if not results:
         return []
     failed = [r for r in results if not r.passed]
+
+    # A gate that could not RUN is a defect in the gate, not a failure of the
+    # turn. It no longer clamps the verdict or forces a retry (core.gates
+    # .failing excludes it), so this is the only channel that tells the agent
+    # its check has been verifying nothing — carried to the next turn's scout
+    # via reflect_lessons, the same way retry guidance travels.
+    try:
+        from core.gates import format_broken_notice
+
+        notice = format_broken_notice(results)
+        if notice:
+            existing = session_obj.turn.reflect_lessons or ""
+            if notice not in existing:
+                session_obj.turn.reflect_lessons = (existing + "\n\n" + notice).strip()
+            logger.info("Gate(s) broken for %s — notice carried to the next turn", session_id)
+    except Exception as e:
+        logger.debug("Broken-gate notice skipped for %s: %s", session_id, e)
     try:
         await asyncio.to_thread(
             db.add_message,
@@ -410,6 +427,7 @@ async def _run_turn_gates(session_id: str, session: dict, session_obj, emit=None
                 "total": len(results),
                 "failed": len(failed),
                 "names_failed": [r.name for r in failed],
+                "names_broken": [r.name for r in results if r.broken],
             }
         )
     try:
