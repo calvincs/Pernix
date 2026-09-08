@@ -75,6 +75,7 @@ class TerminationReason(str, Enum):
     ERROR = "error"
     SCOUT_ERROR = "scout_error"
     BUDGET_EXHAUSTED = "budget_exhausted"  # LLM session-time budget hit mid-turn
+    INTERRUPTED = "interrupted"  # the process died mid-turn; boot reconcile found the wreck
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +150,11 @@ TRANSITIONS: dict[tuple[S, str], S] = {
     (S.PAUSE_REQUESTED, "reaper-unstick"): S.IDLE_READY,
     (S.PAUSED, "reaper-unstick"): S.IDLE_READY,  # 24h safety net / orphaned parent
     (S.AWAITING_USER, "reaper-unstick"): S.IDLE_READY,
+    # A crash can persist either of these too, and the boot reconcile walks
+    # every state a dead turn can be found in — not only the ones the reaper
+    # used to reach.
+    (S.FINALIZING, "reaper-unstick"): S.IDLE_READY,
+    (S.COMPACTING, "reaper-unstick"): S.IDLE_READY,
     # cancel-timeout: emergency exit when cancel was requested but the session
     # never reached CANCELLING (race between the cancel request and the agent
     # returning normally, or a failed transition to CANCELLING). One edge per

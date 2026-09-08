@@ -462,8 +462,15 @@ async def test_reconcile_resumes_parent_when_workers_already_done(mgr, monkeypat
 
 
 async def test_reconcile_skips_when_workers_still_running(mgr, monkeypatch):
-    """If watched workers are still PROCESSING after restart, reconcile
-    must leave the parent suspended (the reaper handles the timeout)."""
+    """A watched worker with a LIVE turn keeps its parent suspended.
+
+    This used to assert the same for a worker merely persisted in PROCESSING,
+    which after a restart is a worker whose task died with the process: nothing
+    would ever move it, and the parent waited out the reaper's thirty-minute
+    net for a turn that had already ended. That case is now reconciled (see
+    tests/regressions/test_2026-09-08_a_restarted_parent_forgot_its_own_workers.py);
+    an actually-running task is what this pins.
+    """
     parent_id = mgr.create_session(title="P")
     worker_id = mgr.create_session(
         title="W",
@@ -492,7 +499,14 @@ async def test_reconcile_skips_when_workers_still_running(mgr, monkeypatch):
 
     monkeypatch.setattr(fresh, "_resume_from_workers", fake_resume)
 
-    resumed = await fresh.reconcile_awaiting_workers()
+    # The worker really is mid-turn: give the hydrated object a live task.
+    hydrated_worker = fresh.get_or_create(worker_id)
+    never = asyncio.get_running_loop().create_future()
+    hydrated_worker.task = asyncio.ensure_future(asyncio.wait_for(never, timeout=5))
+    try:
+        resumed = await fresh.reconcile_awaiting_workers()
+    finally:
+        hydrated_worker.task.cancel()
 
     assert resumed == 0
     assert resume_called == []

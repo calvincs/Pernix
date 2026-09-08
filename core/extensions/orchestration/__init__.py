@@ -424,7 +424,11 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
     if not parent:
         return "Error: Session not found in memory"
 
-    if not parent.worker_ids:
+    # The durable inventory, not the memory-only list: after a restart the
+    # in-memory list is empty and this answered "No workers spawned." to a
+    # parent with live children in the database (H09).
+    inventory = manager.worker_inventory(parent)
+    if not inventory:
         return "No workers spawned."
 
     from sessions import state_v2 as sv2
@@ -434,7 +438,7 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
     failed = 0
     empty = 0
     filter_set = set(_filter_ids) if _filter_ids is not None else None
-    wid_list = [w for w in parent.worker_ids if filter_set is None or w in filter_set]
+    wid_list = [w for w in inventory if filter_set is None or w in filter_set]
     for wid in wid_list:
         worker_obj = manager.get(wid)
         _row = db.get_session(wid)
@@ -448,9 +452,18 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
         # transition fires — distinguish via task (set by manager.prompt).
         # Status payload doesn't carry v2 state directly, so read in-memory.
         if worker_obj is None:
-            v2 = sv2.SessionStateV2.IDLE_READY
+            # Not resident: reaped, or the server restarted. The row knows what
+            # memory does not — reading defaults here reported finished workers
+            # as "queued (not yet started)" for the rest of the parent's life.
+            try:
+                v2 = sv2.SessionStateV2((_row or {}).get("state_v2") or "idle_ready")
+            except ValueError:
+                v2 = sv2.SessionStateV2.IDLE_READY
             idle = 0
-            has_started = False
+            try:
+                has_started = db.latest_turn_id(wid) > 0 or bool(db.recent_termination_reasons(wid, 1))
+            except Exception:
+                has_started = False
         else:
             v2 = sv2._current_state(worker_obj)
             idle = _worker_idle_seconds(worker_obj)
@@ -501,7 +514,7 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
     result_text = header + "\n" + "\n".join(lines)
 
     # Cross-pollinate completed worker findings to running siblings
-    if done > 0 and done < len(parent.worker_ids):
+    if done > 0 and done < len(inventory):
         try:
             xp = cross_pollinate(_context=_context)
             if "Cross-pollinated" in xp:
@@ -510,6 +523,19 @@ def check_workers(_context: dict | None = None, _filter_ids: list | None = None)
             logger.debug("Cross-pollination skipped: %s", e)
 
     return result_text
+
+
+def _worker_is_mid_turn(worker_obj) -> bool:
+    """True while the worker's turn is still running. A running turn has no
+    ending yet, so the durable log's answer belongs to a previous run."""
+    if worker_obj is None:
+        return False
+    try:
+        from sessions import state_v2 as sv2
+
+        return sv2._current_state(worker_obj) is not sv2.SessionStateV2.IDLE_READY
+    except Exception:
+        return False
 
 
 def _latest_reflect(worker_id: str) -> dict | None:
@@ -578,7 +604,12 @@ def get_worker_result(worker_id: str, _context: dict | None = None) -> str:
 
     _worker_obj = _get_mgr().get(worker_id)
     term_reason = _worker_obj.termination_reason if _worker_obj else None
-    if term_reason is None and _worker_obj is None:
+    if term_reason is None and not _worker_is_mid_turn(_worker_obj):
+        # `_worker_obj is None` was the old guard, and hydration made it
+        # unreachable: a rehydrated worker IS in memory, with a None reason it
+        # never restored (H09). The real question is whether the worker has
+        # settled — a live turn has not ended, so it has no ending to report,
+        # and reading the previous run's would be worse than reading nothing.
         try:
             _recent = db.recent_termination_reasons(worker_id, 1)
             term_reason = _recent[0] if _recent else None

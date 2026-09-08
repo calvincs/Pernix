@@ -881,6 +881,44 @@ def get_worker_sessions(parent_id: str) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def worker_child_ids(parent_id: str) -> list[str]:
+    """The parent's worker children, oldest first — the durable form of
+    `AgentSession.worker_ids`, which is memory-only and dies with the process.
+
+    session_type is part of the filter on purpose: parent_session_id also
+    carries non-worker children (a session forked from another), and attaching
+    those to a parent's worker inventory would put them in its completion
+    listing and its concurrency count.
+    """
+    with connect_sessions() as conn:
+        rows = conn.execute(
+            """SELECT id FROM sessions
+               WHERE parent_session_id = ? AND session_type = 'worker'
+               ORDER BY created_at, id""",
+            (parent_id,),
+        ).fetchall()
+        return [r["id"] for r in rows]
+
+
+def inherited_goal_id(session_id: str) -> int | None:
+    """The goal this session's spend was last billed to.
+
+    A worker inherits its parent's active_goal_id at spawn and stamps it on
+    every token_usage row it writes, so those rows ARE the durable record of
+    the attribution — the in-memory field is just a cache of them. Reading it
+    back is what lets a rehydrated worker keep both its billing and the goal
+    budget check.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute(
+            """SELECT goal_id FROM token_usage
+               WHERE session_id = ? AND goal_id IS NOT NULL
+               ORDER BY id DESC LIMIT 1""",
+            (session_id,),
+        ).fetchone()
+        return int(row["goal_id"]) if row else None
+
+
 # ---------------------------------------------------------------------------
 # Session state log (v13+)
 # ---------------------------------------------------------------------------
