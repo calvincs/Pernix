@@ -209,10 +209,12 @@ def test_an_unknown_session_counts_as_nothing_rather_than_failing():
 async def test_a_heartbeat_survives_a_slow_compile(monkeypatch):
     """Compilation is the load-bearing half: it must run off the loop.
 
-    The gap is asserted against a generous multiple of the tick, not the
-    tick itself — a shared CI core will miss a 5 ms deadline for reasons
-    that have nothing to do with this route. Blocking the loop for the
-    whole compile misses it by two orders of magnitude.
+    Held to a full second of deliberate slowness so the two outcomes are an
+    order of magnitude apart. Blocking the loop delivers one or two of the
+    ~200 ticks due and leaves a gap the length of the whole compile; the
+    thread hop delivers most of them. Neither bound is the 5 ms tick itself
+    — a shared core under a parallel runner misses that for reasons of GIL
+    contention that have nothing to do with this route.
     """
     from core.context import compiler
 
@@ -220,7 +222,7 @@ async def test_a_heartbeat_survives_a_slow_compile(monkeypatch):
     real = compiler.compile_context
 
     def slow(*a, **kw):
-        time.sleep(0.4)
+        time.sleep(1.0)
         return real(*a, **kw)
 
     monkeypatch.setattr(compiler, "compile_context", slow)
@@ -232,8 +234,33 @@ async def test_a_heartbeat_survives_a_slow_compile(monkeypatch):
         ticks = hb.ticks
 
     assert resp.status_code == 200, resp.text
-    assert ticks > 20, f"only {ticks} heartbeats fired while the route compiled"
-    assert gap < 0.2, f"the loop was held for {gap*1000:.0f} ms by a route that should be off it"
+    assert ticks > 80, f"only {ticks} heartbeats fired across a 1-second compile"
+    assert gap < 0.5, f"the loop was held for {gap*1000:.0f} ms by a route that should be off it"
+
+
+async def test_both_routes_compile_on_a_worker_thread(monkeypatch):
+    """The structural half of the same claim, with no stopwatch in it."""
+    import threading
+
+    from core.context import compiler
+
+    sid = _fat_transcript(rounds=3)
+    real = compiler.compile_context
+    main = threading.current_thread()
+    threads: list[object] = []
+
+    def record(*a, **kw):
+        threads.append(threading.current_thread())
+        return real(*a, **kw)
+
+    monkeypatch.setattr(compiler, "compile_context", record)
+
+    async with _client() as c:
+        assert (await c.get(f"/api/context/{sid}")).status_code == 200
+        assert (await c.get(f"/api/context/{sid}/payload")).status_code == 200
+
+    assert len(threads) == 2
+    assert main not in threads, "the compiler ran on the event loop thread"
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +321,7 @@ async def test_status_and_payload_agree_with_each_other():
     assert status["messages_trimmed"] == payload["messages_trimmed"]
 
 
+@pytest.mark.slow
 async def test_payload_runs_off_the_loop_too(monkeypatch):
     from core.context import compiler
 
@@ -301,7 +329,7 @@ async def test_payload_runs_off_the_loop_too(monkeypatch):
     real = compiler.compile_context
 
     def slow(*a, **kw):
-        time.sleep(0.3)
+        time.sleep(1.0)
         return real(*a, **kw)
 
     monkeypatch.setattr(compiler, "compile_context", slow)
@@ -313,7 +341,7 @@ async def test_payload_runs_off_the_loop_too(monkeypatch):
         gap = hb.gap
 
     assert resp.status_code == 200
-    assert ticks > 15 and gap < 0.2, f"{ticks} ticks, worst gap {gap*1000:.0f} ms"
+    assert ticks > 80 and gap < 0.5, f"{ticks} ticks, worst gap {gap*1000:.0f} ms"
 
 
 # ---------------------------------------------------------------------------
