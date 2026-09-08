@@ -221,6 +221,59 @@ def _apply_space_fields(session: AgentSession, space_id: str | None) -> None:
         logger.warning("workspace_home setup failed for space %s: %s", space_id, e)
 
 
+def _durable_termination(session_id: str) -> str | None:
+    """How this session's last turn ended, from the state log.
+
+    The in-memory field is the fresh source while a session is resident; this
+    is the answer after a reap or a restart, and the two must agree or a capped
+    worker reads as a clean one.
+    """
+    try:
+        recent = db.recent_termination_reasons(session_id, 1)
+        return recent[0] if recent else None
+    except Exception as e:
+        logger.debug("durable termination lookup failed for %s: %s", session_id, e)
+        return None
+
+
+def _restore_worker_goal(worker_id: str, row: dict) -> int | None:
+    """The goal a rehydrated worker inherited at spawn, or None.
+
+    Two sources, in order of how much they prove:
+
+      1. The worker's own token_usage rows. A worker bills its inherited goal
+         directly, so a row carrying a goal_id IS the attribution — nothing
+         infers anything.
+      2. Failing that (a worker that had not spent yet), the parent's currently
+         active goal — but ONLY when that goal already existed when the worker
+         was created. A parent that finished one objective and started another
+         must not have the new one charged retroactively to old work.
+    """
+    try:
+        goal_id = db.inherited_goal_id(worker_id)
+        if goal_id is not None:
+            return goal_id
+    except Exception as e:
+        logger.debug("inherited_goal_id lookup failed for %s: %s", worker_id, e)
+    parent_id = row.get("parent_session_id")
+    if not parent_id:
+        return None
+    try:
+        goal = db.get_active_goal(parent_id)
+        if not goal:
+            return None
+        # session_goals stamps started_at, not created_at. An unstamped goal
+        # cannot prove it predates the worker, so it does not get the benefit
+        # of the doubt.
+        started = goal.get("started_at") or ""
+        created = row.get("created_at") or ""
+        if started and created and started <= created:
+            return goal.get("id")
+    except Exception as e:
+        logger.debug("parent goal lookup failed for %s: %s", worker_id, e)
+    return None
+
+
 def kill_session_processes(session, *, kill_after: float = 3.0) -> int:
     """SIGTERM every tracked subprocess group for this session, SIGKILL the
     survivors after `kill_after` seconds. Returns how many were signalled.
@@ -426,8 +479,52 @@ class SessionManager:
                 except Exception as e:
                     logger.warning("Worker kind restore failed for %s: %s", session_id, e)
 
+            # Terminal metadata (H09). The in-memory field dies with the
+            # process, and every consumer downstream — the cap warning in
+            # get_worker_result, the resume manifest, check_workers — reads it.
+            # A round-capped worker that hydrates with None reads as a clean
+            # one, and the parent is the one who pays for believing it.
+            try:
+                _recent = db.recent_termination_reasons(session_id, 1)
+                if _recent:
+                    session.termination_reason = _recent[0]
+            except Exception as e:
+                logger.debug("termination_reason restore failed for %s: %s", session_id, e)
+
+            # Goal attribution. Workers never re-resolve a goal of their own
+            # (they own none); they carry the one inherited at spawn, and it is
+            # what the budget check shipped in b257532 guards on. Restore it
+            # from the rows the spend was actually billed to.
+            session.active_goal_id = _restore_worker_goal(session_id, db_session)
+        else:
+            # Which children this session owns is durable in
+            # sessions.parent_session_id; worker_ids was only ever a cache of
+            # it, and hydration used to leave that cache empty while telling
+            # the parent to collect "every worker listed above".
+            try:
+                session.worker_ids = db.worker_child_ids(session_id)
+            except Exception as e:
+                logger.warning("Worker inventory restore failed for %s: %s", session_id, e)
+
         self._sessions[session_id] = session
         return session
+
+    def worker_inventory(self, session: AgentSession) -> list[str]:
+        """This session's worker children — memory first, durable rows behind.
+
+        Read-only by design: `worker_ids` is mutated only on the event loop
+        (spawn_worker marshals its append there), so the tool-thread and
+        to_thread callers that need the full list take a copy instead of
+        writing to it.
+        """
+        ids = list(session.worker_ids)
+        try:
+            for wid in db.worker_child_ids(session.session_id):
+                if wid not in ids:
+                    ids.append(wid)
+        except Exception as e:
+            logger.debug("worker inventory sweep failed for %s: %s", session.session_id, e)
+        return ids
 
     async def reconcile_awaiting_workers(self) -> int:
         """Boot-time sweep: hydrate every session persisted in
@@ -476,9 +573,33 @@ class SessionManager:
                     continue
                 w_v2 = sv2._current_state(w)
                 has_started = w.task is not None or getattr(w, "_turn_id", 0) > 0
+                task_alive = w.task is not None and not w.task.done()
                 if w_v2 is sv2.SessionStateV2.IDLE_READY:
                     if has_started or w.error or w.termination_reason:
                         stale.add(wid)
+                elif not task_alive:
+                    # A child persisted mid-turn with no task: the process died
+                    # inside its turn. It is neither running nor finished, so
+                    # the old sweep left it in the watch-set and the parent sat
+                    # in AWAITING_WORKERS until the reaper's thirty-minute net.
+                    # Classify the wreck and let the parent synthesize what
+                    # actually exists.
+                    logger.info(
+                        "Boot reconcile: worker %s was interrupted mid-%s; releasing it",
+                        wid[:12],
+                        w_v2.value,
+                    )
+                    try:
+                        sv2.transition(
+                            w,
+                            sv2.SessionStateV2.IDLE_READY,
+                            "reaper-unstick",
+                            termination_reason=sv2.TerminationReason.INTERRUPTED,
+                        )
+                    except Exception as _e:
+                        logger.error("reconcile interrupted-child reset failed for %s: %s", wid, _e)
+                    w.termination_reason = sv2.TerminationReason.INTERRUPTED.value
+                    stale.add(wid)
             if stale:
                 watched -= stale
                 parent._watched_worker_ids = watched
@@ -2547,16 +2668,17 @@ class SessionManager:
         Includes a per-worker terminal status (reflect verdict, error,
         cancellation) so the LLM is forced to acknowledge non-pass outcomes
         instead of having to discover them by reading get_worker_result()."""
+        # The inventory is the durable one. worker_ids is memory-only, so a
+        # restarted parent used to be handed "0 total" and then ordered to
+        # collect every worker "listed above".
+        inventory = self.worker_inventory(parent)
         lines = [
-            f"{_WORKER_RESUME_PREFIX} — {len(parent.worker_ids)} total]",
+            f"{_WORKER_RESUME_PREFIX} — {len(inventory)} total]",
         ]
         problem_workers: list[str] = []
-        for wid in parent.worker_ids:
+        for wid in inventory:
             w = self.get(wid)
-            if w is None:
-                # Full id — agent will copy this verbatim into get_worker_result.
-                lines.append(f"  - {wid}: (no longer in memory)")
-                continue
+            row = db.get_session(wid) or {}
             verdict: str | None = None
             try:
                 import json as _json
@@ -2570,29 +2692,42 @@ class SessionManager:
                         break
             except Exception:
                 pass
-            tr = w.termination_reason or "unknown"
+            # Terminal metadata comes from the durable log whenever memory has
+            # none — a hydrated worker's object is real but incomplete, and the
+            # old `w is None` test could never reach the durable answer.
+            tr = (w.termination_reason if w is not None else None) or _durable_termination(wid) or "unknown"
+            err = w.error if w is not None else None
+            # Model and kind say who produced the output being synthesized.
+            ident = ", ".join(x for x in ((row.get("worker_kind") or ""), (row.get("model_override") or "")) if x)
+            suffix = f" [{ident}]" if ident else ""
             # Use the full worker id in the listing — earlier versions truncated
             # to wid[:8] for readability, but the agent then passed that short
             # form to get_worker_result and matched no row, returning a bogus
             # "no output" for workers that had real transcripts.
-            if w.error:
-                lines.append(f"  - {wid}: ERROR — {w.error[:80]}")
+            if err:
+                lines.append(f"  - {wid}{suffix}: ERROR — {err[:80]}")
                 problem_workers.append(wid)
             elif tr == "cancelled":
-                lines.append(f"  - {wid}: CANCELLED")
+                lines.append(f"  - {wid}{suffix}: CANCELLED")
+                problem_workers.append(wid)
+            elif tr == "interrupted":
+                lines.append(f"  - {wid}{suffix}: INTERRUPTED (the server restarted mid-turn)")
                 problem_workers.append(wid)
             elif verdict == "escalate":
-                lines.append(f"  - {wid}: ESCALATED — needs review")
+                lines.append(f"  - {wid}{suffix}: ESCALATED — needs review")
                 problem_workers.append(wid)
             elif verdict == "retry":
-                lines.append(f"  - {wid}: UNVERIFIED (retries exhausted)")
+                lines.append(f"  - {wid}{suffix}: UNVERIFIED (retries exhausted)")
+                problem_workers.append(wid)
+            elif tr in ("round_ceiling", "stuck_loop", "budget_exhausted", "compaction_failed"):
+                lines.append(f"  - {wid}{suffix}: INCOMPLETE ({tr} — a hard cap, not completion)")
                 problem_workers.append(wid)
             elif verdict == "pass":
-                lines.append(f"  - {wid}: pass")
+                lines.append(f"  - {wid}{suffix}: pass")
             elif tr == "complete":
-                lines.append(f"  - {wid}: complete (no reflect verdict)")
+                lines.append(f"  - {wid}{suffix}: complete (no reflect verdict)")
             else:
-                lines.append(f"  - {wid}: {tr}")
+                lines.append(f"  - {wid}{suffix}: {tr}")
         lines.append(
             "Call get_worker_result(worker_id) for each worker (use the full id "
             "exactly as listed above) to read its full output."

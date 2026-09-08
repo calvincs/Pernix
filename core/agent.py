@@ -2256,7 +2256,21 @@ async def _resolve_active_goal(session: AgentSession, session_id: str) -> None:
     fan-out's spend lands on the parent's goal; everyone else re-resolves, so a
     goal created or completed between turns is respected.
     """
-    if not settings.goals_enabled or session.session_type == "worker":
+    if not settings.goals_enabled:
+        return
+    if session.session_type == "worker":
+        # A worker owns no goal row, so re-resolving by owner would clear the
+        # inherited id. But a rehydrated worker arrives with nothing to keep:
+        # restore the attribution from the rows its own spend was billed to,
+        # or the budget check in _pre_round_gate has nothing to guard on.
+        if session.active_goal_id is None:
+            try:
+                from sessions.manager import _restore_worker_goal
+
+                row = await asyncio.to_thread(db.get_session, session_id)
+                session.active_goal_id = _restore_worker_goal(session_id, row or {})
+            except Exception:
+                session.active_goal_id = None
         return
     try:
         goal_row = await asyncio.to_thread(db.get_active_goal, session_id)

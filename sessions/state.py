@@ -198,10 +198,14 @@ class AgentSession:
     # get_worker_result) can classify completion honestly instead of
     # inferring from state.
     # Legal values: "complete", "round_ceiling", "stuck_loop",
-    # "compaction_failed", "cancelled", "error". None = never ran or not yet
-    # classified. "round_ceiling" is the round budget running out;
-    # "stuck_loop" is the stuck detector force-breaking a repetition loop,
-    # which can happen at any round number.
+    # "compaction_failed", "cancelled", "error", "interrupted". None = never
+    # ran or not yet classified. "round_ceiling" is the round budget running
+    # out; "stuck_loop" is the stuck detector force-breaking a repetition loop,
+    # which can happen at any round number; "interrupted" is a turn the process
+    # died in the middle of, classified by the boot reconcile.
+    # Restored from session_state_log when a worker is rehydrated — a capped
+    # worker that reads as clean because memory was reaped is a lie the parent
+    # pays for.
     termination_reason: str | None = None
 
     # Session type
