@@ -2502,15 +2502,31 @@ async def _end_turn_on_stream_error(
         # evidence shows it AND the user-visible transcript explains the
         # truncation point. We do NOT set session.error here — that's reserved
         # for genuine failures.
-        await asyncio.to_thread(
-            db.add_message,
-            session_id,
-            "system",
+        body = (
             "Turn ended early: per-session LLM time budget exhausted. "
             "Any content the agent produced before this point is the "
             "best result available for this turn. Reflect should grade "
-            "the existing transcript on its merits.",
+            "the existing transcript on its merits."
         )
+        # The harness can carry a long task across turn boundaries by itself,
+        # but only for a session with a live goal — and nothing ever says so.
+        # Three sessions spent a combined 22 hours on an explicit "work till
+        # it's completed and tested" build, took two budget cuts, and never
+        # wrote a single session_goals row (Agent Mesh build, 2026-09-08).
+        # Say it at the one moment it is actionable, and only when there is no
+        # goal already doing the job.
+        try:
+            _goal = await asyncio.to_thread(db.get_active_goal, session_id)
+        except Exception:
+            _goal = None
+        if not _goal:
+            body += (
+                " If this task is meant to run to completion across turns, call "
+                "goal_create(objective=..., continuation_budget=N) — the harness "
+                "then resumes the goal automatically after a budget cut or a round "
+                "ceiling instead of waiting for the user."
+            )
+        await asyncio.to_thread(db.add_message, session_id, "system", body)
         logger.warning(
             "LLM budget exhausted in session %s — soft-landing as BUDGET_EXHAUSTED instead of error: %s",
             session_id,
