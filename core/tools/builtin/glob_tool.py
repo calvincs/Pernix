@@ -13,6 +13,14 @@ from core.tools.paths import workspace_home as _default_root
 
 logger = logging.getLogger("pernix.tools.glob")
 
+# How many paths are rendered inline.
+MAX_RESULTS = 300
+# How many are collected before the walk gives up. The old fallback broke at
+# 500 and then used `total` as if it were the real count, so every number
+# derived from it saturated in silence — the omitted count included. Reaching
+# this ceiling now makes the total an explicit floor instead.
+SCAN_CEILING = 5000
+
 
 def glob_search(pattern: str, path: str = "") -> str:
     """Find files matching a glob pattern.
@@ -45,6 +53,7 @@ def glob_search(pattern: str, path: str = "") -> str:
         return any(fp.is_relative_to(r) for r in contained)
 
     matches: list[Path] = []
+    saturated = False  # the walk stopped at SCAN_CEILING, so `total` is a floor
 
     # Try git ls-files first (respects .gitignore)
     try:
@@ -64,6 +73,9 @@ def glob_search(pattern: str, path: str = "") -> str:
                     fp = (search_root / line).resolve()
                     if _inside(fp) and fp.exists():
                         matches.append(fp)
+                    if len(matches) >= SCAN_CEILING:
+                        saturated = True
+                        break
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass  # Fall through to pathlib
 
@@ -73,14 +85,21 @@ def glob_search(pattern: str, path: str = "") -> str:
             for fp in search_root.glob(pattern):
                 if fp.is_file() and _inside(fp):
                     matches.append(fp)
-                if len(matches) >= 500:  # Safety limit before sorting
+                if len(matches) >= SCAN_CEILING:  # Safety limit before sorting
+                    saturated = True
                     break
         except Exception as e:
             return f"Error: Invalid glob pattern: {e}"
 
-    scope = f"[root: {root}]"
+    # Two separate honesty obligations, kept as two separate lines: which tree
+    # this listing came from (H07) and the bounds it ran under (H16).
+    root_line = f"[root: {root}]"
+    scope = f"{path or '.'} pattern={pattern!r}"
+    caps = f"[scope: {scope} | caps: {MAX_RESULTS} shown, {SCAN_CEILING:,}-file scan ceiling, newest first]"
+
     if not matches:
-        return f"{scope}\nNo files found matching '{pattern}'" + (f" in {path}" if path else "")
+        head = f"No files found matching '{pattern}'" + (f" in {path}" if path else "")
+        return f"{root_line}\n{head}\n{caps}"
 
     # Sort by modification time (newest first)
     try:
@@ -88,26 +107,34 @@ def glob_search(pattern: str, path: str = "") -> str:
     except OSError:
         pass
 
-    # Limit results (raised 100->300, audit P2)
     total = len(matches)
-    matches = matches[:300]
+    shown = matches[:MAX_RESULTS]
 
     # Format output as relative paths
     lines = []
-    for fp in matches:
+    for fp in shown:
         try:
             rel = fp.relative_to(root)
         except ValueError:
             rel = fp
         lines.append(str(rel))
 
-    result = "\n".join(lines)
-    if total > 100:
-        result += f"\n\n[... {total - 100} more files not shown]"
+    # The arithmetic, spelled out because the old version's was wrong in both
+    # directions: `total - 100` invented 50 omissions for a 150-file result
+    # where nothing was omitted, and claimed 300 for a 400-file one where 100
+    # were.
+    omitted = total - len(lines)
+    if saturated:
+        head = (
+            f"[at least {total:,} files matched (scan ceiling reached — the true total is "
+            f"unknown); showing {len(lines):,}; at least {omitted:,} not shown]"
+        )
+    elif omitted:
+        head = f"[{total:,} files matched; showing {len(lines):,}; {omitted:,} not shown]"
     else:
-        result += f"\n\n[{total} file{'s' if total != 1 else ''} found]"
+        head = f"[{total:,} file{'s' if total != 1 else ''} found; showing all {len(lines):,}]"
 
-    return f"{scope}\n{result}"
+    return f"{root_line}\n" + "\n".join(lines) + f"\n\n{head}\n{caps}"
 
 
 # ---------------------------------------------------------------------------
