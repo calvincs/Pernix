@@ -8,6 +8,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
+from core.memory.store import MTIME_TOLERANCE_S, MemoryVersionConflict
+
 router = APIRouter(tags=["memory"])
 
 # Search paging. The browser used to ask for a fixed 10 and had no way to ask
@@ -19,9 +21,11 @@ _SEARCH_MAX_LIMIT = 100
 # what one query can pull out of the store in a single pass.
 _SEARCH_MAX_SCAN = 500
 
-# Same tolerance the workspace and skill editors use, for the same reason: a
-# float mtime round-tripped through JSON is not bit-identical.
-MTIME_TOLERANCE_S = 0.001
+# MTIME_TOLERANCE_S is imported above purely as a re-export: the compare that
+# uses it lives in the store now, because this module must not validate a
+# version it is not about to replace. A check here and a write there is two
+# operations with a window between them, and both an editor's twin save and an
+# agent's append fit through it comfortably. (S05)
 
 _MAX_MEMORY_BYTES = 5 * 1024 * 1024
 
@@ -46,13 +50,6 @@ def _memory_path(name: str) -> Path:
     if not path.is_relative_to(root):
         raise HTTPException(403, detail="Path traversal blocked")
     return path
-
-
-def _mtime_of(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
 
 
 @router.get("/api/memory/files")
@@ -99,22 +96,40 @@ async def read_memory_file(name: str):
     store = get_memory_store()
     if not store:
         return {"error": "Memory unavailable"}
-    content = await asyncio.to_thread(store.read_file, name)
-    if content is None:
+    # One read, not a read plus a stat. The two used to be separate
+    # observations of a file that moves, so the editor could be handed older
+    # content under the mtime of the version that replaced it — a token
+    # certifying bytes it was never shown, which makes the next save a silent
+    # overwrite instead of a 409. (S05)
+    got = await asyncio.to_thread(store.read_file_versioned, name)
+    if got is None:
         return {"error": f"File '{name}' not found"}
-    # Handed back as base_mtime on save — the same optimistic-concurrency
-    # contract the workspace and skill editors use. (S9)
-    return {"name": name, "content": content, "mtime": _mtime_of(_memory_path(name))}
+    content, version = got
+    # Handed back as base_revision (exact) / base_mtime (legacy) on save — the
+    # same optimistic-concurrency contract the workspace and skill editors
+    # use. (S9)
+    return {"name": name, "content": content, "mtime": version.mtime, "revision": version.revision}
 
 
 @router.put("/api/memory/files/{name}")
 async def write_memory_file(name: str, body: dict):
     """Replace a memory file's markdown, then re-index it.
 
-    Mirrors PUT /workspace/{path}: `base_mtime` is optional, and sending it
-    turns last-writer-wins into a 409 when someone (the agent, a sweep) has
-    rewritten the file since it was read. The response carries the new mtime
-    so an editor can keep saving without re-reading.
+    Mirrors PUT /workspace/{path}: a base version is optional, and sending one
+    turns last-writer-wins into a 409 when someone (the agent, a sweep, the
+    same editor in another tab) has rewritten the file since it was read. The
+    response carries the committed version so an editor can keep saving
+    without re-reading.
+
+    Two ways to state that base version. `base_revision` is the token from the
+    read and is exact. `base_mtime` is what the shipped editor sends and is
+    still honoured, within a millisecond of tolerance for the float round-trip
+    — which is also its weakness: two saves landing inside that window look
+    identical to it. A caller sending both gets the revision compared.
+
+    The comparison happens in the store, inside the lock that performs the
+    replacement. Doing it here meant validating against a file that any other
+    writer was free to change before the write went out. (S05)
     """
     from core.memory.store import get_memory_store
 
@@ -131,26 +146,56 @@ async def write_memory_file(name: str, body: dict):
     if not path.is_file():
         raise HTTPException(404, detail=f"Memory file '{name}' not found")
 
+    base_revision = body.get("base_revision")
+    if base_revision is not None and not isinstance(base_revision, str):
+        raise HTTPException(400, detail="base_revision must be a string")
     base_mtime = body.get("base_mtime")
     if base_mtime is not None:
         try:
-            base = float(base_mtime)
+            base_mtime = float(base_mtime)
         except (TypeError, ValueError):
-            base = None
-        if base is not None:
-            current = _mtime_of(path)
-            if abs(current - base) > MTIME_TOLERANCE_S:
-                return JSONResponse(status_code=409, content={"detail": "changed_on_disk", "mtime": current})
+            # An unparseable mtime has always meant "no conflict detection",
+            # not a 400 — unchanged.
+            base_mtime = None
 
     stem = path.stem
 
     # write_file is the store's public whole-file save: temp file + fsync +
-    # rename, writers excluded, and the FTS re-index committed inside the same
+    # rename, writers excluded, the expected version checked immediately
+    # before the replacement, and the FTS re-index committed inside the same
     # lock. The index is derived from the markdown and has to follow it, or the
     # file a user just edited keeps matching searches on text it no longer
     # contains.
-    await asyncio.to_thread(store.write_file, stem, content)
-    return {"saved": True, "name": stem, "bytes": len(content), "mtime": _mtime_of(path)}
+    try:
+        version = await asyncio.to_thread(
+            store.write_file,
+            stem,
+            content,
+            expected_revision=base_revision,
+            expected_mtime=base_mtime,
+        )
+    except MemoryVersionConflict as conflict:
+        # The version on disk, as observed under the same lock that refused
+        # the write. Reported so the user can be told what they nearly
+        # overwrote — never as a new base for the same unmodified draft.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "changed_on_disk",
+                "mtime": conflict.current.mtime,
+                "revision": conflict.current.revision,
+            },
+        )
+    # The version this save committed, from the bytes it wrote — not a stat
+    # taken after the lock was released, which could describe another writer's
+    # file entirely.
+    return {
+        "saved": True,
+        "name": stem,
+        "bytes": version.size,
+        "mtime": version.mtime,
+        "revision": version.revision,
+    }
 
 
 @router.get("/api/memory/search")

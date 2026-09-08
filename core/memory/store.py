@@ -21,6 +21,7 @@ corrections but not relocations, and dangling ones are silent by design.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import logging
 import os
 import re
@@ -28,7 +29,7 @@ import threading
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from config import settings
 from core.memory.format import (
@@ -44,10 +45,98 @@ from db.database import connect_memory
 
 logger = logging.getLogger("pernix.memory")
 
-__all__ = ["MemoryStore", "NAMESPACE_KEYWORDS", "get_memory_store"]
+__all__ = [
+    "MemoryStore",
+    "MemoryFileVersion",
+    "MemoryVersionConflict",
+    "MTIME_TOLERANCE_S",
+    "NAMESPACE_KEYWORDS",
+    "get_memory_store",
+]
 
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+# Legacy optimistic-concurrency tolerance. A float mtime round-tripped through
+# JSON is not bit-identical, so an exact float compare would reject every save.
+# The cost of the slack is that a change landing inside the window is invisible
+# to the check — which is precisely why `revision` exists and why the editor
+# sends it. Kept for clients that only ever had an mtime.
+MTIME_TOLERANCE_S = 0.001
+
+
+class MemoryFileVersion(NamedTuple):
+    """What a memory file looked like at one instant.
+
+    `revision` is a digest of the exact bytes and is the token to compare on:
+    it cannot drift, cannot collide with a float round-trip, and — unlike an
+    mtime — changes whenever the content does, even when two writes land in
+    the same timer tick. `mtime` and `size` ride along for display and for the
+    legacy `base_mtime` contract.
+    """
+
+    revision: str
+    mtime: float
+    size: int
+
+
+class MemoryVersionConflict(RuntimeError):
+    """A whole-file save's expected version no longer describes the file.
+
+    Carries the version that IS on disk, so the caller can tell the user what
+    they would have overwritten without having to go and stat it again (which
+    is its own race).
+    """
+
+    def __init__(self, name: str, current: MemoryFileVersion):
+        super().__init__(f"memory file '{name}' changed on disk")
+        self.name = name
+        self.current = current
+
+
+def _revision_of(data: bytes) -> str:
+    """The revision token for a file's exact bytes.
+
+    Self-describing so a token in a log or a 409 body is recognizable, and
+    truncated because 128 bits of digest is far past collision relevance for
+    a few hundred markdown files.
+    """
+    return "sha256:" + hashlib.sha256(data).hexdigest()[:32]
+
+
+def _read_with_version(md_path: Path) -> tuple[bytes, MemoryFileVersion] | None:
+    """Read a file's bytes and the version describing *those* bytes.
+
+    One open, one read, one fstat on the same descriptor. Statting the path
+    separately is what let a reader hand back old content under a newer
+    file's mtime: `os.replace` swaps the directory entry, so a second lookup
+    can land on a different inode entirely. fstat cannot — it describes the
+    inode already open, whatever the name now points at.
+
+    None when the file does not exist.
+    """
+    try:
+        with open(md_path, "rb") as fh:
+            data = fh.read()
+            st = os.fstat(fh.fileno())
+    except FileNotFoundError:
+        return None
+    return data, MemoryFileVersion(revision=_revision_of(data), mtime=st.st_mtime, size=st.st_size)
+
+
+def _version_matches(current: MemoryFileVersion, expected_revision: str | None, expected_mtime: float | None) -> bool:
+    """Whether `current` is still the version the caller expected to replace.
+
+    A revision, when the caller has one, is the whole answer — exact, and it
+    makes the mtime irrelevant. Only a caller with nothing but an mtime falls
+    back to the tolerance compare.
+    """
+    if expected_revision is not None:
+        return current.revision == expected_revision
+    if expected_mtime is not None:
+        return abs(current.mtime - expected_mtime) <= MTIME_TOLERANCE_S
+    return True
+
 
 # Supersede band — see _supersede_reason.
 _SUPERSEDE_RATIO = 0.82
@@ -736,7 +825,7 @@ class MemoryStore:
         finally:
             conn.close()
 
-    def _write_locked(self, md_path: Path, data: str, on_written: Callable[[], None] | None = None) -> None:
+    def _write_locked(self, md_path: Path, data: str, on_written: Callable[[], None] | None = None) -> os.stat_result:
         """Replace a file's contents atomically, with writers excluded throughout.
 
         The markdown IS the source of truth — the index is derived and can be
@@ -761,19 +850,29 @@ class MemoryStore:
         self._lock (the caller holds it), so the residual window is a second
         OS process writing the same file during the index commit, which this
         single-process deployment does not do.
+
+        Returns the stat of the replaced file, taken while the flock is still
+        held, so a caller can report the version it just committed instead of
+        statting the path again after the exclusion has ended — which is a
+        window another writer can land in.
         """
         tmp_path = md_path.with_name(md_path.name + ".tmp")
         fd = os.open(md_path, os.O_RDWR | os.O_CREAT, 0o644)
         with os.fdopen(fd, "r+", encoding="utf-8") as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             try:
-                with open(tmp_path, "w", encoding="utf-8") as tmp:
+                # newline="": no line-ending translation, so the bytes on disk
+                # are exactly data.encode("utf-8") and a revision computed from
+                # the string handed in describes the file for real.
+                with open(tmp_path, "w", encoding="utf-8", newline="") as tmp:
                     tmp.write(data)
                     tmp.flush()
                     os.fsync(tmp.fileno())
                 os.replace(tmp_path, md_path)
+                st = os.stat(md_path)
                 if on_written is not None:
                     on_written()
+                return st
             except BaseException:
                 tmp_path.unlink(missing_ok=True)
                 raise
@@ -804,7 +903,37 @@ class MemoryStore:
             self._write_locked(md_path, new_raw)
         return True
 
-    def write_file(self, name: str, content: str) -> None:
+    def read_file_versioned(self, name: str) -> tuple[str, MemoryFileVersion] | None:
+        """Read a memory file together with the version describing its bytes.
+
+        `read_file` plus a separate stat is two observations of a file that
+        can move between them, and the editor's whole conflict story rests on
+        the pair being one observation: a token that certifies bytes the user
+        was never shown makes the next save a silent overwrite rather than a
+        409. One descriptor answers both questions here.
+
+        None when the file does not exist.
+        """
+        name = self._validate_name(name)
+        got = _read_with_version(self._dir / f"{name}.md")
+        if got is None:
+            return None
+        data, version = got
+        return data.decode("utf-8"), version
+
+    def file_version(self, name: str) -> MemoryFileVersion | None:
+        """The current version of a memory file, or None if it isn't there."""
+        name = self._validate_name(name)
+        got = _read_with_version(self._dir / f"{name}.md")
+        return got[1] if got is not None else None
+
+    def write_file(
+        self,
+        name: str,
+        content: str,
+        expected_revision: str | None = None,
+        expected_mtime: float | None = None,
+    ) -> MemoryFileVersion:
         """Replace a memory file's markdown wholesale, then re-index it.
 
         The editor's save path. `rewrite_file` is read-modify-write and
@@ -821,12 +950,38 @@ class MemoryStore:
         markdown — exactly how `update_entry` and `delete_entry` do it. The
         file is created (header + DB row) if it does not exist yet, so the
         re-index always has a row to update its entry count on.
+
+        `expected_revision` (preferred) / `expected_mtime` (the legacy editor
+        contract) make the save conditional: the file is read and compared
+        *inside* the lock, immediately before the replacement, and a mismatch
+        raises MemoryVersionConflict having written nothing. Validating in the
+        caller instead — which is what the router used to do — leaves a window
+        between the check and the lock that two editor saves, or an agent's
+        append, fit through comfortably; both then report success and one of
+        them is gone.
+
+        Returns the version this call committed, computed from the bytes it
+        wrote rather than from a stat taken after the lock was released.
+
+        The exclusion is in-process only. `self._lock` and the flock keep this
+        process's writers apart; they say nothing about a second OS process or
+        a human with an editor open on the same file, and a content digest is
+        a consistency check, not filesystem compare-and-swap — nothing here
+        can stop an external writer landing between the read and the replace.
         """
         name = self._validate_name(name)
         self._ensure_file(name)
         md_path = self._dir / f"{name}.md"
+        conditional = expected_revision is not None or expected_mtime is not None
         with self._lock:
-            self._write_locked(md_path, content, on_written=lambda: self._reindex_commit(name, content))
+            if conditional:
+                got = _read_with_version(md_path)
+                current = got[1] if got is not None else MemoryFileVersion(_revision_of(b""), 0.0, 0)
+                if not _version_matches(current, expected_revision, expected_mtime):
+                    raise MemoryVersionConflict(name, current)
+            st = self._write_locked(md_path, content, on_written=lambda: self._reindex_commit(name, content))
+        data = content.encode("utf-8")
+        return MemoryFileVersion(revision=_revision_of(data), mtime=st.st_mtime, size=len(data))
 
     def update_entry(self, file_name: str, epoch: int, new_content: str) -> str:
         """Replace the content of an existing entry (identified by epoch).
