@@ -70,6 +70,12 @@ async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False
     the filter is now server-side: the hidden type's rows are no longer in
     the page to be counted, and a legend entry that reads 0 is a control the
     user can no longer reason about.
+
+    `space_counts` is how many live sessions each space holds. The union that
+    pulls space sessions back past the recency window is bounded now
+    (`SPACE_UNION_FLOOR`), and a bound without a count would let a group
+    silently under-report itself — the one thing a "never rolls off" contract
+    cannot do. Absent from the archived answer, which has no union.
     """
     import asyncio as _asyncio
 
@@ -82,6 +88,7 @@ async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False
     sessions = [annotate_read_only(s) for s in rows]
     spaces = await _asyncio.to_thread(db.list_spaces)
     type_counts = await _asyncio.to_thread(db.count_sessions_by_type)
+    space_counts = {} if archived else await _asyncio.to_thread(db.count_live_sessions_by_space)
     if archived:
         total = await _asyncio.to_thread(db.count_sessions, archived=True, exclude_types=excluded)
         archived_count = total if not excluded else await _asyncio.to_thread(db.count_sessions, archived=True)
@@ -101,6 +108,7 @@ async def list_sessions(limit: int = 50, offset: int = 0, archived: bool = False
         "archived_count": archived_count,
         "excluded_types": excluded,
         "type_counts": type_counts,
+        "space_counts": space_counts,
     }
 
 
