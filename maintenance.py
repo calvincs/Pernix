@@ -7,7 +7,8 @@ import logging
 import time
 
 from config import settings
-from core.pools import run_background
+from core.pools import get_background_executor, run_background
+from db.exclusive import MaintenanceBusy
 
 logger = logging.getLogger("pernix.maintenance")
 
@@ -16,12 +17,39 @@ TICK_INTERVAL = 60  # seconds
 # Bound on the fast duties only (subscriber reaping, session reaping, partial
 # cleanup, checkpoint, hygiene). Snooze is deliberately NOT covered by this —
 # it has its own, larger budget and runs outside the tick. See _run_snooze.
+# Neither is the daily tier: it used to sit inside this bound with only one
+# await in it, so wait_for could neither preempt the blocking half nor bound
+# it, and firing meant abandoning five duties. See _run_daily_tier.
 TICK_TIMEOUT = 30  # seconds
 
 # Headroom over settings.snooze_max_cycle_seconds. run_cycle already bounds
 # itself; this outer wait only catches a cycle wedged outside its own wait_for,
 # so it must never be the one that fires first.
 SNOOZE_TIMEOUT_GRACE = 15  # seconds
+
+# The daily duties, in the order they are attempted. Named individually
+# because completion is tracked per duty: a health check that overruns must
+# not take the vacuum and the four prunes down with it, and must not mark
+# them done either.
+DAILY_DUTIES = ("memory_health", "incremental_vacuum", "prune_cron", "prune_hygiene")
+
+# Per-duty step budget. Generous — these are hour-scale-rare jobs on a thread
+# of their own — but finite, so one wedged duty cannot hold the tier's
+# single-flight slot shut and starve the duties queued behind it.
+DAILY_DUTY_TIMEOUT = 300  # seconds
+
+# How soon the tier tries again when it did not get through all of its
+# duties. The old code stamped once a day BEFORE doing any work, so a tier
+# that was cut short waited a full day — and, because the stamp is durable,
+# waited it out across restarts too. An hour is often enough to recover from
+# a transient stall and rare enough not to hammer a duty that keeps failing.
+DAILY_RETRY_INTERVAL_S = 3600
+
+# How long a daily duty waits on the database gate before deferring. It
+# leaves itself unstamped when it does, so deferring costs an hour rather
+# than a day.
+DB_GATE_WAIT_S = 30.0
+DB_DRAIN_TIMEOUT_S = 60.0
 
 
 class MaintenanceRunner:
@@ -31,6 +59,17 @@ class MaintenanceRunner:
         self._task: asyncio.Task | None = None
         self._tracked_tasks: set[asyncio.Task] = set()
         self._snooze_task: asyncio.Task | None = None
+        self._daily_task: asyncio.Task | None = None
+        self._backup_task: asyncio.Task | None = None
+        # Duty name -> when its thread started. Cleared by the FUTURE's done
+        # callback, not by whoever stopped waiting on it: a duty whose thread
+        # outlived its budget is still running, and starting a second one
+        # would be two memory repairs on one index.
+        self._daily_inflight: dict[str, float] = {}
+        # Duty name -> last success, mirroring the durable snooze_state rows
+        # so /api/health does not read four rows on every poll.
+        self._daily_success: dict[str, float] = {}
+        self._daily_errors: dict[str, str] = {}
         self._tick_count = 0
         self._last_tick_time = 0.0
         self._stats = {
@@ -66,6 +105,22 @@ class MaintenanceRunner:
             except asyncio.CancelledError:
                 pass
 
+        # The daily tier is cancelled explicitly rather than waited out: it
+        # is budgeted in minutes, and shutdown is budgeted in seconds. What
+        # cancellation reaches is the coroutine awaiting the duty, never the
+        # thread running it — so say so, and leave the duty unstamped. The
+        # next process finds it still eligible and runs it again, which is
+        # safe because every duty here is idempotent.
+        if self._daily_task and not self._daily_task.done():
+            self._daily_task.cancel()
+        if self._daily_inflight:
+            logger.info(
+                "Shutdown with %d daily maintenance duties still on their threads (%s): "
+                "left to finish, none stamped, all eligible again on the next start",
+                len(self._daily_inflight),
+                ", ".join(sorted(self._daily_inflight)),
+            )
+
         # Wait for tracked background tasks (with timeout to prevent shutdown hang)
         if self._tracked_tasks:
             logger.info("Waiting for %d background tasks", len(self._tracked_tasks))
@@ -93,7 +148,25 @@ class MaintenanceRunner:
             "tick_count": self._tick_count,
             "last_tick_time": self._last_tick_time,
             "active_background_tasks": len(self._tracked_tasks),
+            "daily": self.daily_status(),
             "snooze": get_snooze().get_stats(),
+        }
+
+    def daily_status(self) -> dict:
+        """What the daily tier has and has not managed to do.
+
+        Reported because a stranded day used to be invisible: the durable
+        stamp said the tier had run, the log said only "Maintenance tick
+        exceeded 30s timeout, skipping", and nothing anywhere said the
+        vacuum and the five prunes had not happened. Attempted, running and
+        successfully-completed are three different facts and each is here.
+        """
+        return {
+            "running": self._daily_task is not None and not self._daily_task.done(),
+            "in_flight": sorted(self._daily_inflight),
+            "due": self._duties_due(),
+            "last_success": {name: (self._duty_last_success(name) or None) for name in DAILY_DUTIES},
+            "last_error": dict(self._daily_errors),
         }
 
     async def _heartbeat(self) -> None:
@@ -127,6 +200,24 @@ class MaintenanceRunner:
                         self.track_task(self._snooze_task)
                     else:
                         logger.debug("Snooze cycle still running — skipping this slot")
+
+                # The daily tier runs OUTSIDE the tick bound too, and for a
+                # sharper version of the same reason. It used to sit inside
+                # _tick with exactly one await in it — the memory health
+                # check — so wait_for could only ever fire there, and firing
+                # abandoned the incremental vacuum and five prunes that came
+                # after it. Worse, the durable "last daily run" stamp had
+                # already been written before any of the work started, so the
+                # abandoned duties were suppressed for a full day and across
+                # restarts, with nothing in the log saying they had not run.
+                # As its own single-flight task it is bounded per duty, and a
+                # duty that does not finish simply stays due.
+                if self._daily_task is None or self._daily_task.done():
+                    if self._daily_tier_due():
+                        self._daily_task = asyncio.create_task(self._run_daily_tier())
+                        self.track_task(self._daily_task)
+                else:
+                    logger.debug("Daily maintenance still running — skipping this slot")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -160,29 +251,270 @@ class MaintenanceRunner:
         except Exception as e:
             logger.error("Snooze cycle error: %s", e, exc_info=True)
 
+    # The ATTEMPT stamp. It used to be the only stamp there was, written
+    # before any work ran, which is what made an interrupted tier look
+    # identical to a finished one. It now throttles retries and nothing else;
+    # whether a duty is DONE is a separate row per duty.
     _DAILY_TIER_KEY = "maintenance_last_daily_at"
     _DAILY_TIER_INTERVAL_S = 24 * 3600
 
-    def _daily_tier_due(self) -> bool:
-        """True at most once a day, by the clock, and stamp the run.
+    @staticmethod
+    def _duty_key(name: str) -> str:
+        return f"maintenance_daily_ok:{name}"
 
-        Reads and writes a snooze_state row so the schedule survives a
-        restart — the whole point, since the tick counter does not.
-        """
+    def _duty_last_success(self, name: str) -> float:
+        """When this duty last COMPLETED, from the durable row, cached."""
+        cached = self._daily_success.get(name)
+        if cached is not None:
+            return cached
+        from db import models as db
+
+        try:
+            value = float(db.get_snooze_state(self._duty_key(name)) or 0)
+        except Exception:
+            return 0.0
+        self._daily_success[name] = value
+        return value
+
+    def _stamp_duty(self, name: str) -> None:
+        """Record a duty as done — after it is done, and only for itself."""
         from db import models as db
 
         now = time.time()
+        self._daily_success[name] = now
         try:
-            last = float(db.get_snooze_state(self._DAILY_TIER_KEY) or 0)
+            db.set_snooze_state(self._duty_key(name), str(now))
+        except Exception as e:
+            logger.warning("Could not stamp daily maintenance duty %s: %s", name, e)
+
+    def _duties_due(self) -> list[str]:
+        """The duties whose last SUCCESS is older than a day (or never)."""
+        now = time.time()
+        return [name for name in DAILY_DUTIES if now - self._duty_last_success(name) >= self._DAILY_TIER_INTERVAL_S]
+
+    def _daily_tier_due(self) -> bool:
+        """True when there is daily work outstanding and it is time to try.
+
+        Two questions, deliberately separate. Is anything outstanding? — per
+        duty, from its own completion row, so unfinished work stays eligible
+        without anything else being re-run. Is it time to try again? — from
+        the attempt stamp, so a duty that keeps failing is retried hourly
+        rather than every tick, and a box whose duties all succeeded is left
+        alone for a day.
+
+        Both rows are durable, so the schedule survives a restart. That was
+        always the point of the stamp; what it must not survive is work that
+        never happened.
+        """
+        from db import models as db
+
+        if not self._duties_due():
+            return False
+
+        now = time.time()
+        try:
+            last_attempt = float(db.get_snooze_state(self._DAILY_TIER_KEY) or 0)
         except (TypeError, ValueError):
-            last = 0.0
-        if last and now - last < self._DAILY_TIER_INTERVAL_S:
+            last_attempt = 0.0
+        if last_attempt and now - last_attempt < DAILY_RETRY_INTERVAL_S:
             return False
         try:
             db.set_snooze_state(self._DAILY_TIER_KEY, str(now))
         except Exception as e:
-            logger.warning("Could not stamp the daily maintenance tier: %s", e)
+            logger.warning("Could not stamp the daily maintenance attempt: %s", e)
         return True
+
+    # ------------------------------------------------------------------
+    # The daily tier
+    # ------------------------------------------------------------------
+
+    async def _run_daily_tier(self) -> None:
+        """Run the outstanding daily duties, one at a time, off the loop.
+
+        Every duty here used to run synchronously on the event loop —
+        `incremental_vacuum`, `prune_cron` and the four hygiene prunes were
+        plain blocking calls, unlike the WAL checkpoint and the backup, which
+        were explicitly moved off it because running them on the loop "froze
+        every session's SSE". A daily prune sweep froze it too; it just did
+        so once a day, so nobody caught it in the act.
+        """
+        # Ordered first, and unchanged in intent: the duties below rewrite
+        # the memory index and delete rows, and they must never do that
+        # without a recent snapshot to undo them from. Sharing one helper
+        # with the hourly check keeps that true now that the tier is a task
+        # of its own rather than a block inside the same tick.
+        await self._ensure_recent_backup()
+
+        for name in self._duties_due():
+            if name in self._daily_inflight:
+                logger.warning(
+                    "Daily maintenance duty %s is still running from an earlier attempt — not started again",
+                    name,
+                )
+                continue
+            await self._run_daily_duty(name)
+
+    async def _run_daily_duty(self, name: str) -> None:
+        """One duty, on a thread, under its own budget.
+
+        `asyncio.shield` is the load-bearing part. A thread cannot be
+        cancelled, so a plain `wait_for` around it would either hang until
+        the thread finished anyway or leave the executor future cancelled-in
+        -name-only. Shielding lets this coroutine give up on schedule while
+        the thread runs on, and the future's done callback — not this
+        function's exit — is what clears the in-flight marker. So the duty
+        stays unstamped (eligible again in an hour) and is not started a
+        second time on top of the thread still doing it.
+        """
+        body = getattr(self, f"_duty_{name}")
+        future = asyncio.get_running_loop().run_in_executor(get_background_executor(), body)
+        self._daily_inflight[name] = time.time()
+        future.add_done_callback(lambda f, n=name: self._duty_thread_done(n, f))
+
+        try:
+            summary = await asyncio.wait_for(asyncio.shield(future), timeout=DAILY_DUTY_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._daily_errors[name] = f"exceeded its {DAILY_DUTY_TIMEOUT}s budget"
+            logger.warning(
+                "Daily maintenance duty %s exceeded its %ds budget; its thread continues and the duty stays due",
+                name,
+                DAILY_DUTY_TIMEOUT,
+            )
+            return
+        except asyncio.CancelledError:
+            logger.info("Daily maintenance cancelled during %s; the duty stays due", name)
+            raise
+        except MaintenanceBusy as e:
+            self._daily_errors[name] = str(e)
+            logger.info("Daily maintenance duty %s deferred: %s", name, e)
+            return
+        except Exception as e:
+            self._daily_errors[name] = str(e)
+            logger.warning("Daily maintenance duty %s failed: %s", name, e, exc_info=True)
+            return
+
+        self._daily_errors.pop(name, None)
+        self._stamp_duty(name)
+        if summary:
+            logger.info("Daily maintenance — %s: %s", name, summary)
+
+    def _duty_thread_done(self, name: str, future) -> None:
+        """The thread has actually stopped. Only now is the duty not running."""
+        self._daily_inflight.pop(name, None)
+        try:
+            error = future.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None and self._daily_errors.get(name, "").startswith("exceeded"):
+            logger.warning("Daily maintenance duty %s failed after its budget ran out: %s", name, error)
+
+    # -- the duties themselves. Blocking bodies, run on the background pool.
+
+    def _duty_memory_health(self) -> str:
+        from core.memory.store import get_memory_store
+
+        store = get_memory_store()
+        if store is None:
+            return "memory store unavailable"
+        return str(store.health_check(fix=True))
+
+    def _duty_incremental_vacuum(self) -> str:
+        from db import models as db
+        from db.exclusive import exclusive
+
+        # Exclusive, not merely announced: this is a rebuild of the free
+        # list, and an operator pressing Optimize at the same moment is the
+        # collision the S07 gate exists to make impossible. Whichever gets
+        # there first wins; this one defers and comes back in an hour.
+        with exclusive("maintenance:incremental-vacuum", drain_timeout=DB_DRAIN_TIMEOUT_S):
+            db.incremental_vacuum()
+        return "incremental vacuum complete"
+
+    def _duty_prune_cron(self) -> str:
+        from core.retention import prune_cron
+        from db.exclusive import writing
+
+        # Also done by snooze, but this ensures it happens even if snooze is
+        # disabled. Same implementation as snooze's Activity 7 — one set of
+        # retention budgets, two callers.
+        with writing("maintenance:prune-cron", wait=DB_GATE_WAIT_S):
+            counts = prune_cron()
+        return f"{counts['runs']} runs, {counts['sessions']} sessions, {counts['state_log']} state_log rows pruned"
+
+    def _duty_prune_hygiene(self) -> str:
+        from core import retention
+        from db import models as db
+        from db.exclusive import writing
+
+        with writing("maintenance:prune-hygiene", wait=DB_GATE_WAIT_S):
+            token_usage = db.prune_orphaned_token_usage(max_age_days=30)
+            messages = db.prune_old_session_messages(max_age_days=7)
+            questions = db.prune_old_questions(max_age_days=7)
+            # This tier runs even with snooze disabled — same reason the cron
+            # cleanup lives here too.
+            retention.prune_notifications()
+        return f"{token_usage} token-usage, {messages} session-message, {questions} question rows pruned"
+
+    # ------------------------------------------------------------------
+    # Backups
+    # ------------------------------------------------------------------
+
+    async def _ensure_recent_backup(self) -> None:
+        """Take a backup if the newest completed one is a day old or more.
+
+        One implementation, two callers: the hourly check (which is what
+        makes the schedule survive restarts — the tick counter does not) and
+        the daily tier's first step (which is what keeps the mutating duties
+        standing on a snapshot at most ~24h old). Single-flight, so the two
+        cannot start two backups, and shielded, so a caller that gives up
+        waiting does not cancel the one already running.
+        """
+        from scripts.backup import hours_since_last_backup
+
+        try:
+            age = await asyncio.to_thread(hours_since_last_backup)
+        except Exception as e:
+            logger.warning("Could not read backup freshness: %s", e)
+            return
+        if age is not None and age < 24.0:
+            return
+
+        if self._backup_task is None or self._backup_task.done():
+            self._backup_task = asyncio.create_task(self._take_backup())
+            self.track_task(self._backup_task)
+        try:
+            await asyncio.shield(self._backup_task)
+        except Exception:
+            pass  # _take_backup logged it; the tier proceeds as it always has
+
+    async def _take_backup(self) -> None:
+        """One backup run, off the loop — VACUUM INTO plus a corpus copy is
+        seconds of blocking IO, the same reason the WAL checkpoint moved."""
+        from scripts.backup import run_backup
+
+        try:
+            result = await run_background(run_backup)
+        except Exception as e:
+            logger.warning("Backup failed: %s", e)
+            return
+        if result.get("skipped"):
+            logger.debug("Backup skipped: %s", result["skipped"])
+        else:
+            logger.info(
+                "Backup complete: %s (%d memory files, %d rotated out)",
+                result["db"],
+                result["memory_files"],
+                len(result["rotated_out"]),
+            )
+
+    @staticmethod
+    def _checkpoint() -> None:
+        """WAL checkpoint, announced so a rebuild waits for it."""
+        from db import models as db
+        from db.exclusive import writing
+
+        with writing("maintenance:checkpoint", wait=DB_GATE_WAIT_S):
+            db.checkpoint()
 
     async def _tick(self) -> None:
         """Execute stratified maintenance duties.
@@ -273,100 +605,25 @@ class MaintenanceRunner:
         # session's SSE when run on the loop.
         if tick % 60 == 0:
             try:
-                await asyncio.to_thread(db.checkpoint)
+                await asyncio.to_thread(self._checkpoint)
                 logger.debug("WAL checkpoint complete")
             except Exception as e:
                 logger.warning("WAL checkpoint failed: %s", e)
 
-            # Daily backup, checked hourly. This lived in the 24h tier below,
+            # Daily backup, checked hourly. This lived in the 24h tier,
             # keyed on tick % 1440 — but the tick counter starts at zero on
             # every process start, so a box that restarts daily (every deploy
             # day) never reached tick 1440 and silently skipped its backups
             # for as long as the deploy streak lasted (4 days on the live
-            # box). Due-ness now comes from the newest snapshot's own
-            # name-encoded timestamp, which survives restarts. Off-loop —
-            # VACUUM INTO plus a corpus copy is seconds of blocking IO, the
-            # same reason the WAL checkpoint above moved off the loop.
-            try:
-                from scripts.backup import hours_since_last_backup, run_backup
+            # box). Due-ness comes from the newest COMPLETED snapshot's own
+            # name-encoded timestamp, which survives restarts.
+            await self._ensure_recent_backup()
 
-                age = await asyncio.to_thread(hours_since_last_backup)
-                if age is None or age >= 24.0:
-                    result = await run_background(run_backup)
-                    if result.get("skipped"):
-                        logger.debug("Backup skipped: %s", result["skipped"])
-                    else:
-                        logger.info(
-                            "Backup complete: %s (%d memory files, %d rotated out)",
-                            result["db"],
-                            result["memory_files"],
-                            len(result["rotated_out"]),
-                        )
-            except Exception as e:
-                logger.warning("Backup failed: %s", e)
-
-        # Once every 24h by the CLOCK, not by tick count. The counter starts
-        # at 0 each process and is further delayed by any long snooze cycle,
-        # so a box that restarts daily never reached 1440 and never ran the
-        # memory self-repair, the vacuum, or the aux-table prunes at all.
-        # Same wall-clock treatment the backup above already gets.
-        if self._daily_tier_due():
-            # The mutating steps here (health_check(fix=True) rewrites the
-            # memory index, the prunes delete rows) always run with a backup
-            # at most ~24h old: the hourly check above shares this tick's
-            # boundary (60 divides 1440) and runs earlier in the same pass
-            # whenever one is due.
-            try:
-                from core.memory.store import get_memory_store
-
-                store = get_memory_store()
-                if store:
-                    health = await asyncio.to_thread(store.health_check, fix=True)
-                    logger.info("Memory maintenance: %s", health)
-            except Exception as e:
-                logger.warning("Memory maintenance failed: %s", e)
-
-            try:
-                db.incremental_vacuum()
-                logger.debug("Incremental vacuum complete")
-            except Exception as e:
-                logger.warning("Incremental vacuum failed: %s", e)
-
-            # Cron cleanup (also done by snooze, but this ensures it happens
-            # even if snooze is disabled). Same implementation as snooze's
-            # Activity 7 — one set of retention budgets, two callers.
-            try:
-                from core.retention import prune_cron
-
-                counts = prune_cron()
-                if any(counts.values()):
-                    logger.info(
-                        "Cron cleanup: %d runs, %d sessions, %d state_log rows pruned",
-                        counts["runs"],
-                        counts["sessions"],
-                        counts["state_log"],
-                    )
-            except Exception as e:
-                logger.warning("Cron cleanup failed: %s", e)
-
-            # Data hygiene: prune orphaned/old rows from auxiliary tables
-            try:
-                pruned = db.prune_orphaned_token_usage(max_age_days=30)
-                if pruned:
-                    logger.info("Token usage cleanup: %d rows pruned", pruned)
-                pruned = db.prune_old_session_messages(max_age_days=7)
-                if pruned:
-                    logger.info("Session messages cleanup: %d rows pruned", pruned)
-                pruned = db.prune_old_questions(max_age_days=7)
-                if pruned:
-                    logger.info("Questions cleanup: %d rows pruned", pruned)
-                # This tier runs even with snooze disabled — same reason the
-                # cron cleanup lives here too.
-                from core import retention
-
-                retention.prune_notifications()
-            except Exception as e:
-                logger.warning("Data hygiene cleanup failed: %s", e)
+        # The 24h tier is NOT here any more. It ran inside this coroutine,
+        # under wait_for(TICK_TIMEOUT), with exactly one await in it — so the
+        # timeout could only fire at the memory health check, and firing
+        # abandoned the incremental vacuum and five prunes behind it. See
+        # _run_daily_tier, scheduled from _heartbeat.
 
 
 # Module singleton
