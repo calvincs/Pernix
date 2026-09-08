@@ -36,6 +36,10 @@ class GateResult:
     error: str = ""  # runner-level problem (timeout, spawn failure)
     fingerprint: str = ""
     scope: str = "session"
+    # The gate never actually ran: its command or working directory does not
+    # resolve on this host. That is a broken gate, not failing work, and it
+    # must not be graded as if the agent's turn had failed a check.
+    broken: bool = False
 
     def to_payload(self) -> dict:
         return {
@@ -47,7 +51,46 @@ class GateResult:
             "output_tail": self.output_tail[-1500:],
             "reused": self.reused,
             "error": self.error,
+            "broken": self.broken,
         }
+
+
+# Shell exit codes and messages that mean "the command never ran", as opposed
+# to "the command ran and reported a failure".
+_UNRUNNABLE_EXIT_CODES = frozenset({126, 127})
+_UNRUNNABLE_MARKERS = (
+    "can't cd to",
+    "cannot cd to",
+    "no such file or directory",
+    "command not found",
+    "not found",
+    "permission denied",
+    "is a directory",
+)
+
+
+def _looks_unrunnable(exit_code: int | None, output_tail: str) -> bool:
+    """True when a non-zero exit means the gate could not start.
+
+    A gate registered against a directory that does not exist yet exits 2 with
+    `/bin/sh: 1: cd: can't cd to <path>`. Treating that as a failing check made
+    the Agent Mesh build's completion gate force three retry turns in the
+    middle of an active build and graded three turns of real progress as
+    escalate — for a gate that had verified nothing at all.
+
+    Deliberately narrow: only a SHORT output is scanned, because a real test
+    run that happens to print "no such file or directory" somewhere in its
+    output is a genuine failure, not a broken gate.
+    """
+    if exit_code == 0 or exit_code is None:
+        return False
+    if exit_code in _UNRUNNABLE_EXIT_CODES:
+        return True
+    tail = (output_tail or "").strip()
+    if not tail or len(tail) > 400:
+        return False
+    lowered = tail.lower()
+    return any(marker in lowered for marker in _UNRUNNABLE_MARKERS)
 
 
 def _fingerprint(watch_paths: list[str], base: Path) -> str:
@@ -221,6 +264,7 @@ def _refused(row: dict, fingerprint: str, reason: str) -> GateResult:
         error=reason,
         fingerprint=fingerprint,
         scope=row.get("scope", "session"),
+        broken=True,
     )
 
 
@@ -272,6 +316,7 @@ def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
             output_tail=tail.strip(),
             fingerprint=fingerprint,
             scope=row.get("scope", "session"),
+            broken=_looks_unrunnable(proc.returncode, tail),
         )
     except subprocess.TimeoutExpired:
         # Kill the group, not just the shell: gates run unattended every turn,
@@ -308,7 +353,41 @@ def _run_one(row: dict, workspace: Path, fingerprint: str) -> GateResult:
 
 
 def failing(results: list[GateResult]) -> list[GateResult]:
-    return [r for r in results if not r.passed]
+    """Gates that RAN and reported a failure.
+
+    Broken gates are excluded on purpose: they never executed, so they are
+    evidence about the gate, not about the turn. Including them made a gate
+    registered one turn too early force retries and block pass verdicts on
+    work it had never looked at.
+    """
+    return [r for r in results if not r.passed and not r.broken]
+
+
+def broken(results: list[GateResult]) -> list[GateResult]:
+    """Gates that could not run at all — a gate to fix, not work to redo."""
+    return [r for r in results if r.broken]
+
+
+def format_broken_notice(results: list[GateResult]) -> str:
+    """Text carried to the next turn so the agent can fix or re-register.
+
+    A broken gate is silent otherwise: it stops clamping the verdict and stops
+    forcing retries, so without this the agent would never learn that the
+    check it registered has been verifying nothing.
+    """
+    bad = broken(results)
+    if not bad:
+        return ""
+    lines = [
+        "A deterministic gate you registered could NOT RUN — it has verified "
+        "nothing. Fix the command or re-register it with remove_gate + add_gate:"
+    ]
+    for r in bad:
+        detail = r.error or (f"exit {r.exit_code}" if r.exit_code is not None else "did not start")
+        lines.append(f"- `{r.name}` ({detail}): {r.command}")
+        if r.output_tail:
+            lines.append(f"  {r.output_tail[-300:]}")
+    return "\n".join(lines)
 
 
 def format_evidence(results: list[GateResult]) -> str:
@@ -317,9 +396,15 @@ def format_evidence(results: list[GateResult]) -> str:
     them regardless of what the model concludes."""
     if not results:
         return ""
-    lines = ["GATE EVIDENCE (deterministic checks; a failing gate means the turn CANNOT pass):"]
+    lines = [
+        "GATE EVIDENCE (deterministic checks; a FAILing gate means the turn CANNOT pass):",
+        "A gate marked BROKEN never ran — its command or working directory does not "
+        "resolve. That is a defect in the gate, NOT a failure of this turn's work: do "
+        "not hold it against the agent, and do not treat it as an unmet deliverable "
+        "unless registering a working gate was itself the ask.",
+    ]
     for r in results:
-        status = "PASS" if r.passed else "FAIL"
+        status = "PASS" if r.passed else ("BROKEN" if r.broken else "FAIL")
         detail = f"exit={r.exit_code}" if r.exit_code is not None else (r.error or "no result")
         reused = " [reused prior failure — watch_paths unchanged]" if r.reused else ""
         lines.append(f"- {r.name}: {status} ({detail}){reused}  cmd: {r.command}")

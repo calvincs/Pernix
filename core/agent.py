@@ -2061,6 +2061,15 @@ def _resolve_tool_surface(
     for t in registry.enabled_tools():
         if t.source == "builtin":
             active.add(t.name)
+    # Gates are a standing property of the session, not a per-task tool, so
+    # the one read-only way to see them travels with every turn. Scout dropped
+    # the gate tools from a session whose whole job was validating a build; the
+    # agent probed for an HTTP endpoint, found none, and wrote "no such gate
+    # API exists on this deployment" into the project's own task file
+    # (Agent Mesh build, 2026-09-08). list_gates is a no-argument reader — the
+    # cheapest possible way to make the mechanism findable.
+    if settings.gates_enabled and registry.exists("list_gates") and not registry.is_disabled("list_gates"):
+        active.add("list_gates")
     # Monotonic allowlist: if the agent successfully used an extension tool in
     # a prior turn of this session, keep it in the schema. Prevents scout from
     # silently narrowing the surface between turns (e.g. dropping

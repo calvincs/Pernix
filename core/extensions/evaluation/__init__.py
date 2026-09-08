@@ -279,7 +279,13 @@ def list_gates(_context: dict | None = None) -> str:
 
     rows = db.get_gates(session_id, enabled_only=False)
     if not rows:
-        return "No gates registered for this session."
+        return (
+            "No gates registered for this session. Gates are per-session, so one "
+            "registered in an earlier session does not carry over — register this "
+            "session's own with add_gate(name=..., command=...). A gate is a shell "
+            "command that runs at every turn end; a non-zero exit blocks a pass "
+            "verdict."
+        )
     lines = []
     for r in rows:
         state = "enabled" if r.get("enabled") else "disabled"
