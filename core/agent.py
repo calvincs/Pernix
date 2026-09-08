@@ -30,7 +30,7 @@ from core.llm.types import REJECTED_CALL_KEY, is_rejected_call
 from core.tools.executor import execute_tool_round
 from core.tools.registry import get_registry
 from db import models as db
-from sessions.state import AgentSession
+from sessions.state import AgentSession, turn_state
 
 logger = logging.getLogger("pernix.agent")
 
@@ -1535,6 +1535,17 @@ async def run_agent(
     _forced_followups = 0
     _followup_pending = False
 
+    # One extra pass for a correction that landed after the last compile. The
+    # rapid-fire combiner rewrites the running turn's user row in place and
+    # queues nothing; mid-loop that is free (the next round re-compiles), but a
+    # text-only final answer ends the turn without re-reading, and the combined
+    # row then has an assistant message after it, so the orphan sweep never
+    # flags it either. Bounded to one: the pass exists to let the model address
+    # the amendment, not to chase a user who keeps typing.
+    _final_answer_rereads = 0
+    FINAL_ANSWER_REREAD_LIMIT = 1
+    _compiled_user_row_version = turn_state(session).user_row_version
+
     # Last compiled prompt size (F13, field case 17683100ecf8): the only
     # token number the window actually constrains. One round stale by
     # construction — the status is built before this round's compile.
@@ -1608,6 +1619,10 @@ async def run_agent(
             context_budget=effective_budget,
             context_tokens=_last_context_tokens,
         )
+        # Read before the compile, not after: a combine landing while the
+        # compiler is reading rows may or may not make it into this payload, and
+        # an extra pass is recoverable where a dropped correction is not.
+        _compiled_user_row_version = turn_state(session).user_row_version
         payload = await asyncio.to_thread(
             compile_context,
             session_id=session_id,
@@ -1869,6 +1884,38 @@ async def run_agent(
                 }
             )
             session.touch()
+
+            # The user amended this turn's message while the answer above was
+            # streaming. Nothing else will ever read that amendment, so take one
+            # more round: the next compile carries the combined row and this
+            # answer, and the model gets to address what it missed.
+            if (
+                turn_state(session).user_row_version != _compiled_user_row_version
+                and _final_answer_rereads < FINAL_ANSWER_REREAD_LIMIT
+                and not session.cancel_requested
+            ):
+                _final_answer_rereads += 1
+                logger.info(
+                    "Session %s: user row %s changed after the last compile — re-reading before ending the turn",
+                    session_id,
+                    _turn_user_msg_id,
+                )
+                await asyncio.to_thread(
+                    db.add_message,
+                    session_id,
+                    "system",
+                    "[the user edited the message you were answering while you were "
+                    "answering it — the current text is in the user turn above. Re-read "
+                    "it and handle anything your answer missed. If the answer already "
+                    "covers it, say so in one line.]",
+                )
+                session.emit_event({"type": "turn.late_correction", "message_id": _turn_user_msg_id})
+                collected_content = ""
+                collected_tool_calls = []
+                # Deliberately not tool_round += 1: the harness asked for this
+                # pass, so it must not spend the turn's round budget.
+                continue
+
             session.termination_reason = "complete"
             return
 
