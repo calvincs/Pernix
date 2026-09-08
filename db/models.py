@@ -3582,6 +3582,32 @@ def mark_session_reviewed(session_id: str) -> None:
         )
 
 
+def get_distill_watermark(session_id: str) -> int:
+    """Newest message id distillation has both extracted AND stored (v38).
+
+    0 for a session that has never been distilled, and for a session id with
+    no row — a distiller handed a synthetic transcript still has to run.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT distilled_up_to FROM sessions WHERE id = ?", (session_id,)).fetchone()
+    return int(row["distilled_up_to"] or 0) if row else 0
+
+
+def set_distill_watermark(session_id: str, msg_id: int) -> None:
+    """Advance the distillation watermark. Never rewinds.
+
+    Called only after a chunk's entries have been through the memory store,
+    so a failed extraction or a failed write leaves the material uncovered
+    and the next run picks it up again. Deliberately does not touch
+    updated_at: distilling a session is not activity in it.
+    """
+    with connect_sessions() as conn:
+        conn.execute(
+            "UPDATE sessions SET distilled_up_to = ? WHERE id = ? AND distilled_up_to < ?",
+            (int(msg_id), session_id, int(msg_id)),
+        )
+
+
 def get_unrefined_sessions(min_idle_minutes: int = 10, limit: int = 1) -> list[dict]:
     """Sessions eligible for the snooze tail-end refine pass.
 

@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 
 from config import settings
 
@@ -141,9 +142,138 @@ If the conversation includes [REFLECT] messages with retry verdicts, extract the
 learned (what worked, what failed, recovery strategies) as "skill" type entries with
 weight "high". These are hard-won operational patterns worth preserving.
 
+PROVENANCE (every entry): transcript lines are tagged with their message id, as in
+"[assistant #412]". Add these fields:
+  "source_msgs": [412, 455]   — the message ids the entry actually rests on
+  "status": "verified" | "asserted" — "verified" ONLY when a [tool_result] line in the
+      transcript shows the outcome; "asserted" when the assistant merely stated it.
+
+CORRECTIONS AND FINAL OUTCOMES: when later material refutes, narrows or replaces an
+earlier claim, extract the CORRECTED form — never the superseded one — and add
+  "supersedes": "one line naming the earlier claim this replaces"
+The end of a long investigation is where its conclusion lives; a hypothesis stated
+early and refuted later belongs in memory in its refuted form, or not at all.
+
 If there is nothing worth saving, respond with just: SKIP
 
 Be selective — only save what would be valuable in a future session."""
+
+# One extraction call's worth of transcript, and how many of them a single
+# invocation may make. Material past the last chunk keeps its place behind the
+# watermark and is picked up by the next turn or the snooze catch-up: this is
+# a background hook at turn end, not a place to fire ten LLM calls.
+_CHUNK_CHARS = 40_000
+_MAX_CHUNKS = 3
+# Long bodies are clipped HEAD AND TAIL. A head-only clip is what made this
+# subsystem blind to corrections: a refutation, a final result and a "that
+# turned out to be wrong" all live at the END of the message carrying them,
+# and the old 800-character prefix cut every one of them off.
+_MSG_HEAD, _MSG_TAIL = 1_200, 800
+_TOOL_HEAD, _TOOL_TAIL = 400, 400
+# Provenance rendering caps.
+_MAX_SOURCE_MSGS = 6
+_MAX_SUPERSEDES = 200
+
+
+def _clip_body(text: str, head: int, tail: int) -> str:
+    """Keep the opening and the ending, and say what came out of the middle."""
+    if len(text) <= head + tail:
+        return text
+    return f"{text[:head]} … [{len(text) - head - tail} chars elided] … {text[-tail:]}"
+
+
+def _transcript_line(msg: dict) -> str:
+    """One transcript line, tagged with the message id an entry can cite."""
+    role = msg.get("role", "")
+    content = msg.get("content") or ""
+    if not isinstance(content, str):
+        content = str(content)
+    if not content:
+        return ""
+    tag = f"#{msg['id']}" if msg.get("id") is not None else "#?"
+    if role in ("user", "assistant", "reflect"):
+        return f"[{role} {tag}] {_clip_body(content, _MSG_HEAD, _MSG_TAIL)}"
+    if role == "tool":
+        # Tool results carry what already landed ("SAVED file=... VERIFY=OK")
+        # so the extractor does not re-extract it, and they are the only
+        # evidence in the transcript that anything was actually verified.
+        return f"[tool_result {tag}] {_clip_body(content, _TOOL_HEAD, _TOOL_TAIL)}"
+    return ""
+
+
+@dataclass
+class _Chunk:
+    """One extraction call's material, and the coverage it commits on success."""
+
+    text: str
+    last_id: int
+    tool_ids: set
+    is_tail: bool
+
+
+_TAIL_NOTE = (
+    "\n[This is the most recent material in the session. Where it contradicts anything "
+    "earlier, it is the current state — extract the later form.]"
+)
+
+
+def _chunk_transcript(lines: list[tuple], header: str) -> list[_Chunk]:
+    """Split tagged transcript lines into bounded chunks, oldest first.
+
+    `lines` is (msg_id, role, rendered). Every chunk repeats the header, which
+    carries the session's opening request: the point is to stop re-reading the
+    oldest 40,000 characters on every turn, not to swap that for a tail-only
+    view that forgets what was asked for.
+    """
+    chunks: list[_Chunk] = []
+    body: list[str] = []
+    tool_ids: set = set()
+    last_id = 0
+    for msg_id, role, rendered in lines:
+        if body and len(header) + sum(len(b) + 1 for b in body) + len(rendered) > _CHUNK_CHARS:
+            chunks.append(_Chunk("\n".join([header, *body]), last_id, tool_ids, False))
+            body, tool_ids = [], set()
+        body.append(rendered)
+        last_id = max(last_id, msg_id)
+        if role == "tool":
+            tool_ids.add(msg_id)
+    if body:
+        chunks.append(_Chunk("\n".join([header, *body]) + _TAIL_NOTE, last_id, tool_ids, True))
+    return chunks
+
+
+def _apply_provenance(entry: dict, chunk: _Chunk, session_id: str) -> tuple[str, str]:
+    """Stamp an entry with where it came from and how well it is supported.
+
+    A "verified" status is checked, not taken: the entry has to cite a
+    message id that really is a tool result in the material it was extracted
+    from. Otherwise it is an agent assertion, and says so — textual overlap
+    with a transcript is not evidence that anything was run.
+
+    A correction keeps the claim it replaces in its own text, so superseding
+    the older entry does not erase what changed.
+    """
+    content = str(entry.get("content") or "")
+    raw = entry.get("source_msgs")
+    cited: list[int] = []
+    for value in raw if isinstance(raw, list) else []:
+        try:
+            cited.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    verified = bool(chunk.tool_ids & set(cited))
+    label = "tool-verified" if verified else "agent assertion, no tool result cited"
+    cite = ",".join(str(i) for i in cited[:_MAX_SOURCE_MSGS]) or "unrecorded"
+    content += f"\n[Provenance: session {session_id}, msgs {cite} — {label}]"
+
+    supersedes = str(entry.get("supersedes") or "").strip()
+    if supersedes:
+        content += f"\n[Corrects an earlier claim: {supersedes[:_MAX_SUPERSEDES]}]"
+
+    tags = "tool-verified" if verified else "agent-asserted"
+    if supersedes:
+        tags += ",correction"
+    return content, tags
 
 
 async def distill_session(
@@ -168,29 +298,59 @@ async def distill_session(
     if not store:
         return
 
+    from db import models as db
+
     # Claim-origin provenance (coarse, session-level): if the session pulled
     # external content in, everything distilled from it is marked external so
     # downstream consumers (the dream evidence packs, future scout weighting)
     # can discount web-derived claims relative to operational records.
     origin = "external" if _session_used_web_tools(messages) else "internal"
 
-    # Build conversation transcript (include tool results so LLM sees what was already saved)
-    transcript_lines = [f"Session: {title} (type={session_type})"]
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if role in ("user", "assistant", "reflect") and content:
-            transcript_lines.append(f"[{role}] {content[:800]}")
-        elif role == "tool" and content:
-            # Include tool results (e.g. "SAVED file=user.profile epoch=... VERIFY=OK",
-            # or "Saved to user.profile" in transcripts predating the verdict
-            # contract) so the LLM knows what entries were already saved and
-            # won't re-extract them
-            transcript_lines.append(f"[tool_result] {content[:400]}")
-    transcript = "\n".join(transcript_lines)
-
-    if len(transcript) < 200:
+    # Only the material this session has not already been distilled from
+    # (v38). Running the whole transcript through every turn meant that past
+    # ~40,000 clipped characters the extractor's input was FROZEN: two
+    # consecutive turns sent byte-identical bytes, burning a background call
+    # each time, while every later correction sat outside the prefix forever.
+    watermark = await asyncio.to_thread(db.get_distill_watermark, session_id)
+    fresh = [m for m in messages if int(m.get("id") or 0) > watermark]
+    if not fresh:
+        logger.debug("Distillation: nothing new past msg %d for session %s", watermark, session_id)
         return
+
+    # The header rides every chunk. The opening request is what states the
+    # session's standing constraints, and dropping it in favour of the newest
+    # material would trade one bias for its mirror image.
+    header_lines = [f"Session: {title} (type={session_type})"]
+    if watermark:
+        opening = next((m for m in messages if m.get("role") == "user" and (m.get("content") or "")), None)
+        covered = len(messages) - len(fresh)
+        header_lines.append(
+            f"[context] {covered} earlier message(s) in this session were distilled previously "
+            f"(up to msg {watermark}) and are not repeated here."
+        )
+        if opening is not None and int(opening.get("id") or 0) <= watermark:
+            header_lines.append(f"[context · original request #{opening.get('id')}] {(opening['content'])[:800]}")
+    header = "\n".join(header_lines)
+
+    lines = []
+    for msg in fresh:
+        rendered = _transcript_line(msg)
+        if rendered:
+            lines.append((int(msg.get("id") or 0), msg.get("role", ""), rendered))
+    if not lines:
+        return
+
+    chunks = _chunk_transcript(lines, header)
+    if sum(len(c.text) for c in chunks) < 200:
+        return
+    if len(chunks) > _MAX_CHUNKS:
+        logger.info(
+            "Distillation: %d chunks of new material for %s, taking %d this pass",
+            len(chunks),
+            session_id,
+            _MAX_CHUNKS,
+        )
+        chunks = chunks[:_MAX_CHUNKS]
 
     # Build existing file list for the prompt (rich catalog: name + count + description)
     from core.memory.ingest import _build_file_catalog
@@ -228,91 +388,108 @@ async def distill_session(
             "finding or list):\n" + "\n".join(f"- [{f} · {t or 'note'}] {c[:600]}" for f, t, c in agent_saved[:12])
         )
 
-    # LLM extraction
+    # LLM extraction, one call per chunk. Coverage is committed per chunk and
+    # only after both the extraction and every store write for it succeeded:
+    # a failed call or a failed write leaves the material uncovered, and the
+    # next turn sees it again.
     client = get_llm_client()
     model = settings.background_model or settings.llm_model
-    try:
-        response = await client.chat(
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": transcript[:40000]},
-            ],
-            model=model,
-            max_tokens=2000,
-        )
-        text = response.content.strip()
-    except Exception as e:
-        logger.warning("Distillation LLM call failed: %s", e)
-        return
+    saved = superseded = skipped_dup = skipped_restated = 0
+    covered_to = watermark
 
-    if text.upper() == "SKIP":
-        logger.debug("Distillation: LLM returned SKIP for session %s", session_id)
-        return
-
-    # Parse JSON entries
-    entries = _parse_entries(text)
-    if not entries:
-        return
-
-    # Save with dedup
-    saved = 0
-    superseded = 0
-    skipped_dup = 0
-    skipped_restated = 0
-    for entry in entries:
-        content = entry.get("content", "")
-        if not content:
-            continue
-
-        restated = _restates(content, entry.get("file") or "", str(entry.get("type") or ""), agent_saved)
-        if restated is not None:
-            skipped_restated += 1
-            logger.info(
-                "Distill: dropped a candidate for %s that restates the agent's own entry in %s",
-                entry.get("file") or "?",
-                restated[0],
+    for index, chunk in enumerate(chunks):
+        try:
+            response = await client.chat(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": chunk.text},
+                ],
+                model=model,
+                max_tokens=2000,
             )
-            continue
+            text = response.content.strip()
+        except Exception as e:
+            logger.warning("Distillation LLM call failed on chunk %d/%d: %s", index + 1, len(chunks), e)
+            break
 
-        tags = entry.get("tags", "")
-        content, tags = _apply_grounding_guard(content, tags, entry, transcript)
-        # Add date tag
-        tags = f"{tags},{time.strftime('%Y-%m-%d')}" if tags else time.strftime("%Y-%m-%d")
-        if session_type == "worker":
-            tags += ",worker"
-
-        # add_or_supersede_entry runs the multi-signal dedup gate itself and,
-        # when a blocked write is a correction of the entry blocking it,
-        # rewrites that entry in place instead of dropping the correction —
-        # the similarity that makes a correction detectable is exactly what
-        # made the old is_duplicate-then-continue discard it. It also enforces
-        # unique (file, epoch) identity at write time.
-        # Threaded: with an embedding model set the gate runs a hybrid search
-        # whose query embedding is a blocking HTTP call, and this hook runs on
-        # the event loop at turn end.
-        result = str(
-            await asyncio.to_thread(
-                store.add_or_supersede_entry,
-                content=content,
-                file_name=entry.get("file") or None,
-                entry_type=entry.get("type", "note"),
-                tags=tags,
-                weight=entry.get("weight", "normal"),
-                source="distill",
-                origin=origin,
-                space_slug=space_slug,
-            )
-        )
-        if result.startswith("Superseded"):
-            superseded += 1
-        elif _is_saved(result):
-            saved += 1
+        if text.upper() == "SKIP":
+            logger.debug("Distillation: LLM returned SKIP for session %s chunk %d", session_id, index + 1)
+            entries: list[dict] = []
         else:
-            skipped_dup += 1
+            entries = _parse_entries(text)
+            if not entries:
+                # Unparseable output is a failed extraction, not an empty
+                # one. Committing coverage here would retire the material on
+                # the strength of a response nobody could read.
+                logger.warning("Distillation: unparseable output for %s chunk %d", session_id, index + 1)
+                break
+
+        try:
+            for entry in entries:
+                content = entry.get("content", "")
+                if not content:
+                    continue
+
+                restated = _restates(content, entry.get("file") or "", str(entry.get("type") or ""), agent_saved)
+                if restated is not None:
+                    skipped_restated += 1
+                    logger.info(
+                        "Distill: dropped a candidate for %s that restates the agent's own entry in %s",
+                        entry.get("file") or "?",
+                        restated[0],
+                    )
+                    continue
+
+                content, provenance_tags = _apply_provenance(entry, chunk, session_id)
+                tags = ",".join(t for t in (str(entry.get("tags") or ""), provenance_tags) if t)
+                content, tags = _apply_grounding_guard(content, tags, entry, chunk.text)
+                # Add date tag
+                tags = f"{tags},{time.strftime('%Y-%m-%d')}" if tags else time.strftime("%Y-%m-%d")
+                if session_type == "worker":
+                    tags += ",worker"
+
+                # add_or_supersede_entry runs the multi-signal dedup gate
+                # itself and, when a blocked write is a correction of the
+                # entry blocking it, rewrites that entry in place instead of
+                # dropping the correction — the similarity that makes a
+                # correction detectable is exactly what made the old
+                # is_duplicate-then-continue discard it. It also enforces
+                # unique (file, epoch) identity at write time.
+                # Threaded: with an embedding model set the gate runs a hybrid
+                # search whose query embedding is a blocking HTTP call, and
+                # this hook runs on the event loop at turn end.
+                result = str(
+                    await asyncio.to_thread(
+                        store.add_or_supersede_entry,
+                        content=content,
+                        file_name=entry.get("file") or None,
+                        entry_type=entry.get("type", "note"),
+                        tags=tags,
+                        weight=entry.get("weight", "normal"),
+                        source="distill",
+                        origin=origin,
+                        space_slug=space_slug,
+                    )
+                )
+                if result.startswith("Superseded"):
+                    superseded += 1
+                elif _is_saved(result):
+                    saved += 1
+                else:
+                    skipped_dup += 1
+        except Exception as e:
+            logger.warning("Distillation storage failed for %s chunk %d: %s", session_id, index + 1, e)
+            break
+
+        covered_to = chunk.last_id
+        await asyncio.to_thread(db.set_distill_watermark, session_id, covered_to)
 
     logger.info(
-        "Distilled session %s: %d saved, %d superseded, %d deduped, %d dropped as restating the agent's own entries",
+        "Distilled session %s up to msg %d (was %d): %d saved, %d superseded, %d deduped, "
+        "%d dropped as restating the agent's own entries",
         session_id,
+        covered_to,
+        watermark,
         saved,
         superseded,
         skipped_dup,
