@@ -560,6 +560,7 @@ class TrustState:
     reasoning: str = ""
     verification: str = ""
     verification_reason: str = ""
+    missing: str = ""
     stale_verdict: str | None = None
     stale_seq: int = 0
     modified: bool = False
@@ -590,6 +591,11 @@ class TrustState:
             return f"# INCOMPLETE (worker terminated: {r})\n"
         return ""
 
+    def _missing_note(self) -> str:
+        """Evidence the grade itself said it never saw. Kept whatever the
+        verdict is — it is the one line that names what to go and check."""
+        return f"# Missing evidence: {self.missing[:300]}\n" if self.missing else ""
+
     def verification_note(self) -> str:
         """What the grader said about THIS run's output. Empty only for a
         clean, current, verified pass."""
@@ -597,16 +603,29 @@ class TrustState:
             return (
                 f"# ESCALATED (worker reflect: verdict=escalate)\n"
                 f"# Reason: {self.reasoning or '(no reasoning provided)'}\n"
-                f"# Consider get_worker_transcript({self.worker_id[:12]!r}) to inspect "
+                + self._missing_note()
+                + f"# Consider get_worker_transcript({self.worker_id[:12]!r}) to inspect "
                 f"the full work stream before trusting this output.\n"
             )
         if self.verdict == "retry":
             return (
                 f"# UNVERIFIED (worker reflect: verdict=retry, retries exhausted)\n"
-                f"# Reason: {self.reasoning or '(no reasoning provided)'}\n"
+                f"# Reason: {self.reasoning or '(no reasoning provided)'}\n" + self._missing_note()
             )
         if self.verdict == "pass":
-            return ""
+            # A pass is a retry disposition, not a certificate. When the grade
+            # says so — a confidence downgrade, a self-contradiction, a check
+            # that could not run — the parent hears it here instead of finding
+            # a marker clipped out of the end of `reasoning` (H11).
+            if self.verification and self.verification != "verified":
+                return (
+                    f"# PASS BUT UNVERIFIED (reflect verdict=pass, verification={self.verification})\n"
+                    f"# Why: {self.verification_reason or '(no reason recorded)'}\n"
+                    + self._missing_note()
+                    + f"# The work was not judged worth retrying; that is not the same as checked. "
+                    f"Use get_worker_transcript({self.worker_id[:12]!r}) if the claim matters.\n"
+                )
+            return self._missing_note()
         if self.stale_verdict:
             return (
                 f"# UNVERIFIED (this run has no grade of its own)\n"
@@ -662,6 +681,7 @@ def worker_trust(
         reasoning=grade.get("reasoning", "") or "",
         verification=grade.get("verification", "") or "",
         verification_reason=grade.get("verification_reason", "") or "",
+        missing=grade.get("missing", "") or "",
         stale_verdict=(stale or {}).get("verdict"),
         stale_seq=stale_seq,
         modified=include_history and _report.graded_artifact_changed(worker_id, ref),
@@ -973,8 +993,13 @@ def _transcript_lines(messages: list, *, include_tool_results: bool, full: bool)
         elif role == "reflect":
             try:
                 r = json.loads(content)
+                # verification rides beside the verdict, not inside the
+                # reasoning: the downgrade marker lives at the END of that
+                # string and the clip below is exactly where it disappeared.
+                _ver = r.get("verification")
+                _ver_txt = f" verification={_ver}" if _ver else ""
                 lines.append(
-                    f"[#{mid} reflect] verdict={r.get('verdict')} "
+                    f"[#{mid} reflect] verdict={r.get('verdict')}{_ver_txt} "
                     f"reasoning={clip(r.get('reasoning', ''), 200, mid, 'reasoning')}"
                 )
             except (json.JSONDecodeError, TypeError):

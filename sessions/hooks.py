@@ -1072,6 +1072,11 @@ async def _run_deferred_reflect(session_obj, snap: _DeferredGrade, next_user_mes
             "missing": result.missing,
             "failure_cause": result.failure_cause,
             "confidence": result.confidence,
+            # Retry disposition and verification state are separate channels
+            # (H11): a downgraded non-pass is `verdict=pass` for control flow
+            # and `verification=unknown` for everyone who has to trust it.
+            "verification": result.verification,
+            "verification_reason": result.verification_reason,
             "latency_ms": result.reflect_latency_ms,
             "reflect_model": result.reflect_model,
             # Regime marker: this verdict never had the power to retry the
@@ -1360,6 +1365,10 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
             "missing": result.missing,
             "failure_cause": result.failure_cause,
             "confidence": result.confidence,
+            # See the deferred writer above: verdict is the retry disposition,
+            # verification is whether anything was actually checked.
+            "verification": result.verification,
+            "verification_reason": result.verification_reason,
             "latency_ms": result.reflect_latency_ms,
             "reflect_model": result.reflect_model,
             # Regime marker — this verdict ran on the critical path and can
@@ -1612,6 +1621,8 @@ async def _maybe_reflect(session_id: str, session: dict, emit=None, session_obj=
                 "missing": "",
                 "failure_cause": "env",
                 "confidence": 0.0,
+                "verification": "unknown",
+                "verification_reason": "reflect crashed before it could check anything",
                 "latency_ms": 0,
                 "_sentinel": True,
             }

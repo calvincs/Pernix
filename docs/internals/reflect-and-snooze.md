@@ -140,6 +140,37 @@ separate defensive coercion) and a grade that omits `confidence` entirely
 are excluded on purpose, so the floor can't undo that conservative default
 by flipping it back to pass.
 
+**Verdict is a retry disposition; `verification` is the trust state.** The
+floor answers "should this turn run again?" — and "no" is not the same
+sentence as "the deliverable checks out". Both were carried on `verdict`
+until 2026-09-08, so a grade meaning *I could not see the evidence, and
+another attempt would not produce any* reached the parent as a plain pass;
+the `[downgraded from ...]` marker was appended to the END of `reasoning`,
+which is exactly where `get_worker_transcript`'s 200-char clip removed it.
+
+`ReflectResult.verification` is now a separate channel — `verified` /
+`partial` / `unknown`, plus `verification_reason`, with `""` meaning a grade
+written before the field existed (read as "unstated", behaving exactly as
+before). The floor's downgrade and the `failure_cause=none` coercion both
+record `unknown`; a pass that still names `missing` evidence or an
+unestablished deliverable records `partial`; a model may state its own.
+`apply_verification_receipts` then overlays what the deterministic gates
+actually did: a failing gate leaves `unknown`, a **broken** gate (one that
+could not run at all) caps the state at `partial` no matter how confident
+the grade was, and a gate that ran and passed is evidence the grader did not
+have — enough to lift `unknown` to `partial`, never enough on its own to
+certify work the gate does not cover.
+
+Consumers, and how each reads it:
+
+| Consumer | Reads |
+| --- | --- |
+| `get_worker_result` (`TrustState.verification_note`) | `pass` + non-`verified` → a `# PASS BUT UNVERIFIED` header naming the state and the reason |
+| `_finalize_worker`'s stamp | the same header, from the same builder — so the file and the reader agree |
+| `_build_resume_message` | `pass but UNVERIFIED (verification=…)`, and the worker joins the ⚠ inspect list |
+| `get_worker_transcript` | `verification=` beside `verdict=`, outside the clipped `reasoning` |
+| retry control flow (`hooks._maybe_reflect`), trial arms, tripwire, synthesis, metrics, feedback, scout's post-mortem read, dream validation | unchanged: they act on the retry disposition, which is what `verdict` still means. `verification` is advisory to them and deliberately does not gate a retry — the floor exists precisely so ambiguity does not force one. |
+
 ### Failure classification
 
 When reflect returns `retry` or `escalate`, it also classifies the *cause*:

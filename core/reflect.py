@@ -133,6 +133,12 @@ FAILURE_CAUSES: frozenset = frozenset(
     }
 )
 
+# Valid values for ReflectResult.verification — the channel that answers "was
+# the deliverable actually checked?", which `verdict` (a retry disposition)
+# cannot. "" means the grade never said, and every consumer treats that as the
+# pre-H11 status quo rather than inventing an answer for it.
+VERIFICATION_STATES: frozenset = frozenset({"verified", "partial", "unknown"})
+
 
 @dataclass
 class ReflectResult:
@@ -157,6 +163,23 @@ class ReflectResult:
     # Structured attribution (populated from reflect output; defaults are safe).
     failure_cause: str = "none"
     confidence: float = 0.0  # 0.0–1.0
+
+    # Verification state — SEPARATE from the verdict on purpose (H11).
+    #
+    # `verdict` is a retry disposition: it answers "should this turn run
+    # again?". `verification` answers "was the deliverable actually checked?".
+    # They came apart the moment the materiality floor started downgrading a
+    # low-confidence non-pass to pass: "no retry is warranted, and I could not
+    # see the evidence" is a sensible control-flow decision and a terrible
+    # certification, and with one field it was recorded as the latter.
+    #
+    #   "verified" — the grader (or a deterministic check) saw the evidence
+    #   "partial"  — some of it; something named is unchecked or unavailable
+    #   "unknown"  — nothing here establishes the deliverable is correct
+    #   ""         — the grade predates this field; consumers read it as
+    #                "unstated" and behave exactly as they did before.
+    verification: str = ""
+    verification_reason: str = ""
     deliverables: list = field(default_factory=list)  # list[Deliverable]
     artifact_id: str = ""  # set by post_mortems writer
 
@@ -1223,6 +1246,13 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
         result.reasoning = (
             result.reasoning or ""
         ) + " [verdict coerced to pass: non-pass verdict carried failure_cause=none]"
+        # The verdict is now "no retry warranted". That is not the same claim
+        # as "the deliverable checks out", and recording it as one is H11.
+        result.verification = "unknown"
+        result.verification_reason = (
+            "the grade contradicted itself (non-pass verdict, failure_cause=none), so its "
+            "verdict was coerced to pass for control flow; nothing in it verified the deliverable"
+        )
 
     conf_explicit = False
     try:
@@ -1248,6 +1278,7 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
         and result.verdict in ("retry", "escalate")
         and result.confidence < floor
     ):
+        _downgraded_from = result.verdict
         logger.info(
             "Reflect %s at confidence %.2f (< %.2f floor) — downgrading to pass-with-lessons (%s)",
             result.verdict,
@@ -1261,6 +1292,15 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
         )
         result.verdict = "pass"
         result.failure_cause = "none"
+        # Same separation. The floor is a statement about whether to RETRY —
+        # the grader saying "I could not see enough to be sure" is precisely
+        # not a verification, and it used to be filed as one.
+        result.verification = "unknown"
+        result.verification_reason = (
+            f"downgraded from {_downgraded_from}: the grader's own confidence was "
+            f"{result.confidence:.2f}, below the {floor:.2f} materiality floor — ambiguous "
+            f"evidence does not warrant a retry, and does not verify anything either"
+        )
 
     raw_deliv = data.get("deliverables") or []
     if isinstance(raw_deliv, list):
@@ -1304,7 +1344,91 @@ def _result_from_data(data: dict, model: str, latency_ms: int) -> ReflectResult:
     if settings.reflect_experience and isinstance(raw_exp, dict) and raw_exp:
         result.experience = _sanitize_experience(raw_exp)
 
+    _settle_verification(result, data, coerced=_verdict_coerced)
     return result
+
+
+def _settle_verification(result: ReflectResult, data: dict, *, coerced: bool) -> None:
+    """Fill `verification` where the conversions above have not already.
+
+    Order of authority: what the model explicitly stated, then what the
+    conversions recorded, then what the rest of the grade implies. A pass that
+    still names something it could not see is `partial` — "no retry warranted"
+    and "everything checked out" are different sentences and the first one is
+    not evidence for the second.
+    """
+    stated = str(data.get("verification") or "").strip().lower()
+    if stated in VERIFICATION_STATES:
+        result.verification = stated
+        if not result.verification_reason:
+            result.verification_reason = str(data.get("verification_reason") or "")[:500] or "stated by the grader"
+        return
+    if result.verification:
+        return  # a conversion already settled it, with its reason
+    if coerced:
+        result.verification = "unknown"
+        result.verification_reason = "the grade was malformed and its verdict coerced; nothing in it was checked"
+        return
+    if result.verdict in ("retry", "escalate"):
+        result.verification = "unknown"
+        result.verification_reason = f"the grader returned {result.verdict}; the deliverable is not established"
+        return
+    gaps = [d.description or "(unnamed)" for d in result.deliverables if d.status in ("unmet", "partial", "unknown")]
+    if result.missing:
+        result.verification = "partial"
+        result.verification_reason = f"the grade names missing evidence: {result.missing[:200]}"
+    elif gaps:
+        result.verification = "partial"
+        result.verification_reason = "deliverables not established: " + ", ".join(gaps[:3])[:200]
+    else:
+        result.verification = "verified"
+        result.verification_reason = ""
+
+
+def apply_verification_receipts(result: ReflectResult, gate_results: list | None) -> None:
+    """Overlay what the DETERMINISTIC checks actually did.
+
+    Gates report their own execution facts, and those facts outrank a model's
+    self-assessment in both directions. A gate that could not run is an
+    unavailable check, so "verified" becomes "partial" no matter how confident
+    the grade was. A gate that ran and failed leaves nothing established. And a
+    gate that ran and passed is real evidence a grader who could not see the
+    transcript did not have — enough to move "unknown" to "partial", never
+    enough on its own to certify work the gate does not cover.
+    """
+    if not gate_results:
+        return
+    from core.gates import broken as _broken
+    from core.gates import failing as _failing
+
+    ran = [g for g in gate_results if not g.broken]
+    failed = _failing(gate_results)
+    unavailable = _broken(gate_results)
+    passed = [g for g in ran if g.passed]
+
+    def _names(gs) -> str:
+        return ", ".join(g.name for g in gs)
+
+    if failed:
+        result.verification = "unknown"
+        result.verification_reason = f"deterministic check(s) failing: {_names(failed)}"
+        return
+    if unavailable:
+        if result.verification == "verified":
+            result.verification = "partial"
+        result.verification_reason = (
+            f"deterministic check(s) could not run: {_names(unavailable)} — an unavailable "
+            "check is not a passing one"
+        ) + (f"; {_names(passed)} did pass" if passed else "")
+        return
+    if passed and result.verification == "unknown":
+        result.verification = "partial"
+        result.verification_reason = (
+            f"deterministic check(s) passed: {_names(passed)} — evidence the grader did not have, "
+            "but they cover only what they check"
+        )
+    elif passed and result.verification == "verified" and not result.verification_reason:
+        result.verification_reason = f"deterministic check(s) passed: {_names(passed)}"
 
 
 _SENTIMENTS = frozenset({"satisfied", "neutral", "frustrated", "unknown"})
@@ -1965,9 +2089,15 @@ async def reflect_on_session(
                     if not result.missing:
                         result.missing = f"Make the failing gate(s) pass: {names}"
 
+            # Deterministic receipts, on top of the model's self-assessment and
+            # after the clamp — a check's own execution facts are not something
+            # confidence can stand in for, in either direction (H11).
+            apply_verification_receipts(result, gate_results)
+
             logger.info(
-                "Reflect verdict=%s for session %s (%dms, inner=%d): %s",
+                "Reflect verdict=%s verification=%s for session %s (%dms, inner=%d): %s",
                 result.verdict,
+                result.verification,
                 session_id,
                 latency_ms,
                 inner_attempt,
