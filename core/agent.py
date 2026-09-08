@@ -529,20 +529,40 @@ def _parse_args_dict(tc: dict) -> dict:
     return {}
 
 
+_PROMPT_WS_RE = re.compile(r"\s+")
+
+
+def _normalized_prompt(args: dict) -> str:
+    """Prompt text reduced to what actually distinguishes two questions.
+
+    Capitalisation and the run-length of whitespace do not; anything else does.
+    """
+    return _PROMPT_WS_RE.sub(" ", str(args.get("prompt") or "")).strip().casefold()
+
+
 def _is_near_duplicate_call(a: dict, b: dict, tool_name: str) -> bool:
     """Check if two tool calls are near-duplicates based on structural args.
 
-    For call_model: same model + same images/attachments = near-duplicate,
-    regardless of prompt wording differences.
+    For call_model: the same question, to the same model, about the same
+    image. A different prompt or a different image is different work.
     """
     a_args = _parse_args_dict(a)
     b_args = _parse_args_dict(b)
 
     if tool_name == "call_model":
-        # Same model and same images → near-duplicate
-        same_model = a_args.get("model", "") == b_args.get("model", "")
-        same_images = a_args.get("images", []) == b_args.get("images", [])
-        return same_model and same_images
+        # The live schema is model/prompt/system/image_path/fallback_model
+        # (core/extensions/model_mgmt). This used to compare an `images` key
+        # that the tool has never had, so every pair matched on the default
+        # empty list, and the prompt was ignored "regardless of wording" — two
+        # descriptions of two different screenshots, or two unrelated questions
+        # to one model, were one call and only the first was answered. Dedup
+        # here suppresses work the user asked for, so it has to be sure.
+        return (
+            a_args.get("model", "") == b_args.get("model", "")
+            and a_args.get("image_path", "") == b_args.get("image_path", "")
+            and a_args.get("system", "") == b_args.get("system", "")
+            and _normalized_prompt(a_args) == _normalized_prompt(b_args)
+        )
 
     # Generic fallback: compare all args except the largest string value
     # (assumed to be the "prompt" or main content)
@@ -965,8 +985,7 @@ class _ToolCallGate:
         return kept
 
     async def _semantic_dedup(self, calls: list[dict]) -> list[dict]:
-        """Drop near-identical calls to expensive tools (same model + images,
-        different prompt wording)."""
+        """Drop calls to expensive tools that ask the same thing twice."""
         if len(calls) <= 1:
             return calls
         by_name: dict[str, list[dict]] = {}

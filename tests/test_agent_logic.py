@@ -141,8 +141,10 @@ def test_is_meta_commentary_long_stalling():
 
 
 def test_near_dup_call_model_same():
-    a = {"arguments": json.dumps({"model": "gpt-4", "images": ["img.png"], "prompt": "describe"})}
-    b = {"arguments": json.dumps({"model": "gpt-4", "images": ["img.png"], "prompt": "explain"})}
+    """Same question, same model, same image — only the wording of the
+    whitespace and the capitalisation differ."""
+    a = {"arguments": json.dumps({"model": "gpt-4", "image_path": "img.png", "prompt": "Describe   the chart"})}
+    b = {"arguments": json.dumps({"model": "gpt-4", "image_path": "img.png", "prompt": "describe the chart"})}
     assert _is_near_duplicate_call(a, b, "call_model") is True
 
 
@@ -152,10 +154,28 @@ def test_near_dup_call_model_diff_model():
     assert _is_near_duplicate_call(a, b, "call_model") is False
 
 
-def test_near_dup_call_model_diff_images():
-    a = {"arguments": json.dumps({"model": "gpt-4", "images": ["a.png"]})}
-    b = {"arguments": json.dumps({"model": "gpt-4", "images": ["b.png"]})}
+def test_near_dup_call_model_diff_image_path():
+    a = {"arguments": json.dumps({"model": "gpt-4", "prompt": "describe", "image_path": "a.png"})}
+    b = {"arguments": json.dumps({"model": "gpt-4", "prompt": "describe", "image_path": "b.png"})}
     assert _is_near_duplicate_call(a, b, "call_model") is False
+
+
+def test_near_dup_call_model_diff_prompt():
+    """Two questions to one model are two questions."""
+    a = {"arguments": json.dumps({"model": "gpt-4", "prompt": "What colour is the car?"})}
+    b = {"arguments": json.dumps({"model": "gpt-4", "prompt": "Transcribe the sign."})}
+    assert _is_near_duplicate_call(a, b, "call_model") is False
+
+
+def test_near_dup_call_model_diff_system():
+    a = {"arguments": json.dumps({"model": "gpt-4", "prompt": "hi", "system": "be terse"})}
+    b = {"arguments": json.dumps({"model": "gpt-4", "prompt": "hi", "system": "be thorough"})}
+    assert _is_near_duplicate_call(a, b, "call_model") is False
+
+
+def test_near_dup_call_model_identical():
+    args = json.dumps({"model": "gpt-4", "prompt": "describe", "image_path": "a.png"})
+    assert _is_near_duplicate_call({"arguments": args}, {"arguments": args}, "call_model") is True
 
 
 def test_near_dup_generic_same_structural():
