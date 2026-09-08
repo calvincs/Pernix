@@ -1269,10 +1269,15 @@ class _CompactionController:
     @property
     def can_help_with_overflow(self) -> bool:
         """Whether a provider overflow should come back to the loop for a
-        compact-and-retry, or stay in the ladder as a fatal stream error
-        (where the fallback model's larger window is the last rescue).
+        compact-and-retry, or stay in the ladder as a fatal stream error.
         Once the compactor is spent or provably a no-op, re-sending the same
-        oversized request can only fail the same way."""
+        oversized request can only fail the same way.
+
+        Falling over is not a second rescue: the documented topology is a
+        large cloud primary in front of a local fallback, so the ladder's
+        next model usually has the *smaller* window. Trimming the request to
+        the model that will receive it — which the loop now does from the
+        moment it goes sticky — is the only thing that helps here."""
         return not (self.exhausted or self._stalled)
 
     @property
@@ -1438,8 +1443,20 @@ async def run_agent(
     # field on `session`, mutated by the model_mgmt extension).
     _baseline_model = settings.llm_model
 
-    def _resolve_effective_model() -> tuple[str, bool, bool]:
+    def _resolve_effective_model(on_fallback: bool = False) -> tuple[str, bool, bool]:
+        """The model the next request will actually reach, and its modalities.
+
+        `on_fallback` is the turn's sticky failover flag. Once the ladder has
+        fallen over, every remaining request in the turn is dispatched to
+        settings.fallback_model, so the context budget, the output cap, the
+        vision/audio capabilities and the compiler's model_name all have to
+        come from that model and not from the primary we stopped calling.
+        session.model_override is deliberately left alone: a failover is a
+        per-turn detour, not the session-level switch the override means.
+        """
         raw = session.model_override or settings.llm_model
+        if on_fallback and settings.fallback_model:
+            raw = settings.fallback_model
         resolved_id = client.router.registry.resolve_model_id(raw)
         if resolved_id != raw:
             logger.info("Session %s: resolved model '%s' -> '%s'", session_id, raw, resolved_id)
@@ -1559,16 +1576,23 @@ async def run_agent(
 
         # Re-resolve the effective model each round so an in-turn switch_model
         # call (which writes session.model_override) actually moves the next
-        # round's LLM call to the new provider/model.
-        effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
+        # round's LLM call to the new provider/model — and so a turn that has
+        # already failed over compiles for the fallback it is now talking to.
+        effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model(_tried_fallback)
         if effective_model != _last_effective_model:
             # Same registry-miss guard as at turn start: an in-turn switch to
             # a freshly pulled model must not land on the manual fallback.
             if await ensure_model_known(effective_model):
-                effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model()
+                effective_model, model_supports_vision, model_supports_audio = _resolve_effective_model(_tried_fallback)
             _model_budget = derive_model_budget(effective_model)
             _max_output = derive_max_output(effective_model)
-            await _announce_model_switch(session, session_id, _last_effective_model, effective_model, _baseline_model)
+            # A failover is not a model switch the user made: the ladder has
+            # already emitted stream.fallback, and a model_divider row reads
+            # from session.model_override, which a failover never touches.
+            if not _tried_fallback:
+                await _announce_model_switch(
+                    session, session_id, _last_effective_model, effective_model, _baseline_model
+                )
             _last_effective_model = effective_model
 
         # Build context (resource status is dynamic — includes remaining tool rounds).
@@ -1703,6 +1727,21 @@ async def run_agent(
             # saw a false ceiling. The next compile measures the attempt
             # (stalled), and once the controller cannot help the ladder
             # keeps the overflow as a fatal stream error instead.
+            #
+            # When the ladder fell over inside THIS round, `payload` was
+            # compiled for the primary and its history_budget is the wrong
+            # target: the model that just rejected the request is the
+            # fallback, usually the smaller window of the two. Re-compile
+            # first — the loop head above now resolves to the fallback and
+            # the compiler trims history to fit it — and spend a compaction
+            # attempt only if that still overflows.
+            if _resolve_effective_model(_tried_fallback)[0] != effective_model:
+                logger.warning(
+                    "API context overflow in session %s right after failover; "
+                    "re-compiling for the fallback model before compacting",
+                    session_id,
+                )
+                continue
             logger.warning(
                 "API context overflow in session %s, attempting compaction-retry %d/%d",
                 session_id,
@@ -1993,6 +2032,17 @@ async def run_agent(
     # classify it now so downstream hooks can tell "round ceiling" from "complete".
     if session.termination_reason is None:
         session.termination_reason = "round_ceiling"
+    # The loop can exit in the very round the ladder fell over (round ceiling,
+    # stuck break), which leaves effective_model on the primary while the
+    # final answer is dispatched to the fallback. Resolve once more so the
+    # compile below is sized for the model that will receive it.
+    _final_model, model_supports_vision, model_supports_audio = _resolve_effective_model(_tried_fallback)
+    if _final_model != effective_model:
+        if await ensure_model_known(_final_model):
+            _final_model, model_supports_vision, model_supports_audio = _resolve_effective_model(_tried_fallback)
+        _model_budget = derive_model_budget(_final_model)
+        _max_output = derive_max_output(_final_model)
+        effective_model = _final_model
     if did_tool_calls and session.termination_reason != "compaction_failed":
         # A turn that broke on compaction_failed already emitted its error;
         # streaming a final answer against a context that is still over the
