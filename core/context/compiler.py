@@ -1716,13 +1716,45 @@ def _trim_history(
 # Trim notice builder
 # ---------------------------------------------------------------------------
 
+# The notice is pinned, so it is the one message in the window that trim can
+# never take back: its tokens are added to history_tokens and stay there for
+# the rest of the turn. A turn that drops three hundred groups must not
+# answer a context problem with a three-hundred-line system message. Entries
+# past the cap collapse into one line naming their count and id span, which
+# session_read reaches exactly as well as a line each.
+_NOTICE_MAX_ENTRIES = 40
+_NOTICE_MAX_CHARS = 6000
+# A dropped plain assistant row gets the same verbatim allowance a dropped
+# user row gets. _snapshot already captured 500 characters of it; the
+# renderer used to show 80 and throw the rest away, so a milestone or a
+# negative result was reduced to its opening clause.
+_ASSISTANT_PREVIEW_CHARS = 500
+_OTHER_PREVIEW_CHARS = 80
+
+
+def _bound_notice_entries(entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split rendered entries into the ones the notice prints and the ones it
+    collapses. Dropped user messages are always printed — quoting the user's
+    intent verbatim is the whole reason the notice exists — and the newest
+    of the rest fill the remaining room, since trim drops oldest-first and
+    the newest drops are the ones the turn is still working with.
+    """
+    if len(entries) <= _NOTICE_MAX_ENTRIES:
+        return entries, []
+    users = [i for i, e in enumerate(entries) if e["kind"] == "user"]
+    others = [i for i, e in enumerate(entries) if e["kind"] != "user"]
+    room = max(_NOTICE_MAX_ENTRIES - len(users), 4)
+    keep = set(users[:_NOTICE_MAX_ENTRIES]) | set(others[-room:])
+    return [e for i, e in enumerate(entries) if i in keep], [e for i, e in enumerate(entries) if i not in keep]
+
 
 def _build_trim_notice(dropped_groups: list[dict]) -> str:
     """Render a single pinned system-role notice describing what trim dropped.
 
     The notice names msg_ids so the agent can recover via session_read(msg_id),
     and quotes any dropped user message verbatim (up to ~500 chars) so the
-    user's intent survives even after eviction.
+    user's intent survives even after eviction. Bounded: see
+    _NOTICE_MAX_ENTRIES.
     """
     if not dropped_groups:
         return ""
@@ -1740,11 +1772,13 @@ def _build_trim_notice(dropped_groups: list[dict]) -> str:
     lines.append("")
     lines.append("Dropped (oldest first):")
 
+    entries: list[dict] = []
     for grp in dropped_groups:
         kind = grp.get("kind")
         msgs = grp.get("msgs") or []
         if not msgs:
             continue
+        ids = [m.get("_db_id") for m in msgs if m.get("_db_id") is not None]
 
         if kind == "user":
             m = msgs[0]
@@ -1755,14 +1789,13 @@ def _build_trim_notice(dropped_groups: list[dict]) -> str:
             if len(full) > 500:
                 quote += "…"
             quote = quote.replace("\n", " ")
-            lines.append(f'  • user msg {mid} ({created}) — "{quote}"')
+            entries.append({"kind": kind, "ids": ids, "line": f'  • user msg {mid} ({created}) — "{quote}"'})
 
         elif kind == "assistant_group":
-            ids = [str(m.get("_db_id")) for m in msgs if m.get("_db_id") is not None]
             head = msgs[0]
             tool_names = head.get("_tool_names") or []
             total_chars = sum(int(m.get("content_len") or 0) for m in msgs)
-            ids_str = ",".join(ids)
+            ids_str = ",".join(str(i) for i in ids)
             if tool_names:
                 tools_label = (
                     f"{tool_names[0]} ×{len(tool_names)}"
@@ -1771,17 +1804,46 @@ def _build_trim_notice(dropped_groups: list[dict]) -> str:
                 )
             else:
                 tools_label = "tool call"
-            lines.append(f"  • assistant+tools {ids_str} ({tools_label}) — ~{total_chars} chars")
+            entries.append(
+                {
+                    "kind": kind,
+                    "ids": ids,
+                    "line": f"  • assistant+tools {ids_str} ({tools_label}) — ~{total_chars} chars",
+                }
+            )
 
         else:
-            # tool_orphan or other — show ids only
             for m in msgs:
                 mid = m.get("_db_id")
                 role = m.get("role")
                 preview = (m.get("content_preview") or "").strip()
-                lines.append(f"  • {role} msg {mid} — {preview[:80]}")
+                limit = _ASSISTANT_PREVIEW_CHARS if role == "assistant" else _OTHER_PREVIEW_CHARS
+                quote = preview[:limit]
+                if int(m.get("content_len") or 0) > len(quote):
+                    quote += "…"
+                entries.append(
+                    {
+                        "kind": kind,
+                        "ids": [mid] if mid is not None else [],
+                        "line": f"  • {role} msg {mid} — {quote}".replace("\n", " "),
+                    }
+                )
 
-    return "\n".join(lines)
+    kept, elided = _bound_notice_entries(entries)
+    lines.extend(e["line"] for e in kept)
+    if elided:
+        elided_ids = [i for e in elided for i in e["ids"]]
+        span = f"msg ids {min(elided_ids)}–{max(elided_ids)}" if elided_ids else "ids not recorded"
+        lines.append(
+            f"  • …and {len(elided)} further dropped item(s), {span} — "
+            "session_read(msg_id) reaches any of them individually"
+        )
+
+    text = "\n".join(lines)
+    if len(text) > _NOTICE_MAX_CHARS:
+        text = text[:_NOTICE_MAX_CHARS].rsplit("\n", 1)[0]
+        text += "\n  • …notice truncated — search_sessions(query) covers the rest of this session"
+    return text
 
 
 def _strip_private_fields(messages: list[dict]) -> list[dict]:

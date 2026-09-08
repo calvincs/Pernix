@@ -17,7 +17,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from config import settings
-from core.context.compaction import compact_with_llm
+from core.context.compaction import NOTHING_TO_SUMMARIZE, CompactionOutcome, compact_with_llm
 from core.context.compiler import attach_cache_breakpoints, compile_context, normalize_for_openrouter
 from core.context.tokens import get_estimator
 from core.llm.budget import derive_max_output, derive_model_budget, ensure_model_known
@@ -1260,6 +1260,8 @@ class _CompactionController:
         self._tokens_before_last: int | None = None
         self._awaiting_measure = False
         self._stalled = False
+        self._refused = False
+        self._floor_announced = False
         # The live turn's root user row, set by run_agent once known, so the
         # compactor clamps to the real ask rather than guessing it.
         self.turn_user_msg_id: int | None = None
@@ -1267,6 +1269,31 @@ class _CompactionController:
     @property
     def exhausted(self) -> bool:
         return self.attempts >= self.ATTEMPT_LIMIT
+
+    @property
+    def cannot_help(self) -> bool:
+        """True once the compactor has said there is nothing it may summarize.
+
+        A first turn is the whole of this case: the boundary clamps to the
+        turn's root user row, nothing sits before it, and `compact_with_llm`
+        returns without calling a summarizer at all. That is a refusal, not a
+        failure — the compactor did not try and lose, it correctly declined —
+        and the caller must not end the turn over it. Relief for a single
+        long turn comes from the compiler's trim, which works.
+
+        Sticky for the turn because it cannot un-become true: the slice is
+        everything before the root, the transcript is append-only, and rows
+        only ever arrive after it.
+        """
+        return self._refused
+
+    def announce_floor(self) -> bool:
+        """True the first time per turn — so a turn riding the trim floor
+        logs and emits once instead of on every remaining round."""
+        if self._floor_announced:
+            return False
+        self._floor_announced = True
+        return True
 
     @property
     def can_help_with_overflow(self) -> bool:
@@ -1333,15 +1360,22 @@ class _CompactionController:
         # after the fixed prefix and the output reservation. Without it the
         # compactor falls back to a fraction-of-budget heuristic and keeps a
         # different amount than the compiler will accept on the next compile.
+        outcome = CompactionOutcome()
         compacted = await compact_with_llm(
             self._session_id,
             payload.messages,
             history_budget=payload.history_budget,
             turn_user_msg_id=self.turn_user_msg_id,
+            outcome=outcome,
         )
-        self.attempts += 1
+        # A refusal is not an attempt. No summarizer ran, nothing was spent,
+        # and burning the attempt budget on it only walked a long first turn
+        # to compaction_failed three rounds sooner.
+        self._refused = not compacted and outcome.reason == NOTHING_TO_SUMMARIZE
+        if not self._refused:
+            self.attempts += 1
         self._session.touch()  # keep the reaper honest — COMPACTING can take seconds
-        if compacted or restore_state_on_failure:
+        if compacted or self._refused or restore_state_on_failure:
             try:
                 _sv2.transition(self._session, _sv2.SessionStateV2.PROCESSING, "compact-done")
             except Exception as _e:
@@ -1645,7 +1679,7 @@ async def run_agent(
         # Context health check
         utilization = payload.token_count / max(effective_budget, 1)
         if utilization > settings.context_critical_threshold:
-            if not compaction.exhausted and not compaction.stalled:
+            if not compaction.exhausted and not compaction.stalled and not compaction.cannot_help:
                 logger.warning(
                     "Context critical (%.0f%%), attempting compaction-retry %d/%d",
                     utilization * 100,
@@ -1656,17 +1690,43 @@ async def run_agent(
                     payload, transition_reason="compact-critical", event_reason="critical_threshold"
                 ):
                     continue  # re-compile context, retry same round
-            # Compaction failed, made no progress, or attempts exhausted — break with error
-            logger.warning("Context critical (%.0f%%) after compaction, breaking", utilization * 100)
-            session.emit_event({"type": "context.reset"})
-            session.emit_event(
-                {
-                    "type": "stream.error",
-                    "error": f"Context full ({utilization:.0%}). Compaction insufficient.",
-                }
-            )
-            session.termination_reason = "compaction_failed"
-            break
+            if compaction.cannot_help:
+                # The compactor refused, it did not fail: on a single long
+                # turn there is nothing older than the root ask that it is
+                # allowed to fold. Killing the turn here killed work
+                # compaction was never going to save — and the compiler has
+                # already fitted history into its own budget and pinned an
+                # id-addressable trim notice, so this request is sendable.
+                # Utilization sits above the threshold because the output
+                # reservation is what is left, not because history overflows:
+                # on a 192k window any max_output under ~26.8k trips it, and
+                # a full first turn at 8,192 measured 0.936 with nothing
+                # wrong. Send it.
+                if compaction.announce_floor():
+                    logger.warning(
+                        "Context at %.0f%% on a turn compaction cannot help (nothing older than the "
+                        "live turn to summarize) — continuing on the compiler's trim",
+                        utilization * 100,
+                    )
+                    session.emit_event(
+                        {
+                            "type": "context.trim_floor",
+                            "utilization": round(utilization, 3),
+                            "trimmed": payload.metadata.messages_trimmed,
+                        }
+                    )
+            else:
+                # Compaction failed, made no progress, or attempts exhausted — break with error
+                logger.warning("Context critical (%.0f%%) after compaction, breaking", utilization * 100)
+                session.emit_event({"type": "context.reset"})
+                session.emit_event(
+                    {
+                        "type": "stream.error",
+                        "error": f"Context full ({utilization:.0%}). Compaction insufficient.",
+                    }
+                )
+                session.termination_reason = "compaction_failed"
+                break
 
         # Proactive compaction stays single-shot relative to the critical/
         # overflow paths: once a forced compaction has run this turn, the
@@ -1678,7 +1738,11 @@ async def run_agent(
         # re-fires every tool round for the whole turn; counting it hands any
         # further attempts to the critical path above, which enforces the
         # stalled() guard and the attempt limit.
-        if payload.needs_compaction and compaction.attempts == 0:
+        #
+        # A refusal costs no attempt, so `attempts == 0` alone would re-run
+        # the compactor — a full transcript read — on every round of a turn
+        # it has already said it cannot help with.
+        if payload.needs_compaction and compaction.attempts == 0 and not compaction.cannot_help:
             await compaction.run(payload, transition_reason="compact-proactive", restore_state_on_failure=True)
 
         # Normalize for provider

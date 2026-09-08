@@ -92,7 +92,14 @@ def apply_view_pruning(
             content = msg.get("content") or ""
             if len(content) > min_chars:
                 preview = content[:80].replace("\n", " ")
-                stub = f"[pruned — {len(content)} chars] {preview}..."
+                # Carry the row id. Without it the stub was the one dropped
+                # thing in the whole context with no way back to the thing it
+                # replaced — the trim notice names ids, the compaction
+                # coverage record names ids, and this said only how many
+                # characters used to be here.
+                mid = msg.get("id")
+                where = f" · msg {mid}, session_read({mid}) for the full result" if mid is not None else ""
+                stub = f"[pruned — {len(content)} chars{where}] {preview}..."
                 result.append({**msg, "content": stub, "_view_pruned": True})
                 continue
         result.append(msg)
