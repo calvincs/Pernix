@@ -2683,11 +2683,13 @@ class SessionManager:
             # about to synthesize (H10). The same scoping get_worker_result and
             # the finalize stamp use — three readers, one record.
             verdict: str | None = None
+            verification = ""
             try:
                 from core.extensions.orchestration import report as _wreport
 
                 _current, _stale, _stale_seq = _wreport.run_scoped_reflect(wid)
                 verdict = (_current or {}).get("verdict")
+                verification = (_current or {}).get("verification") or ""
                 if verdict is None and _stale:
                     verdict = "stale"
             except Exception as _e:
@@ -2724,6 +2726,10 @@ class SessionManager:
                 problem_workers.append(wid)
             elif tr in ("round_ceiling", "stuck_loop", "budget_exhausted", "compaction_failed"):
                 lines.append(f"  - {wid}{suffix}: INCOMPLETE ({tr} — a hard cap, not completion)")
+                problem_workers.append(wid)
+            elif verdict == "pass" and verification and verification != "verified":
+                # A downgraded grade is pass for control flow only (H11).
+                lines.append(f"  - {wid}{suffix}: pass but UNVERIFIED (verification={verification})")
                 problem_workers.append(wid)
             elif verdict == "pass":
                 lines.append(f"  - {wid}{suffix}: pass")
