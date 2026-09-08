@@ -2204,6 +2204,8 @@ class SessionManager:
         """
         import json as _json
 
+        from core.llm.types import is_rejected_call
+
         ids = list(parent.worker_ids or [])
         if not ids:
             return False
@@ -2228,7 +2230,7 @@ class SessionManager:
             except (ValueError, TypeError):
                 continue
             for call in calls or []:
-                if not isinstance(call, dict):
+                if not isinstance(call, dict) or is_rejected_call(call):
                     continue
                 fn = call.get("function") if isinstance(call.get("function"), dict) else {}
                 if (fn.get("name") or call.get("name")) != "get_worker_result":
