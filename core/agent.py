@@ -156,10 +156,26 @@ class StuckDetector:
     # another candidate fit (>=2 marker matches per result body).
     falsified_fit_streak: int = 0
     pending_hints: list = field(default_factory=list)  # one-time system hints
+    # How many times this turn the stuck handler let a change of approach run
+    # instead of discarding it (see _is_recovery_move). Bounded per turn.
+    recovery_passes: int = 0
 
     def evaluate(self, content: str, tool_calls: list[dict] | None, tool_failures: dict, registry) -> tuple[float, int]:
         """Evaluate stuck signals. Returns (score 0-1, repeat_count)."""
         score = 0.0
+
+        # What THIS response actually touches. Signals 7 and 11 read counters
+        # that stay sticky for the rest of the turn; charging them to a
+        # response that calls neither the failing tool nor the failing file
+        # made every later move score >= 0.4 — a distinct ask_user, a switch
+        # to another tool, a worker's file_write deliverable — so a compliant
+        # recovery round arrived at the handler already over the threshold.
+        # The counters stay sticky (real repetition still accumulates across
+        # interleaved work); only the scoring is scoped to the current move.
+        # A round with no tool calls has nothing to compare against and keeps
+        # the whole-turn reading; it leaves the loop as a completion anyway.
+        called_tools = {tc.get("name", "") for tc in (tool_calls or [])}
+        called_file_targets = {t for t in map(_call_file_target, tool_calls or []) if t}
 
         # Signal 1: Exact content repeat
         if content and content in self.content_history:
@@ -210,7 +226,7 @@ class StuckDetector:
         # Catches loops where each attempt uses a different old_string/args
         # (bypassing Signal 3's exact-args check) but targets the same file.
         for key, count in self.file_failure_counts.items():
-            if count >= 3:
+            if count >= 3 and (not tool_calls or key in called_file_targets):
                 score += 0.4
                 self.behavioral_flags.add("file_edit_loop")
                 break
@@ -297,7 +313,7 @@ class StuckDetector:
         # args hash (evading Signal 3), the tool is real (evading Signal 5), and
         # a fresh failure each round keeps resetting Signal 6's drift counter.
         for tool_name, count in self.tool_failure_counts.items():
-            if tool_name not in _FILE_TOOLS and count >= 3:
+            if tool_name not in _FILE_TOOLS and count >= 3 and (not tool_calls or tool_name in called_tools):
                 score += 0.4
                 self.behavioral_flags.add("tool_failure_loop")
                 break
@@ -438,6 +454,27 @@ def _hash_args(args) -> str:
     if isinstance(args, dict):
         args = json.dumps(args, sort_keys=True)
     return hashlib.sha256(str(args).encode()).hexdigest()[:12]
+
+
+def _call_file_target(tc: dict) -> tuple[str, str] | None:
+    """The (tool, path) key a file-tool call targets, or None.
+
+    Same shape as the key `StuckDetector.mark_failure` files under, so a
+    response can be compared against the per-file failure counters.
+    """
+    name = tc.get("name", "")
+    if name not in _FILE_TOOLS:
+        return None
+    args = tc.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args or "{}")
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(args, dict):
+        return None
+    path = args.get("path") or args.get("file_path") or args.get("file", "")
+    return (name, str(path)) if path else None
 
 
 def _summarize_args(args: dict, max_value_len: int = 200) -> dict:
@@ -1809,6 +1846,7 @@ async def run_agent(
             nudges_used=_stuck_ask_user_continues,
             nudge_limit=STUCK_ASK_USER_LIMIT,
             turn_user_msg_id=_turn_user_msg_id,
+            stuck=stuck,
         )
         if _stuck_action == "nudge-and-retry":
             # Don't break — let one more round run so the agent can ask.
@@ -2497,6 +2535,51 @@ async def _record_round_results(
             _inject_created_tool(item["parsed_args"].get("name", ""), active_tools)
 
 
+def _is_recovery_move(
+    *,
+    score: float,
+    tool_calls: list[dict],
+    active_tools: list[str],
+    stuck: StuckDetector,
+) -> bool:
+    """Is this round the change of approach the nudge asks for?
+
+    A low score is most of the answer: at <= 0.3 neither Signal 2 (the same
+    call signature again with nothing changed in between) nor Signal 3 (an
+    args hash that already failed) fired, so this is not the repeated call.
+    What is left to check is whether the tools it reaches for are the ones
+    already failing — a third guess at the same broken call is repetition
+    however novel its arguments are.
+
+    Two shapes qualify. `ask_user` is the way out the nudge names wherever it
+    is reachable. Where it is not — a worker kind or job charter whose
+    allowlist drops it — the way out is a tool with no failure history this
+    turn, which includes the `file_write` of the deliverable the worker
+    exists to produce. Every call must be one the session can actually run;
+    a move the gate would reject is not a recovery.
+    """
+    if not tool_calls or score > 0.3:
+        return False
+    allowed = set(active_tools or [])
+    names = [tc.get("name", "") for tc in tool_calls]
+    if any(n not in allowed for n in names):
+        return False
+    if "ask_user" in names:
+        return True
+    for tc in tool_calls:
+        # File tools carry their history per target, the way Signal 7 reads
+        # them (and the way Signal 11 declines to): a worker whose first
+        # attempt at the report file failed is not repeating itself by
+        # writing a different one.
+        target = _call_file_target(tc)
+        history = (
+            stuck.file_failure_counts.get(target, 0) if target else stuck.tool_failure_counts.get(tc.get("name", ""), 0)
+        )
+        if history:
+            return False
+    return True
+
+
 async def _handle_stuck_signals(
     *,
     session_id: str,
@@ -2507,12 +2590,15 @@ async def _handle_stuck_signals(
     nudges_used: int,
     nudge_limit: int,
     turn_user_msg_id: int | None = None,
+    stuck: StuckDetector | None = None,
+    recovery_limit: int = 2,
 ) -> tuple[str, int]:
     """Decide what a stuck score means for this round, and tell the model.
 
     Returns (action, nudges_used) where action is one of:
       "proceed"         — run the round normally (a mild-repetition nudge may
-                          still have been written to the transcript)
+                          still have been written to the transcript, or the
+                          round is a bounded recovery move past the threshold)
       "nudge-and-retry" — asked the agent to call ask_user; discard this
                           round's calls and give it another round to comply
       "stop"            — end the tool loop
@@ -2560,6 +2646,30 @@ async def _handle_stuck_signals(
         return "proceed", 0
 
     logger.warning("Session %s stuck (score=%.1f, repeats=%d)", session_id, score, repeats)
+
+    # The nudge asks for a change of approach and the discard below used to
+    # throw that change away: the calls never ran, so nothing could succeed,
+    # so the unresolved failure that pins repeat_count at the threshold never
+    # cleared, and three complied-with rounds later the turn was stopped for
+    # not complying. A recovery move runs instead. Bounded — two per turn —
+    # so a model that "changes approach" every round still meets the cap, and
+    # the nudge budget is untouched: real repetition is nudged then stopped
+    # exactly as before.
+    if (
+        stuck is not None
+        and stuck.recovery_passes < recovery_limit
+        and _is_recovery_move(score=score, tool_calls=tool_calls, active_tools=active_tools, stuck=stuck)
+    ):
+        stuck.recovery_passes += 1
+        logger.info(
+            "Session %s stuck but this round changes approach (%s) — letting recovery %d/%d run",
+            session_id,
+            ", ".join(sorted({tc.get("name", "") for tc in tool_calls})) or "n/a",
+            stuck.recovery_passes,
+            recovery_limit,
+        )
+        return "proceed", nudges_used
+
     ask_user_available = "ask_user" in (active_tools or [])
     if nudges_used < nudge_limit:
         nudges_used += 1
