@@ -431,13 +431,29 @@ class StuckDetector:
                 self.file_failure_counts.pop(key, None)
 
 
-def _goal_budget_exceeded(session_id: str, goal_id: int) -> str | None:
+# The goal states a budget check still governs. A completed or errored goal
+# is settled, so its budgets no longer stop anything; the same three states
+# db.get_active_goal() treats as live.
+_LIVE_GOAL_STATUSES = ("active", "paused", "budget_limited")
+
+
+def _goal_budget_exceeded(goal_id: int) -> str | None:
     """Synchronous mid-turn budget check (runs in a thread). Returns a short
-    reason string when the active goal's token or time budget is spent."""
+    reason string when the goal's token or time budget is spent.
+
+    Resolved by goal id, not by owning session. A worker inherits its parent's
+    active_goal_id at spawn and stamps it on every token_usage row it writes,
+    so goal_token_usage() already counts the worker's spend — but the check
+    used to look the goal up by the RUNNING session, and a worker owns no
+    goal. Every worker in a fan-out therefore read "no goal, nothing to
+    enforce" and kept spending against a budget the parent would have been
+    stopped by. Enforcement now resolves the same goal identity the spend is
+    attributed to.
+    """
     from datetime import datetime, timezone
 
-    goal = db.get_active_goal(session_id)
-    if not goal or int(goal.get("id", 0)) != int(goal_id):
+    goal = db.get_goal(goal_id)
+    if not goal or goal.get("status") not in _LIVE_GOAL_STATUSES:
         return None
     if goal.get("token_budget"):
         used = db.goal_token_usage(goal["id"])
@@ -2065,7 +2081,7 @@ async def _pre_round_gate(session: AgentSession, session_id: str, tool_round: in
     # remains the authoritative settlement.
     if settings.goals_enabled and session.active_goal_id and tool_round > 0 and tool_round % 3 == 0:
         try:
-            exceeded = await asyncio.to_thread(_goal_budget_exceeded, session_id, session.active_goal_id)
+            exceeded = await asyncio.to_thread(_goal_budget_exceeded, session.active_goal_id)
         except Exception as _e:
             logger.debug("In-turn goal budget check failed: %s", _e)
             exceeded = None

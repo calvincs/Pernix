@@ -2611,6 +2611,20 @@ def get_active_goal(session_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def get_goal(goal_id: int) -> dict | None:
+    """One goal by id, whatever session owns it and whatever its status.
+
+    The owner-scoped lookup above answers "what is THIS session working on",
+    which is the right question for creating or mutating a goal. It is the
+    wrong one for enforcement: a worker inherits its parent's goal id and
+    bills the parent's goal, so budget checks must resolve the goal the spend
+    is attributed to, not one the checking session happens to own.
+    """
+    with connect_sessions() as conn:
+        row = conn.execute("SELECT * FROM session_goals WHERE id = ?", (goal_id,)).fetchone()
+        return dict(row) if row else None
+
+
 def update_goal(goal_id: int, **fields) -> None:
     allowed = {"objective", "status", "token_budget", "time_budget_s", "continuation_budget", "continuations_used"}
     sets, params = [], []
