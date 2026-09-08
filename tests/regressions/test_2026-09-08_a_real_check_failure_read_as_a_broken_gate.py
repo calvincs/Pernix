@@ -114,7 +114,7 @@ def test_the_bash_wording_of_the_same_cd_failure():
 
 
 def test_a_missing_executable_is_broken(workspace):
-    r = gates._run_one(_row("definitely_not_a_binary_xyz --version"), workspace, "")
+    r = gates._run_one(_row("definitely_not_a_binary_xyz --version"), workspace, workspace, "")
     assert r.exit_code == 127
     assert r.broken is True
     assert r.state == "unavailable"
@@ -122,14 +122,14 @@ def test_a_missing_executable_is_broken(workspace):
 
 def test_a_gate_whose_cwd_does_not_exist_is_broken(workspace):
     """The spawn itself fails — structured launch evidence, no output at all."""
-    r = gates._run_one(_row("pytest -q", cwd="impl/does/not/exist"), workspace, "")
+    r = gates._run_one(_row("pytest -q", cwd="impl/does/not/exist"), workspace, workspace, "")
     assert r.broken is True
     assert r.passed is False
     assert r.error
 
 
 def test_a_cd_that_fails_inside_the_command_is_broken(workspace):
-    r = gates._run_one(_row("cd no_such_dir && pytest -q"), workspace, "")
+    r = gates._run_one(_row("cd no_such_dir && pytest -q"), workspace, workspace, "")
     assert r.exit_code != 0
     assert r.broken is True
 
@@ -138,7 +138,7 @@ def test_a_command_that_is_not_executable_is_broken(workspace):
     script = workspace / "noexec.sh"
     script.write_text("echo hi\n")
     os.chmod(script, 0o644)
-    r = gates._run_one(_row("./noexec.sh"), workspace, "")
+    r = gates._run_one(_row("./noexec.sh"), workspace, workspace, "")
     assert r.exit_code == 126
     assert r.broken is True
 
@@ -150,7 +150,7 @@ def test_a_real_smoke_failure_runs_and_fails(workspace):
         "if not pathlib.Path('dist/report.json').exists():\n"
         "    print('ERROR: expected output file dist/report.json not found'); sys.exit(1)\n"
     )
-    r = gates._run_one(_row("python3 verify.py"), workspace, "")
+    r = gates._run_one(_row("python3 verify.py"), workspace, workspace, "")
     assert r.exit_code == 1
     assert r.broken is False
     assert r.state == "failed"
@@ -227,7 +227,7 @@ def test_reuse_still_carries_a_real_failure(monkeypatch, workspace):
 
 
 def test_a_broken_gate_still_reaches_the_agent(workspace):
-    r = gates._run_one(_row("definitely_not_a_binary_xyz", name="impl-suite"), workspace, "")
+    r = gates._run_one(_row("definitely_not_a_binary_xyz", name="impl-suite"), workspace, workspace, "")
     notice = gates.format_broken_notice([r])
     assert "impl-suite" in notice
     assert "could NOT RUN" in notice

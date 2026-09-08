@@ -68,13 +68,42 @@ def workspace() -> Path:
 
 
 def workspace_home() -> Path:
-    """The effective working folder for the current tool call: the space
-    home when one is active (and no sandbox override is), else workspace().
-    Used for bash cwd/HOME and kernel spawn cwd — never for containment."""
+    """THE default working root for the current tool call: the space home when
+    one is active (and no sandbox override is), else workspace().
+
+    This is the one relative-path contract, and every tool shares it — bash's
+    cwd and HOME, the file tools' first resolution root, grep/glob's default
+    search root, a detached job's cwd, a gate's cwd. Six tools used to resolve
+    three different roots from one relative name, and because gates ran in the
+    global tree while a space session edited and tested in its own, a gate
+    could report PASS on work the foreground had correctly failed (2026-09-08).
+
+    Never a containment boundary — that stays workspace(), separate on purpose
+    so this default cannot harden into a cross-space access restriction.
+    """
     home = WORKSPACE_HOME.get()
     if home and WORKSPACE_OVERRIDE.get() is None:
         return Path(home).resolve()
     return workspace()
+
+
+def roots_for_context(workspace_override: str | None, workspace_home_dir: str | None) -> tuple[Path, Path]:
+    """(containment root, default cwd) for a caller that runs OUTSIDE the
+    per-call ContextVar window, computed from values handed to it explicitly.
+
+    The detached job runner and the turn-end gate sweep both owe the agent the
+    same contract but cannot read it from ambient thread state: a job outlives
+    the thread that started it, and gates run from a post-hook long after
+    execute_sync reset the ContextVars. The rule is the one above — an override
+    is a sandbox and wins outright, otherwise the space home is the cwd and the
+    global workspace stays the containment root.
+    """
+    if workspace_override:
+        root = Path(workspace_override).resolve()
+        return root, root
+    root = Path(settings.workspace_dir).resolve()
+    home = Path(workspace_home_dir).resolve() if workspace_home_dir else root
+    return root, home
 
 
 # Harness-data subtrees that live under DATA_DIR, never under the workspace.
@@ -139,9 +168,9 @@ def root_mismatch_hint(path: str) -> str:
         if not target.is_relative_to(data) or target.is_relative_to(ws):
             return ""
     else:
-        # The tools resolve relative paths under the workspace; if that
+        # The tools resolve relative paths under the contract roots; if that
         # resolution would have worked, the root was never the problem.
-        if (ws / raw).exists():
+        if any((root / raw).exists() for root in relative_path_roots()):
             return ""
         parts = Path(raw).parts
         first = parts[0] if parts else ""
@@ -267,6 +296,39 @@ def _relative_resolution_roots(roots: list[Path]) -> list[Path]:
     if ws in roots and ws not in allowed:
         allowed.append(ws)
     return allowed or roots
+
+
+def relative_path_roots() -> list[Path]:
+    """The roots a relative path may land in, in contract order: the space home
+    (when active), then the global workspace.
+
+    Public because the search tools resolve their `path` argument through the
+    same rule the file tools use — `impl` has to name one directory to grep and
+    to file_read alike. Deliberately not allowed_read_roots(): /tmp, skills and
+    the spill trees stay absolute-path-only, so sharing a resolver never hands
+    one tool the union of every tool's roots.
+    """
+    return _relative_resolution_roots(_base_roots())
+
+
+def resolve_workspace_path(path: str) -> Path:
+    """Resolve a search tool's path argument under the shared contract.
+
+    The same doubled-prefix guard, prefer-existing scan and global fallback the
+    file tools get, contained to relative_path_roots(). Raises ValueError when
+    the path escapes them or names a protected location.
+    """
+    return _resolve_within(path, relative_path_roots(), create_roots=False)
+
+
+def owning_root(target: Path) -> Path:
+    """Which contract root a resolved path came from — the effective root a
+    tool displays so the agent can see which project it just hit."""
+    roots = relative_path_roots()
+    for root in roots:
+        if target.is_relative_to(root):
+            return root
+    return roots[0] if roots else workspace()
 
 
 def check_protected(resolved: Path, roots: list[Path]) -> None:

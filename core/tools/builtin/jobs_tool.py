@@ -47,12 +47,17 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _jobs_root() -> Path:
-    from core.tools.paths import workspace
+def _jobs_root(root: Path | None = None) -> Path:
+    """Where job bookkeeping lives: under the CONTAINMENT root, never under the
+    job's cwd. Logs and exit sidecars are harness state shared by every session
+    in the workspace — only the working directory follows a space."""
+    if root is None:
+        from core.tools.paths import workspace
 
-    root = workspace() / ".jobs"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+        root = workspace()
+    jobs = root / ".jobs"
+    jobs.mkdir(parents=True, exist_ok=True)
+    return jobs
 
 
 def _rlimits():
@@ -169,6 +174,15 @@ def _tail_lines(log_path: str, n: int) -> list[str]:
         return []
 
 
+def _job_cwd(job: dict) -> str:
+    """The root the job was launched against, from the sidecar written at
+    start. Empty for a job that predates the sidecar."""
+    try:
+        return (Path(job["log_path"]).parent / "cwd").read_text().strip()
+    except (OSError, KeyError):
+        return ""
+
+
 def _elapsed(job: dict) -> str:
     try:
         start = datetime.fromisoformat(job["created_at"])
@@ -202,6 +216,9 @@ def _format_job(job: dict, verbose: bool = False) -> str:
         line += "\n  last output:\n" + "\n".join(f"    {t}" for t in tail)
     else:
         line += "\n  (no output yet)"
+    cwd = _job_cwd(job)
+    if cwd:
+        line += f"\n  [cwd: {cwd}]"
     line += f"\n  full log: job_tail(job_id='{job['id']}')  file: {job['log_path']}"
     return line
 
@@ -233,8 +250,22 @@ def job_start(
         min(requested, int(settings.jobs_max_timeout_s)) if requested > 0 else int(settings.jobs_default_timeout_s)
     )
 
+    from core.tools.paths import build_shell_env, roots_for_context
+
+    # The one relative-path root, taken from this call's context rather than
+    # the paths ContextVars: the job outlives the thread that starts it, so the
+    # root it runs against has to be decided and passed here, explicitly. Jobs
+    # used to launch in the global workspace while bash ran in the space home,
+    # which is how `job_start("cd impl && pytest")` reported a green suite from
+    # a different copy of the project than the one under edit (2026-09-08).
+    ws_root, job_cwd = roots_for_context(
+        (_context or {}).get("workspace_override"),
+        (_context or {}).get("workspace_home"),
+    )
+    job_cwd.mkdir(parents=True, exist_ok=True)
+
     job_id = uuid.uuid4().hex[:12]
-    job_dir = _jobs_root() / job_id
+    job_dir = _jobs_root(ws_root) / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     log_path = job_dir / "output.log"
     exit_file = job_dir / "exit_code"
@@ -243,15 +274,19 @@ def job_start(
     # wrapper's final echo makes completion durable across server restarts.
     wrapped = f"timeout -k 10 {timeout_s} bash -c {shlex.quote(command)}; " f"echo $? > {shlex.quote(str(exit_file))}"
 
-    from core.tools.paths import build_shell_env, workspace
-
     # Same environment bash gets — venv on PATH, VIRTUAL_ENV set, env-mode
     # filter applied. A bare os.environ.copy() left jobs on the system
     # python, so `python3 script.py` in a job failed to import packages the
-    # agent had just installed in bash (session 3dc5a307d751: sympy).
-    # HOME tracks the job's cwd below, which is the workspace root.
-    job_cwd = workspace()
-    env = build_shell_env(job_cwd, job_cwd)
+    # agent had just installed in bash (session 3dc5a307d751: sympy). The venv
+    # and PATH stay on the containment root because the toolchain is shared;
+    # only HOME and the cwd follow the space, exactly as the bash tool does it.
+    env = build_shell_env(ws_root, job_cwd)
+    # Durable next to the log, so a poll after a server restart can still say
+    # which project the job actually ran against.
+    try:
+        (job_dir / "cwd").write_text(str(job_cwd))
+    except OSError:
+        pass
 
     try:
         with open(log_path, "ab") as log_fh:
@@ -277,9 +312,12 @@ def job_start(
         log_path=str(log_path),
         deadline_s=timeout_s,
     )
-    logger.info("job %s started (session %s, pid %d, cap %ds)", job_id, session_id[:12], proc.pid, timeout_s)
+    logger.info(
+        "job %s started (session %s, pid %d, cap %ds, cwd %s)", job_id, session_id[:12], proc.pid, timeout_s, job_cwd
+    )
     return (
         f"Job started: {job_id} (pid {proc.pid}, wall cap {timeout_s}s).\n"
+        f"[cwd: {job_cwd}]\n"
         f"It runs detached — keep working and poll with job_status('{job_id}') "
         f"or job_tail('{job_id}'). Output streams to {log_path}."
     )
@@ -366,8 +404,8 @@ def register(reg) -> None:
         name="job_start",
         func=job_start,
         description=(
-            "Start a long-running shell command as a DETACHED background job "
-            "(cwd=data/workspace). Use this instead of a blocking bash call for "
+            "Start a long-running shell command as a DETACHED background job, "
+            "in the same working directory bash uses. Use this instead of a blocking bash call for "
             "heavy compute that needs minutes: solvers, brute-force searches, "
             "builds, dataset crunching. The job survives the end of your turn; "
             "output streams to a log file. Returns a job_id — keep working and "
