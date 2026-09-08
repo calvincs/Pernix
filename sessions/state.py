@@ -183,8 +183,11 @@ class AgentSession:
     # post-turn force-reset to IDLE so downstream hooks (_finalize_worker,
     # get_worker_result) can classify completion honestly instead of
     # inferring from state.
-    # Legal values: "complete", "round_ceiling", "compaction_failed",
-    # "cancelled", "error". None = never ran or not yet classified.
+    # Legal values: "complete", "round_ceiling", "stuck_loop",
+    # "compaction_failed", "cancelled", "error". None = never ran or not yet
+    # classified. "round_ceiling" is the round budget running out;
+    # "stuck_loop" is the stuck detector force-breaking a repetition loop,
+    # which can happen at any round number.
     termination_reason: str | None = None
 
     # Session type

@@ -68,7 +68,8 @@ class TerminationReason(str, Enum):
     agent loop' without re-reading message history."""
 
     COMPLETE = "complete"
-    ROUND_CEILING = "round_ceiling"
+    ROUND_CEILING = "round_ceiling"  # the round budget ran out
+    STUCK_LOOP = "stuck_loop"  # stuck detector force-broke a repetition loop
     COMPACTION_FAILED = "compaction_failed"
     CANCELLED = "cancelled"
     ERROR = "error"
@@ -89,7 +90,7 @@ class TerminationReason(str, Enum):
 #   compact-critical, compact-overflow, compact-done, compaction-failed,
 #   ask-user, pause-requested, pause-observed, resume, cancel-requested,
 #   cancel-during-pause, cancel-complete, cancel-timeout, loop-complete,
-#   round-ceiling, agent-error, reflect-retry, eval-retry, turn-complete,
+#   round-ceiling, stuck-loop, agent-error, reflect-retry, eval-retry, turn-complete,
 #   finalize-error, answer-received, question-dismissed,
 #   invariant-violation, reaper-unstick
 
@@ -114,6 +115,7 @@ TRANSITIONS: dict[tuple[S, str], S] = {
     (S.PROCESSING, "cancel-requested"): S.CANCELLING,
     (S.PROCESSING, "loop-complete"): S.FINALIZING,
     (S.PROCESSING, "round-ceiling"): S.FINALIZING,
+    (S.PROCESSING, "stuck-loop"): S.FINALIZING,
     (S.PROCESSING, "agent-error"): S.FINALIZING,
     # Pause/resume
     (S.PAUSE_REQUESTED, "pause-observed"): S.PAUSED,

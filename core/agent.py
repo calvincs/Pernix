@@ -1684,7 +1684,12 @@ async def run_agent(
             collected_tool_calls = []
             continue
         if _stuck_action == "stop":
-            session.termination_reason = "round_ceiling"
+            # Its own wall, not the round budget: the stuck detector fires on
+            # repetition, which happens at any round number. Reporting
+            # round_ceiling here sent reflect chasing max_tool_rounds — one
+            # worker was told to "split the task or raise the limit" after
+            # dying at round 4 of a 500-round budget.
+            session.termination_reason = "stuck_loop"
             break
 
         # Filter, correct and validate before anything executes.
@@ -2363,12 +2368,23 @@ async def _handle_stuck_signals(
                           round's calls and give it another round to comply
       "stop"            — end the tool loop
 
-    Prefer asking the user over silent exhaustion: when ask_user is active,
-    direct the agent to call it with a concrete question. But cap the nudging
-    — an LLM that ignores the ask_user hint keeps the loop spinning, emitting
-    another nudge and burning more LLM time each round (observed: 16 in a row
-    before the agent self-corrected). Past the cap, fall through to the same
-    "summarize and stop" path used when ask_user isn't available at all.
+    Every session gets the same nudge budget; only the instruction differs.
+    Where ask_user is active, the way out is to ask. Where it is not — a worker
+    kind or a job charter whose allowlist drops it — the way out is to change
+    approach and, failing that, to WRITE THE DELIVERABLE with what is already
+    in hand.
+
+    That second branch used to have no budget at all: the first trip of the
+    detector went straight to "summarize your progress and stop". In the Agent
+    Mesh build all four research workers died that way, three of them before
+    writing the report file they existed to produce, and each cost a full
+    reflect retry that redid the research from scratch. Stopping a worker one
+    move before its deliverable is the most expensive thing this function can
+    do, so the message now names the file, not the summary.
+
+    The cap still matters — an LLM that ignores the hint keeps the loop
+    spinning and burns LLM time each round (observed: 16 in a row before the
+    agent self-corrected).
     """
     # These notices are advice about THIS round's behavior. Stamped with the
     # turn they belong to, the compiler drops them from every later turn's
@@ -2396,48 +2412,50 @@ async def _handle_stuck_signals(
 
     logger.warning("Session %s stuck (score=%.1f, repeats=%d)", session_id, score, repeats)
     ask_user_available = "ask_user" in (active_tools or [])
-    if ask_user_available and nudges_used < nudge_limit:
+    if nudges_used < nudge_limit:
         nudges_used += 1
         recent_tool_names = sorted({tc.get("name", "") for tc in (tool_calls or [])})
-        await asyncio.to_thread(
-            db.add_message,
-            session_id,
-            "system",
-            "You appear to be stuck in a loop "
-            f"(recently used: {', '.join(recent_tool_names) or 'n/a'}). "
-            "Do NOT retry the same approach. Call ask_user with a specific "
-            "clarifying question that names what you tried, what failed, and "
-            "what you need from the user to proceed. After ask_user returns, "
-            "use the answer to pick a new strategy.",
-            metadata=_ephemeral,
-        )
+        used = ", ".join(recent_tool_names) or "n/a"
+        if ask_user_available:
+            body = (
+                f"You appear to be stuck in a loop (recently used: {used}). "
+                "Do NOT retry the same approach. Call ask_user with a specific "
+                "clarifying question that names what you tried, what failed, and "
+                "what you need from the user to proceed. After ask_user returns, "
+                "use the answer to pick a new strategy."
+            )
+        else:
+            body = (
+                f"You appear to be stuck in a loop (recently used: {used}). "
+                "No user is reachable from this session, so decide for yourself. "
+                "Do NOT repeat those calls. Change approach: a different tool, a "
+                "different source, or fewer moving parts. If nothing else works, "
+                "WRITE YOUR DELIVERABLE NOW with what you already have, marking "
+                "what is unverified — a report on disk with gaps beats no report."
+            )
+        await asyncio.to_thread(db.add_message, session_id, "system", body, metadata=_ephemeral)
         return "nudge-and-retry", nudges_used
 
+    # Hit the cap. Emit a final, distinct system message so the transcript
+    # records why we gave up nudging, then stop.
+    logger.warning(
+        "Session %s stuck cap reached (%d consecutive nudges ignored), force-breaking loop",
+        session_id,
+        nudges_used,
+    )
     if ask_user_available:
-        # Hit the cap. Emit a final, distinct system message so the transcript
-        # records why we gave up nudging, then stop.
-        logger.warning(
-            "Session %s stuck cap reached (%d consecutive nudges ignored), force-breaking loop",
-            session_id,
-            nudges_used,
-        )
-        await asyncio.to_thread(
-            db.add_message,
-            session_id,
-            "system",
-            f"Stuck-detection nudged you {nudges_used} "
-            "times to call ask_user and you did not. Summarize what "
-            "you have so far and stop.",
-            metadata=_ephemeral,
+        final = (
+            f"Stuck-detection nudged you {nudges_used} times to call ask_user and "
+            "you did not. Write any file deliverable your task named, then "
+            "summarize what you have and stop."
         )
     else:
-        await asyncio.to_thread(
-            db.add_message,
-            session_id,
-            "system",
-            "You appear to be stuck in a loop. Summarize your progress and stop.",
-            metadata=_ephemeral,
+        final = (
+            f"Stuck-detection nudged you {nudges_used} times to change approach and "
+            "the loop continued. Write any file deliverable your task named — even "
+            "partial, with gaps marked — then summarize what you have and stop."
         )
+    await asyncio.to_thread(db.add_message, session_id, "system", final, metadata=_ephemeral)
     return "stop", nudges_used
 
 
