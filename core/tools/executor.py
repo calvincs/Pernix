@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -210,6 +211,49 @@ def _session_cancel_requested(context: dict | None) -> bool:
     except Exception:
         return False
     return bool(session is not None and getattr(session, "cancel_requested", False))
+
+
+# What a pool thread returns when it declined to enter the tool. A value,
+# not an exception: the task that would have retrieved an exception is by
+# definition already unwinding, and an unretrieved one is only log noise.
+_DISPATCH_CANCELLED = object()
+
+
+class _DispatchGate:
+    """Settles, exactly once, whether one queued call gets to run.
+
+    Both pools are bounded, so a submitted call can sit in the executor queue
+    with no thread on it — and cancelling the task that awaits it cancels
+    neither the queued item nor the callable. The pool thread claims the
+    dispatch immediately before the tool's first line; the cancel path claims
+    it on the way out. Whoever takes the lock first decides, so a cancel that
+    lands an instant before the tool starts drops the call outright, and one
+    that lands an instant after it knows the tool is running and goes after
+    its children instead. Without that hand-off the queue-to-running boundary
+    is a coin toss, and the losing side is a file write that happens after
+    the user pressed stop.
+    """
+
+    __slots__ = ("_lock", "_cancelled", "_running")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._running = False
+
+    def claim_for_run(self) -> bool:
+        """Pool thread: may this call enter the tool?"""
+        with self._lock:
+            if self._cancelled:
+                return False
+            self._running = True
+            return True
+
+    def cancel(self) -> bool:
+        """Dispatcher: this call must not start. True if it already had."""
+        with self._lock:
+            self._cancelled = True
+            return self._running
 
 
 def _kill_tool_subprocess(context: dict | None, call_id: str) -> None:
@@ -506,10 +550,18 @@ async def _execute_single(
         # time, then the tool's real timeout measured from the moment a thread
         # actually enters it.
         started = asyncio.Event()
+        gate = _DispatchGate()
 
         def _runner():
-            # Runs on the pool thread. call_soon_threadsafe, not Event.set:
-            # asyncio.Event is not thread-safe.
+            # Runs on the pool thread, possibly minutes after submission.
+            # Everything the dispatcher decided in the meantime is checked
+            # here, at the last instruction before the tool can touch
+            # anything: the dispatch's own cancel, and the session-wide stop
+            # that a sibling call's dispatcher may have observed instead.
+            if _session_cancel_requested(context) or not gate.claim_for_run():
+                return _DISPATCH_CANCELLED
+            # call_soon_threadsafe, not Event.set: asyncio.Event is not
+            # thread-safe.
             loop.call_soon_threadsafe(started.set)
             return registry.execute_sync(name, arguments, ctx)
 
@@ -524,10 +576,11 @@ async def _execute_single(
         if not started.is_set() and not fut.done():
             # Never got a thread inside the ceiling. Report saturation as
             # itself rather than as a tool timeout — the two have different
-            # causes and different fixes. fut.cancel() drops the queued item
-            # if the executor has not dequeued it yet; if it loses that race
-            # the call runs to completion with nobody awaiting it, which is
-            # the same exposure a dispatch timeout already carries.
+            # causes and different fixes. The dispatcher has given up, so the
+            # call must not run later with nobody awaiting it: the gate stops
+            # it at the pool thread even when fut.cancel() loses the race to
+            # a dequeue.
+            gate.cancel()
             fut.cancel()
             latency = int((time.monotonic() - start) * 1000)
             registry.metrics[name].record_timeout(latency)
@@ -553,6 +606,12 @@ async def _execute_single(
             )
 
         raw = await asyncio.wait_for(fut, timeout=timeout)
+        if raw is _DISPATCH_CANCELLED:
+            # The pool thread declined to start: the session asked to stop
+            # while this call was queued. Nothing ran, so there is nothing to
+            # kill and nothing to say about the tool — unwind the round the
+            # same way an in-flight cancel does.
+            raise asyncio.CancelledError()
         latency = int((time.monotonic() - start) * 1000)
 
         # execute_sync may return (str, dict) for structured metadata
@@ -603,13 +662,25 @@ async def _execute_single(
         )
     except asyncio.CancelledError:
         latency = int((time.monotonic() - start) * 1000)
-        registry.metrics[name].record_failure("cancelled", latency)
-        # Returning an error result here swallowed the cancel: Task.cancel()
-        # was consumed by the awaited future, _must_cancel never set, and the
-        # sequential loop dispatched the NEXT tool while the user's bash
-        # child kept running to its own timeout. Kill the child and let the
-        # cancel unwind the round; the agent loop stubs the tool rows.
-        _kill_tool_subprocess(context, call_id)
+        # Cancelling the task that awaits a pool future cancels neither the
+        # queued item nor the callable, and killing the subprocesses of a
+        # tool that has not started yet cannot stop it — a saturated pool
+        # would hand the call a thread minutes later and run it, side
+        # effects and all, after the session had stopped. Claim the gate
+        # first (so a thread that has not entered the tool drops the call),
+        # then fut.cancel(), which succeeds only while the item is still
+        # queued. Only if the tool really was already running is there a
+        # child to kill or anything to record against the tool.
+        was_running = gate.cancel()
+        fut.cancel()
+        if was_running:
+            registry.metrics[name].record_failure("cancelled", latency)
+            # Returning an error result here swallowed the cancel: Task.cancel()
+            # was consumed by the awaited future, _must_cancel never set, and the
+            # sequential loop dispatched the NEXT tool while the user's bash
+            # child kept running to its own timeout. Kill the child and let the
+            # cancel unwind the round; the agent loop stubs the tool rows.
+            _kill_tool_subprocess(context, call_id)
         raise
     except Exception as e:
         latency = int((time.monotonic() - start) * 1000)
