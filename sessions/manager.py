@@ -1711,8 +1711,17 @@ class SessionManager:
                 # loop has stopped re-reading the row, so the appended text
                 # would be lost silently.
                 now = time.monotonic()
+                # Only a human's own follow-up may be folded into a human's
+                # row. A cron job firing within the window had its prompt
+                # appended to whatever the user had just typed — the machine's
+                # instructions injected into the human's turn, the job never
+                # run, and (with the job's model pin and tool charter also
+                # applied session-wide) that human turn executed under the
+                # job's charter. Scheduled work always gets its own turn.
+                absorbable = origin == "user" and exec_options is None
                 if (
                     message
+                    and absorbable
                     and not settling
                     and session.last_user_msg_id is not None
                     and (now - session.last_user_msg_at) <= RAPID_FIRE_WINDOW_SECONDS
