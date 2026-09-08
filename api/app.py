@@ -409,8 +409,10 @@ async def lifespan(app: FastAPI):
         _mcp = get_mcp_manager_if_started()
         if _mcp is not None:
             await asyncio.wait_for(_mcp.shutdown(), timeout=8)
-    except Exception:
-        pass
+    except Exception as e:
+        # shutdown() force-closes and untracks whatever the timeout cut short,
+        # but a teardown that had to be abandoned is worth one line in the log.
+        logger.warning("MCP shutdown did not finish cleanly (%s); its connections were force-closed", e)
     try:
         from core.llm.client import get_llm_client
 
