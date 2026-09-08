@@ -256,6 +256,128 @@ _SAFE_CACHE_DIRS: frozenset[str] = frozenset(
 )
 
 
+def _split_shell_operators(command: str) -> list[str]:
+    """Split a command string on shell operators, respecting quotes.
+
+    shlex alone is not enough: it keeps `x;` as one token, so a `;` written
+    without a leading space hides the next command word. This scans the raw
+    string instead, tracking quote state and backslash escapes, and cuts at
+    `;` `&&` `||` `|` `&` and newlines that are not inside quotes.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(command[i + 1])
+            i += 2
+            continue
+        if ch in ";\n":
+            parts.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        if ch in "&|":
+            parts.append("".join(buf))
+            buf = []
+            i += 2 if i + 1 < n and command[i + 1] == ch else 1
+            continue
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return [p for p in (p.strip() for p in parts) if p]
+
+
+# Tokens that are shell plumbing, not arguments: redirections and fd dups.
+_REDIRECT_RE = re.compile(r"^\d*(?:>>?|<<?|>&|<&|&>)")
+
+
+def _strip_redirections(tokens: list[str]) -> list[str]:
+    """Drop redirection tokens (and a following target) from an argument list.
+
+    `rm -rf x 2>/dev/null` must be read as one target, not two — otherwise the
+    exemption checks below see `2>/dev/null` as a path outside the workspace
+    and refuse a command that only touches the workspace.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if _REDIRECT_RE.match(tok):
+            # A bare operator takes the next token as its target.
+            if _REDIRECT_RE.fullmatch(tok):
+                i += 2
+            else:
+                i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _rm_segments(command: str) -> list[list[str]] | None:
+    """Every `rm` invocation in a command, as its own token list.
+
+    A command is rarely a bare `rm`. `cd impl && rm -rf __pycache__` and
+    `mv a b 2>/dev/null && rm -rf tmpdir; ls` are the ordinary shapes, and both
+    used to skip the exemption checks below entirely because those checks began
+    with `tokens[0] != "rm"` — so the agent was refused by an error message
+    that told it the very target it had just used was allowed (Agent Mesh
+    build, 2026-09-08).
+
+    Returns None when a segment cannot be tokenized — the caller keeps the
+    block, because an unparseable command is not one we can clear.
+    """
+    out: list[list[str]] = []
+    for segment in _split_shell_operators(command):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            return None
+        i = 0
+        # Peel env assignments and prefix wrappers (env/nice/sudo/...) so
+        # `env FOO=1 rm -rf x` is still seen as an rm.
+        while i < len(tokens):
+            tok = tokens[i]
+            if "=" in tok and not tok.startswith(("-", "/")):
+                lhs = tok.split("=", 1)[0]
+                if lhs and (lhs[0].isalpha() or lhs[0] == "_") and all(c.isalnum() or c == "_" for c in lhs):
+                    i += 1
+                    continue
+            base = os.path.basename(tok).lower()
+            if base in PREFIX_WRAPPERS:
+                i += 1
+                while i < len(tokens) and tokens[i].startswith("-"):
+                    takes_value = tokens[i] in WRAPPER_FLAGS_WITH_VALUE.get(base, set())
+                    i += 1
+                    if takes_value and i < len(tokens):
+                        i += 1
+                continue
+            break
+        if i < len(tokens) and os.path.basename(tokens[i]).lower() == "rm":
+            out.append(["rm"] + _strip_redirections(tokens[i + 1 :]))
+    return out
+
+
 def _rm_targets_are_safe_caches(command: str) -> bool:
     """Return True iff every non-flag argument to `rm` is a cache directory.
 
@@ -263,28 +385,25 @@ def _rm_targets_are_safe_caches(command: str) -> bool:
     `rm -rf` block. Conservative: any non-cache target (file path, absolute
     path, glob, env var, parent-traversal, multiple tokens with one unsafe)
     fails the check and keeps the original block in place.
+
+    EVERY rm in the command must qualify — a compound command that cleans a
+    cache and also deletes something else stays blocked.
     """
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return False  # parse failure → don't take the safe path
-    if not tokens or tokens[0] != "rm":
-        return False
-    targets: list[str] = []
-    for tok in tokens[1:]:
-        if tok.startswith("-"):
-            continue
-        targets.append(tok)
-    if not targets:
-        return False
-    for t in targets:
-        # Reject absolute paths, parent traversal, env interpolation, globs.
-        if t.startswith("/") or ".." in t.split("/") or "$" in t or "*" in t or "?" in t:
+    segments = _rm_segments(command)
+    if not segments:
+        return False  # parse failure or no rm at all → don't take the safe path
+    for tokens in segments:
+        targets = [tok for tok in tokens[1:] if not tok.startswith("-")]
+        if not targets:
             return False
-        # The final path segment must match a known cache directory name.
-        last = t.rstrip("/").rsplit("/", 1)[-1]
-        if last not in _SAFE_CACHE_DIRS:
-            return False
+        for t in targets:
+            # Reject absolute paths, parent traversal, env interpolation, globs.
+            if t.startswith("/") or ".." in t.split("/") or "$" in t or "*" in t or "?" in t:
+                return False
+            # The final path segment must match a known cache directory name.
+            last = t.rstrip("/").rsplit("/", 1)[-1]
+            if last not in _SAFE_CACHE_DIRS:
+                return False
     return True
 
 
@@ -327,33 +446,34 @@ def _rm_targets_are_in_workspace(command: str) -> bool:
     error-prone workarounds (field case 8d411d30d12d). Conservative: env
     interpolation, parent traversal, and glob-leading targets all fail the
     check; a glob later in the path is allowed because expansion happens with
-    cwd=workspace and the literal prefix already pins the tree."""
+    cwd=workspace and the literal prefix already pins the tree.
+
+    EVERY rm in the command must qualify, so `rm -rf ok && rm -rf /etc` stays
+    blocked on the second segment."""
     from core.tools.paths import workspace
 
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return False
-    if not tokens or tokens[0] != "rm":
+    segments = _rm_segments(command)
+    if not segments:
         return False
     ws = workspace()
-    targets = [t for t in tokens[1:] if not t.startswith("-")]
-    if not targets:
-        return False
-    for t in targets:
-        if "$" in t or ".." in t.split("/"):
+    for tokens in segments:
+        targets = [t for t in tokens[1:] if not t.startswith("-")]
+        if not targets:
             return False
-        first_seg = t.lstrip("/").split("/", 1)[0]
-        if any(ch in first_seg for ch in "*?["):
-            return False  # `rm -rf *` — too broad even inside the workspace
-        literal = t.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0]
-        base = Path(literal) if literal.startswith("/") else ws / literal
-        try:
-            resolved = base.resolve()
-        except OSError:
-            return False
-        if not (resolved.is_relative_to(ws) and resolved != ws):
-            return False
+        for t in targets:
+            if "$" in t or ".." in t.split("/"):
+                return False
+            first_seg = t.lstrip("/").split("/", 1)[0]
+            if any(ch in first_seg for ch in "*?["):
+                return False  # `rm -rf *` — too broad even inside the workspace
+            literal = t.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0]
+            base = Path(literal) if literal.startswith("/") else ws / literal
+            try:
+                resolved = base.resolve()
+            except OSError:
+                return False
+            if not (resolved.is_relative_to(ws) and resolved != ws):
+                return False
     return True
 
 
