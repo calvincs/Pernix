@@ -50,6 +50,36 @@ def test_a_doubled_prefix_is_redirected_even_with_no_existing_directory(space_ho
     assert resolved == ws / "spaces" / "agent-mesh" / "brand-new" / "x.md"
 
 
+def test_the_guard_beats_an_orphan_tree_that_already_exists(space_home):
+    """Caught live on the box: once the mistake has been made, the nested tree
+    is real, so "this path exists" and "its parent exists" both point at the
+    orphan. The prefix has to win over both or every later write compounds it.
+    """
+    home, ws = space_home
+    orphan = home / "spaces" / "agent-mesh" / "impl"
+    orphan.mkdir(parents=True)
+    (orphan / "Makefile").write_text("written by the bug")
+    (ws / "spaces" / "agent-mesh" / "impl").mkdir(parents=True, exist_ok=True)
+
+    resolved = paths.safe_write_path("spaces/agent-mesh/impl/Makefile")
+    assert resolved == ws / "spaces" / "agent-mesh" / "impl" / "Makefile"
+    assert (orphan / "Makefile").read_text() == "written by the bug", "the orphan must be left untouched"
+
+
+def test_reads_of_a_doubled_path_are_redirected_too(space_home):
+    """Otherwise a write lands in the right place and the read that verifies it
+    finds the stale orphan instead."""
+    home, ws = space_home
+    orphan = home / "spaces" / "agent-mesh" / "impl"
+    orphan.mkdir(parents=True)
+    (orphan / "notes.md").write_text("stale")
+    real = ws / "spaces" / "agent-mesh" / "impl"
+    real.mkdir(parents=True, exist_ok=True)
+    (real / "notes.md").write_text("current")
+
+    assert paths.safe_read_path("spaces/agent-mesh/impl/notes.md") == real / "notes.md"
+
+
 # ── the general rule: a new file lands next to its siblings ──────────────────
 
 
