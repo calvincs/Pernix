@@ -847,6 +847,16 @@ class SessionManager:
         if session.task and not session.task.done():
             session.task.cancel()
             return True
+        if cascade and sv2._current_state(session) is sv2.SessionStateV2.AWAITING_WORKERS:
+            # Nothing to cancel and nothing to finalize: a parent suspended on
+            # await_workers owns no task, so the flag above is the whole of the
+            # cancel and the session stays parked. Release it from a task of
+            # our own — this method is synchronous and the release needs the
+            # session lock, which the in-flight resume may still be holding.
+            self._spawn_detached(
+                self._settle_cancelled_awaiting_workers(session),
+                "settle-cancelled-parent",
+            )
         return False
 
     def drop_pending_for_cancel(self, session: AgentSession) -> int:
@@ -1841,6 +1851,17 @@ class SessionManager:
             # Gap 1+2: wake parent if it's watching this worker.
             try:
                 await self._on_watched_worker_done(session)
+            except asyncio.CancelledError:
+                # The parent's cancel cascade reaches this worker's task while
+                # the resume it just triggered is mid-transcript-read. The
+                # parent's release is already scheduled by _resume_from_workers;
+                # re-raise so this task still ends as cancelled rather than
+                # looking like a clean finish.
+                logger.info(
+                    "Post-turn watcher notify cancelled for %s — parent release scheduled",
+                    session.session_id[:12],
+                )
+                raise
             except Exception as _e:
                 logger.error("Post-turn watcher notify failed for %s: %s", session.session_id, _e)
 
@@ -2355,6 +2376,64 @@ class SessionManager:
         )
         return "\n".join(lines)
 
+    async def _settle_cancelled_awaiting_workers_locked(self, parent: AgentSession) -> bool:
+        """Release a parent parked in AWAITING_WORKERS whose turn was cancelled.
+
+        Caller holds `parent.lock`. Returns True when it did the release.
+
+        A parent suspended on await_workers has no task of its own, so every
+        cancel path's `task.cancel()` is a no-op for it and nothing walks it
+        back to IDLE_READY. Until this existed the only exit was the reaper's
+        empty-watch-set safety net, thirty minutes later, and a prompt sent
+        meanwhile queued behind a session that was never going to run.
+        """
+        if sv2._current_state(parent) is not sv2.SessionStateV2.AWAITING_WORKERS:
+            return False
+        try:
+            sv2.transition(
+                parent,
+                sv2.SessionStateV2.CANCELLING,
+                "cancel-requested",
+                termination_reason=sv2.TerminationReason.CANCELLED,
+            )
+            sv2.transition(
+                parent,
+                sv2.SessionStateV2.IDLE_READY,
+                "cancel-complete",
+            )
+        except Exception as _e:
+            logger.error(
+                "Cancel-after-workers transition failed for %s: %s",
+                parent.session_id,
+                _e,
+            )
+        # The watch-set is what a later worker callback resumes against, and
+        # what the reaper reads to decide a parked session is stuck. A
+        # cancelled turn wants neither.
+        parent._watched_worker_ids.clear()
+        self._persist_watched(parent)
+        parent.emit_event({"type": "turn.complete"})
+        try:
+            await asyncio.to_thread(
+                db.add_message,
+                parent.session_id,
+                "notice",
+                "[turn cancelled — workers cascade-cancelled by user]",
+            )
+        except Exception as _e:
+            logger.debug("Cascade-cancel notice insert skipped: %s", _e)
+        return True
+
+    async def _settle_cancelled_awaiting_workers(self, parent: AgentSession) -> bool:
+        """Lock-taking form of _settle_cancelled_awaiting_workers_locked.
+
+        Idempotent: whichever of the cancel routes, the resume path and the
+        finishing worker gets there first does the release, the rest see a
+        state that is no longer AWAITING_WORKERS and no-op.
+        """
+        async with parent.lock:
+            return await self._settle_cancelled_awaiting_workers_locked(parent)
+
     async def _resume_from_workers(self, parent: AgentSession) -> None:
         """Re-enter the parent session after all watched workers have completed.
         Handles two cases: parent suspended in AWAITING_WORKERS (Gap 2), or
@@ -2374,36 +2453,7 @@ class SessionManager:
             )
             # Honor the cancel: drive the parent back to IDLE_READY if it's
             # still suspended in AWAITING_WORKERS (no other path will).
-            current_v2 = sv2._current_state(parent)
-            if current_v2 is sv2.SessionStateV2.AWAITING_WORKERS:
-                async with parent.lock:
-                    try:
-                        sv2.transition(
-                            parent,
-                            sv2.SessionStateV2.CANCELLING,
-                            "cancel-requested",
-                            termination_reason=sv2.TerminationReason.CANCELLED,
-                        )
-                        sv2.transition(
-                            parent,
-                            sv2.SessionStateV2.IDLE_READY,
-                            "cancel-complete",
-                        )
-                    except Exception as _e:
-                        logger.error(
-                            "Cancel-after-workers transition failed for %s: %s",
-                            parent.session_id,
-                            _e,
-                        )
-                    parent.emit_event({"type": "turn.complete"})
-                    try:
-                        db.add_message(
-                            parent.session_id,
-                            "notice",
-                            "[turn cancelled — workers cascade-cancelled by user]",
-                        )
-                    except Exception as _e:
-                        logger.debug("Cascade-cancel notice insert skipped: %s", _e)
+            await self._settle_cancelled_awaiting_workers(parent)
             return
 
         # Workers may have run for a long time, draining the parent's LLM
@@ -2420,61 +2470,89 @@ class SessionManager:
             logger.debug("Resume-from-workers budget extend failed: %s", _ext_err)
 
         deferred_task: asyncio.Task | None = None
-        async with parent.lock:
-            current_v2 = sv2._current_state(parent)
-            # Gap 1 only: the parent went idle on its own, which usually means
-            # its turn already collected everything. Field case (session
-            # 3dc5a307d751): it had called get_worker_result for all four
-            # workers and answered, and the resume injected the "[Watched
-            # workers have completed" message anyway — a redundant turn that
-            # re-read the same results, and whose grade then superseded the
-            # real turn's. A parked (AWAITING_WORKERS) parent is never skipped:
-            # it is waiting precisely because it has not collected them.
-            if current_v2 is sv2.SessionStateV2.IDLE_READY and await asyncio.to_thread(
-                self._worker_results_already_collected, parent
-            ):
-                logger.info(
-                    "Session %s: worker resume skipped — results already collected this turn",
-                    parent.session_id[:12],
+        try:
+            async with parent.lock:
+                current_v2 = sv2._current_state(parent)
+                # Gap 1 only: the parent went idle on its own, which usually means
+                # its turn already collected everything. Field case (session
+                # 3dc5a307d751): it had called get_worker_result for all four
+                # workers and answered, and the resume injected the "[Watched
+                # workers have completed" message anyway — a redundant turn that
+                # re-read the same results, and whose grade then superseded the
+                # real turn's. A parked (AWAITING_WORKERS) parent is never skipped:
+                # it is waiting precisely because it has not collected them.
+                if current_v2 is sv2.SessionStateV2.IDLE_READY and await asyncio.to_thread(
+                    self._worker_results_already_collected, parent
+                ):
+                    logger.info(
+                        "Session %s: worker resume skipped — results already collected this turn",
+                        parent.session_id[:12],
+                    )
+                    parent._watched_worker_ids.clear()
+                    self._persist_watched(parent)
+                    parent.emit_event(
+                        {
+                            "type": "workers.resume_skipped",
+                            "workers": list(parent.worker_ids),
+                            "reason": "results-already-collected",
+                        }
+                    )
+                    return
+                # Off-loop: one 100-row transcript read per worker, under the
+                # parent lock — an orchestrator with 20 workers stalled every
+                # SSE stream for the duration when this ran inline.
+                resume_msg = await asyncio.to_thread(self._build_resume_message, parent)
+                # Re-validate before dispatching. Both awaits above are
+                # to_thread hops, and neither cancel route takes this lock, so a
+                # cancel that landed during the transcript read is invisible to
+                # every check made before it. Launching anyway restarted the work
+                # the user had just stopped and cleared the flag that said so.
+                if parent.cancel_requested or sv2._current_state(parent) is not current_v2:
+                    logger.info(
+                        "Session %s: worker resume abandoned — cancelled or state moved during prep",
+                        parent.session_id[:12],
+                    )
+                    await self._settle_cancelled_awaiting_workers_locked(parent)
+                    return
+                # A fast worker can finish while the parent's suspended turn is
+                # still settling its post-hooks. Starting the synthesis turn now
+                # would run two turns against one transcript, so queue it and
+                # dispatch when the parent's task exits.
+                if self._turn_in_flight(parent):
+                    logger.warning(
+                        "Session %s: worker resume queued — the suspended turn is still settling",
+                        parent.session_id[:12],
+                    )
+                    parent.pending_messages.append(PendingMessage(resume_msg, None, False))
+                    deferred_task = parent.task
+                elif current_v2 is sv2.SessionStateV2.AWAITING_WORKERS:
+                    # Parent is suspended waiting — start a new agent turn directly.
+                    # _run_agent_safe detects AWAITING_WORKERS and uses reason="workers-complete".
+                    parent.cancel_requested = False
+                    parent.turn = TurnState()
+                    parent.error = None
+                    parent.termination_reason = None
+                    parent.task = asyncio.create_task(self._run_agent_safe(parent, resume_msg, None))
+                elif current_v2 is sv2.SessionStateV2.IDLE_READY:
+                    # Parent already returned to idle; push as a pending message so
+                    # it's processed on the next available slot (Gap 1 auto-resume).
+                    parent.pending_messages.append(PendingMessage(resume_msg, None, False))
+                    # _process_pending acquires lock itself, so release first.
+        except asyncio.CancelledError:
+            # The ordinary resume runs inside the finishing worker's own
+            # task, and a cancel cascades worker.task.cancel() — which lands
+            # on the transcript read above. CancelledError is not an
+            # Exception, so _finalize_turn's handler let it through and the
+            # parent stayed parked in AWAITING_WORKERS with cancel_requested
+            # set, an empty watch-set and no notice; only the reaper's
+            # 30-minute safety net would ever have released it. Settle from a
+            # task of our own — this one is being torn down.
+            if parent.cancel_requested and not self.shutting_down:
+                self._spawn_detached(
+                    self._settle_cancelled_awaiting_workers(parent),
+                    "settle-cancelled-parent",
                 )
-                parent._watched_worker_ids.clear()
-                self._persist_watched(parent)
-                parent.emit_event(
-                    {
-                        "type": "workers.resume_skipped",
-                        "workers": list(parent.worker_ids),
-                        "reason": "results-already-collected",
-                    }
-                )
-                return
-            # Off-loop: one 100-row transcript read per worker, under the
-            # parent lock — an orchestrator with 20 workers stalled every
-            # SSE stream for the duration when this ran inline.
-            resume_msg = await asyncio.to_thread(self._build_resume_message, parent)
-            # A fast worker can finish while the parent's suspended turn is
-            # still settling its post-hooks. Starting the synthesis turn now
-            # would run two turns against one transcript, so queue it and
-            # dispatch when the parent's task exits.
-            if self._turn_in_flight(parent):
-                logger.warning(
-                    "Session %s: worker resume queued — the suspended turn is still settling",
-                    parent.session_id[:12],
-                )
-                parent.pending_messages.append(PendingMessage(resume_msg, None, False))
-                deferred_task = parent.task
-            elif current_v2 is sv2.SessionStateV2.AWAITING_WORKERS:
-                # Parent is suspended waiting — start a new agent turn directly.
-                # _run_agent_safe detects AWAITING_WORKERS and uses reason="workers-complete".
-                parent.cancel_requested = False
-                parent.turn = TurnState()
-                parent.error = None
-                parent.termination_reason = None
-                parent.task = asyncio.create_task(self._run_agent_safe(parent, resume_msg, None))
-            elif current_v2 is sv2.SessionStateV2.IDLE_READY:
-                # Parent already returned to idle; push as a pending message so
-                # it's processed on the next available slot (Gap 1 auto-resume).
-                parent.pending_messages.append(PendingMessage(resume_msg, None, False))
-                # _process_pending acquires lock itself, so release first.
+            raise
 
         # Outside the lock: drain pending for the IDLE_READY case.
         if deferred_task is not None:
