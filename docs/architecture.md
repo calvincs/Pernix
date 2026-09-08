@@ -337,6 +337,15 @@ Key event types:
 
 Every event has a `_seq` (monotonically increasing sequence number). On reconnect, the client sends `Last-Event-ID: <last_seq>` and the server replays anything it missed.
 
+A view's content is `snapshot(B) ⊕ every event after B`, and **B is read before
+the transcript, not after it.** Reading the boundary afterwards loses any
+answer that completes between the two reads — the client would mark those
+events consumed without ever having rendered them, and a later cursor advance
+then hides the gap from reconciliation permanently. A cursor-bearing stream
+opens with a `stream.resume` frame saying whether the server could actually
+honour the cursor; when it could not, the client re-reads rather than assuming
+it is merely behind.
+
 Full event catalog: [api.md](api.md#real-time-events-sse).
 
 ---

@@ -418,6 +418,35 @@ This is a persistent, long-lived HTTP connection. The server pushes events as th
 
 **Reconnection:** Include `Last-Event-ID: <last_seq>` on reconnect (or a `?last_event_id=` query parameter) to receive any events you missed. The client should reconcile by checking for gaps in `seq` (a monotonically increasing sequence number on every event).
 
+The cursor is three-valued, and the three values mean different things:
+
+| Cursor | Meaning |
+| --- | --- |
+| absent | no replay wanted — live events only |
+| `0` | replay everything the server still retains |
+| `N` | replay everything after seq `N` |
+
+Omitting the header and sending `0` used to be the same request, which left a
+client unable to ask for replay on its *first* connection. That is why an
+answer could arrive with its opening missing: the transcript was read, tokens
+landed, and the subscription then opened with no way to ask for them.
+
+**`stream.resume`.** A cursor-bearing stream opens with one control frame
+before any replayed event. It carries no event id, so it never advances your
+cursor:
+
+```json
+{"from_seq": 41, "replayed": 6, "oldest_retained": 12,
+ "server_seq": 47, "complete": true}
+```
+
+`complete` is the field that matters. It is `false` when the server could not
+honour your cursor — the process restarted, or the retained ring has already
+dropped the events you asked for (`oldest_retained > from_seq`). A client that
+sees `complete: false` must re-read the transcript rather than assume it is
+merely behind. Treat a missing `stream.resume` on a cursor-bearing stream as
+`complete: false` too; it means an older server.
+
 ### Connecting (JavaScript example)
 ```javascript
 const evtSource = new EventSource(`/api/sessions/${sessionId}/events`);
