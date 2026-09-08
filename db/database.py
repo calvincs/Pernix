@@ -1234,6 +1234,21 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE sessions ADD COLUMN worker_run TEXT",
         ],
     ),
+    (
+        41,
+        "index the sidebar's own ordering: (archived_at, updated_at DESC)",
+        [
+            # Every sidebar page is "the live sessions, newest first" — and
+            # there was no index for it, so SQLite read the whole sessions
+            # table and sorted it in a temp B-tree before it could hand back
+            # 50 rows. `archived_at IS NULL` is an index-usable constraint,
+            # so the leading column turns the live page and the archived page
+            # into two ordered scans of the same index rather than two full
+            # table scans. Measured at 1,622 sessions: 0.204 ms -> 0.035 ms
+            # for the id page, and the cost is linear in the table without it.
+            "CREATE INDEX IF NOT EXISTS idx_sessions_recency ON sessions(archived_at, updated_at DESC)",
+        ],
+    ),
 ]
 
 

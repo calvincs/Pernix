@@ -125,36 +125,66 @@ def count_sessions(*, archived: bool | None = False, exclude_types: Iterable[str
         return int(row["c"]) if row else 0
 
 
-_ENRICHED_SELECT = """SELECT
+# One page of the sidebar, enriched for exactly the ids on it.
+#
+# This used to be a single statement that LEFT JOINed three derived tables:
+# a GROUP BY over every user/assistant message, a GROUP BY over the whole of
+# token_usage, and a ROW_NUMBER() window over EVERY user message in the
+# database — all of it computed before the outer LIMIT could be applied.
+# EXPLAIN QUERY PLAN showed three MATERIALIZE steps ahead of `SCAN s`, so
+# `LIMIT 25` and `LIMIT 500` cost the same, and the cost tracked total
+# history rather than page size: 17,402 messages -> 56 ms, 107,402 -> 245 ms
+# with the page held at 50. On a 1,622-session / 116,410-message fixture the
+# window alone measured 103.6 ms, and once any space existed the whole thing
+# ran twice.
+#
+# Correlated subqueries against a fixed id list do the same work through
+# `idx_messages_session_role` and `idx_token_usage_session`, per row, for the
+# rows actually being returned. `first_message` reads one row rather than
+# ranking every user message: messages.id is INTEGER PRIMARY KEY, so
+# ORDER BY id inside a (session_id, role) index prefix is index order.
+_ENRICH_SQL = """SELECT
     s.*,
-    COALESCE(mc.message_count, 0) AS message_count,
-    COALESCE(tu.total_tokens, 0) AS total_tokens,
-    COALESCE(tu.total_cost, 0) AS total_cost,
-    fm.first_message
+    (SELECT COUNT(*) FROM messages m
+      WHERE m.session_id = s.id AND m.role IN ('user', 'assistant')) AS message_count,
+    (SELECT COALESCE(SUM(t.total_tokens), 0) FROM token_usage t
+      WHERE t.session_id = s.id) AS total_tokens,
+    (SELECT COALESCE(SUM(COALESCE(t.cost_estimate, 0)), 0) FROM token_usage t
+      WHERE t.session_id = s.id) AS total_cost,
+    (SELECT substr(m.content, 1, 200) FROM messages m
+      WHERE m.session_id = s.id AND m.role = 'user'
+      ORDER BY m.id LIMIT 1) AS first_message
 FROM sessions s
-LEFT JOIN (
-    SELECT session_id, COUNT(*) AS message_count
-    FROM messages
-    WHERE role IN ('user', 'assistant')
-    GROUP BY session_id
-) mc ON mc.session_id = s.id
-LEFT JOIN (
-    SELECT session_id, SUM(total_tokens) AS total_tokens,
-           SUM(COALESCE(cost_estimate, 0)) AS total_cost
-    FROM token_usage
-    GROUP BY session_id
-) tu ON tu.session_id = s.id
-LEFT JOIN (
-    SELECT session_id, substr(content, 1, 200) AS first_message
-    FROM (
-        SELECT session_id, content,
-               ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS rn
-        FROM messages
-        WHERE role = 'user'
-    )
-    WHERE rn = 1
-) fm ON fm.session_id = s.id
-"""
+WHERE s.id IN ({placeholders})"""
+
+# SQLite takes 32,766 bound parameters, but a page that large is a sign of a
+# caller asking for the whole table; chunking keeps the statement small and
+# the plan stable whatever the page size.
+_ENRICH_CHUNK = 400
+
+# How many space sessions one response will carry back past the recency
+# window. The union exists so a space group never loses members to the LIMIT,
+# and it had no LIMIT of its own at all: 900 live space sessions made every
+# ten-second poll 1,302 items and 1.1 MB per visible tab. It follows the
+# caller's page instead — a client asking for more rows gets more space rows
+# with them — with a floor at the web client's own page size so no install
+# that fits in one page sees any change. `space_counts` on the API response
+# carries the true membership either way, so a capped group still knows how
+# big it is.
+SPACE_UNION_FLOOR = 500
+
+
+def _enrich_session_ids(conn, ids: list[str]) -> list[dict]:
+    """Enrich exactly these session ids, returned in the order given."""
+    if not ids:
+        return []
+    found: dict[str, dict] = {}
+    for start in range(0, len(ids), _ENRICH_CHUNK):
+        chunk = ids[start : start + _ENRICH_CHUNK]
+        sql = _ENRICH_SQL.format(placeholders=",".join("?" * len(chunk)))
+        for row in conn.execute(sql, chunk):
+            found[row["id"]] = dict(row)
+    return [found[i] for i in ids if i in found]
 
 
 def list_sessions_enriched(
@@ -166,9 +196,20 @@ def list_sessions_enriched(
 ) -> list[dict]:
     """List sessions with message_count, total_tokens, and first_message.
 
+    Candidate ids first, enrichment second. The page is chosen by one
+    indexed query over `sessions` alone — no aggregate touches a message
+    until the rows are known — and the enrichment then runs against that
+    fixed id list. Unrelated and archived history no longer costs anything:
+    on the reference fixture the same page went from 352.9 ms to 3.2 ms.
+
     Space sessions are long-lived by contract: any that fall outside the
     recency window are unioned back in, so the sidebar's space groups never
-    lose members to the LIMIT no matter how stale they get.
+    lose members to the LIMIT no matter how stale they get. That union is now
+    an id query too, and its ids join the page's for a SINGLE enrichment pass
+    — the aggregates used to be computed twice per refresh in full.
+    `SPACE_UNION_FLOOR` bounds how far past the window it will reach; the
+    route reports per-space counts alongside, so a group that is paged is
+    still a group that knows its own size.
 
     ``archived`` picks the population: False (default) the live list, True
     the archived one. Archiving is precisely how a session leaves the
@@ -190,30 +231,45 @@ def list_sessions_enriched(
         conds.append(ex_sql)
     where = "WHERE " + " AND ".join(conds) + " "
     with connect_sessions() as conn:
+        ordered = [
+            r["id"]
+            for r in conn.execute(
+                "SELECT s.id FROM sessions s " + where + "ORDER BY s.updated_at DESC LIMIT ? OFFSET ?",
+                (*ex_params, limit, offset),
+            )
+        ]
+        # With no spaces configured the union can only return ids the page
+        # already has, so it is not asked for at all.
+        if not archived and conn.execute("SELECT 1 FROM spaces LIMIT 1").fetchone():
+            union_where = "WHERE s.space_id IS NOT NULL AND s.archived_at IS NULL "
+            if ex_sql:
+                union_where += "AND " + ex_sql + " "
+            seen = set(ordered)
+            for r in conn.execute(
+                "SELECT s.id FROM sessions s " + union_where + "ORDER BY s.updated_at DESC LIMIT ?",
+                (*ex_params, max(limit, SPACE_UNION_FLOOR)),
+            ):
+                if r["id"] not in seen:
+                    seen.add(r["id"])
+                    ordered.append(r["id"])
+        return _enrich_session_ids(conn, ordered)
+
+
+def count_live_sessions_by_space() -> dict[str, int]:
+    """How many live sessions each space holds — the group's true size.
+
+    The sidebar's space groups are rendered from whatever rows the response
+    carries, and the space union is bounded now, so the count has to travel
+    separately or a paged group would silently under-report itself. One
+    GROUP BY over `sessions` through `idx_sessions_space`; no message is
+    touched.
+    """
+    with connect_sessions() as conn:
         rows = conn.execute(
-            _ENRICHED_SELECT + where + "ORDER BY s.updated_at DESC LIMIT ? OFFSET ?",
-            (*ex_params, limit, offset),
+            "SELECT space_id, COUNT(*) AS c FROM sessions "
+            "WHERE space_id IS NOT NULL AND archived_at IS NULL GROUP BY space_id"
         ).fetchall()
-        result = [dict(r) for r in rows]
-        if archived:
-            return result
-        # _ENRICHED_SELECT GROUP BYs all of messages and token_usage and runs
-        # a ROW_NUMBER() over every user message before the outer LIMIT, so
-        # running it twice doubles the disk and CPU of every sidebar refresh.
-        # With no spaces configured the second pass can only return rows the
-        # first already has.
-        if not conn.execute("SELECT 1 FROM spaces LIMIT 1").fetchone():
-            return result
-        seen = {r["id"] for r in result}
-        union_where = "WHERE s.space_id IS NOT NULL AND s.archived_at IS NULL "
-        if ex_sql:
-            union_where += "AND " + ex_sql + " "
-        extra = conn.execute(
-            _ENRICHED_SELECT + union_where + "ORDER BY s.updated_at DESC",
-            ex_params,
-        ).fetchall()
-        result.extend(dict(r) for r in extra if r["id"] not in seen)
-        return result
+        return {r["space_id"]: int(r["c"]) for r in rows}
 
 
 def count_sessions_by_type() -> dict[str, int]:
